@@ -1,6 +1,6 @@
 # Continuous integration and regression policy
 
-Every push and pull request runs native Linux arm64 (`ubuntu-24.04-arm`) and macOS arm64 (`macos-15`) checks. Merge groups and manual runs use the same workflow. The final **CI** check succeeds only when both native jobs and the issue-policy job succeed; skipped, cancelled and failed dependencies cannot produce a green gate. Main requires this GitHub Actions check and an up-to-date PR branch, including for administrators.
+Every push to `main` and every pull request runs native Linux arm64 (`ubuntu-24.04-arm`) and macOS arm64 (`macos-15`) checks. Merge groups and manual runs use the same workflow. The final **CI** check succeeds only when both native jobs and the issue-policy job succeed; skipped, cancelled and failed dependencies cannot produce a green gate. Main requires this GitHub Actions check and an up-to-date PR branch, including for administrators.
 
 ## What is tested
 
