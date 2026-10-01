@@ -187,5 +187,15 @@
       "stdout": "3 3 2\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "cores-stable.tin",
+    "issue": 17,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "same true\n",
+      "stderr": ""
+    }
   }
 ]
