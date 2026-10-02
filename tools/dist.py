@@ -10,9 +10,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ('darwin-arm64', 'linux-arm64', 'linux-amd64')
-# The source tree an archive carries: the compiler and library, the native packages the Makefile
-# builds (base, testkit), and what `make test` needs.
-TREES = ('lib', 'selfhost', 'base', 'testkit', 'tools', 'tests', 'docs', 'examples', 'bench')
+TREES = ('lib', 'selfhost', 'tools', 'tests', 'docs', 'examples', 'bench')
 
 
 def version_name(value):

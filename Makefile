@@ -14,9 +14,6 @@ SELF_LINUX = $(filter-out selfhost/host_darwin.tin selfhost/host_linux.tin,$(SEL
 
 all: bin/tinc
 
-# Native packages (base, testkit, ...): C built with the host toolchain; see docs/NATIVE.md.
-include tools/mk/native.mk
-
 # Native release archive. Build on each supported host; releases.yml collects all three.
 DIST_TARGET ?= $(HOST_OS)-$(shell uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 dist: bin/tinc
@@ -46,7 +43,6 @@ test: bin/tinc
 ifeq ($(HOST_OS),darwin)
 	python3 tools/ci/legacy_suite.py bin/tinc --mode asm
 endif
-	$(MAKE) native-test
 
 bench: bin/tinc
 	bench/run.py

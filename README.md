@@ -73,7 +73,7 @@ tin examples/api.tin          # compile and run
 tin build app.tin -o app      # native executable
 tin test ./mypkg               # run mypkg's *_test.tin tests (Go style)
 tin suite                     # the compiler's strict test suite (tests/v2)
-make test                     # everything: strict suite, legacy-syntax suites, native unit tests
+make test                     # everything: strict suite and legacy-syntax suites
 make bootstrap                # tinc rebuilds itself twice; the binaries must be identical
 ```
 
@@ -179,8 +179,6 @@ selfhost/    the compiler: lex, parse, check, lower, generics, region, inline, o
 lib/         runtime and standard library
 tests/v2/    strict tests with expected outputs (*_bad.tin: expected compile errors)
 bench/       CPU benchmarks vs Go (v2/), HTTP benchmarks (http/), Go reference programs (ref/)
-base/        native C packages: the shared foundation (arena, strings, buffers, diagnostics, files, processes)
-testkit/     the unit-test framework for the native packages
 seed/        tinc-darwin-arm64, tinc-linux-arm64: the compilers that start a build
 tools/       test runners (v2test.sh, linuxtest.sh), debugging helpers, gendoc.py
 docs/        the documentation (index: docs/README.md)

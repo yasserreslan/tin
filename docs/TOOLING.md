@@ -2,8 +2,8 @@
 
 Everything lives in one tree (`~/Desktop/tin`). Nothing outside it is needed to build
 Tin: the checked-in seed compiler builds the compiler, which builds everything else. Go
-is used only by the HTTP conformance tools, benchmarks and reference programs; a C compiler
-only for the native packages ([NATIVE.md](NATIVE.md)); Docker only for Linux testing.
+is used only by the HTTP conformance tools, benchmarks and reference programs; Docker only
+for Linux testing.
 
 ## 1. Installing
 
@@ -69,8 +69,7 @@ tinc [-o OUT] [-S] [-target darwin-arm64|linux-arm64|linux-amd64] FILE.tin...
 | `make` / `make bin/tinc` | build the compiler from the host's seed (`seed/tinc-<os>-<arch>`) |
 | `make bootstrap` | `bin/tinc` builds `bin/s2/tinc`, which builds `bin/s3/tinc`; they must be byte-identical |
 | `make seed` | bootstrap, then refresh the host's seed from `bin/s3/tinc` |
-| `make test` | the strict suite, the legacy-syntax suite (native executable, and on macOS tinc -S through cc), then the native unit tests |
-| `make native`, `native-test`, `native-asan`, `native-format` | the C packages: build, test, test under sanitizers, format ([NATIVE.md](NATIVE.md)) |
+| `make test` | the strict suite, then the legacy-syntax suite (native executable, and on macOS tinc -S through cc) |
 | `make linux-test` | cross-compile every strict test for linux-arm64 and run it in an arm64 container (`tools/linuxtest.sh`) |
 | `make linux-bootstrap` | cross-compile a Linux compiler, then in the container it must rebuild itself identically; refreshes `seed/tinc-linux-arm64` |
 | `make linux-amd64-bootstrap` | the same for x86-64 in `tin-debian-amd64` (emulated on an arm64 Mac); refreshes `seed/tinc-linux-amd64` |
@@ -91,7 +90,6 @@ passes.
 | strict tests | `tests/v2/*.tin` | `tools/v2test.sh`: compiles and runs each, sorts the output and compares it with `NAME.out`; `NAME_bad.tin` must fail to compile with exactly `NAME_bad.err` |
 | Linux | same files | `tools/linuxtest.sh`: cross-compiles for linux-arm64, runs in `tin-debian-arm64`, compares with the same `.out` files |
 | legacy suite | `tests/*.tin`, `tests/errors/*.tin` | `tools/ci/legacy_suite.py`: `// expect:` and `// exit:` comments give the stdout and status; `// error:` gives a message the compiler must reject the program with; `--mode asm` links `tinc -S` output with cc (macOS) |
-| native packages | `base/tests`, `testkit` | `make native-test`: one program per module, also run under AddressSanitizer and UBSan in CI |
 | HTTP conformance | `bench/http/conformance` | 26 edge cases against a running server: `bin/conformance -addr 127.0.0.1:9180 -pid PID` |
 | x86-64 encoder | `tools/x64fuzz` | `tools/x64fuzz/run.sh [COUNT] [SEED]`: random instructions vs `x86_64-linux-gnu-objdump` |
 | stdlib vs Go | `bench/ref/NAME/main.go` | the same cases written with Go's library; outputs diffed (see notes/stdlib_verified.md) |
@@ -213,7 +211,6 @@ selfhost/           the compiler, in legacy Tin (COMPILER.md)
 lib/                runtime and standard library (RUNTIME.md, STDLIB.md)
 tests/v2/           strict tests and expected outputs
 tests/*.tin         legacy-syntax tests (driven by tools/ci/legacy_suite.py)
-base/, testkit/     native C packages and their test framework (NATIVE.md)
 seed/               tinc-darwin-arm64, tinc-linux-arm64, tinc-linux-amd64: the compilers that start a build
 examples/           api.tin (HTTP server), tasks.tin, redis.tin, mysql.tin, websocket.tin, demo.tin, demo_go/
 bench/              v2/ CPU benchmarks, http/ HTTP benchmarks and tools, v04/ the service benchmark, ref/ Go references

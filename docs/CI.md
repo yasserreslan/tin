@@ -7,7 +7,6 @@ Every push to `main` and every pull request runs native Linux arm64 (`ubuntu-24.
 - Clean build from the committed seed and two byte-identical self-hosted compiler rebuilds.
 - Every `tests/v2/*.tin`, including negative compilation tests and their exact diagnostics. Missing expected output, compiler crashes, process crashes, nonzero exit and timeouts fail. Each run uses fresh executable paths.
 - Legacy-syntax compatibility (`tools/ci/legacy_suite.py`): the compiler writes the executable on every platform; on macOS the assembly it prints is also linked by `cc`. The runner is Python, so a green run cannot hide a crash or timeout, and a compiler crash is not counted as rejecting a bad program.
-- Native packages (`base`, `testkit`): every module's unit tests with warnings as errors, then again under AddressSanitizer and UBSan (leak detection on Linux).
 - Memory regressions: bounds panics, allocation size overflow and negative lengths, large first allocations, single evaluation of allocation lengths, read-only and region checking through indirect calls, nested zero values, deep `keep` ownership and 200 request-pool reset/reuse cycles.
 - Linux HTTP framing/conformance, stable RSS over two million requests after warmup, and graceful shutdown. Throughput is reported, never used as a performance threshold.
 - Request tasks (`task_check.py`): waits on one core overlap, fast requests stay fast behind waiting ones (timers, proxied `wire` calls, helper-thread file I/O), deadlines give 504, refused upstreams 502, and pipelined responses keep their order.
@@ -47,7 +46,6 @@ tools/v2test.sh bin/tinc
 python3 tools/ci/regressions.py
 python3 tools/ci/regressions.py --audit   # network; GH_TOKEN optional for public issues
 python3 tools/ci/legacy_suite.py bin/tinc
-make native-test native-asan NATIVE_WERROR=-Werror
 python3 tools/ci/http_check.py            # Linux HTTP/RSS/shutdown
 python3 tools/ci/task_check.py            # request tasks, deadlines, helpers
 python3 tools/ci/router_check.py          # routed server: parameters, middleware, 404/405 under load

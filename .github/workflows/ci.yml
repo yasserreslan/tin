@@ -35,7 +35,7 @@ jobs:
         with:
           persist-credentials: false
       # Go is still needed by tools/ci/http_check.py (the conformance client and the graceful
-      # shutdown test). Remove this step when those are ported to C.
+      # shutdown test). Remove this step when those are rewritten in Tin.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -59,10 +59,6 @@ jobs:
       - name: Legacy-syntax tests (assembly linked by cc, macOS)
         if: runner.os == 'macOS'
         run: python3 tools/ci/legacy_suite.py bin/tinc --mode asm
-      - name: Native packages (unit tests, warnings are errors)
-        run: make native-test NATIVE_WERROR=-Werror
-      - name: Native packages under AddressSanitizer and UBSan
-        run: make native-asan NATIVE_WERROR=-Werror
       - name: Request tasks (waits overlap, deadlines, pipelined order)
         run: python3 tools/ci/task_check.py
       - name: Router (parameters, middleware, 404/405 and waits under concurrent requests)

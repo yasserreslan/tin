@@ -22,12 +22,10 @@ def make_var(name, *overrides, env=None):
 
 
 def install_into(tree, *overrides, env=None):
-    # Copies the Makefile, the tin script and the build rules the Makefile includes into tree and
-    # runs install without building bin/tinc.
+    # Copies the Makefile and tin script into tree and runs install without building bin/tinc.
     tree.mkdir(parents=True, exist_ok=True)
     for name in ('Makefile', 'tin'):
         shutil.copy2(ROOT / name, tree / name)
-    shutil.copytree(ROOT / 'tools/mk', tree / 'tools/mk', dirs_exist_ok=True)
     return subprocess.run(['make', '-s', '-C', str(tree), '-o', 'bin/tinc', 'install', *overrides],
                           capture_output=True, text=True, env=env or make_env())
 
