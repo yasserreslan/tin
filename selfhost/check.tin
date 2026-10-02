@@ -266,12 +266,8 @@ fn resolve_type(tx) {
         return resolve_type(tx[TX_A]);
     }
     if k == TX_OPT {
-        if tx[TX_A][N_KIND] == TX_DYN {
-            err_at(tx[TX_A][N_POS], "dyn shapes are not usable yet: reach the shape through a type parameter (#141)");
-            return ty_int;
-        }
         let inner = resolve_type(tx[TX_A]);
-        if kind_of(inner) != K_STRUCT {
+        if kind_of(inner) != K_STRUCT && kind_of(inner) != K_DYN {
             err_type(tx[N_POS], "only struct references can be optional, not ", inner, "");
             return inner;
         }
@@ -290,8 +286,14 @@ fn resolve_type(tx) {
         return st;
     }
     if k == TX_DYN {
-        err_at(tx[N_POS], "dyn shapes are not usable yet: reach the shape through a type parameter (#141)");
-        return ty_int;
+        let inst = shape_inst(tx[TX_A]);
+        if !inst {
+            return ty_int;
+        }
+        if !saw_dyn {
+            saw_dyn_pos = tx[N_POS];
+        }
+        return dyn_of(vec_get(inst, 0), vec_get(inst, 1));
     }
     err_at(tx[N_POS], "invalid type");
     return ty_int;
@@ -952,7 +954,9 @@ fn check_var(v) {
     if !s[S_TYPE] {
         s[S_TYPE] = default_type(t);
     }
-    if !assignable(t, s[S_TYPE]) {
+    if kind_of(s[S_TYPE]) == K_DYN && kind_of(t) != K_DYN {
+        check_shape(init[N_POS], t, s[S_TYPE][TY_GDECL], s[S_TYPE][TY_TARGS]);
+    } else if !assignable(t, s[S_TYPE]) {
         err_types(init[N_POS], "cannot use ", t, " as ", s[S_TYPE]);
     }
     let target = node_new(EX_IDENT, v[D_POS]);
@@ -2271,7 +2275,7 @@ fn zero_value(pos, t) {
         // A real header, made in the current region, so append never has to pick one.
         return rt_call(pos, "rt_slice_make", args3(mk_int(pos, 0, ty_int), mk_int(pos, 0, ty_int), mk_int(pos, elem_size(t), ty_int)), t);
     }
-    if (k == K_STRUCT || k == K_MAP || k == K_FUNC) && !ck_legacy {
+    if (k == K_STRUCT || k == K_MAP || k == K_FUNC || k == K_DYN) && !ck_legacy {
         err_type(pos, "a variable of type ", t, " needs an initializer (it cannot be nil; use ?T for an optional)");
     }
     return mk_int(pos, 0, t);
@@ -2758,6 +2762,12 @@ fn check_assign(s) {
 }
 
 fn check_assignable(e, from, to) {
+    // A concrete value converts to dyn S implicitly when it satisfies the shape; a dyn
+    // value converts only to the same dyn type (no downcast, no dyn-to-dyn).
+    if kind_of(to) == K_DYN && kind_of(from) != K_DYN {
+        check_shape(e[N_POS], from, to[TY_GDECL], to[TY_TARGS]);
+        return;
+    }
     if !assignable(from, to) && !ck_legacy {
         if is_query_t(to) && kind_of(from) == K_STRING {
             err_at(e[N_POS], "a query takes a string literal: put values in {...} so they are sent apart from the text, never pasted into it");

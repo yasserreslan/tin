@@ -1,5 +1,10 @@
 # Design: `dyn` and multi-word values
 
+Status: staging step 2 has landed — the checker types `dyn` (conversions check
+satisfaction, `?dyn` and `[]dyn` are types, the region bits are the object's) and both back
+ends refuse a program that uses one with a positioned message naming the step. Step 3 is the
+arm64 code generation.
+
 This note is the implementation design for the `dyn` sub-item of #141 (notes/roadmap.md,
 "`dyn` fat reference (data pointer plus table) for open sets, with region rules"). The
 decision that `dyn S` exists and what it means is in notes/design_foundations.md section 2;
