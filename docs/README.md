@@ -10,6 +10,7 @@
 | [COMPILER.md](COMPILER.md) | how the self-hosted compiler works: passes, data structures, code generation, linkers, bootstrapping, how to change it |
 | [PORTING.md](PORTING.md) | targets (macOS, Linux arm64, Linux amd64), ELF details, containers and Kubernetes, adding a target |
 | [PERFORMANCE.md](PERFORMANCE.md) | benchmark results against Go, methodology, where Go still wins and why (the v0.4 service benchmark is pending: #74) |
+| [NATIVE.md](NATIVE.md) | the C packages in this tree (`base`, `testkit`): layout, how to build and test them, the conventions every module follows, how to add a package |
 | [AGENT_PRIMER.md](AGENT_PRIMER.md) | a one-page brief to give an AI agent before it writes Tin code |
 
 Design notes and records live in [`../notes/`](../notes): the roadmap (`roadmap.md`), the

@@ -14,6 +14,9 @@ SELF_LINUX = $(filter-out selfhost/host_darwin.tin selfhost/host_linux.tin,$(SEL
 
 all: bin/tinc
 
+# Native packages (base, testkit, ...): C built with the host toolchain; see docs/NATIVE.md.
+include tools/mk/native.mk
+
 # Native release archive. Build on each supported host; releases.yml collects all three.
 DIST_TARGET ?= $(HOST_OS)-$(shell uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 dist: bin/tinc
@@ -36,15 +39,14 @@ bootstrap: bin/tinc
 seed: bootstrap
 	cp bin/s3/tinc $(SEED)
 
-# Stage 0, the original Go compiler: kept for history and the test harness.
-bin/tinc0: $(wildcard bootstrap/*.go)
-	go build -o $@ ./bootstrap
-
-test: bin/tinc0 bin/tinc
+# Everything but the Linux container runs. The assembly mode links Darwin assembly, so macOS only.
+test: bin/tinc
 	tools/v2test.sh bin/tinc
-	go test -count=1 ./bootstrap
-	TINC=$(CURDIR)/bin/tinc go test -count=1 ./bootstrap
-	TINC=$(CURDIR)/bin/tinc TINC_ASM=1 go test -count=1 ./bootstrap
+	python3 tools/ci/legacy_suite.py bin/tinc
+ifeq ($(HOST_OS),darwin)
+	python3 tools/ci/legacy_suite.py bin/tinc --mode asm
+endif
+	$(MAKE) native-test
 
 bench: bin/tinc
 	bench/run.py
