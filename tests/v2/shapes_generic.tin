@@ -1,0 +1,66 @@
+package main
+
+// Generic shapes (roadmap #141, "shape embedding and composition; shapes with generic
+// parameters"): a shape instance as a constraint, an instance in a composition, a
+// generic type's instance satisfying one, and the library's composed io.ReadWriteCloser
+// satisfied by a type here.
+
+import "io"
+import "say"
+
+shape Seq[T any] { Next() ?T }
+
+type Ints struct { n i64 }
+
+func (x Ints) Next() ?Ints {
+	return nil
+}
+
+type Stack[T any] struct { xs []T }
+
+func (s Stack[T]) Next() ?Stack[T] {
+	return nil
+}
+
+type File struct { n i64 }
+
+func (f File) Read(buf mut []u8) !i64 {
+	return 0
+}
+
+func (f File) Write(data []u8) !i64 {
+	return len(data)
+}
+
+func (f File) Close() !i64 {
+	return 0
+}
+
+// A shape instance as a constraint.
+func Drain[S Seq[Ints]](s S) i64 {
+	return 1
+}
+
+// A composition that lists an instance of a generic shape.
+shape Streams { Seq[Stack[i64]] }
+
+func Use[X Streams](x X) i64 {
+	return 2
+}
+
+// The library's io.ReadWriteCloser (Reader, Writer and Closer), satisfied by File.
+func Wrap[RW io.ReadWriteCloser](rw RW) i64 {
+	n := rw.Read(mut make([]u8, 1)) catch _ { -1 }
+	m := rw.Write([]u8{1}) catch _ { -1 }
+	c := rw.Close() catch _ { -1 }
+	return n + m + c
+}
+
+func main() {
+	let x = Ints{n: 1}
+	say.Line("seq: {Drain(x)}")
+	let st = Stack[i64]{xs: []i64{}}
+	say.Line("streams: {Use(st)}")
+	let f = File{n: 1}
+	say.Line("rwc: {Wrap(f)}")
+}

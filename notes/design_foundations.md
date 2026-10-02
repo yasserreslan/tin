@@ -131,7 +131,10 @@ shape Seq[T any] { Next() ?T; Close() !i64 }       // type parameters
 
 - A shape member is a method signature or the name of another shape. The two cannot be
   confused: a member is a method exactly when a `(` follows its name. A listed shape with
-  type arguments (`Seq[i64]`) is part of the later generic-shape step and is diagnosed today.
+  type arguments (`Seq[i64]`) is an instance of a generic shape; a bare generic name is an
+  error.
+- Two listed shapes that give the same method name different signatures are a compile error at
+  the shape's declaration; identical duplicates are allowed.
 - A method signature is a `func` signature without a receiver and without a body, so the two
   grammars are one and cannot drift. Parameter `mut` marks, `...` and `!T` results are all
   written as in a function declaration. There is no `self` parameter: a method's receiver is
@@ -168,8 +171,8 @@ when the type argument is concrete. The checks are:
   visible at the call site, as everywhere else in Tin.
 - **Composition**: `shape ReadWriter { Reader; Writer }` is satisfied by satisfying every
   listed shape; a shape may not list itself, directly or through other shapes (diagnosed once,
-  at the shape that closes the cycle), and a generic shape is listed only with the later
-  generic-shape work.
+  at the shape that closes the cycle), and a generic shape is listed as an instance
+  (`Seq[i64]`), whose methods are checked with its type arguments bound.
 - **A named union used as a constraint** (`shape Ordered = i64 | f64 | str`, then `[T Ordered]`)
   is membership in its list; its members are concrete types, never shapes.
 - One name is either a type or a shape, not both.
@@ -182,9 +185,8 @@ Dispatch costs nothing to provide: monomorphization already re-checks a generic 
 type parameters bound, so a call through a shaped parameter resolves to the concrete method
 like any other call, with no table and no indirection. `dyn` is the explicit exception and is
 the next step; until it is built, a `dyn` type in any signature that is resolved (every
-non-generic shape's signature is resolved when it is declared) and a generic shape used as a
-constraint are rejected with a message naming the missing step rather than being misread as
-ordinary types.
+non-generic shape's signature is resolved when it is declared) is rejected with a message
+naming the missing step rather than being misread as an ordinary type.
 
 ---
 
