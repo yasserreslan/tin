@@ -133,9 +133,9 @@ shape Seq[T any] { Next() ?T; Close() !i64 }       // type parameters
   confused: a member is a method exactly when a `(` follows its name. A listed shape with
   type arguments (`Seq[i64]`) is part of the later generic-shape step and is diagnosed today.
 - A method signature is a `func` signature without a receiver and without a body, so the two
-  grammars are one and cannot drift. Parameter `mut` marks, `...`, `!T` results and a `mut`
-  result are all written as in a function declaration. There is no `self` parameter: a method's
-  receiver is implicit, as it is for a declared method.
+  grammars are one and cannot drift. Parameter `mut` marks, `...` and `!T` results are all
+  written as in a function declaration. There is no `self` parameter: a method's receiver is
+  implicit, as it is for a declared method.
 - `shape X = A | B | C` is the same union grammar as a generic type parameter's constraint;
   the named union and the inline form are interchangeable (a named union used as a constraint is
   exactly the named-constraint item of section 1).

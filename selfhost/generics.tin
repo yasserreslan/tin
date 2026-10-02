@@ -617,7 +617,7 @@ fn shapes_declared() {
                     }
                     j = j + 1;
                 }
-                if bad {
+                if bad && !shape_on_path(shape_bad, d) {
                     vec_push(shape_bad, d);
                 }
             } else {
@@ -636,7 +636,7 @@ fn shapes_declared() {
                     j = j + 1;
                 }
             }
-            if error_count != before {
+            if error_count != before && !shape_on_path(shape_bad, d) {
                 vec_push(shape_bad, d);
             }
             ck_state_restore(saved);
@@ -1022,7 +1022,9 @@ fn check_shape(pos, t, sd) {
     let j = 0;
     while j < sd[D_UNION][VEC_LEN] {
         let sub = shape_ref(vec_get(sd[D_UNION], j));
-        if sub {
+        // A generic shape listed here was diagnosed at declaration; resolving it would
+        // add errors from its unbound type parameters.
+        if sub && !sub[D_TPARAMS] {
             check_shape(pos, t, sub);
         }
         j = j + 1;

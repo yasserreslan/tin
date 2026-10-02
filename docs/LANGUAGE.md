@@ -1075,12 +1075,15 @@ FuncDecl      = "func" [ Receiver ] ident [ TypeParams ] Params [ Results ] Bloc
 Receiver      = "(" ident [ "mut" ] Type ")" .
 Params        = "(" [ Param { "," Param } ] ")" .
 Param         = identList [ "mut" ] Type .
-Results       = [ "!" ] [ Type | "(" Type { "," Type } ")" ] .   (a bare "!" only)
+Results       = "!" [ Type | "(" Type { "," Type } ")" ]   (a bare "!" adds the fault result)
+              | "mut" Type
+              | Type
+              | "(" Type { "," Type } ")" .
 ExternDecl    = "extern" "func" ident "(" [ Param { "," Param } ] [ "," "..." ] ")" [ Results ] .
 
 Type          = TypeName [ TypeArgs ] | "[" "]" Type | "[" expr "]" Type
               | "map" "[" Type "]" Type | "?" Type | "func" ParamTypes [ Results ]
-              | "dyn" Type
+              | "dyn" TypeName [ TypeArgs ]
               | "struct" "{" { identList Type ";" } "}"
               | "enum" "{" Variant { ( "," | ";" ) Variant } "}" .
 Variant       = ident [ "(" [ identList Type { "," identList Type } ] ")" ] .

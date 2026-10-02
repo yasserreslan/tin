@@ -32,3 +32,13 @@ type Box[T any] struct { V T }
 func (b Box[T]) Put(v Item) i64 {
 	return v.N
 }
+
+// Both is a package-local type whose name can match a shape in the importing program: a
+// union here must resolve this type, not the caller's shape of the same name.
+type Both struct { N i64 }
+
+shape Named = Both | i64
+
+func Pick[X Named](x X) i64 {
+	return 0
+}

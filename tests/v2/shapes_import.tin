@@ -36,4 +36,6 @@ func main() {
 	say.Line("both: {IsBoth(c)}")
 	let b = shapepkg.Box[i64]{V: 1}
 	say.Line("put: {Put(b, shapepkg.Item{N: 7})}")
+	// The package's own Both type, not this file's Both shape.
+	say.Line("pick: {shapepkg.Pick(3)}")
 }
