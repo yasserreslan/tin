@@ -68,6 +68,10 @@ func handle(q anvil.Req, w mut anvil.Out) {
 		if q.Path == "/close" {
 			ws.Close()
 			ws.Close()
+			_, e := ws.Read()
+			if e == nil || !websocket.IsClosed(e) {
+				panic("Read after Close did not report closure")
+			}
 			return
 		}
 		if q.Path == "/raw" {

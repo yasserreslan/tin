@@ -308,6 +308,9 @@ func (c Conn) fill() ! {
 // need makes sure n bytes are buffered.
 func (c Conn) need(n i64) ! {
 	st := c.st
+	if st[sBuf] == 0 {
+		fail "websocket: closed (the connection is closed)"
+	}
 	if st[sS]+n > st[sCap] {
 		memmove(st[sBuf], st[sBuf]+st[sS], st[sE]-st[sS])
 		st[sE] -= st[sS]
@@ -461,6 +464,9 @@ func (c Conn) Read() !Message {
 		fail "websocket: the connection is not open"
 	}
 	st := c.st
+	if st[sBuf] == 0 {
+		fail "websocket: closed (the connection is closed)"
+	}
 	data := calloc(3, 8) // [heap buffer, length, capacity], including all fragments
 	defer free_message(data)
 	text := false
