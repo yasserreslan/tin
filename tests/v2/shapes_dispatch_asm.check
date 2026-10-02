@@ -1,0 +1,13 @@
+# Assembly check for tests/v2/shapes_dispatch_asm.tin: the call through the Reader
+# parameter is a direct call on Buf.Read on both CPUs, and no indirect call appears
+# anywhere in the program (a method table would need one).
+#
+# CHECK lines match in order; CHECK-NOT must not match after the previous CHECK.
+
+[arm64]
+CHECK: bl _Buf.Read
+CHECK-NOT: blr
+
+[amd64]
+CHECK: call S[0-9]+ +# Buf.Read
+CHECK-NOT: call r[a-z0-9]+

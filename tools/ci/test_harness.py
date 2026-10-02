@@ -54,6 +54,37 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(result[0], 124)
 
 
+class AssemblyCheckTests(unittest.TestCase):
+    def checks(self, text, arch='arm64'):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'x_asm.check'
+            path.write_text(text)
+            return suite.parse_checks(path, arch)
+
+    def test_sections_select_one_arch(self):
+        directives = self.checks('# comment\n[arm64]\nCHECK: bl A\n[amd64]\nCHECK: call B\n')
+        self.assertEqual(directives, [('CHECK', 'bl A')])
+
+    def test_lines_before_a_section_apply_everywhere(self):
+        directives = self.checks('CHECK: prologue\n[amd64]\nCHECK: call B\n')
+        self.assertEqual(directives, [('CHECK', 'prologue')])
+
+    def test_ordered_check_and_scoped_check_not(self):
+        self.assertTrue(suite.check_asm('a\nbl X\nc\nd', [('CHECK', 'bl X'), ('CHECK-NOT', 'blr')])[0])
+        # CHECK-NOT only looks after the previous CHECK.
+        self.assertTrue(suite.check_asm('blr\na\nbl X\nc', [('CHECK', 'bl X'), ('CHECK-NOT', 'blr')])[0])
+        ok, why = suite.check_asm('bl X\nblr x16\n', [('CHECK', 'bl X'), ('CHECK-NOT', 'blr')])
+        self.assertFalse(ok)
+        self.assertIn('blr', why)
+
+    def test_check_order_is_required(self):
+        self.assertFalse(suite.check_asm('second first', [('CHECK', 'first'), ('CHECK', 'second')])[0])
+
+    def test_a_bad_line_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, 'not a CHECK'):
+            self.checks('CHEC: oops\n')
+
+
 class RegressionTests(unittest.TestCase):
     def setUp(self):
         self.case = {'expected': {'phase': 'run', 'exit': 0, 'stdout': 'ok\n'},

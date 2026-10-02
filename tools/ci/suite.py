@@ -5,11 +5,65 @@ import difflib
 import json
 import os
 from pathlib import Path
+import platform
+import re
 import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Assembly checks (NAME_asm.tin + NAME_asm.check): ordered CHECK/CHECK-NOT lines matched
+# against the -S listing, the way lit does it. A [arch] line selects a section, so one
+# file can hold the arm64 and amd64 expectations; lines before any section apply to all.
+ASM_ARCH = re.compile(r'^\[([a-z0-9_-]+)\]$')
+ASM_DIRECTIVE = re.compile(r'^(CHECK|CHECK-NOT):\s*(.*)$')
+
+
+def asm_arch(target=None):
+    """The architecture whose section of a .check file applies: the target if given, else the host."""
+    if target:
+        return target.split('-')[-1]
+    machine = platform.machine().lower()
+    if machine in ('arm64', 'aarch64'):
+        return 'arm64'
+    if machine in ('x86_64', 'amd64'):
+        return 'amd64'
+    return machine
+
+
+def parse_checks(path, arch):
+    """Read a .check file into ordered (kind, pattern) directives for arch."""
+    directives = []
+    section = None
+    for number, raw in enumerate(path.read_text().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = ASM_ARCH.match(line)
+        if match:
+            section = match.group(1)
+            continue
+        match = ASM_DIRECTIVE.match(line)
+        if not match:
+            raise ValueError(f'{path}:{number}: not a CHECK, CHECK-NOT or [arch] line: {line}')
+        if section in (None, arch):
+            directives.append((match.group(1), match.group(2)))
+    return directives
+
+
+def check_asm(text, directives):
+    """Match lit-style directives in order; return (ok, the directive that failed)."""
+    position = 0
+    for kind, pattern in directives:
+        match = re.search(pattern, text[position:])
+        if kind == 'CHECK':
+            if not match:
+                return False, f'CHECK: {pattern}'
+            position += match.end()
+        elif match:
+            return False, f'CHECK-NOT: {pattern}'
+    return True, ''
 
 
 def execute(command, *, cwd=ROOT, timeout=60, env=None):
@@ -30,7 +84,9 @@ def compare(name, expected, actual):
 
 
 def run(compiler, target=None, docker=None, root=ROOT):
-    cases = sorted((root / 'tests/v2').glob('*.tin'))
+    discovered = sorted((root / 'tests/v2').glob('*.tin'))
+    # An _asm.tin file is a program for the assembly checker, not a program to run.
+    cases = [c for c in discovered if not c.stem.endswith('_asm')]
     if not cases:
         raise ValueError('No strict tests discovered')
     output = root / 'bin/ci'
@@ -68,6 +124,28 @@ def run(compiler, target=None, docker=None, root=ROOT):
                 passed = code == 0 and compare(name, golden.read_bytes(), b''.join(sorted(stdout.splitlines(True))))
             if not passed:
                 print(f'FAIL {name}: exit {code}\n{stderr.decode(errors="replace")[:4000]}')
+            else:
+                print('PASS', name)
+            results.append({'name': name, 'passed': passed, 'exit': code})
+        arch = asm_arch(target)
+        for source in sorted((root / 'tests/v2').glob('*_asm.tin')):
+            name = source.stem
+            check = source.with_suffix('.check')
+            if not check.exists():
+                print('FAIL', name, 'missing check file:', check)
+                results.append({'name': name, 'passed': False})
+                continue
+            command = [str(compiler)] + (['-target', target] if target else [])
+            command += ['-S', '-o', str(work / name), str(source.relative_to(root))]
+            code, stdout, stderr = execute(command, cwd=root, env=env)
+            (output / (name + '.asm.log')).write_bytes(stdout + stderr)
+            if code != 0:
+                passed, why = False, f'compiler exit {code}'
+            else:
+                directives = parse_checks(check, arch)
+                passed, why = check_asm(stdout.decode(errors='replace'), directives)
+            if not passed:
+                print(f'FAIL {name} [{arch}]: {why}\n{stderr.decode(errors="replace")[:4000]}')
             else:
                 print('PASS', name)
             results.append({'name': name, 'passed': passed, 'exit': code})
