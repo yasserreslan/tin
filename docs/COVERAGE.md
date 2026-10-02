@@ -160,7 +160,7 @@ Ordered by import path, as `go list std` prints them.
 | `image/jpeg` | 7+1 | missing |  |  |
 | `image/png` | 6+0 | missing |  | needs compress/zlib |
 | `index/suffixarray` |  | missing |  |  |
-| `io` | 91+20 | partial | lib/io declares the shapes (Reader, Writer, Closer, Seeker, ReaderAt, WriterAt and the compositions); a type satisfies them structurally. Copy, ReadAll, Pipe, MultiWriter, LimitReader and TeeReader, and EOF as a sentinel fault, are the next step (#141) |
+| `io` | 91+20 | partial | `io` declares the shapes (Reader, Writer, Closer, Seeker, ReaderAt, WriterAt and the compositions); a type satisfies them structurally. Copy, ReadAll, Pipe, MultiWriter, LimitReader and TeeReader, and EOF as a sentinel fault, are the next step (#141) |
 | `io/fs` | 2+0 | missing |  |  |
 | `io/ioutil` |  | n/a | quarry | deprecated in Go; quarry has ReadFile, WriteFile, ReadDir |
 | `iter` |  | missing |  | range over functions; `for range` covers slices, strings, maps and integers |
@@ -214,7 +214,7 @@ Ordered by import path, as `go list std` prints them.
 | `slices` | 79+37 | partial | sift | Sort, SortFunc, SortStableFunc (Go's algorithm, same order of equal elements), IsSorted, BinarySearch, Min, Max, Index, Contains, Equal, Compare, Reverse, Insert, Delete, DeleteFunc, Replace, Compact, Clone, Grow, Concat, Repeat, with the Func forms; Insert, Delete and the others take a `mut` slice and return the result; no Clip, Chunk, or iterator forms, and no variadic forms (InsertAll and ConcatAll take slices) |
 | `sort` | 105+8 | partial | sift | Ints, Strs, SortBy, Search* and the generic Sort and SortFunc; no sort.Interface (by design), no sort.Slice (use SortFunc) |
 | `strconv` | 875+97 | partial | mint | Itoa, Atoi, ParseInt, ParseUint, ParseBool, ParseFloat, FormatInt, FormatUint, FormatFloat, Quote, Unquote and friends; no AppendFloat, AppendBool, QuoteToASCII, IsPrint, ParseComplex |
-| `strings` | 657+147 | partial | twine | every function except the iterator forms and Reader: Index family, Split family with SplitAfter, Fields and FieldsFunc, Map, Title, Unicode ToUpper, ToLower, ToTitle, EqualFold by SimpleFold, Trim family with Func forms, Cut, CutPrefix, CutSuffix, Replacer, Lines, ToValidUTF8, Clone, Builder (Cap, Grow, Write); Lines is a slice, not an iterator; no NewReader (needs shapes), no ToUpperSpecial |
+| `strings` | 657+147 | partial | twine | every function except the iterator forms and Reader: Index family, Split family with SplitAfter, Fields and FieldsFunc, Map, Title, Unicode ToUpper, ToLower, ToTitle, EqualFold by SimpleFold, Trim family with Func forms, Cut, CutPrefix, CutSuffix, Replacer, Lines, ToValidUTF8, Clone, Builder (Cap, Grow, Write); Lines is a slice, not an iterator; no NewReader (with the io port), no ToUpperSpecial |
 | `structs` |  | n/a |  |  |
 | `sync` | 69+32 | design | share-nothing cores, relay | no Mutex or RWMutex by design; WaitGroup, Once, Pool and Map need routine-level equivalents |
 | `sync/atomic` | 7+12 | missing |  | the runtime has atomic operations as compiler intrinsics; there is no public package |

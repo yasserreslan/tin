@@ -51,7 +51,7 @@ Package argo writes JSON. argo.Put(b, v) appends v to the []u8 buffer b; the com
 
 ## io
 
-Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or Seeker by having the methods, with no declaration, and compositions like ReadWriteCloser by satisfying every listed shape. The helpers (Copy, ReadAll, Pipe, MultiWriter, ...) and EOF as a sentinel fault land with the io port (roadmap #141); Go's ReaderFrom and WriterTo need dyn and are not declared yet.
+Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or Seeker by having the methods, with no declaration, and compositions like ReadWriteCloser by satisfying every listed shape. The helpers (Copy, ReadAll, Pipe, MultiWriter, ...) and EOF as a sentinel fault land with the io port (roadmap #141); the byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...) and Go's ReaderFrom and WriterTo (which need dyn) are not declared yet.
 
 - `shape Reader { Read(buf mut []u8) !i64 }`: Reader is anything with Read: it fills buf and returns how many bytes it wrote.
 - `shape Writer { Write(data []u8) !i64 }`: Writer is anything with Write: it takes data and returns how many bytes it took.
@@ -62,6 +62,8 @@ Package io declares the streaming shapes: a type satisfies Reader, Writer, Close
 - `shape ReadWriter`: ReadWriter reads and writes.
 - `shape ReadCloser`: ReadCloser reads and closes.
 - `shape WriteCloser`: WriteCloser writes and closes.
+- `shape WriteSeeker`: WriteSeeker writes and seeks.
+- `shape ReadSeekCloser`: ReadSeekCloser reads, seeks and closes.
 - `shape ReadWriteCloser`: ReadWriteCloser reads, writes and closes.
 - `shape ReadSeeker`: ReadSeeker reads and seeks.
 - `shape ReadWriteSeeker`: ReadWriteSeeker reads, writes and seeks.

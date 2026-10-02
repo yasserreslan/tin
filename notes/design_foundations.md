@@ -146,6 +146,9 @@ shape Seq[T any] { Next() ?T; Close() !i64 }       // type parameters
   they are recognized only where the grammar wants them, so a program may keep using them as
   names (`shape := 1`, `type dyn = i64`, `var x dyn`). `shape` opens a declaration only at the
   top level; `dyn` is a fat reference only when a shape name follows it in type position.
+- The streaming shapes live in `lib/io`, not in `flume` as the roadmap first assumed:
+  `flume.Reader` and `flume.Writer` are concrete types, and a type and a shape cannot share a
+  name. `flume` keeps the buffered reader and writer and gains the `io` methods at the port.
 - `dyn S` is written in type position; `?dyn S` is the optional. A `dyn S` is never nil.
 - There is no downcast, no type assertion and no type switch on a `dyn` value, and therefore no
   runtime type information: a closed set of cases is an `enum`, an open set is a method on the

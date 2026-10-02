@@ -2,7 +2,8 @@
 // Seeker by having the methods, with no declaration, and compositions like
 // ReadWriteCloser by satisfying every listed shape. The helpers (Copy, ReadAll, Pipe,
 // MultiWriter, ...) and EOF as a sentinel fault land with the io port (roadmap #141);
-// Go's ReaderFrom and WriterTo need dyn and are not declared yet.
+// the byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...) and Go's
+// ReaderFrom and WriterTo (which need dyn) are not declared yet.
 package io
 
 // Reader is anything with Read: it fills buf and returns how many bytes it wrote.
@@ -38,6 +39,19 @@ shape ReadCloser {
 // WriteCloser writes and closes.
 shape WriteCloser {
 	Writer
+	Closer
+}
+
+// WriteSeeker writes and seeks.
+shape WriteSeeker {
+	Writer
+	Seeker
+}
+
+// ReadSeekCloser reads, seeks and closes.
+shape ReadSeekCloser {
+	Reader
+	Seeker
 	Closer
 }
 

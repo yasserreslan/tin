@@ -1,1 +1,1 @@
-tests/v2/shapes_gencomp_bad.tin:6:14: error: shape Both lists the generic shape Getter, which needs type arguments
+tests/v2/shapes_gencomp_bad.tin:6:14: error: shape Getter needs type arguments, like Getter[...]

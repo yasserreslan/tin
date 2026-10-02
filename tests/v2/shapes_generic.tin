@@ -56,6 +56,26 @@ func Wrap[RW io.ReadWriteCloser](rw RW) i64 {
 	return n + m + c
 }
 
+// A generic shape whose body lists another generic shape with its own parameter.
+shape Getter[T any] { Get() T }
+
+shape PairGetter[U any] { Getter[U] }
+
+type Seven struct { n i64 }
+
+func (s Seven) Get() i64 {
+	return 7
+}
+
+func Pair[G PairGetter[i64]](g G) i64 {
+	return g.Get()
+}
+
+// A later constraint may mention an earlier parameter: T is inferred from x.
+func Pick[T any, S Seq[T]](s S, x T) i64 {
+	return 1
+}
+
 func main() {
 	let x = Ints{n: 1}
 	say.Line("seq: {Drain(x)}")
@@ -63,4 +83,7 @@ func main() {
 	say.Line("streams: {Use(st)}")
 	let f = File{n: 1}
 	say.Line("rwc: {Wrap(f)}")
+	let s = Seven{n: 0}
+	say.Line("pair: {Pair(s)}")
+	say.Line("pick: {Pick(x, x)}")
 }
