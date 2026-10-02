@@ -114,8 +114,8 @@ error's `keep` suggestion keeps working.
 
 Each step keeps `make bootstrap` a fixed point and adds its own tests. Positive `dyn` tests
 can only run once both backends emit size-16 values, because CI runs the strict suite on
-amd64 and arm64; steps 2 and 3 add negative tests (and `_asm` checks for the table), and the
-positive tests land with step 4.
+amd64 and arm64; steps 2 and 3 add negative tests, and the
+positive tests and the table `_asm` check land with step 4.
 
 1. **This note** (no compiler change).
 2. **Size-16 in the type system**: `K_DYN` interned by (shape, bindings), `type_width`,
