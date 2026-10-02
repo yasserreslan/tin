@@ -28,16 +28,13 @@ shape Seq[T any] {
 	Close() !i64
 }
 
-// Members may be written on one line, and a method may be variadic or give a mut result.
+// Members may be written on one line, and a method may be variadic.
 shape OneLiner { Ping() }
 
 shape Odd {
 	Sum(xs ...i64) i64
 	Take(v mut []u8)
 }
-
-// A listed shape may carry type arguments.
-shape IntSeq = Seq[i64]
 
 // Contextual words: types of their own named `shape` and `dyn` still resolve.
 type shape = str

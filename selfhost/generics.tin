@@ -176,6 +176,12 @@ fn check_constraints(pos, names, cons, targs, file) {
                     }
                 } else {
                     sd = shape_ref(cx);
+                    if sd && sd[D_TPARAMS] {
+                        // A generic shape written without type arguments: same later step.
+                        err_quoted(cx[N_POS], "shape ", cx[TX_B], " takes type arguments, which are not usable in a constraint yet (#141)");
+                        handled = 1;
+                        sd = 0;
+                    }
                 }
             }
             if handled {
@@ -186,7 +192,7 @@ fn check_constraints(pos, names, cons, targs, file) {
                 let j = 0;
                 while j < c[VEC_LEN] {
                     let mt = vec_get(c, j);
-                    if shape_ref(mt) {
+                    if shape_ref(mt) || shape_ref_name(mt) {
                         err_quoted(mt[N_POS], "", shape_member_name(mt), " is a shape: a union constraint lists concrete types, and a shape goes in the constraint alone");
                     } else if resolve_type(mt) == t {
                         ok = 1;
@@ -537,10 +543,18 @@ var ty_shapes;    // vec of [qualified name, shape decl], like ty_named for type
 var sm_bind;      // bindings that resolve the candidate method's signature
 var sm_declared;  // 1 when the candidate method has been declared (receiver prepended)
 var shape_cycles; // shapes already reported in a composition cycle
+var shape_validated; // shapes whose body has been validated (memo: composition is a DAG)
+var shape_checking;  // shapes on the current satisfaction path (a cycle guard)
+var shape_checked;   // shapes already checked in the current satisfaction tree
+var shape_bad;       // shapes whose signature did not resolve (reported once)
 
 fn shapes_init() {
     ty_shapes = vec_new();
     shape_cycles = vec_new();
+    shape_validated = vec_new();
+    shape_checking = vec_new();
+    shape_checked = vec_new();
+    shape_bad = vec_new();
     let i = 0;
     while i < prog_shapes[VEC_LEN] {
         let d = vec_get(prog_shapes, i);
@@ -575,6 +589,43 @@ fn find_shape(qname) {
     return 0;
 }
 
+// shapes_declared resolves every non-generic shape's method signatures once the named
+// types exist, so an unused shape still reports a `dyn` it cannot carry or a type that
+// does not exist, instead of hiding it until first use. A shape whose signature failed
+// is remembered so satisfaction does not report the same error again.
+fn shapes_declared() {
+    let i = 0;
+    while i < prog_shapes[VEC_LEN] {
+        let d = vec_get(prog_shapes, i);
+        if !d[D_TPARAMS] && !d[D_UNIONKIND] {
+            let saved = ck_state_save();
+            set_file(d[D_FILE]);
+            ck_tbind = 0;
+            let before = error_count;
+            let j = 0;
+            while j < d[D_SHAPE][VEC_LEN] {
+                let m = vec_get(d[D_SHAPE], j);
+                let k = 0;
+                while k < m[F_PTYPES][VEC_LEN] {
+                    resolve_type(vec_get(m[F_PTYPES], k));
+                    k = k + 1;
+                }
+                k = 0;
+                while k < m[F_RTYPES][VEC_LEN] {
+                    resolve_type(vec_get(m[F_RTYPES], k));
+                    k = k + 1;
+                }
+                j = j + 1;
+            }
+            if error_count != before {
+                vec_push(shape_bad, d);
+            }
+            ck_state_restore(saved);
+        }
+        i = i + 1;
+    }
+}
+
 // shape_ref_name resolves a name (qualified or not) to a shape in scope, or 0.
 fn shape_ref_name(tx) {
     let d = 0;
@@ -607,16 +658,25 @@ fn shape_ref(tx) {
 // lists types only, and the listed shapes do not form a cycle. path holds the shapes on
 // the way down; a cycle is reported once, at the shape that closes it, and every shape
 // in it is remembered so the walk over it does not recurse forever or report again.
+// Each name is resolved in the file that declares the shape, and a validated shape is
+// remembered, so a shared sub-shape is walked once and diamonds do not cost 2^depth.
 fn check_shape_decl(d, path) {
+    if shape_on_path(shape_validated, d) {
+        return;
+    }
+    let saved = ck_state_save();
+    set_file(d[D_FILE]);
+    vec_push(shape_validated, d);
     if d[D_UNIONKIND] {
         let i = 0;
         while i < d[D_UNION][VEC_LEN] {
             let m = vec_get(d[D_UNION], i);
-            if shape_ref(m) {
+            if shape_ref(m) || shape_ref_name(m) {
                 err_quoted(m[N_POS], "a named union lists concrete types, but ", shape_member_name(m), " is a shape: list shapes in a shape body instead");
             }
             i = i + 1;
         }
+        ck_state_restore(saved);
         return;
     }
     vec_push(path, d);
@@ -648,12 +708,13 @@ fn check_shape_decl(d, path) {
             buf_str(e2, sub[D_NAME]);
             buf_str(e2, ", which needs type arguments (#141)");
             err_end(e2);
-        } else if !shape_on_path(shape_cycles, sub) {
+        } else {
             check_shape_decl(sub, path);
         }
         i = i + 1;
     }
     path[VEC_LEN] = path[VEC_LEN] - 1;
+    ck_state_restore(saved);
 }
 
 // shape_mark_cycle remembers the shapes from sub to the current top of path, the cycle
@@ -722,12 +783,14 @@ fn shape_method(t, name) {
 }
 
 // find_method_by_recv finds a method declared on t before declare_fn ran, as it has
-// not when a type alias's instance is checked during type resolution.
+// not when a type alias's instance is checked during type resolution. A generic
+// method template is skipped: its receiver type mentions the type parameters, which
+// have no bindings here (shape_method finds those through their declaration).
 fn find_method_by_recv(t, name) {
     let i = 0;
     while i < prog_fns[VEC_LEN] {
         let f = vec_get(prog_fns, i);
-        if f[F_RECV] && !f[F_TBIND] && f[F_NAME] && streq(f[F_NAME], name) {
+        if f[F_RECV] && !f[F_TBIND] && !f[F_TPARAMS] && f[F_NAME] && streq(f[F_NAME], name) {
             let saved = ck_state_save();
             set_file(f[F_FILE]);
             let rt = resolve_type(f[F_RECV]);
@@ -807,6 +870,9 @@ fn shape_sig_same(a, b) {
     }
     let ars = vec_get(a, 3);
     let brs = vec_get(b, 3);
+    if ars[VEC_LEN] != brs[VEC_LEN] {
+        return 0;
+    }
     i = 0;
     while i < ars[VEC_LEN] {
         if vec_get(ars, i) != vec_get(brs, i) {
@@ -880,8 +946,22 @@ fn shape_result_list(b, rs, n) {
     buf_byte(b, ')');
 }
 
-// check_shape reports why t does not satisfy sd, or nothing when it does.
+// check_shape reports why t does not satisfy sd, or nothing when it does. Composition is
+// walked once per shape per satisfaction tree (shape_checked) and never through a cycle
+// (shape_checking), so a diamond costs its depth, not 2^depth, and a cycle reported at
+// registration cannot recurse here.
 fn check_shape(pos, t, sd) {
+    if shape_on_path(shape_bad, sd) {
+        return;
+    }
+    if shape_checking[VEC_LEN] == 0 {
+        shape_checked = vec_new();
+    }
+    if shape_on_path(shape_checking, sd) || shape_on_path(shape_checked, sd) {
+        return;
+    }
+    vec_push(shape_checked, sd);
+    vec_push(shape_checking, sd);
     let saved = ck_state_save();
     set_file(sd[D_FILE]);
     if sd[D_UNIONKIND] {
@@ -903,6 +983,7 @@ fn check_shape(pos, t, sd) {
             shape_union_str(m, sd);
             err_end(m);
         }
+        shape_checking[VEC_LEN] = shape_checking[VEC_LEN] - 1;
         ck_state_restore(saved);
         return;
     }
@@ -919,6 +1000,7 @@ fn check_shape(pos, t, sd) {
         check_shape_method(pos, t, sd, vec_get(sd[D_SHAPE], i));
         i = i + 1;
     }
+    shape_checking[VEC_LEN] = shape_checking[VEC_LEN] - 1;
     ck_state_restore(saved);
 }
 
@@ -947,7 +1029,11 @@ fn check_shape_method(pos, t, sd, want) {
         return;
     }
     let wsig = shape_sig_of(want, 0, 0);
+    // The candidate's types belong to the file that declares the method, not the shape's.
+    let saved = ck_state_save();
+    set_file(cand[F_FILE]);
     let csig = shape_sig_of(cand, sm_declared, sm_bind);
+    ck_state_restore(saved);
     if !shape_sig_same(wsig, csig) {
         let m = err_begin(pos);
         buf_str(m, "type ");

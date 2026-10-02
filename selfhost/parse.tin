@@ -542,6 +542,7 @@ fn parse_shape_decl() {
         p_end();
     }
     p_next();
+    p_end();
     return d;
 }
 
