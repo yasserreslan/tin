@@ -4,7 +4,7 @@
 #
 # CHECK lines match in order; a CHECK-NOT must not match between the previous CHECK's
 # match and the next CHECK's match, as in lit. The program has no function values, so
-# the trailing CHECK-NOT covers the whole listing.
+# the trailing CHECK-NOT runs from the direct call to the end of the listing.
 
 [arm64]
 CHECK: bl _Buf.Read

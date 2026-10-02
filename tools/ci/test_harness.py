@@ -95,8 +95,42 @@ class AssemblyCheckTests(unittest.TestCase):
     def test_a_bad_line_or_empty_pattern_is_an_error(self):
         with self.assertRaisesRegex(ValueError, 'not a CHECK'):
             self.checks('CHEC: oops\n')
-        with self.assertRaisesRegex(ValueError, 'not a CHECK'):
+        with self.assertRaisesRegex(ValueError, 'empty pattern'):
             self.checks('CHECK:\n')
+
+
+class AsmSuiteTests(unittest.TestCase):
+    """run()'s assembly branches, not just the pure checker functions."""
+
+    def scenario(self, *, check='[arm64]\nCHECK: bl X\n[amd64]\nCHECK: bl X\n', tin=True):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tests = root / 'tests/v2'
+            tests.mkdir(parents=True)
+            # run() insists on finding the ordinary suite too; one tiny passing case.
+            (tests / 'sample.tin').write_text('package main\n')
+            (tests / 'sample.out').write_text('bl X\n')
+            if tin:
+                (tests / 'sample_asm.tin').write_text('package main\n')
+            if check is not None:
+                (tests / 'sample_asm.check').write_text(check)
+            with patch.object(suite, 'execute', return_value=(0, b'bl X\n', b'')), contextlib.redirect_stdout(io.StringIO()):
+                return suite.run(Path('/compiler'), root=root)
+
+    def test_matching_check_passes(self):
+        self.assertTrue(self.scenario())
+
+    def test_missing_check_fails(self):
+        self.assertFalse(self.scenario(check=None))
+
+    def test_no_directive_for_this_arch_fails(self):
+        self.assertFalse(self.scenario(check='[otherarch]\nCHECK: bl X\n'))
+
+    def test_invalid_regex_fails_without_crashing_the_suite(self):
+        self.assertFalse(self.scenario(check='[arm64]\nCHECK: (unclosed\n[amd64]\nCHECK: x\n'))
+
+    def test_check_without_a_test_fails(self):
+        self.assertFalse(self.scenario(tin=False))
 
 
 class RegressionTests(unittest.TestCase):

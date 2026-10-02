@@ -201,6 +201,6 @@ The two functions' generated bodies are instruction-identical after normalizing 
 `tinc -S` prints `_drainBuf` and `_Drain[Buf]` as the same instruction sequence. Across the
 machines it has been run on, the ratio stays within a few percent (0.97 to 1.02), i.e. there
 is no dispatch overhead. The committed check `tests/v2/shapes_dispatch_asm.tin` + `.check`
-asserts the direct call (`bl _Buf.Read` on arm64, `call S<n>  # Buf.Read` on amd64) with no
-indirect call in the listing, on every target in CI.
+asserts the direct call (`bl _Buf.Read` on arm64, `call S<n>  # Buf.Read` on amd64) and that
+no indirect call follows it in the listing, on every target in CI.
 

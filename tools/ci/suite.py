@@ -45,8 +45,10 @@ def parse_checks(path, arch):
             section = match.group(1)
             continue
         match = ASM_DIRECTIVE.match(line)
-        if not match or not match.group(2):
+        if not match:
             raise ValueError(f'{path}:{number}: not a CHECK, CHECK-NOT or [arch] line: {line}')
+        if not match.group(2):
+            raise ValueError(f'{path}:{number}: {match.group(1)} with an empty pattern')
         if section in (None, arch):
             directives.append((match.group(1), match.group(2)))
     return directives
@@ -115,7 +117,7 @@ def run(compiler, target=None, docker=None, root=ROOT):
             golden = source.with_suffix('.err' if negative else '.out')
             if not golden.exists():
                 print('FAIL', name, 'missing expected output:', golden)
-                results.append({'name': name, 'passed': False})
+                results.append({'name': name, 'passed': False, 'exit': None})
                 continue
             exe = work / name
             command = [str(compiler)] + (['-target', target] if target else [])
@@ -147,7 +149,7 @@ def run(compiler, target=None, docker=None, root=ROOT):
             check = source.with_suffix('.check')
             if not check.exists():
                 print('FAIL', name, 'missing check file:', check)
-                results.append({'name': name, 'passed': False})
+                results.append({'name': name, 'passed': False, 'exit': None})
                 continue
             command = [str(compiler)] + (['-target', target] if target else [])
             command += ['-S', '-o', str(work / name), str(source.relative_to(root))]
@@ -174,7 +176,7 @@ def run(compiler, target=None, docker=None, root=ROOT):
         for check in sorted((root / 'tests/v2').glob('*_asm.check')):
             if check.stem not in asm_stems:
                 print('FAIL', check.stem, 'check file without a test:', check)
-                results.append({'name': check.stem, 'passed': False})
+                results.append({'name': check.stem, 'passed': False, 'exit': None})
     (output / 'strict-results.json').write_text(json.dumps(results, indent=2) + '\n')
     return all(r['passed'] for r in results)
 
