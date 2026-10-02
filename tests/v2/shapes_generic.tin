@@ -76,6 +76,22 @@ func Pick[T any, S Seq[T]](s S, x T) i64 {
 	return 1
 }
 
+// A generic shape whose listed instance has a constrained parameter: the constraint is
+// checked at the instantiation, not at the declaration.
+shape Limited[T i64 | str] { Get() T }
+
+shape LimitedGetter[U any] { Limited[U] }
+
+// A generic shape with a map keyed by its parameter (a placeholder must be a valid key).
+shape Indexed[T any] { Lookup(m map[T]i64) i64 }
+
+// A generic named union.
+shape NumberOr[T any] = i64 | T
+
+func Numbered[S NumberOr[Seven]](s S) i64 {
+	return 2
+}
+
 func main() {
 	let x = Ints{n: 1}
 	say.Line("seq: {Drain(x)}")
@@ -86,4 +102,5 @@ func main() {
 	let s = Seven{n: 0}
 	say.Line("pair: {Pair(s)}")
 	say.Line("pick: {Pick(x, x)}")
+	say.Line("limited: {Numbered(s)}")
 }

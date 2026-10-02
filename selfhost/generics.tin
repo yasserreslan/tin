@@ -637,12 +637,16 @@ fn shapes_declared() {
                     }
                     j = j + 1;
                 }
-                if error_count == before {
+                if error_count != before {
+                    // d's own signature is what failed; conflicts are checked for the
+                    // shapes that are still sound.
+                    if !shape_on_path(shape_bad, d) {
+                        vec_push(shape_bad, d);
+                    }
+                } else {
+                    // check_shape_conflicts marks the shape whose method failed, not d.
                     check_shape_conflicts(d, bind);
                 }
-            }
-            if error_count != before && !shape_on_path(shape_bad, d) {
-                vec_push(shape_bad, d);
             }
             ck_state_restore(saved);
         }
@@ -760,10 +764,55 @@ fn shape_sym_bind(d) {
     let i = 0;
     while i < d[D_TPARAMS][VEC_LEN] {
         let ph = ty_new(K_STRUCT, vec_get(d[D_TPARAMS], i));
+        // A struct with no fields, not a null one: key_valid walks a map key's fields.
+        ph[TY_FIELDS] = vec_new();
         vec_push(bind, pair(vec_get(d[D_TPARAMS], i), ph));
         i = i + 1;
     }
     return bind;
+}
+
+// shape_inst_soft resolves a listed instance for declaration validation: it checks the
+// name and the arity, binds the arguments, but does not check their constraints, because
+// a symbolic parameter cannot satisfy a union or a shape. The constraints are checked
+// again at every real instantiation.
+fn shape_inst_soft(tx) {
+    let d = shape_ref_name(tx);
+    if !d {
+        return 0;
+    }
+    if !d[D_TPARAMS] {
+        if tx[TX_ARGS] {
+            err_quoted(tx[N_POS], "shape ", tx[TX_B], " takes no type arguments");
+            return 0;
+        }
+        return pair(d, 0);
+    }
+    if !tx[TX_ARGS] {
+        let e = err_begin(tx[N_POS]);
+        buf_str(e, "shape ");
+        buf_str(e, tx[TX_B]);
+        buf_str(e, " needs type arguments, like ");
+        buf_str(e, tx[TX_B]);
+        buf_str(e, "[...]");
+        err_end(e);
+        return 0;
+    }
+    if tx[TX_ARGS][VEC_LEN] != d[D_TPARAMS][VEC_LEN] {
+        let e = err_begin(tx[N_POS]);
+        buf_str(e, "wrong number of type arguments for shape ");
+        buf_str(e, tx[TX_B]);
+        buf_str(e, ": it takes ");
+        buf_int(e, d[D_TPARAMS][VEC_LEN]);
+        err_end(e);
+        return 0;
+    }
+    let before = error_count;
+    let targs = resolve_types(tx[TX_ARGS]);
+    if error_count != before {
+        return 0;
+    }
+    return pair(d, tbind_pairs(d[D_TPARAMS], targs));
 }
 
 // shape_collect_visited reports whether (shape, bindings) has been collected in the
@@ -823,7 +872,13 @@ fn shape_collect(sd, bind, methods, owner, own) {
         // non-generic one with arguments, a bad shape) is skipped so its error is not
         // reported once per listing.
         if base && !shape_on_path(shape_bad, base) && ((base[D_TPARAMS] && m[TX_ARGS]) || (!base[D_TPARAMS] && !m[TX_ARGS])) {
-            let inst = shape_inst(m);
+            // Under symbolic bindings the argument constraints cannot be checked here.
+            let inst = 0;
+            if bind {
+                inst = shape_inst_soft(m);
+            } else {
+                inst = shape_inst(m);
+            }
             if inst {
                 shape_collect(vec_get(inst, 0), vec_get(inst, 1), methods, owner, vec_new());
             }
@@ -836,8 +891,9 @@ fn shape_collect(sd, bind, methods, owner, own) {
         let before = error_count;
         let sig = shape_sig_of(f, 0, bind);
         if error_count != before {
-            if !shape_on_path(shape_bad, owner) {
-                vec_push(shape_bad, owner);
+            // The failing signature is sd's, not the owner's that listed it.
+            if !shape_on_path(shape_bad, sd) {
+                vec_push(shape_bad, sd);
             }
             ck_state_restore(saved);
             return;
@@ -895,7 +951,10 @@ fn check_shape_decl(d, path) {
     let saved = ck_state_save();
     set_file(d[D_FILE]);
     vec_push(shape_validated, d);
-    let before = error_count;
+    // Only an error about d's own members marks d bad; an error inside a listed shape is
+    // that shape's, and marking d too would skip its own signature checks in
+    // shapes_declared (and lose them).
+    let mine = 0;
     let bind = 0;
     if d[D_TPARAMS] {
         bind = shape_sym_bind(d);
@@ -906,6 +965,7 @@ fn check_shape_decl(d, path) {
             let m = vec_get(d[D_UNION], i);
             if shape_ref_name(m) {
                 err_quoted(m[N_POS], "a named union lists concrete types, but ", shape_member_name(m), " is a shape: list shapes in a shape body instead");
+                mine = 1;
             }
             i = i + 1;
         }
@@ -929,14 +989,18 @@ fn check_shape_decl(d, path) {
                 } else {
                     err_at(m[N_POS], "a shape lists another shape by name");
                 }
+                mine = 1;
             } else if shape_on_path(path, sub) {
                 err_quoted(sub[D_POS], "shape ", sub[D_NAME], " is composed of itself (directly or through other shapes)");
                 shape_mark_cycle(path, sub);
             } else {
                 // Reports a missing type argument, a wrong count or extra arguments.
+                let before_inst = error_count;
                 let inst = shape_inst_decl(m);
                 if inst {
                     check_shape_decl(sub, path);
+                } else if error_count != before_inst {
+                    mine = 1;
                 }
             }
             i = i + 1;
@@ -944,7 +1008,7 @@ fn check_shape_decl(d, path) {
         ck_tbind = saved[3];
         path[VEC_LEN] = path[VEC_LEN] - 1;
     }
-    if error_count != before && !shape_on_path(shape_bad, d) {
+    if mine && !shape_on_path(shape_bad, d) {
         vec_push(shape_bad, d);
     }
     ck_state_restore(saved);
@@ -1234,6 +1298,7 @@ fn check_shape(pos, t, sd, bind) {
     vec_push(shape_checking, shape_key(sd, t, bind));
     let saved = ck_state_save();
     set_file(sd[D_FILE]);
+    ck_tbind = bind;
     if sd[D_UNIONKIND] {
         let ok = 0;
         let j = 0;
@@ -1258,7 +1323,6 @@ fn check_shape(pos, t, sd, bind) {
         return;
     }
     let j = 0;
-    ck_tbind = bind;
     while j < sd[D_UNION][VEC_LEN] {
         let inst = shape_inst(vec_get(sd[D_UNION], j));
         if inst {

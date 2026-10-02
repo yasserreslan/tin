@@ -134,7 +134,11 @@ shape Seq[T any] { Next() ?T; Close() !i64 }       // type parameters
   type arguments (`Seq[i64]`) is an instance of a generic shape; a bare generic name is an
   error.
 - Two listed shapes that give the same method name different signatures are a compile error at
-  the shape's declaration; identical duplicates are allowed.
+  the shape's declaration, and so is one shape declaring a name twice; identical methods coming
+  from different listed shapes are allowed. A generic body is validated at the declaration with
+  its parameters standing in as fresh types, so a conflict or a cycle through instances is
+  reported without an instantiation; its listed instances' parameter constraints are checked at
+  each instantiation, where the arguments are real.
 - A method signature is a `func` signature without a receiver and without a body, so the two
   grammars are one and cannot drift. Parameter `mut` marks, `...` and `!T` results are all
   written as in a function declaration. There is no `self` parameter: a method's receiver is
