@@ -377,8 +377,9 @@ them, so a program may still use either as an ordinary name (`shape := 1`, `type
 type satisfies it structurally, shapes compose, named unions work as constraints, and every
 call through a shaped parameter is a direct call on the concrete type, because a generic body
 is checked with its type parameters bound. `dyn` is parsed but not yet usable, and a generic
-shape (`Seq[T]`) is not yet usable as a constraint; both are diagnosed and both are the
-following steps. The `io`, `hash`, `Stringer` and driver ports come after `dyn`.
+shape (`Seq[T]`) is not yet usable as a constraint; each is rejected with a message naming the
+missing step wherever its signature is resolved, and each is a following step. The `io`,
+`hash`, `Stringer` and driver ports come after `dyn`.
 
 ---
 
@@ -850,8 +851,9 @@ s := Stack[i64]{items: []i64{}}
 p := Pair[str, i64]{first: "k", second: 7}
 ```
 
-- Type parameters: `[T any]`, `[T comparable]`, or a union `[T i64 | f64 | str]` (the
-  type argument must be one of them). Several: `[K comparable, V any]`.
+- Type parameters: `[T any]`, `[T comparable]`, a union `[T i64 | f64 | str]` (the
+  type argument must be one of them), or a shape name (`[R Reader]`, section 3). Several:
+  `[K comparable, V any]`.
 - Type arguments are inferred from the call's arguments (untyped constants default to
   `i64`/`f64`), or given explicitly: `F[T](...)`, `pkg.F[T](...)`.
 - Every instantiation is compiled separately and fully specialized: there is no boxing
@@ -1073,15 +1075,12 @@ FuncDecl      = "func" [ Receiver ] ident [ TypeParams ] Params [ Results ] Bloc
 Receiver      = "(" ident [ "mut" ] Type ")" .
 Params        = "(" [ Param { "," Param } ] ")" .
 Param         = identList [ "mut" ] Type .
-Results       = "!" [ Type | "(" Type { "," Type } ")" ]   (a bare "!" adds the fault result)
-              | "mut" Type
-              | Type
-              | "(" Type { "," Type } ")" .
+Results       = [ "!" ] [ Type | "(" Type { "," Type } ")" ] .   (a bare "!" only)
 ExternDecl    = "extern" "func" ident "(" [ Param { "," Param } ] [ "," "..." ] ")" [ Results ] .
 
 Type          = TypeName [ TypeArgs ] | "[" "]" Type | "[" expr "]" Type
               | "map" "[" Type "]" Type | "?" Type | "func" ParamTypes [ Results ]
-              | "dyn" TypeName [ TypeArgs ]
+              | "dyn" Type
               | "struct" "{" { identList Type ";" } "}"
               | "enum" "{" Variant { ( "," | ";" ) Variant } "}" .
 Variant       = ident [ "(" [ identList Type { "," identList Type } ] ")" ] .

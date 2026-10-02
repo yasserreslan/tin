@@ -129,9 +129,9 @@ shape Ordered = i64 | i32 | f64 | str              // a named union
 shape Seq[T any] { Next() ?T; Close() !i64 }       // type parameters
 ```
 
-- A shape member is a method signature or the name of another shape, optionally with type
-  arguments (`Seq[i64]`). The two cannot be confused: a member is a method exactly when a `(`
-  follows its name.
+- A shape member is a method signature or the name of another shape. The two cannot be
+  confused: a member is a method exactly when a `(` follows its name. A listed shape with
+  type arguments (`Seq[i64]`) is part of the later generic-shape step and is diagnosed today.
 - A method signature is a `func` signature without a receiver and without a body, so the two
   grammars are one and cannot drift. Parameter `mut` marks, `...`, `!T` results and a `mut`
   result are all written as in a function declaration. There is no `self` parameter: a method's
