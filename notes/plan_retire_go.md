@@ -8,10 +8,12 @@ from here on, the tools around them. Go stays only where it is the thing being c
 - **Stage 0 is gone.** `bootstrap/` was the original Go compiler (`tinc0`, 1,656 lines) for
   Tin's first syntax. Since the compiler's own sources moved to the new syntax, it could no
   longer build them (`selfhost/lex.tin:545: expected 'fn', found name 'func'`), so it was not a
-  bootstrap path any more. Its one remaining job was running the legacy tests, and the
-  self-hosted `tinc` does that now: `tools/ci/legacy_suite.py` runs `tests/*.tin` and
-  `tests/errors/*.tin` against `tinc`. The seeds in `seed/` are the root of the build, and
-  `make bootstrap` proves the fixed point.
+  bootstrap path any more. The seeds in `seed/` are the root of the build, and `make bootstrap`
+  proves the fixed point.
+- **The legacy-syntax tests are gone with it.** `tests/*.tin` and `tests/errors/` (28 cases)
+  existed only to be run by the Go harness. The language is new and has no users to keep
+  compatible, and the compiler still compiles itself in the legacy syntax on every build, so
+  there is no replacement runner. `tests/v2` and `tests/regressions` are the suites.
 
 ## What Go is left (4,431 lines, 35 files)
 

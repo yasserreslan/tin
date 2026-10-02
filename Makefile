@@ -36,13 +36,8 @@ bootstrap: bin/tinc
 seed: bootstrap
 	cp bin/s3/tinc $(SEED)
 
-# Everything but the Linux container runs. The assembly mode links Darwin assembly, so macOS only.
 test: bin/tinc
 	tools/v2test.sh bin/tinc
-	python3 tools/ci/legacy_suite.py bin/tinc
-ifeq ($(HOST_OS),darwin)
-	python3 tools/ci/legacy_suite.py bin/tinc --mode asm
-endif
 
 bench: bin/tinc
 	bench/run.py

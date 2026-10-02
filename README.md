@@ -73,7 +73,7 @@ tin examples/api.tin          # compile and run
 tin build app.tin -o app      # native executable
 tin test ./mypkg               # run mypkg's *_test.tin tests (Go style)
 tin suite                     # the compiler's strict test suite (tests/v2)
-make test                     # everything: strict suite and legacy-syntax suites
+make test                     # the strict suite
 make bootstrap                # tinc rebuilds itself twice; the binaries must be identical
 ```
 
