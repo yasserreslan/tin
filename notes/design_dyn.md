@@ -14,7 +14,8 @@ cannot hold a heterogeneous slice. Go pays two words plus an itab for the same c
 Tin's target is two words, no allocation and one indirect call, with no runtime type
 information beyond the table the shape needs.
 
-**Decision.** A `dyn S` value is a **two-word value**: `[object, table]`.
+**Decision.** A `dyn S` value is a **two-word value**: `[object, table]`. **Replaces:**
+nothing new; it inherits design_foundations section 2 (`interface`, `any`, type assertions).
 
 - `object` is the concrete value as it is today (a struct is already a reference, so one
   word). Only structs and enums (structs underneath) can be objects today, because methods
@@ -24,9 +25,11 @@ information beyond the table the shape needs.
   `[keep, method0, method1, ...]`: entry 0 is the concrete type's deep-copy routine, so
   `keep(dyn)` can copy the object without runtime type information, and the methods follow in
   the shape's flatten order (`shape_collect`'s: listed shapes first, then the shape's own
-  methods, deduplicated by name). Entries are **function descriptor addresses**, so a call
-  reuses the existing indirect-call convention (load the code word from the descriptor, pass
-  it in the environment register).
+  methods), deduplicated by name by the table build (the flattening itself keeps identical
+  duplicates from different listed shapes). Entries are **function descriptor addresses**, so
+  a call reuses the existing indirect-call convention (load the code word from the descriptor,
+  pass it in the environment register). Building a table marks every method and the keep entry
+  reachable, so their descriptors are initialized like any called function's.
 - A `dyn S` is never nil; `?dyn S` is the same two words with `object == 0` meaning absent.
   `== nil` on a `?dyn` tests the object word only. `==` between two `dyn` values is rejected
   (a shape's identity is a method on the shape, as design_foundations section 2 requires);
@@ -45,10 +48,10 @@ information beyond the table the shape needs.
 | context | today (one word) | with two words |
 |---|---|---|
 | local | one home slot | two adjacent slots; a size-16 local occupies both |
-| parameter / result | one register each (x0..x7, d0..d7) | two consecutive integer registers; a result consumes two words, so later results shift |
+| parameter / result | one register each (x0..x7, d0..d7) | two consecutive integer registers; when fewer than two remain, both words go to the stack (16-byte aligned) under the same rule in caller and callee; a result consumes two words, so later results shift |
 | stack argument | 8-byte slot | two 8-byte slots, 16-byte aligned; arm64 gains callee-side stack-parameter loading (x64 has it) |
 | struct field | 8-byte slot | 16-byte slot, 8-byte aligned; `layout_struct` starts its width walk at 16 |
-| slice element | scale 1/2/4/8 | address `base + idx*16` with two loads/stores at +0 and +8; `append`'s inline fast path is disabled for size-16 elements |
+| slice element | scale 1/2/4/8 | address `base + idx*16` with two loads/stores at +0 and +8; size-16 `append` lowers to the grow check plus two stores (the existing inline path, extended), so the one-word `rt_append`/`rt_store_elem` is not used for it; `keep_each` uses the same address rule |
 | map value | one word | **later step**: the runtime map ABI (header value size, 16-byte slots) changes with it |
 | `?dyn` | nil check | `object == 0` |
 
@@ -72,7 +75,8 @@ like a struct or a map.
   tables move with it.
 - A conversion whose object is statically known keeps a direct `keep$T` entry; the table's
   keep entry is what makes `keep(dyn)` and `keep` of a struct or slice containing a `dyn`
-  work. A `dyn` may not be a map key.
+  work (the struct's or slice's `keep$T` calls the field's or element's table entry, and
+  `keep_each`'s address rule is the size-16 one). A `dyn` may not be a map key.
 
 ## 3. Regions
 
@@ -116,13 +120,16 @@ positive tests land with step 4.
 1. **This note** (no compiler change).
 2. **Size-16 in the type system**: `K_DYN` interned by (shape, bindings), `type_width`,
    `?dyn`, `[]dyn`, conversion checking, region bits, and a gate at the top of
-   `generate`/`generate_x64` that refuses a program using `dyn` with one clear message per
-   target. The two existing `_bad` tests that assert "dyn shapes are not usable yet"
-   (`shapes_dyn_bad`, `shapes_dyn_unused_bad`) are updated here.
+   `generate`/`generate_x64` that refuses a program in which the checker built any `K_DYN`
+   type, with one clear message per target. The gate is whole-program (an uncalled function's
+   signature and an unused shape's signature both resolve `dyn`), so the two existing `_bad`
+   tests that assert "dyn shapes are not usable yet" (`shapes_dyn_bad`, `shapes_dyn_unused_bad`)
+   stay negative with the gate's message.
 3. **arm64 codegen**: homes, parameters, results, fields, element access, tables and the
-   startup fill, method calls; `_asm` checks for the direct table call.
-4. **amd64 codegen** and the positive suite tests, `[]dyn`, and the Go twin of the
-   acceptance program.
+   startup fill, method calls. No `_asm` check yet: the strict suite compiles `*_asm.tin` on
+   both CPUs, and the amd64 gate would fail one here.
+4. **amd64 codegen** and the positive suite tests, `[]dyn`, the table's `_asm` check, and the
+   Go twin of the acceptance program.
 5. **Region and lifetime tests**: storing a `dyn` of request memory in a global is an error;
    `keep(dyn)` survives pool resets; `[]dyn` of two types works.
 6. **Map values and the library ports that need `dyn`** (`io.ReaderFrom`/`WriterTo`,
@@ -130,6 +137,7 @@ positive tests land with step 4.
 
 ## 7. What this unlocks
 
-The layout and type-system half is shared with value arrays (`[N]T`, any N: UUIDs and hashes
-as map keys), `complex128` (FP registers) and SIMD vectors (vector registers), so the
-language gets one reviewed multi-word layout instead of three ad-hoc ones.
+The layout and type-system half generalizes to value arrays (`[N]T` with copy semantics,
+which today's `[N]T` is not: UUIDs and hashes as map keys), and to `complex128` (FP registers)
+and SIMD vectors (vector registers) when those exist, so the language gets one reviewed
+multi-word layout instead of three ad-hoc ones.
