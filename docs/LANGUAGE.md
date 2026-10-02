@@ -336,6 +336,46 @@ There are no implicit conversions between types. Convert explicitly:
 `type Celsius f64`, `type IDs []i64`, `type Handler func(Req, mut Out)` declare new names;
 a named type converts to and from its underlying type explicitly.
 
+### Shapes and `dyn`
+
+A *shape* is a set of method signatures. A type satisfies a shape structurally: if it has the
+methods, it satisfies it, with no declaration. Shapes replace interfaces (section 21).
+
+```
+shape Reader { Read(buf mut []u8) !i64 }
+shape Writer { Write(data []u8) !i64 }
+shape ReadWriter { Reader; Writer; Flush() !i64 }   // composition by listing shapes
+shape Ordered = i64 | i32 | f64 | str               // a named union
+shape Seq[T any] { Next() ?T; Close() !i64 }        // a shape with type parameters
+```
+
+A member is a method signature or the name of another shape, optionally with type arguments
+(`Seq[i64]`). A method signature is a `func` signature without a receiver and without a body:
+the same `mut` marks, `...` and `!T` results apply, and a method's receiver is implicit.
+
+A shape is used in two ways:
+
+- **Statically**, as a type-parameter constraint: `func Copy[R Reader, W Writer](dst mut W, src mut R) !i64`.
+  This is the default; it is monomorphized, with no dispatch and no allocation.
+- **Dynamically**, as `dyn S`: the object pointer plus a table of its methods for `S`. It converts
+  from a concrete type where a `dyn S` is expected, costs two words, and allocates nothing. A
+  `dyn S` is never nil; `?dyn S` is the optional.
+
+There is no downcast and no type switch: a closed set of cases is an `enum` with an exhaustive
+`switch`, an open set is a method on the shape. `any`, `comparable` and `Ordered` are ordinary
+library names rather than syntax.
+
+`shape` and `dyn` are **contextual words**: they are recognized only where the grammar wants
+them, so a program may still use either as an ordinary name (`shape := 1`, `type dyn = i64`).
+
+**Status.** Declarations and static use are built (roadmap #141 steps 2 and 3): a shape can be
+a type-parameter constraint, a type satisfies it structurally, shapes compose, named unions
+work as constraints, and every call through a shaped parameter is a direct call on the
+concrete type, because a generic body is checked with its type parameters bound. `dyn` is
+parsed but not yet usable, and a generic shape (`Seq[T]`) is not yet usable as a constraint;
+both are diagnosed and both are the following steps. The `io`, `hash`, `Stringer` and driver
+ports come after `dyn`.
+
 ---
 
 ## 4. Constants
@@ -1008,7 +1048,7 @@ File          = PackageClause ";" { Import ";" } { TopDecl ";" } .
 PackageClause = "package" ident .
 Import        = "import" ( ImportSpec | "(" { ImportSpec ";" } ")" ) .
 ImportSpec    = [ ident ] string .
-TopDecl       = ConstDecl | VarDecl | TypeDecl | FuncDecl | ExternDecl .
+TopDecl       = ConstDecl | VarDecl | TypeDecl | FuncDecl | ExternDecl | ShapeDecl .
 
 ConstDecl     = "const" ( ConstSpec | "(" { ConstSpec ";" } ")" ) .
 ConstSpec     = identList [ Type ] [ "=" exprList ] .
@@ -1020,15 +1060,24 @@ TypeParams    = "[" TypeParam { "," TypeParam } "]" .
 TypeParam     = ident [ Constraint ] .
 Constraint    = "any" | "comparable" | Type { "|" Type } .
 
+ShapeDecl     = "shape" ident [ TypeParams ] ( ShapeBody | "=" TypeUnion ) .
+ShapeBody     = "{" { ShapeMember ";" } "}" .
+ShapeMember   = ident [ TypeArgs ] | ident Params [ Results ] .
+TypeUnion     = Type { "|" Type } .
+
 FuncDecl      = "func" [ Receiver ] ident [ TypeParams ] Params [ Results ] Block .
 Receiver      = "(" ident [ "mut" ] Type ")" .
 Params        = "(" [ Param { "," Param } ] ")" .
 Param         = identList [ "mut" ] Type .
-Results       = [ "!" ] [ Type | "(" Type { "," Type } ")" ] .   (a bare "!" only)
+Results       = "!" [ Type | "(" Type { "," Type } ")" ]   (a bare "!" adds the fault result)
+              | "mut" Type
+              | Type
+              | "(" Type { "," Type } ")" .
 ExternDecl    = "extern" "func" ident "(" [ Param { "," Param } ] [ "," "..." ] ")" [ Results ] .
 
 Type          = TypeName [ TypeArgs ] | "[" "]" Type | "[" expr "]" Type
               | "map" "[" Type "]" Type | "?" Type | "func" ParamTypes [ Results ]
+              | "dyn" TypeName [ TypeArgs ]
               | "struct" "{" { identList Type ";" } "}"
               | "enum" "{" Variant { ( "," | ";" ) Variant } "}" .
 Variant       = ident [ "(" [ identList Type { "," identList Type } ] ")" ] .
@@ -1110,7 +1159,7 @@ has no package clause). See [COMPILER.md](COMPILER.md) for how the compiler is w
 | goroutines, channels, mutexes | one thread per core, per-core globals, `relay` messages |
 | package variables initialized in dependency order | declaration order; an initializer using a later global is a compile error |
 | garbage collector | request pools + `keep` into a long-lived heap, checked at compile time |
-| interfaces, reflection | generics (monomorphized), compiler-generated `say` and `argo` |
+| interfaces, reflection | shapes (`shape`, satisfied structurally) and `dyn S` for explicit dynamic dispatch; generics (monomorphized); compiler-generated `say` and `argo` |
 | closures capture variables | the same, with Go 1.22's per-iteration loop variables; no `mut` parameter capture; a local closure cannot recurse |
 | `defer` in loops, `recover` | defer outside loops only; no recover |
 | `fmt.Println` | `say.Line` (formatting by static type) |

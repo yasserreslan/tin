@@ -285,6 +285,10 @@ fn resolve_type(tx) {
         layout_struct(st);
         return st;
     }
+    if k == TX_DYN {
+        err_at(tx[N_POS], "dyn shapes are not usable yet: reach the shape through a type parameter (#141)");
+        return ty_int;
+    }
     err_at(tx[N_POS], "invalid type");
     return ty_int;
 }
@@ -384,6 +388,7 @@ fn check() {
         i = i + 1;
     }
     generics_init();
+    shapes_init();
     // Named types: structs first, so fields and aliases can refer to any of them.
     i = 0;
     while i < prog_types[VEC_LEN] {
@@ -407,6 +412,17 @@ fn check() {
             layout_struct(find_type(q));
         } else {
             name_type(q, resolve_type(d[D_TYPE]));
+        }
+        i = i + 1;
+    }
+    // A type and a shape may not share a name: the two would be ambiguous wherever a
+    // name can be either (a constraint) and confusing everywhere else.
+    i = 0;
+    while i < prog_shapes[VEC_LEN] {
+        let sd = vec_get(prog_shapes, i);
+        set_file(sd[D_FILE]);
+        if find_type(qual(ck_pkg, sd[D_NAME])) {
+            err_quoted(sd[D_POS], "", sd[D_NAME], " is declared as a type and as a shape");
         }
         i = i + 1;
     }
