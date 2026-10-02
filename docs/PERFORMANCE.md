@@ -193,13 +193,14 @@ iterations per round, best of 5 rounds, on the arm64 development machine:
 
 | form | ns/op (three runs) |
 |---|---|
-| through `Reader` (shape-constrained, monomorphized) | 10.58, 10.44, 10.67 |
-| hand-written `drainBuf(b Buf)` | 10.39, 10.40, 10.63 |
-| ratio | 1.019, 1.004, 1.004 |
+| through `Reader` (shape-constrained, monomorphized) | 10.72, 11.00, 10.67 |
+| hand-written `drainBuf(b Buf)` | 10.52, 10.89, 10.85 |
+| ratio | 1.019, 1.010, 0.983 |
 
-The two functions' generated bodies are instruction-identical: `tinc -S` on the benchmark
-prints `_drainBuf` and `_Drain[Buf]` as the same 17 instructions with different labels. The
-committed check `tests/v2/shapes_dispatch_asm.tin` + `.check` asserts the direct call
-(`bl _Buf.Read` on arm64, `call S<n>  # Buf.Read` on amd64) and the absence of any indirect
-call, on every target in CI.
+The two functions' generated bodies are instruction-identical after normalizing labels:
+`tinc -S` prints `_drainBuf` and `_Drain[Buf]` as the same instruction sequence. Across the
+machines it has been run on, the ratio stays within a few percent (0.97 to 1.02), i.e. there
+is no dispatch overhead. The committed check `tests/v2/shapes_dispatch_asm.tin` + `.check`
+asserts the direct call (`bl _Buf.Read` on arm64, `call S<n>  # Buf.Read` on amd64) with no
+indirect call in the listing, on every target in CI.
 

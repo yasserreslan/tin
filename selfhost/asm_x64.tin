@@ -354,19 +354,24 @@ fn x64_pr_target(b, addr, label, pc) {
     }
 }
 
-// x64_call_name returns the name of the function entered at `label`, for the -S listing;
-// 0 when no function has that label (an indirect call's operand is not a label).
-fn x64_call_name(label) {
-    let i = 0;
-    while i < prog_fns[VEC_LEN] && i < x_fn_labels[VEC_LEN] {
-        if vec_get(x_fn_labels, i) == label {
-            let f = vec_get(prog_fns, i);
-            if f[F_QNAME] {
-                return f[F_QNAME];
-            }
-            return 0;
-        }
-        i = i + 1;
+// x64_call_name returns the name of the function a direct call enters, for the -S
+// listing; 0 for anything else (an indirect call's operand is not a symbol id). The
+// operand is an x_syms id, so the symbol must be decoded the way x64_sym_hook does.
+fn x64_call_name(id) {
+    if id < 0 || id >= x_syms[VEC_LEN] {
+        return 0;
+    }
+    let sym = vec_get(x_syms, id);
+    if sym >> 32 != SK_FN {
+        return 0;
+    }
+    let index = sym & 0xffffffff;
+    if index >= prog_fns[VEC_LEN] {
+        return 0;
+    }
+    let f = vec_get(prog_fns, index);
+    if f[F_QNAME] {
+        return f[F_QNAME];
     }
     return 0;
 }

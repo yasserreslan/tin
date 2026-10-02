@@ -77,12 +77,26 @@ class AssemblyCheckTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('blr', why)
 
+    def test_check_not_is_bounded_by_the_next_check(self):
+        # Lit's scope: a pattern after the next CHECK is not this CHECK-NOT's business.
+        self.assertTrue(suite.check_asm('A\nB\nX\n', [('CHECK', 'A'), ('CHECK-NOT', 'X'), ('CHECK', 'B')])[0])
+        self.assertFalse(suite.check_asm('A\nX\nB\n', [('CHECK', 'A'), ('CHECK-NOT', 'X'), ('CHECK', 'B')])[0])
+
     def test_check_order_is_required(self):
         self.assertFalse(suite.check_asm('second first', [('CHECK', 'first'), ('CHECK', 'second')])[0])
 
-    def test_a_bad_line_is_an_error(self):
+    def test_arch_comes_from_the_target_or_the_host(self):
+        self.assertEqual(suite.asm_arch('linux-amd64'), 'amd64')
+        self.assertEqual(suite.asm_arch('linux-arm64'), 'arm64')
+        for machine, expected in (('aarch64', 'arm64'), ('arm64', 'arm64'), ('x86_64', 'amd64'), ('AMD64', 'amd64')):
+            with patch.object(suite.platform, 'machine', return_value=machine):
+                self.assertEqual(suite.asm_arch(), expected)
+
+    def test_a_bad_line_or_empty_pattern_is_an_error(self):
         with self.assertRaisesRegex(ValueError, 'not a CHECK'):
             self.checks('CHEC: oops\n')
+        with self.assertRaisesRegex(ValueError, 'not a CHECK'):
+            self.checks('CHECK:\n')
 
 
 class RegressionTests(unittest.TestCase):

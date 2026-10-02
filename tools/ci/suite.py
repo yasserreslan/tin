@@ -45,7 +45,7 @@ def parse_checks(path, arch):
             section = match.group(1)
             continue
         match = ASM_DIRECTIVE.match(line)
-        if not match:
+        if not match or not match.group(2):
             raise ValueError(f'{path}:{number}: not a CHECK, CHECK-NOT or [arch] line: {line}')
         if section in (None, arch):
             directives.append((match.group(1), match.group(2)))
@@ -53,16 +53,29 @@ def parse_checks(path, arch):
 
 
 def check_asm(text, directives):
-    """Match lit-style directives in order; return (ok, the directive that failed)."""
+    """Match lit-style directives in order; return (ok, the directive that failed).
+
+    A CHECK-NOT must not match between the previous CHECK's match and the next CHECK's
+    match (or the end of the listing), which is lit's scope, so a later part of the file
+    that legitimately contains the pattern does not fail an earlier assertion.
+    """
     position = 0
-    for kind, pattern in directives:
-        match = re.search(pattern, text[position:])
-        if kind == 'CHECK':
+    for index, (kind, pattern) in enumerate(directives):
+        if kind == 'CHECK-NOT':
+            limit = len(text)
+            for next_kind, next_pattern in directives[index + 1:]:
+                if next_kind == 'CHECK':
+                    match = re.search(next_pattern, text[position:])
+                    if match:
+                        limit = position + match.start()
+                    break
+            if re.search(pattern, text[position:limit]):
+                return False, f'CHECK-NOT: {pattern}'
+        else:
+            match = re.search(pattern, text[position:])
             if not match:
                 return False, f'CHECK: {pattern}'
             position += match.end()
-        elif match:
-            return False, f'CHECK-NOT: {pattern}'
     return True, ''
 
 
@@ -128,7 +141,8 @@ def run(compiler, target=None, docker=None, root=ROOT):
                 print('PASS', name)
             results.append({'name': name, 'passed': passed, 'exit': code})
         arch = asm_arch(target)
-        for source in sorted((root / 'tests/v2').glob('*_asm.tin')):
+        asm_cases = sorted((root / 'tests/v2').glob('*_asm.tin'))
+        for source in asm_cases:
             name = source.stem
             check = source.with_suffix('.check')
             if not check.exists():
@@ -142,13 +156,25 @@ def run(compiler, target=None, docker=None, root=ROOT):
             if code != 0:
                 passed, why = False, f'compiler exit {code}'
             else:
-                directives = parse_checks(check, arch)
-                passed, why = check_asm(stdout.decode(errors='replace'), directives)
+                try:
+                    directives = parse_checks(check, arch)
+                    if not directives:
+                        passed, why = False, f'no directives for {arch}'
+                    else:
+                        passed, why = check_asm(stdout.decode(errors='replace'), directives)
+                except (ValueError, re.error) as error:
+                    passed, why = False, str(error)
             if not passed:
                 print(f'FAIL {name} [{arch}]: {why}\n{stderr.decode(errors="replace")[:4000]}')
             else:
                 print('PASS', name)
             results.append({'name': name, 'passed': passed, 'exit': code})
+        # A check file whose test is missing (a typo in the name) would check nothing.
+        asm_stems = {source.stem for source in asm_cases}
+        for check in sorted((root / 'tests/v2').glob('*_asm.check')):
+            if check.stem not in asm_stems:
+                print('FAIL', check.stem, 'check file without a test:', check)
+                results.append({'name': check.stem, 'passed': False})
     (output / 'strict-results.json').write_text(json.dumps(results, indent=2) + '\n')
     return all(r['passed'] for r in results)
 
