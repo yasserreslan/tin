@@ -540,8 +540,10 @@ var shape_checked;   // shapes already checked in the current satisfaction tree
 var shape_bad;       // shapes whose signature did not resolve (reported once)
 var shape_collecting; // (shape, bindings) pairs collected in the current flattening
 var shape_conflicts;  // errors the current flattening attributed to the owner shape
+var shape_placeholders; // the fresh types shape_sym_bind made for symbolic validation
 
 fn shapes_init() {
+    shape_placeholders = vec_new();
     ty_shapes = vec_new();
     shape_cycles = vec_new();
     shape_validated = vec_new();
@@ -720,7 +722,13 @@ fn shape_inst(tx) {
         // fallback types would only add misleading errors.
         return 0;
     }
+    let before_cons = error_count;
     check_constraints(tx[N_POS], d[D_TPARAMS], d[D_TCONS], targs, d[D_FILE]);
+    if error_count != before_cons {
+        // The arguments were reported; a pair built from them would only cause the same
+        // error again at use.
+        return 0;
+    }
     return pair(d, tbind_pairs(d[D_TPARAMS], targs));
 }
 
@@ -760,18 +768,42 @@ fn shape_inst_decl(tx) {
     return pair(d, 0);
 }
 
-// shape_member_symbolic reports whether any type argument of a listed member mentions one
-// of the enclosing shape's parameters, which is what makes an instance's own argument
-// constraints impossible to check at declaration. A concrete argument inside a generic
-// body (`shape G[T any] { A[f64] }`) is still checked.
-fn shape_member_symbolic(m, sd) {
-    if !m[TX_ARGS] {
+// shape_member_symbolic reports whether any type argument of a listed member is one of
+// the enclosing shape's parameters bound to a symbolic type, which is what makes an
+// instance's own argument constraints impossible to check at declaration. A concrete
+// argument (`shape G[T any] { A[f64] }`) and a parameter already bound to a real type
+// (`shape C[V any] { A[V] }` used with `C[f64]`) are checked.
+fn shape_member_symbolic(m, sd, bind) {
+    if !m[TX_ARGS] || !bind {
         return 0;
     }
     let i = 0;
     while i < m[TX_ARGS][VEC_LEN] {
-        if shape_tx_mentions(vec_get(m[TX_ARGS], i), sd[D_TPARAMS]) {
-            return 1;
+        let arg = vec_get(m[TX_ARGS], i);
+        let j = 0;
+        while j < sd[D_TPARAMS][VEC_LEN] {
+            let name = vec_get(sd[D_TPARAMS], j);
+            let one = vec_new();
+            vec_push(one, name);
+            if shape_tx_mentions(arg, one) {
+                let value = shape_bind_value(bind, name);
+                if value && shape_on_path(shape_placeholders, value) {
+                    return 1;
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn shape_bind_value(bind, name) {
+    let i = 0;
+    while i < bind[VEC_LEN] {
+        let p = vec_get(bind, i);
+        if streq(vec_get(p, 0), name) {
+            return vec_get(p, 1);
         }
         i = i + 1;
     }
@@ -849,6 +881,7 @@ fn shape_sym_bind(d) {
         let ph = ty_new(K_STRUCT, vec_get(d[D_TPARAMS], i));
         // A struct with no fields, not a null one: key_valid walks a map key's fields.
         ph[TY_FIELDS] = vec_new();
+        vec_push(shape_placeholders, ph);
         vec_push(bind, pair(vec_get(d[D_TPARAMS], i), ph));
         i = i + 1;
     }
@@ -962,7 +995,7 @@ fn shape_collect(sd, bind, methods, owner, own) {
             // arguments (even inside a generic body) they can, and an error is sd's.
             let before_inst = error_count;
             let inst = 0;
-            if bind && shape_member_symbolic(m, sd) {
+            if shape_member_symbolic(m, sd, bind) {
                 inst = shape_inst_soft(m);
             } else {
                 inst = shape_inst(m);
