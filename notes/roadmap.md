@@ -3721,7 +3721,7 @@ Each line is one task: the Go item, what Go documents it as doing (the first sen
 - [ ] `suffixarray`: regression policy. Why: it is how this package earns the [x] mark above, and how a regression is caught later. Done when: every bug the twin finds has a regression case in tests/regressions/cases.json tied to an issue, and the PR links it.
 - [ ] `suffixarray`: benchmark. Why: it is how this package earns the [x] mark above, and how a regression is caught later. Done when: a benchmark against Go exists, allocations per call are recorded, and the result is written in docs/PERFORMANCE.md.
 
-#### `io` (64 items, 3 constants; coverage status: design)
+#### `io` (64 items, 3 constants; coverage status: partial: the shapes are declared in lib/io, the helpers and the twin are next)
 
 - [ ] `io.EOF` (var). Go: EOF is the error returned by Read when no more input is available. Tin: not there yet; add it to `flume` (the package that carries `io`), in Tin's shape (faults as `!T`, slices as references, no interfaces). Done when: the Tin function exists and the generated twin program prints identical output for it, including edge cases and fault messages.
 - [ ] `io.ErrClosedPipe` (var). Go: ErrClosedPipe is the error used for read or write operations on a closed pipe. Tin: not there yet; add it to `flume` (the package that carries `io`), in Tin's shape (faults as `!T`, slices as references, no interfaces). Done when: the Tin function exists and the generated twin program prints identical output for it, including edge cases and fault messages.

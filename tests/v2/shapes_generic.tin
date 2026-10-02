@@ -85,11 +85,32 @@ shape LimitedGetter[U any] { Limited[U] }
 // A generic shape with a map keyed by its parameter (a placeholder must be a valid key).
 shape Indexed[T any] { Lookup(m map[T]i64) i64 }
 
+type Table struct { n i64 }
+
+func (t Table) Lookup(m map[str]i64) i64 {
+	return 3
+}
+
+type Num struct { n i64 }
+
+func (n Num) Get() i64 {
+	return 4
+}
+
 // A generic named union.
 shape NumberOr[T any] = i64 | T
 
 func Numbered[S NumberOr[Seven]](s S) i64 {
 	return 2
+}
+
+// The constrained composition and the map-key shape, instantiated.
+func Limited[S LimitedGetter[i64]](s S) i64 {
+	return 3
+}
+
+func Lookup[S Indexed[str]](s S) i64 {
+	return 4
 }
 
 func main() {
@@ -103,4 +124,8 @@ func main() {
 	say.Line("pair: {Pair(s)}")
 	say.Line("pick: {Pick(x, x)}")
 	say.Line("limited: {Numbered(s)}")
+	let n = Num{n: 0}
+	say.Line("constraint: {Limited(n)}")
+	let t = Table{n: 0}
+	say.Line("lookup: {Lookup(t)}")
 }
