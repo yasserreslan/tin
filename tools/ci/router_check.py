@@ -252,6 +252,24 @@ def conformance(port, failures):
     got, closed = first(b'GET /users/9?ms=200 HTTP/1.1\r\nHost: x\r\n\r\n', wait=5, shut=True)
     if not got.startswith(b'HTTP/1.1 200 ') or not got.endswith(b'user 9 stamp>tag /users/{id}') or not closed:
         failures.append('half-closed client with a waiting request: %r closed=%s' % (got, closed))
+    # #103: a client that sends Expect: 100-continue waits for 100 Continue before its body.
+    with socket.create_connection(('127.0.0.1', port), timeout=10) as s:
+        s.sendall(b'POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n')
+        s.settimeout(1)
+        try:
+            interim = s.recv(100)
+        except socket.timeout:
+            interim = b'(nothing within 1 s)'
+        s.sendall(b'hello')
+        s.settimeout(10)
+        rest = b''
+        while True:
+            d = s.recv(65536)
+            if not d:
+                break
+            rest += d
+        if interim != b'HTTP/1.1 100 Continue\r\n\r\n' or not rest.startswith(b'HTTP/1.1 201 ') or not rest.endswith(b'created 5'):
+            failures.append('Expect: 100-continue: %r then %r' % (interim, rest))
     print('request conformance (#183):', not failures)
 
 
@@ -426,6 +444,43 @@ def overflow(exe, failures):
             server.wait()
 
 
+def panics(exe, failures):
+    """#142: a handler that panics, at once or after a wait, answers 500 and closes its
+    connection; the panic and its backtrace go to stderr; other requests, including one
+    waiting on the same core at the time, are served and the server keeps running."""
+    port = ws.free_port()
+    server = subprocess.Popen([str(exe)], env=dict(os.environ, PORT=str(port), TIN_CORES='1'),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(100):
+            try:
+                socket.create_connection(('127.0.0.1', port), timeout=0.1).close()
+                break
+            except OSError:
+                time.sleep(0.05)
+        slow = {}
+        t = threading.Thread(target=lambda: slow.setdefault('r', request(port, 'GET', '/users/5?ms=400')))
+        t.start()
+        time.sleep(0.1)
+        got = [request(port, 'GET', p)[0] for p in ('/boom', '/boom?ms=100', '/fast', '/boom', '/fast')]
+        t.join()
+        print('panicking handlers and others:', got, 'waiting request:', slow.get('r', (0,))[0])
+        if got != [500, 500, 200, 500, 200] or slow.get('r', (0,))[0] != 200:
+            failures.append('panics: %r, waiting request %r' % (got, slow.get('r')))
+        if server.poll() is not None:
+            failures.append('the server exited after a handler panicked')
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+        err = server.stderr.read().decode(errors='replace')
+        if err.count('panic: index out of range [5] with length 3') != 3:
+            failures.append('panic messages on stderr: %r' % err[:2000])
+
+
 def main():
     out = ROOT / 'bin/ci/router'
     out.mkdir(parents=True, exist_ok=True)
@@ -450,6 +505,8 @@ def main():
             stop(server)
     print('-- limits')
     limits(exe, failures)
+    print('-- panics')
+    panics(exe, failures)
     print('-- stack overflow')
     overflow(exe, failures)
     if failures:
