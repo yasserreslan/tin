@@ -381,7 +381,7 @@ checked with its type parameters bound. A method that two listed shapes give dif
 signatures is a compile error. `dyn S` is typed by the checker — a conversion checks
 satisfaction, `?dyn S` and `[]dyn S` work as types, and the region rules apply — but
 generating the two-word value is the next step, so a program that uses one is refused with a
-message naming the step at the first `dyn` written (notes/design_dyn.md). The `io` shapes are
+message naming the step, at the first `dyn` the checker resolves (notes/design_dyn.md). The `io` shapes are
 declared in `lib/io`; the `Copy` family, `hash`, `Stringer` and the driver shapes come after
 `dyn`.
 

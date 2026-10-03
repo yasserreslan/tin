@@ -253,7 +253,15 @@ fn resolve_type(tx) {
         return t;
     }
     if k == TX_SLICE || k == TX_ARRAY {
-        return slice_of(resolve_type(tx[TX_A + (k == TX_ARRAY)]));
+        let et = resolve_type(tx[TX_A + (k == TX_ARRAY)]);
+        if k == TX_ARRAY && kind_of(et) == K_DYN {
+            let e = err_begin(tx[N_POS]);
+            buf_str(e, "an array of ");
+            type_name(e, et);
+            buf_str(e, " has no zero element: use []dyn and append, or a composite literal");
+            err_end(e);
+        }
+        return slice_of(et);
     }
     if k == TX_MAP {
         let mkt = resolve_type(tx[TX_A]);
@@ -288,6 +296,21 @@ fn resolve_type(tx) {
     if k == TX_DYN {
         let inst = shape_inst(tx[TX_A]);
         if !inst {
+            if !shape_ref_name(tx[TX_A]) {
+                // Not a shape (an undefined name, a type, a package member): never typed
+                // as an ordinary type.
+                let e = err_begin(tx[TX_A][N_POS]);
+                buf_str(e, "dyn needs a shape");
+                if tx[TX_A][N_KIND] == TX_NAME {
+                    buf_str(e, ", not ");
+                    if tx[TX_A][TX_A] {
+                        buf_str(e, tx[TX_A][TX_A]);
+                        buf_byte(e, '.');
+                    }
+                    buf_str(e, tx[TX_A][TX_B]);
+                }
+                err_end(e);
+            }
             return ty_int;
         }
         if !saw_dyn {
@@ -955,7 +978,11 @@ fn check_var(v) {
         s[S_TYPE] = default_type(t);
     }
     if kind_of(s[S_TYPE]) == K_DYN && kind_of(t) != K_DYN {
-        check_shape(init[N_POS], t, s[S_TYPE][TY_GDECL], s[S_TYPE][TY_TARGS]);
+        if kind_of(t) != K_STRUCT {
+            err_type(init[N_POS], "only a struct or enum can be a dyn object, not ", t, "");
+        } else {
+            check_shape(init[N_POS], t, s[S_TYPE][TY_GDECL], s[S_TYPE][TY_TARGS]);
+        }
     } else if !assignable(t, s[S_TYPE]) {
         err_types(init[N_POS], "cannot use ", t, " as ", s[S_TYPE]);
     }
@@ -2764,8 +2791,26 @@ fn check_assign(s) {
 fn check_assignable(e, from, to) {
     // A concrete value converts to dyn S implicitly when it satisfies the shape; a dyn
     // value converts only to the same dyn type (no downcast, no dyn-to-dyn).
+    if kind_of(to) == K_DYN && kind_of(from) == K_DYN {
+        if from != to {
+            err_at(e[N_POS], "dyn values do not widen (no downcast, no dyn-to-dyn): convert from the concrete value");
+        }
+        return;
+    }
     if kind_of(to) == K_DYN && kind_of(from) != K_DYN {
+        if kind_of(from) != K_STRUCT {
+            err_type(e[N_POS], "only a struct or enum can be a dyn object, not ", from, "");
+            return;
+        }
         check_shape(e[N_POS], from, to[TY_GDECL], to[TY_TARGS]);
+        return;
+    }
+    if kind_of(to) == K_OPT && kind_of(to[TY_ELEM]) == K_DYN && kind_of(from) != K_DYN && kind_of(from) != K_OPT {
+        if kind_of(from) != K_STRUCT {
+            err_type(e[N_POS], "only a struct or enum can be a dyn object, not ", from, "");
+            return;
+        }
+        check_shape(e[N_POS], from, to[TY_ELEM][TY_GDECL], to[TY_ELEM][TY_TARGS]);
         return;
     }
     if !assignable(from, to) && !ck_legacy {

@@ -197,9 +197,7 @@ fn dyn_of(sd, bind) {
     return n;
 }
 
-fn dyn_shape(t) {
-    return t[TY_GDECL];
-}
+
 
 fn func_of(params, results, variadic) {
     return interned(K_FUNC, 0, 0, params, results, variadic);
@@ -414,6 +412,19 @@ fn type_name(b, t) {
         let sd = t[TY_GDECL];
         if sd {
             buf_str(b, sd[D_NAME]);
+        }
+        let bind = t[TY_TARGS];
+        if bind {
+            buf_byte(b, '[');
+            let i = 0;
+            while i < bind[VEC_LEN] {
+                if i > 0 {
+                    buf_byte(b, ',');
+                }
+                type_name(b, vec_get(vec_get(bind, i), 1));
+                i = i + 1;
+            }
+            buf_byte(b, ']');
         }
         return;
     }
