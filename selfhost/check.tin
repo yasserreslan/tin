@@ -258,7 +258,7 @@ fn resolve_type(tx) {
             let e = err_begin(tx[N_POS]);
             buf_str(e, "an array of ");
             type_name(e, et);
-            buf_str(e, " has no zero element: use []dyn and append, or a composite literal");
+            buf_str(e, " has no zero element: use []dyn and append");
             err_end(e);
         }
         return slice_of(et);
@@ -955,6 +955,9 @@ fn check_var(v) {
         if !s[S_TYPE] {
             s[S_TYPE] = ty_int;
         }
+        if kind_of(s[S_TYPE]) == K_DYN && !ck_legacy {
+            zero_value(v[D_POS], s[S_TYPE]);
+        }
         return;
     }
     if (ck_legacy || is_int_const_expr(init)) && !s[S_TLS] {
@@ -982,6 +985,12 @@ fn check_var(v) {
             err_type(init[N_POS], "only a struct or enum can be a dyn object, not ", t, "");
         } else {
             check_shape(init[N_POS], t, s[S_TYPE][TY_GDECL], s[S_TYPE][TY_TARGS]);
+        }
+    } else if kind_of(s[S_TYPE]) == K_OPT && kind_of(s[S_TYPE][TY_ELEM]) == K_DYN && kind_of(t) != K_DYN && kind_of(t) != K_OPT {
+        if kind_of(t) != K_STRUCT {
+            err_type(init[N_POS], "only a struct or enum can be a dyn object, not ", t, "");
+        } else {
+            check_shape(init[N_POS], t, s[S_TYPE][TY_ELEM][TY_GDECL], s[S_TYPE][TY_ELEM][TY_TARGS]);
         }
     } else if !assignable(t, s[S_TYPE]) {
         err_types(init[N_POS], "cannot use ", t, " as ", s[S_TYPE]);
