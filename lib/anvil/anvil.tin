@@ -55,6 +55,7 @@ extern func listen(fd i64, backlog i64) i64
 extern func accept(fd i64, addr i64, n i64) i64
 extern func fcntl(fd i64, cmd i64, ...) i64
 extern func close(fd i64) i64
+extern func shutdown(fd i64, how i64) i64
 extern func pipe(fds i64) i64
 extern func signal(sig i64, h i64) i64
 extern func time(t i64) i64
@@ -113,7 +114,8 @@ const cDead = 12  // closed while its task waited: freed when the task ends
 const cHijack = 13 // taken out of HTTP by its handler (Req.Hijack): closed when the task ends
 const cDeadline = 14 // monotonic ns after which the sweep closes the connection (0: none)
 const cStart = 15    // when the first bytes of the request still arriving came (0: none pending)
-const cWords = 16
+const cLinger = 16   // 1: close after an error response by lingering (see linger); 2: lingering
+const cWords = 17
 
 shared var gListen i64
 shared var gIP i64
@@ -680,6 +682,18 @@ func on_read(c i64) {
 // on_read_once reads and serves what one read returns; true means more may be waiting.
 func on_read_once(c i64) bool {
 	fd := c[cFD]
+	if c[cLinger] == 2 {
+		for {
+			n := read(fd, scr, scrSize)
+			if n == 0 || (n < 0 && errno() != EAGAIN && errno() != 4) {
+				close_conn(c)
+				return false
+			}
+			if n < 0 {
+				return false
+			}
+		}
+	}
 	buf := scr
 	cap := scrSize
 	have := 0
@@ -794,7 +808,7 @@ func on_read_once(c i64) bool {
 func flush(c i64) bool {
 	if obLen == 0 {
 		if c[cClose] != 0 && c[cOut] == 0 {
-			close_conn(c)
+			close_or_linger(c)
 			return false
 		}
 		return true
@@ -823,7 +837,7 @@ func flush(c i64) bool {
 	}
 	obLen = 0
 	if c[cClose] != 0 {
-		close_conn(c)
+		close_or_linger(c)
 		return false
 	}
 	return true
@@ -864,7 +878,7 @@ func on_write(c i64) {
 	c[cOutOff] = 0
 	c[cWriting] = 0
 	if c[cClose] != 0 {
-		close_conn(c)
+		close_or_linger(c)
 		return
 	}
 	ev_conn_read(c[cFD])
@@ -1431,6 +1445,38 @@ func bad(c i64, code i64) {
 	w.Body = append(w.Body, status_text(code)...)
 	respond_out(w, false, false)
 	c[cClose] = 1
+	c[cLinger] = 1
+}
+
+// lingerMs bounds how long a connection closed after an error response keeps reading.
+const lingerMs = 2000
+
+// linger ends a connection after an error response without losing the response: closing a
+// socket with unread input (a client still sending the body of a 413 or 503) makes the kernel
+// reset it, and the client may never read the answer. So the sending side is shut down and
+// whatever arrives is read and dropped until the client closes or lingerMs pass (as nginx's
+// lingering close).
+func linger(c i64) {
+	shutdown(c[cFD], 1)
+	c[cLinger] = 2
+	if c[cIn] != 0 {
+		bufBytes -= c[cInCap]
+		free(c[cIn])
+		c[cIn] = 0
+		c[cInLen] = 0
+		c[cInCap] = 0
+	}
+	c[cDeadline] = loopNow + lingerMs*1000000
+}
+
+// close_or_linger closes c once its last response is out: at once, or by lingering after an
+// error response.
+func close_or_linger(c i64) {
+	if c[cLinger] != 0 && c[cTask] == 0 {
+		linger(c)
+		return
+	}
+	close_conn(c)
 }
 
 func ob_room(n i64) {

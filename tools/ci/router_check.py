@@ -335,10 +335,26 @@ def limits(exe, failures):
             got = s.recv(100)
             if not got.startswith(b'HTTP/1.1 413 '):
                 failures.append('body over TIN_MAX_BODY: %r' % got)
+        # A client still sending the body of a refused request must read the refusal: the
+        # server lingers instead of closing with unread input (which would reset the connection).
+        with conn() as s:
+            try:
+                s.sendall(b'POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 1500000\r\n\r\n' + b'b' * 1500000)
+            except OSError:
+                pass
+            try:
+                got = s.recv(100)
+            except OSError as e:
+                got = repr(e).encode()
+            if not got.startswith(b'HTTP/1.1 413 '):
+                failures.append('413 while the client sends its body: %r' % got)
         held = []
         for _ in range(4):
             c = conn()
-            c.sendall(b'POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 900000\r\n\r\n' + b'a' * 800000)
+            try:
+                c.sendall(b'POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 900000\r\n\r\n' + b'a' * 800000)
+            except OSError:
+                pass
             held.append(c)
             time.sleep(0.2)
         refused = 0
@@ -347,7 +363,7 @@ def limits(exe, failures):
             try:
                 if c.recv(100).startswith(b'HTTP/1.1 503 '):
                     refused += 1
-            except socket.timeout:
+            except (socket.timeout, ConnectionResetError):
                 pass
             c.close()
         print('partial 900 kB bodies past a 3 MB budget: %d of 4 refused' % refused)

@@ -219,6 +219,10 @@ reading resumes and buffered input is served.
   header timeout for its first request. 0 turns one off. While a handler runs, only the
   request deadline (`anvil.Deadline`) applies. Each core checks its connections' deadlines
   once a second, in its event loop (no timer per connection).
+- **Closing after an error:** a connection closed after a parse error, 413 or 503 shuts down
+  its sending side and reads and drops input for up to 2 s before it closes (a lingering
+  close, as nginx does): closing with unread input would reset the connection, and a client
+  still sending its body would lose the response.
 - **Memory and connections:** the partial requests one core buffers are limited to 256 MiB
   (`TIN_MAX_BUFFERED`): a new partial request past it gets 503 and close. Each core takes at
   most 16384 connections (`TIN_MAX_CONNS`); more are closed at accept.
