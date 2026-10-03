@@ -131,7 +131,9 @@ positive tests and the table `_asm` check land with step 4.
    type, with one clear message per target. The gate is whole-program (an uncalled function's
    signature and an unused shape's signature both resolve `dyn`), so the two existing `_bad`
    tests that assert "dyn shapes are not usable yet" (`shapes_dyn_bad`, `shapes_dyn_unused_bad`)
-   stay negative with the gate's message.
+   stay negative with the gate's message. A generic template that mentions `dyn` only inside a
+   body that is never instantiated builds no `K_DYN` type and is not gated; nothing can
+   generate one either, so this is the lazy-constraint rule, not a hole.
 3. **arm64 codegen**: homes, parameters, results, fields, element access, tables and the
    startup fill, method calls. No `_asm` check yet: the strict suite compiles `*_asm.tin` on
    both CPUs, and the amd64 gate would fail one here.
