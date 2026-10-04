@@ -88,9 +88,27 @@ if ! cmp -s tests/edition1/match_bad.err "$tmp/match_bad.err"; then
 	diff -u tests/edition1/match_bad.err "$tmp/match_bad.err" || true
 	exit 1
 fi
+# Bounded values (#240): argo stops at a bound with fault.LimitExceeded, bound(x) checks a
+# length, and an unbounded value never becomes bounded without it.
+"$compiler" -edition 1 -o "$tmp/bounded" tests/edition1/run/bounded.tin
+"$tmp/bounded" >"$tmp/bounded.out" 2>/dev/null
+if ! cmp -s tests/edition1/run/bounded.out "$tmp/bounded.out"; then
+	echo "FAIL edition1/run/bounded: output differs"
+	diff -u tests/edition1/run/bounded.out "$tmp/bounded.out" || true
+	exit 1
+fi
+if "$compiler" -edition 1 -o "$tmp/bounded_bad" tests/edition1/bounded_bad.tin >"$tmp/bounded_bad.out" 2>"$tmp/bounded_bad.err"; then
+	echo "FAIL edition1/bounded_bad: unexpectedly accepted"
+	exit 1
+fi
+if ! cmp -s tests/edition1/bounded_bad.err "$tmp/bounded_bad.err"; then
+	echo "FAIL edition1/bounded_bad: diagnostic mismatch"
+	diff -u tests/edition1/bounded_bad.err "$tmp/bounded_bad.err" || true
+	exit 1
+fi
 
 # Structured concurrency (#232): scopes, spawn, wait, cancel, first-fault cancellation.
-for name in scopes lanes selects guards
+for name in scopes lanes selects guards handles
 do
 	"$compiler" -edition 1 -o "$tmp/$name" "tests/edition1/run/$name.tin"
 	"$tmp/$name" >"$tmp/$name.out" 2>/dev/null
@@ -130,6 +148,39 @@ do
 	fi
 	if "$compiler" -edition 1 -audit-secrets "tests/edition1/$name.tin" >/dev/null 2>&1; then
 		echo "FAIL edition1/$name: audit accepted a rejected program"
+		exit 1
+	fi
+done
+# with policies and bind (#237): retry, trace, cached, slots seen by spawned children and
+# parallel lines; a policy that keeps its body is a compile error.
+"$compiler" -edition 1 -o "$tmp/policies" tests/edition1/run/policies.tin
+"$tmp/policies" >"$tmp/policies.out" 2>/dev/null
+if ! cmp -s tests/edition1/run/policies.out "$tmp/policies.out"; then
+	echo "FAIL edition1/run/policies: output differs"
+	diff -u tests/edition1/run/policies.out "$tmp/policies.out" || true
+	exit 1
+fi
+if "$compiler" -edition 1 -o "$tmp/policy_keeps_body" tests/edition1/policy_keeps_body.tin >"$tmp/policy_keeps_body.out" 2>"$tmp/policy_keeps_body.err"; then
+	echo "FAIL edition1/policy_keeps_body: unexpectedly accepted"
+	exit 1
+fi
+if ! cmp -s tests/edition1/policy_keeps_body.err "$tmp/policy_keeps_body.err"; then
+	echo "FAIL edition1/policy_keeps_body: diagnostic mismatch"
+	diff -u tests/edition1/policy_keeps_body.err "$tmp/policy_keeps_body.err" || true
+	exit 1
+fi
+
+# A task handle cannot outlive its scope, and detach captures only long-lived memory (#232):
+# each is a compile error.
+for name in scope_escape_bad detach_capture_bad
+do
+	if "$compiler" -edition 1 -o "$tmp/$name" "tests/edition1/$name.tin" >"$tmp/$name.out" 2>"$tmp/$name.err"; then
+		echo "FAIL edition1/$name: unexpectedly accepted"
+		exit 1
+	fi
+	if ! cmp -s "tests/edition1/$name.err" "$tmp/$name.err"; then
+		echo "FAIL edition1/$name: diagnostic mismatch"
+		diff -u "tests/edition1/$name.err" "$tmp/$name.err" || true
 		exit 1
 	fi
 done
