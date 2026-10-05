@@ -86,6 +86,14 @@ cases and a byte-identical `-S` comparison. The seed is not touched until step 6
    still call, and the entry point and start-up sequence become the strict program's. This is its own PR
    (the compiler still untyped, built as a strict program), measured for compile time, binary size and
    memory use before and after, and it is the real gate for every typed file.
+   Measured as a feasibility probe (2026-10-05, darwin-arm64, not committed): drop `lib/runtime/memory.tin`
+   and `number.tin` from the compiler's file list, drop the heap and `rt_sys_*` duplicates from `std.tin`
+   and `host_darwin.tin` (keeping `opendir`, `readdir`, `closedir`, `creat`, `unlink`, `uname`), rename the
+   untyped `main` to `compiler_main(argc, argv)` and add one typed `fn main() { compiler_main(rtArgc,
+   rtArgv) }`. The result builds (805 KB against 750 KB), compiles the test programs with output
+   byte-identical to the untyped compiler, takes the same time to compile itself (0.48 s against 0.47 s),
+   and reaches the bootstrap fixed point (stage 2 equals stage 3 when both are written to the same file
+   name: the code signature embeds it).
 1. **Records.** Tokens (`lex.tin`), positions and errors (`util.tin`), then the remaining small
    records. Each is a struct with the layout check of rule 1, and `lex.tin` is converted to typed
    edition 1 because it owns the token record and is the smallest pass (about 640 lines).
