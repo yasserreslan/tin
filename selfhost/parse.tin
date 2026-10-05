@@ -679,7 +679,7 @@ fn buf_describe(b []u8, t Token) {
 fn p_fail_code(pos i64, code i64, msg i64) {
 	let e = cast([]i64, err_code(pos, code))
 	buf_str(cast([]u8, e), msg)
-	fatal(cast([]i64, e))
+	fatal(cast([]u8, e))
 }
 
 fn p_fail_found_code(pos i64, code i64, msg i64, t i64) {
@@ -687,7 +687,7 @@ fn p_fail_found_code(pos i64, code i64, msg i64, t i64) {
 	buf_str(cast([]u8, e), msg)
 	buf_str(cast([]u8, e), cstr(", found "))
 	buf_describe(cast([]u8, e), cast(Token, t))
-	fatal(cast([]i64, e))
+	fatal(cast([]u8, e))
 }
 
 fn p_expect(text i64) i64 {
@@ -697,7 +697,7 @@ fn p_expect(text i64) i64 {
 		buf_str(cast([]u8, e), text)
 		buf_str(cast([]u8, e), cstr("', found "))
 		buf_describe(cast([]u8, e), p_peek())
-		fatal(cast([]i64, e))
+		fatal(cast([]u8, e))
 	}
 	return p_next()
 }
@@ -1511,7 +1511,7 @@ fn parse_binding(pos i64, is_mut i64) i64 {
 		p_expect(cstr(")"))
 		p_expect(cstr("="))
 		let m = cast(MultiStmt, node_new(ST_MULTI, pos))
-		m.targets = cast([]i64, idents_of(pos, cast([]i64, names)))
+		m.targets = cast([]i64, idents_of(pos, names))
 		m.values = parse_expr_list()
 		m.define = 1
 		m.mut_ = is_mut
@@ -1551,9 +1551,9 @@ fn parse_local_var(pos i64) i64 {
 		inits = parse_expr_list()
 	}
 	p_end()
-	if cast(i64, inits) != 0 && len(inits) != len(cast([]i64, names)) {
+	if cast(i64, inits) != 0 && len(inits) != len(names) {
 		let m = cast(MultiStmt, node_new(ST_MULTI, pos))
-		m.targets = cast([]i64, idents_of(pos, cast([]i64, names)))
+		m.targets = cast([]i64, idents_of(pos, names))
 		m.values = cast([]i64, inits)
 		m.define = 1
 		return cast(i64, m)
@@ -1561,7 +1561,7 @@ fn parse_local_var(pos i64) i64 {
 	let list = cast(ListStmt, node_new(ST_LIST, pos))
 	list.stmts = []i64{}
 	mut i = 0
-	for i < len(cast([]i64, names)) {
+	for i < len(names) {
 		let l = cast(LetStmt, node_new(ST_LET, pos))
 		l.name = names[i]
 		l.type_ = ty
@@ -4107,7 +4107,7 @@ fn fx_sibling_names(toks []Token) i64 {
 			let src = cast([]u8, cast([]i64, try_read_file(cat_path(cat_path(dir, cstr("/")), name))))
 			if cast(i64, src) != 0 {
 				let stoks = cast([]i64, lex(0, slice_data(src), len(src), source_edition(slice_data(src), len(src))))
-				fx_collect_names(cast([]Token, stoks), cast([]i64, names))
+				fx_collect_names(cast([]Token, stoks), names)
 			}
 		}
 	}

@@ -1040,14 +1040,14 @@ fn rs_join(dead_a []i64, cur_a []Sym, dead_b []i64, cur_b []Sym) {
 	i = 0
 	for i < len(cur_b) {
 		let s = cur_b[i]
-		if rs_bits(cast([]Sym, cast([]i64, out)), s) == s.region && rs_has_entry(cast([]i64, out), cast(i64, s)) == 0 {
+		if rs_bits(cast([]Sym, out), s) == s.region && rs_has_entry(out, cast(i64, s)) == 0 {
 			out = append(out, cast(i64, s))
 			out = append(out, cast(i64, cur_b[i + 1]) | s.region)
 		}
 		i = i + 2
 	}
 	rs_dead = cast([]i64, dead_a)
-	rs_cur = cast([]i64, out)
+	rs_cur = out
 }
 
 fn rs_has_entry(cur []i64, s i64) i64 {
@@ -1223,7 +1223,7 @@ fn rg_call(e i64) i64 {
 		for i < n && i < 63 {
 			if (mask & (1 << i)) != 0 {
 				let saved = rg_report
-				if rg_report != 0 && ((b[i] | rg_pass(cast([]i64, rg_fnsum[10]), i, cast([]Node, args), cast([]i64, b), -1, pos)) & (RG_INGOT | RG_UNK)) != 0 {
+				if rg_report != 0 && ((b[i] | rg_pass(cast([]i64, rg_fnsum[10]), i, cast([]Node, args), b, -1, pos)) & (RG_INGOT | RG_UNK)) != 0 {
 					let m = err_code(pos, cstr("E312 ARG_ESCAPE"))
 					buf_str(m, cstr("a call through a function value may store request memory into its mut argument "))
 					buf_int(m, i + 1)
@@ -1233,13 +1233,13 @@ fn rg_call(e i64) i64 {
 				}
 				let a = cast(Node, args[i])
 				rg_store(b[i], rg_owner(cast(i64, a)), rg_key(a.type_), RG_EMB, 0, pos, 0)
-				rg_pass(cast([]i64, rg_fnsum[10]), i, cast([]Node, args), cast([]i64, b), RG_EMB, pos)
-				rg_pass(cast([]i64, rg_fnsum[11]), i, cast([]Node, args), cast([]i64, b), 0, pos)
+				rg_pass(cast([]i64, rg_fnsum[10]), i, cast([]Node, args), b, RG_EMB, pos)
+				rg_pass(cast([]i64, rg_fnsum[11]), i, cast([]Node, args), b, 0, pos)
 				rg_report = saved
 			}
 			i = i + 1
 		}
-		rg_import(cast([]i64, rg_fnsum[1]), cast([]i64, args), cast([]i64, b))
+		rg_import(cast([]i64, rg_fnsum[1]), cast([]i64, args), b)
 		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return RG_UNK | RG_EMB
 		}
@@ -1257,7 +1257,7 @@ fn rg_call(e i64) i64 {
 		return RG_INGOT
 	}
 	if name != 0 && str_prefix(name, cstr("rt_")) != 0 {
-		return rg_runtime_call(e, name, cast([]i64, b), pos)
+		return rg_runtime_call(e, name, b, pos)
 	}
 	mut sum = 0
 	if cast(i64, f) != 0 {
@@ -1274,7 +1274,7 @@ fn rg_call(e i64) i64 {
 		let mutp = i64(cast(i64, f.muts) != 0 && i < len(f.muts) && f.muts[i] != 0)
 		if (sum[0] & (1 << i)) != 0 {
 			let saved = rg_report
-			if rg_report != 0 && (rg_pass(cast([]i64, sum[10]), i, cast([]Node, args), cast([]i64, b), -1, pos) & (RG_INGOT | RG_UNK)) != 0 {
+			if rg_report != 0 && (rg_pass(cast([]i64, sum[10]), i, cast([]Node, args), b, -1, pos) & (RG_INGOT | RG_UNK)) != 0 {
 				let m = err_code(pos, cstr("E312 ARG_ESCAPE"))
 				buf_str(m, name)
 				buf_str(m, cstr(" stores request memory into its mut parameter '"))
@@ -1289,19 +1289,19 @@ fn rg_call(e i64) i64 {
 				err_end(cast([]u8, m))
 				rg_report = 0
 			}
-			rg_pass(cast([]i64, sum[10]), i, cast([]Node, args), cast([]i64, b), RG_EMB, pos)
+			rg_pass(cast([]i64, sum[10]), i, cast([]Node, args), b, RG_EMB, pos)
 			rg_report = saved
 		} else if mutp != 0 {
 			let a = cast(Node, args[i])
 			rg_store(b[i], rg_owner(cast(i64, a)), rg_key(a.type_), 0, 0, pos, 0)
 		}
 		if mutp != 0 {
-			rg_pass(cast([]i64, sum[11]), i, cast([]Node, args), cast([]i64, b), 0, pos)
+			rg_pass(cast([]i64, sum[11]), i, cast([]Node, args), b, 0, pos)
 		}
 		i = i + 1
 	}
-	rg_arena_call(cast(i64, f), cast([]i64, b), pos)
-	rg_import(cast([]i64, sum[1]), cast([]i64, args), cast([]i64, b))
+	rg_arena_call(cast(i64, f), b, pos)
+	rg_import(cast([]i64, sum[1]), cast([]i64, args), b)
 	let res = []i64{}
 	mut j = 0
 	for j < 8 {
@@ -1309,7 +1309,7 @@ fn rg_call(e i64) i64 {
 		if j < len(f.rtypes) {
 			rt = f.rtypes[j]
 		}
-		res = append(res, rg_subst(sum[2 + j], cast([]Node, args), cast([]i64, b), rt))
+		res = append(res, rg_subst(sum[2 + j], cast([]Node, args), b, rt))
 		j = j + 1
 	}
 	rg_multi = cast([]i64, res)

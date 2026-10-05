@@ -213,7 +213,7 @@ fn write_elf_x64(path i64) {
 	pc = code_addr
 	i = 0
 	for i < len(code) {
-		pc = pc + x64_encode(slice_data(code) + 8 * i, pc, cast([]i64, out))
+		pc = pc + x64_encode(slice_data(code) + 8 * i, pc, out)
 		i = i + 5
 	}
 	if len(out) != code_size {
@@ -245,7 +245,7 @@ fn write_elf_x64(path i64) {
 		let e = cast([]i64, err_code(NO_POS, cstr("E904 CANNOT_CREATE")))
 		buf_str(cast([]u8, e), cstr("cannot create "))
 		buf_str(cast([]u8, e), path)
-		fatal(cast([]i64, e))
+		fatal(cast([]u8, e))
 	}
 	let wh = cast(SliceHdr, malloc(24))
 	wh.len = file_size

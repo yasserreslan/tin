@@ -190,7 +190,7 @@ fn x64_fail(msg i64) {
 	let e = cast([]i64, err_code(NO_POS, cstr("E990 INTERNAL")))
 	buf_str(cast([]u8, e), cstr("x64: "))
 	buf_str(cast([]u8, e), msg)
-	fatal(cast([]i64, e))
+	fatal(cast([]u8, e))
 }
 
 // ---- text printer (Intel syntax, as objdump -M intel prints it) ----
@@ -381,14 +381,14 @@ fn x64_size(ins i64, pc i64) i64 {
 	let relocs = x64_relocs
 	x64_relocs = cast([]i64, 0)
 	slice_truncate(x64_scratch, 0)
-	let n = x64_encode(ins, pc, cast([]i64, x64_scratch))
+	let n = x64_encode(ins, pc, cast([]u8, cast([]i64, x64_scratch)))
 	x64_relocs = relocs
 	return n
 }
 
 // x64_print appends one line of Intel-syntax assembly for ins at pc (labels print nothing).
 // With a negative pc branch targets and rip-relative operands print as L<label>/S<sym>.
-fn x64_print(b []i64, ins i64, pc i64) {
+fn x64_print(b []u8, ins i64, pc i64) {
 	let op = ins[0]
 	let x = ins[1]
 	let y = ins[2]
@@ -417,7 +417,7 @@ fn x64_print(b []i64, ins i64, pc i64) {
 			x64_pr_ri(cast([]u8, b), cstr("movabs"), x, y, 3)
 		}
 	} else if op == X_LOAD {
-		x64_pr_load(cast([]i64, b), x, y, z, end)
+		x64_pr_load(b, x, y, z, end)
 	} else if op == X_STORE {
 		x64_pr_rm(cast([]u8, b), cstr("mov"), x, z, y, z, 0, end)
 	} else if op == X_LEA {
@@ -506,7 +506,7 @@ fn x64_print(b []i64, ins i64, pc i64) {
 			x64_pr_reg(cast([]u8, b), y, z)
 		}
 	} else if op >= X_MOVSD && op <= X_ANDPD {
-		x64_pr_sse(cast([]i64, b), op, x, y, end)
+		x64_pr_sse(b, op, x, y, end)
 	} else if op == X_ROUNDSD {
 		x64_pr_rr(cast([]u8, b), cstr("roundsd"), x, y, 3)
 		buf_byte(cast([]u8, b), ',')
@@ -582,7 +582,7 @@ fn x64_unary_name(op i64) i64 {
 }
 
 // x64_pr_load prints the mov/movzx/movsx/movsxd form a sized load uses.
-fn x64_pr_load(b []i64, rt i64, m i64, kind i64, end i64) {
+fn x64_pr_load(b []u8, rt i64, m i64, kind i64, end i64) {
 	let size = kind & 3
 	let signed = kind & XK_SIGNED
 	if size == 3 {
@@ -598,7 +598,7 @@ fn x64_pr_load(b []i64, rt i64, m i64, kind i64, end i64) {
 	}
 }
 
-fn x64_pr_sse(b []i64, op i64, x i64, y i64, end i64) {
+fn x64_pr_sse(b []u8, op i64, x i64, y i64, end i64) {
 	if op == X_MOVSD_LD {
 		x64_pr_rm(cast([]u8, b), cstr("movsd"), x, 3, y, 3, 1, end)
 	} else if op == X_MOVSD_ST {
@@ -643,7 +643,7 @@ fn x64_imm32(out []u8, v i64) {
 	buf_byte(out, v >> 24)
 }
 
-fn x64_imm64(out []i64, v i64) {
+fn x64_imm64(out []u8, v i64) {
 	x64_imm32(cast([]u8, out), v)
 	x64_imm32(cast([]u8, out), v >> 32)
 }
@@ -684,7 +684,7 @@ fn x64_rr(out []u8, pfx i64, w i64, opc i64, reg i64, rm i64, force i64) {
 }
 
 // x64_rm emits PFX REX OPC ModRM [SIB] [disp] for a memory rm operand.
-fn x64_rm(out []i64, pfx i64, w i64, opc i64, reg i64, m i64, force i64) {
+fn x64_rm(out []u8, pfx i64, w i64, opc i64, reg i64, m i64, force i64) {
 	let r = x64_rn(reg)
 	let base = x64_mem_base(m)
 	let index = x64_mem_index(m)
@@ -778,7 +778,7 @@ fn x64_rel(out []u8, target i64, short i64) {
 }
 
 // x64_encode appends the machine code of ins at address pc to out and returns its length.
-fn x64_encode(ins i64, pc i64, out []i64) i64 {
+fn x64_encode(ins i64, pc i64, out []u8) i64 {
 	let start = len(out)
 	x64_base = pc - start
 	let op = ins[0]
@@ -802,28 +802,28 @@ fn x64_encode(ins i64, pc i64, out []i64) i64 {
 		} else {
 			x64_rex(cast([]u8, out), 1, 0, 0, x, 0)
 			buf_byte(cast([]u8, out), 0xB8 + (x & 7))
-			x64_imm64(cast([]i64, out), y)
+			x64_imm64(out, y)
 		}
 	} else if op == X_LOAD {
-		x64_enc_load(cast([]i64, out), x, y, z)
+		x64_enc_load(out, x, y, z)
 	} else if op == X_STORE {
 		if z == 3 {
-			x64_rm(cast([]i64, out), 0, 1, 0x89, x, y, 0)
+			x64_rm(out, 0, 1, 0x89, x, y, 0)
 		} else if z == 2 {
-			x64_rm(cast([]i64, out), 0, 0, 0x89, x, y, 0)
+			x64_rm(out, 0, 0, 0x89, x, y, 0)
 		} else if z == 1 {
-			x64_rm(cast([]i64, out), 0x66, 0, 0x89, x, y, 0)
+			x64_rm(out, 0x66, 0, 0x89, x, y, 0)
 		} else {
-			x64_rm(cast([]i64, out), 0, 0, 0x88, x, y, x64_byte_reg(x))
+			x64_rm(out, 0, 0, 0x88, x, y, x64_byte_reg(x))
 		}
 	} else if op == X_LEA {
-		x64_rm(cast([]i64, out), 0, 1, 0x8D, x, y, 0)
+		x64_rm(out, 0, 1, 0x8D, x, y, 0)
 	} else if op >= X_ADD && op <= X_TEST {
 		x64_rr(cast([]u8, out), 0, 1, x64_alu_mr(op - X_ADD), y, x, 0)
 	} else if op >= X_ADDI && op <= X_TESTI {
 		x64_enc_alu_imm(cast([]u8, out), op - X_ADDI, x, y)
 	} else if op >= X_ADDM && op <= X_TESTM {
-		x64_rm(cast([]i64, out), 0, 1, x64_alu_rm(op - X_ADDM), x, y, 0)
+		x64_rm(out, 0, 1, x64_alu_rm(op - X_ADDM), x, y, 0)
 	} else if op == X_IMUL_RR {
 		x64_rr(cast([]u8, out), 0, 1, 0x0FAF, x, y, 0)
 	} else if op == X_IMUL_RRI {
@@ -909,9 +909,9 @@ fn x64_encode(ins i64, pc i64, out []i64) i64 {
 	} else if op == X_MOVSD {
 		x64_rr(cast([]u8, out), 0xF2, 0, 0x0F10, x, y, 0)
 	} else if op == X_MOVSD_LD {
-		x64_rm(cast([]i64, out), 0xF2, 0, 0x0F10, x, y, 0)
+		x64_rm(out, 0xF2, 0, 0x0F10, x, y, 0)
 	} else if op == X_MOVSD_ST {
-		x64_rm(cast([]i64, out), 0xF2, 0, 0x0F11, x, y, 0)
+		x64_rm(out, 0xF2, 0, 0x0F11, x, y, 0)
 	} else if op >= X_ADDSD && op <= X_SQRTSD {
 		x64_rr(cast([]u8, out), 0xF2, 0, 0x0F00 | i64(load8(cstr("\x58\x5c\x59\x5e\x51") + (op - X_ADDSD))), x, y, 0)
 	} else if op == X_UCOMISD {
@@ -934,15 +934,15 @@ fn x64_encode(ins i64, pc i64, out []i64) i64 {
 		x64_rr(cast([]u8, out), 0x66, 0, 0x0F3A0B, x, y, 0)
 		buf_byte(cast([]u8, out), z)
 	} else if op == X_PREFETCHW {
-		x64_rm(cast([]i64, out), 0, 0, 0x0F0D, 1, x, 0)
+		x64_rm(out, 0, 0, 0x0F0D, 1, x, 0)
 	} else if op == X_PREFETCHT0 {
-		x64_rm(cast([]i64, out), 0, 0, 0x0F18, 1, x, 0)
+		x64_rm(out, 0, 0, 0x0F18, 1, x, 0)
 	} else if op == X_LOCK_XADD {
-		x64_rm(cast([]i64, out), 0xF0, 1, 0x0FC1, x, y, 0)
+		x64_rm(out, 0xF0, 1, 0x0FC1, x, y, 0)
 	} else if op == X_XCHG {
-		x64_rm(cast([]i64, out), 0, 1, 0x87, x, y, 0)
+		x64_rm(out, 0, 1, 0x87, x, y, 0)
 	} else if op == X_LOCK_CMPXCHG {
-		x64_rm(cast([]i64, out), 0xF0, 1, 0x0FB1, x, y, 0)
+		x64_rm(out, 0xF0, 1, 0x0FB1, x, y, 0)
 	} else if op == X_MFENCE {
 		buf_byte(cast([]u8, out), 0x0F)
 		buf_byte(cast([]u8, out), 0xAE)
@@ -954,9 +954,9 @@ fn x64_encode(ins i64, pc i64, out []i64) i64 {
 		buf_byte(cast([]u8, out), 0x0F)
 		buf_byte(cast([]u8, out), 0x0B)
 	} else if op == X_MOVSS_LD {
-		x64_rm(cast([]i64, out), 0xF3, 0, 0x0F10, x, y, 0)
+		x64_rm(out, 0xF3, 0, 0x0F10, x, y, 0)
 	} else if op == X_MOVSS_ST {
-		x64_rm(cast([]i64, out), 0xF3, 0, 0x0F11, x, y, 0)
+		x64_rm(out, 0xF3, 0, 0x0F11, x, y, 0)
 	} else if op == X_CVTSD2SS {
 		x64_rr(cast([]u8, out), 0xF2, 0, 0x0F5A, x, y, 0)
 	} else if op == X_CVTSS2SD {
@@ -976,7 +976,7 @@ fn x64_shift_digit(i i64) i64 {
 }
 
 // x64_enc_load picks mov, movzx, movsx or movsxd for a sized load into rt.
-fn x64_enc_load(out []i64, rt i64, m i64, kind i64) {
+fn x64_enc_load(out []u8, rt i64, m i64, kind i64) {
 	let size = kind & 3
 	let signed = kind & XK_SIGNED
 	if size == 3 {
@@ -1087,15 +1087,15 @@ fn x64_layout(code []i64, base i64) i64 {
 
 // x64_assemble lays code out at base and returns a buffer with its machine code; relocations
 // against symbols are left in x64_relocs.
-fn x64_assemble(code []i64, base i64) i64 {
+fn x64_assemble(code []i64, base i64) []u8 {
 	x64_layout(code, base)
 	x64_relocs = []i64{}
 	let out = buf_new()
 	mut pc = base
 	mut i = 0
 	for i < len(code) {
-		pc = pc + x64_encode(slice_data(code) + 8 * i, pc, cast([]i64, out))
+		pc = pc + x64_encode(slice_data(code) + 8 * i, pc, out)
 		i = i + 5
 	}
-	return cast(i64, out)
+	return cast([]u8, cast(i64, out))
 }

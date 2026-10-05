@@ -98,7 +98,7 @@ fn manifest_error(path i64, line_no i64, msg i64, word i64) {
 		buf_byte(e, '\'')
 	}
 	buf_str(e, cstr(" (a tin.mod line is module PATH, require PATH SOURCE or caps net files spawn exec unsafe)"))
-	fatal(cast([]i64, e))
+	fatal(e)
 }
 
 // manifest_caps reads a tin.mod and returns the capabilities its caps lines declare.
@@ -227,7 +227,7 @@ fn vendored_package(ipath i64, found []i64) i64 {
 			buf_str(cast([]u8, e), cstr(", its manifest declares \""))
 			buf_str(cast([]u8, e), slice_data(want))
 			buf_str(cast([]u8, e), cstr("\" (run tin vendor)"))
-			fatal(cast([]i64, e))
+			fatal(cast([]u8, e))
 		}
 	}
 	cap_pkgs = append(cap_pkgs, cast(CapsRec, rec))
@@ -689,5 +689,5 @@ fn print_capabilities() {
 		buf_byte(out, '\n')
 		i = i + 1
 	}
-	write_all(1, cast([]u8, cast([]i64, out)))
+	write_all(1, cast([]u8, out))
 }

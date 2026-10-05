@@ -3446,41 +3446,41 @@ fn raw(v []i64, word i64) {
 
 fn sha256_hw_words() i64 {
 	let w = []i64{}
-	raw(cast([]i64, w), q_ldp(0, 1, 0, 0))
-	let loop_ = len(cast([]i64, w))
-	raw(cast([]i64, w), q_ldp(4, 5, 1, 0))
-	raw(cast([]i64, w), q_ldp(6, 7, 1, 32))
-	raw(cast([]i64, w), 0x91010021)
+	raw(w, q_ldp(0, 1, 0, 0))
+	let loop_ = len(w)
+	raw(w, q_ldp(4, 5, 1, 0))
+	raw(w, q_ldp(6, 7, 1, 32))
+	raw(w, 0x91010021)
 	mut r = 4
 	for r <= 7 {
-		raw(cast([]i64, w), 0x6E200800 | (r << 5) | r)
+		raw(w, 0x6E200800 | (r << 5) | r)
 		r = r + 1
 	}
-	raw(cast([]i64, w), v3(0x4EA01C00, 16, 0, 0))
-	raw(cast([]i64, w), v3(0x4EA01C00, 17, 1, 1))
+	raw(w, v3(0x4EA01C00, 16, 0, 0))
+	raw(w, v3(0x4EA01C00, 17, 1, 1))
 	mut i = 0
 	for i < 16 {
 		let wi = 4 + i % 4
-		raw(cast([]i64, w), q_ldr(20, 3, 16 * i))
-		raw(cast([]i64, w), v3(0x4EA08400, 20, 20, wi))
+		raw(w, q_ldr(20, 3, 16 * i))
+		raw(w, v3(0x4EA08400, 20, 20, wi))
 		if i < 12 {
-			raw(cast([]i64, w), 0x5E282800 | ((4 + (i + 1) % 4) << 5) | wi)
+			raw(w, 0x5E282800 | ((4 + (i + 1) % 4) << 5) | wi)
 		}
-		raw(cast([]i64, w), v3(0x4EA01C00, 18, 0, 0))
-		raw(cast([]i64, w), v3(0x5E004000, 0, 1, 20))
-		raw(cast([]i64, w), v3(0x5E005000, 1, 18, 20))
+		raw(w, v3(0x4EA01C00, 18, 0, 0))
+		raw(w, v3(0x5E004000, 0, 1, 20))
+		raw(w, v3(0x5E005000, 1, 18, 20))
 		if i < 12 {
-			raw(cast([]i64, w), v3(0x5E006000, wi, 4 + (i + 2) % 4, 4 + (i + 3) % 4))
+			raw(w, v3(0x5E006000, wi, 4 + (i + 2) % 4, 4 + (i + 3) % 4))
 		}
 		i = i + 1
 	}
-	raw(cast([]i64, w), v3(0x4EA08400, 0, 0, 16))
-	raw(cast([]i64, w), v3(0x4EA08400, 1, 1, 17))
-	raw(cast([]i64, w), 0xF1000442)
-	let back = (loop_ - len(cast([]i64, w))) & 0x7ffff
-	raw(cast([]i64, w), 0x54000000 | (back << 5) | 1)
-	raw(cast([]i64, w), q_stp(0, 1, 0, 0))
-	raw(cast([]i64, w), 0xD65F03C0)
+	raw(w, v3(0x4EA08400, 0, 0, 16))
+	raw(w, v3(0x4EA08400, 1, 1, 17))
+	raw(w, 0xF1000442)
+	let back = (loop_ - len(w)) & 0x7ffff
+	raw(w, 0x54000000 | (back << 5) | 1)
+	raw(w, q_stp(0, 1, 0, 0))
+	raw(w, 0xD65F03C0)
 	return cast(i64, w)
 }
 
@@ -3561,25 +3561,25 @@ fn gen_stack_param_load(dst i64, incoming_off i64) {
 fn memory_words(fill i64) i64 {
 	let w = []i64{}
 	if fill == 0 {
-		raw(cast([]i64, w), 0xb4000122)
-		raw(cast([]i64, w), 0xad400420)
-		raw(cast([]i64, w), 0xad410c22)
-		raw(cast([]i64, w), 0xad000400)
-		raw(cast([]i64, w), 0xad010c02)
-		raw(cast([]i64, w), 0x91010000)
-		raw(cast([]i64, w), 0x91010021)
-		raw(cast([]i64, w), 0xf1000442)
-		raw(cast([]i64, w), 0x54ffff21)
+		raw(w, 0xb4000122)
+		raw(w, 0xad400420)
+		raw(w, 0xad410c22)
+		raw(w, 0xad000400)
+		raw(w, 0xad010c02)
+		raw(w, 0x91010000)
+		raw(w, 0x91010021)
+		raw(w, 0xf1000442)
+		raw(w, 0x54ffff21)
 	} else {
-		raw(cast([]i64, w), 0xb40000e2)
-		raw(cast([]i64, w), 0x4e080c20)
-		raw(cast([]i64, w), 0xad000000)
-		raw(cast([]i64, w), 0xad010000)
-		raw(cast([]i64, w), 0x91010000)
-		raw(cast([]i64, w), 0xf1000442)
-		raw(cast([]i64, w), 0x54ffff81)
+		raw(w, 0xb40000e2)
+		raw(w, 0x4e080c20)
+		raw(w, 0xad000000)
+		raw(w, 0xad010000)
+		raw(w, 0x91010000)
+		raw(w, 0xf1000442)
+		raw(w, 0x54ffff81)
 	}
-	raw(cast([]i64, w), 0xd65f03c0)
+	raw(w, 0xd65f03c0)
 	return cast(i64, w)
 }
 
@@ -3587,19 +3587,19 @@ fn memory_words(fill i64) i64 {
 fn syscall_words(restorer i64) i64 {
 	let w = []i64{}
 	if restorer != 0 {
-		raw(cast([]i64, w), 0xd2801168)
-		raw(cast([]i64, w), 0xd4000001)
+		raw(w, 0xd2801168)
+		raw(w, 0xd4000001)
 		return cast(i64, w)
 	}
-	raw(cast([]i64, w), 0xaa0003e8)
-	raw(cast([]i64, w), 0xaa0103e0)
-	raw(cast([]i64, w), 0xaa0203e1)
-	raw(cast([]i64, w), 0xaa0303e2)
-	raw(cast([]i64, w), 0xaa0403e3)
-	raw(cast([]i64, w), 0xaa0503e4)
-	raw(cast([]i64, w), 0xaa0603e5)
-	raw(cast([]i64, w), 0xd4000001)
-	raw(cast([]i64, w), 0xd65f03c0)
+	raw(w, 0xaa0003e8)
+	raw(w, 0xaa0103e0)
+	raw(w, 0xaa0203e1)
+	raw(w, 0xaa0303e2)
+	raw(w, 0xaa0403e3)
+	raw(w, 0xaa0503e4)
+	raw(w, 0xaa0603e5)
+	raw(w, 0xd4000001)
+	raw(w, 0xd65f03c0)
 	return cast(i64, w)
 }
 

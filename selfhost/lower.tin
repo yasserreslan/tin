@@ -740,7 +740,7 @@ fn enum_eq_fn(t Ty) i64 {
 	types = append(types, cast(i64, t))
 	let rts = []i64{}
 	rts = append(rts, ty_bool)
-	let f = lifted_fn(cstr("eq"), cast([]i64, names), cast([]i64, types), cast(i64, rts))
+	let f = lifted_fn(cstr("eq"), names, cast([]i64, types), cast(i64, rts))
 	mut vs1 = cast([]i64, enum_eq_types)
 	vs1 = append(vs1, cast(i64, t))
 	enum_eq_fns = append(enum_eq_fns, cast(i64, f))
@@ -935,7 +935,7 @@ fn key_enc_fn(t Ty) i64 {
 	types = append(types, cast(i64, t))
 	let rts = []i64{}
 	rts = append(rts, ty_int)
-	let f = lifted_fn(cstr("keyenc"), cast([]i64, names), cast([]i64, types), cast(i64, rts))
+	let f = lifted_fn(cstr("keyenc"), names, cast([]i64, types), cast(i64, rts))
 	mut vs1 = cast([]i64, key_enc_types)
 	vs1 = append(vs1, cast(i64, t))
 	key_enc_fns = append(key_enc_fns, cast(i64, f))
@@ -1015,7 +1015,7 @@ fn key_dec_fn(t Ty) i64 {
 	types = append(types, ty_string)
 	let rts = []i64{}
 	rts = append(rts, cast(i64, t))
-	let f = lifted_fn(cstr("keydec"), cast([]i64, names), cast([]i64, types), cast(i64, rts))
+	let f = lifted_fn(cstr("keydec"), names, cast([]i64, types), cast(i64, rts))
 	mut vs1 = cast([]i64, key_dec_types)
 	vs1 = append(vs1, cast(i64, t))
 	key_dec_fns = append(key_dec_fns, cast(i64, f))
@@ -4920,7 +4920,7 @@ fn say_struct_fn(t Ty, prefix i64) Fn {
 	names = append(names, cstr("x"))
 	let types = []i64{}
 	types = append(types, cast(i64, t))
-	let f = lifted_fn(cstr("say"), cast([]i64, names), cast([]i64, types), cast(i64, []i64{}))
+	let f = lifted_fn(cstr("say"), names, cast([]i64, types), cast(i64, []i64{}))
 	let kp2 = []i64{}
 	kp2 = append(kp2, cast(i64, t))
 	kp2 = append(kp2, prefix)
@@ -5200,7 +5200,7 @@ fn say_enum_fn(t Ty, prefix i64) Fn {
 	names = append(names, cstr("x"))
 	let types = []i64{}
 	types = append(types, cast(i64, t))
-	let f = lifted_fn(cstr("say"), cast([]i64, names), cast([]i64, types), cast(i64, []i64{}))
+	let f = lifted_fn(cstr("say"), names, cast([]i64, types), cast(i64, []i64{}))
 	let kp2 = []i64{}
 	kp2 = append(kp2, cast(i64, t))
 	kp2 = append(kp2, prefix)

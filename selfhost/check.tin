@@ -1472,7 +1472,7 @@ fn collect_local_decls(stmts []i64, names []i64) {
 		} else if k == ST_LIST {
 			collect_local_decls(cast(ListStmt, s).stmts, names)
 		} else if mt_stmt_expr(s) != 0 && cast(Node, mt_stmt_expr(s)).kind == EX_MATCH {
-			mt_collect_decls(cast(MatchExpr, mt_stmt_expr(s)), cast([]i64, names))
+			mt_collect_decls(cast(MatchExpr, mt_stmt_expr(s)), names)
 		} else if k == ST_IF {
 			if cast(IfStmt, s).init != 0 {
 				let tmp = []i64{}
@@ -7231,7 +7231,7 @@ fn len_bound(c i64) []i64 {
 	}
 	let b = cast([]i64, pair(cast(i64, is), cast(i64, xs)))
 	b = append(b, length)
-	return cast([]i64, b)
+	return b
 }
 
 // add_len_fact makes x[i] unchecked inside `if i < len(x) {...}` when i cannot be
@@ -7696,7 +7696,7 @@ fn drop_fn(t i64) i64 {
 	names = append(names, cstr("x"))
 	let types = []i64{}
 	types = append(types, t)
-	let f = lifted_fn(cstr("drop"), cast([]i64, names), cast([]i64, types), cast(i64, []i64{}))
+	let f = lifted_fn(cstr("drop"), names, cast([]i64, types), cast(i64, []i64{}))
 	mut vs1 = cast([]i64, drop_types)
 	vs1 = append(vs1, t)
 	drop_fns = append(drop_fns, cast(i64, f))
@@ -7811,7 +7811,7 @@ fn arrdrop_fn(et i64) i64 {
 	names = append(names, cstr("p"))
 	let types = []i64{}
 	types = append(types, ty_int)
-	let f = lifted_fn(cstr("arrdrop"), cast([]i64, names), cast([]i64, types), cast(i64, []i64{}))
+	let f = lifted_fn(cstr("arrdrop"), names, cast([]i64, types), cast(i64, []i64{}))
 	mut vs1 = cast([]i64, arrdrop_types)
 	vs1 = append(vs1, et)
 	arrdrop_fns = append(arrdrop_fns, cast(i64, f))

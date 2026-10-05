@@ -161,11 +161,11 @@ fn buf_pos(b []u8, pos i64) {
 
 fn err_end(b []u8) {
 	buf_byte(b, '\n')
-	write_all(2, cast([]u8, cast([]i64, b)))
+	write_all(2, cast([]u8, b))
 	error_count = error_count + 1
 }
 
-fn fatal(b []i64) {
+fn fatal(b []u8) {
 	err_end(cast([]u8, b))
 	rt_sys_exit(1)
 }

@@ -323,7 +323,7 @@ fn prefetch_loop(w i64) {
 		nb = append(nb, body0[i])
 		i = i + 1
 	}
-	cast(Block, cast(WhileStmt, w).body).stmts = cast([]i64, nb)
+	cast(Block, cast(WhileStmt, w).body).stmts = nb
 }
 
 fn count_assigns(stmts i64, sym i64) i64 {

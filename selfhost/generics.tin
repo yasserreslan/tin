@@ -911,7 +911,7 @@ fn shape_tx_mentions(tx i64, names []i64) i64 {
 		return shape_tx_mentions(cast(TypeExpr, tx).a, names)
 	}
 	if k == TX_FUNC {
-		return i64(shape_tx_list_mentions(cast([]i64, cast(TypeExpr, tx).a), cast([]i64, names)) != 0 || shape_tx_list_mentions(cast([]i64, cast(TypeExpr, tx).b), cast([]i64, names)) != 0)
+		return i64(shape_tx_list_mentions(cast([]i64, cast(TypeExpr, tx).a), names) != 0 || shape_tx_list_mentions(cast([]i64, cast(TypeExpr, tx).b), names) != 0)
 	}
 	if k == TX_STRUCT {
 		let fields = cast(TypeExpr, tx).a
@@ -1159,7 +1159,7 @@ fn dyn_table_add(t Ty, dt Ty, pos i64) i64 {
 	for i < len(cast([]i64, flat)) {
 		let item = cast([]i64, flat[i])
 		let name = item[0]
-		if slice_has_str(cast([]i64, names), name) == 0 {
+		if slice_has_str(names, name) == 0 {
 			mut f = shape_method(t, name)
 			if f != 0 && is_template(cast(Fn, f)) != 0 {
 				f = cast(i64, instantiate_fn(cast(Fn, f), cast([]Ty, t.targs), pos))
@@ -1194,9 +1194,9 @@ fn dyn_shape_method(dt Ty, name i64) i64 {
 	for i < len(cast([]i64, flat)) {
 		let item = cast([]i64, flat[i])
 		let method = item[0]
-		if slice_has_str(cast([]i64, names), method) == 0 {
+		if slice_has_str(names, method) == 0 {
 			if streq(method, name) != 0 {
-				return pair(len(cast([]i64, names)) + 1, item[1])
+				return pair(len(names) + 1, item[1])
 			}
 			names = append(names, method)
 		}

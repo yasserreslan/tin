@@ -3163,7 +3163,7 @@ fn print_asm_x64() i64 {
 	}
 	i = 0
 	for i < len(code) {
-		x64_print(cast([]i64, b), slice_data(code) + 8 * i, -1)
+		x64_print(b, slice_data(code) + 8 * i, -1)
 		i = i + 5
 	}
 	return cast(i64, b)

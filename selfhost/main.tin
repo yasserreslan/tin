@@ -35,7 +35,7 @@ fn read_file(path i64) []i64 {
 		let e = cast([]i64, err_code(NO_POS, cstr("E003 CANNOT_OPEN")))
 		buf_str(cast([]u8, e), cstr("cannot open "))
 		buf_str(cast([]u8, e), path)
-		fatal(cast([]i64, e))
+		fatal(cast([]u8, e))
 	}
 	return cast([]i64, b)
 }
@@ -86,14 +86,14 @@ fn set_target(t i64) {
 		buf_str(cast([]u8, e), cstr("unknown target "))
 		buf_str(cast([]u8, e), t)
 		buf_str(cast([]u8, e), cstr(" (darwin-arm64, linux-arm64, linux-amd64)"))
-		fatal(cast([]i64, e))
+		fatal(cast([]u8, e))
 	}
 }
 
 fn usage() i64 {
 	let u = buf_new()
 	buf_str(u, cstr("usage: tinc [-fix] [-polls] [-edition 0|1] [-parse-only] [-audit-secrets] [-caps] [-hash FILE...] [-S] [-o OUT] [-target darwin-arm64|linux-arm64|linux-amd64] FILE.tin...\n"))
-	write_all(2, cast([]u8, cast([]i64, u)))
+	write_all(2, cast([]u8, u))
 	return 2
 }
 
@@ -180,7 +180,7 @@ fn load_file_trusted(path i64, trusted_in i64) {
 		let e = cast([]i64, err_code(NO_POS, cstr("E090 OLD_SYNTAX")))
 		buf_str(cast([]u8, e), path)
 		buf_str(cast([]u8, e), cstr(" is edition 0, which is retired: translate it with tin fix -edition 1"))
-		fatal(cast([]i64, e))
+		fatal(cast([]u8, e))
 	}
 	let toks = lex(cur_file, slice_data(src), len(src), edition)
 	file_sources = append(file_sources, cast(i64, src))
@@ -369,7 +369,7 @@ fn check_pkg_home(ipath i64, found []i64) {
 				buf_str(cast([]u8, e), ipath)
 				buf_str(cast([]u8, e), cstr("\" are different packages with the same name "))
 				buf_str(cast([]u8, e), name)
-				fatal(cast([]i64, e))
+				fatal(cast([]u8, e))
 			}
 			return
 		}
@@ -399,14 +399,14 @@ fn load_imports() {
 				buf_str(cast([]u8, e), cstr("\" is not vendored: there is no vendor/"))
 				buf_str(cast([]u8, e), ipath)
 				buf_str(cast([]u8, e), cstr(" in the program's directory (tin vendor copies it there; the build never fetches)"))
-				fatal(cast([]i64, e))
+				fatal(cast([]u8, e))
 			}
 			if cast(i64, found) == 0 {
 				let e = cast([]i64, err_code(NO_POS, cstr("E110 UNKNOWN_PACKAGE")))
 				buf_str(cast([]u8, e), cstr("unknown package \""))
 				buf_str(cast([]u8, e), ipath)
 				buf_str(cast([]u8, e), cstr("\" (looked in the standard library, next to the importing file and in the program's directory)"))
-				fatal(cast([]i64, e))
+				fatal(cast([]u8, e))
 			}
 			check_pkg_home(ipath, found)
 			// A vendored package is restricted to its manifest's capabilities; a package a
@@ -569,7 +569,7 @@ fn lock_has(path i64) i64 {
 		buf_str(cast([]u8, e), hex)
 		buf_str(cast([]u8, e), cstr("); every vendored file must be locked"))
 	}
-	fatal(cast([]i64, e))
+	fatal(cast([]u8, e))
 	return 0
 }
 
@@ -601,7 +601,7 @@ fn print_hashes(argc i64, argv i64) i64 {
 		buf_byte(out, '\n')
 		i = i + 1
 	}
-	write_all(1, cast([]u8, cast([]i64, out)))
+	write_all(1, cast([]u8, out))
 	return 0
 }
 
@@ -646,7 +646,7 @@ fn compiler_main(argc i64, argv i64) i64 {
 				buf_str(cast([]u8, e), cstr("unknown edition "))
 				buf_str(cast([]u8, e), argv[i])
 				buf_str(cast([]u8, e), cstr(" (expected 0 or 1)"))
-				fatal(cast([]i64, e))
+				fatal(cast([]u8, e))
 			}
 		} else if streq(a, cstr("-polls")) != 0 {
 			compiler_polls = 1
@@ -686,7 +686,7 @@ fn compiler_main(argc i64, argv i64) i64 {
 		if compiler_edition != 1 || len(files) != 1 {
 			let e = cast([]i64, err_code(NO_POS, cstr("E906 FIX_USAGE")))
 			buf_str(cast([]u8, e), cstr("-fix translates one file to edition 1: pass -edition 1 and exactly one file"))
-			fatal(cast([]i64, e))
+			fatal(cast([]u8, e))
 		}
 		let source = cast([]u8, cast([]i64, file_sources[0]))
 		let toks = cast([]i64, file_tokens[0])
@@ -708,7 +708,7 @@ fn compiler_main(argc i64, argv i64) i64 {
 		let e = cast([]i64, err_code(NO_POS, cstr("E903 NO_RUNTIME")))
 		buf_str(cast([]u8, e), cstr("the runtime package is missing: no lib/runtime in "))
 		buf_str(cast([]u8, e), lib_root)
-		fatal(cast([]i64, e))
+		fatal(cast([]u8, e))
 	}
 	mut rk = 0
 	for rk < len(rtfiles) {
