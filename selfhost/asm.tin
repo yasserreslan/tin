@@ -235,10 +235,10 @@ fn pr_sym(b Buf, sym i64) {
 		buf_int(b, i)
 	} else if kind == SK_FN {
 		buf_byte(b, '_')
-		buf_str(b, vec_get(prog_fns, i).qname)
+		buf_str(b, prog_fns[i].qname)
 	} else if kind == SK_FNDESC {
 		buf_byte(b, '_')
-		buf_str(b, vec_get(prog_fns, i).qname)
+		buf_str(b, prog_fns[i].qname)
 		buf_str(b, cstr("$desc"))
 	} else if kind == SK_BTRACE {
 		buf_str(b, cstr("l_.backtrace"))
@@ -248,7 +248,7 @@ fn pr_sym(b Buf, sym i64) {
 		buf_str(b, cstr("l_.zero"))
 	} else {
 		buf_byte(b, '_')
-		buf_str(b, var_label(vec_get(prog_vars, i)))
+		buf_str(b, var_label(prog_vars[i]))
 	}
 }
 

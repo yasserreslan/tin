@@ -18,54 +18,43 @@ fn streq(a i64, b i64) i64 {
 // Data structures for the self-hosted compiler: word vectors, byte buffers, positions, errors.
 // Vectors and buffers share one header layout; vectors count words, buffers count bytes.
 
-fn vec_new[T Any]() Vec[T] {
-	let v = cast(Vec[T], malloc(24))
-	v.len = 0
-	v.cap = 8
-	v.data = malloc(64)
-	return v
+// slice_truncate shortens (or, up to its capacity, lengthens) v in place: every holder of the slice sees it.
+fn slice_truncate[T Any](v []T, n i64) {
+	cast(SliceHdr, v).len = n
 }
 
-fn vec_push[T Any](v Vec[T], x T) {
-	if v.len == v.cap {
-		v.cap = v.cap * 2
-		v.data = realloc(v.data, v.cap * 8)
-	}
-	let d = v.data
-	d[v.len] = cast(i64, x)
-	v.len = v.len + 1
+// slice_data is the address of v's first element.
+fn slice_data[T Any](v []T) i64 {
+	return cast(SliceHdr, v).data
 }
 
-fn vec_get[T Any](v Vec[T], i i64) T {
-	let d = v.data
-	return cast(T, d[i])
-}
-
-fn vec_filled[T Any](n i64, x T) Vec[T] {
-	let v = vec_new[T]()
+// slice_filled is a slice of n copies of x.
+fn slice_filled[T Any](n i64, x T) []T {
+	mut v = []T{}
 	mut i = 0
 	for i < n {
-		vec_push(v, x)
+		v = append(v, x)
 		i = i + 1
 	}
 	return v
 }
 
-fn vec_clone[T Any](v Vec[T]) Vec[T] {
-	let out = vec_new[T]()
+// slice_clone is a copy of v (an empty slice for a nil one).
+fn slice_clone[T Any](v []T) []T {
+	mut out = []T{}
 	if cast(i64, v) == 0 {
 		return out
 	}
 	mut i = 0
-	for i < v.len {
-		vec_push(out, vec_get(v, i))
+	for i < len(v) {
+		out = append(out, v[i])
 		i = i + 1
 	}
 	return out
 }
 
 fn buf_new() Buf {
-	let b = cast(Vec[i64], malloc(24))
+	let b = cast(Buf, malloc(24))
 	b.len = 0
 	b.cap = 256
 	b.data = malloc(256)
@@ -133,7 +122,7 @@ fn mem_eq(a i64, b i64, n i64) i64 {
 	return 1
 }
 
-fn write_all(fd i64, b Vec[i64]) {
+fn write_all(fd i64, b Buf) {
 	mut done = 0
 	for done < b.len {
 		let n = rt_sys_write(fd, b.data + done, b.len - done)
@@ -147,7 +136,7 @@ fn write_all(fd i64, b Vec[i64]) {
 // A position packs file index, line and column into one word.
 const NO_POS = -1
 
-shared mut files Vec[i64]
+shared mut files []i64
 shared mut tgt_linux i64 // the target OS is Linux (else macOS)
 shared mut tgt_x64 i64 // the target CPU is x86-64 (else arm64)
 shared mut error_count i64
@@ -157,7 +146,7 @@ fn pos_make(file i64, line i64, col i64) i64 {
 }
 
 fn buf_pos(b Buf, pos i64) {
-	buf_str(b, vec_get(files, pos >> 48))
+	buf_str(b, files[pos >> 48])
 	buf_byte(b, ':')
 	buf_int(b, (pos >> 16) & 0xffffffff)
 	buf_byte(b, ':')
@@ -166,11 +155,11 @@ fn buf_pos(b Buf, pos i64) {
 
 fn err_end(b Buf) {
 	buf_byte(b, '\n')
-	write_all(2, cast(Vec[i64], b))
+	write_all(2, cast(Buf, cast([]i64, b)))
 	error_count = error_count + 1
 }
 
-fn fatal(b Vec[i64]) {
+fn fatal(b []i64) {
 	err_end(cast(Buf, b))
 	rt_sys_exit(1)
 }
