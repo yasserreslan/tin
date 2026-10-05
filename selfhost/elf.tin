@@ -86,7 +86,7 @@ fn el_symbols(img i64, own []Fn, name_off []i64, lay []i64) {
 	buf_byte(names, 0)
 	buf_str(names, cstr(".shstrtab"))
 	buf_byte(names, 0)
-	memcpy(img + shstr, names.data, names.len)
+	memcpy(img + shstr, slice_data(names), len(names))
 	let sh = align_up(shstr + 39, 8)
 	mut p = img + sh + 64
 	el_shdr(p, 1, 1, 6, lay[3], lay[3], lay[5] - lay[3])
@@ -118,7 +118,7 @@ fn el_check_static() {
 			buf_str(b, cstr("a Linux executable is static, but the program imports "))
 			buf_str(b, f.name)
 			buf_byte(b, 0)
-			link_fail(b.data)
+			link_fail(slice_data(b))
 		}
 		i = i + 1
 	}
@@ -158,7 +158,7 @@ fn write_elf(path i64) {
 		let f = prog_fns[i]
 		if f.extern_ == 0 && f.reach != 0 {
 			own = append(own, cast(Fn, f))
-			name_off = append(name_off, dstr.len)
+			name_off = append(name_off, len(dstr))
 			buf_str(dstr, cstr("tin."))
 			buf_str(dstr, f.qname)
 			buf_byte(dstr, 0)
@@ -170,7 +170,7 @@ fn write_elf(path i64) {
 	let ph_off = 64
 	let phnum = 5
 	let dynstr_off = ph_off + 56 * phnum
-	lk_btrace = align_up(dynstr_off + dstr.len, 8)
+	lk_btrace = align_up(dynstr_off + len(dstr), 8)
 	let ro_end = lk_btrace + 8 + 24 * len(cast([]i64, own))
 
 	// Text segment: _start, code, strings, constants.
@@ -246,7 +246,7 @@ fn write_elf(path i64) {
 	p = el_phdr(p, 1, 6, data_addr, data_addr, data_end - data_addr, data_end - data_addr, E_ALIGN)
 	p = el_phdr(p, 0x6474e551, 6, 0, 0, 0, 0, 16)
 
-	memcpy(img + dynstr_off, dstr.data, dstr.len)
+	memcpy(img + dynstr_off, slice_data(dstr), len(dstr))
 	put64(img + lk_btrace, len(cast([]i64, own)))
 	i = 0
 	for i < len(cast([]i64, own)) {
@@ -267,7 +267,7 @@ fn write_elf(path i64) {
 		let lay = []i64{}
 		lay = append(lay, data_end)
 		lay = append(lay, dynstr_off)
-		lay = append(lay, dstr.len)
+		lay = append(lay, len(dstr))
 		lay = append(lay, text_addr)
 		lay = append(lay, lk_stubs)
 		lay = append(lay, text_end)
@@ -310,14 +310,14 @@ fn write_elf(path i64) {
 	let fd = rt_sys_creat(path, 493)
 	if (fd & 0x80000000) != 0 {
 		let e = cast([]i64, err_code(NO_POS, cstr("E904 CANNOT_CREATE")))
-		buf_str(cast(Buf, e), cstr("cannot create "))
-		buf_str(cast(Buf, e), path)
+		buf_str(cast([]u8, e), cstr("cannot create "))
+		buf_str(cast([]u8, e), path)
 		fatal(cast([]i64, e))
 	}
-	let out = cast(Buf, malloc(24))
-	out.len = file_size
-	out.cap = file_size
-	out.data = img
-	write_all(fd, out)
+	let outh = cast(SliceHdr, malloc(24))
+	outh.len = file_size
+	outh.cap = file_size
+	outh.data = img
+	write_all(fd, cast([]u8, outh))
 	rt_sys_close(fd)
 }

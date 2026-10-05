@@ -1228,7 +1228,7 @@ fn rg_call(e i64) i64 {
 					buf_str(m, cstr("a call through a function value may store request memory into its mut argument "))
 					buf_int(m, i + 1)
 					buf_str(m, cstr(", which may be long-lived: call the function directly or pass request-owned memory"))
-					err_end(cast(Buf, m))
+					err_end(cast([]u8, m))
 					rg_report = 0
 				}
 				let a = cast(Node, args[i])
@@ -1286,7 +1286,7 @@ fn rg_call(e i64) i64 {
 					buf_str(m, cstr("', but this argument may be long-lived: keep() the stored values inside "))
 					buf_str(m, name)
 				}
-				err_end(cast(Buf, m))
+				err_end(cast([]u8, m))
 				rg_report = 0
 			}
 			rg_pass(cast([]i64, sum[10]), i, cast([]Node, args), cast([]i64, b), RG_EMB, pos)
@@ -1578,7 +1578,7 @@ fn wb_keeps(pos i64, via i64) {
 			buf_str(m, cstr(" keeps the body of a with block"))
 		}
 		buf_str(m, cstr(": a policy may only call body, or pass it to a function that only calls it (the block's variables live on the caller's frame)"))
-		err_end(cast(Buf, m))
+		err_end(cast([]u8, m))
 	}
 	wb_bad = 1
 }

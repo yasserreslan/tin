@@ -65,18 +65,18 @@ fn intrinsic_arity(name i64) i64 {
 fn err_code_type(pos i64, code i64, prefix i64, t i64, suffix i64) {
 	let e = err_code(pos, code)
 	buf_str(e, prefix)
-	type_name(cast(Buf, e), cast(Ty, t))
+	type_name(cast([]u8, e), cast(Ty, t))
 	buf_str(e, suffix)
-	err_end(cast(Buf, e))
+	err_end(cast([]u8, e))
 }
 
 fn err_code_types(pos i64, code i64, prefix i64, a i64, mid i64, b i64) {
 	let e = err_code(pos, code)
 	buf_str(e, prefix)
-	type_name(cast(Buf, e), cast(Ty, a))
+	type_name(cast([]u8, e), cast(Ty, a))
 	buf_str(e, mid)
-	type_name(cast(Buf, e), cast(Ty, b))
-	err_end(cast(Buf, e))
+	type_name(cast([]u8, e), cast(Ty, b))
+	err_end(cast([]u8, e))
 }
 
 fn str_cat3(a i64, b i64, c i64) i64 {
@@ -85,7 +85,7 @@ fn str_cat3(a i64, b i64, c i64) i64 {
 	buf_str(s, b)
 	buf_str(s, c)
 	buf_byte(s, 0)
-	return s.data
+	return slice_data(s)
 }
 
 // qual is the symbol name of a top-level name declared in package pkg.
@@ -182,7 +182,7 @@ fn declare_global(s Sym) {
 		buf_str(e, cstr("' redeclared (previous declaration at "))
 		buf_pos(e, prev.pos)
 		buf_byte(e, ')')
-		err_end(cast(Buf, e))
+		err_end(cast([]u8, e))
 		return
 	}
 	globals = append(globals, cast(Sym, s))
@@ -274,9 +274,9 @@ fn resolve_type(tx i64) i64 {
 		if k == TX_ARRAY && kind_of(cast(Ty, et)) == K_DYN {
 			let e = err_code(cast(Node, tx).pos, cstr("E203 NO_ZERO_VALUE"))
 			buf_str(e, cstr("an array of "))
-			type_name(cast(Buf, e), cast(Ty, et))
+			type_name(cast([]u8, e), cast(Ty, et))
 			buf_str(e, cstr(" has no zero element: use []dyn and append"))
-			err_end(cast(Buf, e))
+			err_end(cast([]u8, e))
 		}
 		return slice_of(et)
 	}
@@ -335,7 +335,7 @@ fn resolve_type(tx i64) i64 {
 					}
 					buf_str(e, cast(TypeExpr, cast(TypeExpr, tx).a).b)
 				}
-				err_end(cast(Buf, e))
+				err_end(cast([]u8, e))
 			}
 			return ty_int
 		}
@@ -419,19 +419,19 @@ fn bounded_value(e i64, from Ty, to Ty) i64 {
 			buf_str(m, cstr("this str is "))
 			buf_int(m, cast(StrLit, e).len)
 			buf_str(m, cstr(" bytes long, over the bound of "))
-			type_name(cast(Buf, m), to)
-			err_end(cast(Buf, m))
+			type_name(cast([]u8, m), to)
+			err_end(cast([]u8, m))
 		}
 		return 1
 	}
 	if assignable(from, cast(Ty, to.bound)) != 0 {
 		let m = err_code(cast(Node, e).pos, cstr("E251 UNCHECKED_BOUND"))
 		buf_str(m, cstr("cannot use "))
-		type_name(cast(Buf, m), from)
+		type_name(cast([]u8, m), from)
 		buf_str(m, cstr(" as "))
-		type_name(cast(Buf, m), to)
+		type_name(cast([]u8, m), to)
 		buf_str(m, cstr(": its length is unchecked (check it with bound(x), which fails with fault.LimitExceeded)"))
-		err_end(cast(Buf, m))
+		err_end(cast([]u8, m))
 		return 1
 	}
 	return 0
@@ -683,7 +683,7 @@ fn check() {
 			let e0 = err_code(NO_POS, cstr("E120 NO_MAIN"))
 			buf_str(e0, cstr("no entry function "))
 			buf_str(e0, entry_name)
-			err_end(cast(Buf, e0))
+			err_end(cast([]u8, e0))
 			return
 		}
 	} else {
@@ -692,17 +692,17 @@ fn check() {
 	if cast(i64, m) == 0 || m.kind != SYM_FUNC {
 		let e = err_code(NO_POS, cstr("E120 NO_MAIN"))
 		buf_str(e, cstr("no main function"))
-		err_end(cast(Buf, e))
+		err_end(cast([]u8, e))
 		return
 	}
 	if cast(Fn, m.fn_).extern_ != 0 {
 		let e2 = err_code(m.pos, cstr("E121 MAIN_SIGNATURE"))
 		buf_str(e2, cstr("main cannot be extern"))
-		err_end(cast(Buf, e2))
+		err_end(cast([]u8, e2))
 	} else if len(cast(Fn, m.fn_).params) != 0 {
 		let e3 = err_code(m.pos, cstr("E121 MAIN_SIGNATURE"))
 		buf_str(e3, cstr("main takes no parameters"))
-		err_end(cast(Buf, e3))
+		err_end(cast([]u8, e3))
 	}
 	make_start(cast(Fn, m.fn_))
 	mark_reach(cast(Fn, start_fn))
@@ -815,7 +815,7 @@ fn declare_fn(f Fn) {
 		buf_str(e, cstr("' has "))
 		buf_int(e, len(cast([]i64, ptypes)))
 		buf_str(e, cstr(" parameters, the limit is 8"))
-		err_end(cast(Buf, e))
+		err_end(cast([]u8, e))
 	}
 	if len(rtypes) > 8 {
 		err_code_at(f.pos, cstr("E907 TOO_MANY_PARAMS"), cstr("too many results"))
@@ -1397,7 +1397,7 @@ fn reach_expr(e i64) {
 			buf_str(b, cstr("' uses '"))
 			buf_str(b, s.name)
 			buf_str(b, cstr("' before it is initialized (globals are initialized in declaration order)"))
-			err_end(cast(Buf, b))
+			err_end(cast([]u8, b))
 		}
 	} else if k == EX_UNARY {
 		reach_expr(cast(Unary, e).x)
@@ -2188,7 +2188,7 @@ fn declare_scoped(s Sym) {
 				buf_str(e, cstr("' redeclared in this scope (previous declaration at "))
 				buf_pos(e, prev.pos)
 				buf_byte(e, ')')
-				err_end(cast(Buf, e))
+				err_end(cast([]u8, e))
 				break
 			}
 			i = i - 1
@@ -3008,7 +3008,7 @@ fn life_name(prefix i64, i i64) i64 {
 	buf_str(nb, prefix)
 	buf_int(nb, i)
 	buf_byte(nb, 0)
-	return nb.data
+	return slice_data(nb)
 }
 
 // life_event is the kind of an event expression (app.start ...), or 0 after an error.
@@ -3538,7 +3538,7 @@ fn sel_name(pos i64, kind i64, i i64) i64 {
 	buf_byte(nb, '_')
 	buf_int(nb, i)
 	buf_byte(nb, 0)
-	return nb.data
+	return slice_data(nb)
 }
 
 shared mut sel_seq i64
@@ -3558,7 +3558,7 @@ fn sel_site(pos i64) i64 {
 	buf_str(b, f + base)
 	buf_byte(b, ':')
 	buf_int(b, (pos >> 16) & 0xffffffff)
-	return str_node(pos, cast(Buf, b))
+	return str_node(pos, cast([]u8, b))
 }
 
 // sel_gate is arm i's replay gate (#243): $selr < 0 (not replaying) || $selr == i.
@@ -3877,9 +3877,9 @@ fn sb_forbid(pos i64, t i64, what i64) {
 	buf_str(e, what)
 	buf_str(e, sb_noun(cast(Ty, t)))
 	buf_str(e, cstr(" ("))
-	type_name(cast(Buf, e), cast(Ty, t))
+	type_name(cast([]u8, e), cast(Ty, t))
 	buf_str(e, cstr("): it must not outlive its scope block, so it lives only in local variables and parameters"))
-	err_end(cast(Buf, e))
+	err_end(cast([]u8, e))
 }
 
 // sb_targs rejects task handles and scopes as type arguments (a generic could keep them).
@@ -4117,7 +4117,7 @@ fn sb_store(pos i64, s Sym, d i64) {
 	buf_str(e, cstr(" cannot outlive its scope: '"))
 	buf_str(e, s.name)
 	buf_str(e, cstr("' is declared outside the scope this value belongs to, which ends first; declare it inside that scope"))
-	err_end(cast(Buf, e))
+	err_end(cast([]u8, e))
 }
 
 // sb_assign checks target = value (before either is checked).
@@ -4192,7 +4192,7 @@ fn sb_call(e Call) {
 				buf_str(m, cstr("a task handle cannot outlive its scope: this argument belongs to a scope that ends before '"))
 				buf_str(m, h.name)
 				buf_str(m, cstr("', which the call may keep it in"))
-				err_end(cast(Buf, m))
+				err_end(cast([]u8, m))
 			}
 			j = j + 1
 		}
@@ -4245,7 +4245,7 @@ fn sb_captures(e i64, f Fn) {
 				buf_str(m, sb_noun(cast(Ty, os.type_)))
 				buf_str(m, cstr(", which must not outlive its scope block: use it in a child spawned on the scope, or in a closure only passed to a call that runs it"))
 			}
-			err_end(cast(Buf, m))
+			err_end(cast([]u8, m))
 		}
 		i = i + 1
 	}
@@ -4390,8 +4390,8 @@ fn defer_thunk(pos i64, call Call) i64 {
 	buf_str(nb, cstr("defer$"))
 	buf_int(nb, lifted_count)
 	buf_byte(nb, 0)
-	f.qname = nb.data
-	f.name = nb.data
+	f.qname = slice_data(nb)
+	f.name = slice_data(nb)
 	f.lifted = 2
 	f.file = ck_fn.file
 	f.params = append(f.params, cstr("r"))
@@ -4641,7 +4641,7 @@ fn check_target(t i64) i64 {
 			let u = err_code(cast(Node, t).pos, cstr("E103 UNDEFINED"))
 			buf_str(u, cstr("undefined: "))
 			buf_str(u, cast(IdentExpr, t).name)
-			err_end(cast(Buf, u))
+			err_end(cast([]u8, u))
 			return ty_int
 		}
 		if s.kind == SYM_CONST {
@@ -4659,7 +4659,7 @@ fn check_target(t i64) i64 {
 				buf_str(u, cstr("cannot assign to mut parameter '"))
 				buf_str(u, cast(IdentExpr, t).name)
 				buf_str(u, cstr("': it would rebind only this function's copy, and the caller would not see it; modify its fields or elements, or return the new value"))
-				err_end(cast(Buf, u))
+				err_end(cast([]u8, u))
 			}
 		}
 		if s.captured != 0 {
@@ -5176,7 +5176,7 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 			buf_str(nb, cstr("$catch"))
 			buf_int(nb, catch_seq)
 			buf_byte(nb, 0)
-			temps[0].name = nb.data
+			temps[0].name = slice_data(nb)
 		}
 		if (mode == 3 || ((mode == 4 || mode == 1 || mode == 2) && nvals > 1)) && ends_in_jump(cast([]Node, cast(Block, cast(CatchExpr, handler).body).stmts)) == 0 {
 			err_code_at(cast(Node, handler).pos, cstr("E415 CATCH_VALUE"), cstr("this catch block must leave (return, break, continue or fail): there is no single value to give"))
@@ -5785,10 +5785,10 @@ fn lower_enum_switch(s i64, t Ty) {
 				let vi = enum_variant(t, pat[0])
 				if vi < 0 {
 					let u = err_code(e.pos, cstr("E290 MATCH_PATTERN"))
-					type_name(cast(Buf, u), t)
+					type_name(cast([]u8, u), t)
 					buf_str(u, cstr(" has no variant "))
 					buf_str(u, pat[0])
-					err_end(cast(Buf, u))
+					err_end(cast([]u8, u))
 					pop_scope()
 					return
 				}
@@ -5808,7 +5808,7 @@ fn lower_enum_switch(s i64, t Ty) {
 						buf_int(u, v[2])
 						buf_str(u, cstr(" values, the case binds "))
 						buf_int(u, len(names))
-						err_end(cast(Buf, u))
+						err_end(cast([]u8, u))
 					} else {
 						mut k = 0
 						for k < len(names) {
@@ -5871,12 +5871,12 @@ fn lower_enum_switch(s i64, t Ty) {
 		if n > 0 {
 			let u = err_code(pos, cstr("E291 MATCH_EXHAUSTIVE"))
 			buf_str(u, cstr("switch on "))
-			type_name(cast(Buf, u), t)
+			type_name(cast([]u8, u), t)
 			buf_str(u, cstr(" does not handle "))
 			buf_byte(missing, 0)
-			buf_str(u, missing.data)
+			buf_str(u, slice_data(missing))
 			buf_str(u, cstr(" (add the cases, or a default)"))
-			err_end(cast(Buf, u))
+			err_end(cast([]u8, u))
 		}
 	} else if cast(i64, last) != 0 {
 		last.else_ = deflt
@@ -5950,7 +5950,7 @@ fn mt_name(prefix i64) i64 {
 	buf_str(nb, prefix)
 	buf_int(nb, mt_seq)
 	buf_byte(nb, 0)
-	return nb.data
+	return slice_data(nb)
 }
 
 fn mt_record(vs i64, mode i64, hint i64) i64 {
@@ -6621,15 +6621,15 @@ fn mt_pattern(p []i64, path []i64, t i64, binds []i64, top i64) i64 {
 			buf_str(u, cstr("' is a variable, and a name in a pattern binds a new one: compare with a guard (v if v == "))
 			buf_str(u, name)
 			buf_str(u, cstr(")"))
-			err_end(cast(Buf, u))
+			err_end(cast([]u8, u))
 			return 0
 		}
 		if mt_is_enum(cast(Ty, t)) != 0 && i64(load8(name)) >= 'A' && i64(load8(name)) <= 'Z' {
 			let u = err_code(pos, cstr("E290 MATCH_PATTERN"))
-			type_name(cast(Buf, u), cast(Ty, t))
+			type_name(cast([]u8, u), cast(Ty, t))
 			buf_str(u, cstr(" has no variant "))
 			buf_str(u, name)
-			err_end(cast(Buf, u))
+			err_end(cast([]u8, u))
 			return 0
 		}
 	}
@@ -6645,10 +6645,10 @@ fn mt_variant_test(pos i64, path []i64, t Ty, name i64, kids []i64, binds []i64)
 	let vi = enum_variant(t, name)
 	if vi < 0 {
 		let u = err_code(pos, cstr("E290 MATCH_PATTERN"))
-		type_name(cast(Buf, u), t)
+		type_name(cast([]u8, u), t)
 		buf_str(u, cstr(" has no variant "))
 		buf_str(u, name)
-		err_end(cast(Buf, u))
+		err_end(cast([]u8, u))
 		return 0
 	}
 	let v = cast([]i64, t.enum_[vi])
@@ -6663,7 +6663,7 @@ fn mt_variant_test(pos i64, path []i64, t Ty, name i64, kids []i64, binds []i64)
 			buf_int(u, v[2])
 			buf_str(u, cstr(" values, the pattern has "))
 			buf_int(u, len(kids))
-			err_end(cast(Buf, u))
+			err_end(cast([]u8, u))
 			return cond
 		}
 		mut j = 0
@@ -6883,11 +6883,11 @@ fn lower_match(m i64, mode i64, rec []Sym) i64 {
 		buf_byte(missing, 0)
 		let u = err_code(pos, cstr("E291 MATCH_EXHAUSTIVE"))
 		buf_str(u, cstr("match on "))
-		type_name(cast(Buf, u), st)
+		type_name(cast([]u8, u), st)
 		buf_str(u, cstr(" does not handle "))
-		buf_str(u, missing.data)
+		buf_str(u, slice_data(missing))
 		buf_str(u, cstr(" (add the arms, or _)"))
-		err_end(cast(Buf, u))
+		err_end(cast([]u8, u))
 	} else if exhaustive == 0 && (mode == MATCH_VALUE || mode == MATCH_RETURN || mode == MATCH_EXPR) {
 		err_code_at(pos, cstr("E291 MATCH_EXHAUSTIVE"), cstr("a match that gives a value must handle every value: add a _ arm"))
 	}
@@ -7437,8 +7437,8 @@ fn keep_fn(t Ty) Fn {
 	buf_str(nb, cstr("keep$"))
 	buf_int(nb, lifted_count)
 	buf_byte(nb, 0)
-	f.qname = nb.data
-	f.name = nb.data
+	f.qname = slice_data(nb)
+	f.name = slice_data(nb)
 	f.lifted = 2
 	f.params = append(f.params, cstr("x"))
 	f.ptypes = append(f.ptypes, cast(i64, t))
@@ -7915,8 +7915,8 @@ fn arenacopy_fn(t Ty) Fn {
 	buf_str(nb, cstr("arenacopy$"))
 	buf_int(nb, lifted_count)
 	buf_byte(nb, 0)
-	f.qname = nb.data
-	f.name = nb.data
+	f.qname = slice_data(nb)
+	f.name = slice_data(nb)
 	f.lifted = 2
 	f.params = append(f.params, cstr("x"))
 	f.ptypes = append(f.ptypes, cast(i64, t))

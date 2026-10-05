@@ -654,7 +654,7 @@ fn p_end() {
 	p_expect(cstr(";"))
 }
 
-fn buf_describe(b Buf, t Token) {
+fn buf_describe(b []u8, t Token) {
 	let k = t.kind
 	if k == TK_EOF {
 		buf_str(b, cstr("end of file"))
@@ -678,25 +678,25 @@ fn buf_describe(b Buf, t Token) {
 // p_fail_code and p_fail_found_code stop with a coded error (docs/ERRORS.md).
 fn p_fail_code(pos i64, code i64, msg i64) {
 	let e = cast([]i64, err_code(pos, code))
-	buf_str(cast(Buf, e), msg)
+	buf_str(cast([]u8, e), msg)
 	fatal(cast([]i64, e))
 }
 
 fn p_fail_found_code(pos i64, code i64, msg i64, t i64) {
 	let e = cast([]i64, err_code(pos, code))
-	buf_str(cast(Buf, e), msg)
-	buf_str(cast(Buf, e), cstr(", found "))
-	buf_describe(cast(Buf, e), cast(Token, t))
+	buf_str(cast([]u8, e), msg)
+	buf_str(cast([]u8, e), cstr(", found "))
+	buf_describe(cast([]u8, e), cast(Token, t))
 	fatal(cast([]i64, e))
 }
 
 fn p_expect(text i64) i64 {
 	if p_is(text) == 0 {
 		let e = cast([]i64, err_code(p_peek().pos, cstr("E020 UNEXPECTED")))
-		buf_str(cast(Buf, e), cstr("expected '"))
-		buf_str(cast(Buf, e), text)
-		buf_str(cast(Buf, e), cstr("', found "))
-		buf_describe(cast(Buf, e), p_peek())
+		buf_str(cast([]u8, e), cstr("expected '"))
+		buf_str(cast([]u8, e), text)
+		buf_str(cast([]u8, e), cstr("', found "))
+		buf_describe(cast([]u8, e), p_peek())
 		fatal(cast([]i64, e))
 	}
 	return p_next()
@@ -1022,13 +1022,13 @@ fn enum_field_name(variant i64, index i64) i64 {
 			value = value / 10
 		}
 	}
-	mut i = digits.len - 1
+	mut i = len(digits) - 1
 	for i >= 0 {
-		buf_byte(out, i64(load8(digits.data + i)))
+		buf_byte(out, i64(load8(slice_data(digits) + i)))
 		i = i - 1
 	}
 	buf_byte(out, 0)
-	return out.data
+	return slice_data(out)
 }
 
 fn parse_struct_body(pos i64) i64 {
@@ -1630,11 +1630,11 @@ fn has_brace(p i64, n i64) i64 {
 	return 0
 }
 
-fn str_node(pos i64, b Buf) i64 {
+fn str_node(pos i64, b []u8) i64 {
 	let s = cast(StrLit, node_new(EX_STR, pos))
-	s.len = b.len
+	s.len = len(b)
 	buf_byte(b, 0)
-	s.ptr = b.data
+	s.ptr = slice_data(b)
 	return cast(i64, s)
 }
 
@@ -1687,9 +1687,9 @@ fn parse_interp(t Token, pos i64) i64 {
 					k = k + 1
 				}
 				buf_byte(sb, 0)
-				spec = sb.data
+				spec = slice_data(sb)
 			}
-			parts = append(parts, str_node(pos, cast(Buf, cur)))
+			parts = append(parts, str_node(pos, cast([]u8, cur)))
 			cur = buf_new()
 			args = append(args, interp_expr(p + i + 1, ee - i - 1, pos))
 			specs = append(specs, spec)
@@ -1699,7 +1699,7 @@ fn parse_interp(t Token, pos i64) i64 {
 			i = i + 1
 		}
 	}
-	parts = append(parts, str_node(pos, cast(Buf, cur)))
+	parts = append(parts, str_node(pos, cast([]u8, cur)))
 	if len(cast([]i64, args)) == 0 {
 		return parts[0]
 	}
@@ -2959,12 +2959,12 @@ fn print_edition1(file i64, source i64, toks []Token) i64 {
 		}
 		fx_cur_ind = fx_ind[i]
 		if fx_triv[i] != 0 {
-			fx_put(cast(Buf, out), fx_triv[i], strlen(fx_triv[i]))
+			fx_put(cast([]u8, out), fx_triv[i], strlen(fx_triv[i]))
 			if fx_lead[i] != 0 {
 				buf_str(out, fx_lead[i])
 			}
 		} else {
-			fx_copy_trivia(cast(Buf, out), source, cursor, t.start, fx_lead[i])
+			fx_copy_trivia(cast([]u8, out), source, cursor, t.start, fx_lead[i])
 		}
 		fx_cur_ind = 0
 		if cast([]i64, prefixes)[i] != 0 {
@@ -3025,7 +3025,7 @@ fn print_edition1(file i64, source i64, toks []Token) i64 {
 		source_len = toks[len(toks) - 1].end
 	}
 	if cursor < source_len {
-		fx_copy_comments(cast(Buf, out), source, cursor, source_len)
+		fx_copy_comments(cast([]u8, out), source, cursor, source_len)
 	}
 	return cast(i64, out)
 }
@@ -3142,7 +3142,7 @@ fn loop_post_text(source i64, toks []Token, post_start i64, post_end i64, post_o
 		let last = toks[post_end].end
 		buf_bytes(b, source + first, last - first)
 	}
-	return str_slice(b.data, b.len)
+	return str_slice(slice_data(b), len(b))
 }
 
 // rewrite_for_fallback moves a C loop's init out and post into its body when it is not a range.
@@ -3254,7 +3254,7 @@ fn rewrite_for_fallback(source i64, toks []Token, for_at i64, replacements []i64
 			buf_byte(b, '\n')
 			buf_str(b, indent)
 			buf_str(b, extra)
-			prefixes[body_close] = str_slice(b.data, b.len)
+			prefixes[body_close] = str_slice(slice_data(b), len(b))
 			i = body + 1
 			for i < body_close {
 				let c = toks[i]
@@ -3268,7 +3268,7 @@ fn rewrite_for_fallback(source i64, toks []Token, for_at i64, replacements []i64
 						buf_byte(before, '\n')
 						buf_str(before, ind)
 						buf_str(before, extra)
-						prefixes[i] = str_slice(before.data, before.len)
+						prefixes[i] = str_slice(slice_data(before), len(before))
 					}
 				}
 				i = i + 1
@@ -3943,7 +3943,7 @@ fn rewrite_local_const(source i64, toks []Token, at i64, top i64, replacements [
 		let up = buf_new()
 		buf_byte(up, i64(load8(nm)) - 32 * i64((i64(load8(nm)) >= 'a' && i64(load8(nm)) <= 'z')))
 		buf_str(up, nm + 1)
-		new_ = str_cat3(fx_fn_name, str_slice(up.data, up.len), cstr(""))
+		new_ = str_cat3(fx_fn_name, str_slice(slice_data(up), len(up)), cstr(""))
 	}
 	if streq(new_, nm) == 0 {
 		fx_rename_uses(toks, last + 1, nm, new_)
@@ -4000,7 +4000,7 @@ fn fx_value_text(source i64, toks []Token, a i64, b i64) i64 {
 		}
 		i = i + 1
 	}
-	return str_slice(out.data, out.len)
+	return str_slice(slice_data(out), len(out))
 }
 
 // fx_take_line_comment returns the // comment after token last on its line, or 0, and leaves
@@ -4104,9 +4104,9 @@ fn fx_sibling_names(toks []Token) i64 {
 		}
 		let name = host_dirent_name(ent)
 		if ends_with(name, cstr(".tin")) != 0 && i64(load8(name)) != '.' && streq(name, self) == 0 {
-			let src = cast(Buf, cast([]i64, try_read_file(cat_path(cat_path(dir, cstr("/")), name))))
+			let src = cast([]u8, cast([]i64, try_read_file(cat_path(cat_path(dir, cstr("/")), name))))
 			if cast(i64, src) != 0 {
-				let stoks = cast([]i64, lex(0, src.data, src.len, source_edition(src.data, src.len)))
+				let stoks = cast([]i64, lex(0, slice_data(src), len(src), source_edition(slice_data(src), len(src))))
 				fx_collect_names(cast([]Token, stoks), cast([]i64, names))
 			}
 		}
@@ -4247,12 +4247,12 @@ fn fx_binds_tighter(toks []i64, i i64) i64 {
 fn fx_int_text(t Token) i64 {
 	let b = buf_new()
 	buf_int(b, t.val)
-	return str_slice(b.data, b.len)
+	return str_slice(slice_data(b), len(b))
 }
 
 // fx_copy_trivia copies the source between tokens, turning /* block comments */ into
 // line comments and putting lead (if any) after the trivia's last blank line.
-fn fx_copy_trivia(out Buf, source i64, a i64, b i64, lead i64) {
+fn fx_copy_trivia(out []u8, source i64, a i64, b i64, lead i64) {
 	mut at = a
 	if lead != 0 {
 		mut k = b - 1
@@ -4279,7 +4279,7 @@ fn fx_copy_trivia(out Buf, source i64, a i64, b i64, lead i64) {
 	fx_copy_comments(out, source, at, b)
 }
 
-fn fx_copy_comments(out Buf, source i64, a i64, b i64) {
+fn fx_copy_comments(out []u8, source i64, a i64, b i64) {
 	mut i = a
 	for i < b {
 		let c = i64(load8(source + i))
@@ -4307,7 +4307,7 @@ fn fx_copy_comments(out Buf, source i64, a i64, b i64) {
 				buf_byte(out, d)
 				if d == '\n' {
 					fx_put_tabs(out)
-					buf_bytes(out, ind.data, ind.len)
+					buf_bytes(out, slice_data(ind), len(ind))
 					// skip the comment line's own indentation and a leading '*'
 					i = i + 1
 					for i < b && (i64(load8(source + i)) == ' ' || i64(load8(source + i)) == '\t') {
@@ -4324,8 +4324,8 @@ fn fx_copy_comments(out Buf, source i64, a i64, b i64) {
 				}
 				i = i + 1
 			}
-			for out.len > 0 && (i64(load8(out.data + out.len - 1)) == ' ' || i64(load8(out.data + out.len - 1)) == '\t') {
-				out.len = out.len - 1
+			for len(out) > 0 && (i64(load8(slice_data(out) + len(out) - 1)) == ' ' || i64(load8(slice_data(out) + len(out) - 1)) == '\t') {
+				slice_truncate(out, len(out) - 1)
 			}
 			i = i + 2
 			// code after the comment on the same line goes to a line of its own
@@ -4336,7 +4336,7 @@ fn fx_copy_comments(out Buf, source i64, a i64, b i64) {
 			if j >= b || i64(load8(source + j)) != '\n' {
 				buf_byte(out, '\n')
 				fx_put_tabs(out)
-				buf_bytes(out, ind.data, ind.len)
+				buf_bytes(out, slice_data(ind), len(ind))
 				i = j
 			}
 		} else {
@@ -4503,7 +4503,7 @@ fn rewrite_const_group(source i64, toks []Token, at i64) i64 {
 				}
 			}
 		}
-		fx_copy_dedent(cast(Buf, out), source, cursor, toks[i].start)
+		fx_copy_dedent(cast([]u8, out), source, cursor, toks[i].start)
 		let name = toks[i]
 		buf_str(out, cstr("const "))
 		buf_str(out, fx_renamed(name.text))
@@ -4538,17 +4538,17 @@ fn rewrite_const_group(source i64, toks []Token, at i64) i64 {
 		index = index + 1
 		i = fx_next(toks, end)
 	}
-	fx_copy_dedent(cast(Buf, out), source, cursor, toks[close].start)
-	for out.len > 0 && (i64(load8(out.data + out.len - 1)) == '\n' || i64(load8(out.data + out.len - 1)) == ' ' || i64(load8(out.data + out.len - 1)) == '\t') {
-		out.len = out.len - 1
+	fx_copy_dedent(cast([]u8, out), source, cursor, toks[close].start)
+	for len(out) > 0 && (i64(load8(slice_data(out) + len(out) - 1)) == '\n' || i64(load8(slice_data(out) + len(out) - 1)) == ' ' || i64(load8(slice_data(out) + len(out) - 1)) == '\t') {
+		slice_truncate(out, len(out) - 1)
 	}
-	fx_rep[at] = str_slice(out.data, out.len)
+	fx_rep[at] = str_slice(slice_data(out), len(out))
 	fx_span[at] = close + 1
 	return 1
 }
 
 // fx_copy_dedent copies trivia with one tab less at each line start.
-fn fx_copy_dedent(out Buf, source i64, a i64, b i64) {
+fn fx_copy_dedent(out []u8, source i64, a i64, b i64) {
 	mut i = a
 	for i < b {
 		let c = i64(load8(source + i))
@@ -4644,7 +4644,7 @@ fn fx_assigns(toks []Token, a i64, b i64, name i64) i64 {
 
 // fx_put writes n bytes of trivia, adding fx_cur_ind tabs after each newline that does not
 // end an empty line.
-fn fx_put(out Buf, p i64, n i64) {
+fn fx_put(out []u8, p i64, n i64) {
 	mut i = 0
 	for i < n {
 		let c = i64(load8(p + i))
@@ -4677,7 +4677,7 @@ fn source_has_newline(source i64, a_in i64, b i64) i64 {
 	return 0
 }
 
-fn fx_put_tabs(out Buf) {
+fn fx_put_tabs(out []u8) {
 	mut k = 0
 	for k < fx_cur_ind {
 		buf_byte(out, '\t')

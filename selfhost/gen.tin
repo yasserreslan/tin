@@ -3736,7 +3736,7 @@ fn gen_fn(f Fn) {
 		buf_str(tb, cstr("gen "))
 		buf_str(tb, f.qname)
 		buf_byte(tb, '\n')
-		write_all(2, cast(Buf, cast([]i64, tb)))
+		write_all(2, cast([]u8, cast([]i64, tb)))
 	}
 	inline_appends(f)
 	licm_fn(f)
@@ -4096,7 +4096,7 @@ fn dyn_layout() {
 			buf_int(b, i)
 			buf_str(b, cstr("_table"))
 			buf_byte(b, 0)
-			s.words = append_dyn_slot(b.data)
+			s.words = append_dyn_slot(slice_data(b))
 		}
 		i = i + 1
 	}
@@ -4108,7 +4108,7 @@ fn dyn_layout() {
 		buf_int(b, i)
 		buf_byte(b, 0)
 		rec[4] = len(prog_vars)
-		append_dyn_slot(b.data)
+		append_dyn_slot(slice_data(b))
 		let fs = cast([]i64, rec[3])
 		mut j = 0
 		for j < len(fs) {
@@ -4118,7 +4118,7 @@ fn dyn_layout() {
 			buf_byte(b, '_')
 			buf_int(b, j + 1)
 			buf_byte(b, 0)
-			append_dyn_slot(b.data)
+			append_dyn_slot(slice_data(b))
 			j = j + 1
 		}
 		i = i + 1
@@ -4161,7 +4161,7 @@ fn print_asm() i64 {
 	buf_str(b, cstr("\t.section\t__TEXT,__text,regular,pure_instructions\n"))
 	mut i = 0
 	for i < len(code) {
-		print_ins(cast(Buf, b), slice_data(code) + 8 * i)
+		print_ins(cast([]u8, b), slice_data(code) + 8 * i)
 		i = i + 5
 	}
 	if len(prog_vars) > 0 || len(prog_fns) > 0 {
@@ -4194,7 +4194,7 @@ fn print_asm() i64 {
 			buf_str(b, cstr("l_.str."))
 			buf_int(b, i)
 			buf_str(b, cstr(":\n\t.asciz \""))
-			asm_escape(cast(Buf, b), g_str_ptrs[i], g_str_lens[i])
+			asm_escape(cast([]u8, b), g_str_ptrs[i], g_str_lens[i])
 			buf_str(b, cstr("\"\n"))
 			i = i + 1
 		}
@@ -4208,7 +4208,7 @@ fn print_asm() i64 {
 			buf_str(b, cstr(":\n\t.quad "))
 			buf_int(b, g_tstr_lens[i])
 			buf_str(b, cstr("\n\t.asciz \""))
-			asm_escape(cast(Buf, b), g_tstr_ptrs[i], g_tstr_lens[i])
+			asm_escape(cast([]u8, b), g_tstr_ptrs[i], g_tstr_lens[i])
 			buf_str(b, cstr("\"\n"))
 			i = i + 1
 		}
@@ -4222,7 +4222,7 @@ fn var_label(v Decl) i64 {
 }
 
 // asm_escape writes bytes the assembler's string syntax can't hold as octal escapes.
-fn asm_escape(b Buf, s i64, n i64) {
+fn asm_escape(b []u8, s i64, n i64) {
 	mut i = 0
 	for i < n {
 		let c = i64(load8(s + i))

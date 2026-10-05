@@ -420,7 +420,7 @@ fn assignable(from Ty, to Ty) i64 {
 	return 0
 }
 
-fn type_name(b Buf, t Ty) {
+fn type_name(b []u8, t Ty) {
 	if cast(i64, t) == 0 {
 		buf_str(b, cstr("int"))
 		return
@@ -618,11 +618,11 @@ fn bounded_of(t_in i64, max_ i64) i64 {
 	b.bound = cast(i64, t)
 	b.max = max_
 	let nb = buf_new()
-	type_name(cast(Buf, nb), t)
+	type_name(cast([]u8, nb), t)
 	buf_str(nb, cstr(" max "))
 	buf_int(nb, max_)
 	buf_byte(nb, 0)
-	b.name = nb.data
+	b.name = slice_data(nb)
 	let r = []i64{}
 	r = append(r, cast(i64, t))
 	r = append(r, max_)

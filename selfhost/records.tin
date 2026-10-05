@@ -561,11 +561,6 @@ type WrapExpr struct {
 
 shape Any {}
 
-type Buf struct {
-	len i64
-	cap i64
-	data i64
-}
 
 type ConstStmt struct {
 	w0 i64

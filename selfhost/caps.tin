@@ -45,7 +45,7 @@ fn cap_bit(name i64) i64 {
 }
 
 // cap_list appends the capabilities in mask in their fixed order, separated by sep.
-fn cap_list(b Buf, mask i64, sep i64) {
+fn cap_list(b []u8, mask i64, sep i64) {
 	mut bit = 1
 	mut first = 1
 	for bit <= CAP_UNSAFE {
@@ -78,7 +78,7 @@ fn cap_word(line i64, i_in i64, out i64) {
 		i = i + 1
 	}
 	buf_byte(w, 0)
-	out[0] = w.data
+	out[0] = slice_data(w)
 	out[1] = i
 }
 
@@ -102,9 +102,9 @@ fn manifest_error(path i64, line_no i64, msg i64, word i64) {
 }
 
 // manifest_caps reads a tin.mod and returns the capabilities its caps lines declare.
-fn manifest_caps(src Buf, path i64) i64 {
-	let data = src.data
-	let n = src.len
+fn manifest_caps(src []u8, path i64) i64 {
+	let data = slice_data(src)
+	let n = len(src)
 	mut caps = 0
 	mut line_no = 0
 	let out = calloc(2, 8)
@@ -122,7 +122,7 @@ fn manifest_caps(src Buf, path i64) i64 {
 			j = j + 1
 		}
 		buf_byte(lb, 0)
-		let line = lb.data
+		let line = slice_data(lb)
 		cap_word(line, 0, out)
 		let w = out[0]
 		if w != 0 && starts_with(w, cstr("//")) == 0 {
@@ -152,8 +152,8 @@ fn manifest_caps(src Buf, path i64) i64 {
 
 // lock_caps_line returns tin.lock's "caps PATH ..." line for an import path as a C string, or 0.
 fn lock_caps_line(ipath i64) i64 {
-	let data = project_lock.data
-	let n = project_lock.len
+	let data = slice_data(project_lock)
+	let n = len(project_lock)
 	let m = strlen(ipath)
 	mut i = 0
 	for i < n {
@@ -169,7 +169,7 @@ fn lock_caps_line(ipath i64) i64 {
 				j = j + 1
 			}
 			buf_byte(b, 0)
-			return b.data
+			return slice_data(b)
 		}
 		i = end + 1
 	}
@@ -199,7 +199,7 @@ fn vendored_package(ipath i64, found []i64) i64 {
 		rec.manifest = manifest
 		// The manifest is vendored source too: the lock pins it like the code.
 		lock_has(manifest)
-		rec.caps = manifest_caps(cast(Buf, src), manifest)
+		rec.caps = manifest_caps(cast([]u8, src), manifest)
 	}
 	// The lock shows a reviewer each package's capabilities; it must say what the manifest says.
 	if cast(i64, project_lock) != 0 {
@@ -208,25 +208,25 @@ fn vendored_package(ipath i64, found []i64) i64 {
 		buf_str(want, ipath)
 		if rec.caps != 0 {
 			buf_byte(want, ' ')
-			cap_list(cast(Buf, want), rec.caps, cstr(" "))
+			cap_list(cast([]u8, want), rec.caps, cstr(" "))
 		}
 		buf_byte(want, 0)
 		let got = lock_caps_line(ipath)
-		if (got != 0 || cast(i64, src) != 0) && !(got != 0 && streq(got, want.data) != 0) {
+		if (got != 0 || cast(i64, src) != 0) && !(got != 0 && streq(got, slice_data(want)) != 0) {
 			let e = cast([]i64, err_code(NO_POS, cstr("E115 LOCK_CAPS")))
-			buf_str(cast(Buf, e), cstr("tin.lock "))
+			buf_str(cast([]u8, e), cstr("tin.lock "))
 			if got != 0 {
-				buf_str(cast(Buf, e), cstr("says \""))
-				buf_str(cast(Buf, e), got)
-				buf_str(cast(Buf, e), cstr("\""))
+				buf_str(cast([]u8, e), cstr("says \""))
+				buf_str(cast([]u8, e), got)
+				buf_str(cast([]u8, e), cstr("\""))
 			} else {
-				buf_str(cast(Buf, e), cstr("has no caps line"))
+				buf_str(cast([]u8, e), cstr("has no caps line"))
 			}
-			buf_str(cast(Buf, e), cstr(" for "))
-			buf_str(cast(Buf, e), ipath)
-			buf_str(cast(Buf, e), cstr(", its manifest declares \""))
-			buf_str(cast(Buf, e), want.data)
-			buf_str(cast(Buf, e), cstr("\" (run tin vendor)"))
+			buf_str(cast([]u8, e), cstr(" for "))
+			buf_str(cast([]u8, e), ipath)
+			buf_str(cast([]u8, e), cstr(", its manifest declares \""))
+			buf_str(cast([]u8, e), slice_data(want))
+			buf_str(cast([]u8, e), cstr("\" (run tin vendor)"))
 			fatal(cast([]i64, e))
 		}
 	}
@@ -485,7 +485,7 @@ fn cap_graph() {
 }
 
 // cap_path appends how g reaches the capability bit: g -> ... -> the tagged entry point.
-fn cap_path(b Buf, g i64, bit i64) {
+fn cap_path(b []u8, g i64, bit i64) {
 	let path = []Fn{}
 	let found = cap_find(g, bit, cast([]i64, path))
 	if len(cast([]i64, path)) == 0 {
@@ -546,17 +546,17 @@ fn cap_violation(pos i64, p CapsRec, g Fn, need i64) {
 	buf_str(e, cstr(" needs capability "))
 	buf_str(e, cap_name(bit))
 	buf_str(e, cstr(" ("))
-	cap_path(cast(Buf, e), cast(i64, g), bit)
+	cap_path(cast([]u8, e), cast(i64, g), bit)
 	buf_str(e, cstr("), which package "))
 	buf_str(e, p.path)
 	buf_str(e, cstr(" does not declare in its tin.mod (caps: "))
 	if p.caps != 0 {
-		cap_list(cast(Buf, e), p.caps, cstr(" "))
+		cap_list(cast([]u8, e), p.caps, cstr(" "))
 	} else {
 		buf_str(e, cstr("none"))
 	}
 	buf_byte(e, ')')
-	err_end(cast(Buf, e))
+	err_end(cast([]u8, e))
 }
 
 // cap_check_edges reports each call from package p, at site positions, that leaves the
@@ -684,10 +684,10 @@ fn print_capabilities() {
 		buf_str(out, names[k])
 		if masks[k] != 0 {
 			buf_byte(out, ' ')
-			cap_list(cast(Buf, out), masks[k], cstr(" "))
+			cap_list(cast([]u8, out), masks[k], cstr(" "))
 		}
 		buf_byte(out, '\n')
 		i = i + 1
 	}
-	write_all(1, cast(Buf, cast([]i64, out)))
+	write_all(1, cast([]u8, cast([]i64, out)))
 }

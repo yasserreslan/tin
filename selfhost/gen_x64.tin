@@ -2912,7 +2912,7 @@ fn x_gen_fn(f Fn) {
 		buf_str(tb, cstr("gen "))
 		buf_str(tb, f.qname)
 		buf_byte(tb, '\n')
-		write_all(2, cast(Buf, cast([]i64, tb)))
+		write_all(2, cast([]u8, cast([]i64, tb)))
 	}
 	inline_appends(f)
 	licm_fn(f)

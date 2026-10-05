@@ -86,7 +86,7 @@ fn lx_advance() i64 {
 // lx_fail_code stops with a coded error (docs/ERRORS.md).
 fn lx_fail_code(pos i64, code i64, msg i64) {
 	let e = cast([]i64, err_code(pos, code))
-	buf_str(cast(Buf, e), msg)
+	buf_str(cast([]u8, e), msg)
 	fatal(cast([]i64, e))
 }
 
@@ -274,9 +274,9 @@ fn lex_next() i64 {
 		return token_new(TK_PUNCT, one, 0, pos)
 	}
 	let e = cast([]i64, err_code(pos, cstr("E010 UNEXPECTED_CHARACTER")))
-	buf_str(cast(Buf, e), cstr("unexpected character '"))
-	buf_byte(cast(Buf, e), c)
-	buf_byte(cast(Buf, e), '\'')
+	buf_str(cast([]u8, e), cstr("unexpected character '"))
+	buf_byte(cast([]u8, e), c)
+	buf_byte(cast([]u8, e), '\'')
 	fatal(cast([]i64, e))
 	return 0
 }
@@ -340,7 +340,7 @@ fn lex_raw_string(pos i64) i64 {
 	}
 	lx_advance()
 	buf_byte(b, 0)
-	let rt = cast(Token, token_new(TK_STRING, b.data, b.len - 1, pos))
+	let rt = cast(Token, token_new(TK_STRING, slice_data(b), len(b) - 1, pos))
 	rt.raw = 1
 	return cast(i64, rt)
 }
@@ -444,8 +444,8 @@ fn lex_number(pos i64) i64 {
 	let text = str_slice(s, n)
 	if ok == 0 {
 		let e = cast([]i64, err_code(pos, cstr("E011 INVALID_NUMBER")))
-		buf_str(cast(Buf, e), cstr("invalid number "))
-		buf_str(cast(Buf, e), text)
+		buf_str(cast([]u8, e), cstr("invalid number "))
+		buf_str(cast([]u8, e), text)
 		fatal(cast([]i64, e))
 	}
 	let t = cast(Token, token_new(TK_INT, text, val, pos))
@@ -506,7 +506,7 @@ fn lex_char(pos i64) i64 {
 }
 
 // buf_utf8 appends rune r encoded as UTF-8.
-fn buf_utf8(b Buf, r i64) {
+fn buf_utf8(b []u8, r i64) {
 	if r < 0x80 {
 		buf_byte(b, r)
 	} else if r < 0x800 {
@@ -536,7 +536,7 @@ fn lex_string(pos i64) i64 {
 		if c == '"' {
 			// The NUL makes T_TEXT usable as a C string; T_VAL keeps the real length.
 			buf_byte(b, 0)
-			let st = cast(Token, token_new(TK_STRING, b.data, b.len - 1, pos))
+			let st = cast(Token, token_new(TK_STRING, slice_data(b), len(b) - 1, pos))
 			st.dbl = doubled
 			return cast(i64, st)
 		}
@@ -548,7 +548,7 @@ fn lex_string(pos i64) i64 {
 				doubled = 1
 			}
 			if lx_esc_rune != 0 {
-				buf_utf8(cast(Buf, b), e)
+				buf_utf8(cast([]u8, b), e)
 			} else {
 				buf_byte(b, e)
 			}
@@ -627,8 +627,8 @@ fn lx_escape(pos i64) i64 {
 		return v & 255
 	}
 	let e = cast([]i64, err_code(pos, cstr("E015 ESCAPE")))
-	buf_str(cast(Buf, e), cstr("unknown escape sequence \\"))
-	buf_byte(cast(Buf, e), c)
+	buf_str(cast([]u8, e), cstr("unknown escape sequence \\"))
+	buf_byte(cast([]u8, e), c)
 	fatal(cast([]i64, e))
 	return 0
 }

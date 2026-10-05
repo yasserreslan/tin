@@ -95,7 +95,7 @@ fn write_elf_x64(path i64) {
 		let f = prog_fns[i]
 		if f.extern_ == 0 && f.reach != 0 {
 			own = append(own, cast(Fn, f))
-			name_off = append(name_off, dstr.len)
+			name_off = append(name_off, len(dstr))
 			buf_str(dstr, cstr("tin."))
 			buf_str(dstr, f.qname)
 			buf_byte(dstr, 0)
@@ -107,7 +107,7 @@ fn write_elf_x64(path i64) {
 	let ph_off = 64
 	let phnum = 5
 	let dynstr_off = ph_off + 56 * phnum
-	lk_btrace = align_up(dynstr_off + dstr.len, 8)
+	lk_btrace = align_up(dynstr_off + len(dstr), 8)
 	let ro_end = lk_btrace + 8 + 24 * len(cast([]i64, own))
 
 	// Text segment: _start, code (laid out and relaxed first), strings, constants.
@@ -180,7 +180,7 @@ fn write_elf_x64(path i64) {
 	p = el_phdr(p, 1, 6, data_addr, data_addr, data_end - data_addr, data_end - data_addr, EX64_ALIGN)
 	p = el_phdr(p, 0x6474e551, 6, 0, 0, 0, 0, 16)
 
-	memcpy(img + dynstr_off, dstr.data, dstr.len)
+	memcpy(img + dynstr_off, slice_data(dstr), len(dstr))
 	put64(img + lk_btrace, len(cast([]i64, own)))
 	i = 0
 	for i < len(cast([]i64, own)) {
@@ -202,7 +202,7 @@ fn write_elf_x64(path i64) {
 		let lay = []i64{}
 		lay = append(lay, data_end)
 		lay = append(lay, dynstr_off)
-		lay = append(lay, dstr.len)
+		lay = append(lay, len(dstr))
 		lay = append(lay, text_addr)
 		lay = append(lay, lk_stubs)
 		lay = append(lay, text_end)
@@ -216,10 +216,10 @@ fn write_elf_x64(path i64) {
 		pc = pc + x64_encode(slice_data(code) + 8 * i, pc, cast([]i64, out))
 		i = i + 5
 	}
-	if out.len != code_size {
+	if len(out) != code_size {
 		link_fail(cstr("x86-64 code size changed between layout and encoding"))
 	}
-	memcpy(img + code_addr, out.data, out.len)
+	memcpy(img + code_addr, slice_data(out), len(out))
 
 	i = 0
 	for i < len(g_str_ptrs) {
@@ -243,14 +243,14 @@ fn write_elf_x64(path i64) {
 	let fd = rt_sys_creat(path, 493)
 	if (fd & 0x80000000) != 0 {
 		let e = cast([]i64, err_code(NO_POS, cstr("E904 CANNOT_CREATE")))
-		buf_str(cast(Buf, e), cstr("cannot create "))
-		buf_str(cast(Buf, e), path)
+		buf_str(cast([]u8, e), cstr("cannot create "))
+		buf_str(cast([]u8, e), path)
 		fatal(cast([]i64, e))
 	}
-	let w = cast(Buf, malloc(24))
-	w.len = file_size
-	w.cap = file_size
-	w.data = img
-	write_all(fd, w)
+	let wh = cast(SliceHdr, malloc(24))
+	wh.len = file_size
+	wh.cap = file_size
+	wh.data = img
+	write_all(fd, cast([]u8, wh))
 	rt_sys_close(fd)
 }

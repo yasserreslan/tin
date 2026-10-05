@@ -23,8 +23,8 @@ shared mut mo i64 // the output file image
 
 fn link_fail(msg i64) {
 	let e = cast([]i64, err_code(NO_POS, cstr("E990 INTERNAL")))
-	buf_str(cast(Buf, e), cstr("link: "))
-	buf_str(cast(Buf, e), msg)
+	buf_str(cast([]u8, e), cstr("link: "))
+	buf_str(cast([]u8, e), msg)
 	fatal(cast([]i64, e))
 }
 
@@ -103,7 +103,7 @@ fn w_section(p i64, name i64, seg i64, addr i64, size i64, align i64, flags i64)
 	return p + 80
 }
 
-fn uleb(b Buf, v_in i64) {
+fn uleb(b []u8, v_in i64) {
 	mut v = v_in
 	for v >= 128 {
 		buf_byte(b, (v & 127) | 128)
@@ -199,12 +199,12 @@ fn write_executable(path i64) {
 		buf_byte(bind_, 0)
 		buf_byte(bind_, 0x51)
 		buf_byte(bind_, 0x72)
-		uleb(cast(Buf, bind_), 8 * i)
+		uleb(cast([]u8, bind_), 8 * i)
 		buf_byte(bind_, 0x90)
 		i = i + 1
 	}
 	buf_byte(bind_, 0)
-	let bind_size = align_up(bind_.len, 8)
+	let bind_size = align_up(len(bind_), 8)
 	let syms = buf_new()
 	let strs = buf_new()
 	buf_byte(strs, ' ')
@@ -215,14 +215,14 @@ fn write_executable(path i64) {
 		let f = prog_fns[i]
 		if f.extern_ == 0 && f.reach != 0 {
 			buf_reserve(syms, 16)
-			let s = syms.data + syms.len
-			put32(s, strs.len)
+			let s = slice_data(syms) + len(syms)
+			put32(s, len(strs))
 			store8(s + 4, 0x0e)
 			store8(s + 5, 1)
 			store8(s + 6, 0)
 			store8(s + 7, 0)
 			put64(s + 8, f.addr)
-			syms.len = syms.len + 16
+			slice_truncate(syms, len(syms) + 16)
 			buf_byte(strs, '_')
 			buf_str(strs, f.qname)
 			buf_byte(strs, 0)
@@ -231,8 +231,8 @@ fn write_executable(path i64) {
 		i = i + 1
 	}
 	let sym_off = link_off + bind_size
-	let str_off = sym_off + syms.len
-	let str_size = align_up(strs.len, 8)
+	let str_off = sym_off + len(syms)
+	let str_size = align_up(len(strs), 8)
 	let sig_off = align_up(str_off + str_size, 16)
 	mut ident = path
 	i = 0
@@ -370,9 +370,9 @@ fn write_executable(path i64) {
 		put64(mo + text_size + 8 * nimp + 8 * i, prog_vars[i].val)
 		i = i + 1
 	}
-	memcpy(mo + link_off, bind_.data, bind_.len)
-	memcpy(mo + sym_off, syms.data, syms.len)
-	memcpy(mo + str_off, strs.data, strs.len)
+	memcpy(mo + link_off, slice_data(bind_), len(bind_))
+	memcpy(mo + sym_off, slice_data(syms), len(syms))
+	memcpy(mo + str_off, slice_data(strs), len(strs))
 
 	// The UUID is a hash of the code, so identical builds are byte-identical.
 	let digest = malloc(32)
@@ -422,14 +422,14 @@ fn write_executable(path i64) {
 	let fd = rt_sys_creat(path, 493)
 	if (fd & 0x80000000) != 0 {
 		let e = cast([]i64, err_code(NO_POS, cstr("E904 CANNOT_CREATE")))
-		buf_str(cast(Buf, e), cstr("cannot create "))
-		buf_str(cast(Buf, e), path)
+		buf_str(cast([]u8, e), cstr("cannot create "))
+		buf_str(cast([]u8, e), path)
 		fatal(cast([]i64, e))
 	}
-	let img = cast(Buf, malloc(24))
-	img.len = file_size
-	img.cap = file_size
-	img.data = mo
-	write_all(fd, img)
+	let imgh = cast(SliceHdr, malloc(24))
+	imgh.len = file_size
+	imgh.cap = file_size
+	imgh.data = mo
+	write_all(fd, cast([]u8, imgh))
 	rt_sys_close(fd)
 }
