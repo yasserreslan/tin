@@ -231,37 +231,37 @@ fn resolve_type(tx i64) i64 {
 		return tx
 	}
 	let k = cast(Node, tx).kind
-	if k == TX_NAME && cast(i64, cast(TypeExpr, tx).args) != 0 {
+	if k == TX_NAME && cast(TypeExpr, tx).args != 0 {
 		return generic_type_ref(tx)
 	}
-	if k == TX_NAME && cast(i64, cast(TypeExpr, tx).a) == 0 {
-		let bound = tbind_lookup(cast(i64, cast(TypeExpr, tx).b))
+	if k == TX_NAME && cast(TypeExpr, tx).a == 0 {
+		let bound = tbind_lookup(cast(TypeExpr, tx).b)
 		if bound != 0 {
 			return bound
 		}
 	}
 	if k == TX_NAME {
 		mut t = 0
-		if cast(i64, cast(TypeExpr, tx).a) != 0 {
-			let pkg = import_pkg(cast(i64, cast(TypeExpr, tx).a))
+		if cast(TypeExpr, tx).a != 0 {
+			let pkg = import_pkg(cast(TypeExpr, tx).a)
 			if pkg == 0 {
-				err_code_quoted(cast(Node, tx).pos, cstr("E103 UNDEFINED"), cstr("undefined package "), cast(i64, cast(TypeExpr, tx).a), cstr(""))
+				err_code_quoted(cast(Node, tx).pos, cstr("E103 UNDEFINED"), cstr("undefined package "), cast(TypeExpr, tx).a, cstr(""))
 				return ty_int
 			}
-			t = find_type(str_cat3(pkg, cstr("."), cast(i64, cast(TypeExpr, tx).b)))
-			if t != 0 && is_private(cast(i64, cast(TypeExpr, tx).b)) != 0 {
-				private_use(cast(Node, tx).pos, cstr("type"), cast(i64, cast(TypeExpr, tx).b), pkg)
+			t = find_type(str_cat3(pkg, cstr("."), cast(TypeExpr, tx).b))
+			if t != 0 && is_private(cast(TypeExpr, tx).b) != 0 {
+				private_use(cast(Node, tx).pos, cstr("type"), cast(TypeExpr, tx).b, pkg)
 			}
 		} else {
 			if i64(load8(ck_pkg)) != 0 {
-				t = find_type(qual(ck_pkg, cast(i64, cast(TypeExpr, tx).b)))
+				t = find_type(qual(ck_pkg, cast(TypeExpr, tx).b))
 			}
 			if t == 0 {
-				t = find_type(cast(i64, cast(TypeExpr, tx).b))
+				t = find_type(cast(TypeExpr, tx).b)
 			}
 		}
 		if t == 0 {
-			err_code_quoted(cast(Node, tx).pos, cstr("E103 UNDEFINED"), cstr("undefined type "), cast(i64, cast(TypeExpr, tx).b), cstr(""))
+			err_code_quoted(cast(Node, tx).pos, cstr("E103 UNDEFINED"), cstr("undefined type "), cast(TypeExpr, tx).b, cstr(""))
 			return ty_int
 		}
 		return t
@@ -281,22 +281,22 @@ fn resolve_type(tx i64) i64 {
 		return slice_of(et)
 	}
 	if k == TX_MAP {
-		let mkt = resolve_type(cast(i64, cast(TypeExpr, tx).a))
+		let mkt = resolve_type(cast(TypeExpr, tx).a)
 		secret_map_key(cast(Node, tx).pos, mkt)
 		if key_valid(cast(Ty, mkt), cast(Vec[Ty], vec_new[i64]())) == 0 {
 			err_code_type(cast(Node, tx).pos, cstr("E201 MAP_KEY"), cstr("a map key must compare by value (str, numbers, bool, or structs and enums of those), not "), mkt, cstr(""))
 		}
-		let mvt = resolve_type(cast(i64, cast(TypeExpr, tx).b))
+		let mvt = resolve_type(cast(TypeExpr, tx).b)
 		if is_dyn_value(cast(Ty, mvt)) != 0 {
 			err_code_at(cast(Node, tx).pos, cstr("E530 DYN_NOT_YET"), cstr("a map value of type dyn is the next step: the map stores 16-byte slots with the table (#141)"))
 		}
 		return map_of(mkt, mvt)
 	}
 	if k == TX_PTR {
-		return resolve_type(cast(i64, cast(TypeExpr, tx).a))
+		return resolve_type(cast(TypeExpr, tx).a)
 	}
 	if k == TX_OPT {
-		let inner = resolve_type(cast(i64, cast(TypeExpr, tx).a))
+		let inner = resolve_type(cast(TypeExpr, tx).a)
 		let ik = kind_of(cast(Ty, inner))
 		if ik != K_STRUCT && ik != K_DYN && ik != K_STRING && ik != K_SLICE && ik != K_MAP {
 			err_code_type(cast(Node, tx).pos, cstr("E420 OPTIONAL_TYPE"), cstr("only references (str, slices, maps, structs, dyn) can be optional, not "), inner, cstr(""))
@@ -308,10 +308,10 @@ fn resolve_type(tx i64) i64 {
 		return bounded_type(tx)
 	}
 	if k == TX_CHAN {
-		return chan_of(resolve_type(cast(i64, cast(TypeExpr, tx).a)))
+		return chan_of(resolve_type(cast(TypeExpr, tx).a))
 	}
 	if k == TX_FUNC {
-		return func_of_m(resolve_types(cast(Vec[i64], cast(TypeExpr, tx).a)), resolve_types(cast(Vec[i64], cast(TypeExpr, tx).b)), 0, cast(i64, cast(TypeExpr, tx).args))
+		return func_of_m(resolve_types(cast(Vec[i64], cast(TypeExpr, tx).a)), resolve_types(cast(Vec[i64], cast(TypeExpr, tx).b)), 0, cast(TypeExpr, tx).args)
 	}
 	if k == TX_STRUCT {
 		let st = ty_new(K_STRUCT, cstr("struct"))
@@ -320,7 +320,7 @@ fn resolve_type(tx i64) i64 {
 		return st
 	}
 	if k == TX_DYN {
-		let inst = shape_inst(cast(i64, cast(TypeExpr, tx).a))
+		let inst = shape_inst(cast(TypeExpr, tx).a)
 		if cast(i64, inst) == 0 {
 			if cast(i64, shape_ref_name(cast(TypeExpr, cast(TypeExpr, tx).a))) == 0 {
 				// Not a shape (an undefined name, a type, a package member): never typed
@@ -329,11 +329,11 @@ fn resolve_type(tx i64) i64 {
 				buf_str(e, cstr("dyn needs a shape"))
 				if cast(Node, cast(TypeExpr, tx).a).kind == TX_NAME {
 					buf_str(e, cstr(", not "))
-					if cast(i64, cast(TypeExpr, cast(TypeExpr, tx).a).a) != 0 {
-						buf_str(e, cast(i64, cast(TypeExpr, cast(TypeExpr, tx).a).a))
+					if cast(TypeExpr, cast(TypeExpr, tx).a).a != 0 {
+						buf_str(e, cast(TypeExpr, cast(TypeExpr, tx).a).a)
 						buf_byte(e, '.')
 					}
-					buf_str(e, cast(i64, cast(TypeExpr, cast(TypeExpr, tx).a).b))
+					buf_str(e, cast(TypeExpr, cast(TypeExpr, tx).a).b)
 				}
 				err_end(cast(Buf, e))
 			}
@@ -364,7 +364,7 @@ fn resolve_types(v Vec[i64]) Vec[i64] {
 // ---- bounded types (#240) ----
 // bounded_type resolves T max N: N is a constant length, T a str, slice or map.
 fn bounded_type(tx i64) i64 {
-	let t = cast(Ty, resolve_type(cast(i64, cast(TypeExpr, tx).a)))
+	let t = cast(Ty, resolve_type(cast(TypeExpr, tx).a))
 	let k = kind_of(t)
 	if k != K_STRING && k != K_SLICE && k != K_MAP {
 		err_code_type(cast(Node, tx).pos, cstr("E250 BOUND_TYPE"), cstr("max bounds the length of a str, a slice or a map, not "), cast(i64, t), cstr(""))
@@ -400,7 +400,7 @@ fn bounded_elem(tx Node) i64 {
 	}
 	let inner = node_new(tx.kind, tx.pos)
 	replace_node(inner, cast(i64, tx))
-	inner[ei] = cast(i64, cast(TypeExpr, el).a)
+	inner[ei] = cast(TypeExpr, el).a
 	let outer = cast(TypeExpr, node_new(TX_MAX, tx.pos))
 	outer.a = cast(i64, cast(Vec[i64], inner))
 	outer.b = cast(TypeExpr, el).b
@@ -470,13 +470,13 @@ fn array_len(tx i64) i64 {
 	if tx == 0 || cast(Node, tx).kind != TX_ARRAY {
 		return 0
 	}
-	let n = const_value(cast(i64, cast(TypeExpr, tx).a), 0)
+	let n = const_value(cast(TypeExpr, tx).a, 0)
 	if n < 0 {
 		err_code_at(cast(Node, tx).pos, cstr("E202 ARRAY_TYPE"), cstr("array length must not be negative"))
 		return 0
 	}
 	// [N][M]T: remember M, so every row starts with M zero elements.
-	array_inner = array_len(cast(i64, cast(TypeExpr, tx).b))
+	array_inner = array_len(cast(TypeExpr, tx).b)
 	return n
 }
 
@@ -534,8 +534,8 @@ fn resolve_fields(st Ty, tx TypeExpr) {
 		vec_push(fs, cast(i64, rec))
 		i = i + 1
 	}
-	st.fields = cast(i64, fs)
-	st.enum_ = cast(i64, tx.b)
+	st.fields = cast(Vec[i64], cast(i64, fs))
+	st.enum_ = cast(Vec[i64], cast(i64, tx.b))
 }
 
 // ---- declarations ----
@@ -558,7 +558,7 @@ fn check() {
 		let d = vec_get(prog_types, i)
 		set_file(d.file)
 		let q = qual(ck_pkg, d.name)
-		if d.tparams != 0 {
+		if cast(i64, d.tparams) != 0 {
 		} else if cast(Node, d.type_).kind == TX_STRUCT {
 			name_type(q, ty_new(K_STRUCT, q))
 		}
@@ -569,7 +569,7 @@ fn check() {
 		let d = vec_get(prog_types, i)
 		set_file(d.file)
 		let q = qual(ck_pkg, d.name)
-		if d.tparams != 0 {
+		if cast(i64, d.tparams) != 0 {
 		} else if cast(Node, d.type_).kind == TX_STRUCT {
 			resolve_fields(cast(Ty, find_type(q)), cast(TypeExpr, d.type_))
 			layout_struct(cast(Ty, find_type(q)))
@@ -716,7 +716,7 @@ fn check() {
 fn declare_template(f Fn) {
 	set_file(f.file)
 	if f.recv != 0 {
-		f.qname = str_cat3(qual(ck_pkg, cast(i64, cast(TypeExpr, f.recv).b)), cstr("[]."), f.name)
+		f.qname = str_cat3(qual(ck_pkg, cast(TypeExpr, f.recv).b), cstr("[]."), f.name)
 		return
 	}
 	let name = qual(ck_pkg, f.name)
@@ -786,10 +786,10 @@ fn declare_fn(f Fn) {
 			i = i + 1
 		}
 		f.params = cast(Vec[i64], params)
-		f.muts = cast(i64, muts)
+		f.muts = cast(Vec[i64], cast(i64, muts))
 		ptypes = pt
 	}
-	f.ptypes = cast(i64, ptypes)
+	f.ptypes = cast(Vec[i64], cast(i64, ptypes))
 	f.rtypes = cast(Vec[i64], rtypes)
 	f.qname = name
 	f.type_ = func_of_m(cast(Vec[i64], ptypes), cast(Vec[i64], rtypes), f.variadic, mut_mask(cast(Vec[i64], f.muts)))
@@ -1207,7 +1207,7 @@ fn make_start(main_fn Fn) {
 	f.generated = 1
 	vec_push(cast(Vec[i64], f.params), cstr("argc"))
 	vec_push(cast(Vec[i64], f.params), cstr("argv"))
-	f.ptypes = cast(i64, vec_new[i64]())
+	f.ptypes = cast(Vec[i64], cast(i64, vec_new[i64]()))
 	vec_push(cast(Vec[i64], f.ptypes), ty_int)
 	vec_push(cast(Vec[i64], f.ptypes), ty_int)
 	f.rtypes = vec_new[i64]()
@@ -2023,7 +2023,7 @@ fn check_fn(f Fn) {
 		let ps = cast(Sym, declare_local(f.pos, vec_get(params, i), vec_get(cast(Vec[i64], f.ptypes), i)))
 		ps.reads = 1
 		secret_lib_param(ps)
-		if f.muts != 0 && i < cast(Vec[i64], f.muts).len {
+		if cast(i64, f.muts) != 0 && i < cast(Vec[i64], f.muts).len {
 			ps.mut_ = vec_get(cast(Vec[i64], f.muts), i)
 			if ps.mut_ != 0 && mut_capable(vec_get(cast(Vec[i64], f.ptypes), i)) == 0 {
 				err_code_type(f.pos, cstr("E702 MUT_VALUE_PARAM"), str_cat3(cstr("parameter '"), vec_get(params, i), cstr("' is mut, but a value of type ")), vec_get(cast(Vec[i64], f.ptypes), i), cstr(" is passed by value: only structs, slices and maps can be modified through a parameter, so remove mut"))
@@ -5587,7 +5587,7 @@ fn lower_switch(s i64) {
 	}
 	if cast(SwitchStmt, s).tag != 0 {
 		let tt = cast(Ty, chk(cast(Node, cast(SwitchStmt, s).tag), 0))
-		if kind_of(tt) == K_STRUCT && tt.enum_ != 0 {
+		if kind_of(tt) == K_STRUCT && cast(i64, tt.enum_) != 0 {
 			lower_enum_switch(s, tt)
 			return
 		}
@@ -6050,7 +6050,7 @@ fn mt_pattern_names(p Vec[i64], names Vec[i64]) {
 // mt_arm_block is an arm's body as a block: its own, or one holding its expression.
 fn mt_arm_block(arm Vec[Node]) i64 {
 	let b = cast(MatchArm, arm).body
-	if cast(i64, cast(MatchArm, arm).block) != 0 {
+	if cast(MatchArm, arm).block != 0 {
 		return cast(i64, b)
 	}
 	let blk = cast(Block, empty_block(cast(Node, b).pos))
@@ -6074,7 +6074,7 @@ fn match_as_switch(s i64, m MatchExpr) i64 {
 		if kind_of(t) == K_OPT || is_untyped(cast(i64, t)) != 0 {
 			return 0
 		}
-		if kind_of(t) == K_STRUCT && t.enum_ != 0 {
+		if kind_of(t) == K_STRUCT && cast(i64, t.enum_) != 0 {
 			vs = cast(Vec[i64], t.enum_)
 		}
 	}
@@ -6212,7 +6212,7 @@ fn match_case_expr(p Vec[i64], t Ty, seen Vec[i64], npats i64) i64 {
 		} else if cast(Pattern, kid).kind == PAT_NAME_KIND && cast(Node, cast(Pattern, kid).name).kind == EX_IDENT && npats == 1 {
 			a = cast(IdentExpr, cast(Pattern, kid).name)
 			let ft = cast(Ty, field_type(t, vec_get(v, 1) + j))
-			if kind_of(ft) == K_STRUCT && ft.enum_ != 0 && enum_variant(ft, a.name) >= 0 {
+			if kind_of(ft) == K_STRUCT && cast(i64, ft.enum_) != 0 && enum_variant(ft, a.name) >= 0 {
 				return 0
 			}
 		} else {
@@ -6515,7 +6515,7 @@ fn mt_node(pos i64, path Vec[Sym]) i64 {
 }
 
 fn mt_is_enum(t Ty) i64 {
-	return i64(kind_of(t) == K_STRUCT && t.enum_ != 0)
+	return i64(kind_of(t) == K_STRUCT && cast(i64, t.enum_) != 0)
 }
 
 fn mt_compare(pos i64, path Vec[i64], t i64, x i64) i64 {
@@ -7460,7 +7460,7 @@ fn keep_fn(t Ty) Fn {
 			keep_each(pos, body, out.sym, et)
 		}
 		ret.value = sym_ref_node(pos, cast(Sym, out.sym))
-	} else if k == K_STRUCT && t.enum_ != 0 {
+	} else if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		// Copy the object, then keep only the active variant's references.
 		let out = temp(pos, rt_call(pos, cstr("rt_keep_raw"), args2(sym_ref_node(pos, x), mk_int(pos, t.size, ty_int)), cast(i64, t)), cast(i64, t))
 		vec_push(body, cast(i64, out))
@@ -7718,7 +7718,7 @@ fn rc_drop_body(pos i64, body Vec[i64], x i64, t Ty) {
 		ifs.then = empty_block(pos)
 		vec_push(cast(Block, ifs.then).stmts, expr_stmt(call_fn(pos, cast(Fn, drop_fn(t.elem)), args1(x), ty_void)))
 		vec_push(body, cast(i64, ifs))
-	} else if k == K_STRUCT && t.enum_ != 0 {
+	} else if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		let vs = cast(Vec[i64], t.enum_)
 		mut vi = 0
 		for vi < vs.len {
@@ -7932,7 +7932,7 @@ fn arenacopy_fn(t Ty) Fn {
 			vec_push(body, cast(i64, w))
 		}
 		ret.value = sym_ref_node(pos, cast(Sym, out.sym))
-	} else if k == K_STRUCT && t.enum_ != 0 {
+	} else if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		let out = temp(pos, rt_call(pos, cstr("rt_arena_raw"), args2(sym_ref_node(pos, x), mk_int(pos, t.size, ty_int)), cast(i64, t)), cast(i64, t))
 		vec_push(body, cast(i64, out))
 		let vs = cast(Vec[i64], t.enum_)
@@ -8027,7 +8027,7 @@ fn type_cycle(t Ty, path Vec[Ty]) i64 {
 			mut j = i
 			for j < path.len {
 				let pj = vec_get(path, j)
-				if !(kind_of(pj) == K_STRUCT && pj.enum_ != 0) {
+				if !(kind_of(pj) == K_STRUCT && cast(i64, pj.enum_) != 0) {
 					return 1
 				}
 				j = j + 1

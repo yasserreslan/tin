@@ -168,9 +168,9 @@ fn fn_new(pos i64, name i64) Fn {
 	f.pos = pos
 	f.name = name
 	f.params = vec_new[i64]()
-	f.ptypes = cast(i64, vec_new[i64]())
+	f.ptypes = cast(Vec[i64], cast(i64, vec_new[i64]()))
 	f.rtypes = vec_new[i64]()
-	f.muts = cast(i64, vec_new[i64]())
+	f.muts = cast(Vec[i64], cast(i64, vec_new[i64]()))
 	f.file = cur_file
 	return cast(Fn, f)
 }
@@ -259,7 +259,7 @@ fn parse_mode(toks Vec[i64], edition i64) {
 				p_fail_found_code(p_peek().pos, cstr("E040 ATTRIBUTE_PLACEMENT"), cstr("attributes here must precede a function"), cast(i64, p_peek()))
 			}
 			let f = cast(Fn, parse_fn(0))
-			f.attrs = attrs
+			f.attrs = cast(Vec[i64], attrs)
 			vec_push(prog_fns, cast(Fn, f))
 		} else if p_is(cstr("fn")) != 0 {
 			if p_edition1 == 0 {
@@ -500,7 +500,7 @@ fn parse_value_spec(is_const i64, iota i64, prev_init Vec[i64], prev_type i64, d
 		d.type_ = ty
 		d.iota = iota
 		d.mut_ = i64(is_const == 0 && p_decl_mut != 0)
-		d.inits = cast(i64, inits)
+		d.inits = cast(Vec[i64], cast(i64, inits))
 		if cast(i64, inits) != 0 && i < inits.len {
 			d.init = vec_get(inits, i)
 		}
@@ -530,8 +530,8 @@ fn parse_type_decl() {
 		let generic = i64(p_is(cstr("]")) == 0)
 		p_i = save
 		if generic != 0 {
-			d.tparams = cast(i64, vec_new[i64]())
-			d.tcons = cast(i64, vec_new[i64]())
+			d.tparams = cast(Vec[i64], cast(i64, vec_new[i64]()))
+			d.tcons = cast(Vec[i64], cast(i64, vec_new[i64]()))
 			parse_tparams(cast(Vec[i64], d.tparams), cast(Vec[i64], d.tcons))
 		}
 	}
@@ -554,18 +554,18 @@ fn parse_type_decl() {
 fn parse_shape_decl() i64 {
 	let pos = cast(Token, p_next()).pos
 	let d = decl_new(pos, p_expect_ident().text)
-	d.shape_ = cast(i64, vec_new[i64]())
-	d.union = cast(i64, vec_new[i64]())
+	d.shape_ = cast(Vec[i64], cast(i64, vec_new[i64]()))
+	d.union = cast(Vec[i64], cast(i64, vec_new[i64]()))
 	// shape Seq[T]: a shape may take type parameters, constrained like a generic type's.
 	if p_is(cstr("[")) != 0 {
-		d.tparams = cast(i64, vec_new[i64]())
-		d.tcons = cast(i64, vec_new[i64]())
+		d.tparams = cast(Vec[i64], cast(i64, vec_new[i64]()))
+		d.tcons = cast(Vec[i64], cast(i64, vec_new[i64]()))
 		parse_tparams(cast(Vec[i64], d.tparams), cast(Vec[i64], d.tcons))
 	}
 	if p_is(cstr("=")) != 0 {
 		p_next()
 		d.unionkind = 1
-		d.union = parse_type_union(parse_type())
+		d.union = cast(Vec[i64], parse_type_union(parse_type()))
 		p_end()
 		return cast(i64, d)
 	}
@@ -1160,7 +1160,7 @@ fn parse_fn(is_extern i64) i64 {
 	let at = p_i
 	let pos = cast(Token, p_next()).pos
 	let f = fn_new(pos, 0)
-	f.toks = cast(i64, p_toks)
+	f.toks = cast(Vec[i64], cast(i64, p_toks))
 	f.tokat = at
 	f.extern_ = is_extern
 	if p_is(cstr("(")) != 0 {
@@ -1175,24 +1175,24 @@ fn parse_fn(is_extern i64) i64 {
 	}
 	f.name = p_expect_ident().text
 	if p_is(cstr("[")) != 0 {
-		f.tparams = cast(i64, vec_new[i64]())
-		f.tcons = cast(i64, vec_new[i64]())
+		f.tparams = cast(Vec[i64], cast(i64, vec_new[i64]()))
+		f.tcons = cast(Vec[i64], cast(i64, vec_new[i64]()))
 		parse_tparams(cast(Vec[i64], f.tparams), cast(Vec[i64], f.tcons))
 	}
 	// A method of a generic type is generic over the type's parameters.
 	let rx = f.recv
-	if rx != 0 && cast(Node, rx).kind == TX_NAME && cast(i64, cast(TypeExpr, rx).args) != 0 {
-		if f.tparams == 0 {
-			f.tparams = cast(i64, vec_new[i64]())
-			f.tcons = cast(i64, vec_new[i64]())
+	if rx != 0 && cast(Node, rx).kind == TX_NAME && cast(TypeExpr, rx).args != 0 {
+		if cast(i64, f.tparams) == 0 {
+			f.tparams = cast(Vec[i64], cast(i64, vec_new[i64]()))
+			f.tcons = cast(Vec[i64], cast(i64, vec_new[i64]()))
 		}
 		mut ri = 0
 		for ri < cast(Vec[i64], cast(TypeExpr, rx).args).len {
 			let a = vec_get(cast(Vec[i64], cast(TypeExpr, rx).args), ri)
-			if cast(Node, a).kind != TX_NAME || cast(i64, cast(TypeExpr, a).a) != 0 || cast(i64, cast(TypeExpr, a).args) != 0 {
+			if cast(Node, a).kind != TX_NAME || cast(TypeExpr, a).a != 0 || cast(TypeExpr, a).args != 0 {
 				p_fail_code(pos, cstr("E506 RECEIVER_TYPE_PARAMS"), cstr("a method's receiver lists its type's parameters by name, like (s Stack[T])"))
 			}
-			vec_push(cast(Vec[i64], f.tparams), cast(i64, cast(TypeExpr, a).b))
+			vec_push(cast(Vec[i64], f.tparams), cast(TypeExpr, a).b)
 			vec_push(cast(Vec[i64], f.tcons), 0)
 			ri = ri + 1
 		}

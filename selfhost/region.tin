@@ -394,7 +394,7 @@ fn rg_reaches(from_in i64, to i64, seen Vec[i64]) i64 {
 		return i64(rg_key(from.elem) == to || rg_reaches(from.elem, to, seen) != 0)
 	}
 	mut i = 0
-	for k == K_STRUCT && from.fields != 0 && i < cast(Vec[i64], from.fields).len {
+	for k == K_STRUCT && cast(i64, from.fields) != 0 && i < cast(Vec[i64], from.fields).len {
 		let t = field_type(from, i)
 		if rg_key(t) == to || rg_reaches(t, to, seen) != 0 {
 			return 1
@@ -1268,7 +1268,7 @@ fn rg_call(e i64) i64 {
 	}
 	i = 0
 	for i < n && i < RG_MAXP {
-		let mutp = i64(f.muts != 0 && i < cast(Vec[i64], f.muts).len && vec_get(cast(Vec[i64], f.muts), i) != 0)
+		let mutp = i64(cast(i64, f.muts) != 0 && i < cast(Vec[i64], f.muts).len && vec_get(cast(Vec[i64], f.muts), i) != 0)
 		if (sum[0] & (1 << i)) != 0 {
 			let saved = rg_report
 			if rg_report != 0 && (rg_pass(cast(Vec[i64], sum[10]), i, cast(Vec[Node], args), cast(Vec[i64], b), -1, pos) & (RG_INGOT | RG_UNK)) != 0 {
@@ -2021,7 +2021,7 @@ shared mut cg_in_main i64 // 1 while walking main's tree (record stores, follow 
 fn core_global_check() {
 	let run = find_fn(cstr("hearth.Run"))
 	let m = find_fn(cstr("main"))
-	if cast(i64, run) == 0 || cast(Fn, cast(i64, run)).reach == 0 || cast(i64, m) == 0 || cast(Fn, cast(i64, m)).body == 0 {
+	if cast(i64, run) == 0 || cast(Fn, run).reach == 0 || cast(i64, m) == 0 || cast(Fn, m).body == 0 {
 		return
 	}
 	cg_seen = vec_new[i64]()
@@ -2036,8 +2036,8 @@ fn core_global_check() {
 	mut i = 0
 	for i < prog_fns.len {
 		let f = vec_get(prog_fns, i)
-		if cast(Fn, cast(i64, f)).reach != 0 && cast(Fn, cast(i64, f)).extern_ == 0 && cast(Fn, cast(i64, f)).body != 0 && cast(Fn, cast(i64, f)).generated == 0 && vec_has(cg_seen, cast(i64, f)) == 0 {
-			cg_stmts(cast(Vec[i64], cast(Block, cast(Fn, cast(i64, f)).body).stmts))
+		if cast(Fn, f).reach != 0 && cast(Fn, f).extern_ == 0 && cast(Fn, f).body != 0 && cast(Fn, f).generated == 0 && vec_has(cg_seen, cast(i64, f)) == 0 {
+			cg_stmts(cast(Vec[i64], cast(Block, cast(Fn, f).body).stmts))
 		}
 		i = i + 1
 	}

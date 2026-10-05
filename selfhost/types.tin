@@ -145,8 +145,8 @@ fn interned(kind i64, elem i64, key i64, params Vec[i64], results Vec[i64], vari
 	let n = cast(Ty, ty_new(kind, 0))
 	n.elem = elem
 	n.key = key
-	n.fields = cast(i64, params)
-	n.results = cast(i64, results)
+	n.fields = cast(Vec[i64], cast(i64, params))
+	n.results = cast(Vec[i64], cast(i64, results))
 	n.variadic = variadic
 	vec_push(ty_interned, cast(Ty, n))
 	return cast(i64, n)
@@ -183,7 +183,7 @@ fn dyn_of(sd i64, bind_ Vec[i64]) i64 {
 	}
 	let n = cast(Ty, ty_new(K_DYN, 0))
 	n.gdecl = sd
-	n.targs = cast(i64, bind_)
+	n.targs = cast(Vec[i64], cast(i64, bind_))
 	vec_push(ty_interned, cast(Ty, n))
 	saw_dyn = 1
 	return cast(i64, n)
@@ -213,7 +213,7 @@ fn mut_mask(muts Vec[i64]) i64 {
 
 fn tuple_of(types i64) i64 {
 	let t = cast(Ty, ty_new(K_TUPLE, 0))
-	t.fields = types
+	t.fields = cast(Vec[i64], types)
 	return cast(i64, t)
 }
 
@@ -491,7 +491,7 @@ fn type_name(b Buf, t Ty) {
 			type_name(b, cast(Ty, vec_get(cast(Vec[i64], t.results), 0)))
 		} else if k == K_FUNC && cast(Vec[i64], t.results).len > 1 {
 			buf_byte(b, ' ')
-			type_name(b, cast(Ty, tuple_of(t.results)))
+			type_name(b, cast(Ty, tuple_of(cast(i64, t.results))))
 		}
 	} else {
 		buf_str(b, cstr("?"))

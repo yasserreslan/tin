@@ -609,7 +609,7 @@ fn chk_binary(e i64, want i64) i64 {
 	}
 	if is_cmp_op(op) != 0 {
 		let ordered = i64(streq(op, cstr("==")) == 0 && streq(op, cstr("!=")) == 0)
-		if ordered == 0 && kind_of(t) == K_STRUCT && t.enum_ != 0 {
+		if ordered == 0 && kind_of(t) == K_STRUCT && cast(i64, t.enum_) != 0 {
 			return lower_enum_eq(cast(Node, e), op, l, r, cast(i64, t))
 		}
 		if kind_of(t) == K_STRING {
@@ -675,7 +675,7 @@ fn enum_incomparable(t Ty) i64 {
 	for i < fs.len {
 		let ft = cast(Ty, field_type(t, i))
 		let k = kind_of(ft)
-		if k == K_STRUCT && ft.enum_ != 0 {
+		if k == K_STRUCT && cast(i64, ft.enum_) != 0 {
 			if ft != t {
 				let inner = enum_incomparable(ft)
 				if inner != 0 {
@@ -892,7 +892,7 @@ fn key_valid(t Ty, path Vec[Ty]) i64 {
 	mut i = 0
 	for i < path.len {
 		if vec_get(path, i) == t {
-			return i64(t.enum_ != 0)
+			return i64(cast(i64, t.enum_) != 0)
 		}
 		i = i + 1
 	}
@@ -942,7 +942,7 @@ fn key_enc_fn(t Ty) i64 {
 	let b = vec_get(cast(Vec[i64], f.locals), 0)
 	let x = vec_get(cast(Vec[i64], f.locals), 1)
 	let body = cast(Block, f.body).stmts
-	if t.enum_ != 0 {
+	if cast(i64, t.enum_) != 0 {
 		key_enc_field(pos, body, b, x, cast(i64, t), 0)
 		let vs = cast(Vec[i64], t.enum_)
 		mut vi = 0
@@ -1022,7 +1022,7 @@ fn key_dec_fn(t Ty) i64 {
 	let body = cast(Block, f.body).stmts
 	let obj = temp(pos, rt_call(pos, cstr("rt_alloc"), args1(mk_int(pos, t.size, ty_int)), cast(i64, t)), cast(i64, t))
 	vec_push(body, cast(i64, obj))
-	if t.enum_ != 0 {
+	if cast(i64, t.enum_) != 0 {
 		key_dec_field(pos, body, s, obj.sym, cast(i64, t), 0)
 		let vs = cast(Vec[i64], t.enum_)
 		mut vi = 0
@@ -1286,7 +1286,7 @@ fn enum_type_of(x i64) i64 {
 			t = cast(Ty, resolve_type(gtx))
 		}
 	}
-	if cast(i64, t) != 0 && kind_of(t) == K_STRUCT && t.enum_ != 0 {
+	if cast(i64, t) != 0 && kind_of(t) == K_STRUCT && cast(i64, t.enum_) != 0 {
 		return cast(i64, t)
 	}
 	return 0
@@ -1399,7 +1399,7 @@ fn chk_select(e i64, want i64) i64 {
 		err_code_type(pos, cstr("E421 UNCHECKED_OPTIONAL"), cstr("cannot use a field of optional "), cast(i64, xt), cstr(" before checking it against nil"))
 		return ty_int
 	}
-	if kind_of(xt) == K_STRUCT && xt.enum_ != 0 {
+	if kind_of(xt) == K_STRUCT && cast(i64, xt.enum_) != 0 {
 		err_code_type(pos, cstr("E213 FIELD"), cstr("an enum's data is read with switch, not as a field of "), cast(i64, xt), cstr(""))
 		return ty_int
 	}
@@ -1476,7 +1476,7 @@ fn chk_composite(e i64, want i64) i64 {
 	let keys = cast(Composite, e).keys
 	let stmts = vec_new[i64]()
 	let k = kind_of(t)
-	if k == K_STRUCT && t.enum_ != 0 {
+	if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		err_code_type(pos, cstr("E216 COMPOSITE"), cstr("build an enum with one of its variants ("), cast(i64, t), cstr(".Variant(...)), not a composite literal"))
 		return cast(i64, t)
 	}
@@ -1714,7 +1714,7 @@ fn chk_funclit(e i64) i64 {
 	f.qname = f.name
 	f.parent = cast(i64, ck_fn)
 	f.captures = cast(Vec[Sym], vec_new[i64]())
-	f.outer_syms = cast(i64, vec_clone(sc_syms))
+	f.outer_syms = cast(Vec[i64], cast(i64, vec_clone(sc_syms)))
 	f.escapes = cast(FuncLit, e).escape
 	if cast(FuncLit, e).scoped != 0 {
 		f.escapes = 0
@@ -3760,7 +3760,7 @@ fn argo_fn(pos i64, t Ty) i64 {
 	vec_push(cast(Vec[i64], f.locals), cast(i64, b))
 	vec_push(cast(Vec[i64], f.locals), cast(i64, x))
 	let body = cast(Block, f.body).stmts
-	if k == K_STRUCT && t.enum_ != 0 {
+	if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		// "Name" for a variant without data, {"Name":{"field":...}} for one with data.
 		let vs = cast(Vec[i64], t.enum_)
 		mut vi = 0
@@ -4039,7 +4039,7 @@ fn argo_new(pos i64, body Vec[i64], t Ty) i64 {
 	if k != K_STRUCT {
 		return mk_int(pos, 0, cast(i64, t))
 	}
-	if t.enum_ != 0 {
+	if cast(i64, t.enum_) != 0 {
 		return enum_zero(pos, body, t)
 	}
 	let obj = temp(pos, rt_call(pos, cstr("rt_alloc"), args1(mk_int(pos, t.size, ty_int)), cast(i64, t)), cast(i64, t))
@@ -4381,7 +4381,7 @@ fn argo_dfn(pos i64, t Ty) i64 {
 	vec_push(cast(Vec[i64], f.locals), cast(i64, p))
 	vec_push(cast(Vec[i64], f.locals), cast(i64, x))
 	let body = cast(Block, f.body).stmts
-	if k == K_STRUCT && t.enum_ != 0 {
+	if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		argo_denum(pos, body, cast(i64, p), cast(i64, x), t)
 	} else if k == K_STRUCT {
 		let ifs = cast(IfStmt, node_new(ST_IF, pos))
@@ -4588,7 +4588,7 @@ fn argo_vfn(pos i64, t Ty) i64 {
 	vec_push(cast(Vec[i64], f.locals), cast(i64, ps))
 	let p = cast(i64, ps)
 	let body = cast(Block, f.body).stmts
-	if k == K_STRUCT && t.enum_ != 0 {
+	if k == K_STRUCT && cast(i64, t.enum_) != 0 {
 		// An enum's payload shapes are decoded into a scratch value.
 		let df = argo_dfn(pos, t)
 		if df != 0 {
@@ -4751,7 +4751,7 @@ fn say_arg(a Node, prefix i64) Node {
 			suffix = cstr("slt")
 		} else if ek == K_INT {
 			return cast(Node, rt_call(pos, str_cat3(prefix, cstr("slint"), cstr("")), args3(cast(i64, a), mk_int(pos, type_width(cast(Ty, et)), ty_int), mk_int(pos, cast(Ty, et).signed, ty_int)), ty_void))
-		} else if ek == K_STRUCT && cast(Ty, et).enum_ != 0 {
+		} else if ek == K_STRUCT && cast(i64, cast(Ty, et).enum_) != 0 {
 			return cast(Node, say_enum_slice(a, t, prefix))
 		} else if ek == K_STRUCT {
 			return cast(Node, say_struct_slice(a, t, prefix))
@@ -4811,7 +4811,7 @@ fn say_opt(a Node, t Ty, prefix i64) i64 {
 
 // say_struct prints {a b c} by formatting each field in turn (nil optionals print <nil>).
 fn say_struct(a Node, t Ty, prefix i64) i64 {
-	if t.enum_ != 0 {
+	if cast(i64, t.enum_) != 0 {
 		return say_enum(a, cast(i64, t), prefix)
 	}
 	let pos = a.pos
@@ -4887,7 +4887,7 @@ fn say_struct_fn(t Ty, prefix i64) Fn {
 		vec_push(body, cast(i64, named))
 		let ft = cast(Ty, field_type(t, i))
 		let fv = mk_mem(pos, sym_ref_node(pos, cast(Sym, x)), 0, 0, field_offset(t, i), cast(i64, ft))
-		if kind_of(ft) == K_STRUCT && ft.enum_ != 0 {
+		if kind_of(ft) == K_STRUCT && cast(i64, ft.enum_) != 0 {
 			vec_push(body, expr_stmt(call_fn(pos, say_enum_fn(ft, prefix), args1(fv), ty_void)))
 		} else if kind_of(ft) == K_STRUCT {
 			vec_push(body, expr_stmt(call_fn(pos, say_struct_fn(ft, prefix), args1(fv), ty_void)))
@@ -5071,7 +5071,7 @@ fn say_map_keyed(a Node, t Ty, prefix i64) i64 {
 	vec_push(lb, assign_stmt(pos, sym_ref_node(pos, cast(Sym, first)), mk_int(pos, 0, ty_bool)))
 	let kt = t.key
 	let kv = key_out(cast(Node, rt_call(pos, cstr("rt_map_key"), args2(sym_ref_node(pos, cast(Sym, m.sym)), sym_ref_node(pos, cast(Sym, j))), ty_int)), kt)
-	if cast(Ty, kt).enum_ != 0 {
+	if cast(i64, cast(Ty, kt).enum_) != 0 {
 		vec_push(lb, expr_stmt(call_fn(pos, say_enum_fn(cast(Ty, kt), prefix), args1(kv), ty_void)))
 	} else {
 		vec_push(lb, expr_stmt(cast(Node, say_struct(cast(Node, kv), cast(Ty, kt), prefix))))
@@ -5166,7 +5166,7 @@ fn say_enum_fn(t Ty, prefix i64) Fn {
 				let fi = vec_get(v, 1) + k
 				let ft = cast(Ty, field_type(t, fi))
 				let fv = mk_mem(pos, sym_ref_node(pos, cast(Sym, x)), 0, 0, field_offset(t, fi), cast(i64, ft))
-				if kind_of(ft) == K_STRUCT && ft.enum_ != 0 {
+				if kind_of(ft) == K_STRUCT && cast(i64, ft.enum_) != 0 {
 					vec_push(b, expr_stmt(call_fn(pos, say_enum_fn(ft, prefix), args1(fv), ty_void)))
 				} else {
 					vec_push(b, expr_stmt(say_arg(cast(Node, fv), prefix)))
