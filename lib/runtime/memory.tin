@@ -1,5 +1,4 @@
-// Shared, seed-compatible memory operations and mmap heap; no libc allocation calls.
-// Seed-compatible bodies; the backends substitute bounded vector leaves.
+// Memory operations and the mmap heap shared by every program and by the compiler; no libc allocation calls.
 fn mem_avx2_supported() i64 {
 	return 0
 }

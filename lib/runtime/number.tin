@@ -1,6 +1,6 @@
 // Copyright 2009, 2020 The Go Authors. All rights reserved.
 // Adapted from Go strconv decimal.go, atof.go and eisel_lemire.go; license in notes/licenses/strconv.txt.
-// Integer-only helpers are shared with the legacy bootstrap compiler and allocate no memory.
+// Integer-only helpers allocate no memory.
 // A decimal is [digit count, decimal point, sticky tail, sign, consumed length] followed by 800 digits.
 fn num_shr(x i64, k i64) i64 {
 	if k == 0 {
