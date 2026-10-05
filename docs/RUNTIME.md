@@ -14,7 +14,7 @@ JSON (`argo`) are ordinary library packages built on it.
 | `f64` | IEEE double in a d register |
 | `str` | pointer to `[length (8 bytes)][bytes][NUL]`; literals live in the executable's constant segment |
 | slice | pointer to a 32-byte header `[len, cap, data pointer, region]`; `region` is 1 when the data lives in the ingot heap |
-| map | pointer to an 80-byte header `[count, capacity, keys, values, control bytes, string keys?, shift, tombstones, hashes, region]`; open addressing, power-of-two capacity |
+| map | pointer to a 192-byte header (count, index slots, keys, values, index, string keys?, shift, tombstones, hashes, region, entries used, entry capacity, live bytes, ...); entries in insertion order found through an open-addressing index, in chunks of 4096 past that many entries (see Maps) |
 | struct | pointer to its fields, laid out widest first with natural alignment, size rounded to 8 |
 | `?T` | the T pointer, or 0 for nil |
 | fault | a pointer to a str holding the full message (`outer: inner` when wrapped), or 0 for nil; four words before the str hold the record `[trace, joined, identity, cause]` (notes/interface_faults.md) |
@@ -74,6 +74,20 @@ cores never share a line.
   until it is assigned again, on any path, loops included: keep() it before the reset or
   create it after.
 - Plain programs never reset: they release everything at exit.
+
+**Maps.** A map keeps its entries (key, value, cached str hash, live byte) in arrays in
+insertion order and finds them through an open-addressing index of entry numbers at most
+half full. Up to 4096 entries the arrays are flat and a full map is rebuilt into bigger
+ones. Past that (#346) the entries live in chunks of 4096 reached through directories, so
+a full map adds a chunk instead of copying anything, and when the entries outgrow the
+index a new one twice the size is made and the entries are moved into it 16 per map
+operation (lookups try the new index, then the old one; a delete clears an entry's slot
+in both). Inserting 4 million integer keys therefore never stalls a core for more than a
+fraction of a millisecond (it stalled 50 to 100 ms at 2^21 entries). A big old index gives
+its memory back a megabyte per operation. Maps never shrink: the entries of deleted keys
+stay until the map is full and more than half of its entries are dead, when it is rebuilt
+compactly in one O(n) pause (as every growth was before); a flat map is rebuilt on every
+growth. A map's tables are not returned when it empties, only when it is dropped.
 
 **Ingot heap.** `rt_ingot_alloc(n)` returns zeroed, 16-byte-aligned memory from the
 core's mmap heap. There are 40 classes, including a 16-byte `[owning heap, size word]`
@@ -138,6 +152,15 @@ its globals, and values stored where the compiler cannot count (through a parame
 pinned: they are never freed. A task that lives for a long time (a WebSocket, a `detach`
 loop) holds back releases on its core; past 2^20 queued blocks a core pins what it drops
 instead, so such a core leaks as before reclamation but its limbo stays bounded.
+A long-lived task avoids this by waiting outside the epochs (#358): `hearth.Quiet(wait)` runs
+`wait` (a `tide.Wait`, a channel receive) with the task taken out of them, and
+`websocket.Conn`'s reads wait that way. The rule is that the task holds no value it borrowed
+from long-lived memory across the wait: `let u = cache[k]` before it must not be used after it
+(read `cache[k]` again). With one WebSocket connection parked on the only core, 10 million
+overwrites of a cache entry leave 80 counted blocks and an empty limbo
+(`tools/ci/limbo_check.py`); before, 9.5 million blocks (360 MB) were pinned. A request that
+a client closes after its response (`Connection: close`, HTTP/1.0) now also ends at a
+quiescent point; before, a core serving only such clients never released anything.
 `hearth.RcStats()` reports the counted blocks (pinned ones included), their bytes and the
 limbo length.
 

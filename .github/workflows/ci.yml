@@ -64,6 +64,10 @@ jobs:
         run: python3 tools/ci/heap_check.py
       - name: shared let and atomic (one copy of a 100 MB table for 1 and 8 cores, an exact atomic count)
         run: python3 tools/ci/shared_check.py
+      - name: Map growth (no insert into a growing long-lived map takes a millisecond)
+        run: python3 tools/ci/map_growth_check.py
+      - name: Reclamation with long-lived tasks (a parked WebSocket does not pin dropped blocks)
+        run: python3 tools/ci/limbo_check.py
       - name: Arena blocks (flat peak RSS in a batch loop, arenas in waiting handlers)
         run: python3 tools/ci/arena_check.py
       - name: Replay tapes (record, replay, divergence)
