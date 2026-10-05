@@ -24,6 +24,7 @@ const ctxPoolExtra = 9  // overflow chunks and big blocks, freed at reset: [next
 const ctxPoll = 12
 const ctxWatch = 13
 const ctxRunGen = 14
+const ctxAlt = 16      // the top of this thread's signal stack, where rt_altstack made it
 const ctxWords = 32
 
 const chunkSize = 4194304
@@ -116,9 +117,24 @@ fn rt_altstack() {
 		return
 	}
 	let st = calloc(1, 32)
-	rt_stack_t(st, calloc(1, altStackSize), altStackSize)
+	let base = calloc(1, altStackSize)
+	rt_stack_t(st, base, altStackSize)
 	rt_sys_sigaltstack(st, 0)
+	__ctx()[ctxAlt] = base + altStackSize
 	free(st)
+}
+
+// rt_resume_sp is the stack pointer rt_overflow_resume starts with: just under the top of this
+// thread's signal stack. macOS reports a signal stack in the ucontext that is not the one the
+// thread set (the pages beyond it are unmapped), so the top rt_altstack recorded is used; a
+// thread whose stack was set otherwise (Linux threads made by the runtime) takes it from the
+// context.
+fn rt_resume_sp(uctx i64) i64 {
+	mut top = __ctx()[ctxAlt]
+	if top == 0 {
+		top = rt_uctx_altstack_top(uctx)
+	}
+	return (top&-16)-16
 }
 
 // rt_fault handles SIGSEGV and SIGBUS on the thread's signal stack. It only reads this core's
@@ -138,7 +154,7 @@ fn rt_fault(sig i64, info i64, uctx i64) {
 	if g != 0 && addr >= g[gStack] && addr < g[gStack]+taskGuard {
 		// A guard block (also a tick's or a relay handler's implicit one) overflowed its stack:
 		// a panic of that guard, which lands in its fault (#342).
-		rt_uctx_redirect(uctx, cast(i64, rt_overflow_resume), (rt_uctx_altstack_top(uctx)&-16)-16)
+		rt_uctx_redirect(uctx, cast(i64, rt_overflow_resume), rt_resume_sp(uctx))
 		return
 	}
 	if t != 0 && addr >= t[tStack] && addr < t[tStack]+taskGuard {
@@ -149,7 +165,7 @@ fn rt_fault(sig i64, info i64, uctx i64) {
 			// resume in rt_overflow_resume on the (now free) signal stack, which leaves the
 			// signal properly (sigreturn) and gives the unwinding a stack to run on; the task's
 			// own stack is abandoned where it is.
-			rt_uctx_redirect(uctx, cast(i64, rt_overflow_resume), (rt_uctx_altstack_top(uctx)&-16)-16)
+			rt_uctx_redirect(uctx, cast(i64, rt_overflow_resume), rt_resume_sp(uctx))
 			return
 		}
 		rt_fault_say("\npanic: stack overflow in a request handler (a request task's stack is " + rt_i64str(taskStack/1024) + " KiB, TIN_TASK_STACK: deep or unbounded recursion?)\n")
@@ -1220,6 +1236,7 @@ fn rt_backtrace(fp i64) {
 	rt_write_all(2, core, cn)
 	{
 		mut k = 0
+		mut hopped = false
 		for k < 64 && fp != 0 {
 			let ret = fp[1]
 			if ret == 0 {
@@ -1245,7 +1262,12 @@ fn rt_backtrace(fp i64) {
 			}
 			let next = fp[0]
 			if next <= fp {
-				break
+				// One step down is allowed: rt_overflow_resume runs on the signal stack, and its
+				// saved frame pointer is the overflowing function's, on the task's stack (#342).
+				if hopped || next&7 != 0 {
+					break
+				}
+				hopped = true
 			}
 			fp = next
 			k += 1
@@ -1260,6 +1282,7 @@ fn rt_backtrace_text(fp i64) str {
 	mut out = ""
 	{
 		mut k = 0
+		mut hopped = false
 		for k < 64 && fp != 0 {
 			let ret = fp[1]
 			if ret == 0 {
@@ -1284,7 +1307,12 @@ fn rt_backtrace_text(fp i64) str {
 			}
 			let next = fp[0]
 			if next <= fp {
-				break
+				// One step down is allowed: rt_overflow_resume runs on the signal stack, and its
+				// saved frame pointer is the overflowing function's, on the task's stack (#342).
+				if hopped || next&7 != 0 {
+					break
+				}
+				hopped = true
 			}
 			fp = next
 			k += 1
