@@ -1,20 +1,19 @@
-SELF = lib/std.tin lib/runtime/memory.tin lib/runtime/number.tin selfhost/util.tin selfhost/lex.tin selfhost/types.tin selfhost/secret.tin selfhost/parse.tin \
+SELF = lib/std.tin selfhost/entry.tin selfhost/util.tin selfhost/lex.tin selfhost/types.tin selfhost/secret.tin selfhost/parse.tin \
        selfhost/check.tin selfhost/lower.tin selfhost/generics.tin selfhost/region.tin selfhost/inline.tin selfhost/opt.tin selfhost/asm.tin selfhost/gen.tin selfhost/asm_x64.tin selfhost/gen_x64.tin \
        selfhost/memory_fast.tin selfhost/syscall_fast.tin selfhost/sha256.tin selfhost/aes_hw.tin selfhost/macho.tin selfhost/elf.tin selfhost/elf_x64.tin selfhost/caps.tin selfhost/main.tin \
-       selfhost/host_$(HOST_OS).tin $(SELF_SYSCALLS)
+       selfhost/host_$(HOST_OS).tin
 
 .PHONY: all bootstrap seed test bench clean install dist linux-bootstrap linux-amd64-bootstrap linux-test
 
 HOST_OS := $(shell uname -s | tr A-Z a-z)
 HOST_ARCH := $(shell uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-SELF_SYSCALLS = $(if $(filter linux,$(HOST_OS)),lib/runtime/syscalls_linux.tin lib/runtime/syscalls_linux_$(HOST_ARCH).tin)
 # Where `make install` links tin: Homebrew's prefix on a Mac that has one, /usr/local elsewhere.
 PREFIX ?= $(if $(and $(filter darwin,$(HOST_OS)),$(wildcard /opt/homebrew/bin)),/opt/homebrew,/usr/local)
 SEED := seed/tinc-$(HOST_OS)-$(shell uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 # Sources of a compiler for the other OS (cross builds).
-SELF_LINUX_COMMON = $(filter-out selfhost/host_darwin.tin selfhost/host_linux.tin lib/runtime/syscalls_linux%.tin,$(SELF)) selfhost/host_linux.tin lib/runtime/syscalls_linux.tin
-SELF_LINUX = $(SELF_LINUX_COMMON) lib/runtime/syscalls_linux_arm64.tin
-SELF_LINUX_AMD64 = $(SELF_LINUX_COMMON) lib/runtime/syscalls_linux_amd64.tin
+SELF_LINUX_COMMON = $(filter-out selfhost/host_darwin.tin selfhost/host_linux.tin,$(SELF)) selfhost/host_linux.tin
+SELF_LINUX = $(SELF_LINUX_COMMON)
+SELF_LINUX_AMD64 = $(SELF_LINUX_COMMON)
 
 all: bin/tinc
 
