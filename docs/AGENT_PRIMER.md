@@ -31,8 +31,8 @@ the compiler: write a minimal repro to notes/compiler_bugs_NAME.md and work arou
   exist (`tin fix -edition 1` rewrites them).
 - Types: i8 i16 i32 i64 u8 u16 u32 u64, f64, f32 (exact float32 semantics, 4 bytes in slices), bool,
   str (immutable bytes), [N]T arrays, []T (reference header; append mutates it in place and returns
-  it), map[K]V (K = str, ints, bool, f64, or structs/enums of those, by value; insertion-ordered),
-  struct (reference, never nil; == compares identity), ?T optional (may be nil), fault (error;
+  it, so `mut ys = xs` is one slice under two names: copy for a snapshot), map[K]V (K = str, ints, bool, f64, or structs/enums of those, by value; insertion-ordered),
+  struct (reference, never nil; == compares fields by value, same(a, b) is identity; a struct with a slice/map/func field cannot be compared, E237), ?T optional (may be nil), fault (error;
   nil = ok), fn(A) R function values (top-level functions or literals, which may capture).
 - No implicit conversions: i64(x), u8(x), f64(x), str(c) for a rune/byte, str(bytes []u8). Untyped
   constants adapt and must fit. Conditions must be bool. Integer overflow wraps; division by zero
@@ -79,6 +79,10 @@ the compiler: write a minimal repro to notes/compiler_bugs_NAME.md and work arou
   two-word object/table value and one indirect method call; conversion allocates nothing.
 - No threads and no shared mutable globals: every global is per core (each core thread has its own
   copy, initialized on every core). Concurrency is thread-per-core via hearth; messages via relay.
+  Data every core only reads (a big lookup table) goes in `shared let t = build()`: one copy, built on
+  core 0 before the cores start, immutable (E603 on any write through its name, E604 for a func/dyn/
+  fault type); counters and flags every core changes are `shared let n = atomic.NewInt(0)` with
+  `n.Add(1)`, `Load`, `Store`, `CompareSwap`.
   `main` runs on core 0 only, so assigning a global in `main` (or in a function it calls) in a program
   that starts cores (`anvil.Serve`, `hearth.Run`) is a compile error (E131): assign it in its
   initializer, in `on core.start` or in `once` (examples/percore.tin).

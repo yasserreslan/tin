@@ -1002,7 +1002,7 @@ fn rg_resets() {
 fn rs_bits(cur []Sym, s Sym) i64 {
 	mut i = 0
 	for i < len(cur) {
-		if cur[i] == s {
+		if cast(i64, cur[i]) == cast(i64, s) {
 			return cast(i64, cur[i + 1])
 		}
 		i = i + 2
@@ -1532,8 +1532,8 @@ fn with_body_check() {
 fn wb_param_ok(f Fn, i i64, say i64) i64 {
 	mut j = 0
 	for j < len(wb_memo) {
-		if wb_memo[j] == cast(i64, f) && wb_memo[j + 1] == i {
-			return i64(wb_memo[j + 2] == 1)
+		if cast(i64, wb_memo[j]) == cast(i64, f) && cast(i64, wb_memo[j + 1]) == i {
+			return i64(cast(i64, wb_memo[j + 2]) == 1)
 		}
 		j = j + 3
 	}
