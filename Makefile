@@ -30,8 +30,8 @@ bin/tinc: $(SEED) $(SELF)
 # Rebuild tinc with itself twice; the two binaries must be byte-identical.
 bootstrap: bin/tinc
 	@mkdir -p bin/s2 bin/s3
-	bin/tinc -o bin/s2/tinc $(SELF)
-	bin/s2/tinc -o bin/s3/tinc $(SELF)
+	TIN_ROOT=$(CURDIR) bin/tinc -o bin/s2/tinc $(SELF)
+	TIN_ROOT=$(CURDIR) bin/s2/tinc -o bin/s3/tinc $(SELF)
 	cmp bin/s2/tinc bin/s3/tinc
 	@echo "fixed point: tinc compiles itself to an identical binary"
 
@@ -58,7 +58,7 @@ bin/linux/tinc: bin/tinc $(SELF_LINUX)
 	bin/tinc -target linux-arm64 -o $@ $(SELF_LINUX)
 
 linux-bootstrap: bin/linux/tinc
-	docker run --rm -v $(CURDIR):/src -w /src $${TIN_LINUX_IMAGE:-tin-debian-arm64} sh -c '\
+	docker run --rm -e TIN_ROOT=/src -v $(CURDIR):/src -w /src $${TIN_LINUX_IMAGE:-tin-debian-arm64} sh -c '\
 	  bin/linux/tinc -o /tmp/s2 $(SELF_LINUX) && /tmp/s2 -o /tmp/s3 $(SELF_LINUX) && cmp /tmp/s2 /tmp/s3 && \
 	  cp /tmp/s3 seed/tinc-linux-arm64 && echo "linux fixed point: tinc compiles itself to an identical binary"'
 
@@ -69,7 +69,7 @@ bin/linux-amd64/tinc: bin/tinc $(SELF_LINUX_AMD64)
 	bin/tinc -target linux-amd64 -o $@ $(SELF_LINUX_AMD64)
 
 linux-amd64-bootstrap: bin/linux-amd64/tinc
-	docker run --rm --platform linux/amd64 -v $(CURDIR):/src -w /src $${TIN_LINUX_AMD64_IMAGE:-tin-debian-amd64} sh -c '\
+	docker run --rm --platform linux/amd64 -e TIN_ROOT=/src -v $(CURDIR):/src -w /src $${TIN_LINUX_AMD64_IMAGE:-tin-debian-amd64} sh -c '\
 	  bin/linux-amd64/tinc -o /tmp/s2 $(SELF_LINUX_AMD64) && /tmp/s2 -o /tmp/s3 $(SELF_LINUX_AMD64) && cmp /tmp/s2 /tmp/s3 && \
 	  cp /tmp/s3 seed/tinc-linux-amd64 && echo "linux-amd64 fixed point: tinc compiles itself to an identical binary"'
 
