@@ -84,6 +84,9 @@ jobs:
       - name: Linux DNS contract, transport and request deadlines
         if: runner.os == 'Linux'
         run: python3 tools/ci/dns_check.py
+      - name: Linux DNS caches (answers for their TTL, missing names, /etc/hosts re-read on change)
+        if: runner.os == 'Linux'
+        run: python3 tools/ci/dns_cache_check.py
       - name: Cryptographic primitives (Wycheproof and hashlib vectors)
         run: python3 tools/ci/crypto_check.py
       - name: TLS 1.3 client (RFC 8448 trace, openssl and Python interop, https and wss)
@@ -108,6 +111,8 @@ jobs:
         run: python3 tools/ci/lifecycle_check.py
       - name: Streaming responses (chunks, Content-Length, SendFile, server-sent events, flat memory)
         run: python3 tools/ci/stream_check.py
+      - name: HTTP client keep-alive pool (connections reused, stale ones replaced, MaxIdle, https on one handshake)
+        run: python3 tools/ci/wire_pool_check.py
       - name: CPU safepoints (deadline, defers, server recovery and Linux drain)
         run: python3 tools/ci/poll_check.py
       - name: Certificates and signatures (test PKI, Wycheproof, mutated certificates, against Go)
