@@ -41,6 +41,8 @@ def run(exe, cores):
                 time.sleep(.05)
         sums = {get(port, '/sum') for _ in range(40)}
         assert sums == {'12500000 235076008923'}, sums
+        lookups = {get(port, '/lookup') for _ in range(40)}
+        assert lookups == {'30000 449985000'}, lookups
         bumps = 4000
         errors = []
 
