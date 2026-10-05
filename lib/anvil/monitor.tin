@@ -42,7 +42,9 @@ fn arm_hard_stop(ns i64) {
 	}
 }
 
-fn monitor_main(arg i64) i64 {
+// monitor_main has no safepoint polls (@nopoll): this thread is not a core, and until it sets its
+// own context below, a poll would read through a null context.
+@nopoll fn monitor_main(arg i64) i64 {
 	__set_ctx(rt_aligned_alloc((ctxWords + rtTLS)*8))
 	rt_sig_block_term()
 	let ts = calloc(2, 8)
