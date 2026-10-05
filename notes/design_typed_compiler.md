@@ -67,6 +67,13 @@ using word indices on the same object.
 Every step is a small PR (`Part of #228`) with `make bootstrap`, the strict suite, the regression
 cases and a byte-identical `-S` comparison. The seed is not touched until step 6.
 
+0. **Trust and the seed.** The checked-in seeds predate edition 1: they cannot read a typed file, and
+   they would have to read `selfhost/` files as trusted to allow `cast` in them (rule 6). So before any
+   typed file: (a) the trust rule lands in `selfhost/main.tin` (a small PR, no user-visible change); (b)
+   the seeds are refreshed from that commit for darwin-arm64, linux-arm64 and linux-amd64, announced in
+   the milestone and merged alone (AGENTS.md rule 8); (c) a script, `tools/compare_compilers.sh`, compiles
+   a fixed corpus with two compilers and compares the `-S` listings, the proof for rule 7. Measured
+   2026-10-05: the current seed stops at the first `mut` of an edition 1 file.
 1. **Records.** Tokens (`lex.tin`), positions and errors (`util.tin`), then the remaining small
    records. Each is a struct with the layout check of rule 1, and `lex.tin` is converted to typed
    edition 1 because it owns the token record and is the smallest pass (about 640 lines).
