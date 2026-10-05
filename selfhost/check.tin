@@ -4717,7 +4717,7 @@ fn alias_read(pos i64, s Sym) {
 	buf_str(u, cstr("', which append has grown since: '"))
 	buf_str(u, s.name)
 	buf_str(u, cstr("' changed too; copy the slice (sift.Clone) when two independent slices are meant"))
-	err_end(cast(Buf, u))
+	err_end(cast([]u8, u))
 }
 
 fn check_let(s i64) {
@@ -4850,7 +4850,7 @@ fn check_assign(s i64) {
 		if alias_slice_local(ts) != 0 {
 			if v.kind == EX_IDENT {
 				alias_link(ts, lookup_name(cast(IdentExpr, v).name))
-			} else if !(v.kind == EX_CALL && cast(Call, v).name != 0 && streq(cast(Call, v).name, cstr("append")) != 0 && cast(Call, v).args.len > 0 && cast(Node, vec_get(cast(Call, v).args, 0)).kind == EX_IDENT && streq(cast(IdentExpr, vec_get(cast(Call, v).args, 0)).name, cast(IdentExpr, target).name) != 0) {
+			} else if !(v.kind == EX_CALL && cast(Call, v).name != 0 && streq(cast(Call, v).name, cstr("append")) != 0 && len(cast(Call, v).args) > 0 && cast(Node, cast(Call, v).args[0]).kind == EX_IDENT && streq(cast(IdentExpr, cast(Call, v).args[0]).name, cast(IdentExpr, target).name) != 0) {
 				// xs = something else: xs no longer shares a slice with another name
 				alias_unlink(ts)
 			}
