@@ -53,7 +53,7 @@ def main():
     out = ROOT / 'bin/ci/files'
     out.mkdir(parents=True, exist_ok=True)
     exe = out / 'files'
-    subprocess.run([str(ROOT / "bin/linux-amd64/tinc"), '-o', str(exe), 'tools/ci/fixtures/files.tin'],
+    subprocess.run([os.environ.get('TIN_COMPILER', str(ROOT / 'bin/tinc')), '-o', str(exe), 'tools/ci/fixtures/files.tin'],
                    cwd=ROOT, env=dict(os.environ, TIN_ROOT=str(ROOT)), check=True)
     data = out / 'data.txt'
     data.write_text('hello from a helper thread\n')
