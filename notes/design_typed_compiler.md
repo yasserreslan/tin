@@ -74,6 +74,18 @@ cases and a byte-identical `-S` comparison. The seed is not touched until step 6
    the milestone and merged alone (AGENTS.md rule 8); (c) a script, `tools/compare_compilers.sh`, compiles
    a fixed corpus with two compilers and compares the `-S` listings, the proof for rule 7. Measured
    2026-10-05: the current seed stops at the first `mut` of an edition 1 file.
+0d. **The compiler becomes a strict program.** Measured 2026-10-05 with the new compiler: adding a
+   single typed file to the compiler build fails with about sixty E101 REDECLARED errors, because any
+   strict file makes the driver load the real runtime (`lib/runtime`), and the compiler's own build
+   already carries its private copies of the same things: `lib/std.tin` (`malloc`, `free`, `calloc`,
+   `realloc`, `mem_failpoint`, `print*`), `lib/runtime/memory.tin` and `number.tin`, and the
+   `rt_sys_*` wrappers in `selfhost/host_*.tin`. A typed compiler therefore means the compiler runs on
+   the real runtime like every other Tin program: the duplicates go (the runtime's allocator, syscalls
+   and number code serve the compiler, `host_*.tin` keeps only what the runtime lacks: `realpath`,
+   `getenv`, `uname`, `dirent`, the executable path), `std.tin` shrinks to the helpers the untyped files
+   still call, and the entry point and start-up sequence become the strict program's. This is its own PR
+   (the compiler still untyped, built as a strict program), measured for compile time, binary size and
+   memory use before and after, and it is the real gate for every typed file.
 1. **Records.** Tokens (`lex.tin`), positions and errors (`util.tin`), then the remaining small
    records. Each is a struct with the layout check of rule 1, and `lex.tin` is converted to typed
    edition 1 because it owns the token record and is the smallest pass (about 640 lines).
