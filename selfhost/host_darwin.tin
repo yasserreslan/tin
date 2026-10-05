@@ -18,8 +18,8 @@ fn host_start(argc i64, argv i64) {
 
 }
 
-fn host_getenv(name i64) i64 {
-	return getenv(name)
+fn host_getenv(name str) i64 {
+	return getenv(cstr(name))
 }
 
 extern fn creat(path i64, mode i64) i64

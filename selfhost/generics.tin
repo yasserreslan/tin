@@ -13,7 +13,7 @@ fn tbind_lookup(name i64) i64 {
 	mut i = 0
 	for i < len(ck_tbind) {
 		let p = cast([]i64, cast([]i64, ck_tbind)[i])
-		if streq(p[0], name) != 0 {
+		if streq(p[0], str_of(name)) != 0 {
 			return p[1]
 		}
 		i = i + 1
@@ -83,7 +83,7 @@ fn generics_init() {
 			set_file(f.file)
 			let d = find_generic(qual(ck_pkg, cast(TypeExpr, rx).b))
 			if cast(i64, d) == 0 {
-				err_code_quoted(f.pos, cstr("E501 NOT_GENERIC"), cstr(""), cast(TypeExpr, rx).b, cstr(" is not a generic type"))
+				err_code_quoted(f.pos, "E501 NOT_GENERIC", "", cast(TypeExpr, rx).b, " is not a generic type")
 			} else {
 				d.methods = append(d.methods, cast(i64, f))
 			}
@@ -96,7 +96,7 @@ fn find_generic(qname i64) Decl {
 	mut i = 0
 	for i < len(ty_generics) {
 		let p = cast([]i64, ty_generics[i])
-		if streq(p[0], qname) != 0 {
+		if streq(p[0], str_of(qname)) != 0 {
 			return cast(Decl, p[1])
 		}
 		i = i + 1
@@ -114,7 +114,7 @@ fn generic_type_ref(tx i64) i64 {
 	if cast(TypeExpr, tx).a != 0 {
 		let pkg = import_pkg(cast(TypeExpr, tx).a)
 		if pkg != 0 {
-			d = find_generic(str_cat3(pkg, cstr("."), cast(TypeExpr, tx).b))
+			d = find_generic(str_cat3(pkg, ".", str_of(cast(TypeExpr, tx).b)))
 		}
 	} else {
 		if i64(load8(ck_pkg)) != 0 {
@@ -125,12 +125,12 @@ fn generic_type_ref(tx i64) i64 {
 		}
 	}
 	if cast(i64, d) == 0 {
-		err_code_quoted(cast(Node, tx).pos, cstr("E501 NOT_GENERIC"), cstr(""), cast(TypeExpr, tx).b, cstr(" is not a generic type"))
+		err_code_quoted(cast(Node, tx).pos, "E501 NOT_GENERIC", "", cast(TypeExpr, tx).b, " is not a generic type")
 		return ty_int
 	}
 	let targs = resolve_types(cast([]i64, cast(TypeExpr, tx).args))
 	if len(targs) != len(d.tparams) {
-		err_code_quoted(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"), cstr("wrong number of type arguments for "), cast(TypeExpr, tx).b, cstr(""))
+		err_code_quoted(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT", "wrong number of type arguments for ", cast(TypeExpr, tx).b, "")
 		return ty_int
 	}
 	return instantiate_type(d, cast([]i64, targs), cast(Node, tx).pos)
@@ -166,7 +166,7 @@ fn check_constraints(pos i64, names []i64, cons []i64, targs []i64, file i64) {
 			mut handled = 0
 			let cx = cast(Node, c[0])
 			if len(c) == 1 && cx.kind == TX_DYN {
-				err_code_at(cx.pos, cstr("E520 DYN_CONSTRAINT"), cstr("a dyn type is not a constraint: name the shape"))
+				err_code_at(cx.pos, "E520 DYN_CONSTRAINT", "a dyn type is not a constraint: name the shape")
 				handled = 1
 			}
 			if handled == 0 && len(c) == 1 && cx.kind == TX_NAME {
@@ -185,18 +185,18 @@ fn check_constraints(pos i64, names []i64, cons []i64, targs []i64, file i64) {
 				for j < len(c) {
 					let mt = cast(Node, c[j])
 					if cast(i64, shape_ref_name(cast(TypeExpr, mt))) != 0 {
-						err_code_quoted(mt.pos, cstr("E521 SHAPE_IN_UNION"), cstr(""), shape_member_name(cast(i64, mt)), cstr(" is a shape: a union constraint lists concrete types, and a shape goes in the constraint alone"))
+						err_code_quoted(mt.pos, "E521 SHAPE_IN_UNION", "", shape_member_name(cast(i64, mt)), " is a shape: a union constraint lists concrete types, and a shape goes in the constraint alone")
 					} else if resolve_type(cast(i64, mt)) == t {
 						ok = 1
 					}
 					j = j + 1
 				}
 				if ok == 0 {
-					let m = err_code(pos, cstr("E510 NOT_IN_UNION"))
-					buf_str(m, cstr("type "))
+					let m = err_code(pos, "E510 NOT_IN_UNION")
+					buf_str(m, "type ")
 					type_name(cast([]u8, m), cast(Ty, t))
-					buf_str(m, cstr(" does not satisfy the constraint of "))
-					buf_str(m, names[i])
+					buf_str(m, " does not satisfy the constraint of ")
+					buf_str(m, str_of(names[i]))
 					err_end(cast([]u8, m))
 				}
 			}
@@ -220,16 +220,16 @@ fn instantiate_type(d Decl, targs []i64, pos i64) i64 {
 	let saved = ck_state_save()
 	set_file(d.file)
 	let nb = buf_new()
-	buf_str(nb, qual(ck_pkg, d.name))
+	buf_str(nb, str_of(qual(ck_pkg, d.name)))
 	targs_name(cast([]u8, nb), cast([]Ty, targs))
 	buf_byte(nb, 0)
 	let name = buf_cstring(nb)
 	mut t = cast(Ty, 0)
 	if cast(Node, d.type_).kind == TX_STRUCT {
-		t = cast(Ty, ty_new(K_STRUCT, name))
+		t = cast(Ty, ty_new(K_STRUCT, cstr(name)))
 		t.targs = cast([]i64, cast(i64, targs))
 		t.gdecl = cast(i64, d)
-		name_type(name, cast(i64, t))
+		name_type(cstr(name), cast(i64, t))
 		d.insts = append(d.insts, pair(cast(i64, targs), cast(i64, t)))
 		ck_tbind = cast([]i64, tbind_pairs(d.tparams, targs))
 		resolve_fields(t, cast(TypeExpr, d.type_))
@@ -312,7 +312,7 @@ fn instantiate_fn(g Fn, targs []Ty, pos i64) Fn {
 		i = i + 1
 	}
 	if len(targs) != len(g.tparams) {
-		err_code_quoted(pos, cstr("E502 TYPE_ARG_COUNT"), cstr("wrong number of type arguments for "), g.name, cstr(""))
+		err_code_quoted(pos, "E502 TYPE_ARG_COUNT", "wrong number of type arguments for ", g.name, "")
 		return cast(Fn, g)
 	}
 	// A generic that calls itself with a type built from its own type parameter (F[T] calling
@@ -329,7 +329,7 @@ fn instantiate_fn(g Fn, targs []Ty, pos i64) Fn {
 	if d > 48 || len(g.insts) >= 4096 {
 		if g.instcycle == 0 {
 			g.instcycle = 1
-			err_code_quoted(pos, cstr("E503 ENDLESS_INSTANTIATION"), cstr("instantiating "), g.name, cstr(" does not end: it is instantiated with ever deeper type arguments (a generic function calling itself with a type built from its type parameter, such as F[[]T] inside F[T])"))
+			err_code_quoted(pos, "E503 ENDLESS_INSTANTIATION", "instantiating ", g.name, " does not end: it is instantiated with ever deeper type arguments (a generic function calling itself with a type built from its type parameter, such as F[[]T] inside F[T])")
 		}
 		return cast(Fn, g)
 	}
@@ -357,10 +357,10 @@ fn instantiate_fn(g Fn, targs []Ty, pos i64) Fn {
 	nf.file = g.file
 	if nf.recv == 0 {
 		let nb = buf_new()
-		buf_str(nb, nf.name)
+		buf_str(nb, str_of(nf.name))
 		targs_name(cast([]u8, nb), targs)
 		buf_byte(nb, 0)
-		nf.name = buf_cstring(nb)
+		nf.name = cstr(buf_cstring(nb))
 	}
 	g.insts = append(g.insts, pair(cast(i64, targs), cast(i64, nf)))
 	prog_fns = append(prog_fns, cast(Fn, nf))
@@ -380,7 +380,7 @@ fn tunify(g Fn, binds []i64, tx i64, t Ty, untyped_ok i64) {
 	if k == TX_NAME && cast(TypeExpr, tx).a == 0 && cast(TypeExpr, tx).args == 0 {
 		mut i = 0
 		for i < len(g.tparams) {
-			if streq(g.tparams[i], cast(TypeExpr, tx).b) != 0 {
+			if streq(g.tparams[i], str_of(cast(TypeExpr, tx).b)) != 0 {
 				if is_untyped(cast(i64, t)) != 0 {
 					if untyped_ok != 0 && binds[i] == 0 {
 						binds[i] = default_type(cast(i64, t))
@@ -446,11 +446,11 @@ fn generic_call(e i64, g Fn) i64 {
 	}
 	let np = len(g.ptypes)
 	if len(args) != np {
-		let m = err_code(cast(Node, e).pos, cstr("E210 ARG_COUNT"))
-		buf_str(m, g.name)
-		buf_str(m, cstr(" expects "))
+		let m = err_code(cast(Node, e).pos, "E210 ARG_COUNT")
+		buf_str(m, str_of(g.name))
+		buf_str(m, " expects ")
 		buf_int(m, np)
-		buf_str(m, cstr(" arguments, got "))
+		buf_str(m, " arguments, got ")
 		buf_int(m, len(args))
 		err_end(cast([]u8, m))
 		return ty_int
@@ -479,7 +479,7 @@ fn generic_call(e i64, g Fn) i64 {
 	i = 0
 	for i < len(cast([]i64, binds)) {
 		if binds[i] == 0 {
-			err_code_quoted(cast(Node, e).pos, cstr("E504 CANNOT_INFER"), cstr("cannot infer type parameter "), g.tparams[i], cstr(" (give it explicitly: F[T](...))"))
+			err_code_quoted(cast(Node, e).pos, "E504 CANNOT_INFER", "cannot infer type parameter ", g.tparams[i], " (give it explicitly: F[T](...))")
 			return ty_int
 		}
 		i = i + 1
@@ -502,9 +502,9 @@ fn generic_call(e i64, g Fn) i64 {
 		if !(i == 0 && cast(Call, e).method != 0) {
 			let pm = i64(i < 63 && (mask & (1 << i)) != 0)
 			if pm != 0 && marked == 0 {
-				mut_arg_error(cast(Call, e), cast(Node, a), i, cstr("is a mut parameter: write mut before the argument"))
+				mut_arg_error(cast(Call, e), cast(Node, a), i, "is a mut parameter: write mut before the argument")
 			} else if marked != 0 && pm == 0 {
-				mut_arg_error(cast(Call, e), cast(Node, a), i, cstr("is not a mut parameter: remove mut"))
+				mut_arg_error(cast(Call, e), cast(Node, a), i, "is not a mut parameter: remove mut")
 			}
 		}
 		let want = ptypes[i]
@@ -558,9 +558,9 @@ fn index_targs(e i64) i64 {
 	for i < len(list) {
 		mut tx = cast(TypeExpr, expr_to_tx(list[i]))
 		if cast(i64, tx) == 0 {
-			err_code_at(cast(Node, list[i]).pos, cstr("E505 NOT_A_TYPE_ARG"), cstr("expected a type argument"))
+			err_code_at(cast(Node, list[i]).pos, "E505 NOT_A_TYPE_ARG", "expected a type argument")
 			tx = cast(TypeExpr, node_new(TX_NAME, cast(Node, e).pos))
-			tx.b = cast(i64, cast([]i64, cstr("i64")))
+			tx.b = cstr("i64")
 		}
 		out = append(out, cast(i64, tx))
 		i = i + 1
@@ -631,7 +631,7 @@ fn shapes_init() {
 		set_file(d.file)
 		let q = qual(ck_pkg, d.name)
 		if find_shape(q) != 0 {
-			err_code_quoted(d.pos, cstr("E101 REDECLARED"), cstr(""), d.name, cstr(" is declared as a shape twice"))
+			err_code_quoted(d.pos, "E101 REDECLARED", "", d.name, " is declared as a shape twice")
 		} else {
 			ty_shapes = append(ty_shapes, pair(q, cast(i64, d)))
 		}
@@ -651,7 +651,7 @@ fn find_shape(qname i64) i64 {
 	mut i = len(ty_shapes) - 1
 	for i >= 0 {
 		let rec = cast([]i64, ty_shapes[i])
-		if streq(rec[0], qname) != 0 {
+		if streq(rec[0], str_of(qname)) != 0 {
 			return rec[1]
 		}
 		i = i - 1
@@ -743,7 +743,7 @@ fn shape_ref_name(tx TypeExpr) Decl {
 	if cast(i64, tx.a) != 0 {
 		let pkg = import_pkg(cast(i64, tx.a))
 		if pkg != 0 {
-			return cast(Decl, find_shape(str_cat3(pkg, cstr("."), cast(i64, tx.b))))
+			return cast(Decl, find_shape(str_cat3(pkg, ".", str_of(cast(i64, tx.b)))))
 		}
 		return cast(Decl, 0)
 	}
@@ -764,26 +764,26 @@ fn shape_inst(tx i64) []i64 {
 	}
 	if cast(i64, d.tparams) == 0 {
 		if cast(TypeExpr, tx).args != 0 {
-			err_code_quoted(cast(Node, tx).pos, cstr("E501 NOT_GENERIC"), cstr("shape "), cast(TypeExpr, tx).b, cstr(" takes no type arguments"))
+			err_code_quoted(cast(Node, tx).pos, "E501 NOT_GENERIC", "shape ", cast(TypeExpr, tx).b, " takes no type arguments")
 			return cast([]i64, 0)
 		}
 		return cast([]i64, pair(cast(i64, d), 0))
 	}
 	if cast(TypeExpr, tx).args == 0 {
-		let e = err_code(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"))
-		buf_str(e, cstr("shape "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr(" needs type arguments, like "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr("[...]"))
+		let e = err_code(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT")
+		buf_str(e, "shape ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, " needs type arguments, like ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, "[...]")
 		err_end(cast([]u8, e))
 		return cast([]i64, 0)
 	}
 	if len(cast([]i64, cast(TypeExpr, tx).args)) != len(cast([]i64, d.tparams)) {
-		let e = err_code(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"))
-		buf_str(e, cstr("wrong number of type arguments for shape "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr(": it takes "))
+		let e = err_code(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT")
+		buf_str(e, "wrong number of type arguments for shape ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, ": it takes ")
 		buf_int(e, len(cast([]i64, d.tparams)))
 		err_end(cast([]u8, e))
 		return cast([]i64, 0)
@@ -814,26 +814,26 @@ fn shape_inst_decl(tx i64) i64 {
 	}
 	if cast(i64, d.tparams) == 0 {
 		if cast(TypeExpr, tx).args != 0 {
-			err_code_quoted(cast(Node, tx).pos, cstr("E501 NOT_GENERIC"), cstr("shape "), cast(TypeExpr, tx).b, cstr(" takes no type arguments"))
+			err_code_quoted(cast(Node, tx).pos, "E501 NOT_GENERIC", "shape ", cast(TypeExpr, tx).b, " takes no type arguments")
 			return 0
 		}
 		return pair(cast(i64, d), 0)
 	}
 	if cast(TypeExpr, tx).args == 0 {
-		let e = err_code(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"))
-		buf_str(e, cstr("shape "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr(" needs type arguments, like "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr("[...]"))
+		let e = err_code(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT")
+		buf_str(e, "shape ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, " needs type arguments, like ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, "[...]")
 		err_end(cast([]u8, e))
 		return 0
 	}
 	if len(cast([]i64, cast(TypeExpr, tx).args)) != len(cast([]i64, d.tparams)) {
-		let e = err_code(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"))
-		buf_str(e, cstr("wrong number of type arguments for shape "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr(": it takes "))
+		let e = err_code(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT")
+		buf_str(e, "wrong number of type arguments for shape ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, ": it takes ")
 		buf_int(e, len(cast([]i64, d.tparams)))
 		err_end(cast([]u8, e))
 		return 0
@@ -875,7 +875,7 @@ fn shape_bind_value(bind_ []i64, name i64) i64 {
 	mut i = 0
 	for i < len(bind_) {
 		let p = cast([]i64, bind_[i])
-		if streq(p[0], name) != 0 {
+		if streq(p[0], str_of(name)) != 0 {
 			return p[1]
 		}
 		i = i + 1
@@ -891,7 +891,7 @@ fn shape_tx_mentions(tx i64, names []i64) i64 {
 	if k == TX_NAME {
 		mut i = 0
 		for i < len(names) {
-			if cast(TypeExpr, tx).a == 0 && streq(cast(TypeExpr, tx).b, names[i]) != 0 {
+			if cast(TypeExpr, tx).a == 0 && streq(cast(TypeExpr, tx).b, str_of(names[i])) != 0 {
 				return 1
 			}
 			i = i + 1
@@ -973,26 +973,26 @@ fn shape_inst_soft(tx i64) i64 {
 	}
 	if cast(i64, d.tparams) == 0 {
 		if cast(TypeExpr, tx).args != 0 {
-			err_code_quoted(cast(Node, tx).pos, cstr("E501 NOT_GENERIC"), cstr("shape "), cast(TypeExpr, tx).b, cstr(" takes no type arguments"))
+			err_code_quoted(cast(Node, tx).pos, "E501 NOT_GENERIC", "shape ", cast(TypeExpr, tx).b, " takes no type arguments")
 			return 0
 		}
 		return pair(cast(i64, d), 0)
 	}
 	if cast(TypeExpr, tx).args == 0 {
-		let e = err_code(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"))
-		buf_str(e, cstr("shape "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr(" needs type arguments, like "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr("[...]"))
+		let e = err_code(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT")
+		buf_str(e, "shape ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, " needs type arguments, like ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, "[...]")
 		err_end(cast([]u8, e))
 		return 0
 	}
 	if len(cast([]i64, cast(TypeExpr, tx).args)) != len(cast([]i64, d.tparams)) {
-		let e = err_code(cast(Node, tx).pos, cstr("E502 TYPE_ARG_COUNT"))
-		buf_str(e, cstr("wrong number of type arguments for shape "))
-		buf_str(e, cast(TypeExpr, tx).b)
-		buf_str(e, cstr(": it takes "))
+		let e = err_code(cast(Node, tx).pos, "E502 TYPE_ARG_COUNT")
+		buf_str(e, "wrong number of type arguments for shape ")
+		buf_str(e, str_of(cast(TypeExpr, tx).b))
+		buf_str(e, ": it takes ")
 		buf_int(e, len(cast([]i64, d.tparams)))
 		err_end(cast([]u8, e))
 		return 0
@@ -1100,13 +1100,13 @@ fn shape_collect(sd Decl, bind_ []i64, methods []i64, owner Decl, own []i64) {
 			// signatures are identical (a listed shape may repeat a method).
 			mut k = 0
 			for k < len(own) {
-				if streq(own[k], f.name) != 0 {
-					let e0 = err_code(f.pos, cstr("E524 SHAPE_METHOD_TWICE"))
-					buf_str(e0, cstr("shape "))
-					buf_str(e0, owner.name)
-					buf_str(e0, cstr(" declares "))
-					buf_str(e0, f.name)
-					buf_str(e0, cstr(" twice"))
+				if streq(own[k], str_of(f.name)) != 0 {
+					let e0 = err_code(f.pos, "E524 SHAPE_METHOD_TWICE")
+					buf_str(e0, "shape ")
+					buf_str(e0, str_of(owner.name))
+					buf_str(e0, " declares ")
+					buf_str(e0, str_of(f.name))
+					buf_str(e0, " twice")
 					err_end(cast([]u8, e0))
 					shape_conflicts = shape_conflicts + 1
 				}
@@ -1117,13 +1117,13 @@ fn shape_collect(sd Decl, bind_ []i64, methods []i64, owner Decl, own []i64) {
 		mut j = 0
 		for j < len(methods) {
 			let prev = cast([]i64, methods[j])
-			if streq(prev[0], f.name) != 0 && shape_sig_same(cast([]i64, prev[1]), sig) == 0 {
-				let e = err_code(f.pos, cstr("E525 SHAPE_METHOD_CONFLICT"))
-				buf_str(e, cstr("shape "))
-				buf_str(e, owner.name)
-				buf_str(e, cstr(" has two methods named "))
-				buf_str(e, f.name)
-				buf_str(e, cstr(" with different signatures (one from a listed shape)"))
+			if streq(prev[0], str_of(f.name)) != 0 && shape_sig_same(cast([]i64, prev[1]), sig) == 0 {
+				let e = err_code(f.pos, "E525 SHAPE_METHOD_CONFLICT")
+				buf_str(e, "shape ")
+				buf_str(e, str_of(owner.name))
+				buf_str(e, " has two methods named ")
+				buf_str(e, str_of(f.name))
+				buf_str(e, " with different signatures (one from a listed shape)")
 				err_end(cast([]u8, e))
 				shape_conflicts = shape_conflicts + 1
 			}
@@ -1199,7 +1199,7 @@ fn dyn_shape_method(dt Ty, name i64) i64 {
 		let item = cast([]i64, flat[i])
 		let method = item[0]
 		if slice_has_str(names, method) == 0 {
-			if streq(method, name) != 0 {
+			if streq(method, str_of(name)) != 0 {
 				return pair(len(names) + 1, item[1])
 			}
 			names = append(names, method)
@@ -1251,7 +1251,7 @@ fn check_shape_decl(d Decl, path []i64) {
 		for i < len(d.union) {
 			let m = cast(Node, d.union[i])
 			if cast(i64, shape_ref_name(cast(TypeExpr, m))) != 0 {
-				err_code_quoted(m.pos, cstr("E521 SHAPE_IN_UNION"), cstr("a named union lists concrete types, but "), shape_member_name(cast(i64, m)), cstr(" is a shape: list shapes in a shape body instead"))
+				err_code_quoted(m.pos, "E521 SHAPE_IN_UNION", "a named union lists concrete types, but ", shape_member_name(cast(i64, m)), " is a shape: list shapes in a shape body instead")
 				mine = 1
 			}
 			i = i + 1
@@ -1266,19 +1266,19 @@ fn check_shape_decl(d Decl, path []i64) {
 			if cast(i64, sub) == 0 {
 				let nm = shape_member_name(cast(i64, m))
 				if nm != 0 {
-					let e = err_code(m.pos, cstr("E522 NOT_A_SHAPE"))
-					buf_str(e, cstr("shape "))
-					buf_str(e, d.name)
-					buf_str(e, cstr(" lists "))
-					buf_str(e, nm)
-					buf_str(e, cstr(", which is not a shape"))
+					let e = err_code(m.pos, "E522 NOT_A_SHAPE")
+					buf_str(e, "shape ")
+					buf_str(e, str_of(d.name))
+					buf_str(e, " lists ")
+					buf_str(e, str_of(nm))
+					buf_str(e, ", which is not a shape")
 					err_end(cast([]u8, e))
 				} else {
-					err_code_at(m.pos, cstr("E522 NOT_A_SHAPE"), cstr("a shape lists another shape by name"))
+					err_code_at(m.pos, "E522 NOT_A_SHAPE", "a shape lists another shape by name")
 				}
 				mine = 1
 			} else if shape_on_path(path, cast(i64, sub)) != 0 {
-				err_code_quoted(sub.pos, cstr("E523 SHAPE_CYCLE"), cstr("shape "), sub.name, cstr(" is composed of itself (directly or through other shapes)"))
+				err_code_quoted(sub.pos, "E523 SHAPE_CYCLE", "shape ", sub.name, " is composed of itself (directly or through other shapes)")
 				shape_mark_cycle(path, cast(i64, sub))
 			} else {
 				// Reports a missing type argument, a wrong count or extra arguments.
@@ -1390,14 +1390,14 @@ fn shape_method(t Ty, name i64) i64 {
 		mut i = 0
 		for i < len(d.methods) {
 			let f = cast(Fn, d.methods[i])
-			if streq(f.name, name) != 0 {
+			if streq(f.name, str_of(name)) != 0 {
 				return cast(i64, f)
 			}
 			i = i + 1
 		}
 		return 0
 	}
-	let f = find_fn(str_cat3(t.name, cstr("."), name))
+	let f = find_fn(str_of(str_cat3(t.name, ".", str_of(name))))
 	if cast(i64, f) != 0 {
 		sm_declared = 1
 		return cast(i64, f)
@@ -1413,7 +1413,7 @@ fn find_method_by_recv(t i64, name i64) i64 {
 	mut i = 0
 	for i < len(prog_fns) {
 		let f = prog_fns[i]
-		if f.recv != 0 && cast(i64, f.tbind) == 0 && cast(i64, f.tparams) == 0 && f.name != 0 && streq(f.name, name) != 0 {
+		if f.recv != 0 && cast(i64, f.tbind) == 0 && cast(i64, f.tparams) == 0 && f.name != 0 && streq(f.name, str_of(name)) != 0 {
 			let saved = ck_state_save()
 			set_file(f.file)
 			let rt = resolve_type(f.recv)
@@ -1513,22 +1513,22 @@ fn shape_sig_str(b []u8, name i64, sig []i64) {
 	let ms = cast([]i64, sig[2])
 	let rs = cast([]i64, sig[3])
 	let variadic = sig[4]
-	buf_str(b, name)
+	buf_str(b, str_of(name))
 	buf_byte(b, '(')
 	mut i = 0
 	for i < len(ps) {
 		if i > 0 {
-			buf_str(b, cstr(", "))
+			buf_str(b, ", ")
 		}
 		let pn = ns[i]
 		if pn != 0 {
-			buf_str(b, pn)
+			buf_str(b, str_of(pn))
 			buf_byte(b, ' ')
 		}
 		if variadic != 0 && i == len(ps) - 1 {
-			buf_str(b, cstr("..."))
+			buf_str(b, "...")
 		} else if ms[i] != 0 {
-			buf_str(b, cstr("mut "))
+			buf_str(b, "mut ")
 		}
 		type_name(b, cast(Ty, ps[i]))
 		i = i + 1
@@ -1536,7 +1536,7 @@ fn shape_sig_str(b []u8, name i64, sig []i64) {
 	buf_byte(b, ')')
 	mut n = len(rs)
 	if sig[6] != 0 {
-		buf_str(b, cstr(" !"))
+		buf_str(b, " !")
 		n = n - 1
 		if n == 1 {
 			type_name(b, cast(Ty, rs[0]))
@@ -1546,7 +1546,7 @@ fn shape_sig_str(b []u8, name i64, sig []i64) {
 	} else if n == 1 {
 		buf_byte(b, ' ')
 		if sig[5] != 0 {
-			buf_str(b, cstr("mut "))
+			buf_str(b, "mut ")
 		}
 		type_name(b, cast(Ty, rs[0]))
 	} else if n > 1 {
@@ -1560,7 +1560,7 @@ fn shape_result_list(b []u8, rs []Ty, n i64) {
 	mut i = 0
 	for i < n {
 		if i > 0 {
-			buf_str(b, cstr(", "))
+			buf_str(b, ", ")
 		}
 		type_name(b, rs[i])
 		i = i + 1
@@ -1577,7 +1577,7 @@ fn shape_result_list(b []u8, rs []Ty, n i64) {
 // compiler-checked property constraint. Keep the property named in the library API rather
 // than treating the word as generic-parameter syntax.
 fn constraints_shape(sd Decl, name i64) i64 {
-	return i64(streq(file_pkgs[sd.file], cstr("constraints")) != 0 && streq(sd.name, name) != 0)
+	return i64(streq(file_pkgs[sd.file], "constraints") != 0 && streq(sd.name, str_of(name)) != 0)
 }
 
 fn check_shape(pos i64, t Ty, sd Decl, bind_ []i64) {
@@ -1588,10 +1588,10 @@ fn check_shape(pos i64, t Ty, sd Decl, bind_ []i64) {
 		if key_valid(t, cast([]Ty, []i64{})) != 0 {
 			return
 		}
-		let m = err_code(pos, cstr("E511 NOT_COMPARABLE"))
-		buf_str(m, cstr("type "))
+		let m = err_code(pos, "E511 NOT_COMPARABLE")
+		buf_str(m, "type ")
 		type_name(cast([]u8, m), t)
-		buf_str(m, cstr(" does not satisfy shape Comparable: it is not comparable"))
+		buf_str(m, " does not satisfy shape Comparable: it is not comparable")
 		err_end(cast([]u8, m))
 		return
 	}
@@ -1602,7 +1602,7 @@ fn check_shape(pos i64, t Ty, sd Decl, bind_ []i64) {
 		if constraints_shape(sd, cstr("Any")) != 0 {
 			return
 		}
-		err_code_at(pos, cstr("E514 DYN_WIDENING"), cstr("a dyn value satisfies its own shape only; dyn-to-dyn widening is the next step (#141)"))
+		err_code_at(pos, "E514 DYN_WIDENING", "a dyn value satisfies its own shape only; dyn-to-dyn widening is the next step (#141)")
 		return
 	}
 	if len(shape_checking) == 0 {
@@ -1632,12 +1632,12 @@ fn check_shape(pos i64, t Ty, sd Decl, bind_ []i64) {
 			j = j + 1
 		}
 		if ok == 0 {
-			let m = err_code(pos, cstr("E510 NOT_IN_UNION"))
-			buf_str(m, cstr("type "))
+			let m = err_code(pos, "E510 NOT_IN_UNION")
+			buf_str(m, "type ")
 			type_name(cast([]u8, m), t)
-			buf_str(m, cstr(" is not in shape "))
-			buf_str(m, sd.name)
-			buf_str(m, cstr(": want one of "))
+			buf_str(m, " is not in shape ")
+			buf_str(m, str_of(sd.name))
+			buf_str(m, ": want one of ")
 			shape_union_str(cast([]u8, m), sd)
 			err_end(cast([]u8, m))
 		}
@@ -1678,7 +1678,7 @@ fn shape_union_str(b []u8, sd Decl) {
 	mut i = 0
 	for i < len(sd.union) {
 		if i > 0 {
-			buf_str(b, cstr(" | "))
+			buf_str(b, " | ")
 		}
 		type_name(b, cast(Ty, resolve_type(sd.union[i])))
 		i = i + 1
@@ -1700,14 +1700,14 @@ fn check_shape_method(pos i64, t i64, sd Decl, want Fn, bind_ i64) i64 {
 	}
 	let cand = cast(Fn, shape_method(cast(Ty, t), want.name))
 	if cast(i64, cand) == 0 {
-		let m = err_code(pos, cstr("E512 MISSING_METHOD"))
-		buf_str(m, cstr("type "))
+		let m = err_code(pos, "E512 MISSING_METHOD")
+		buf_str(m, "type ")
 		type_name(cast([]u8, m), cast(Ty, t))
-		buf_str(m, cstr(" does not satisfy shape "))
-		buf_str(m, sd.name)
-		buf_str(m, cstr(": it has no method "))
+		buf_str(m, " does not satisfy shape ")
+		buf_str(m, str_of(sd.name))
+		buf_str(m, ": it has no method ")
 		shape_sig_str(cast([]u8, m), want.name, wsig)
-		buf_str(m, cstr("; fix-it: add method "))
+		buf_str(m, "; fix-it: add method ")
 		shape_sig_str(cast([]u8, m), want.name, wsig)
 		err_end(cast([]u8, m))
 		return 1
@@ -1718,16 +1718,16 @@ fn check_shape_method(pos i64, t i64, sd Decl, want Fn, bind_ i64) i64 {
 	let csig = shape_sig_of(cand, sm_declared, cast([]i64, sm_bind))
 	ck_state_restore(saved)
 	if shape_sig_same(wsig, csig) == 0 {
-		let m = err_code(pos, cstr("E513 METHOD_SIGNATURE"))
-		buf_str(m, cstr("type "))
+		let m = err_code(pos, "E513 METHOD_SIGNATURE")
+		buf_str(m, "type ")
 		type_name(cast([]u8, m), cast(Ty, t))
-		buf_str(m, cstr(" does not satisfy shape "))
-		buf_str(m, sd.name)
-		buf_str(m, cstr(": method "))
+		buf_str(m, " does not satisfy shape ")
+		buf_str(m, str_of(sd.name))
+		buf_str(m, ": method ")
 		shape_sig_str(cast([]u8, m), want.name, csig)
-		buf_str(m, cstr(" has the wrong signature, want "))
+		buf_str(m, " has the wrong signature, want ")
 		shape_sig_str(cast([]u8, m), want.name, wsig)
-		buf_str(m, cstr("; fix-it: change the method signature to "))
+		buf_str(m, "; fix-it: change the method signature to ")
 		shape_sig_str(cast([]u8, m), want.name, wsig)
 		err_end(cast([]u8, m))
 	}

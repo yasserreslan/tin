@@ -36,7 +36,7 @@ fn cap_name(bit i64) i64 {
 fn cap_bit(name i64) i64 {
 	mut bit = 1
 	for bit <= CAP_UNSAFE {
-		if streq(name, cap_name(bit)) != 0 {
+		if streq(name, str_of(cap_name(bit))) != 0 {
 			return bit
 		}
 		bit = bit * 2
@@ -45,7 +45,7 @@ fn cap_bit(name i64) i64 {
 }
 
 // cap_list appends the capabilities in mask in their fixed order, separated by sep.
-fn cap_list(b []u8, mask i64, sep i64) {
+fn cap_list(b []u8, mask i64, sep str) {
 	mut bit = 1
 	mut first = 1
 	for bit <= CAP_UNSAFE {
@@ -53,7 +53,7 @@ fn cap_list(b []u8, mask i64, sep i64) {
 			if first == 0 {
 				buf_str(b, sep)
 			}
-			buf_str(b, cap_name(bit))
+			buf_str(b, str_of(cap_name(bit)))
 			first = 0
 		}
 		bit = bit * 2
@@ -78,26 +78,26 @@ fn cap_word(line i64, i_in i64, out i64) {
 		i = i + 1
 	}
 	buf_byte(w, 0)
-	out[0] = buf_cstring(w)
+	out[0] = cstr(buf_cstring(w))
 	out[1] = i
 }
 
-fn manifest_error(path i64, line_no i64, msg i64, word i64) {
+fn manifest_error(path i64, line_no i64, msg str, word i64) {
 	let e = buf_new()
-	buf_str(e, path)
+	buf_str(e, str_of(path))
 	buf_byte(e, ':')
 	buf_int(e, line_no)
 	// A tin.mod is not a loaded source file, so its position is written here.
-	buf_str(e, cstr(": error "))
-	buf_str(e, cstr("E114 MANIFEST"))
-	buf_str(e, cstr(": "))
+	buf_str(e, ": error ")
+	buf_str(e, "E114 MANIFEST")
+	buf_str(e, ": ")
 	buf_str(e, msg)
 	if word != 0 {
-		buf_str(e, cstr(" '"))
-		buf_str(e, word)
+		buf_str(e, " '")
+		buf_str(e, str_of(word))
 		buf_byte(e, '\'')
 	}
-	buf_str(e, cstr(" (a tin.mod line is module PATH, require PATH SOURCE or caps net files spawn exec unsafe)"))
+	buf_str(e, " (a tin.mod line is module PATH, require PATH SOURCE or caps net files spawn exec unsafe)")
 	fatal(e)
 }
 
@@ -123,26 +123,26 @@ fn manifest_caps(src []u8, path i64) i64 {
 		}
 		buf_byte(lb, 0)
 		let line = buf_cstring(lb)
-		cap_word(line, 0, out)
+		cap_word(cstr(line), 0, out)
 		let w = out[0]
 		if w != 0 && starts_with(w, cstr("//")) == 0 {
-			if streq(w, cstr("caps")) != 0 {
-				cap_word(line, out[1], out)
+			if streq(w, "caps") != 0 {
+				cap_word(cstr(line), out[1], out)
 				for out[0] != 0 {
 					let bit = cap_bit(out[0])
 					if bit == 0 {
-						manifest_error(path, line_no, cstr("unknown capability"), out[0])
+						manifest_error(path, line_no, "unknown capability", out[0])
 					}
 					caps = caps | bit
-					cap_word(line, out[1], out)
+					cap_word(cstr(line), out[1], out)
 				}
-			} else if streq(w, cstr("module")) != 0 || streq(w, cstr("require")) != 0 {
-				cap_word(line, out[1], out)
+			} else if streq(w, "module") != 0 || streq(w, "require") != 0 {
+				cap_word(cstr(line), out[1], out)
 				if out[0] == 0 {
-					manifest_error(path, line_no, cstr("missing path after"), w)
+					manifest_error(path, line_no, "missing path after", w)
 				}
 			} else {
-				manifest_error(path, line_no, cstr("unknown line"), w)
+				manifest_error(path, line_no, "unknown line", w)
 			}
 		}
 		i = end + 1
@@ -169,7 +169,7 @@ fn lock_caps_line(ipath i64) i64 {
 				j = j + 1
 			}
 			buf_byte(b, 0)
-			return buf_cstring(b)
+			return cstr(buf_cstring(b))
 		}
 		i = end + 1
 	}
@@ -186,7 +186,7 @@ fn vendored_package(ipath i64, found []i64) i64 {
 	}
 	mut i = 0
 	for i < len(cap_pkgs) {
-		if streq(cap_pkgs[i].path, ipath) != 0 {
+		if streq(cap_pkgs[i].path, str_of(ipath)) != 0 {
 			return cast(i64, cap_pkgs[i])
 		}
 		i = i + 1
@@ -204,29 +204,29 @@ fn vendored_package(ipath i64, found []i64) i64 {
 	// The lock shows a reviewer each package's capabilities; it must say what the manifest says.
 	if cast(i64, project_lock) != 0 {
 		let want = buf_new()
-		buf_str(want, cstr("caps "))
-		buf_str(want, ipath)
+		buf_str(want, "caps ")
+		buf_str(want, str_of(ipath))
 		if rec.caps != 0 {
 			buf_byte(want, ' ')
-			cap_list(cast([]u8, want), rec.caps, cstr(" "))
+			cap_list(cast([]u8, want), rec.caps, " ")
 		}
 		buf_byte(want, 0)
 		let got = lock_caps_line(ipath)
 		if (got != 0 || cast(i64, src) != 0) && !(got != 0 && streq(got, buf_cstring(want)) != 0) {
-			let e = cast([]i64, err_code(NO_POS, cstr("E115 LOCK_CAPS")))
-			buf_str(cast([]u8, e), cstr("tin.lock "))
+			let e = cast([]i64, err_code(NO_POS, "E115 LOCK_CAPS"))
+			buf_str(cast([]u8, e), "tin.lock ")
 			if got != 0 {
-				buf_str(cast([]u8, e), cstr("says \""))
-				buf_str(cast([]u8, e), got)
-				buf_str(cast([]u8, e), cstr("\""))
+				buf_str(cast([]u8, e), "says \"")
+				buf_str(cast([]u8, e), str_of(got))
+				buf_str(cast([]u8, e), "\"")
 			} else {
-				buf_str(cast([]u8, e), cstr("has no caps line"))
+				buf_str(cast([]u8, e), "has no caps line")
 			}
-			buf_str(cast([]u8, e), cstr(" for "))
-			buf_str(cast([]u8, e), ipath)
-			buf_str(cast([]u8, e), cstr(", its manifest declares \""))
+			buf_str(cast([]u8, e), " for ")
+			buf_str(cast([]u8, e), str_of(ipath))
+			buf_str(cast([]u8, e), ", its manifest declares \"")
 			buf_str(cast([]u8, e), buf_cstring(want))
-			buf_str(cast([]u8, e), cstr("\" (run tin vendor)"))
+			buf_str(cast([]u8, e), "\" (run tin vendor)")
 			fatal(cast([]u8, e))
 		}
 	}
@@ -244,10 +244,10 @@ fn cap_sealed(f Fn) i64 {
 		return 0
 	}
 	let name = f.qname
-	if streq(name, cstr("wire.resolve")) != 0 || streq(name, cstr("anvil.serve_on")) != 0 {
+	if streq(name, "wire.resolve") != 0 || streq(name, "anvil.serve_on") != 0 {
 		return 1 + CAP_NET
 	}
-	if streq(name, cstr("anvil.drop_one")) != 0 {
+	if streq(name, "anvil.drop_one") != 0 {
 		return 1
 	}
 	return 0
@@ -271,18 +271,18 @@ fn cap_tag(f Fn) i64 {
 		if starts_with(name, cstr("rt_sys_")) == 0 {
 			return 0
 		}
-		name = str_slice(name + 7, strlen(name) - 7)
+		name = cstr(str_slice(name + 7, strlen(name) - 7))
 	}
-	if streq(name, cstr("socket")) != 0 || streq(name, cstr("connect")) != 0 || streq(name, cstr("bind")) != 0 || streq(name, cstr("listen")) != 0 || streq(name, cstr("accept")) != 0 || streq(name, cstr("getaddrinfo")) != 0 {
+	if streq(name, "socket") != 0 || streq(name, "connect") != 0 || streq(name, "bind") != 0 || streq(name, "listen") != 0 || streq(name, "accept") != 0 || streq(name, "getaddrinfo") != 0 {
 		return CAP_NET
 	}
-	if streq(name, cstr("open")) != 0 || streq(name, cstr("creat")) != 0 || streq(name, cstr("opendir")) != 0 || streq(name, cstr("mkdir")) != 0 || streq(name, cstr("rmdir")) != 0 || streq(name, cstr("unlink")) != 0 || streq(name, cstr("rename")) != 0 || streq(name, cstr("stat")) != 0 || streq(name, cstr("lstat")) != 0 || streq(name, cstr("chdir")) != 0 || streq(name, cstr("readlink")) != 0 {
+	if streq(name, "open") != 0 || streq(name, "creat") != 0 || streq(name, "opendir") != 0 || streq(name, "mkdir") != 0 || streq(name, "rmdir") != 0 || streq(name, "unlink") != 0 || streq(name, "rename") != 0 || streq(name, "stat") != 0 || streq(name, "lstat") != 0 || streq(name, "chdir") != 0 || streq(name, "readlink") != 0 {
 		return CAP_FILES
 	}
-	if streq(name, cstr("fork")) != 0 || streq(name, cstr("vfork")) != 0 || streq(name, cstr("posix_spawn")) != 0 || streq(name, cstr("posix_spawnp")) != 0 {
+	if streq(name, "fork") != 0 || streq(name, "vfork") != 0 || streq(name, "posix_spawn") != 0 || streq(name, "posix_spawnp") != 0 {
 		return CAP_SPAWN
 	}
-	if streq(name, cstr("execve")) != 0 || streq(name, cstr("execv")) != 0 || streq(name, cstr("execvp")) != 0 {
+	if streq(name, "execve") != 0 || streq(name, "execv") != 0 || streq(name, "execvp") != 0 {
 		return CAP_EXEC
 	}
 	return 0
@@ -495,17 +495,17 @@ fn cap_path(b []u8, g i64, bit i64) {
 	for i < len(cast([]i64, path)) {
 		let f = path[i]
 		if i > 0 {
-			buf_str(b, cstr(" -> "))
+			buf_str(b, " -> ")
 		}
 		if cap_tag(f) != 0 && cap_sealed(f) == 0 {
-			buf_str(b, f.name)
+			buf_str(b, str_of(f.name))
 		} else {
-			buf_str(b, f.qname)
+			buf_str(b, str_of(f.qname))
 		}
 		i = i + 1
 	}
 	if found == 2 {
-		buf_str(b, cstr(" -> ..."))
+		buf_str(b, " -> ...")
 	}
 }
 
@@ -541,19 +541,19 @@ fn cap_violation(pos i64, p CapsRec, g Fn, need i64) {
 	for (need & bit) == 0 {
 		bit = bit * 2
 	}
-	let e = err_code(pos, cstr("E804 CAPABILITY"))
-	buf_str(e, g.qname)
-	buf_str(e, cstr(" needs capability "))
-	buf_str(e, cap_name(bit))
-	buf_str(e, cstr(" ("))
+	let e = err_code(pos, "E804 CAPABILITY")
+	buf_str(e, str_of(g.qname))
+	buf_str(e, " needs capability ")
+	buf_str(e, str_of(cap_name(bit)))
+	buf_str(e, " (")
 	cap_path(cast([]u8, e), cast(i64, g), bit)
-	buf_str(e, cstr("), which package "))
-	buf_str(e, p.path)
-	buf_str(e, cstr(" does not declare in its tin.mod (caps: "))
+	buf_str(e, "), which package ")
+	buf_str(e, str_of(p.path))
+	buf_str(e, " does not declare in its tin.mod (caps: ")
 	if p.caps != 0 {
-		cap_list(cast([]u8, e), p.caps, cstr(" "))
+		cap_list(cast([]u8, e), p.caps, " ")
 	} else {
-		buf_str(e, cstr("none"))
+		buf_str(e, "none")
 	}
 	buf_byte(e, ')')
 	err_end(cast([]u8, e))
@@ -653,7 +653,7 @@ fn print_capabilities() {
 				name = p.path
 			}
 			mut k = 0
-			for k < len(names) && streq(names[k], name) == 0 {
+			for k < len(names) && streq(names[k], str_of(name)) == 0 {
 				k = k + 1
 			}
 			if k == len(names) {
@@ -681,10 +681,10 @@ fn print_capabilities() {
 	i = 0
 	for i < len(order) {
 		mut k = order[i]
-		buf_str(out, names[k])
+		buf_str(out, str_of(names[k]))
 		if masks[k] != 0 {
 			buf_byte(out, ' ')
-			cap_list(cast([]u8, out), masks[k], cstr(" "))
+			cap_list(cast([]u8, out), masks[k], " ")
 		}
 		buf_byte(out, '\n')
 		i = i + 1

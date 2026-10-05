@@ -100,7 +100,7 @@ fn an_expr(e i64) {
 		an_use(cast(Sym, cast(IdentExpr, e).ref))
 	} else if k == EX_UNARY {
 		let x = cast(IdentExpr, cast(Unary, e).x)
-		if streq(cast(Unary, e).op, cstr("&")) != 0 && cast(Sym, x.ref).kind == SYM_LOCAL {
+		if streq(cast(Unary, e).op, "&") != 0 && cast(Sym, x.ref).kind == SYM_LOCAL {
 			cast(Sym, x.ref).addr = 1
 		}
 		an_expr(cast(i64, x))
@@ -263,7 +263,7 @@ fn prefetch_loop(w i64) {
 		if cast(Node, s).kind == ST_ASSIGN && is_reg_local(cast(AssignStmt, s).target) != 0 {
 			let v = cast(AssignStmt, s).value
 			let t = cast(IdentExpr, cast(AssignStmt, s).target).ref
-			if cast(Node, v).kind == EX_BINARY && streq(cast(Binary, v).op, cstr("+")) != 0 && cast(Node, cast(Binary, v).l).kind == EX_IDENT && cast(IdentExpr, cast(Binary, v).l).ref == t && invariant(cast(Binary, v).r) != 0 {
+			if cast(Node, v).kind == EX_BINARY && streq(cast(Binary, v).op, "+") != 0 && cast(Node, cast(Binary, v).l).kind == EX_IDENT && cast(IdentExpr, cast(Binary, v).l).ref == t && invariant(cast(Binary, v).r) != 0 {
 				j = cast(Sym, t)
 				step = cast(Binary, v).r
 			}
@@ -313,7 +313,7 @@ fn prefetch_loop(w i64) {
 	} else {
 		call.args = append(call.args, node_copy(cast(IndexExpr, target).x))
 	}
-	call.args = append(call.args, binary_node(pos, cstr("+"), cast(i64, jref), binary_node(pos, cstr("*"), node_copy(step), cast(i64, ahead))))
+	call.args = append(call.args, binary_node(pos, "+", cast(i64, jref), binary_node(pos, "*", node_copy(step), cast(i64, ahead))))
 	let st = cast(ExprStmt, node_new(ST_EXPR, pos))
 	st.x = cast(i64, call)
 	let nb = []i64{}
@@ -459,10 +459,10 @@ fn invariant(e i64) i64 {
 		return i64(s.kind == SYM_LOCAL && s.addr == 0 && is_assigned(cast(i64, s)) == 0)
 	}
 	if k == EX_UNARY {
-		return i64(streq(cast(Unary, e).op, cstr("&")) == 0 && invariant(cast(Unary, e).x) != 0)
+		return i64(streq(cast(Unary, e).op, "&") == 0 && invariant(cast(Unary, e).x) != 0)
 	}
 	if k == EX_BINARY {
-		return i64(streq(cast(Binary, e).op, cstr("&&")) == 0 && streq(cast(Binary, e).op, cstr("||")) == 0 && may_panic(cast(Binary, e)) == 0 && invariant(cast(Binary, e).l) != 0 && invariant(cast(Binary, e).r) != 0)
+		return i64(streq(cast(Binary, e).op, "&&") == 0 && streq(cast(Binary, e).op, "||") == 0 && may_panic(cast(Binary, e)) == 0 && invariant(cast(Binary, e).l) != 0 && invariant(cast(Binary, e).r) != 0)
 	}
 	if k == EX_FLOAT {
 		return 1
@@ -489,7 +489,7 @@ fn op_cost(e i64) i64 {
 	if k == EX_BINARY {
 		let op = cast(Binary, e).op
 		mut c = 1
-		if streq(op, cstr("*")) != 0 || streq(op, cstr("/")) != 0 || streq(op, cstr("%")) != 0 {
+		if streq(op, "*") != 0 || streq(op, "/") != 0 || streq(op, "%") != 0 {
 			c = 3
 		}
 		return c + op_cost(cast(Binary, e).l) + op_cost(cast(Binary, e).r)
@@ -598,9 +598,9 @@ fn hoist_expr(e i64) {
 	}
 }
 
-fn binary_node(pos i64, op i64, l i64, r i64) i64 {
+fn binary_node(pos i64, op str, l i64, r i64) i64 {
 	let b = cast(Binary, node_new(EX_BINARY, pos))
-	b.op = op
+	b.op = cstr(op)
 	b.l = l
 	b.r = r
 	return cast(i64, b)
@@ -609,7 +609,7 @@ fn binary_node(pos i64, op i64, l i64, r i64) i64 {
 // index_rewrite turns x[a + b] into (x + (a << 3))[b] when x and a are invariant and b is not.
 fn index_rewrite(e i64) {
 	let ix = cast(IndexExpr, e).i
-	if cast(Node, ix).kind != EX_BINARY || streq(cast(Binary, ix).op, cstr("+")) == 0 || invariant(cast(IndexExpr, e).x) == 0 {
+	if cast(Node, ix).kind != EX_BINARY || streq(cast(Binary, ix).op, "+") == 0 || invariant(cast(IndexExpr, e).x) == 0 {
 		return
 	}
 	mut a = cast(Binary, ix).l
@@ -623,7 +623,7 @@ fn index_rewrite(e i64) {
 	}
 	let three = cast(IntLit, node_new(EX_INT, cast(Node, e).pos))
 	three.val = 3
-	cast(IndexExpr, e).x = binary_node(cast(Node, e).pos, cstr("+"), cast(IndexExpr, e).x, binary_node(cast(Node, e).pos, cstr("<<"), a, cast(i64, three)))
+	cast(IndexExpr, e).x = binary_node(cast(Node, e).pos, "+", cast(IndexExpr, e).x, binary_node(cast(Node, e).pos, "<<", a, cast(i64, three)))
 	cast(IndexExpr, e).i = b
 }
 
@@ -640,7 +640,7 @@ fn replace_with_temp(e i64) {
 	}
 	if cast(i64, s) == 0 {
 		let moved = node_copy(e)
-		s = sym_new(SYM_LOCAL, cstr("licm"), cast(Node, e).pos)
+		s = sym_new(SYM_LOCAL, "licm", cast(Node, e).pos)
 		s.type_ = cast(Node, e).type_
 		s.slot = cast(Fn, lc_fn).slots
 		cast(Fn, lc_fn).slots = cast(Fn, lc_fn).slots + 1
@@ -673,7 +673,7 @@ fn elem_specialize(e i64) {
 	let pos = cast(Node, e).pos
 	mut data = cast(Node, 0)
 	if cast(ElemExpr, e).str != 0 {
-		data = cast(Node, binary_node(pos, cstr("+"), node_copy(x), int_node(pos, 8)))
+		data = cast(Node, binary_node(pos, "+", node_copy(x), int_node(pos, 8)))
 		data.type_ = ty_int
 	} else {
 		data = cast(Node, mk_hdr(pos, node_copy(x), 2))
@@ -701,7 +701,7 @@ fn int_node(pos i64, v i64) i64 {
 // (base + a*scale)[b], so the row address is computed once per loop.
 fn mem_rewrite(e i64) {
 	let ix = cast(MemExpr, e).index
-	if ix == 0 || cast(MemExpr, e).len != 0 || cast(Node, ix).kind != EX_BINARY || streq(cast(Binary, ix).op, cstr("+")) == 0 || invariant(cast(MemExpr, e).base) == 0 {
+	if ix == 0 || cast(MemExpr, e).len != 0 || cast(Node, ix).kind != EX_BINARY || streq(cast(Binary, ix).op, "+") == 0 || invariant(cast(MemExpr, e).base) == 0 {
 		return
 	}
 	mut a = cast(Binary, ix).l
@@ -714,6 +714,6 @@ fn mem_rewrite(e i64) {
 		return
 	}
 	let sh = int_node(cast(Node, e).pos, width_log2(cast(MemExpr, e).scale))
-	cast(MemExpr, e).base = binary_node(cast(Node, e).pos, cstr("+"), cast(MemExpr, e).base, binary_node(cast(Node, e).pos, cstr("<<"), a, sh))
+	cast(MemExpr, e).base = binary_node(cast(Node, e).pos, "+", cast(MemExpr, e).base, binary_node(cast(Node, e).pos, "<<", a, sh))
 	cast(MemExpr, e).index = b
 }

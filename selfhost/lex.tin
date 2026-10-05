@@ -84,7 +84,7 @@ fn lx_advance() i64 {
 }
 
 // lx_fail_code stops with a coded error (docs/ERRORS.md).
-fn lx_fail_code(pos i64, code i64, msg i64) {
+fn lx_fail_code(pos i64, code str, msg str) {
 	let e = cast([]i64, err_code(pos, code))
 	buf_str(cast([]u8, e), msg)
 	fatal(cast([]u8, e))
@@ -113,29 +113,29 @@ fn hex_value(c i64) i64 {
 }
 
 fn is_keyword(s i64) i64 {
-	let words = cstr("fn extern const var let if else while return break continue func type struct for range import package map true false nil switch case default go defer try mut ")
+	let words = "fn extern const var let if else while return break continue func type struct for range import package map true false nil switch case default go defer try mut "
 	let n = strlen(s)
 	mut i = 0
-	for i64(load8(words + i)) != 0 {
+	for i < len(words) {
 		mut j = 0
-		for i64(load8(words + i + j)) != ' ' {
+		for i64(words[i + j]) != ' ' {
 			j = j + 1
 		}
-		if j == n && mem_eq(words + i, s, n) != 0 {
+		if j == n && str_has_at(words, i, str_of(s)) {
 			return 1
 		}
 		i = i + j + 1
 	}
 	if lx_edition != 0 {
-		let edition1 = cstr("enum match within limit guard parallel detach secret shared fail catch keep ")
+		let edition1 = "enum match within limit guard parallel detach secret shared fail catch keep "
 		let n = strlen(s)
 		mut i = 0
-		for i64(load8(edition1 + i)) != 0 {
+		for i < len(edition1) {
 			mut j = 0
-			for i64(load8(edition1 + i + j)) != ' ' {
+			for i64(edition1[i + j]) != ' ' {
 				j = j + 1
 			}
-			if j == n && mem_eq(edition1 + i, s, n) != 0 {
+			if j == n && str_has_at(edition1, i, str_of(s)) {
 				return 1
 			}
 			i = i + j + 1
@@ -163,10 +163,10 @@ fn is_two_char_punct(a i64, b i64) i64 {
 }
 
 fn is_one_char_punct(c i64) i64 {
-	let s = cstr("(){{}}[],;=<>+-*/%&|^~!.:?@")
+	let s = "(){{}}[],;=<>+-*/%&|^~!.:?@"
 	mut i = 0
-	for i64(load8(s + i)) != 0 {
-		if i64(load8(s + i)) == c {
+	for i < len(s) {
+		if i64(s[i]) == c {
 			return 1
 		}
 		i = i + 1
@@ -190,7 +190,7 @@ fn lx_skip_space() {
 			}
 		} else if c == '/' && lx_peek(1) == '*' {
 			if lx_edition != 0 {
-				lx_fail_code(pos_make(lx_file, lx_line, lx_col), cstr("E090 OLD_SYNTAX"), cstr("edition 1 supports // comments, not block comments"))
+				lx_fail_code(pos_make(lx_file, lx_line, lx_col), "E090 OLD_SYNTAX", "edition 1 supports // comments, not block comments")
 			}
 			lx_advance()
 			lx_advance()
@@ -216,9 +216,9 @@ fn ends_statement(t Token) i64 {
 	}
 	let s = t.text
 	if k == TK_KEYWORD {
-		return i64(streq(s, cstr("break")) != 0 || streq(s, cstr("continue")) != 0 || streq(s, cstr("return")) != 0 || streq(s, cstr("true")) != 0 || streq(s, cstr("false")) != 0 || streq(s, cstr("nil")) != 0)
+		return i64(streq(s, "break") != 0 || streq(s, "continue") != 0 || streq(s, "return") != 0 || streq(s, "true") != 0 || streq(s, "false") != 0 || streq(s, "nil") != 0)
 	}
-	return i64(k == TK_PUNCT && (streq(s, cstr(")")) != 0 || streq(s, cstr("]")) != 0 || streq(s, cstr("}}")) != 0 || streq(s, cstr("++")) != 0 || streq(s, cstr("--")) != 0))
+	return i64(k == TK_PUNCT && (streq(s, ")") != 0 || streq(s, "]") != 0 || streq(s, "}}") != 0 || streq(s, "++") != 0 || streq(s, "--") != 0))
 }
 
 fn lex_next() i64 {
@@ -230,7 +230,7 @@ fn lex_next() i64 {
 	}
 	let c = lx_peek(0)
 	if lx_edition != 0 && c == ';' {
-		lx_fail_code(pos, cstr("E090 OLD_SYNTAX"), cstr("edition 1 statements end at a newline, not a semicolon"))
+		lx_fail_code(pos, "E090 OLD_SYNTAX", "edition 1 statements end at a newline, not a semicolon")
 	}
 	if is_letter(c) != 0 {
 		let start = lx_i
@@ -238,10 +238,10 @@ fn lex_next() i64 {
 			lx_advance()
 		}
 		let text = str_slice(lx_src + start, lx_i - start)
-		if is_keyword(text) != 0 {
-			return token_new(TK_KEYWORD, text, 0, pos)
+		if is_keyword(cstr(text)) != 0 {
+			return token_new(TK_KEYWORD, cstr(text), 0, pos)
 		}
-		return token_new(TK_IDENT, text, 0, pos)
+		return token_new(TK_IDENT, cstr(text), 0, pos)
 	}
 	if is_digit(c) != 0 || (c == '.' && is_digit(lx_peek(1)) != 0) {
 		return lex_number(pos)
@@ -254,7 +254,7 @@ fn lex_next() i64 {
 		lx_advance()
 		lx_advance()
 		lx_advance()
-		return token_new(TK_PUNCT, three, 0, pos)
+		return token_new(TK_PUNCT, cstr(three), 0, pos)
 	}
 	if c == '\'' {
 		return lex_char(pos)
@@ -266,15 +266,15 @@ fn lex_next() i64 {
 		let two = str_slice(lx_src + lx_i, 2)
 		lx_advance()
 		lx_advance()
-		return token_new(TK_PUNCT, two, 0, pos)
+		return token_new(TK_PUNCT, cstr(two), 0, pos)
 	}
 	if is_one_char_punct(c) != 0 {
 		let one = str_slice(lx_src + lx_i, 1)
 		lx_advance()
-		return token_new(TK_PUNCT, one, 0, pos)
+		return token_new(TK_PUNCT, cstr(one), 0, pos)
 	}
-	let e = cast([]i64, err_code(pos, cstr("E010 UNEXPECTED_CHARACTER")))
-	buf_str(cast([]u8, e), cstr("unexpected character '"))
+	let e = cast([]i64, err_code(pos, "E010 UNEXPECTED_CHARACTER"))
+	buf_str(cast([]u8, e), "unexpected character '")
 	buf_byte(cast([]u8, e), c)
 	buf_byte(cast([]u8, e), '\'')
 	fatal(cast([]u8, e))
@@ -295,7 +295,7 @@ fn lex_float(pos i64, start i64) i64 {
 			lx_advance()
 		}
 		if is_digit(lx_peek(0)) == 0 {
-			lx_fail_code(pos, cstr("E011 INVALID_NUMBER"), cstr("invalid float literal"))
+			lx_fail_code(pos, "E011 INVALID_NUMBER", "invalid float literal")
 		}
 		for is_digit(lx_peek(0)) != 0 {
 			lx_advance()
@@ -308,19 +308,19 @@ fn lex_float(pos i64, start i64) i64 {
 		for is_letter(lx_peek(0)) != 0 {
 			lx_advance()
 		}
-		unit_ = unit_name(str_slice(lx_src + unit_start, lx_i - unit_start))
+		unit_ = unit_name(cstr(str_slice(lx_src + unit_start, lx_i - unit_start)))
 		if unit_ == 0 {
-			lx_fail_code(pos, cstr("E012 NUMERIC_UNIT"), cstr("unknown numeric unit suffix"))
+			lx_fail_code(pos, "E012 NUMERIC_UNIT", "unknown numeric unit suffix")
 		}
 	}
 	let text = str_slice(lx_src + start, number_end - start)
-	let t = cast(Token, token_new(TK_FLOAT, text, float_bits(text), pos))
+	let t = cast(Token, token_new(TK_FLOAT, cstr(text), float_bits(cstr(text)), pos))
 	t.unit = unit_
 	return cast(i64, t)
 }
 
 fn unit_name(s i64) i64 {
-	if streq(s, cstr("ns")) != 0 || streq(s, cstr("us")) != 0 || streq(s, cstr("ms")) != 0 || streq(s, cstr("s")) != 0 || streq(s, cstr("m")) != 0 || streq(s, cstr("h")) != 0 || streq(s, cstr("b")) != 0 || streq(s, cstr("kb")) != 0 || streq(s, cstr("mb")) != 0 || streq(s, cstr("gb")) != 0 {
+	if streq(s, "ns") != 0 || streq(s, "us") != 0 || streq(s, "ms") != 0 || streq(s, "s") != 0 || streq(s, "m") != 0 || streq(s, "h") != 0 || streq(s, "b") != 0 || streq(s, "kb") != 0 || streq(s, "mb") != 0 || streq(s, "gb") != 0 {
 		return s
 	}
 	return 0
@@ -331,7 +331,7 @@ fn lex_raw_string(pos i64) i64 {
 	let b = buf_new()
 	for lx_peek(0) != '`' {
 		if lx_i >= lx_len {
-			lx_fail_code(pos, cstr("E013 UNTERMINATED"), cstr("unterminated raw string literal"))
+			lx_fail_code(pos, "E013 UNTERMINATED", "unterminated raw string literal")
 		}
 		let c = lx_advance()
 		if c != '\r' {
@@ -340,7 +340,7 @@ fn lex_raw_string(pos i64) i64 {
 	}
 	lx_advance()
 	buf_byte(b, 0)
-	let rt = cast(Token, token_new(TK_STRING, buf_cstring(b), len(b) - 1, pos))
+	let rt = cast(Token, token_new(TK_STRING, cstr(buf_cstring(b)), len(b) - 1, pos))
 	rt.raw = 1
 	return cast(i64, rt)
 }
@@ -378,9 +378,9 @@ fn lex_number(pos i64) i64 {
 		for is_letter(lx_peek(0)) != 0 {
 			lx_advance()
 		}
-		unit_ = unit_name(str_slice(lx_src + unit_start, lx_i - unit_start))
+		unit_ = unit_name(cstr(str_slice(lx_src + unit_start, lx_i - unit_start)))
 		if unit_ == 0 {
-			lx_fail_code(pos, cstr("E012 NUMERIC_UNIT"), cstr("unknown numeric unit suffix"))
+			lx_fail_code(pos, "E012 NUMERIC_UNIT", "unknown numeric unit suffix")
 		}
 	} else {
 		for is_letter(lx_peek(0)) != 0 || is_digit(lx_peek(0)) != 0 {
@@ -443,12 +443,12 @@ fn lex_number(pos i64) i64 {
 	}
 	let text = str_slice(s, n)
 	if ok == 0 {
-		let e = cast([]i64, err_code(pos, cstr("E011 INVALID_NUMBER")))
-		buf_str(cast([]u8, e), cstr("invalid number "))
+		let e = cast([]i64, err_code(pos, "E011 INVALID_NUMBER"))
+		buf_str(cast([]u8, e), "invalid number ")
 		buf_str(cast([]u8, e), text)
 		fatal(cast([]u8, e))
 	}
-	let t = cast(Token, token_new(TK_INT, text, val, pos))
+	let t = cast(Token, token_new(TK_INT, cstr(text), val, pos))
 	t.unit = unit_
 	return cast(i64, t)
 }
@@ -487,7 +487,7 @@ fn lex_char(pos i64) i64 {
 	let start = lx_i
 	lx_advance()
 	if lx_i >= lx_len || lx_peek(0) == '\n' || lx_peek(0) == '\'' {
-		lx_fail_code(pos, cstr("E014 CHAR_LITERAL"), cstr("invalid character literal"))
+		lx_fail_code(pos, "E014 CHAR_LITERAL", "invalid character literal")
 	}
 	mut c = 0
 	if lx_peek(0) == '\\' {
@@ -499,10 +499,10 @@ fn lex_char(pos i64) i64 {
 		c = lx_advance()
 	}
 	if lx_peek(0) != '\'' {
-		lx_fail_code(pos, cstr("E014 CHAR_LITERAL"), cstr("unterminated character literal"))
+		lx_fail_code(pos, "E014 CHAR_LITERAL", "unterminated character literal")
 	}
 	lx_advance()
-	return token_new(TK_INT, str_slice(lx_src + start, lx_i - start), c, pos)
+	return token_new(TK_INT, cstr(str_slice(lx_src + start, lx_i - start)), c, pos)
 }
 
 // buf_utf8 appends rune r encoded as UTF-8.
@@ -530,13 +530,13 @@ fn lex_string(pos i64) i64 {
 	mut doubled = 0
 	for {
 		if lx_i >= lx_len || lx_peek(0) == '\n' {
-			lx_fail_code(pos, cstr("E013 UNTERMINATED"), cstr("unterminated string literal"))
+			lx_fail_code(pos, "E013 UNTERMINATED", "unterminated string literal")
 		}
 		let c = lx_advance()
 		if c == '"' {
 			// The NUL makes T_TEXT usable as a C string; T_VAL keeps the real length.
 			buf_byte(b, 0)
-			let st = cast(Token, token_new(TK_STRING, buf_cstring(b), len(b) - 1, pos))
+			let st = cast(Token, token_new(TK_STRING, cstr(buf_cstring(b)), len(b) - 1, pos))
 			st.dbl = doubled
 			return cast(i64, st)
 		}
@@ -564,7 +564,7 @@ fn lx_hex(pos i64, digits_in i64) i64 {
 	for digits > 0 {
 		let c = lx_peek(0)
 		if is_hex_digit(c) == 0 {
-			lx_fail_code(pos, cstr("E015 ESCAPE"), cstr("invalid hex escape"))
+			lx_fail_code(pos, "E015 ESCAPE", "invalid hex escape")
 		}
 		lx_advance()
 		v = v * 16 + hex_value(c)
@@ -578,7 +578,7 @@ fn lx_hex(pos i64, digits_in i64) i64 {
 fn lx_escape(pos i64) i64 {
 	lx_esc_rune = 0
 	if lx_i >= lx_len {
-		lx_fail_code(pos, cstr("E013 UNTERMINATED"), cstr("unterminated escape sequence"))
+		lx_fail_code(pos, "E013 UNTERMINATED", "unterminated escape sequence")
 	}
 	let c = lx_advance()
 	if c == 'n' {
@@ -626,8 +626,8 @@ fn lx_escape(pos i64) i64 {
 		}
 		return v & 255
 	}
-	let e = cast([]i64, err_code(pos, cstr("E015 ESCAPE")))
-	buf_str(cast([]u8, e), cstr("unknown escape sequence \\"))
+	let e = cast([]i64, err_code(pos, "E015 ESCAPE"))
+	buf_str(cast([]u8, e), "unknown escape sequence \\")
 	buf_byte(cast([]u8, e), c)
 	fatal(cast([]u8, e))
 	return 0

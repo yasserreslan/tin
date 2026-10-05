@@ -260,7 +260,7 @@ fn rg_stmt(s i64) {
 // header in place and returns it, so storing the result back changes nothing.
 fn rg_regrow(t i64, x_in i64) i64 {
 	mut x = x_in
-	for cast(Node, x).kind == EX_CALL && cast(Call, x).name != 0 && (streq(cast(Call, x).name, cstr("rt_append")) != 0 || streq(cast(Call, x).name, cstr("rt_append_rc")) != 0 || streq(cast(Call, x).name, cstr("rt_slice_appendn")) != 0 || streq(cast(Call, x).name, cstr("rt_slice_appendn_rc")) != 0 || streq(cast(Call, x).name, cstr("rt_append_str")) != 0) {
+	for cast(Node, x).kind == EX_CALL && cast(Call, x).name != 0 && (streq(cast(Call, x).name, "rt_append") != 0 || streq(cast(Call, x).name, "rt_append_rc") != 0 || streq(cast(Call, x).name, "rt_slice_appendn") != 0 || streq(cast(Call, x).name, "rt_slice_appendn_rc") != 0 || streq(cast(Call, x).name, "rt_append_str") != 0) {
 		x = cast(Call, x).args[0]
 	}
 	return rg_same(t, x)
@@ -480,7 +480,7 @@ fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname i64) {
 		if (c & (RG_P0 << i)) != 0 {
 			if rg_report != 0 && cast(Fn, rg_fn).muts[i] == 0 && (rg_modrep & (1 << i)) == 0 {
 				rg_modrep = rg_modrep | (1 << i)
-				err_code_quoted(pos, cstr("E701 NOT_MUT"), cstr("cannot modify parameter "), rg_param_name(i), cstr(": declare it mut"))
+				err_code_quoted(pos, "E701 NOT_MUT", "cannot modify parameter ", rg_param_name(i), ": declare it mut")
 			}
 			rg_record(cast([]i64, rg_sum[11]), i, co, ct)
 		}
@@ -498,9 +498,9 @@ fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname i64) {
 	}
 	if (c & (RG_INGOT | RG_UNK)) != 0 && rg_report != 0 {
 		if gname != 0 {
-			err_code_quoted(pos, cstr("E310 REQUEST_ESCAPE"), cstr("request memory stored into global "), gname, cstr(", which outlives the request: wrap the value in keep()"))
+			err_code_quoted(pos, "E310 REQUEST_ESCAPE", "request memory stored into global ", gname, ", which outlives the request: wrap the value in keep()")
 		} else {
-			err_code_at(pos, cstr("E310 REQUEST_ESCAPE"), cstr("request memory stored into long-lived memory (it may be reachable from a global): wrap the value in keep()"))
+			err_code_at(pos, "E310 REQUEST_ESCAPE", "request memory stored into long-lived memory (it may be reachable from a global): wrap the value in keep()")
 		}
 	}
 	i = 0
@@ -576,11 +576,11 @@ fn rg_cell_store(i i64, v_in i64, t i64, pos i64) {
 	if cast(Fn, rg_fn).escapes != 0 {
 		if (v & RG_EMB) != 0 && has_ptr(cast(Ty, t)) != 0 && rg_report != 0 {
 			let os = cast(Fn, rg_fn).captures[i]
-			mut name = cstr("a captured variable")
+			mut name = "a captured variable"
 			if cast(i64, os) != 0 {
-				name = os.name
+				name = str_of(os.name)
 			}
-			err_code_quoted(pos, cstr("E311 CAPTURE_ESCAPE"), cstr("request memory stored into "), name, cstr(", a captured variable of a closure that may outlive the request (keep() copies its variables into long-lived memory): wrap the value in keep(), or pass the closure only to functions that call it"))
+			err_code_quoted(pos, "E311 CAPTURE_ESCAPE", "request memory stored into ", cstr(name), ", a captured variable of a closure that may outlive the request (keep() copies its variables into long-lived memory): wrap the value in keep(), or pass the closure only to functions that call it")
 		}
 		return
 	}
@@ -601,7 +601,7 @@ fn rg_expr(e i64) i64 {
 		if s.kind == SYM_LOCAL {
 			if rs_active != 0 && slice_has(rs_dead, cast(i64, s)) != 0 && slice_has(rs_said, cast(i64, s)) == 0 {
 				rs_said = append(rs_said, cast(i64, s))
-				err_code_quoted(cast(Node, e).pos, cstr("E313 USE_AFTER_RESET"), cstr(""), s.name, cstr(" may hold request memory from before hearth.Reset(), which freed it, and is read after the reset: keep() the value before the reset, or create it after"))
+				err_code_quoted(cast(Node, e).pos, "E313 USE_AFTER_RESET", "", s.name, " may hold request memory from before hearth.Reset(), which freed it, and is read after the reset: keep() the value before the reset, or create it after")
 			}
 			return s.region
 		}
@@ -794,7 +794,7 @@ fn rg_detach_check(f i64) {
 				bit = j
 			}
 			if cast(i64, os) != 0 && (raw & (1 << bit)) != 0 && has_ptr(cast(Ty, os.type_)) != 0 && (rg_capture_bits(cast(Sym, os)) & RG_EMB) != 0 {
-				err_code_quoted(d.pos, cstr("E314 DETACH_ESCAPE"), cstr("detach captures "), os.name, cstr(", which may hold request memory, but the detached task outlives the request: keep() it before the block (let v = keep(...)), or read it in the block only inside keep()"))
+				err_code_quoted(d.pos, "E314 DETACH_ESCAPE", "detach captures ", os.name, ", which may hold request memory, but the detached task outlives the request: keep() it before the block (let v = keep(...)), or read it in the block only inside keep()")
 			}
 			j = j + 1
 		}
@@ -834,7 +834,7 @@ fn rg_arena_made(v i64) i64 {
 }
 
 fn rg_arena_escape(pos i64, name i64) {
-	err_code_quoted(pos, cstr("E315 ARENA_ESCAPE"), cstr("memory made in an arena stored into "), name, cstr(", a variable from outside it, which outlives the arena: make the value the arena block's result (it is copied out), or keep() it"))
+	err_code_quoted(pos, "E315 ARENA_ESCAPE", "memory made in an arena stored into ", name, ", a variable from outside it, which outlives the arena: make the value the arena block's result (it is copied out), or keep() it")
 }
 
 // rg_arena_cell_store checks a store of bits v into captured variable i inside an arena and
@@ -843,17 +843,17 @@ fn rg_arena_cell_store(i i64, v i64, t i64, pos i64) i64 {
 	let os = cast(Fn, rg_fn).captures[i]
 	let outside = i64(rg_is_arena(rg_fn) != 0 || (cast(i64, os) != 0 && os.captured != 0 && rg_is_arena(cast(Fn, rg_fn).parent) != 0))
 	if outside != 0 && cast(Fn, rg_fn).escapes == 0 && has_ptr(cast(Ty, t)) != 0 && rg_arena_made(v) != 0 && rg_report != 0 {
-		mut name = cstr("a captured variable")
+		mut name = "a captured variable"
 		if cast(i64, os) != 0 {
-			name = os.name
+			name = str_of(os.name)
 		}
-		rg_arena_escape(pos, name)
+		rg_arena_escape(pos, cstr(name))
 	}
 	return v & ~RG_OUT
 }
 
 fn rg_grows_op(name i64) i64 {
-	return i64(streq(name, cstr("rt_append")) != 0 || streq(name, cstr("rt_append_rc")) != 0 || streq(name, cstr("rt_append_dyn")) != 0 || streq(name, cstr("rt_slice_appendn")) != 0 || streq(name, cstr("rt_slice_appendn_rc")) != 0 || streq(name, cstr("rt_append_str")) != 0 || streq(name, cstr("rt_map_set")) != 0 || streq(name, cstr("rt_map_setk")) != 0)
+	return i64(streq(name, "rt_append") != 0 || streq(name, "rt_append_rc") != 0 || streq(name, "rt_append_dyn") != 0 || streq(name, "rt_slice_appendn") != 0 || streq(name, "rt_slice_appendn_rc") != 0 || streq(name, "rt_append_str") != 0 || streq(name, "rt_map_set") != 0 || streq(name, "rt_map_setk") != 0)
 }
 
 // rg_grow notes that the running function may grow the slice or map with bits b.
@@ -871,7 +871,7 @@ fn rg_grow(b i64, pos i64) {
 		i = i + 1
 	}
 	if (b & RG_OUT) != 0 && (b & ~(RG_OUT | RG_INGOT)) != 0 && rg_report != 0 && rg_in_arena() != 0 {
-		err_code_at(pos, cstr("E315 ARENA_ESCAPE"), cstr("a slice or map from outside an arena grows inside it (append or insert), so its new memory would be the arena's: grow it after the block, from the block's result"))
+		err_code_at(pos, "E315 ARENA_ESCAPE", "a slice or map from outside an arena grows inside it (append or insert), so its new memory would be the arena's: grow it after the block, from the block's result")
 	}
 }
 
@@ -904,7 +904,7 @@ fn rg_arena_store(c i64, v i64, pos i64) {
 		i = i + 1
 	}
 	if (c & (RG_INGOT | RG_UNK)) == 0 && (c & RG_OUT) != 0 && rg_report != 0 && rg_in_arena() != 0 && rg_arena_made(v) != 0 {
-		err_code_at(pos, cstr("E315 ARENA_ESCAPE"), cstr("memory made in an arena stored into an object from outside it, which outlives the arena: make the value the arena block's result (it is copied out), or keep() it"))
+		err_code_at(pos, "E315 ARENA_ESCAPE", "memory made in an arena stored into an object from outside it, which outlives the arena: make the value the arena block's result (it is copied out), or keep() it")
 	}
 }
 
@@ -1224,10 +1224,10 @@ fn rg_call(e i64) i64 {
 			if (mask & (1 << i)) != 0 {
 				let saved = rg_report
 				if rg_report != 0 && ((b[i] | rg_pass(cast([]i64, rg_fnsum[10]), i, cast([]Node, args), b, -1, pos)) & (RG_INGOT | RG_UNK)) != 0 {
-					let m = err_code(pos, cstr("E312 ARG_ESCAPE"))
-					buf_str(m, cstr("a call through a function value may store request memory into its mut argument "))
+					let m = err_code(pos, "E312 ARG_ESCAPE")
+					buf_str(m, "a call through a function value may store request memory into its mut argument ")
 					buf_int(m, i + 1)
-					buf_str(m, cstr(", which may be long-lived: call the function directly or pass request-owned memory"))
+					buf_str(m, ", which may be long-lived: call the function directly or pass request-owned memory")
 					err_end(cast([]u8, m))
 					rg_report = 0
 				}
@@ -1250,7 +1250,7 @@ fn rg_call(e i64) i64 {
 	if cast(i64, f) != 0 && f.qname != 0 {
 		name = f.qname
 	}
-	if (name != 0 && streq(name, cstr("hearth.Reset")) != 0) || (cast(i64, f) != 0 && f.regsum != 0 && f.regsum[12] != 0 && file_trusted[f.file] == 0) {
+	if (name != 0 && streq(name, "hearth.Reset") != 0) || (cast(i64, f) != 0 && f.regsum != 0 && f.regsum[12] != 0 && file_trusted[f.file] == 0) {
 		rg_resets()
 	}
 	if cast(Node, e).region == R_OWNED || (cast(i64, f) != 0 && is_keep_fn(f) != 0) || (name != 0 && str_prefix(name, cstr("rt_keep")) != 0) {
@@ -1275,16 +1275,16 @@ fn rg_call(e i64) i64 {
 		if (sum[0] & (1 << i)) != 0 {
 			let saved = rg_report
 			if rg_report != 0 && (rg_pass(cast([]i64, sum[10]), i, cast([]Node, args), b, -1, pos) & (RG_INGOT | RG_UNK)) != 0 {
-				let m = err_code(pos, cstr("E312 ARG_ESCAPE"))
-				buf_str(m, name)
-				buf_str(m, cstr(" stores request memory into its mut parameter '"))
-				buf_str(m, cast(Sym, cast([]i64, f.locals)[i]).name)
+				let m = err_code(pos, "E312 ARG_ESCAPE")
+				buf_str(m, str_of(name))
+				buf_str(m, " stores request memory into its mut parameter '")
+				buf_str(m, str_of(cast(Sym, cast([]i64, f.locals)[i]).name))
 				if file_trusted[f.file] != 0 {
 					// The standard library cannot be changed by its caller: the argument must.
-					buf_str(m, cstr("', but this argument may be long-lived: pass request memory (a local) instead"))
+					buf_str(m, "', but this argument may be long-lived: pass request memory (a local) instead")
 				} else {
-					buf_str(m, cstr("', but this argument may be long-lived: keep() the stored values inside "))
-					buf_str(m, name)
+					buf_str(m, "', but this argument may be long-lived: keep() the stored values inside ")
+					buf_str(m, str_of(name))
 				}
 				err_end(cast([]u8, m))
 				rg_report = 0
@@ -1443,26 +1443,26 @@ fn rg_runtime_call(e i64, name i64, b []i64, pos i64) i64 {
 	if n > 0 && rg_grows_op(name) != 0 {
 		rg_grow(b0, pos)
 	}
-	if streq(name, cstr("rt_map_set")) != 0 {
+	if streq(name, "rt_map_set") != 0 {
 		rg_store(b0, co, ct, b[1], cast(Node, args[1]).type_, pos, 0)
 		rg_store(b0, co, ct, b[2], cast(Node, args[2]).type_, pos, 0)
 		return 0
 	}
-	if streq(name, cstr("rt_map_setk")) != 0 {
+	if streq(name, "rt_map_setk") != 0 {
 		// The encoded key is copied into the map's region; only the value is stored.
 		rg_store(b0, co, ct, b[2], cast(Node, args[2]).type_, pos, 0)
 		return 0
 	}
-	if streq(name, cstr("rt_append")) != 0 || streq(name, cstr("rt_append_rc")) != 0 {
+	if streq(name, "rt_append") != 0 || streq(name, "rt_append_rc") != 0 {
 		rg_store(b0, co, ct, b[1], cast(Node, args[1]).type_, pos, 0)
 		return b0
 	}
-	if streq(name, cstr("rt_append_dyn")) != 0 {
+	if streq(name, "rt_append_dyn") != 0 {
 		mut et = cast(Ty, cast(Node, args[0]).type_).elem
 		rg_store(b0, co, ct, b[1], et, pos, 0)
 		return b0
 	}
-	if streq(name, cstr("rt_slice_appendn")) != 0 || streq(name, cstr("rt_slice_copy")) != 0 || streq(name, cstr("rt_slice_appendn_rc")) != 0 || streq(name, cstr("rt_slice_copy_rc")) != 0 {
+	if streq(name, "rt_slice_appendn") != 0 || streq(name, "rt_slice_copy") != 0 || streq(name, "rt_slice_appendn_rc") != 0 || streq(name, "rt_slice_copy_rc") != 0 {
 		mut et = 0
 		let a1 = cast(Node, args[1])
 		if kind_of(cast(Ty, a1.type_)) == K_SLICE {
@@ -1475,17 +1475,17 @@ fn rg_runtime_call(e i64, name i64, b []i64, pos i64) i64 {
 		}
 		return b0
 	}
-	if streq(name, cstr("rt_append_str")) != 0 || streq(name, cstr("rt_copy_str")) != 0 || streq(name, cstr("rt_map_del")) != 0 {
+	if streq(name, "rt_append_str") != 0 || streq(name, "rt_copy_str") != 0 || streq(name, "rt_map_del") != 0 {
 		rg_store(b0, co, ct, 0, 0, pos, 0)
 		return b0
 	}
-	if streq(name, cstr("rt_map_get")) != 0 || streq(name, cstr("rt_map_key")) != 0 || streq(name, cstr("rt_map_val")) != 0 {
+	if streq(name, "rt_map_get") != 0 || streq(name, "rt_map_key") != 0 || streq(name, "rt_map_val") != 0 {
 		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return rg_load(b0, cast(Node, e).type_)
 		}
 		return 0
 	}
-	if streq(name, cstr("rt_slice_sub")) != 0 {
+	if streq(name, "rt_slice_sub") != 0 {
 		return b0 | RG_FRESH | RG_EMB
 	}
 	if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
@@ -1568,16 +1568,16 @@ fn wb_param_ok(f Fn, i i64, say i64) i64 {
 // passed to, or is 0.
 fn wb_keeps(pos i64, via i64) {
 	if wb_say != 0 && wb_bad == 0 {
-		let m = err_code(pos, cstr("E653 POLICY_BODY"))
-		buf_str(m, cast(Fn, wb_fn).qname)
+		let m = err_code(pos, "E653 POLICY_BODY")
+		buf_str(m, str_of(cast(Fn, wb_fn).qname))
 		if via != 0 {
-			buf_str(m, cstr(" passes the body of a with block to "))
-			buf_str(m, cast(Fn, via).qname)
-			buf_str(m, cstr(", which may keep it"))
+			buf_str(m, " passes the body of a with block to ")
+			buf_str(m, str_of(cast(Fn, via).qname))
+			buf_str(m, ", which may keep it")
 		} else {
-			buf_str(m, cstr(" keeps the body of a with block"))
+			buf_str(m, " keeps the body of a with block")
 		}
-		buf_str(m, cstr(": a policy may only call body, or pass it to a function that only calls it (the block's variables live on the caller's frame)"))
+		buf_str(m, ": a policy may only call body, or pass it to a function that only calls it (the block's variables live on the caller's frame)")
 		err_end(cast([]u8, m))
 	}
 	wb_bad = 1
@@ -1893,7 +1893,7 @@ fn rc_wrap(s i64, stmts []i64, i i64, oldRead i64, t i64, pre0 []i64) i64 {
 // rc_pin_value pins the value assignment s stores, in place: rt_rc_pinned returns its
 // argument, so the evaluation order of the store does not change.
 fn rc_pin_value(s i64, t i64) {
-	let c = cast(Call, rt_call(cast(Node, s).pos, cstr("rt_rc_pinned"), args1(cast(AssignStmt, s).value), t))
+	let c = cast(Call, rt_call(cast(Node, s).pos, "rt_rc_pinned", args1(cast(AssignStmt, s).value), t))
 	mark_reach(cast(Fn, c.fn_))
 	cast(AssignStmt, s).value = cast(i64, c)
 }
@@ -1997,7 +1997,7 @@ fn rc_elem_read(pos i64, target ElemExpr, t i64) i64 {
 // rc_append_into reports whether xs = append(xs, v) grows the very global being assigned:
 // rt_append_rc counted its element and returned the same header, so nothing else moves.
 fn rc_append_into(v i64, target IdentExpr) i64 {
-	if cast(Node, v).kind != EX_CALL || cast(Call, v).name == 0 || streq(cast(Call, v).name, cstr("rt_append_rc")) == 0 {
+	if cast(Node, v).kind != EX_CALL || cast(Call, v).name == 0 || streq(cast(Call, v).name, "rt_append_rc") == 0 {
 		return 0
 	}
 	let a0 = cast(Call, v).args[0]
@@ -2020,8 +2020,8 @@ shared mut cg_refs []i64
 shared mut cg_in_main i64 // 1 while walking main's tree (record stores, follow calls), 0 while collecting names
 
 fn core_global_check() {
-	let run = find_fn(cstr("hearth.Run"))
-	let m = find_fn(cstr("main"))
+	let run = find_fn("hearth.Run")
+	let m = find_fn("main")
 	if cast(i64, run) == 0 || cast(Fn, run).reach == 0 || cast(i64, m) == 0 || cast(Fn, m).body == 0 {
 		return
 	}
@@ -2046,7 +2046,7 @@ fn core_global_check() {
 	for i < len(cg_stores) {
 		let g = cg_stores[i]
 		if slice_has(cg_refs, g) != 0 {
-			err_code_quoted(cg_stores[i + 1], cstr("E131 CORE_GLOBAL"), cstr("global "), cast(Sym, g).name, cstr(" is assigned here, in code that runs on core 0 only (main and what it calls): the other cores keep the initializer's value. Assign it in its initializer, in `on core.start` or in `once`"))
+			err_code_quoted(cg_stores[i + 1], "E131 CORE_GLOBAL", "global ", cast(Sym, g).name, " is assigned here, in code that runs on core 0 only (main and what it calls): the other cores keep the initializer's value. Assign it in its initializer, in `on core.start` or in `once`")
 		}
 		i = i + 2
 	}

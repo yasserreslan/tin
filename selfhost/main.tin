@@ -32,9 +32,9 @@ fn try_read_file(path i64) i64 {
 fn read_file(path i64) []i64 {
 	let b = try_read_file(path)
 	if b == 0 {
-		let e = cast([]i64, err_code(NO_POS, cstr("E003 CANNOT_OPEN")))
-		buf_str(cast([]u8, e), cstr("cannot open "))
-		buf_str(cast([]u8, e), path)
+		let e = cast([]i64, err_code(NO_POS, "E003 CANNOT_OPEN"))
+		buf_str(cast([]u8, e), "cannot open ")
+		buf_str(cast([]u8, e), str_of(path))
 		fatal(cast([]u8, e))
 	}
 	return cast([]i64, b)
@@ -72,36 +72,45 @@ fn host_is_x64() i64 {
 
 // set_target parses darwin-arm64, linux-arm64 or linux-amd64.
 fn set_target(t i64) {
-	if streq(t, cstr("darwin-arm64")) != 0 {
+	if streq(t, "darwin-arm64") != 0 {
 		tgt_linux = 0
 		tgt_x64 = 0
-	} else if streq(t, cstr("linux-arm64")) != 0 {
+	} else if streq(t, "linux-arm64") != 0 {
 		tgt_linux = 1
 		tgt_x64 = 0
-	} else if streq(t, cstr("linux-amd64")) != 0 {
+	} else if streq(t, "linux-amd64") != 0 {
 		tgt_linux = 1
 		tgt_x64 = 1
 	} else {
-		let e = cast([]i64, err_code(NO_POS, cstr("E901 UNKNOWN_TARGET")))
-		buf_str(cast([]u8, e), cstr("unknown target "))
-		buf_str(cast([]u8, e), t)
-		buf_str(cast([]u8, e), cstr(" (darwin-arm64, linux-arm64, linux-amd64)"))
+		let e = cast([]i64, err_code(NO_POS, "E901 UNKNOWN_TARGET"))
+		buf_str(cast([]u8, e), "unknown target ")
+		buf_str(cast([]u8, e), str_of(t))
+		buf_str(cast([]u8, e), " (darwin-arm64, linux-arm64, linux-amd64)")
 		fatal(cast([]u8, e))
 	}
 }
 
 fn usage() i64 {
 	let u = buf_new()
-	buf_str(u, cstr("usage: tinc [-fix] [-polls] [-edition 0|1] [-parse-only] [-audit-secrets] [-caps] [-hash FILE...] [-S] [-o OUT] [-target darwin-arm64|linux-arm64|linux-amd64] FILE.tin...\n"))
+	buf_str(u, "usage: tinc [-fix] [-polls] [-edition 0|1] [-parse-only] [-audit-secrets] [-caps] [-hash FILE...] [-S] [-o OUT] [-target darwin-arm64|linux-arm64|linux-amd64] FILE.tin...\n")
 	write_all(2, cast([]u8, u))
 	return 2
 }
 
+// real_path is the canonical path of path as a compiler string, or 0 when it does not exist.
+fn real_path(path i64) i64 {
+	let buf = calloc(4096, 1)
+	if host_realpath(path, buf) == 0 {
+		return 0
+	}
+	return cstr(str_slice(buf, strlen(buf)))
+}
+
 // find_root locates the Tin tree (with lib/) from $TIN_ROOT or this executable's path.
 fn find_root() i64 {
-	let env = host_getenv(cstr("TIN_ROOT"))
+	let env = host_getenv("TIN_ROOT")
 	if env != 0 {
-		return str_slice(env, strlen(env))
+		return cstr(str_slice(env, strlen(env)))
 	}
 	let raw = calloc(4096, 1)
 	host_exe_path(raw, 4096)
@@ -120,7 +129,7 @@ fn find_root() i64 {
 		}
 		i = i - 1
 	}
-	return real
+	return cstr(str_slice(real, strlen(real)))
 }
 
 fn load_file(path i64) {
@@ -128,22 +137,22 @@ fn load_file(path i64) {
 	// cast like the runtime does.
 	// 2 marks the compiler's own files: their stores are not reference counted (rc_assign), the
 	// compiler's records live as long as the process.
-	mut trusted = path_in_root_dir(path, cstr("/selfhost/")) * 2
+	mut trusted = path_in_root_dir(path, "/selfhost/") * 2
 	if trusted == 0 {
-		trusted = path_in_root_dir(path, cstr("/tools/"))
+		trusted = path_in_root_dir(path, "/tools/")
 	}
 	load_file_trusted(path, trusted)
 }
 
 // path_in_root_dir reports whether the file at path is under <root><dir>, the Tin tree that
 // find_root locates (dir starts and ends with a slash).
-fn path_in_root_dir(path i64, dir i64) i64 {
-	let real = calloc(4096, 1)
-	let root = calloc(4096, 1)
-	if host_realpath(path, real) == 0 || host_realpath(find_root(), root) == 0 {
+fn path_in_root_dir(path i64, dir str) i64 {
+	let real = real_path(path)
+	let root = real_path(find_root())
+	if real == 0 || root == 0 {
 		return 0
 	}
-	let prefix = cat_path(root, dir)
+	let prefix = cat_path(root, cstr(dir))
 	let n = strlen(prefix)
 	return i64(strlen(real) > n && mem_eq(real, prefix, n) != 0)
 }
@@ -177,9 +186,9 @@ fn load_file_trusted(path i64, trusted_in i64) {
 	}
 	if edition == 0 && compiler_fix == 0 {
 		// edition 0 is retired (#226): only tin fix reads it
-		let e = cast([]i64, err_code(NO_POS, cstr("E090 OLD_SYNTAX")))
-		buf_str(cast([]u8, e), path)
-		buf_str(cast([]u8, e), cstr(" is edition 0, which is retired: translate it with tin fix -edition 1"))
+		let e = cast([]i64, err_code(NO_POS, "E090 OLD_SYNTAX"))
+		buf_str(cast([]u8, e), str_of(path))
+		buf_str(cast([]u8, e), " is edition 0, which is retired: translate it with tin fix -edition 1")
 		fatal(cast([]u8, e))
 	}
 	let toks = lex(cur_file, slice_data(src), len(src), edition)
@@ -195,9 +204,9 @@ fn load_file_trusted(path i64, trusted_in i64) {
 // fix_in_lib reports a standard library file (under <root>/lib/): -fix reads it trusted, as an
 // import loads it, so its edition 0 secret types parse.
 fn fix_in_lib(path i64) i64 {
-	let real = calloc(4096, 1)
-	let root = calloc(4096, 1)
-	if host_realpath(path, real) == 0 || host_realpath(find_root(), root) == 0 {
+	let real = real_path(path)
+	let root = real_path(find_root())
+	if real == 0 || root == 0 {
 		return 0
 	}
 	let lib = cat_path(root, cstr("/lib/"))
@@ -208,7 +217,7 @@ fn fix_in_lib(path i64) i64 {
 fn is_loaded(path i64) i64 {
 	mut i = 0
 	for i < len(files) {
-		if streq(files[i], path) != 0 {
+		if streq(files[i], str_of(path)) != 0 {
 			return 1
 		}
 		i = i + 1
@@ -218,10 +227,10 @@ fn is_loaded(path i64) i64 {
 
 fn cat_path(a i64, b i64) i64 {
 	let p = buf_new()
-	buf_str(p, a)
-	buf_str(p, b)
+	buf_str(p, str_of(a))
+	buf_str(p, str_of(b))
 	buf_byte(p, 0)
-	return buf_cstring(p)
+	return cstr(buf_cstring(p))
 }
 
 // dir_of is the directory part of a file path ("." when there is none).
@@ -241,13 +250,13 @@ fn dir_of(path i64) i64 {
 		j = j + 1
 	}
 	buf_byte(b, 0)
-	return buf_cstring(b)
+	return cstr(buf_cstring(b))
 }
 
-fn ends_with(s i64, suffix i64) i64 {
+fn ends_with(s i64, suffix str) i64 {
 	let n = strlen(s)
-	let m = strlen(suffix)
-	return i64(n >= m && mem_eq(s + n - m, suffix, m + 1) != 0)
+	let m = strlen(cstr(suffix))
+	return i64(n >= m && mem_eq(s + n - m, cstr(suffix), m + 1) != 0)
 }
 
 // package_files returns the files of the package at base: base.tin, or every .tin file in
@@ -282,8 +291,8 @@ fn package_files(base i64) i64 {
 		}
 		let dname = host_dirent_name(ent)
 		let name = str_slice(dname, strlen(dname))
-		if ends_with(name, cstr(".tin")) != 0 && ends_with(name, cstr("_test.tin")) == 0 && i64(load8(name)) != '.' && other_os_file(name) == 0 {
-			out = append(out, cat_path(cat_path(base, cstr("/")), name))
+		if ends_with(cstr(name), ".tin") != 0 && ends_with(cstr(name), "_test.tin") == 0 && i64(load8(name)) != '.' && other_os_file(cstr(name)) == 0 {
+			out = append(out, cat_path(cat_path(base, cstr("/")), cstr(name)))
 		}
 	}
 	rt_sys_closedir(d)
@@ -329,7 +338,7 @@ fn resolve_import(ipath i64, from i64) i64 {
 // vendor_dir is the project's vendor/ directory, with a trailing slash ("vendor/" when the
 // program is in the current directory, so paths in messages do not start with ./).
 fn vendor_dir() i64 {
-	if streq(project_root, cstr(".")) != 0 {
+	if streq(project_root, ".") != 0 {
 		return cstr("vendor/")
 	}
 	return cat_path(project_root, cstr("/vendor/"))
@@ -362,15 +371,15 @@ fn check_pkg_home(ipath i64, found []i64) {
 	mut i = 0
 	for i < len(pkg_homes) {
 		let h = cast([]i64, pkg_homes[i])
-		if streq(h[0], name) != 0 {
+		if streq(h[0], str_of(name)) != 0 {
 			if streq(h[1], real) == 0 {
-				let e = cast([]i64, err_code(NO_POS, cstr("E113 PACKAGE_CONFLICT")))
-				buf_str(cast([]u8, e), cstr("import paths \""))
-				buf_str(cast([]u8, e), h[2])
-				buf_str(cast([]u8, e), cstr("\" and \""))
-				buf_str(cast([]u8, e), ipath)
-				buf_str(cast([]u8, e), cstr("\" are different packages with the same name "))
-				buf_str(cast([]u8, e), name)
+				let e = cast([]i64, err_code(NO_POS, "E113 PACKAGE_CONFLICT"))
+				buf_str(cast([]u8, e), "import paths \"")
+				buf_str(cast([]u8, e), str_of(h[2]))
+				buf_str(cast([]u8, e), "\" and \"")
+				buf_str(cast([]u8, e), str_of(ipath))
+				buf_str(cast([]u8, e), "\" are different packages with the same name ")
+				buf_str(cast([]u8, e), str_of(name))
 				fatal(cast([]u8, e))
 			}
 			return
@@ -379,7 +388,7 @@ fn check_pkg_home(ipath i64, found []i64) {
 	}
 	let rec = []i64{}
 	rec = append(rec, name)
-	rec = append(rec, real)
+	rec = append(rec, cstr(real))
 	rec = append(rec, ipath)
 	pkg_homes = append(pkg_homes, cast(i64, rec))
 }
@@ -395,19 +404,19 @@ fn load_imports() {
 			let ipath = cast([]i64, imps[i])[1]
 			let found = cast([]i64, resolve_import(ipath, files[f]))
 			if cast(i64, found) == 0 && remote_path(ipath) != 0 {
-				let e = cast([]i64, err_code(NO_POS, cstr("E112 NOT_VENDORED")))
-				buf_str(cast([]u8, e), cstr("package \""))
-				buf_str(cast([]u8, e), ipath)
-				buf_str(cast([]u8, e), cstr("\" is not vendored: there is no vendor/"))
-				buf_str(cast([]u8, e), ipath)
-				buf_str(cast([]u8, e), cstr(" in the program's directory (tin vendor copies it there; the build never fetches)"))
+				let e = cast([]i64, err_code(NO_POS, "E112 NOT_VENDORED"))
+				buf_str(cast([]u8, e), "package \"")
+				buf_str(cast([]u8, e), str_of(ipath))
+				buf_str(cast([]u8, e), "\" is not vendored: there is no vendor/")
+				buf_str(cast([]u8, e), str_of(ipath))
+				buf_str(cast([]u8, e), " in the program's directory (tin vendor copies it there; the build never fetches)")
 				fatal(cast([]u8, e))
 			}
 			if cast(i64, found) == 0 {
-				let e = cast([]i64, err_code(NO_POS, cstr("E110 UNKNOWN_PACKAGE")))
-				buf_str(cast([]u8, e), cstr("unknown package \""))
-				buf_str(cast([]u8, e), ipath)
-				buf_str(cast([]u8, e), cstr("\" (looked in the standard library, next to the importing file and in the program's directory)"))
+				let e = cast([]i64, err_code(NO_POS, "E110 UNKNOWN_PACKAGE"))
+				buf_str(cast([]u8, e), "unknown package \"")
+				buf_str(cast([]u8, e), str_of(ipath))
+				buf_str(cast([]u8, e), "\" (looked in the standard library, next to the importing file and in the program's directory)")
 				fatal(cast([]u8, e))
 			}
 			check_pkg_home(ipath, found)
@@ -443,9 +452,9 @@ fn load_imports() {
 // other_os_file reports whether a file belongs to the other OS (x_linux.tin on macOS).
 fn other_os_file(name i64) i64 {
 	if tgt_linux != 0 {
-		return i64(ends_with(name, cstr("_darwin.tin")) != 0 || ends_with(name, other_arch_suffix()) != 0)
+		return i64(ends_with(name, "_darwin.tin") != 0 || ends_with(name, str_of(other_arch_suffix())) != 0)
 	}
-	return i64(ends_with(name, cstr("_linux.tin")) != 0 || ends_with(name, cstr("_linux_arm64.tin")) != 0 || ends_with(name, cstr("_linux_amd64.tin")) != 0)
+	return i64(ends_with(name, "_linux.tin") != 0 || ends_with(name, "_linux_arm64.tin") != 0 || ends_with(name, "_linux_amd64.tin") != 0)
 }
 
 fn other_arch_suffix() i64 {
@@ -500,7 +509,7 @@ fn digest_hex(d i64) i64 {
 		i = i + 1
 	}
 	buf_byte(out, 0)
-	return buf_cstring(out)
+	return cstr(buf_cstring(out))
 }
 
 // lock_entry returns the hash tin.lock records for a project-relative path (a C string of
@@ -524,7 +533,7 @@ fn lock_entry(rel i64) i64 {
 				j = j + 1
 			}
 			buf_byte(h, 0)
-			return buf_cstring(h)
+			return cstr(buf_cstring(h))
 		}
 		i = end + 1
 	}
@@ -550,26 +559,26 @@ fn lock_has(path i64) i64 {
 	sha256(slice_data(src), len(src), digest)
 	let hex = digest_hex(digest)
 	let want = lock_entry(rel)
-	if want != 0 && streq(want, hex) != 0 {
+	if want != 0 && streq(want, str_of(hex)) != 0 {
 		return 1
 	}
 	if want == 0 && starts_with(rel, cstr("vendor/")) == 0 {
 		return 1
 	}
-	let e = cast([]i64, err_code(NO_POS, cstr("E111 LOCK_MISMATCH")))
+	let e = cast([]i64, err_code(NO_POS, "E111 LOCK_MISMATCH"))
 	if want != 0 {
-		buf_str(cast([]u8, e), cstr("tin.lock hash mismatch for "))
-		buf_str(cast([]u8, e), rel)
-		buf_str(cast([]u8, e), cstr(": the lock records sha256 "))
-		buf_str(cast([]u8, e), want)
-		buf_str(cast([]u8, e), cstr(", the file has "))
-		buf_str(cast([]u8, e), hex)
+		buf_str(cast([]u8, e), "tin.lock hash mismatch for ")
+		buf_str(cast([]u8, e), str_of(rel))
+		buf_str(cast([]u8, e), ": the lock records sha256 ")
+		buf_str(cast([]u8, e), str_of(want))
+		buf_str(cast([]u8, e), ", the file has ")
+		buf_str(cast([]u8, e), str_of(hex))
 	} else {
-		buf_str(cast([]u8, e), cstr("tin.lock has no entry for "))
-		buf_str(cast([]u8, e), rel)
-		buf_str(cast([]u8, e), cstr(" (sha256 "))
-		buf_str(cast([]u8, e), hex)
-		buf_str(cast([]u8, e), cstr("); every vendored file must be locked"))
+		buf_str(cast([]u8, e), "tin.lock has no entry for ")
+		buf_str(cast([]u8, e), str_of(rel))
+		buf_str(cast([]u8, e), " (sha256 ")
+		buf_str(cast([]u8, e), str_of(hex))
+		buf_str(cast([]u8, e), "); every vendored file must be locked")
 	}
 	fatal(cast([]u8, e))
 	return 0
@@ -597,9 +606,9 @@ fn print_hashes(argc i64, av []i64) i64 {
 		let src = cast([]u8, read_file(av[i]))
 		let digest = calloc(32, 1)
 		sha256(slice_data(src), len(src), digest)
-		buf_str(out, digest_hex(digest))
+		buf_str(out, str_of(digest_hex(digest)))
 		buf_byte(out, ' ')
-		buf_str(out, av[i])
+		buf_str(out, str_of(av[i]))
 		buf_byte(out, '\n')
 		i = i + 1
 	}
@@ -613,10 +622,10 @@ fn compiler_main(argc i64, argv i64) i64 {
 	let av = []i64{}
 	mut ai = 0
 	for ai < argc {
-		av = append(av, str_slice(argv[ai], strlen(argv[ai])))
+		av = append(av, cstr(str_slice(argv[ai], strlen(argv[ai]))))
 		ai = ai + 1
 	}
-	if argc > 1 && streq(av[1], cstr("-hash")) != 0 {
+	if argc > 1 && streq(av[1], "-hash") != 0 {
 		return print_hashes(argc, av)
 	}
 	files = []i64{}
@@ -632,64 +641,64 @@ fn compiler_main(argc i64, argv i64) i64 {
 	compiler_edition = -1
 	compiler_polls = 0
 	polls_auto = 1
-	let polls_env = host_getenv(cstr("TINC_POLLS"))
+	let polls_env = host_getenv("TINC_POLLS")
 	if polls_env != 0 && i64(load8(polls_env)) == '1' {
 		compiler_polls = 1
 	}
 	if polls_env != 0 && i64(load8(polls_env)) == '0' {
 		polls_auto = 0
 	}
-	mut out_path = cstr("a.out")
+	mut out_path = "a.out"
 	tgt_linux = host_is_linux()
 	tgt_x64 = host_is_x64()
 	mut i = 1
 	for i < argc {
 		let a = av[i]
-		if streq(a, cstr("-target")) != 0 && i + 1 < argc {
+		if streq(a, "-target") != 0 && i + 1 < argc {
 			i = i + 1
 			set_target(av[i])
-		} else if streq(a, cstr("-edition")) != 0 && i + 1 < argc {
+		} else if streq(a, "-edition") != 0 && i + 1 < argc {
 			i = i + 1
-			if streq(av[i], cstr("0")) != 0 {
+			if streq(av[i], "0") != 0 {
 				compiler_edition = 0
-			} else if streq(av[i], cstr("1")) != 0 {
+			} else if streq(av[i], "1") != 0 {
 				compiler_edition = 1
 			} else {
-				let e = cast([]i64, err_code(NO_POS, cstr("E902 UNKNOWN_EDITION")))
-				buf_str(cast([]u8, e), cstr("unknown edition "))
-				buf_str(cast([]u8, e), av[i])
-				buf_str(cast([]u8, e), cstr(" (expected 0 or 1)"))
+				let e = cast([]i64, err_code(NO_POS, "E902 UNKNOWN_EDITION"))
+				buf_str(cast([]u8, e), "unknown edition ")
+				buf_str(cast([]u8, e), str_of(av[i]))
+				buf_str(cast([]u8, e), " (expected 0 or 1)")
 				fatal(cast([]u8, e))
 			}
-		} else if streq(a, cstr("-polls")) != 0 {
+		} else if streq(a, "-polls") != 0 {
 			compiler_polls = 1
-		} else if streq(a, cstr("-nopolls")) != 0 {
+		} else if streq(a, "-nopolls") != 0 {
 			// no safepoints, even in a program that starts cores (#341)
 			polls_auto = 0
-		} else if streq(a, cstr("-parse-only")) != 0 {
+		} else if streq(a, "-parse-only") != 0 {
 			parse_only = 1
 			compiler_parse_only = 1
-		} else if streq(a, cstr("-caps")) != 0 {
+		} else if streq(a, "-caps") != 0 {
 			// tin caps: check the program, then print the capabilities each package can reach.
 			caps_report = 1
-		} else if streq(a, cstr("-audit-secrets")) != 0 {
+		} else if streq(a, "-audit-secrets") != 0 {
 			// tin audit secrets: check the program, then list every place a secret leaves.
 			audit_secrets = 1
-		} else if streq(a, cstr("-fix")) != 0 {
+		} else if streq(a, "-fix") != 0 {
 			fix_edition1 = 1
 			compiler_fix = 1
-		} else if streq(a, cstr("-entry")) != 0 && i + 1 < argc {
+		} else if streq(a, "-entry") != 0 && i + 1 < argc {
 			// -entry pkg.Name: start the program at that function instead of main (tin test).
 			i = i + 1
 			entry_name = av[i]
-		} else if streq(a, cstr("-strip")) != 0 {
+		} else if streq(a, "-strip") != 0 {
 			// -strip: a Linux executable without section headers and symbol table (#351)
 			link_strip = 1
-		} else if streq(a, cstr("-S")) != 0 {
+		} else if streq(a, "-S") != 0 {
 			asm_only = 1
-		} else if streq(a, cstr("-o")) != 0 && i + 1 < argc {
+		} else if streq(a, "-o") != 0 && i + 1 < argc {
 			i = i + 1
-			out_path = av[i]
+			out_path = str_of(av[i])
 		} else {
 			load_file(a)
 		}
@@ -700,8 +709,8 @@ fn compiler_main(argc i64, argv i64) i64 {
 	}
 	if fix_edition1 != 0 {
 		if compiler_edition != 1 || len(files) != 1 {
-			let e = cast([]i64, err_code(NO_POS, cstr("E906 FIX_USAGE")))
-			buf_str(cast([]u8, e), cstr("-fix translates one file to edition 1: pass -edition 1 and exactly one file"))
+			let e = cast([]i64, err_code(NO_POS, "E906 FIX_USAGE"))
+			buf_str(cast([]u8, e), "-fix translates one file to edition 1: pass -edition 1 and exactly one file")
 			fatal(cast([]u8, e))
 		}
 		let source = cast([]u8, cast([]i64, file_sources[0]))
@@ -721,9 +730,9 @@ fn compiler_main(argc i64, argv i64) i64 {
 	// The runtime is the package lib/runtime: every file of it for this OS and CPU.
 	let rtfiles = cast([]i64, package_files(cat_path(lib_root, cstr("/lib/runtime"))))
 	if cast(i64, rtfiles) == 0 {
-		let e = cast([]i64, err_code(NO_POS, cstr("E903 NO_RUNTIME")))
-		buf_str(cast([]u8, e), cstr("the runtime package is missing: no lib/runtime in "))
-		buf_str(cast([]u8, e), lib_root)
+		let e = cast([]i64, err_code(NO_POS, "E903 NO_RUNTIME"))
+		buf_str(cast([]u8, e), "the runtime package is missing: no lib/runtime in ")
+		buf_str(cast([]u8, e), str_of(lib_root))
 		fatal(cast([]u8, e))
 	}
 	mut rk = 0
@@ -773,11 +782,11 @@ fn compiler_main(argc i64, argv i64) i64 {
 	} else if asm_only != 0 {
 		write_all(1, cast([]u8, cast([]i64, print_asm())))
 	} else if tgt_x64 != 0 {
-		write_elf_x64(out_path)
+		write_elf_x64(cstr(out_path))
 	} else if tgt_linux != 0 {
-		write_elf(out_path)
+		write_elf(cstr(out_path))
 	} else {
-		write_executable(out_path)
+		write_executable(cstr(out_path))
 	}
 	return 0
 }
