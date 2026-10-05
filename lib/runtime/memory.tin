@@ -1,7 +1,10 @@
 // Memory operations and the mmap heap shared by every program and by the compiler; no libc allocation calls.
 // The bodies of the bulk operations are the portable versions; the backends substitute bounded vector leaves.
+// The backends replace this body on x86-64; it has two statements so that no compiler, the seeds
+// included, inlines the placeholder.
 fn mem_avx2_supported() i64 {
-	return 0
+	let none = 0
+	return none
 }
 
 fn memcpy(dst_in i64, src_in i64, n_in i64) i64 {

@@ -1,8 +1,10 @@
 // Linux system calls, shared by the runtime and the compiler. Both backends generate linux_raw
 // as a leaf (svc #0 on arm64, syscall on x86-64) that returns the kernel's result, -errno on
-// failure, so this body never runs.
+// failure, so this body never runs. It has two statements so that no compiler, the seeds included,
+// takes it for a one-line function worth inlining.
 fn linux_raw(n i64, a i64, b i64, c i64, d i64, e i64, f i64) i64 {
-	return -38
+	let enosys = -38
+	return enosys
 }
 
 fn linux_result(r i64) i64 {
