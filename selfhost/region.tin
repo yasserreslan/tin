@@ -35,10 +35,10 @@ shared mut rs_dead i64 // locals that may hold request memory from before a hear
 shared mut rs_said i64 // locals already reported
 shared mut rs_cur i64 // [local, bits] of each local's latest assignment on the walk (else S_REGION)
 
-fn has_ptr(t i64) i64 {
+fn has_ptr(t Ty) i64 {
 	let k = kind_of(t)
 	if k == K_OPT {
-		return has_ptr(cast(Ty, t).elem)
+		return has_ptr(cast(Ty, t.elem))
 	}
 	if k == K_DYN {
 		// A dyn value's bits are its object's; the table is static.
@@ -47,21 +47,21 @@ fn has_ptr(t i64) i64 {
 	return i64(k == K_STRING || k == K_STRUCT || k == K_SLICE || k == K_MAP || k == K_ERROR || k == K_FUNC)
 }
 
-fn rg_analyzable(f i64) i64 {
-	return i64(cast(Fn, f).extern_ == 0 && cast(Fn, f).body != 0 && cast(Fn, f).generated == 0 && is_template(f) == 0)
+fn rg_analyzable(f Fn) i64 {
+	return i64(f.extern_ == 0 && f.body != 0 && f.generated == 0 && is_template(f) == 0)
 }
 
-fn is_keep_fn(f i64) i64 {
-	let n = cast(Fn, f).qname
+fn is_keep_fn(f Fn) i64 {
+	let n = f.qname
 	return i64(n != 0 && i64(load8(n)) == 'k' && i64(load8(n + 1)) == 'e' && i64(load8(n + 2)) == 'e' && i64(load8(n + 3)) == 'p' && i64(load8(n + 4)) == '$')
 }
 
 fn region_check() {
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
+		let f = cast(Fn, vec_get(prog_fns, i))
 		if rg_analyzable(f) != 0 {
-			cast(Fn, f).regsum = rg_sum_new()
+			f.regsum = rg_sum_new()
 		}
 		i = i + 1
 	}
@@ -72,8 +72,8 @@ fn region_check() {
 		rg_changed = 0
 		i = 0
 		for i < prog_fns[VEC_LEN] {
-			let f = vec_get(prog_fns, i)
-			if cast(Fn, f).regsum != 0 && cast(Fn, f).reach != 0 {
+			let f = cast(Fn, vec_get(prog_fns, i))
+			if f.regsum != 0 && f.reach != 0 {
 				rg_fn_pass(f, 0)
 			}
 			i = i + 1
@@ -82,8 +82,8 @@ fn region_check() {
 	}
 	i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if cast(Fn, f).regsum != 0 && cast(Fn, f).reach != 0 {
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if f.regsum != 0 && f.reach != 0 {
 			rg_fn_pass(f, 1)
 		}
 		i = i + 1
@@ -99,26 +99,26 @@ fn rg_sum_new() i64 {
 	return sum
 }
 
-fn rg_fn_pass(f i64, report i64) {
-	rg_fn = f
-	rg_sum = cast(Fn, f).regsum
+fn rg_fn_pass(f Fn, report i64) {
+	rg_fn = cast(i64, f)
+	rg_sum = f.regsum
 	if is_keep_fn(f) != 0 {
 		rg_sum[2] = RG_INGOT
 		return
 	}
-	set_file(cast(Fn, f).file)
+	set_file(f.file)
 	rg_report = 0
-	let locals = cast(Fn, f).locals
-	rg_nparams = cast(Fn, f).params[VEC_LEN]
+	let locals = f.locals
+	rg_nparams = f.params[VEC_LEN]
 	mut i = 0
 	for i < locals[VEC_LEN] {
-		let s = vec_get(locals, i)
+		let s = cast(Sym, vec_get(locals, i))
 		// A captured local also holds what frame-local closures stored into it.
-		cast(Sym, s).region = cast(Sym, s).capbits
-		if i < rg_nparams && has_ptr(cast(Sym, s).type_) != 0 {
-			cast(Sym, s).region = RG_EMB | RG_UNK
+		s.region = s.capbits
+		if i < rg_nparams && has_ptr(cast(Ty, s.type_)) != 0 {
+			s.region = RG_EMB | RG_UNK
 			if i < RG_MAXP {
-				cast(Sym, s).region = RG_EMB | (RG_P0 << i)
+				s.region = RG_EMB | (RG_P0 << i)
 			}
 		}
 		i = i + 1
@@ -128,7 +128,7 @@ fn rg_fn_pass(f i64, report i64) {
 	rg_lchanged = 1
 	for rg_lchanged != 0 && iter < 30 {
 		rg_lchanged = 0
-		rg_stmts(cast(Block, cast(Fn, f).body).stmts)
+		rg_stmts(cast(Block, f.body).stmts)
 		iter = iter + 1
 	}
 	// Callers can reach what is held only through the parameters and results.
@@ -140,11 +140,11 @@ fn rg_fn_pass(f i64, report i64) {
 		}
 		i = i + 2
 	}
-	if report != 0 && vec_get(file_trusted, cast(Fn, f).file) == 0 {
+	if report != 0 && vec_get(file_trusted, f.file) == 0 {
 		rg_report = 1
 		rg_modrep = 0
-		rg_stmts(cast(Block, cast(Fn, f).body).stmts)
-		rg_detach_check(f)
+		rg_stmts(cast(Block, f.body).stmts)
+		rg_detach_check(cast(i64, f))
 		rg_report = 0
 		if rg_sum[12] != 0 {
 			rs_walk(f)
@@ -160,21 +160,21 @@ fn rg_stmts(v i64) {
 	}
 }
 
-fn rg_local(s i64, bits i64) {
-	if has_ptr(cast(Sym, s).type_) == 0 {
+fn rg_local(s Sym, bits i64) {
+	if has_ptr(cast(Ty, s.type_)) == 0 {
 		return
 	}
-	if (cast(Sym, s).region | bits) != cast(Sym, s).region {
-		cast(Sym, s).region = cast(Sym, s).region | bits
+	if (s.region | bits) != s.region {
+		s.region = s.region | bits
 		rg_lchanged = 1
 	}
 }
 
-fn rg_assign_sym(s i64, bits i64, pos i64) {
-	if cast(Sym, s).kind == SYM_LOCAL {
+fn rg_assign_sym(s Sym, bits i64, pos i64) {
+	if s.kind == SYM_LOCAL {
 		rg_local(s, bits)
-	} else if cast(Sym, s).kind == SYM_GLOBAL {
-		rg_store(RG_INGOT, 0, 0, bits, 0, pos, cast(Sym, s).name)
+	} else if s.kind == SYM_GLOBAL {
+		rg_store(RG_INGOT, 0, 0, bits, 0, pos, s.name)
 	}
 }
 
@@ -184,7 +184,7 @@ fn rg_stmt(s i64) {
 		rg_stmts(cast(Block, s).stmts)
 	} else if k == ST_LET {
 		if cast(LetStmt, s).init != 0 {
-			rg_local(cast(LetStmt, s).sym, rg_expr(cast(LetStmt, s).init))
+			rg_local(cast(Sym, cast(LetStmt, s).sym), rg_expr(cast(LetStmt, s).init))
 		}
 	} else if k == ST_ASSIGN {
 		let t = cast(AssignStmt, s).target
@@ -192,14 +192,14 @@ fn rg_stmt(s i64) {
 		rg_note_kept(t, v)
 		let tk = cast(Node, t).kind
 		if tk == EX_IDENT {
-			rg_assign_sym(cast(IdentExpr, t).ref, v, cast(Node, s).pos)
+			rg_assign_sym(cast(Sym, cast(IdentExpr, t).ref), v, cast(Node, s).pos)
 		} else if rg_regrow(t, cast(AssignStmt, s).value) != 0 {
 			// The slot gets back the object it held; the append checked what it added.
 		} else if tk == EX_MEM && rg_cell_index(cast(MemExpr, t).base) >= 0 {
 			rg_cell_store(rg_cell_index(cast(MemExpr, t).base), v, cast(Node, t).type_, cast(Node, s).pos)
 		} else if tk == EX_MEM && rg_own_cell(t) != 0 {
 			// The parent's own store into a variable it keeps in a cell.
-			rg_local(rg_own_cell(t), v)
+			rg_local(cast(Sym, rg_own_cell(t)), v)
 		} else if tk == EX_MEM {
 			let c = rg_expr(cast(MemExpr, t).base)
 			if cast(MemExpr, t).index != 0 {
@@ -250,7 +250,7 @@ fn rg_stmt(s i64) {
 				if bits != 0 && j < 8 {
 					b = vec_get(bits, j)
 				}
-				rg_assign_sym(sy, b, cast(Node, s).pos)
+				rg_assign_sym(cast(Sym, sy), b, cast(Node, s).pos)
 			}
 			j = j + 1
 		}
@@ -317,13 +317,13 @@ fn rg_load(b i64, t i64) i64 {
 // its element. Strings and faults cannot be modified, so where they come from no longer
 // matters once they are in a container: 0.
 fn rg_key(t_in i64) i64 {
-	mut t = t_in
+	mut t = cast(Ty, t_in)
 	if kind_of(t) == K_OPT {
-		t = cast(Ty, t).elem
+		t = cast(Ty, t.elem)
 	}
 	let k = kind_of(t)
 	if k == K_STRUCT || k == K_SLICE || k == K_MAP || k == K_DYN {
-		return t
+		return cast(i64, t)
 	}
 	return 0
 }
@@ -332,7 +332,7 @@ fn rg_key(t_in i64) i64 {
 // element's slice), or 0 when the expression is not such a read.
 fn rg_owner(e i64) i64 {
 	let k = cast(Node, e).kind
-	if k == EX_MEM && has_ptr(cast(Node, cast(MemExpr, e).base).type_) != 0 {
+	if k == EX_MEM && has_ptr(cast(Ty, cast(Node, cast(MemExpr, e).base).type_)) != 0 {
 		return rg_key(cast(Node, cast(MemExpr, e).base).type_)
 	}
 	if k == EX_ELEM {
@@ -382,20 +382,20 @@ fn rg_hold(t i64, v i64) {
 // rg_reaches reports whether a value of type from leads, through one or more fields,
 // elements or map values, to an object of key type to (seen guards recursive types).
 fn rg_reaches(from_in i64, to i64, seen i64) i64 {
-	mut from = from_in
+	mut from = cast(Ty, from_in)
 	if kind_of(from) == K_OPT {
-		from = cast(Ty, from).elem
+		from = cast(Ty, from.elem)
 	}
-	if vec_index(seen, from) >= 0 {
+	if vec_index(seen, cast(i64, from)) >= 0 {
 		return 0
 	}
-	vec_push(seen, from)
+	vec_push(seen, cast(i64, from))
 	let k = kind_of(from)
 	if k == K_SLICE || k == K_MAP {
-		return i64(rg_key(cast(Ty, from).elem) == to || rg_reaches(cast(Ty, from).elem, to, seen) != 0)
+		return i64(rg_key(from.elem) == to || rg_reaches(from.elem, to, seen) != 0)
 	}
 	mut i = 0
-	for k == K_STRUCT && cast(Ty, from).fields != 0 && i < cast(Ty, from).fields[VEC_LEN] {
+	for k == K_STRUCT && from.fields != 0 && i < from.fields[VEC_LEN] {
 		let t = field_type(from, i)
 		if rg_key(t) == to || rg_reaches(t, to, seen) != 0 {
 			return 1
@@ -433,18 +433,18 @@ fn rg_deep(b_in i64, t i64, o i64, v i64) i64 {
 
 // rg_visible reports whether f's callers can reach objects of key type t: through its
 // parameters or its results.
-fn rg_visible(f i64, t i64) i64 {
+fn rg_visible(f Fn, t i64) i64 {
 	mut i = 0
-	for i < cast(Fn, f).ptypes[VEC_LEN] {
-		let p = vec_get(cast(Fn, f).ptypes, i)
+	for i < f.ptypes[VEC_LEN] {
+		let p = vec_get(f.ptypes, i)
 		if rg_key(p) == t || rg_reaches(p, t, vec_new()) != 0 {
 			return 1
 		}
 		i = i + 1
 	}
 	i = 0
-	for i < cast(Fn, f).rtypes[VEC_LEN] {
-		let r = vec_get(cast(Fn, f).rtypes, i)
+	for i < f.rtypes[VEC_LEN] {
+		let r = vec_get(f.rtypes, i)
 		if rg_key(r) == t || rg_reaches(r, t, vec_new()) != 0 {
 			return 1
 		}
@@ -555,15 +555,15 @@ fn rg_cell_bits(i i64) i64 {
 	if cast(Fn, rg_fn).escapes != 0 {
 		return RG_UNK | RG_EMB
 	}
-	let os = vec_get(cast(Fn, rg_fn).captures, i)
-	if os == 0 || cast(Sym, os).captured != 0 {
+	let os = cast(Sym, vec_get(cast(Fn, rg_fn).captures, i))
+	if cast(i64, os) == 0 || os.captured != 0 {
 		return RG_UNK | RG_EMB
 	}
 	if rg_is_arena(rg_fn) != 0 {
 		// Made outside the arena: what it holds is not the arena's fresh memory.
-		return ((cast(Sym, os).region | cast(Sym, os).capbits) & ~RG_FRESH) | RG_OUT
+		return ((os.region | os.capbits) & ~RG_FRESH) | RG_OUT
 	}
-	return cast(Sym, os).region | cast(Sym, os).capbits
+	return os.region | os.capbits
 }
 
 // rg_cell_store checks an assignment of bits v to captured variable i. In a frame-local closure
@@ -575,19 +575,19 @@ fn rg_cell_store(i i64, v_in i64, t i64, pos i64) {
 		v = rg_arena_cell_store(i, v, t, pos)
 	}
 	if cast(Fn, rg_fn).escapes != 0 {
-		if (v & RG_EMB) != 0 && has_ptr(t) != 0 && rg_report != 0 {
-			let os = vec_get(cast(Fn, rg_fn).captures, i)
+		if (v & RG_EMB) != 0 && has_ptr(cast(Ty, t)) != 0 && rg_report != 0 {
+			let os = cast(Sym, vec_get(cast(Fn, rg_fn).captures, i))
 			mut name = cstr("a captured variable")
-			if os != 0 {
-				name = cast(Sym, os).name
+			if cast(i64, os) != 0 {
+				name = os.name
 			}
 			err_code_quoted(pos, cstr("E311 CAPTURE_ESCAPE"), cstr("request memory stored into "), name, cstr(", a captured variable of a closure that may outlive the request (keep() copies its variables into long-lived memory): wrap the value in keep(), or pass the closure only to functions that call it"))
 		}
 		return
 	}
-	let os = vec_get(cast(Fn, rg_fn).captures, i)
-	if os != 0 && cast(Sym, os).captured == 0 && (cast(Sym, os).capbits | v) != cast(Sym, os).capbits {
-		cast(Sym, os).capbits = cast(Sym, os).capbits | v
+	let os = cast(Sym, vec_get(cast(Fn, rg_fn).captures, i))
+	if cast(i64, os) != 0 && os.captured == 0 && (os.capbits | v) != os.capbits {
+		os.capbits = os.capbits | v
 		rg_changed = 1
 	}
 }
@@ -595,18 +595,18 @@ fn rg_cell_store(i i64, v_in i64, t i64, pos i64) {
 fn rg_expr(e i64) i64 {
 	let k = cast(Node, e).kind
 	if k == EX_IDENT {
-		let s = cast(IdentExpr, e).ref
-		if s == 0 {
+		let s = cast(Sym, cast(IdentExpr, e).ref)
+		if cast(i64, s) == 0 {
 			return 0
 		}
-		if cast(Sym, s).kind == SYM_LOCAL {
-			if rs_active != 0 && vec_has(rs_dead, s) != 0 && vec_has(rs_said, s) == 0 {
-				vec_push(rs_said, s)
-				err_code_quoted(cast(Node, e).pos, cstr("E313 USE_AFTER_RESET"), cstr(""), cast(Sym, s).name, cstr(" may hold request memory from before hearth.Reset(), which freed it, and is read after the reset: keep() the value before the reset, or create it after"))
+		if s.kind == SYM_LOCAL {
+			if rs_active != 0 && vec_has(rs_dead, cast(i64, s)) != 0 && vec_has(rs_said, cast(i64, s)) == 0 {
+				vec_push(rs_said, cast(i64, s))
+				err_code_quoted(cast(Node, e).pos, cstr("E313 USE_AFTER_RESET"), cstr(""), s.name, cstr(" may hold request memory from before hearth.Reset(), which freed it, and is read after the reset: keep() the value before the reset, or create it after"))
 			}
-			return cast(Sym, s).region
+			return s.region
 		}
-		if cast(Sym, s).kind == SYM_GLOBAL {
+		if s.kind == SYM_GLOBAL {
 			return RG_INGOT
 		}
 		return 0
@@ -618,7 +618,7 @@ fn rg_expr(e i64) i64 {
 	if k == EX_BINARY {
 		rg_expr(cast(Binary, e).l)
 		rg_expr(cast(Binary, e).r)
-		if has_ptr(cast(Node, e).type_) != 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return RG_FRESH | RG_EMB
 		}
 		return 0
@@ -628,7 +628,7 @@ fn rg_expr(e i64) i64 {
 		if cast(Conv, e).kind == CV_DYN_KEEP {
 			return RG_INGOT
 		}
-		if has_ptr(cast(Node, e).type_) != 0 && has_ptr(cast(Node, cast(Conv, e).x).type_) == 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 && has_ptr(cast(Ty, cast(Node, cast(Conv, e).x).type_)) == 0 {
 			// A raw word turned into a reference (standard library only): origin unknown.
 			return x | RG_UNK | RG_EMB
 		}
@@ -640,7 +640,7 @@ fn rg_expr(e i64) i64 {
 	}
 	if k == EX_MEM && rg_cell_index(cast(MemExpr, e).base) >= 0 {
 		rg_detach_read(rg_cell_index(cast(MemExpr, e).base))
-		if has_ptr(cast(Node, e).type_) == 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) == 0 {
 			return 0
 		}
 		return rg_cell_bits(rg_cell_index(cast(MemExpr, e).base))
@@ -648,11 +648,11 @@ fn rg_expr(e i64) i64 {
 	if k == EX_MEM && rg_own_cell(e) != 0 {
 		// The parent reading a variable it keeps in a cell for closures that cannot outlive it
 		// (frame-local ones and a scope's children): the variable holds what was stored in it.
-		let os = rg_own_cell(e)
-		if has_ptr(cast(Node, e).type_) == 0 {
+		let os = cast(Sym, rg_own_cell(e))
+		if has_ptr(cast(Ty, cast(Node, e).type_)) == 0 {
 			return 0
 		}
-		return cast(Sym, os).region | cast(Sym, os).capbits
+		return os.region | os.capbits
 	}
 	if k == EX_MEM {
 		let b = rg_expr(cast(MemExpr, e).base)
@@ -662,10 +662,10 @@ fn rg_expr(e i64) i64 {
 		if cast(MemExpr, e).len != 0 {
 			rg_expr(cast(MemExpr, e).len)
 		}
-		if has_ptr(cast(Node, e).type_) == 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) == 0 {
 			return 0
 		}
-		if has_ptr(cast(Node, cast(MemExpr, e).base).type_) == 0 {
+		if has_ptr(cast(Ty, cast(Node, cast(MemExpr, e).base).type_)) == 0 {
 			return b | RG_UNK | RG_EMB
 		}
 		return rg_load(b, cast(Node, e).type_)
@@ -673,7 +673,7 @@ fn rg_expr(e i64) i64 {
 	if k == EX_ELEM {
 		let b2 = rg_expr(cast(ElemExpr, e).seq)
 		rg_expr(cast(ElemExpr, e).idx)
-		if has_ptr(cast(Node, e).type_) == 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) == 0 {
 			return 0
 		}
 		return rg_load(b2, cast(Node, e).type_)
@@ -689,7 +689,7 @@ fn rg_expr(e i64) i64 {
 		if cast(Node, e).region == R_OWNED {
 			return RG_INGOT
 		}
-		if has_ptr(cast(Node, e).type_) != 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return v | RG_FRESH | RG_EMB
 		}
 		return v
@@ -764,13 +764,13 @@ fn rg_note_kept(t i64, v i64) {
 }
 
 // rg_capture_bits is what variable os of the running function (or its capture) may hold.
-fn rg_capture_bits(os i64) i64 {
-	if cast(Sym, os).captured != 0 {
-		return rg_cell_bits(cast(Sym, os).cap_idx)
+fn rg_capture_bits(os Sym) i64 {
+	if os.captured != 0 {
+		return rg_cell_bits(os.cap_idx)
 	}
-	mut b = cast(Sym, os).region | cast(Sym, os).capbits
+	mut b = os.region | os.capbits
 	if rg_kept_bits != 0 {
-		b = b | rg_lookup(rg_kept_bits, os)
+		b = b | rg_lookup(rg_kept_bits, cast(i64, os))
 	}
 	return b
 }
@@ -781,21 +781,21 @@ fn rg_capture_bits(os i64) i64 {
 fn rg_detach_check(f i64) {
 	mut i = 0
 	for ck_detached != 0 && i < ck_detached[VEC_LEN] {
-		let d = vec_get(ck_detached, i)
-		let caps = cast(Fn, d).captures
+		let d = cast(Fn, vec_get(ck_detached, i))
+		let caps = d.captures
 		mut raw = 0
 		if rg_detach_raw != 0 {
-			raw = rg_lookup(rg_detach_raw, d)
+			raw = rg_lookup(rg_detach_raw, cast(i64, d))
 		}
 		mut j = 0
-		for cast(Fn, d).parent == f && caps != 0 && j < caps[VEC_LEN] {
-			let os = vec_get(caps, j)
+		for d.parent == f && caps != 0 && j < caps[VEC_LEN] {
+			let os = cast(Sym, vec_get(caps, j))
 			mut bit = 62
 			if j < 62 {
 				bit = j
 			}
-			if os != 0 && (raw & (1 << bit)) != 0 && has_ptr(cast(Sym, os).type_) != 0 && (rg_capture_bits(os) & RG_EMB) != 0 {
-				err_code_quoted(cast(Fn, d).pos, cstr("E314 DETACH_ESCAPE"), cstr("detach captures "), cast(Sym, os).name, cstr(", which may hold request memory, but the detached task outlives the request: keep() it before the block (let v = keep(...)), or read it in the block only inside keep()"))
+			if cast(i64, os) != 0 && (raw & (1 << bit)) != 0 && has_ptr(cast(Ty, os.type_)) != 0 && (rg_capture_bits(os) & RG_EMB) != 0 {
+				err_code_quoted(d.pos, cstr("E314 DETACH_ESCAPE"), cstr("detach captures "), os.name, cstr(", which may hold request memory, but the detached task outlives the request: keep() it before the block (let v = keep(...)), or read it in the block only inside keep()"))
 			}
 			j = j + 1
 		}
@@ -819,12 +819,12 @@ fn rg_is_arena(f i64) i64 {
 
 // rg_in_arena reports whether the running function is an arena's closure or one inside it.
 fn rg_in_arena() i64 {
-	mut f = rg_fn
-	for f != 0 {
-		if rg_is_arena(f) != 0 {
+	mut f = cast(Fn, rg_fn)
+	for cast(i64, f) != 0 {
+		if rg_is_arena(cast(i64, f)) != 0 {
 			return 1
 		}
-		f = cast(Fn, f).parent
+		f = cast(Fn, f.parent)
 	}
 	return 0
 }
@@ -841,12 +841,12 @@ fn rg_arena_escape(pos i64, name i64) {
 // rg_arena_cell_store checks a store of bits v into captured variable i inside an arena and
 // returns the bits that join the variable (RG_OUT means nothing outside the arena).
 fn rg_arena_cell_store(i i64, v i64, t i64, pos i64) i64 {
-	let os = vec_get(cast(Fn, rg_fn).captures, i)
-	let outside = i64(rg_is_arena(rg_fn) != 0 || (os != 0 && cast(Sym, os).captured != 0 && rg_is_arena(cast(Fn, rg_fn).parent) != 0))
-	if outside != 0 && cast(Fn, rg_fn).escapes == 0 && has_ptr(t) != 0 && rg_arena_made(v) != 0 && rg_report != 0 {
+	let os = cast(Sym, vec_get(cast(Fn, rg_fn).captures, i))
+	let outside = i64(rg_is_arena(rg_fn) != 0 || (cast(i64, os) != 0 && os.captured != 0 && rg_is_arena(cast(Fn, rg_fn).parent) != 0))
+	if outside != 0 && cast(Fn, rg_fn).escapes == 0 && has_ptr(cast(Ty, t)) != 0 && rg_arena_made(v) != 0 && rg_report != 0 {
 		mut name = cstr("a captured variable")
-		if os != 0 {
-			name = cast(Sym, os).name
+		if cast(i64, os) != 0 {
+			name = os.name
 		}
 		rg_arena_escape(pos, name)
 	}
@@ -988,24 +988,24 @@ fn rg_resets() {
 	let locals = cast(Fn, rg_fn).locals
 	mut i = 0
 	for i < locals[VEC_LEN] {
-		let s = vec_get(locals, i)
-		if has_ptr(cast(Sym, s).type_) != 0 && (rs_bits(rs_cur, s) & RG_EMB) != 0 && vec_has(rs_dead, s) == 0 {
-			vec_push(rs_dead, s)
+		let s = cast(Sym, vec_get(locals, i))
+		if has_ptr(cast(Ty, s.type_)) != 0 && (rs_bits(rs_cur, s) & RG_EMB) != 0 && vec_has(rs_dead, cast(i64, s)) == 0 {
+			vec_push(rs_dead, cast(i64, s))
 		}
 		i = i + 1
 	}
 }
 
 // rs_bits is what local s may hold on the walk: its latest assignment's bits, else all of them.
-fn rs_bits(cur i64, s i64) i64 {
+fn rs_bits(cur i64, s Sym) i64 {
 	mut i = 0
 	for i < cur[VEC_LEN] {
-		if vec_get(cur, i) == s {
+		if cast(Sym, vec_get(cur, i)) == s {
 			return vec_get(cur, i + 1)
 		}
 		i = i + 2
 	}
-	return cast(Sym, s).region
+	return s.region
 }
 
 fn rs_assign(s i64, bits i64) {
@@ -1030,17 +1030,17 @@ fn rs_join(dead_a i64, cur_a i64, dead_b i64, cur_b i64) {
 	let out = vec_new()
 	mut i = 0
 	for i < cur_a[VEC_LEN] {
-		let s = vec_get(cur_a, i)
-		vec_push(out, s)
+		let s = cast(Sym, vec_get(cur_a, i))
+		vec_push(out, cast(i64, s))
 		vec_push(out, vec_get(cur_a, i + 1) | rs_bits(cur_b, s))
 		i = i + 2
 	}
 	i = 0
 	for i < cur_b[VEC_LEN] {
-		let s = vec_get(cur_b, i)
-		if rs_bits(out, s) == cast(Sym, s).region && rs_has_entry(out, s) == 0 {
-			vec_push(out, s)
-			vec_push(out, vec_get(cur_b, i + 1) | cast(Sym, s).region)
+		let s = cast(Sym, vec_get(cur_b, i))
+		if rs_bits(out, s) == s.region && rs_has_entry(out, cast(i64, s)) == 0 {
+			vec_push(out, cast(i64, s))
+			vec_push(out, vec_get(cur_b, i + 1) | s.region)
 		}
 		i = i + 2
 	}
@@ -1095,12 +1095,12 @@ fn vec_union(a i64, b i64) {
 // rs_walk follows f's statements in order: after a reset, a local that may hold request
 // memory is freed until it is assigned again; reading it then is an error. Loop bodies are
 // walked twice so a read before the reset in the next iteration is seen; branches join.
-fn rs_walk(f i64) {
+fn rs_walk(f Fn) {
 	rs_active = 1
 	rs_dead = vec_new()
 	rs_said = vec_new()
 	rs_cur = vec_new()
-	rs_stmts(cast(Block, cast(Fn, f).body).stmts)
+	rs_stmts(cast(Block, f.body).stmts)
 	rs_active = 0
 }
 
@@ -1212,10 +1212,10 @@ fn rg_call(e i64) i64 {
 		rg_expr(cast(Call, e).callee)
 		// The callee is unknown: a mut argument may be modified and may receive request
 		// memory, and the call may do what any function used as a value does (rg_fnsum).
-		let ct = cast(Node, cast(Call, e).callee).type_
+		let ct = cast(Ty, cast(Node, cast(Call, e).callee).type_)
 		mut mask = 0
-		if ct != 0 && cast(Ty, ct).kind == K_FUNC {
-			mask = cast(Ty, ct).key
+		if cast(i64, ct) != 0 && ct.kind == K_FUNC {
+			mask = ct.key
 		}
 		i = 0
 		for i < n && i < 63 {
@@ -1229,8 +1229,8 @@ fn rg_call(e i64) i64 {
 					err_end(m)
 					rg_report = 0
 				}
-				let a = vec_get(args, i)
-				rg_store(vec_get(b, i), rg_owner(a), rg_key(cast(Node, a).type_), RG_EMB, 0, pos, 0)
+				let a = cast(Node, vec_get(args, i))
+				rg_store(vec_get(b, i), rg_owner(cast(i64, a)), rg_key(a.type_), RG_EMB, 0, pos, 0)
 				rg_pass(rg_fnsum[10], i, args, b, RG_EMB, pos)
 				rg_pass(rg_fnsum[11], i, args, b, 0, pos)
 				rg_report = saved
@@ -1238,46 +1238,46 @@ fn rg_call(e i64) i64 {
 			i = i + 1
 		}
 		rg_import(rg_fnsum[1], args, b)
-		if has_ptr(cast(Node, e).type_) != 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return RG_UNK | RG_EMB
 		}
 		return 0
 	}
-	let f = cast(Call, e).fn_
+	let f = cast(Fn, cast(Call, e).fn_)
 	mut name = cast(Call, e).name
-	if f != 0 && cast(Fn, f).qname != 0 {
-		name = cast(Fn, f).qname
+	if cast(i64, f) != 0 && f.qname != 0 {
+		name = f.qname
 	}
-	if (name != 0 && streq(name, cstr("hearth.Reset")) != 0) || (f != 0 && cast(Fn, f).regsum != 0 && cast(Fn, f).regsum[12] != 0 && vec_get(file_trusted, cast(Fn, f).file) == 0) {
+	if (name != 0 && streq(name, cstr("hearth.Reset")) != 0) || (cast(i64, f) != 0 && f.regsum != 0 && f.regsum[12] != 0 && vec_get(file_trusted, f.file) == 0) {
 		rg_resets()
 	}
-	if cast(Node, e).region == R_OWNED || (f != 0 && is_keep_fn(f) != 0) || (name != 0 && str_prefix(name, cstr("rt_keep")) != 0) {
+	if cast(Node, e).region == R_OWNED || (cast(i64, f) != 0 && is_keep_fn(f) != 0) || (name != 0 && str_prefix(name, cstr("rt_keep")) != 0) {
 		return RG_INGOT
 	}
 	if name != 0 && str_prefix(name, cstr("rt_")) != 0 {
 		return rg_runtime_call(e, name, b, pos)
 	}
 	mut sum = 0
-	if f != 0 {
-		sum = cast(Fn, f).regsum
+	if cast(i64, f) != 0 {
+		sum = f.regsum
 	}
 	if sum == 0 {
-		if has_ptr(cast(Node, e).type_) != 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return RG_UNK | RG_EMB
 		}
 		return 0
 	}
 	i = 0
 	for i < n && i < RG_MAXP {
-		let mutp = i64(cast(Fn, f).muts != 0 && i < cast(Fn, f).muts[VEC_LEN] && vec_get(cast(Fn, f).muts, i) != 0)
+		let mutp = i64(f.muts != 0 && i < f.muts[VEC_LEN] && vec_get(f.muts, i) != 0)
 		if (sum[0] & (1 << i)) != 0 {
 			let saved = rg_report
 			if rg_report != 0 && (rg_pass(sum[10], i, args, b, -1, pos) & (RG_INGOT | RG_UNK)) != 0 {
 				let m = err_code(pos, cstr("E312 ARG_ESCAPE"))
 				buf_str(m, name)
 				buf_str(m, cstr(" stores request memory into its mut parameter '"))
-				buf_str(m, cast(Sym, vec_get(cast(Fn, f).locals, i)).name)
-				if vec_get(file_trusted, cast(Fn, f).file) != 0 {
+				buf_str(m, cast(Sym, vec_get(f.locals, i)).name)
+				if vec_get(file_trusted, f.file) != 0 {
 					// The standard library cannot be changed by its caller: the argument must.
 					buf_str(m, cstr("', but this argument may be long-lived: pass request memory (a local) instead"))
 				} else {
@@ -1290,28 +1290,28 @@ fn rg_call(e i64) i64 {
 			rg_pass(sum[10], i, args, b, RG_EMB, pos)
 			rg_report = saved
 		} else if mutp != 0 {
-			let a = vec_get(args, i)
-			rg_store(vec_get(b, i), rg_owner(a), rg_key(cast(Node, a).type_), 0, 0, pos, 0)
+			let a = cast(Node, vec_get(args, i))
+			rg_store(vec_get(b, i), rg_owner(cast(i64, a)), rg_key(a.type_), 0, 0, pos, 0)
 		}
 		if mutp != 0 {
 			rg_pass(sum[11], i, args, b, 0, pos)
 		}
 		i = i + 1
 	}
-	rg_arena_call(f, b, pos)
+	rg_arena_call(cast(i64, f), b, pos)
 	rg_import(sum[1], args, b)
 	let res = vec_new()
 	mut j = 0
 	for j < 8 {
 		mut rt = 0
-		if j < cast(Fn, f).rtypes[VEC_LEN] {
-			rt = vec_get(cast(Fn, f).rtypes, j)
+		if j < f.rtypes[VEC_LEN] {
+			rt = vec_get(f.rtypes, j)
 		}
 		vec_push(res, rg_subst(sum[2 + j], args, b, rt))
 		j = j + 1
 	}
 	rg_multi = res
-	if has_ptr(cast(Node, e).type_) == 0 {
+	if has_ptr(cast(Ty, cast(Node, e).type_)) == 0 {
 		return 0
 	}
 	return vec_get(res, 0)
@@ -1364,7 +1364,7 @@ fn rg_dyn_call(e i64, args i64, b i64, pos i64) i64 {
 	cast(Call, e).dyn_index = saved_index
 	cast(Node, vec_get(args, 0)).type_ = saved_type
 	if found == 0 {
-		if has_ptr(cast(Node, e).type_) != 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return RG_UNK | RG_EMB
 		}
 		return 0
@@ -1462,11 +1462,11 @@ fn rg_runtime_call(e i64, name i64, b i64, pos i64) i64 {
 	}
 	if streq(name, cstr("rt_slice_appendn")) != 0 || streq(name, cstr("rt_slice_copy")) != 0 || streq(name, cstr("rt_slice_appendn_rc")) != 0 || streq(name, cstr("rt_slice_copy_rc")) != 0 {
 		mut et = 0
-		let a1 = vec_get(args, 1)
-		if kind_of(cast(Node, a1).type_) == K_SLICE {
-			et = cast(Ty, cast(Node, a1).type_).elem
+		let a1 = cast(Node, vec_get(args, 1))
+		if kind_of(cast(Ty, a1.type_)) == K_SLICE {
+			et = cast(Ty, a1.type_).elem
 		}
-		if has_ptr(et) != 0 {
+		if has_ptr(cast(Ty, et)) != 0 {
 			rg_store(b0, co, ct, rg_load(vec_get(b, 1), et), et, pos, 0)
 		} else {
 			rg_store(b0, co, ct, 0, 0, pos, 0)
@@ -1478,7 +1478,7 @@ fn rg_runtime_call(e i64, name i64, b i64, pos i64) i64 {
 		return b0
 	}
 	if streq(name, cstr("rt_map_get")) != 0 || streq(name, cstr("rt_map_key")) != 0 || streq(name, cstr("rt_map_val")) != 0 {
-		if has_ptr(cast(Node, e).type_) != 0 {
+		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 			return rg_load(b0, cast(Node, e).type_)
 		}
 		return 0
@@ -1486,7 +1486,7 @@ fn rg_runtime_call(e i64, name i64, b i64, pos i64) i64 {
 	if streq(name, cstr("rt_slice_sub")) != 0 {
 		return b0 | RG_FRESH | RG_EMB
 	}
-	if has_ptr(cast(Node, e).type_) != 0 {
+	if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
 		return RG_FRESH | RG_EMB
 	}
 	return 0
@@ -1521,24 +1521,24 @@ fn with_body_check() {
 	wb_memo = vec_new()
 	mut i = 0
 	for i < with_runs[VEC_LEN] {
-		wb_param_ok(vec_get(with_runs, i), 1, 1)
+		wb_param_ok(cast(Fn, vec_get(with_runs, i)), 1, 1)
 		i = i + 2
 	}
 }
 
 // wb_param_ok reports whether parameter i of f is only called or passed on to such parameters.
-fn wb_param_ok(f i64, i i64, say i64) i64 {
+fn wb_param_ok(f Fn, i i64, say i64) i64 {
 	mut j = 0
 	for j < wb_memo[VEC_LEN] {
-		if vec_get(wb_memo, j) == f && vec_get(wb_memo, j + 1) == i {
+		if cast(Fn, vec_get(wb_memo, j)) == f && vec_get(wb_memo, j + 1) == i {
 			return i64(vec_get(wb_memo, j + 2) == 1)
 		}
 		j = j + 3
 	}
-	if f == 0 || cast(Fn, f).extern_ != 0 || cast(Fn, f).body == 0 || cast(Fn, f).locals == 0 || i >= cast(Fn, f).params[VEC_LEN] {
+	if cast(i64, f) == 0 || f.extern_ != 0 || f.body == 0 || f.locals == 0 || i >= f.params[VEC_LEN] {
 		return 0
 	}
-	vec_push(wb_memo, f)
+	vec_push(wb_memo, cast(i64, f))
 	vec_push(wb_memo, i)
 	let at = wb_memo[VEC_LEN]
 	vec_push(wb_memo, 1)
@@ -1546,11 +1546,11 @@ fn wb_param_ok(f i64, i i64, say i64) i64 {
 	let saved_sym = wb_sym
 	let saved_bad = wb_bad
 	let saved_say = wb_say
-	wb_fn = f
-	wb_sym = vec_get(cast(Fn, f).locals, i)
+	wb_fn = cast(i64, f)
+	wb_sym = vec_get(f.locals, i)
 	wb_bad = 0
 	wb_say = say
-	wb_stmts(cast(Block, cast(Fn, f).body).stmts)
+	wb_stmts(cast(Block, f.body).stmts)
 	let ok = i64(wb_bad == 0)
 	if ok == 0 {
 		wb_memo[VEC_DATA][at] = 2
@@ -1673,19 +1673,19 @@ fn wb_expr(e i64) {
 		let args = cast(Call, e).args
 		mut i = 0
 		for i < args[VEC_LEN] {
-			let a = vec_get(args, i)
-			if wb_is_param(a) != 0 {
-				let g = cast(Call, e).fn_
-				if g == 0 || callee != 0 || cast(Call, e).intrinsic != 0 {
-					wb_keeps(cast(Node, a).pos, 0)
-				} else if wb_param_ok(g, i, 0) == 0 && vec_get(file_trusted, cast(Fn, g).file) != 0 && i64(load8(vec_get(file_pkgs, cast(Fn, g).file))) == 0 {
+			let a = cast(Node, vec_get(args, i))
+			if wb_is_param(cast(i64, a)) != 0 {
+				let g = cast(Fn, cast(Call, e).fn_)
+				if cast(i64, g) == 0 || callee != 0 || cast(Call, e).intrinsic != 0 {
+					wb_keeps(a.pos, 0)
+				} else if wb_param_ok(g, i, 0) == 0 && vec_get(file_trusted, g.file) != 0 && i64(load8(vec_get(file_pkgs, g.file))) == 0 {
 					// A runtime helper (append, a store): the use itself keeps it.
-					wb_keeps(cast(Node, a).pos, 0)
+					wb_keeps(a.pos, 0)
 				} else if wb_param_ok(g, i, 0) == 0 {
-					wb_keeps(cast(Node, a).pos, g)
+					wb_keeps(a.pos, cast(i64, g))
 				}
 			} else {
-				wb_expr(a)
+				wb_expr(cast(i64, a))
 			}
 			i = i + 1
 		}
@@ -1728,11 +1728,11 @@ fn rc_mark() {
 	ck_escaping_cells = vec_new()
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if cast(Fn, f).regsum != 0 && cast(Fn, f).reach != 0 && cast(Fn, f).lifted != 2 {
-			rc_fn = f
-			ck_fn = f
-			rc_stmts(cast(Block, cast(Fn, f).body).stmts)
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if f.regsum != 0 && f.reach != 0 && f.lifted != 2 {
+			rc_fn = cast(i64, f)
+			ck_fn = cast(Fn, cast(i64, f))
+			rc_stmts(cast(Block, f.body).stmts)
 		}
 		i = i + 1
 	}
@@ -1809,7 +1809,7 @@ fn rc_assign(s i64, stmts i64, i i64) i64 {
 	}
 	let pos = cast(Node, s).pos
 	let t = cast(Node, target).type_
-	if rc_counted(t) == 0 {
+	if rc_counted(cast(Ty, t)) == 0 {
 		rc_seq(val)
 		return 0
 	}
@@ -1818,10 +1818,10 @@ fn rc_assign(s i64, stmts i64, i i64) i64 {
 		if cast(IdentExpr, target).ref != 0 && cast(Sym, cast(IdentExpr, target).ref).kind == SYM_GLOBAL {
 			// xs = append(xs, v): the append counts its own element and returns the same
 			// header, so the slot's count is already right.
-			if rc_append_into(val, target) != 0 {
+			if rc_append_into(val, cast(IdentExpr, target)) != 0 {
 				return 0
 			}
-			return rc_wrap(s, stmts, i, sym_ref_node(pos, cast(IdentExpr, target).ref), t, 0)
+			return rc_wrap(s, stmts, i, sym_ref_node(pos, cast(Sym, cast(IdentExpr, target).ref)), t, 0)
 		}
 		// A local: the variable itself is not long-lived storage.
 		rc_seq(val)
@@ -1830,7 +1830,7 @@ fn rc_assign(s i64, stmts i64, i i64) i64 {
 	if k == EX_MEM {
 		let base = cast(MemExpr, target).base
 		if cast(MemExpr, target).index == 0 && rc_ingot_base(base) != 0 {
-			return rc_wrap(s, stmts, i, rc_field_read(pos, target, t), t, 0)
+			return rc_wrap(s, stmts, i, rc_field_read(pos, cast(MemExpr, target), t), t, 0)
 		}
 		if rc_local_base(base) == 0 {
 			rc_pin_value(s, t)
@@ -1844,10 +1844,10 @@ fn rc_assign(s i64, stmts i64, i i64) i64 {
 		let seq = cast(ElemExpr, target).seq
 		if rc_ingot_base(seq) != 0 {
 			let pre0 = vec_new()
-			let idx = temp(pos, cast(ElemExpr, target).idx, ty_int)
-			vec_push(pre0, idx)
-			cast(ElemExpr, target).idx = sym_ref_node(pos, cast(LetStmt, idx).sym)
-			return rc_wrap(s, stmts, i, rc_elem_read(pos, target, t), t, pre0)
+			let idx = cast(LetStmt, temp(pos, cast(ElemExpr, target).idx, ty_int))
+			vec_push(pre0, cast(i64, idx))
+			cast(ElemExpr, target).idx = sym_ref_node(pos, cast(Sym, idx.sym))
+			return rc_wrap(s, stmts, i, rc_elem_read(pos, cast(ElemExpr, target), t), t, pre0)
 		}
 		if rc_local_base(seq) == 0 {
 			rc_pin_value(s, t)
@@ -1874,14 +1874,14 @@ fn rc_wrap(s i64, stmts i64, i i64, oldRead i64, t i64, pre0 i64) i64 {
 			p = p + 1
 		}
 	}
-	let v = temp(pos, val, t)
-	vec_push(pre, v)
+	let v = cast(LetStmt, temp(pos, val, t))
+	vec_push(pre, cast(i64, v))
 	// The store reads the temporary now, so the value expression is evaluated once.
-	cast(AssignStmt, s).value = sym_ref_node(pos, cast(LetStmt, v).sym)
-	let old = temp(pos, oldRead, t)
-	vec_push(pre, old)
-	vec_push(pre, expr_stmt(rc_inc_call(pos, sym_ref_node(pos, cast(LetStmt, v).sym))))
-	vec_push(pre, expr_stmt(rc_dec_call(pos, sym_ref_node(pos, cast(LetStmt, old).sym), drop_fn(t))))
+	cast(AssignStmt, s).value = sym_ref_node(pos, cast(Sym, v.sym))
+	let old = cast(LetStmt, temp(pos, oldRead, t))
+	vec_push(pre, cast(i64, old))
+	vec_push(pre, expr_stmt(cast(Node, rc_inc_call(pos, sym_ref_node(pos, cast(Sym, v.sym))))))
+	vec_push(pre, expr_stmt(cast(Node, rc_dec_call(pos, sym_ref_node(pos, cast(Sym, old.sym)), drop_fn(t)))))
 	rc_splice(stmts, i, pre)
 	// A composite literal's own stores travel inside the bound value.
 	rc_stmts(pre)
@@ -1891,9 +1891,9 @@ fn rc_wrap(s i64, stmts i64, i i64, oldRead i64, t i64, pre0 i64) i64 {
 // rc_pin_value pins the value assignment s stores, in place: rt_rc_pinned returns its
 // argument, so the evaluation order of the store does not change.
 fn rc_pin_value(s i64, t i64) {
-	let c = rt_call(cast(Node, s).pos, cstr("rt_rc_pinned"), args1(cast(AssignStmt, s).value), t)
-	mark_reach(cast(Call, c).fn_)
-	cast(AssignStmt, s).value = c
+	let c = cast(Call, rt_call(cast(Node, s).pos, cstr("rt_rc_pinned"), args1(cast(AssignStmt, s).value), t))
+	mark_reach(cast(Fn, c.fn_))
+	cast(AssignStmt, s).value = cast(i64, c)
 }
 
 // rc_callmulti counts the globals a multiple assignment (a, g = f()) stores: each old
@@ -1906,12 +1906,12 @@ fn rc_callmulti(s i64, stmts i64, i i64) i64 {
 	let post = vec_new()
 	mut j = 0
 	for j < syms[VEC_LEN] {
-		let g = vec_get(syms, j)
-		if g != 0 && cast(Sym, g).kind == SYM_GLOBAL && rc_counted(cast(Sym, g).type_) != 0 {
-			let old = temp(pos, sym_ref_node(pos, g), cast(Sym, g).type_)
-			vec_push(pre, old)
-			vec_push(post, expr_stmt(rc_inc_call(pos, sym_ref_node(pos, g))))
-			vec_push(post, expr_stmt(rc_dec_call(pos, sym_ref_node(pos, cast(LetStmt, old).sym), drop_fn(cast(Sym, g).type_))))
+		let g = cast(Sym, vec_get(syms, j))
+		if cast(i64, g) != 0 && g.kind == SYM_GLOBAL && rc_counted(cast(Ty, g.type_)) != 0 {
+			let old = cast(LetStmt, temp(pos, sym_ref_node(pos, g), g.type_))
+			vec_push(pre, cast(i64, old))
+			vec_push(post, expr_stmt(cast(Node, rc_inc_call(pos, sym_ref_node(pos, g)))))
+			vec_push(post, expr_stmt(cast(Node, rc_dec_call(pos, sym_ref_node(pos, cast(Sym, old.sym)), drop_fn(g.type_)))))
 		}
 		j = j + 1
 	}
@@ -1952,14 +1952,14 @@ fn rc_ingot_base(e i64) i64 {
 	if cast(Node, e).kind != EX_IDENT || cast(IdentExpr, e).ref == 0 {
 		return 0
 	}
-	let s = cast(IdentExpr, e).ref
-	if cast(Sym, s).kind == SYM_GLOBAL {
+	let s = cast(Sym, cast(IdentExpr, e).ref)
+	if s.kind == SYM_GLOBAL {
 		return 1
 	}
-	if s == cast(Fn, rc_fn).env_sym {
+	if cast(i64, s) == cast(Fn, rc_fn).env_sym {
 		return 0
 	}
-	return i64(cast(Sym, s).region == RG_INGOT)
+	return i64(s.region == RG_INGOT)
 }
 
 // rc_local_base reports whether the ident e names a container the region pass proved
@@ -1968,38 +1968,38 @@ fn rc_local_base(e i64) i64 {
 	if cast(Node, e).kind != EX_IDENT || cast(IdentExpr, e).ref == 0 {
 		return 0
 	}
-	let s = cast(IdentExpr, e).ref
-	if cast(Sym, s).kind == SYM_GLOBAL || s == cast(Fn, rc_fn).env_sym {
+	let s = cast(Sym, cast(IdentExpr, e).ref)
+	if s.kind == SYM_GLOBAL || cast(i64, s) == cast(Fn, rc_fn).env_sym {
 		return 0
 	}
-	return i64(cast(Sym, s).region != 0 && (cast(Sym, s).region & ~(RG_FRESH | RG_EMB)) == 0)
+	return i64(s.region != 0 && (s.region & ~(RG_FRESH | RG_EMB)) == 0)
 }
 
 // rc_field_read reads the field the store writes (the base is a named ident).
-fn rc_field_read(pos i64, target i64, t i64) i64 {
-	let base = cast(MemExpr, target).base
-	return mk_mem(pos, sym_ref_node(pos, cast(IdentExpr, base).ref), 0, 0, cast(MemExpr, target).off, t)
+fn rc_field_read(pos i64, target MemExpr, t i64) i64 {
+	let base = cast(IdentExpr, target.base)
+	return mk_mem(pos, sym_ref_node(pos, cast(Sym, base.ref)), 0, 0, target.off, t)
 }
 
 // rc_elem_read reads the element the store writes; the slice and the index are names, so
 // naming them twice costs nothing.
-fn rc_elem_read(pos i64, target i64, t i64) i64 {
-	let seq = cast(ElemExpr, target).seq
+fn rc_elem_read(pos i64, target ElemExpr, t i64) i64 {
+	let seq = cast(IdentExpr, target.seq)
 	let n = node_new(EX_ELEM, pos)
-	cast(ElemExpr, n).seq = sym_ref_node(pos, cast(IdentExpr, seq).ref)
-	cast(ElemExpr, n).idx = sym_ref_node(pos, cast(IdentExpr, cast(ElemExpr, target).idx).ref)
-	cast(ElemExpr, n).size = cast(ElemExpr, target).size
-	cast(ElemExpr, n).str = cast(ElemExpr, target).str
+	cast(ElemExpr, n).seq = sym_ref_node(pos, cast(Sym, seq.ref))
+	cast(ElemExpr, n).idx = sym_ref_node(pos, cast(Sym, cast(IdentExpr, target.idx).ref))
+	cast(ElemExpr, n).size = target.size
+	cast(ElemExpr, n).str = target.str
 	cast(Node, n).type_ = t
 	return n
 }
 
 // rc_append_into reports whether xs = append(xs, v) grows the very global being assigned:
 // rt_append_rc counted its element and returned the same header, so nothing else moves.
-fn rc_append_into(v i64, target i64) i64 {
+fn rc_append_into(v i64, target IdentExpr) i64 {
 	if cast(Node, v).kind != EX_CALL || cast(Call, v).name == 0 || streq(cast(Call, v).name, cstr("rt_append_rc")) == 0 {
 		return 0
 	}
 	let a0 = vec_get(cast(Call, v).args, 0)
-	return i64(cast(Node, a0).kind == EX_IDENT && cast(IdentExpr, a0).ref == cast(IdentExpr, target).ref)
+	return i64(cast(Node, a0).kind == EX_IDENT && cast(IdentExpr, a0).ref == target.ref)
 }

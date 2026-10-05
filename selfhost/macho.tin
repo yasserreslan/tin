@@ -32,11 +32,11 @@ fn label_addr(l i64) i64 {
 	return vec_get(lk_labels, l)
 }
 
-fn call_addr(f i64) i64 {
-	if cast(Fn, f).extern_ != 0 {
-		return lk_stubs + 12 * cast(Fn, f).got
+fn call_addr(f Fn) i64 {
+	if f.extern_ != 0 {
+		return lk_stubs + 12 * f.got
 	}
-	return cast(Fn, f).addr
+	return f.addr
 }
 
 fn sym_addr(sym i64) i64 {
@@ -116,9 +116,9 @@ fn uleb(b i64, v_in i64) {
 fn entry_fn() i64 {
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if streq(cast(Fn, f).qname, cstr("main")) != 0 && cast(Fn, f).extern_ == 0 {
-			return f
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if streq(f.qname, cstr("main")) != 0 && f.extern_ == 0 {
+			return cast(i64, f)
 		}
 		i = i + 1
 	}
@@ -131,10 +131,10 @@ fn write_executable(path i64) {
 	lk_imports = vec_new()
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if cast(Fn, f).extern_ != 0 && cast(Fn, f).used != 0 {
-			cast(Fn, f).got = lk_imports[VEC_LEN]
-			vec_push(lk_imports, f)
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if f.extern_ != 0 && f.used != 0 {
+			f.got = lk_imports[VEC_LEN]
+			vec_push(lk_imports, cast(i64, f))
 		}
 		i = i + 1
 	}
@@ -212,8 +212,8 @@ fn write_executable(path i64) {
 	mut nsyms = 0
 	i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if cast(Fn, f).extern_ == 0 && cast(Fn, f).reach != 0 {
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if f.extern_ == 0 && f.reach != 0 {
 			buf_reserve(syms, 16)
 			let s = syms[VEC_DATA] + syms[VEC_LEN]
 			put32(s, strs[VEC_LEN])
@@ -221,10 +221,10 @@ fn write_executable(path i64) {
 			store8(s + 5, 1)
 			store8(s + 6, 0)
 			store8(s + 7, 0)
-			put64(s + 8, cast(Fn, f).addr)
+			put64(s + 8, f.addr)
 			syms[VEC_LEN] = syms[VEC_LEN] + 16
 			buf_byte(strs, '_')
-			buf_str(strs, cast(Fn, f).qname)
+			buf_str(strs, f.qname)
 			buf_byte(strs, 0)
 			nsyms = nsyms + 1
 		}

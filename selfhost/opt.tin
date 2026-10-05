@@ -2,31 +2,31 @@
 shared mut an_fn i64
 shared mut an_depth i64
 
-fn analyze_fn(f i64) {
-	an_fn = f
+fn analyze_fn(f Fn) {
+	an_fn = cast(i64, f)
 	an_depth = 0
-	cast(Fn, f).leaf = 1
-	let locals = cast(Fn, f).locals
+	f.leaf = 1
+	let locals = f.locals
 	mut i = 0
 	for i < locals[VEC_LEN] {
-		let s = vec_get(locals, i)
-		cast(Sym, s).uses = 0
-		cast(Sym, s).addr = 0
+		let s = cast(Sym, vec_get(locals, i))
+		s.uses = 0
+		s.addr = 0
 		i = i + 1
 	}
-	an_stmts(cast(Block, cast(Fn, f).body).stmts)
+	an_stmts(cast(Block, f.body).stmts)
 }
 
 // A use inside k nested loops counts 8^k, so inner-loop variables win registers.
-fn an_use(s i64) {
-	if cast(Sym, s).kind != SYM_LOCAL {
+fn an_use(s Sym) {
+	if s.kind != SYM_LOCAL {
 		return
 	}
 	mut w = 512
 	if an_depth < 3 {
 		w = 1 << (3 * an_depth)
 	}
-	cast(Sym, s).uses = cast(Sym, s).uses + w
+	s.uses = s.uses + w
 }
 
 fn an_stmts(stmts i64) {
@@ -43,11 +43,11 @@ fn an_stmt(s i64) {
 		an_stmts(cast(Block, s).stmts)
 	} else if k == ST_LET {
 		an_expr(cast(LetStmt, s).init)
-		an_use(cast(LetStmt, s).sym)
+		an_use(cast(Sym, cast(LetStmt, s).sym))
 	} else if k == ST_ASSIGN {
 		let t = cast(AssignStmt, s).target
 		if cast(Node, t).kind == EX_IDENT {
-			an_use(cast(IdentExpr, t).ref)
+			an_use(cast(Sym, cast(IdentExpr, t).ref))
 		} else {
 			an_expr(t)
 		}
@@ -80,7 +80,7 @@ fn an_stmt(s i64) {
 		an_expr(cast(CallMultiStmt, s).call)
 		mut i = 0
 		for i < cast(CallMultiStmt, s).syms[VEC_LEN] {
-			an_use(vec_get(cast(CallMultiStmt, s).syms, i))
+			an_use(cast(Sym, vec_get(cast(CallMultiStmt, s).syms, i)))
 			i = i + 1
 		}
 	}
@@ -97,13 +97,13 @@ fn an_exprs(v i64) {
 fn an_expr(e i64) {
 	let k = cast(Node, e).kind
 	if k == EX_IDENT {
-		an_use(cast(IdentExpr, e).ref)
+		an_use(cast(Sym, cast(IdentExpr, e).ref))
 	} else if k == EX_UNARY {
-		let x = cast(Unary, e).x
-		if streq(cast(Unary, e).op, cstr("&")) != 0 && cast(Sym, cast(IdentExpr, x).ref).kind == SYM_LOCAL {
-			cast(Sym, cast(IdentExpr, x).ref).addr = 1
+		let x = cast(IdentExpr, cast(Unary, e).x)
+		if streq(cast(Unary, e).op, cstr("&")) != 0 && cast(Sym, x.ref).kind == SYM_LOCAL {
+			cast(Sym, x.ref).addr = 1
 		}
-		an_expr(x)
+		an_expr(cast(i64, x))
 	} else if k == EX_BINARY {
 		an_expr(cast(Binary, e).l)
 		an_expr(cast(Binary, e).r)
@@ -157,11 +157,11 @@ shared mut lc_syms i64
 shared mut lc_pre i64
 shared mut lc_calls i64 // the loop makes calls, so headers may change under it
 
-fn licm_fn(f i64) {
+fn licm_fn(f Fn) {
 	analyze_fn(f)
-	lc_fn = f
-	prefetch_block(cast(Block, cast(Fn, f).body).stmts)
-	licm_block(cast(Fn, f).body)
+	lc_fn = cast(i64, f)
+	prefetch_block(cast(Block, f.body).stmts)
+	licm_block(cast(Block, f.body))
 }
 
 // ---- strided prefetch ----
@@ -255,7 +255,7 @@ fn prefetch_loop(w i64) {
 	lc_calls = stmts_have_call(body)
 	collect_assigned(body)
 	// The induction step: a top-level `j = j + step` with step invariant.
-	mut j = 0
+	mut j = cast(Sym, 0)
 	mut step = 0
 	mut i = 0
 	for i < body[VEC_LEN] {
@@ -264,13 +264,13 @@ fn prefetch_loop(w i64) {
 			let v = cast(AssignStmt, s).value
 			let t = cast(IdentExpr, cast(AssignStmt, s).target).ref
 			if cast(Node, v).kind == EX_BINARY && streq(cast(Binary, v).op, cstr("+")) != 0 && cast(Node, cast(Binary, v).l).kind == EX_IDENT && cast(IdentExpr, cast(Binary, v).l).ref == t && invariant(cast(Binary, v).r) != 0 {
-				j = t
+				j = cast(Sym, t)
 				step = cast(Binary, v).r
 			}
 		}
 		i = i + 1
 	}
-	if j == 0 || count_assigns(body, j) != 1 {
+	if cast(i64, j) == 0 || count_assigns(body, cast(i64, j)) != 1 {
 		return
 	}
 	if is_const(step) != 0 && const_val(step) < 8 && const_val(step) > -8 {
@@ -282,15 +282,15 @@ fn prefetch_loop(w i64) {
 	for i < body[VEC_LEN] {
 		let s = vec_get(body, i)
 		if cast(Node, s).kind == ST_ASSIGN && cast(Node, cast(AssignStmt, s).target).kind == EX_INDEX {
-			let ix = cast(AssignStmt, s).target
-			if (is_reg_local(cast(IndexExpr, ix).x) != 0 || cast(IndexExpr, cast(IndexExpr, ix).x).hdr != 0) && invariant(cast(IndexExpr, ix).x) != 0 && cast(Node, cast(IndexExpr, ix).i).kind == EX_IDENT && cast(IdentExpr, cast(IndexExpr, ix).i).ref == j {
-				target = ix
+			let ix = cast(IndexExpr, cast(AssignStmt, s).target)
+			if (is_reg_local(ix.x) != 0 || cast(IndexExpr, ix.x).hdr != 0) && invariant(ix.x) != 0 && cast(Node, ix.i).kind == EX_IDENT && cast(Sym, cast(IdentExpr, ix.i).ref) == j {
+				target = cast(i64, ix)
 			}
 		}
 		if cast(Node, s).kind == ST_ASSIGN && cast(Node, cast(AssignStmt, s).target).kind == EX_ELEM {
-			let el = cast(AssignStmt, s).target
-			if is_reg_local(cast(ElemExpr, el).seq) != 0 && invariant(cast(ElemExpr, el).seq) != 0 && cast(ElemExpr, el).size == 8 && cast(Node, cast(ElemExpr, el).idx).kind == EX_IDENT && cast(IdentExpr, cast(ElemExpr, el).idx).ref == j {
-				target = el
+			let el = cast(ElemExpr, cast(AssignStmt, s).target)
+			if is_reg_local(el.seq) != 0 && invariant(el.seq) != 0 && el.size == 8 && cast(Node, el.idx).kind == EX_IDENT && cast(Sym, cast(IdentExpr, el.idx).ref) == j {
+				target = cast(i64, el)
 			}
 		}
 		i = i + 1
@@ -299,25 +299,25 @@ fn prefetch_loop(w i64) {
 		return
 	}
 	let pos = cast(Node, w).pos
-	let ahead = node_new(EX_INT, pos)
-	cast(IntLit, ahead).val = PF_AHEAD
-	let jref = node_new(EX_IDENT, pos)
-	cast(IdentExpr, jref).name = cast(Sym, j).name
-	cast(IdentExpr, jref).ref = j
-	let call = node_new(EX_CALL, pos)
-	cast(Call, call).name = cstr("__prefetchw")
-	cast(Call, call).args = vec_new()
-	cast(Call, call).intrinsic = 1
+	let ahead = cast(IntLit, node_new(EX_INT, pos))
+	ahead.val = PF_AHEAD
+	let jref = cast(IdentExpr, node_new(EX_IDENT, pos))
+	jref.name = j.name
+	jref.ref = cast(i64, j)
+	let call = cast(Call, node_new(EX_CALL, pos))
+	call.name = cstr("__prefetchw")
+	call.args = vec_new()
+	call.intrinsic = 1
 	if cast(Node, target).kind == EX_ELEM {
-		vec_push(cast(Call, call).args, mk_hdr(pos, node_copy(cast(ElemExpr, target).seq), 2))
+		vec_push(call.args, mk_hdr(pos, node_copy(cast(ElemExpr, target).seq), 2))
 	} else {
-		vec_push(cast(Call, call).args, node_copy(cast(IndexExpr, target).x))
+		vec_push(call.args, node_copy(cast(IndexExpr, target).x))
 	}
-	vec_push(cast(Call, call).args, binary_node(pos, cstr("+"), jref, binary_node(pos, cstr("*"), node_copy(step), ahead)))
-	let st = node_new(ST_EXPR, pos)
-	cast(ExprStmt, st).x = call
+	vec_push(call.args, binary_node(pos, cstr("+"), cast(i64, jref), binary_node(pos, cstr("*"), node_copy(step), cast(i64, ahead))))
+	let st = cast(ExprStmt, node_new(ST_EXPR, pos))
+	st.x = cast(i64, call)
 	let nb = vec_new()
-	vec_push(nb, st)
+	vec_push(nb, cast(i64, st))
 	i = 0
 	for i < body0[VEC_LEN] {
 		vec_push(nb, vec_get(body0, i))
@@ -338,15 +338,15 @@ fn count_assigns(stmts i64, sym i64) i64 {
 	return n
 }
 
-fn licm_block(b i64) {
-	let stmts = cast(Block, b).stmts
+fn licm_block(b Block) {
+	let stmts = b.stmts
 	let result = vec_new()
 	mut i = 0
 	for i < stmts[VEC_LEN] {
 		let s = vec_get(stmts, i)
 		licm_nested(s)
 		if cast(Node, s).kind == ST_WHILE && cast(WhileStmt, s).once_ == 0 {
-			let pre = licm_loop(s)
+			let pre = licm_loop(cast(WhileStmt, s))
 			mut j = 0
 			for j < pre[VEC_LEN] {
 				vec_push(result, vec_get(pre, j))
@@ -356,41 +356,41 @@ fn licm_block(b i64) {
 		vec_push(result, s)
 		i = i + 1
 	}
-	cast(Block, b).stmts = result
+	b.stmts = result
 }
 
 fn licm_nested(s i64) {
 	let k = cast(Node, s).kind
 	if k == ST_BLOCK {
-		licm_block(s)
+		licm_block(cast(Block, s))
 	} else if k == ST_IF {
-		licm_block(cast(IfStmt, s).then)
+		licm_block(cast(Block, cast(IfStmt, s).then))
 		if cast(IfStmt, s).else_ != 0 {
 			licm_nested(cast(IfStmt, s).else_)
 		}
 	} else if k == ST_WHILE {
-		licm_block(cast(WhileStmt, s).body)
+		licm_block(cast(Block, cast(WhileStmt, s).body))
 	}
 }
 
 // licm_loop rewrites loop w in place and returns the lets to run before it.
-fn licm_loop(w i64) i64 {
+fn licm_loop(w WhileStmt) i64 {
 	lc_assigned = vec_new()
 	lc_exprs = vec_new()
 	lc_syms = vec_new()
 	lc_pre = vec_new()
-	lc_calls = i64(stmts_have_call(cast(Block, cast(WhileStmt, w).body).stmts) != 0 || contains_call(cast(WhileStmt, w).cond) != 0 || stmt_has_call(cast(WhileStmt, w).post) != 0)
-	collect_assigned(cast(Block, cast(WhileStmt, w).body).stmts)
-	if cast(WhileStmt, w).post != 0 {
+	lc_calls = i64(stmts_have_call(cast(Block, w.body).stmts) != 0 || contains_call(w.cond) != 0 || stmt_has_call(w.post) != 0)
+	collect_assigned(cast(Block, w.body).stmts)
+	if w.post != 0 {
 		let one = vec_new()
-		vec_push(one, cast(WhileStmt, w).post)
+		vec_push(one, w.post)
 		collect_assigned(one)
 	}
-	hoist_expr(cast(WhileStmt, w).cond)
-	hoist_stmts(cast(Block, cast(WhileStmt, w).body).stmts)
-	if cast(WhileStmt, w).post != 0 {
+	hoist_expr(w.cond)
+	hoist_stmts(cast(Block, w.body).stmts)
+	if w.post != 0 {
 		let two = vec_new()
-		vec_push(two, cast(WhileStmt, w).post)
+		vec_push(two, w.post)
 		hoist_stmts(two)
 	}
 	return lc_pre
@@ -452,17 +452,17 @@ fn invariant(e i64) i64 {
 		return 1
 	}
 	if k == EX_IDENT {
-		let s = cast(IdentExpr, e).ref
-		if cast(Sym, s).kind == SYM_CONST {
+		let s = cast(Sym, cast(IdentExpr, e).ref)
+		if s.kind == SYM_CONST {
 			return 1
 		}
-		return i64(cast(Sym, s).kind == SYM_LOCAL && cast(Sym, s).addr == 0 && is_assigned(s) == 0)
+		return i64(s.kind == SYM_LOCAL && s.addr == 0 && is_assigned(cast(i64, s)) == 0)
 	}
 	if k == EX_UNARY {
 		return i64(streq(cast(Unary, e).op, cstr("&")) == 0 && invariant(cast(Unary, e).x) != 0)
 	}
 	if k == EX_BINARY {
-		return i64(streq(cast(Binary, e).op, cstr("&&")) == 0 && streq(cast(Binary, e).op, cstr("||")) == 0 && may_panic(e) == 0 && invariant(cast(Binary, e).l) != 0 && invariant(cast(Binary, e).r) != 0)
+		return i64(streq(cast(Binary, e).op, cstr("&&")) == 0 && streq(cast(Binary, e).op, cstr("||")) == 0 && may_panic(cast(Binary, e)) == 0 && invariant(cast(Binary, e).l) != 0 && invariant(cast(Binary, e).r) != 0)
 	}
 	if k == EX_FLOAT {
 		return 1
@@ -599,11 +599,11 @@ fn hoist_expr(e i64) {
 }
 
 fn binary_node(pos i64, op i64, l i64, r i64) i64 {
-	let b = node_new(EX_BINARY, pos)
-	cast(Binary, b).op = op
-	cast(Binary, b).l = l
-	cast(Binary, b).r = r
-	return b
+	let b = cast(Binary, node_new(EX_BINARY, pos))
+	b.op = op
+	b.l = l
+	b.r = r
+	return cast(i64, b)
 }
 
 // index_rewrite turns x[a + b] into (x + (a << 3))[b] when x and a are invariant and b is not.
@@ -621,42 +621,42 @@ fn index_rewrite(e i64) {
 	if invariant(a) == 0 || invariant(b) != 0 {
 		return
 	}
-	let three = node_new(EX_INT, cast(Node, e).pos)
-	cast(IntLit, three).val = 3
-	cast(IndexExpr, e).x = binary_node(cast(Node, e).pos, cstr("+"), cast(IndexExpr, e).x, binary_node(cast(Node, e).pos, cstr("<<"), a, three))
+	let three = cast(IntLit, node_new(EX_INT, cast(Node, e).pos))
+	three.val = 3
+	cast(IndexExpr, e).x = binary_node(cast(Node, e).pos, cstr("+"), cast(IndexExpr, e).x, binary_node(cast(Node, e).pos, cstr("<<"), a, cast(i64, three)))
 	cast(IndexExpr, e).i = b
 }
 
 // replace_with_temp moves e into a let before the loop and turns e into a read of it,
 // reusing the temp of an identical expression hoisted earlier from the same loop.
 fn replace_with_temp(e i64) {
-	mut s = 0
+	mut s = cast(Sym, 0)
 	mut i = 0
-	for i < lc_exprs[VEC_LEN] && s == 0 {
+	for i < lc_exprs[VEC_LEN] && cast(i64, s) == 0 {
 		if expr_equal(vec_get(lc_exprs, i), e) != 0 {
-			s = vec_get(lc_syms, i)
+			s = cast(Sym, vec_get(lc_syms, i))
 		}
 		i = i + 1
 	}
-	if s == 0 {
+	if cast(i64, s) == 0 {
 		let moved = node_copy(e)
-		s = sym_new(SYM_LOCAL, cstr("licm"), cast(Node, e).pos)
-		cast(Sym, s).type_ = cast(Node, e).type_
-		cast(Sym, s).slot = cast(Fn, lc_fn).slots
+		s = cast(Sym, sym_new(SYM_LOCAL, cstr("licm"), cast(Node, e).pos))
+		s.type_ = cast(Node, e).type_
+		s.slot = cast(Fn, lc_fn).slots
 		cast(Fn, lc_fn).slots = cast(Fn, lc_fn).slots + 1
-		vec_push(cast(Fn, lc_fn).locals, s)
-		let l = node_new(ST_LET, cast(Node, e).pos)
-		cast(LetStmt, l).name = cstr("licm")
-		cast(LetStmt, l).init = moved
-		cast(LetStmt, l).sym = s
-		vec_push(lc_pre, l)
+		vec_push(cast(Fn, lc_fn).locals, cast(i64, s))
+		let l = cast(LetStmt, node_new(ST_LET, cast(Node, e).pos))
+		l.name = cstr("licm")
+		l.init = moved
+		l.sym = cast(i64, s)
+		vec_push(lc_pre, cast(i64, l))
 		vec_push(lc_exprs, moved)
-		vec_push(lc_syms, s)
+		vec_push(lc_syms, cast(i64, s))
 	}
 	let t = cast(Node, e).type_
 	cast(Node, e).kind = EX_IDENT
-	cast(IdentExpr, e).name = cast(Sym, s).name
-	cast(IdentExpr, e).ref = s
+	cast(IdentExpr, e).name = s.name
+	cast(IdentExpr, e).ref = cast(i64, s)
 	e[4] = 0
 	e[5] = 0
 	cast(Node, e).type_ = t
@@ -671,12 +671,12 @@ fn elem_specialize(e i64) {
 		return
 	}
 	let pos = cast(Node, e).pos
-	mut data = 0
+	mut data = cast(Node, 0)
 	if cast(ElemExpr, e).str != 0 {
-		data = binary_node(pos, cstr("+"), node_copy(x), int_node(pos, 8))
-		cast(Node, data).type_ = ty_int
+		data = cast(Node, binary_node(pos, cstr("+"), node_copy(x), int_node(pos, 8)))
+		data.type_ = ty_int
 	} else {
-		data = mk_hdr(pos, node_copy(x), 2)
+		data = cast(Node, mk_hdr(pos, node_copy(x), 2))
 	}
 	mut lenx = 0
 	if cast(ElemExpr, e).safe == 0 {
@@ -685,9 +685,9 @@ fn elem_specialize(e i64) {
 	let idx = cast(ElemExpr, e).idx
 	let size = cast(ElemExpr, e).size
 	let t = cast(Node, e).type_
-	let m = mk_mem(pos, data, idx, size, 0, t)
-	cast(MemExpr, m).len = lenx
-	replace_node(e, m)
+	let m = cast(MemExpr, mk_mem(pos, cast(i64, data), idx, size, 0, t))
+	m.len = lenx
+	replace_node(e, cast(i64, m))
 }
 
 fn int_node(pos i64, v i64) i64 {

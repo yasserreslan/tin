@@ -60,7 +60,7 @@ fn el_symbols(img i64, own i64, name_off i64, lay i64) {
 	let n = own[VEC_LEN]
 	mut i = 0
 	for i < n {
-		let f = vec_get(own, i)
+		let f = cast(Fn, vec_get(own, i))
 		mut end = vec_get(lay, 4)
 		if i + 1 < n {
 			end = cast(Fn, vec_get(own, i + 1)).addr
@@ -69,8 +69,8 @@ fn el_symbols(img i64, own i64, name_off i64, lay i64) {
 		put32(s, vec_get(name_off, i) + 4)
 		store8(s + 4, 0x12)
 		store8(s + 6, 1)
-		put64(s + 8, cast(Fn, f).addr)
-		put64(s + 16, end - cast(Fn, f).addr)
+		put64(s + 8, f.addr)
+		put64(s + 16, end - f.addr)
 		i = i + 1
 	}
 	let shstr = sym + 24 * (n + 1)
@@ -112,11 +112,11 @@ fn el_symbols(img i64, own i64, name_off i64, lay i64) {
 fn el_check_static() {
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if cast(Fn, f).extern_ != 0 && cast(Fn, f).used != 0 {
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if f.extern_ != 0 && f.used != 0 {
 			let b = buf_new()
 			buf_str(b, cstr("a Linux executable is static, but the program imports "))
-			buf_str(b, cast(Fn, f).name)
+			buf_str(b, f.name)
 			buf_byte(b, 0)
 			link_fail(b[VEC_DATA])
 		}
@@ -155,12 +155,12 @@ fn write_elf(path i64) {
 	let own = vec_new()
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		let f = vec_get(prog_fns, i)
-		if cast(Fn, f).extern_ == 0 && cast(Fn, f).reach != 0 {
-			vec_push(own, f)
+		let f = cast(Fn, vec_get(prog_fns, i))
+		if f.extern_ == 0 && f.reach != 0 {
+			vec_push(own, cast(i64, f))
 			vec_push(name_off, dstr[VEC_LEN])
 			buf_str(dstr, cstr("tin."))
-			buf_str(dstr, cast(Fn, f).qname)
+			buf_str(dstr, f.qname)
 			buf_byte(dstr, 0)
 		}
 		i = i + 1
@@ -250,13 +250,13 @@ fn write_elf(path i64) {
 	put64(img + lk_btrace, own[VEC_LEN])
 	i = 0
 	for i < own[VEC_LEN] {
-		let f = vec_get(own, i)
+		let f = cast(Fn, vec_get(own, i))
 		mut end = lk_stubs
 		if i + 1 < own[VEC_LEN] {
 			end = cast(Fn, vec_get(own, i + 1)).addr
 		}
 		let rec = img + lk_btrace + 8 + 24 * i
-		put64(rec, cast(Fn, f).addr)
+		put64(rec, f.addr)
 		put64(rec + 8, end)
 		put64(rec + 16, dynstr_off + vec_get(name_off, i))
 		i = i + 1
