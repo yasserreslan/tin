@@ -42,13 +42,13 @@ fn lex(file i64, src i64, len_ i64, edition i64) i64 {
 	mut last = 0
 	for {
 		let t = lex_next()
-		if last != 0 && (lx_newline != 0 || t[T_KIND] == TK_EOF) && ends_statement(last) != 0 {
-			let semi = token_new(TK_PUNCT, cstr(";"), 1, t[T_POS])
-			semi[T_SYNTH] = 1
+		if last != 0 && (lx_newline != 0 || cast(Token, t).kind == TK_EOF) && ends_statement(last) != 0 {
+			let semi = token_new(TK_PUNCT, cstr(";"), 1, cast(Token, t).pos)
+			cast(Token, semi).synth = 1
 			vec_push(toks, semi)
 		}
 		vec_push(toks, t)
-		if t[T_KIND] == TK_EOF {
+		if cast(Token, t).kind == TK_EOF {
 			return toks
 		}
 		last = t
@@ -59,16 +59,16 @@ fn lex(file i64, src i64, len_ i64, edition i64) i64 {
 // T_VAL holds an integer literal's value or a string literal's byte length.
 fn token_new(kind i64, text i64, val i64, pos i64) i64 {
 	let t = malloc(80)
-	t[T_KIND] = kind
-	t[T_TEXT] = text
-	t[T_VAL] = val
-	t[T_POS] = pos
-	t[T_RAW] = 0
-	t[T_DBL] = 0
-	t[T_UNIT] = 0
-	t[T_START] = lx_token_start
-	t[T_END] = lx_i
-	t[T_SYNTH] = 0
+	cast(Token, t).kind = kind
+	cast(Token, t).text = text
+	cast(Token, t).val = val
+	cast(Token, t).pos = pos
+	cast(Token, t).raw = 0
+	cast(Token, t).dbl = 0
+	cast(Token, t).unit = 0
+	cast(Token, t).start = lx_token_start
+	cast(Token, t).end = lx_i
+	cast(Token, t).synth = 0
 	return t
 }
 
@@ -218,11 +218,11 @@ fn lx_skip_space() {
 
 // Go's semicolon rule: a line break after one of these tokens ends the statement.
 fn ends_statement(t i64) i64 {
-	let k = t[T_KIND]
+	let k = cast(Token, t).kind
 	if k == TK_IDENT || k == TK_INT || k == TK_FLOAT || k == TK_STRING {
 		return 1
 	}
-	let s = t[T_TEXT]
+	let s = cast(Token, t).text
 	if k == TK_KEYWORD {
 		return i64(streq(s, cstr("break")) != 0 || streq(s, cstr("continue")) != 0 || streq(s, cstr("return")) != 0 || streq(s, cstr("true")) != 0 || streq(s, cstr("false")) != 0 || streq(s, cstr("nil")) != 0)
 	}
@@ -323,7 +323,7 @@ fn lex_float(pos i64, start i64) i64 {
 	}
 	let text = str_slice(lx_src + start, number_end - start)
 	let t = token_new(TK_FLOAT, text, float_bits(text), pos)
-	t[T_UNIT] = unit_
+	cast(Token, t).unit = unit_
 	return t
 }
 
@@ -349,7 +349,7 @@ fn lex_raw_string(pos i64) i64 {
 	lx_advance()
 	buf_byte(b, 0)
 	let rt = token_new(TK_STRING, b[VEC_DATA], b[VEC_LEN] - 1, pos)
-	rt[T_RAW] = 1
+	cast(Token, rt).raw = 1
 	return rt
 }
 
@@ -457,7 +457,7 @@ fn lex_number(pos i64) i64 {
 		fatal(e)
 	}
 	let t = token_new(TK_INT, text, val, pos)
-	t[T_UNIT] = unit_
+	cast(Token, t).unit = unit_
 	return t
 }
 
@@ -545,7 +545,7 @@ fn lex_string(pos i64) i64 {
 			// The NUL makes T_TEXT usable as a C string; T_VAL keeps the real length.
 			buf_byte(b, 0)
 			let st = token_new(TK_STRING, b[VEC_DATA], b[VEC_LEN] - 1, pos)
-			st[T_DBL] = doubled
+			cast(Token, st).dbl = doubled
 			return st
 		}
 		if c == '\\' {

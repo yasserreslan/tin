@@ -55,8 +55,8 @@ fn x64_fn_name(id i64) i64 {
 		return 0
 	}
 	let f = vec_get(prog_fns, index)
-	if f[F_QNAME] != 0 {
-		return f[F_QNAME]
+	if cast(Fn, f).qname != 0 {
+		return cast(Fn, f).qname
 	}
 	return 0
 }
@@ -326,7 +326,7 @@ fn x_divide(dst i64, a i64, b_in i64, unsigned i64, rem i64) {
 		x_mov(RCX, b)
 		b = RCX
 	}
-	let strict = i64(cur_gen_fn[F_GENERATED] == 0)
+	let strict = i64(cast(Fn, cur_gen_fn).generated == 0)
 	mut zero_l = 0
 	if strict != 0 {
 		zero_l = x_div_stub()
@@ -491,7 +491,7 @@ fn x_binary_const(op i64, dst i64, l i64, c i64) {
 		} else if c == -1 {
 			x_mov(dst, l)
 			emit1(X_NEG, dst)
-		} else if c == 0 && cur_gen_fn[F_GENERATED] == 0 {
+		} else if c == 0 && cast(Fn, cur_gen_fn).generated == 0 {
 			emit1(X_JMP, x_div_stub())
 		} else if c == 0 {
 			x_load_imm(dst, 0)
@@ -511,7 +511,7 @@ fn x_binary_const(op i64, dst i64, l i64, c i64) {
 		let k = pow2_log(m)
 		if m == 1 {
 			x_load_imm(dst, 0)
-		} else if c == 0 && cur_gen_fn[F_GENERATED] == 0 {
+		} else if c == 0 && cast(Fn, cur_gen_fn).generated == 0 {
 			emit1(X_JMP, x_div_stub())
 		} else if c == 0 {
 			x_mov(dst, l)
@@ -579,29 +579,29 @@ fn x_uconst(op i64, dst i64, l i64, c i64) i64 {
 // x_canon keeps narrow integer results canonical: sign-extended for i8/i16/i32,
 // zero-extended for u8/u16/u32, so wrapping matches the declared width.
 fn x_canon(t i64, r i64) {
-	if t == 0 || t[TY_KIND] != K_INT || t[TY_WIDTH] == 8 || is_fp(r) != 0 {
+	if t == 0 || cast(Ty, t).kind != K_INT || cast(Ty, t).width == 8 || is_fp(r) != 0 {
 		return
 	}
-	if t[TY_SIGNED] != 0 {
-		emit3(X_SXT, r, r, width_log2(t[TY_WIDTH]))
+	if cast(Ty, t).signed != 0 {
+		emit3(X_SXT, r, r, width_log2(cast(Ty, t).width))
 	} else {
-		emit3(X_ZXT, r, r, width_log2(t[TY_WIDTH]))
+		emit3(X_ZXT, r, r, width_log2(cast(Ty, t).width))
 	}
 }
 
 fn x_mask(e i64, dst i64) {
-	x_canon(e[N_TYPE], dst)
+	x_canon(cast(Node, e).type_, dst)
 }
 
 // ---- expressions ----
 // x_gen_val returns a register holding e: a local's own register, or temp depth d.
 fn x_gen_val(e i64, d i64) i64 {
-	let k = e[N_KIND]
+	let k = cast(Node, e).kind
 	if k == EX_REG {
-		return e[REG_NUM]
+		return cast(RegExpr, e).num
 	}
-	if k == EX_IDENT && e[ID_REF][S_KIND] == SYM_LOCAL && e[ID_REF][S_REG] >= 0 {
-		return e[ID_REF][S_REG]
+	if k == EX_IDENT && cast(Sym, cast(IdentExpr, e).ref).kind == SYM_LOCAL && cast(Sym, cast(IdentExpr, e).ref).reg >= 0 {
+		return cast(Sym, cast(IdentExpr, e).ref).reg
 	}
 	mut r = 0
 	if e_fp(e) != 0 {
@@ -615,62 +615,62 @@ fn x_gen_val(e i64, d i64) i64 {
 
 // x_gen_to computes e into dst using temps from depth d up; dst is written last.
 fn x_gen_to(e i64, dst i64, d i64) {
-	let k = e[N_KIND]
+	let k = cast(Node, e).kind
 	if k == EX_INT {
-		x_load_imm(dst, e[INT_VAL])
+		x_load_imm(dst, cast(IntLit, e).val)
 	} else if k == EX_FLOAT {
-		x_load_imm(dst, e[FL_BITS])
+		x_load_imm(dst, cast(FloatLit, e).bits)
 	} else if k == EX_STR {
 		mut sym = 0
-		if kind_of(e[N_TYPE]) == K_STRING {
-			sym = x_sym(SK_TSTR, tstring_index(e[STR_PTR], e[STR_LEN]))
+		if kind_of(cast(Node, e).type_) == K_STRING {
+			sym = x_sym(SK_TSTR, tstring_index(cast(StrLit, e).ptr, cast(StrLit, e).len))
 		} else {
-			sym = x_sym(SK_STR, string_index(e[STR_PTR], e[STR_LEN]))
+			sym = x_sym(SK_STR, string_index(cast(StrLit, e).ptr, cast(StrLit, e).len))
 		}
 		emit2(X_LEA, dst, x64_mem_sym(sym))
 	} else if k == EX_IDENT {
 		x_gen_ident(e, dst)
 	} else if k == EX_REG {
-		x_mov(dst, e[REG_NUM])
+		x_mov(dst, cast(RegExpr, e).num)
 	} else if k == EX_UNARY {
 		x_gen_unary(e, dst, d)
 	} else if k == EX_BINARY {
 		x_gen_binary(e, dst, d)
 	} else if k == EX_INDEX {
 		x_gen_index_load(e, dst, d)
-	} else if k == EX_CONV && (e[CV_KIND] == CV_DYN || e[CV_KIND] == CV_DYN_KEEP || e[CV_KIND] == CV_DYN_OBJECT || e[CV_KIND] == CV_DYN_DESC || (e[CV_KIND] == CV_SAME && is_dyn_value(e[N_TYPE]) != 0)) {
+	} else if k == EX_CONV && (cast(Conv, e).kind == CV_DYN || cast(Conv, e).kind == CV_DYN_KEEP || cast(Conv, e).kind == CV_DYN_OBJECT || cast(Conv, e).kind == CV_DYN_DESC || (cast(Conv, e).kind == CV_SAME && is_dyn_value(cast(Node, e).type_) != 0)) {
 		x_gen_dyn_pair(e, dst, XSCR2, d)
-	} else if k == EX_CONV && e[CV_KIND] == CV_DYN_TABLE_WORD {
+	} else if k == EX_CONV && cast(Conv, e).kind == CV_DYN_TABLE_WORD {
 		mut spare = XSCR
 		if dst == XSCR {
 			spare = XSCR2
 		}
-		x_gen_dyn_pair(e[CV_X], spare, dst, d)
+		x_gen_dyn_pair(cast(Conv, e).x, spare, dst, d)
 	} else if k == EX_CONV {
 		x_gen_conv(e, dst, d)
 	} else if k == EX_MEM {
-		if is_dyn_value(e[N_TYPE]) != 0 {
+		if is_dyn_value(cast(Node, e).type_) != 0 {
 			x_gen_dyn_pair(e, dst, XSCR2, d)
 		} else {
 			x_gen_mem_addr(e, d)
-			x_emit_load(dst, e[N_TYPE])
+			x_emit_load(dst, cast(Node, e).type_)
 		}
 	} else if k == EX_ELEM {
-		if is_dyn_value(e[N_TYPE]) != 0 {
+		if is_dyn_value(cast(Node, e).type_) != 0 {
 			x_gen_dyn_pair(e, dst, XSCR2, d)
 		} else {
 			x_gen_elem_addr(e, d)
-			x_emit_load(dst, e[N_TYPE])
+			x_emit_load(dst, cast(Node, e).type_)
 		}
 	} else if k == EX_SEQ {
 		x_gen_seq(e, dst, d)
 	} else if k == EX_FUNCREF {
 		mut kind = SK_FNDESC
-		if e[FR_RAW] != 0 {
+		if cast(FuncRef, e).raw != 0 {
 			kind = SK_FN
 		}
-		emit2(X_LEA, dst, x64_mem_sym(x_sym(kind, e[FR_FN][F_INDEX])))
-	} else if e[CALL_INTRINSIC] != 0 {
+		emit2(X_LEA, dst, x64_mem_sym(x_sym(kind, cast(Fn, cast(FuncRef, e).fn_).index)))
+	} else if cast(Call, e).intrinsic != 0 {
 		x_gen_intrinsic(e, dst, d)
 	} else {
 		x_gen_call(e, d)
@@ -685,7 +685,7 @@ fn x_gen_to(e i64, dst i64, d i64) {
 // x_gen_dyn_addr computes the address of a two-word field or slice element. x86 has no
 // addressing mode for a scale of 16, so a dyn slice index is multiplied explicitly.
 fn x_gen_dyn_addr(e i64, d i64) {
-	if e[N_KIND] == EX_ELEM {
+	if cast(Node, e).kind == EX_ELEM {
 		x_gen_elem_addr(e, d)
 	} else {
 		x_gen_mem_addr(e, d)
@@ -711,36 +711,36 @@ fn x_gen_dyn_addr(e i64, d i64) {
 
 // x_gen_dyn_pair computes a dyn value as adjacent object and table words.
 fn x_gen_dyn_pair(e i64, obj i64, tab i64, d i64) {
-	let k = e[N_KIND]
-	if k == EX_CONV && e[CV_KIND] == CV_DYN_OBJECT {
+	let k = cast(Node, e).kind
+	if k == EX_CONV && cast(Conv, e).kind == CV_DYN_OBJECT {
 		mut spare = XSCR2
 		if obj == XSCR2 {
 			spare = XSCR
 		}
-		x_gen_dyn_pair(e[CV_X], obj, spare, d)
+		x_gen_dyn_pair(cast(Conv, e).x, obj, spare, d)
 		return
 	}
-	if k == EX_CONV && e[CV_KIND] == CV_DYN_TABLE_WORD {
+	if k == EX_CONV && cast(Conv, e).kind == CV_DYN_TABLE_WORD {
 		mut spare = XSCR
 		if tab == XSCR {
 			spare = XSCR2
 		}
-		x_gen_dyn_pair(e[CV_X], spare, tab, d)
+		x_gen_dyn_pair(cast(Conv, e).x, spare, tab, d)
 		return
 	}
-	if k == EX_CONV && e[CV_KIND] == CV_DYN_DESC {
-		x_gen_dyn_pair(e[CV_X], RAX, RDX, d)
-		x_ld(obj, x_mem1(RDX, 8 * e[CV_DYN_INDEX]), 3)
+	if k == EX_CONV && cast(Conv, e).kind == CV_DYN_DESC {
+		x_gen_dyn_pair(cast(Conv, e).x, RAX, RDX, d)
+		x_ld(obj, x_mem1(RDX, 8 * cast(Conv, e).dyn_index), 3)
 		return
 	}
-	if k == EX_CONV && e[CV_KIND] == CV_DYN {
-		x_gen_to(e[CV_X], obj, d)
-		let rec = vec_get(dyn_tables, e[CV_DYN_TABLE])
+	if k == EX_CONV && cast(Conv, e).kind == CV_DYN {
+		x_gen_to(cast(Conv, e).x, obj, d)
+		let rec = vec_get(dyn_tables, cast(Conv, e).dyn_table)
 		emit2(X_LEA, tab, x64_mem_sym(x_sym(SK_VAR, vec_get(rec, 4))))
 		return
 	}
-	if k == EX_CONV && e[CV_KIND] == CV_DYN_KEEP {
-		x_gen_dyn_pair(e[CV_X], obj, tab, d)
+	if k == EX_CONV && cast(Conv, e).kind == CV_DYN_KEEP {
+		x_gen_dyn_pair(cast(Conv, e).x, obj, tab, d)
 		let done = new_label()
 		emit2(X_TEST, obj, obj)
 		emit2(X_JCC, XC_E, done)
@@ -758,7 +758,7 @@ fn x_gen_dyn_pair(e i64, obj i64, tab i64, d i64) {
 	}
 	if k == EX_SEQ {
 		x_gen_seq(e, -1, d)
-		x_gen_dyn_pair(e[SEQ_VALUE], obj, tab, d)
+		x_gen_dyn_pair(cast(SeqExpr, e).value, obj, tab, d)
 		return
 	}
 	if k == EX_CALL {
@@ -767,21 +767,21 @@ fn x_gen_dyn_pair(e i64, obj i64, tab i64, d i64) {
 		x_mov(tab, RDX)
 		return
 	}
-	if k == EX_CONV && e[CV_KIND] == CV_SAME {
-		x_gen_dyn_pair(e[CV_X], obj, tab, d)
+	if k == EX_CONV && cast(Conv, e).kind == CV_SAME {
+		x_gen_dyn_pair(cast(Conv, e).x, obj, tab, d)
 		return
 	}
 	if k == EX_IDENT {
-		let s = e[ID_REF]
-		if s[S_KIND] == SYM_LOCAL {
-			x_slot_load(obj, s[S_OFF])
-			x_slot_load(tab, s[S_OFF] + 8)
-		} else if s[S_TLS] != 0 {
+		let s = cast(IdentExpr, e).ref
+		if cast(Sym, s).kind == SYM_LOCAL {
+			x_slot_load(obj, cast(Sym, s).off)
+			x_slot_load(tab, cast(Sym, s).off + 8)
+		} else if cast(Sym, s).tls != 0 {
 			x_ld(obj, x_mem1(XCTX, tls_off(s)), 3)
 			x_ld(tab, x_mem1(XCTX, tls_off(s) + 8), 3)
 		} else {
-			x_ld(obj, x64_mem_sym(x_sym(SK_VAR, s[S_INDEX])), 3)
-			x_ld(tab, x64_mem_sym(x_sym(SK_VAR, s[S_WORDS])), 3)
+			x_ld(obj, x64_mem_sym(x_sym(SK_VAR, cast(Sym, s).index)), 3)
+			x_ld(tab, x64_mem_sym(x_sym(SK_VAR, cast(Sym, s).words)), 3)
 		}
 		return
 	}
@@ -796,24 +796,24 @@ fn x_gen_dyn_pair(e i64, obj i64, tab i64, d i64) {
 		x_load_imm(tab, 0)
 		return
 	}
-	err_code_at(e[N_POS], cstr("E990 INTERNAL"), cstr("unsupported dyn value location in amd64 code generation"))
+	err_code_at(cast(Node, e).pos, cstr("E990 INTERNAL"), cstr("unsupported dyn value location in amd64 code generation"))
 }
 
 fn x_gen_ident(e i64, dst i64) {
-	let s = e[ID_REF]
-	let k = s[S_KIND]
+	let s = cast(IdentExpr, e).ref
+	let k = cast(Sym, s).kind
 	if k == SYM_LOCAL {
-		if s[S_REG] >= 0 {
-			x_mov(dst, s[S_REG])
+		if cast(Sym, s).reg >= 0 {
+			x_mov(dst, cast(Sym, s).reg)
 		} else {
-			x_slot_load(dst, s[S_OFF])
+			x_slot_load(dst, cast(Sym, s).off)
 		}
-	} else if k == SYM_GLOBAL && s[S_TLS] != 0 {
+	} else if k == SYM_GLOBAL && cast(Sym, s).tls != 0 {
 		x_ld(dst, x_mem1(XCTX, tls_off(s)), 3)
 	} else if k == SYM_GLOBAL {
-		x_ld(dst, x64_mem_sym(x_sym(SK_VAR, s[S_INDEX])), 3)
+		x_ld(dst, x64_mem_sym(x_sym(SK_VAR, cast(Sym, s).index)), 3)
 	} else {
-		x_load_imm(dst, s[S_VAL])
+		x_load_imm(dst, cast(Sym, s).val)
 	}
 }
 
@@ -850,15 +850,15 @@ fn x_gen_pair(lexp i64, rexp i64, d i64) {
 }
 
 fn x_gen_unary(e i64, dst i64, d i64) {
-	let op = e[UN_OP]
+	let op = cast(Unary, e).op
 	if streq(op, cstr("&")) != 0 {
-		let s = e[UN_X][ID_REF]
-		if s[S_KIND] == SYM_LOCAL {
-			emit2(X_LEA, dst, x_mem1(RBP, s[S_OFF]))
-		} else if s[S_TLS] != 0 {
+		let s = cast(IdentExpr, cast(Unary, e).x).ref
+		if cast(Sym, s).kind == SYM_LOCAL {
+			emit2(X_LEA, dst, x_mem1(RBP, cast(Sym, s).off))
+		} else if cast(Sym, s).tls != 0 {
 			emit2(X_LEA, dst, x_mem1(XCTX, tls_off(s)))
 		} else {
-			emit2(X_LEA, dst, x64_mem_sym(x_sym(SK_VAR, s[S_INDEX])))
+			emit2(X_LEA, dst, x64_mem_sym(x_sym(SK_VAR, cast(Sym, s).index)))
 		}
 		return
 	}
@@ -866,7 +866,7 @@ fn x_gen_unary(e i64, dst i64, d i64) {
 		x_load_imm(dst, const_val(e))
 		return
 	}
-	let x = x_gen_val(e[UN_X], d)
+	let x = x_gen_val(cast(Unary, e).x, d)
 	if is_fp(dst) != 0 {
 		// Negation flips the sign bit.
 		x_load_imm(XSCR, 1 << 63)
@@ -894,7 +894,7 @@ fn x_gen_binary(e i64, dst i64, d i64) {
 		x_load_imm(dst, const_val(e))
 		return
 	}
-	let op = e[BIN_OP]
+	let op = cast(Binary, e).op
 	if streq(op, cstr("&&")) != 0 || streq(op, cstr("||")) != 0 {
 		let f = new_label()
 		let end = new_label()
@@ -915,8 +915,8 @@ fn x_gen_binary(e i64, dst i64, d i64) {
 		x_gen_fbinary(e, dst, d)
 		return
 	}
-	mut l = e[BIN_L]
-	mut r = e[BIN_R]
+	mut l = cast(Binary, e).l
+	mut r = cast(Binary, e).r
 	let comm = i64(streq(op, cstr("+")) != 0 || streq(op, cstr("*")) != 0 || streq(op, cstr("&")) != 0 || streq(op, cstr("|")) != 0 || streq(op, cstr("^")) != 0)
 	if comm != 0 && is_const(l) != 0 {
 		let t = l
@@ -942,8 +942,8 @@ fn x_gen_binary(e i64, dst i64, d i64) {
 }
 
 fn x_gen_fbinary(e i64, dst i64, d i64) {
-	let op = e[BIN_OP]
-	x_gen_pair(e[BIN_L], e[BIN_R], d)
+	let op = cast(Binary, e).op
+	x_gen_pair(cast(Binary, e).l, cast(Binary, e).r, d)
 	if streq(op, cstr("+")) != 0 {
 		x_binop(X_ADDSD, dst, pl, pr, 1)
 	} else if streq(op, cstr("-")) != 0 {
@@ -959,9 +959,9 @@ fn x_gen_fbinary(e i64, dst i64, d i64) {
 // cmp_unord, see x_jcc). Float operands are compared so that NaN compares false like Go:
 // ucomisd leaves CF set when unordered, so < and <= test the swapped operands with a/ae.
 fn x_gen_compare(e i64, d i64) {
-	mut l = e[BIN_L]
-	mut r = e[BIN_R]
-	let op = e[BIN_OP]
+	mut l = cast(Binary, e).l
+	mut r = cast(Binary, e).r
+	let op = cast(Binary, e).op
 	if e_fp(l) != 0 || e_fp(r) != 0 {
 		x_gen_pair(l, r, d)
 		// Set after the operands, which may contain comparisons of their own.
@@ -1006,19 +1006,19 @@ fn x_gen_compare(e i64, d i64) {
 }
 
 fn x_gen_index_load(e i64, dst i64, d i64) {
-	let ix = e[IX_I]
+	let ix = cast(IndexExpr, e).i
 	if is_const(ix) != 0 && x64_fits32(const_val(ix) * 8) != 0 {
-		let base = x_gen_val(e[IX_X], d)
+		let base = x_gen_val(cast(IndexExpr, e).x, d)
 		x_ld(dst, x_mem1(base, const_val(ix) * 8), 3)
 		return
 	}
-	x_gen_pair(e[IX_X], ix, d)
+	x_gen_pair(cast(IndexExpr, e).x, ix, d)
 	x_ld(dst, x64_mem(pl, pr, 8, 0), 3)
 }
 
 fn x_gen_conv(e i64, dst i64, d i64) {
-	let k = e[CV_KIND]
-	let x = e[CV_X]
+	let k = cast(Conv, e).kind
+	let x = cast(Conv, e).x
 	if k == CV_LEN || k == CV_CAP {
 		// Header word 0 (len) or 1 (cap); a nil string, slice or map has length 0.
 		let p = x_gen_val(x, d)
@@ -1042,25 +1042,25 @@ fn x_gen_conv(e i64, dst i64, d i64) {
 		return
 	}
 	if k == CV_I2F {
-		if is_unsigned_t(x[N_TYPE]) != 0 && x[N_TYPE][TY_WIDTH] == 8 {
+		if is_unsigned_t(cast(Node, x).type_) != 0 && cast(Ty, cast(Node, x).type_).width == 8 {
 			x_cvt_u2f(dst, v)
 		} else {
 			emit2(X_CVTSI2SD, dst, v)
 		}
 	} else if k == CV_F2I {
-		if is_unsigned_t(e[N_TYPE]) != 0 && e[N_TYPE][TY_WIDTH] == 8 {
+		if is_unsigned_t(cast(Node, e).type_) != 0 && cast(Ty, cast(Node, e).type_).width == 8 {
 			x_cvt_f2u(dst, v)
 		} else {
 			emit2(X_CVTTSD2SI, dst, v)
 		}
-		x_canon(e[N_TYPE], dst)
+		x_canon(cast(Node, e).type_, dst)
 	} else if k == CV_TOBYTE {
 		emit3(X_ZXT, dst, v, 0)
 	} else if k == CV_INT {
 		// Values are kept canonical, so widening is free; narrowing re-canonicalizes.
 		x_mov(dst, v)
-		if type_width(e[N_TYPE]) < type_width(x[N_TYPE]) || is_unsigned_t(e[N_TYPE]) != is_unsigned_t(x[N_TYPE]) {
-			x_canon(e[N_TYPE], dst)
+		if type_width(cast(Node, e).type_) < type_width(cast(Node, x).type_) || is_unsigned_t(cast(Node, e).type_) != is_unsigned_t(cast(Node, x).type_) {
+			x_canon(cast(Node, e).type_, dst)
 		}
 	} else {
 		x_mov(dst, v)
@@ -1112,7 +1112,7 @@ fn x_cvt_f2u(dst i64, v i64) {
 fn x_mem_kind(t i64) i64 {
 	let w = type_width(t)
 	mut k = width_log2(w)
-	if w < 8 && t[TY_KIND] == K_INT && t[TY_SIGNED] != 0 {
+	if w < 8 && cast(Ty, t).kind == K_INT && cast(Ty, t).signed != 0 {
 		k = k | XK_SIGNED
 	}
 	return k
@@ -1141,12 +1141,12 @@ fn x_scale_ok(s i64) i64 {
 // x_gen_mem_addr evaluates an EX_MEM address into mm_base plus mm_index * mm_scale plus
 // mm_off. Registers may be r11 (scratch), so the caller must use them at once.
 fn x_gen_mem_addr(e i64, d i64) {
-	mut base = x_gen_val(e[MEM_BASE], d)
-	mut off = e[MEM_OFF]
-	mut ix = e[MEM_INDEX]
-	let scale = e[MEM_SCALE]
+	mut base = x_gen_val(cast(MemExpr, e).base, d)
+	mut off = cast(MemExpr, e).off
+	mut ix = cast(MemExpr, e).index
+	let scale = cast(MemExpr, e).scale
 	// A checked constant index stays in a register for its bounds check.
-	if ix != 0 && is_const(ix) != 0 && e[MEM_LEN] == 0 {
+	if ix != 0 && is_const(ix) != 0 && cast(MemExpr, e).len == 0 {
 		off = off + const_val(ix) * scale
 		ix = 0
 	}
@@ -1155,8 +1155,8 @@ fn x_gen_mem_addr(e i64, d i64) {
 	mut ms = 1
 	if ix != 0 {
 		let idx = x_gen_val(ix, next_depth(base, d))
-		if e[MEM_LEN] != 0 {
-			x_bounds_check(idx, e[MEM_LEN], next_depth(idx, next_depth(base, d)))
+		if cast(MemExpr, e).len != 0 {
+			x_bounds_check(idx, cast(MemExpr, e).len, next_depth(idx, next_depth(base, d)))
 		}
 		if x_scale_ok(scale) != 0 {
 			mi = idx
@@ -1177,8 +1177,8 @@ fn x_gen_mem_addr(e i64, d i64) {
 // also catches negative indexes).
 fn x_bounds_check(idx i64, lenexpr i64, d i64) {
 	mut lr = 0
-	if lenexpr[N_KIND] == EX_IDENT && lenexpr[ID_REF][S_KIND] == SYM_LOCAL && lenexpr[ID_REF][S_REG] >= 0 {
-		lr = lenexpr[ID_REF][S_REG]
+	if cast(Node, lenexpr).kind == EX_IDENT && cast(Sym, cast(IdentExpr, lenexpr).ref).kind == SYM_LOCAL && cast(Sym, cast(IdentExpr, lenexpr).ref).reg >= 0 {
+		lr = cast(Sym, cast(IdentExpr, lenexpr).ref).reg
 	} else {
 		x_gen_to(lenexpr, XSCR2, d)
 		lr = XSCR2
@@ -1190,22 +1190,22 @@ fn x_bounds_check(idx i64, lenexpr i64, d i64) {
 // x_gen_elem_addr evaluates a slice or string element address (with its bounds check)
 // into mm_base/mm_index/mm_scale/mm_off.
 fn x_gen_elem_addr(e i64, d i64) {
-	let h = x_gen_val(e[ELEM_SEQ], d)
+	let h = x_gen_val(cast(ElemExpr, e).seq, d)
 	let d1 = next_depth(h, d)
-	let size = e[ELEM_SIZE]
-	let ix = e[ELEM_IDX]
+	let size = cast(ElemExpr, e).size
+	let ix = cast(ElemExpr, e).idx
 	mut first = 0
-	if e[ELEM_STR] != 0 {
+	if cast(ElemExpr, e).str != 0 {
 		first = 8
 	}
 	if is_const(ix) != 0 {
 		let c = const_val(ix)
-		if e[ELEM_SAFE] == 0 {
+		if cast(ElemExpr, e).safe == 0 {
 			x_ld(XSCR2, x_mem1(h, 0), 3)
 			x_cmp_imm(XSCR2, c)
 			emit2(X_JCC, XC_BE, trap_at(-1, XSCR2, c))
 		}
-		if e[ELEM_STR] != 0 {
+		if cast(ElemExpr, e).str != 0 {
 			mm_base = h
 		} else {
 			x_ld(XSCR, x_mem1(h, 16), 3)
@@ -1217,12 +1217,12 @@ fn x_gen_elem_addr(e i64, d i64) {
 		return
 	}
 	let idx = x_gen_val(ix, d1)
-	if e[ELEM_SAFE] == 0 {
+	if cast(ElemExpr, e).safe == 0 {
 		x_ld(XSCR2, x_mem1(h, 0), 3)
 		emit2(X_CMP, idx, XSCR2)
 		emit2(X_JCC, XC_AE, trap_at(idx, XSCR2, 0))
 	}
-	if e[ELEM_STR] != 0 {
+	if cast(ElemExpr, e).str != 0 {
 		mm_base = h
 	} else {
 		x_ld(XSCR, x_mem1(h, 16), 3)
@@ -1247,7 +1247,7 @@ fn x_gen_seq(e i64, dst i64, d i64) {
 		}
 		i = i + 1
 	}
-	x_gen_stmts(e[SEQ_STMTS])
+	x_gen_stmts(cast(SeqExpr, e).stmts)
 	i = d - 1
 	for i >= 0 {
 		if i < f_count {
@@ -1258,8 +1258,8 @@ fn x_gen_seq(e i64, dst i64, d i64) {
 		}
 		i = i - 1
 	}
-	let v = e[SEQ_VALUE]
-	if dst >= 0 && kind_of(e[N_TYPE]) != K_VOID {
+	let v = cast(SeqExpr, e).value
+	if dst >= 0 && kind_of(cast(Node, e).type_) != K_VOID {
 		x_gen_to(v, dst, d)
 	} else {
 		x_gen_effect(v)
@@ -1268,15 +1268,15 @@ fn x_gen_seq(e i64, dst i64, d i64) {
 
 // x_gen_addr8 picks a byte address for p: am_base plus am_index, or plus am_off.
 fn x_gen_addr8(p i64, d i64) {
-	if p[N_KIND] == EX_BINARY && streq(p[BIN_OP], cstr("+")) != 0 {
-		let r = p[BIN_R]
+	if cast(Node, p).kind == EX_BINARY && streq(cast(Binary, p).op, cstr("+")) != 0 {
+		let r = cast(Binary, p).r
 		if is_const(r) != 0 && x64_fits32(const_val(r)) != 0 {
-			am_base = x_gen_val(p[BIN_L], d)
+			am_base = x_gen_val(cast(Binary, p).l, d)
 			am_index = -1
 			am_off = const_val(r)
 			return
 		}
-		x_gen_pair(p[BIN_L], r, d)
+		x_gen_pair(cast(Binary, p).l, r, d)
 		am_base = pl
 		am_index = pr
 		return
@@ -1294,14 +1294,14 @@ fn x_am_operand() i64 {
 }
 
 fn x_gen_intrinsic(e i64, dst i64, d i64) {
-	let name = e[CALL_NAME]
+	let name = cast(Call, e).name
 	if streq(name, cstr("__prefetchw")) != 0 {
-		x_gen_pair(vec_get(e[CALL_ARGS], 0), vec_get(e[CALL_ARGS], 1), d)
+		x_gen_pair(vec_get(cast(Call, e).args, 0), vec_get(cast(Call, e).args, 1), d)
 		emit1(X_PREFETCHW, x64_mem(pl, pr, 8, 0))
 		return
 	}
 	if streq(name, cstr("load8")) != 0 {
-		x_gen_addr8(vec_get(e[CALL_ARGS], 0), d)
+		x_gen_addr8(vec_get(cast(Call, e).args, 0), d)
 		emit3(X_LOAD, dst, x_am_operand(), 0)
 		return
 	}
@@ -1368,8 +1368,8 @@ fn x_float_intrinsic(name i64, dst i64, x i64) i64 {
 
 // Runtime intrinsics: the thread context register and atomics for lib/runtime.tin.
 fn x_gen_runtime_intrinsic(e i64, dst i64, d i64) i64 {
-	let name = e[CALL_NAME]
-	let args = e[CALL_ARGS]
+	let name = cast(Call, e).name
+	let args = cast(Call, e).args
 	if streq(name, cstr("__ctx")) != 0 {
 		x_mov(dst, XCTX)
 		return 1
@@ -1474,19 +1474,19 @@ fn x_gen_runtime_intrinsic(e i64, dst i64, d i64) i64 {
 
 // x_gen_store8 stores a byte and, when dst >= 0, also yields the stored value.
 fn x_gen_store8(e i64, dst i64, d i64) {
-	let p = vec_get(e[CALL_ARGS], 0)
-	let v = vec_get(e[CALL_ARGS], 1)
+	let p = vec_get(cast(Call, e).args, 0)
+	let v = vec_get(cast(Call, e).args, 1)
 	mut base = 0
 	mut index = -1
 	mut off = 0
 	mut dv = d
-	if p[N_KIND] == EX_BINARY && streq(p[BIN_OP], cstr("+")) != 0 && is_const(p[BIN_R]) != 0 && x64_fits32(const_val(p[BIN_R])) != 0 {
-		off = const_val(p[BIN_R])
-		base = x_gen_val(p[BIN_L], d)
+	if cast(Node, p).kind == EX_BINARY && streq(cast(Binary, p).op, cstr("+")) != 0 && is_const(cast(Binary, p).r) != 0 && x64_fits32(const_val(cast(Binary, p).r)) != 0 {
+		off = const_val(cast(Binary, p).r)
+		base = x_gen_val(cast(Binary, p).l, d)
 		dv = next_depth(base, d)
-	} else if p[N_KIND] == EX_BINARY && streq(p[BIN_OP], cstr("+")) != 0 && d + 3 <= t_count {
-		base = x_gen_val(p[BIN_L], d)
-		index = x_gen_val(p[BIN_R], next_depth(base, d))
+	} else if cast(Node, p).kind == EX_BINARY && streq(cast(Binary, p).op, cstr("+")) != 0 && d + 3 <= t_count {
+		base = x_gen_val(cast(Binary, p).l, d)
+		index = x_gen_val(cast(Binary, p).r, next_depth(base, d))
 		dv = next_depth(index, next_depth(base, d))
 	} else {
 		base = x_gen_val(p, d)
@@ -1529,16 +1529,16 @@ fn x_res_reg(i i64) i64 {
 // counted separately, or -1 for an argument that goes on the stack.
 fn x_arg_regs(e i64) i64 {
 	let ptypes = call_ptypes(e)
-	let n = e[CALL_ARGS][VEC_LEN]
+	let n = cast(Call, e).args[VEC_LEN]
 	let regs = vec_new()
 	mut ni = 0
 	mut nf = 0
 	mut i = 0
 	for i < n {
-		let t = vec_get(e[CALL_ARGS], i)[N_TYPE]
+		let t = cast(Node, vec_get(cast(Call, e).args, i)).type_
 		mut fp = i64(i < ptypes[VEC_LEN] && is_float_t(vec_get(ptypes, i)) != 0)
 		if i >= ptypes[VEC_LEN] {
-			fp = e_fp(vec_get(e[CALL_ARGS], i))
+			fp = e_fp(vec_get(cast(Call, e).args, i))
 		}
 		if i < ptypes[VEC_LEN] && is_dyn_value(t) != 0 {
 			if ni + 1 < 6 {
@@ -1570,7 +1570,7 @@ fn x_arg_regs(e i64) i64 {
 
 fn x_arg_regs2(e i64, areg i64) i64 {
 	let ptypes = call_ptypes(e)
-	let n = e[CALL_ARGS][VEC_LEN]
+	let n = cast(Call, e).args[VEC_LEN]
 	let regs = vec_filled(n, -1)
 	mut ni = 0
 	mut nf = 0
@@ -1578,9 +1578,9 @@ fn x_arg_regs2(e i64, areg i64) i64 {
 	for i < n {
 		mut fp = i64(i < ptypes[VEC_LEN] && is_float_t(vec_get(ptypes, i)) != 0)
 		if i >= ptypes[VEC_LEN] {
-			fp = e_fp(vec_get(e[CALL_ARGS], i))
+			fp = e_fp(vec_get(cast(Call, e).args, i))
 		}
-		if i < ptypes[VEC_LEN] && is_dyn_value(vec_get(e[CALL_ARGS], i)[N_TYPE]) != 0 {
+		if i < ptypes[VEC_LEN] && is_dyn_value(cast(Node, vec_get(cast(Call, e).args, i)).type_) != 0 {
 			if vec_get(areg, i) >= 0 {
 				regs[VEC_DATA][i] = x_int_arg(ni + 1)
 			}
@@ -1605,24 +1605,24 @@ fn x_caller_saved(r i64) i64 {
 
 // x_save_local_fp_homes preserves local float values assigned to caller-saved XMM8-XMM14.
 fn x_save_local_fp_homes() {
-	let locals = cur_gen_fn[F_LOCALS]
+	let locals = cast(Fn, cur_gen_fn).locals
 	mut i = 0
 	for i < locals[VEC_LEN] {
 		let s = vec_get(locals, i)
-		if is_float_t(s[S_TYPE]) != 0 && s[S_REG] >= XMM + 8 && s[S_REG] <= XMM + 14 {
-			x_push(s[S_REG])
+		if is_float_t(cast(Sym, s).type_) != 0 && cast(Sym, s).reg >= XMM + 8 && cast(Sym, s).reg <= XMM + 14 {
+			x_push(cast(Sym, s).reg)
 		}
 		i = i + 1
 	}
 }
 
 fn x_restore_local_fp_homes() {
-	let locals = cur_gen_fn[F_LOCALS]
+	let locals = cast(Fn, cur_gen_fn).locals
 	mut i = locals[VEC_LEN] - 1
 	for i >= 0 {
 		let s = vec_get(locals, i)
-		if is_float_t(s[S_TYPE]) != 0 && s[S_REG] >= XMM + 8 && s[S_REG] <= XMM + 14 {
-			x_pop(s[S_REG])
+		if is_float_t(cast(Sym, s).type_) != 0 && cast(Sym, s).reg >= XMM + 8 && cast(Sym, s).reg <= XMM + 14 {
+			x_pop(cast(Sym, s).reg)
 		}
 		i = i - 1
 	}
@@ -1662,15 +1662,15 @@ fn x_restore_temps(d i64) {
 // reverse into their registers (or copied into the stack-argument area reserved below the
 // pushes), so evaluating one argument can never clobber another.
 fn x_gen_call(e i64, d i64) {
-	if e[N_KIND] == EX_SEQ {
+	if cast(Node, e).kind == EX_SEQ {
 		x_gen_seq(e, -1, d)
 		return
 	}
-	let args = e[CALL_ARGS]
+	let args = cast(Call, e).args
 	let n = args[VEC_LEN]
 	let areg = x_arg_regs(e)
 	let areg2 = x_arg_regs2(e, areg)
-	let f = e[CALL_FN]
+	let f = cast(Call, e).fn_
 	x_save_temps(d)
 	let stackoffs = vec_filled(n, -1)
 	let pushslots = vec_filled(n, -1)
@@ -1684,13 +1684,13 @@ fn x_gen_call(e i64, d i64) {
 	for i < n {
 		let a = vec_get(args, i)
 		pushslots[VEC_DATA][i] = stage_slot
-		if is_dyn_value(a[N_TYPE]) != 0 {
+		if is_dyn_value(cast(Node, a).type_) != 0 {
 			stage_slot = stage_slot + 2
 		} else {
 			stage_slot = stage_slot + 1
 		}
 		if vec_get(areg, i) < 0 {
-			if is_dyn_value(a[N_TYPE]) != 0 {
+			if is_dyn_value(cast(Node, a).type_) != 0 {
 				stack_words = align_up(stack_words, 2)
 				stackoffs[VEC_DATA][i] = 8 * stack_words
 				stack_words = stack_words + 2
@@ -1709,13 +1709,13 @@ fn x_gen_call(e i64, d i64) {
 	}
 	mut callee_slot = 0
 	if f == 0 {
-		x_push(x_gen_val(e[CALL_CALLEE], d))
+		x_push(x_gen_val(cast(Call, e).callee, d))
 		callee_slot = 16
 	}
 	i = 0
 	for i < n {
 		let a = vec_get(args, i)
-		if is_dyn_value(a[N_TYPE]) != 0 {
+		if is_dyn_value(cast(Node, a).type_) != 0 {
 			let r0 = treg(d)
 			let r1 = treg(d + 1)
 			x_gen_dyn_pair(a, r0, r1, d)
@@ -1731,7 +1731,7 @@ fn x_gen_call(e i64, d i64) {
 		let a = vec_get(args, i)
 		let r = vec_get(areg, i)
 		let pushslot = vec_get(pushslots, i)
-		if is_dyn_value(a[N_TYPE]) != 0 {
+		if is_dyn_value(cast(Node, a).type_) != 0 {
 			if r >= 0 {
 				x_pop(vec_get(areg2, i))
 				x_pop(r)
@@ -1753,12 +1753,12 @@ fn x_gen_call(e i64, d i64) {
 		x_pop(RAX)
 	}
 	if f != 0 {
-		if f[F_EXTERN] != 0 {
+		if cast(Fn, f).extern_ != 0 {
 			// al counts the vector registers a variadic callee must save.
 			x_load_imm(RAX, nvec)
 		}
-		emit1(X_CALL, x_sym(SK_FN, f[F_INDEX]))
-		f[F_USED] = 1
+		emit1(X_CALL, x_sym(SK_FN, cast(Fn, f).index))
+		cast(Fn, f).used = 1
 	} else {
 		emit2(X_MOV_RR, R11, RAX)
 		x_ld(RAX, x_mem1(R11, 0), 3)
@@ -1773,7 +1773,7 @@ fn x_gen_call(e i64, d i64) {
 // ---- conditions ----
 // x_gen_cmp_branch branches to target when comparison e evaluates to when_true.
 fn x_gen_cmp_branch(e i64, target i64, d i64, when_true i64) {
-	if e_fp(e[BIN_L]) != 0 || e_fp(e[BIN_R]) != 0 {
+	if e_fp(cast(Binary, e).l) != 0 || e_fp(cast(Binary, e).r) != 0 {
 		x_gen_compare(e, d)
 		if when_true != 0 {
 			x_jcc(cmp_cc, cmp_unord, target)
@@ -1782,12 +1782,12 @@ fn x_gen_cmp_branch(e i64, target i64, d i64, when_true i64) {
 		}
 		return
 	}
-	mut cc = x_cond(e[BIN_OP])
-	mut l = e[BIN_L]
-	mut r = e[BIN_R]
+	mut cc = x_cond(cast(Binary, e).op)
+	mut l = cast(Binary, e).l
+	mut r = cast(Binary, e).r
 	let unsigned = i64(e_unsigned(l) != 0 || e_unsigned(r) != 0)
 	if unsigned != 0 {
-		cc = x_ucond(e[BIN_OP])
+		cc = x_ucond(cast(Binary, e).op)
 	}
 	if is_const(l) != 0 {
 		let t = l
@@ -1800,7 +1800,7 @@ fn x_gen_cmp_branch(e i64, target i64, d i64, when_true i64) {
 			let on_zero = i64(i64((cc == XC_E)) == when_true)
 			let k = low_bits_test(l)
 			if k > 0 {
-				x_test_imm(x_gen_val(l[BIN_L], d), (1 << k) - 1)
+				x_test_imm(x_gen_val(cast(Binary, l).l, d), (1 << k) - 1)
 			} else {
 				let z = x_gen_val(l, d)
 				emit2(X_TEST, z, z)
@@ -1845,28 +1845,28 @@ fn x_gen_branch(e i64, target i64, d i64, when_true i64) {
 		}
 		return
 	}
-	let k = e[N_KIND]
+	let k = cast(Node, e).kind
 	if k == EX_SEQ {
-		x_gen_stmts(e[SEQ_STMTS])
-		x_gen_branch(e[SEQ_VALUE], target, d, when_true)
+		x_gen_stmts(cast(SeqExpr, e).stmts)
+		x_gen_branch(cast(SeqExpr, e).value, target, d, when_true)
 		return
 	}
-	if k == EX_UNARY && streq(e[UN_OP], cstr("!")) != 0 {
-		x_gen_branch(e[UN_X], target, d, i64(when_true == 0))
+	if k == EX_UNARY && streq(cast(Unary, e).op, cstr("!")) != 0 {
+		x_gen_branch(cast(Unary, e).x, target, d, i64(when_true == 0))
 		return
 	}
 	if k == EX_BINARY {
-		let op = e[BIN_OP]
+		let op = cast(Binary, e).op
 		let is_and = streq(op, cstr("&&"))
 		if is_and != 0 || streq(op, cstr("||")) != 0 {
 			// Branching on the operator's own sense chains; the other sense skips ahead.
 			if is_and != when_true {
-				x_gen_branch(e[BIN_L], target, d, when_true)
-				x_gen_branch(e[BIN_R], target, d, when_true)
+				x_gen_branch(cast(Binary, e).l, target, d, when_true)
+				x_gen_branch(cast(Binary, e).r, target, d, when_true)
 			} else {
 				let skip = new_label()
-				x_gen_branch(e[BIN_L], skip, d, i64(when_true == 0))
-				x_gen_branch(e[BIN_R], target, d, when_true)
+				x_gen_branch(cast(Binary, e).l, skip, d, i64(when_true == 0))
+				x_gen_branch(cast(Binary, e).r, target, d, when_true)
 				x_label(skip)
 			}
 			return
@@ -1875,8 +1875,8 @@ fn x_gen_branch(e i64, target i64, d i64, when_true i64) {
 			x_gen_cmp_branch(e, target, d, when_true)
 			return
 		}
-		if streq(op, cstr("&")) != 0 && is_const(e[BIN_R]) != 0 && pow2_log(const_val(e[BIN_R])) >= 0 {
-			x_test_imm(x_gen_val(e[BIN_L], d), const_val(e[BIN_R]))
+		if streq(op, cstr("&")) != 0 && is_const(cast(Binary, e).r) != 0 && pow2_log(const_val(cast(Binary, e).r)) >= 0 {
+			x_test_imm(x_gen_val(cast(Binary, e).l, d), const_val(cast(Binary, e).r))
 			if when_true != 0 {
 				emit2(X_JCC, XC_NE, target)
 			} else {
@@ -1906,11 +1906,11 @@ fn x_gen_effect(e i64) {
 	}
 	if is_real_call(e) != 0 {
 		x_gen_call(e, 0)
-	} else if e[N_KIND] == EX_SEQ {
+	} else if cast(Node, e).kind == EX_SEQ {
 		x_gen_seq(e, -1, 0)
-	} else if e[N_KIND] == EX_CALL && (streq(e[CALL_NAME], cstr("__prefetchw")) != 0 || streq(e[CALL_NAME], cstr("store8")) != 0) {
+	} else if cast(Node, e).kind == EX_CALL && (streq(cast(Call, e).name, cstr("__prefetchw")) != 0 || streq(cast(Call, e).name, cstr("store8")) != 0) {
 		x_gen_intrinsic(e, -1, 0)
-	} else if e[N_KIND] == EX_CALL && e[CALL_INTRINSIC] != 0 {
+	} else if cast(Node, e).kind == EX_CALL && cast(Call, e).intrinsic != 0 {
 		mut r = 0
 		if e_fp(e) != 0 {
 			r = freg(0)
@@ -1924,22 +1924,22 @@ fn x_gen_effect(e i64) {
 }
 
 fn x_assign_local(s i64, v i64) {
-	if is_dyn_value(s[S_TYPE]) != 0 {
+	if is_dyn_value(cast(Sym, s).type_) != 0 {
 		let r0 = treg(0)
 		let r1 = treg(1)
 		x_gen_dyn_pair(v, r0, r1, 0)
-		if s[S_REG] == REG_SLOT {
-			x_slot_store(r0, s[S_OFF])
-			x_slot_store(r1, s[S_OFF] + 8)
+		if cast(Sym, s).reg == REG_SLOT {
+			x_slot_store(r0, cast(Sym, s).off)
+			x_slot_store(r1, cast(Sym, s).off + 8)
 		} else {
-			err_code_at(s[S_POS], cstr("E990 INTERNAL"), cstr("dyn local is not in a two-word frame slot"))
+			err_code_at(cast(Sym, s).pos, cstr("E990 INTERNAL"), cstr("dyn local is not in a two-word frame slot"))
 		}
 		return
 	}
-	if s[S_REG] >= 0 {
-		x_gen_to(v, s[S_REG], 0)
-	} else if s[S_REG] == REG_SLOT {
-		x_slot_store(x_gen_val(v, 0), s[S_OFF])
+	if cast(Sym, s).reg >= 0 {
+		x_gen_to(v, cast(Sym, s).reg, 0)
+	} else if cast(Sym, s).reg == REG_SLOT {
+		x_slot_store(x_gen_val(v, 0), cast(Sym, s).off)
 	} else {
 		x_gen_effect(v)
 	}
@@ -1948,7 +1948,7 @@ fn x_assign_local(s i64, v i64) {
 // x_gen_store_mem stores v through an EX_MEM or EX_ELEM target. The address parts are
 // computed into stable temps first; a[i] = a[i] op x loads the element only once.
 fn x_gen_store_mem(t i64, v i64) {
-	if is_dyn_value(t[N_TYPE]) != 0 {
+	if is_dyn_value(cast(Node, t).type_) != 0 {
 		x_gen_dyn_addr(t, 0)
 		x_push(XSCR)
 		let r0 = treg(0)
@@ -1965,12 +1965,12 @@ fn x_gen_store_mem(t i64, v i64) {
 	mut scale = 1
 	mut off = 0
 	mut d = 0
-	let size = type_width(t[N_TYPE])
-	if t[N_KIND] == EX_ELEM {
-		let h = x_gen_val(t[ELEM_SEQ], 0)
+	let size = type_width(cast(Node, t).type_)
+	if cast(Node, t).kind == EX_ELEM {
+		let h = x_gen_val(cast(ElemExpr, t).seq, 0)
 		d = next_depth(h, 0)
-		let ix = t[ELEM_IDX]
-		if is_const(ix) != 0 && t[ELEM_SAFE] == 0 {
+		let ix = cast(ElemExpr, t).idx
+		if is_const(ix) != 0 && cast(ElemExpr, t).safe == 0 {
 			idx = treg(d)
 			x_load_imm(idx, const_val(ix))
 			d = d + 1
@@ -1978,13 +1978,13 @@ fn x_gen_store_mem(t i64, v i64) {
 			idx = x_gen_val(ix, d)
 			d = next_depth(idx, d)
 		}
-		if t[ELEM_SAFE] == 0 {
+		if cast(ElemExpr, t).safe == 0 {
 			x_ld(XSCR2, x_mem1(h, 0), 3)
 			emit2(X_CMP, idx, XSCR2)
 			emit2(X_JCC, XC_AE, trap_at(idx, XSCR2, 0))
 		}
 		scale = size
-		if t[ELEM_STR] != 0 {
+		if cast(ElemExpr, t).str != 0 {
 			base = h
 			off = 8
 		} else {
@@ -1997,24 +1997,24 @@ fn x_gen_store_mem(t i64, v i64) {
 			idx = -1
 		}
 	} else {
-		base = x_gen_val(t[MEM_BASE], 0)
+		base = x_gen_val(cast(MemExpr, t).base, 0)
 		d = next_depth(base, 0)
-		off = t[MEM_OFF]
-		let ix = t[MEM_INDEX]
-		if ix != 0 && is_const(ix) != 0 && t[MEM_LEN] == 0 {
-			off = off + const_val(ix) * t[MEM_SCALE]
+		off = cast(MemExpr, t).off
+		let ix = cast(MemExpr, t).index
+		if ix != 0 && is_const(ix) != 0 && cast(MemExpr, t).len == 0 {
+			off = off + const_val(ix) * cast(MemExpr, t).scale
 		} else if ix != 0 {
 			idx = x_gen_val(ix, d)
 			d = next_depth(idx, d)
-			if t[MEM_LEN] != 0 {
-				x_bounds_check(idx, t[MEM_LEN], d)
+			if cast(MemExpr, t).len != 0 {
+				x_bounds_check(idx, cast(MemExpr, t).len, d)
 			}
-			if x_scale_ok(t[MEM_SCALE]) != 0 {
-				scale = t[MEM_SCALE]
+			if x_scale_ok(cast(MemExpr, t).scale) != 0 {
+				scale = cast(MemExpr, t).scale
 			} else {
 				let nb = treg(d)
 				d = d + 1
-				emit3(X_IMUL_RRI, nb, idx, t[MEM_SCALE])
+				emit3(X_IMUL_RRI, nb, idx, cast(MemExpr, t).scale)
 				emit2(X_ADD, nb, base)
 				base = nb
 				idx = -1
@@ -2022,7 +2022,7 @@ fn x_gen_store_mem(t i64, v i64) {
 		}
 	}
 	mut val = 0
-	if v[N_KIND] == EX_BINARY && d + 2 < t_count && d + 2 < f_count && has_effects(t) == 0 && expr_equal(v[BIN_L], t) != 0 {
+	if cast(Node, v).kind == EX_BINARY && d + 2 < t_count && d + 2 < f_count && has_effects(t) == 0 && expr_equal(cast(Binary, v).l, t) != 0 {
 		mut cur = 0
 		if fpv != 0 {
 			cur = freg(d)
@@ -2033,12 +2033,12 @@ fn x_gen_store_mem(t i64, v i64) {
 		mm_index = idx
 		mm_scale = scale
 		mm_off = off
-		x_emit_load(cur, t[N_TYPE])
-		let saved = node_copy(v[BIN_L])
-		v[BIN_L][N_KIND] = EX_REG
-		v[BIN_L][REG_NUM] = cur
+		x_emit_load(cur, cast(Node, t).type_)
+		let saved = node_copy(cast(Binary, v).l)
+		cast(Node, cast(Binary, v).l).kind = EX_REG
+		cast(RegExpr, cast(Binary, v).l).num = cur
 		x_gen_to(v, cur, d + 1)
-		node_restore(v[BIN_L], saved)
+		node_restore(cast(Binary, v).l, saved)
 		val = cur
 	} else if fpv == 0 && is_const(v) != 0 && const_val(v) == 0 {
 		x_load_imm(XSCR, 0)
@@ -2050,13 +2050,13 @@ fn x_gen_store_mem(t i64, v i64) {
 	mm_index = idx
 	mm_scale = scale
 	mm_off = off
-	x_emit_store(val, t[N_TYPE])
+	x_emit_store(val, cast(Node, t).type_)
 }
 
 fn x_gen_store_index(t i64, v i64) {
-	let base = x_gen_val(t[IX_X], 0)
+	let base = x_gen_val(cast(IndexExpr, t).x, 0)
 	mut d = next_depth(base, 0)
-	let ix = t[IX_I]
+	let ix = cast(IndexExpr, t).i
 	mut index = -1
 	mut off = 0
 	if is_const(ix) != 0 && x64_fits32(const_val(ix) * 8) != 0 {
@@ -2073,7 +2073,7 @@ fn x_gen_store_index(t i64, v i64) {
 	}
 	let fpv = i64(e_fp(v) != 0 || e_fp(t) != 0)
 	mut val = 0
-	if v[N_KIND] == EX_BINARY && d + 1 < t_count && d + 1 < f_count && has_effects(t) == 0 && expr_equal(v[BIN_L], t) != 0 {
+	if cast(Node, v).kind == EX_BINARY && d + 1 < t_count && d + 1 < f_count && has_effects(t) == 0 && expr_equal(cast(Binary, v).l, t) != 0 {
 		// a[i] = a[i] op x: load the element once and update it in a register.
 		mut cur = 0
 		if fpv != 0 {
@@ -2082,11 +2082,11 @@ fn x_gen_store_index(t i64, v i64) {
 			cur = treg(d)
 		}
 		x_ld(cur, m, 3)
-		let saved = node_copy(v[BIN_L])
-		v[BIN_L][N_KIND] = EX_REG
-		v[BIN_L][REG_NUM] = cur
+		let saved = node_copy(cast(Binary, v).l)
+		cast(Node, cast(Binary, v).l).kind = EX_REG
+		cast(RegExpr, cast(Binary, v).l).num = cur
 		x_gen_to(v, cur, d + 1)
-		node_restore(v[BIN_L], saved)
+		node_restore(cast(Binary, v).l, saved)
 		val = cur
 	} else if fpv == 0 && is_const(v) != 0 && const_val(v) == 0 {
 		x_load_imm(XSCR, 0)
@@ -2098,49 +2098,49 @@ fn x_gen_store_index(t i64, v i64) {
 }
 
 fn x_gen_assign(s i64) {
-	let t = s[AS_TARGET]
-	let v = s[AS_VALUE]
-	if t[N_KIND] == EX_INDEX {
+	let t = cast(AssignStmt, s).target
+	let v = cast(AssignStmt, s).value
+	if cast(Node, t).kind == EX_INDEX {
 		x_gen_store_index(t, v)
 		return
 	}
-	if t[N_KIND] == EX_MEM || t[N_KIND] == EX_ELEM {
+	if cast(Node, t).kind == EX_MEM || cast(Node, t).kind == EX_ELEM {
 		x_gen_store_mem(t, v)
 		return
 	}
-	let sym = t[ID_REF]
-	if sym[S_KIND] == SYM_LOCAL {
+	let sym = cast(IdentExpr, t).ref
+	if cast(Sym, sym).kind == SYM_LOCAL {
 		x_assign_local(sym, v)
 		return
 	}
-	if is_dyn_value(sym[S_TYPE]) != 0 {
+	if is_dyn_value(cast(Sym, sym).type_) != 0 {
 		let r0 = treg(0)
 		let r1 = treg(1)
 		x_gen_dyn_pair(v, r0, r1, 0)
-		if sym[S_TLS] != 0 {
+		if cast(Sym, sym).tls != 0 {
 			x_st(r0, x_mem1(XCTX, tls_off(sym)), 3)
 			x_st(r1, x_mem1(XCTX, tls_off(sym) + 8), 3)
 		} else {
-			x_st(r0, x64_mem_sym(x_sym(SK_VAR, sym[S_INDEX])), 3)
-			x_st(r1, x64_mem_sym(x_sym(SK_VAR, sym[S_WORDS])), 3)
+			x_st(r0, x64_mem_sym(x_sym(SK_VAR, cast(Sym, sym).index)), 3)
+			x_st(r1, x64_mem_sym(x_sym(SK_VAR, cast(Sym, sym).words)), 3)
 		}
 		return
 	}
 	let r = x_gen_val(v, 0)
-	if sym[S_TLS] != 0 {
+	if cast(Sym, sym).tls != 0 {
 		x_st(r, x_mem1(XCTX, tls_off(sym)), 3)
 		return
 	}
-	x_st(r, x64_mem_sym(x_sym(SK_VAR, sym[S_INDEX])), 3)
+	x_st(r, x64_mem_sym(x_sym(SK_VAR, cast(Sym, sym).index)), 3)
 }
 
 fn x_gen_while(s i64) {
-	let cond = s[WH_COND]
+	let cond = cast(WhileStmt, s).cond
 	let body_l = new_label()
 	let cond_l = new_label()
 	let post_l = new_label()
 	let end_l = new_label()
-	if s[WH_ONCE] != 0 {
+	if cast(WhileStmt, s).once_ != 0 {
 		// A switch: break leaves it, continue goes to the enclosing loop.
 		mut cont = -1
 		if g_loops[VEC_LEN] >= 2 {
@@ -2148,7 +2148,7 @@ fn x_gen_while(s i64) {
 		}
 		vec_push(g_loops, cont)
 		vec_push(g_loops, end_l)
-		x_gen_stmts(s[WH_BODY][BLK_STMTS])
+		x_gen_stmts(cast(Block, cast(WhileStmt, s).body).stmts)
 		g_loops[VEC_LEN] = g_loops[VEC_LEN] - 2
 		x_label(end_l)
 		return
@@ -2158,7 +2158,7 @@ fn x_gen_while(s i64) {
 	}
 	let forever = is_const(cond)
 	mut cont_l = cond_l
-	if s[WH_POST] != 0 {
+	if cast(WhileStmt, s).post != 0 {
 		cont_l = post_l
 	} else if forever != 0 {
 		cont_l = body_l
@@ -2171,11 +2171,11 @@ fn x_gen_while(s i64) {
 	x_gen_poll()
 	vec_push(g_loops, cont_l)
 	vec_push(g_loops, end_l)
-	x_gen_stmts(s[WH_BODY][BLK_STMTS])
+	x_gen_stmts(cast(Block, cast(WhileStmt, s).body).stmts)
 	g_loops[VEC_LEN] = g_loops[VEC_LEN] - 2
 	x_label(post_l)
-	if s[WH_POST] != 0 {
-		x_gen_stmt(s[WH_POST])
+	if cast(WhileStmt, s).post != 0 {
+		x_gen_stmt(cast(WhileStmt, s).post)
 	}
 	if forever != 0 {
 		emit1(X_JMP, body_l)
@@ -2195,35 +2195,35 @@ fn x_gen_stmts(stmts i64) {
 }
 
 fn x_result_reg(f i64) i64 {
-	if f[F_RTYPES][VEC_LEN] == 1 && is_float_t(vec_get(f[F_RTYPES], 0)) != 0 {
+	if cast(Fn, f).rtypes[VEC_LEN] == 1 && is_float_t(vec_get(cast(Fn, f).rtypes, 0)) != 0 {
 		return XMM
 	}
 	return RAX
 }
 
 fn x_gen_stmt(s i64) {
-	let k = s[N_KIND]
+	let k = cast(Node, s).kind
 	if k == ST_BLOCK {
-		x_gen_stmts(s[BLK_STMTS])
+		x_gen_stmts(cast(Block, s).stmts)
 	} else if k == ST_LET {
-		x_assign_local(s[LET_SYM], s[LET_INIT])
+		x_assign_local(cast(LetStmt, s).sym, cast(LetStmt, s).init)
 	} else if k == ST_ASSIGN {
 		x_gen_assign(s)
 	} else if k == ST_EXPR {
-		x_gen_effect(s[ES_X])
+		x_gen_effect(cast(ExprStmt, s).x)
 	} else if k == ST_IF && x_try_if_increment(s) != 0 {
 		// The condition flags drive a conditional move of x + 1.
 	} else if k == ST_IF && x_try_select(s) != 0 {
 		// Done: both arms computed and picked with cmov.
 	} else if k == ST_IF {
 		let else_l = new_label()
-		x_gen_cond(s[IF_COND], else_l, 0)
-		x_gen_stmts(s[IF_THEN][BLK_STMTS])
-		if s[IF_ELSE] != 0 {
+		x_gen_cond(cast(IfStmt, s).cond, else_l, 0)
+		x_gen_stmts(cast(Block, cast(IfStmt, s).then).stmts)
+		if cast(IfStmt, s).else_ != 0 {
 			let end_l = new_label()
 			emit1(X_JMP, end_l)
 			x_label(else_l)
-			x_gen_stmt(s[IF_ELSE])
+			x_gen_stmt(cast(IfStmt, s).else_)
 			x_label(end_l)
 		} else {
 			x_label(else_l)
@@ -2242,15 +2242,15 @@ fn x_gen_stmt(s i64) {
 		}
 		emit1(X_JMP, vec_get(g_loops, i))
 	} else if k == ST_CALLMULTI {
-		x_gen_call(s[CM_CALL], 0)
-		let syms = s[CM_SYMS]
+		x_gen_call(cast(CallMultiStmt, s).call, 0)
+		let syms = cast(CallMultiStmt, s).syms
 		mut i = 0
 		for i < syms[VEC_LEN] {
 			let sym = vec_get(syms, i)
-			if sym[S_REG] >= 0 {
-				x_mov(sym[S_REG], x_res_reg(i))
-			} else if sym[S_REG] == REG_SLOT {
-				x_slot_store(x_res_reg(i), sym[S_OFF])
+			if cast(Sym, sym).reg >= 0 {
+				x_mov(cast(Sym, sym).reg, x_res_reg(i))
+			} else if cast(Sym, sym).reg == REG_SLOT {
+				x_slot_store(x_res_reg(i), cast(Sym, sym).off)
 			}
 			i = i + 1
 		}
@@ -2261,15 +2261,15 @@ fn x_gen_stmt(s i64) {
 // (floats as bits); a single result goes to rax or xmm0.
 fn x_gen_return(s i64) {
 	let f = cur_gen_fn
-	if s[RET_VALUES] != 0 {
-		let vals = s[RET_VALUES]
+	if cast(ReturnStmt, s).values != 0 {
+		let vals = cast(ReturnStmt, s).values
 		let lanes = vec_new()
 		mut nlanes = 0
 		mut i = 0
 		for i < vals[VEC_LEN] {
 			let v = vec_get(vals, i)
 			vec_push(lanes, nlanes)
-			if is_dyn_value(v[N_TYPE]) != 0 {
+			if is_dyn_value(cast(Node, v).type_) != 0 {
 				let r0 = treg(0)
 				let r1 = treg(1)
 				x_gen_dyn_pair(v, r0, r1, 0)
@@ -2286,7 +2286,7 @@ fn x_gen_return(s i64) {
 		for i >= 0 {
 			let v = vec_get(vals, i)
 			let start = vec_get(lanes, i)
-			if is_dyn_value(v[N_TYPE]) != 0 {
+			if is_dyn_value(cast(Node, v).type_) != 0 {
 				x_pop(x_res_reg(start + 1))
 				x_pop(x_res_reg(start))
 			} else {
@@ -2294,11 +2294,11 @@ fn x_gen_return(s i64) {
 			}
 			i = i - 1
 		}
-	} else if s[RET_VALUE] != 0 {
-		if is_dyn_value(s[RET_VALUE][N_TYPE]) != 0 {
-			x_gen_dyn_pair(s[RET_VALUE], RAX, RDX, 0)
+	} else if cast(ReturnStmt, s).value != 0 {
+		if is_dyn_value(cast(Node, cast(ReturnStmt, s).value).type_) != 0 {
+			x_gen_dyn_pair(cast(ReturnStmt, s).value, RAX, RDX, 0)
 		} else {
-			x_gen_to(s[RET_VALUE], x_result_reg(f), 0)
+			x_gen_to(cast(ReturnStmt, s).value, x_result_reg(f), 0)
 		}
 	} else {
 		x_load_imm(RAX, 0)
@@ -2309,10 +2309,10 @@ fn x_gen_return(s i64) {
 // ---- if-conversion ----
 // x_gen_flags sets the flags for condition e and returns the condition code meaning true.
 fn x_gen_flags(e i64, d i64) i64 {
-	if e[N_KIND] == EX_UNARY && streq(e[UN_OP], cstr("!")) != 0 {
-		return x_gen_flags(e[UN_X], d) ^ 1
+	if cast(Node, e).kind == EX_UNARY && streq(cast(Unary, e).op, cstr("!")) != 0 {
+		return x_gen_flags(cast(Unary, e).x, d) ^ 1
 	}
-	if e[N_KIND] == EX_SEQ {
+	if cast(Node, e).kind == EX_SEQ {
 		mut i = 0
 		for i < d {
 			if i < t_count {
@@ -2323,7 +2323,7 @@ fn x_gen_flags(e i64, d i64) i64 {
 			}
 			i = i + 1
 		}
-		x_gen_stmts(e[SEQ_STMTS])
+		x_gen_stmts(cast(SeqExpr, e).stmts)
 		i = d - 1
 		for i >= 0 {
 			if i < f_count {
@@ -2334,13 +2334,13 @@ fn x_gen_flags(e i64, d i64) i64 {
 			}
 			i = i - 1
 		}
-		return x_gen_flags(e[SEQ_VALUE], d)
+		return x_gen_flags(cast(SeqExpr, e).value, d)
 	}
-	if e[N_KIND] == EX_BINARY {
-		let cc = x_cond(e[BIN_OP])
-		if (cc == XC_E || cc == XC_NE) && e_fp(e[BIN_L]) == 0 && is_const(e[BIN_R]) != 0 && const_val(e[BIN_R]) == 0 && low_bits_test(e[BIN_L]) > 0 {
-			let l = e[BIN_L]
-			x_test_imm(x_gen_val(l[BIN_L], d), (1 << low_bits_test(l)) - 1)
+	if cast(Node, e).kind == EX_BINARY {
+		let cc = x_cond(cast(Binary, e).op)
+		if (cc == XC_E || cc == XC_NE) && e_fp(cast(Binary, e).l) == 0 && is_const(cast(Binary, e).r) != 0 && const_val(cast(Binary, e).r) == 0 && low_bits_test(cast(Binary, e).l) > 0 {
+			let l = cast(Binary, e).l
+			x_test_imm(x_gen_val(cast(Binary, l).l, d), (1 << low_bits_test(l)) - 1)
 			return cc
 		}
 		if cc >= 0 {
@@ -2354,19 +2354,19 @@ fn x_gen_flags(e i64, d i64) i64 {
 }
 
 fn x_try_if_increment(s i64) i64 {
-	if x_float_cmp(s[IF_COND]) != 0 {
+	if x_float_cmp(cast(IfStmt, s).cond) != 0 {
 		return 0
 	}
 	let a = if_increment_assignment(s)
 	if a == 0 {
 		return 0
 	}
-	let x = a[AS_TARGET][ID_REF]
-	let cc = x_gen_flags(s[IF_COND], 0)
+	let x = cast(IdentExpr, cast(AssignStmt, a).target).ref
+	let cc = x_gen_flags(cast(IfStmt, s).cond, 0)
 	// LEA preserves the flags set by the condition and avoids spilling x + 1 while
 	// compiler-created condition sequences are evaluated.
-	emit2(X_LEA, XSCR, x_mem1(x[S_REG], 1))
-	emit3(X_CMOVCC, x[S_REG], XSCR, cc)
+	emit2(X_LEA, XSCR, x_mem1(cast(Sym, x).reg, 1))
+	emit3(X_CMOVCC, cast(Sym, x).reg, XSCR, cc)
 	return 1
 }
 
@@ -2374,58 +2374,58 @@ fn x_try_if_increment(s i64) i64 {
 // select on because of the unordered case.
 fn x_float_cmp(c_in i64) i64 {
 	mut c = c_in
-	for c[N_KIND] == EX_UNARY && streq(c[UN_OP], cstr("!")) != 0 {
-		c = c[UN_X]
+	for cast(Node, c).kind == EX_UNARY && streq(cast(Unary, c).op, cstr("!")) != 0 {
+		c = cast(Unary, c).x
 	}
-	if c[N_KIND] == EX_SEQ {
-		return x_float_cmp(c[SEQ_VALUE])
+	if cast(Node, c).kind == EX_SEQ {
+		return x_float_cmp(cast(SeqExpr, c).value)
 	}
-	return i64(c[N_KIND] == EX_BINARY && x_cond(c[BIN_OP]) >= 0 && (e_fp(c[BIN_L]) != 0 || e_fp(c[BIN_R]) != 0))
+	return i64(cast(Node, c).kind == EX_BINARY && x_cond(cast(Binary, c).op) >= 0 && (e_fp(cast(Binary, c).l) != 0 || e_fp(cast(Binary, c).r) != 0))
 }
 
 // x_try_select compiles `if c { x = a; } else { x = b; }` as x = cmov(c, a, b), like
 // Go's branchelim: both values are cheap, so computing both beats a mispredicted branch.
 fn x_try_select(s i64) i64 {
-	let c = s[IF_COND]
+	let c = cast(IfStmt, s).cond
 	if has_effects(c) != 0 || contains_call(c) != 0 || is_const(c) != 0 || e_fp(c) != 0 {
 		return 0
 	}
-	if c[N_KIND] == EX_BINARY && (streq(c[BIN_OP], cstr("&&")) != 0 || streq(c[BIN_OP], cstr("||")) != 0) {
+	if cast(Node, c).kind == EX_BINARY && (streq(cast(Binary, c).op, cstr("&&")) != 0 || streq(cast(Binary, c).op, cstr("||")) != 0) {
 		return 0
 	}
 	if x_float_cmp(c) != 0 {
 		return 0
 	}
-	let ta = single_reg_assign(s[IF_THEN])
+	let ta = single_reg_assign(cast(IfStmt, s).then)
 	if ta == 0 {
 		return 0
 	}
-	let x = ta[AS_TARGET][ID_REF]
-	if is_fp(x[S_REG]) != 0 {
+	let x = cast(IdentExpr, cast(AssignStmt, ta).target).ref
+	if is_fp(cast(Sym, x).reg) != 0 {
 		return 0
 	}
 	mut fb = 0
-	if s[IF_ELSE] != 0 {
-		if s[IF_ELSE][N_KIND] != ST_BLOCK {
+	if cast(IfStmt, s).else_ != 0 {
+		if cast(Node, cast(IfStmt, s).else_).kind != ST_BLOCK {
 			return 0
 		}
-		fb = single_reg_assign(s[IF_ELSE])
-		if fb == 0 || fb[AS_TARGET][ID_REF] != x {
+		fb = single_reg_assign(cast(IfStmt, s).else_)
+		if fb == 0 || cast(IdentExpr, cast(AssignStmt, fb).target).ref != x {
 			return 0
 		}
 	}
-	if op_cost(ta[AS_VALUE]) > 6 || (fb != 0 && op_cost(fb[AS_VALUE]) > 6) || t_count < 4 || f_count < 4 {
+	if op_cost(cast(AssignStmt, ta).value) > 6 || (fb != 0 && op_cost(cast(AssignStmt, fb).value) > 6) || t_count < 4 || f_count < 4 {
 		return 0
 	}
-	let a = x_gen_val(ta[AS_VALUE], 0)
+	let a = x_gen_val(cast(AssignStmt, ta).value, 0)
 	mut d = next_depth(a, 0)
-	mut b = x[S_REG]
+	mut b = cast(Sym, x).reg
 	if fb != 0 {
-		b = x_gen_val(fb[AS_VALUE], d)
+		b = x_gen_val(cast(AssignStmt, fb).value, d)
 		d = next_depth(b, d)
 	}
 	let cc = x_gen_flags(c, d)
-	let xr = x[S_REG]
+	let xr = cast(Sym, x).reg
 	if xr == a {
 		emit3(X_CMOVCC, xr, b, cc ^ 1)
 	} else if xr == b {
@@ -2510,12 +2510,12 @@ fn x_stmt_calls_in_loop(s i64) i64 {
 	if s == 0 {
 		return 0
 	}
-	let k = s[N_KIND]
+	let k = cast(Node, s).kind
 	if k == ST_BLOCK {
-		return x_stmts_calls_in_loop(s[BLK_STMTS])
+		return x_stmts_calls_in_loop(cast(Block, s).stmts)
 	}
 	if k == ST_IF {
-		return i64(x_stmt_calls_in_loop(s[IF_THEN]) != 0 || x_stmt_calls_in_loop(s[IF_ELSE]) != 0)
+		return i64(x_stmt_calls_in_loop(cast(IfStmt, s).then) != 0 || x_stmt_calls_in_loop(cast(IfStmt, s).else_) != 0)
 	}
 	if k == ST_WHILE {
 		return stmt_has_call(s)
@@ -2526,9 +2526,9 @@ fn x_stmt_calls_in_loop(s i64) i64 {
 // x_assign_homes gives each local a register or frame slot and builds the temp pools.
 // It returns the number of frame slots.
 fn x_assign_homes(f i64) i64 {
-	let locals = f[F_LOCALS]
-	let leaf = f[F_LEAF]
-	let fp_homes = i64(leaf != 0 || x_stmts_calls_in_loop(f[F_BODY][BLK_STMTS]) == 0)
+	let locals = cast(Fn, f).locals
+	let leaf = cast(Fn, f).leaf
+	let fp_homes = i64(leaf != 0 || x_stmts_calls_in_loop(cast(Block, cast(Fn, f).body).stmts) == 0)
 	let pool = vec_new()
 	vec_push(pool, RBX)
 	vec_push(pool, R12)
@@ -2544,19 +2544,19 @@ fn x_assign_homes(f i64) i64 {
 	mut i = 0
 	for i < locals[VEC_LEN] {
 		let s = vec_get(locals, i)
-		s[S_REG] = REG_DEAD
-		if is_dyn_value(s[S_TYPE]) != 0 {
-			s[S_ADDR] = 1
-			s[S_WORDS] = 2
+		cast(Sym, s).reg = REG_DEAD
+		if is_dyn_value(cast(Sym, s).type_) != 0 {
+			cast(Sym, s).addr = 1
+			cast(Sym, s).words = 2
 		}
-		if s[S_ADDR] != 0 {
-			s[S_REG] = REG_SLOT
+		if cast(Sym, s).addr != 0 {
+			cast(Sym, s).reg = REG_SLOT
 			mut nw = 1
-			if s[S_WORDS] > 1 {
-				nw = s[S_WORDS]
+			if cast(Sym, s).words > 1 {
+				nw = cast(Sym, s).words
 			}
 			nslots = nslots + nw
-			s[S_OFF] = -8 * nslots
+			cast(Sym, s).off = -8 * nslots
 		}
 		i = i + 1
 	}
@@ -2568,7 +2568,7 @@ fn x_assign_homes(f i64) i64 {
 		i = 0
 		for i < locals[VEC_LEN] {
 			let c = vec_get(locals, i)
-			if c[S_REG] == REG_DEAD && c[S_USES] > 0 && (best == 0 || c[S_USES] > best[S_USES]) {
+			if cast(Sym, c).reg == REG_DEAD && cast(Sym, c).uses > 0 && (best == 0 || cast(Sym, c).uses > cast(Sym, best).uses) {
 				best = c
 			}
 			i = i + 1
@@ -2576,23 +2576,23 @@ fn x_assign_homes(f i64) i64 {
 		if best == 0 {
 			break
 		}
-		if is_float_t(best[S_TYPE]) != 0 && fnext < fpool[VEC_LEN] {
-			best[S_REG] = vec_get(fpool, fnext)
-			used_fregs = used_fregs | (1 << (best[S_REG] - XMM))
+		if is_float_t(cast(Sym, best).type_) != 0 && fnext < fpool[VEC_LEN] {
+			cast(Sym, best).reg = vec_get(fpool, fnext)
+			used_fregs = used_fregs | (1 << (cast(Sym, best).reg - XMM))
 			fnext = fnext + 1
-		} else if is_float_t(best[S_TYPE]) == 0 && next < pool[VEC_LEN] {
-			best[S_REG] = vec_get(pool, next)
-			used_regs = used_regs | (1 << best[S_REG])
+		} else if is_float_t(cast(Sym, best).type_) == 0 && next < pool[VEC_LEN] {
+			cast(Sym, best).reg = vec_get(pool, next)
+			used_regs = used_regs | (1 << cast(Sym, best).reg)
 			next = next + 1
 		} else {
-			best[S_REG] = REG_SLOT
-			best[S_OFF] = -8 - 8 * nslots
+			cast(Sym, best).reg = REG_SLOT
+			cast(Sym, best).off = -8 - 8 * nslots
 			nslots = nslots + 1
 		}
 	}
 	// Leftover callee-saved registers survive calls for free; caller-saved ones cost
 	// nothing in the prologue. Prefer whichever this function needs.
-	let cross = i64(leaf == 0 && stmts_cross_calls(f[F_BODY][BLK_STMTS]) != 0)
+	let cross = i64(leaf == 0 && stmts_cross_calls(cast(Block, cast(Fn, f).body).stmts) != 0)
 	t_regs = vec_new()
 	f_regs = vec_new()
 	if cross != 0 {
@@ -2635,7 +2635,7 @@ fn x_assign_homes(f i64) i64 {
 // x_entry_moves moves the parameters from their argument registers (or stack slots at
 // [rbp + 16 + 8k]) into their homes; register moves run in parallel.
 fn x_entry_moves(f i64) {
-	let locals = f[F_LOCALS]
+	let locals = cast(Fn, f).locals
 	let dsts = vec_new()
 	let srcs = vec_new()
 	let stack_syms = vec_new()
@@ -2643,30 +2643,30 @@ fn x_entry_moves(f i64) {
 	mut nf = 0
 	x_nstack = 0
 	mut i = 0
-	for i < f[F_PARAMS][VEC_LEN] {
+	for i < cast(Fn, f).params[VEC_LEN] {
 		let s = vec_get(locals, i)
-		let pt = vec_get(f[F_PTYPES], i)
+		let pt = vec_get(cast(Fn, f).ptypes, i)
 		if is_dyn_value(pt) != 0 {
 			if ni + 1 < 6 {
 				let r0 = x_int_arg(ni)
 				let r1 = x_int_arg(ni + 1)
 				ni = ni + 2
-				if s[S_REG] == REG_SLOT {
-					x_slot_store(r0, s[S_OFF])
-					x_slot_store(r1, s[S_OFF] + 8)
+				if cast(Sym, s).reg == REG_SLOT {
+					x_slot_store(r0, cast(Sym, s).off)
+					x_slot_store(r1, cast(Sym, s).off + 8)
 				} else {
-					err_code_at(s[S_POS], cstr("E990 INTERNAL"), cstr("dyn parameter is not in a two-word frame slot"))
+					err_code_at(cast(Sym, s).pos, cstr("E990 INTERNAL"), cstr("dyn parameter is not in a two-word frame slot"))
 				}
 			} else {
 				ni = 6
 				x_nstack = align_up(x_nstack, 2)
 				x_slot_load(XSCR, 16 + 8 * x_nstack)
 				x_slot_load(XSCR2, 24 + 8 * x_nstack)
-				if s[S_REG] == REG_SLOT {
-					x_slot_store(XSCR, s[S_OFF])
-					x_slot_store(XSCR2, s[S_OFF] + 8)
+				if cast(Sym, s).reg == REG_SLOT {
+					x_slot_store(XSCR, cast(Sym, s).off)
+					x_slot_store(XSCR2, cast(Sym, s).off + 8)
 				} else {
-					err_code_at(s[S_POS], cstr("E990 INTERNAL"), cstr("dyn parameter is not in a two-word frame slot"))
+					err_code_at(cast(Sym, s).pos, cstr("E990 INTERNAL"), cstr("dyn parameter is not in a two-word frame slot"))
 				}
 				x_nstack = x_nstack + 2
 			}
@@ -2689,11 +2689,11 @@ fn x_entry_moves(f i64) {
 			vec_push(stack_syms, s)
 			vec_push(stack_syms, 16 + 8 * x_nstack)
 			x_nstack = x_nstack + 1
-		} else if s[S_REG] >= 0 {
-			vec_push(dsts, s[S_REG])
+		} else if cast(Sym, s).reg >= 0 {
+			vec_push(dsts, cast(Sym, s).reg)
 			vec_push(srcs, src)
-		} else if s[S_REG] == REG_SLOT {
-			x_slot_store(src, s[S_OFF])
+		} else if cast(Sym, s).reg == REG_SLOT {
+			x_slot_store(src, cast(Sym, s).off)
 		}
 		i = i + 1
 	}
@@ -2702,20 +2702,20 @@ fn x_entry_moves(f i64) {
 	for i < stack_syms[VEC_LEN] {
 		let s = vec_get(stack_syms, i)
 		let off = vec_get(stack_syms, i + 1)
-		if s[S_REG] >= 0 {
-			x_slot_load(s[S_REG], off)
-		} else if s[S_REG] == REG_SLOT {
+		if cast(Sym, s).reg >= 0 {
+			x_slot_load(cast(Sym, s).reg, off)
+		} else if cast(Sym, s).reg == REG_SLOT {
 			x_slot_load(XSCR, off)
-			x_slot_store(XSCR, s[S_OFF])
+			x_slot_store(XSCR, cast(Sym, s).off)
 		}
 		i = i + 2
 	}
-	if f[F_ENV_SYM] != 0 {
-		let es = f[F_ENV_SYM]
-		if es[S_REG] >= 0 {
-			x_mov(es[S_REG], R11)
-		} else if es[S_REG] == REG_SLOT {
-			x_slot_store(R11, es[S_OFF])
+	if cast(Fn, f).env_sym != 0 {
+		let es = cast(Fn, f).env_sym
+		if cast(Sym, es).reg >= 0 {
+			x_mov(cast(Sym, es).reg, R11)
+		} else if cast(Sym, es).reg == REG_SLOT {
+			x_slot_store(R11, cast(Sym, es).off)
 		}
 	}
 }
@@ -2807,7 +2807,7 @@ fn x_gen_poll_stubs() {
 			emit2(X_MOVSD_ST, FPR + r, x_mem1(RSP, 8 * r))
 			r = r + 1
 		}
-		emit1(X_CALL, x_sym(SK_FN, f[F_INDEX]))
+		emit1(X_CALL, x_sym(SK_FN, cast(Fn, f).index))
 		r = 0
 		for r < 16 {
 			emit2(X_MOVSD_LD, FPR + r, x_mem1(RSP, 8 * r))
@@ -2828,12 +2828,12 @@ fn x_gen_poll_stubs() {
 
 fn x_gen_fn(f i64) {
 	if tgt_linux != 0 {
-		let bytes = syscall_fast_amd64(f[F_QNAME])
+		let bytes = syscall_fast_amd64(cast(Fn, f).qname)
 		if bytes != 0 {
-			x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
-			if streq(f[F_QNAME], cstr("rt_sys_clock_gettime")) != 0 {
+			x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
+			if streq(cast(Fn, f).qname, cstr("rt_sys_clock_gettime")) != 0 {
 				let s = lookup_global(cstr("rtVdsoClock"))
-				x_out4(X_LOAD, RDX, x64_mem_sym(x_sym(SK_VAR, s[S_INDEX])), 3, 0)
+				x_out4(X_LOAD, RDX, x64_mem_sym(x_sym(SK_VAR, cast(Sym, s).index)), 3, 0)
 			}
 			mut i = 0
 			for i < bytes[VEC_LEN] {
@@ -2843,9 +2843,9 @@ fn x_gen_fn(f i64) {
 			return
 		}
 	}
-	if streq(f[F_QNAME], cstr("memcpy")) != 0 || streq(f[F_QNAME], cstr("memmove")) != 0 || streq(f[F_QNAME], cstr("memset")) != 0 || streq(f[F_QNAME], cstr("memcmp")) != 0 || streq(f[F_QNAME], cstr("memchr")) != 0 || streq(f[F_QNAME], cstr("mem_avx2_supported")) != 0 {
-		x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
-		let bs = memory_fast_amd64(f[F_QNAME])
+	if streq(cast(Fn, f).qname, cstr("memcpy")) != 0 || streq(cast(Fn, f).qname, cstr("memmove")) != 0 || streq(cast(Fn, f).qname, cstr("memset")) != 0 || streq(cast(Fn, f).qname, cstr("memcmp")) != 0 || streq(cast(Fn, f).qname, cstr("memchr")) != 0 || streq(cast(Fn, f).qname, cstr("mem_avx2_supported")) != 0 {
+		x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
+		let bs = memory_fast_amd64(cast(Fn, f).qname)
 		mut i = 0
 		for i < bs[VEC_LEN] {
 			x_out4(X_RAWB, vec_get(bs, i), 0, 0, 0)
@@ -2854,9 +2854,9 @@ fn x_gen_fn(f i64) {
 		return
 	}
 
-	if tgt_linux != 0 && (streq(f[F_QNAME], cstr("linux_raw")) != 0 || streq(f[F_QNAME], cstr("linux_restorer")) != 0) {
-		x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
-		let bs = x_syscall_bytes(streq(f[F_QNAME], cstr("linux_restorer")))
+	if tgt_linux != 0 && (streq(cast(Fn, f).qname, cstr("linux_raw")) != 0 || streq(cast(Fn, f).qname, cstr("linux_restorer")) != 0) {
+		x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
+		let bs = x_syscall_bytes(streq(cast(Fn, f).qname, cstr("linux_restorer")))
 		mut i = 0
 		for i < bs[VEC_LEN] {
 			x_out4(X_RAWB, vec_get(bs, i), 0, 0, 0)
@@ -2864,9 +2864,9 @@ fn x_gen_fn(f i64) {
 		}
 		return
 	}
-	if streq(f[F_QNAME], cstr("mem_copy64")) != 0 || streq(f[F_QNAME], cstr("mem_fill64")) != 0 {
-		x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
-		let bs = x_memory_bytes(streq(f[F_QNAME], cstr("mem_fill64")))
+	if streq(cast(Fn, f).qname, cstr("mem_copy64")) != 0 || streq(cast(Fn, f).qname, cstr("mem_fill64")) != 0 {
+		x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
+		let bs = x_memory_bytes(streq(cast(Fn, f).qname, cstr("mem_fill64")))
 		mut i = 0
 		for i < bs[VEC_LEN] {
 			x_out4(X_RAWB, vec_get(bs, i), 0, 0, 0)
@@ -2874,9 +2874,9 @@ fn x_gen_fn(f i64) {
 		}
 		return
 	}
-	if aes_hw_amd64(f[F_QNAME]) != 0 {
-		x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
-		let bs = aes_hw_amd64(f[F_QNAME])
+	if aes_hw_amd64(cast(Fn, f).qname) != 0 {
+		x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
+		let bs = aes_hw_amd64(cast(Fn, f).qname)
 		mut i = 0
 		for i < bs[VEC_LEN] {
 			x_out4(X_RAWB, vec_get(bs, i), 0, 0, 0)
@@ -2884,8 +2884,8 @@ fn x_gen_fn(f i64) {
 		}
 		return
 	}
-	if streq(f[F_QNAME], cstr("rt_task_swap")) != 0 {
-		x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
+	if streq(cast(Fn, f).qname, cstr("rt_task_swap")) != 0 {
+		x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
 		let bs = x_task_swap_bytes()
 		mut i = 0
 		for i < bs[VEC_LEN] {
@@ -2902,7 +2902,7 @@ fn x_gen_fn(f i64) {
 	if host_getenv(cstr("TINC_TRACE")) != 0 {
 		let tb = buf_new()
 		buf_str(tb, cstr("gen "))
-		buf_str(tb, f[F_QNAME])
+		buf_str(tb, cast(Fn, f).qname)
 		buf_byte(tb, '\n')
 		write_all(2, tb)
 	}
@@ -2919,7 +2919,7 @@ fn x_gen_fn(f i64) {
 		mut di = 0
 		for di < prog_fns[VEC_LEN] {
 			let df = vec_get(prog_fns, di)
-			if df[F_EXTERN] == 0 && df[F_REACH] != 0 {
+			if cast(Fn, df).extern_ == 0 && cast(Fn, df).reach != 0 {
 				emit2(X_LEA, RAX, x64_mem_sym(x_sym(SK_FN, di)))
 				emit2(X_LEA, RDX, x64_mem_sym(x_sym(SK_FNDESC, di)))
 				x_st(RAX, x_mem1(RDX, 0), 3)
@@ -2929,7 +2929,7 @@ fn x_gen_fn(f i64) {
 		x_gen_dyn_table_init()
 	}
 	x_gen_poll()
-	let stmts = f[F_BODY][BLK_STMTS]
+	let stmts = cast(Block, cast(Fn, f).body).stmts
 	mut i = 0
 	for i < stmts[VEC_LEN] {
 		x_gen_stmt(vec_get(stmts, i))
@@ -2942,8 +2942,8 @@ fn x_gen_fn(f i64) {
 		x_label(trap_label)
 		let bf = find_fn(cstr("rt_bounds_fail"))
 		if bf != 0 {
-			emit1(X_CALL, x_sym(SK_FN, bf[F_INDEX]))
-			bf[F_USED] = 1
+			emit1(X_CALL, x_sym(SK_FN, cast(Fn, bf).index))
+			cast(Fn, bf).used = 1
 		}
 	}
 	if x_div_label != 0 {
@@ -2952,8 +2952,8 @@ fn x_gen_fn(f i64) {
 		emit2(X_ANDI, RSP, -16)
 		let df = find_fn(cstr("rt_div_fail"))
 		if df != 0 {
-			emit1(X_CALL, x_sym(SK_FN, df[F_INDEX]))
-			df[F_USED] = 1
+			emit1(X_CALL, x_sym(SK_FN, cast(Fn, df).index))
+			cast(Fn, df).used = 1
 		}
 	}
 	// Per-site stubs: the index and length go through the stack into rdi/rsi (any registers),
@@ -2975,8 +2975,8 @@ fn x_gen_fn(f i64) {
 		x_ld(RSI, x_mem1(RSP, 8), 3)
 		emit2(X_ANDI, RSP, -16)
 		if bf2 != 0 {
-			emit1(X_CALL, x_sym(SK_FN, bf2[F_INDEX]))
-			bf2[F_USED] = 1
+			emit1(X_CALL, x_sym(SK_FN, cast(Fn, bf2).index))
+			cast(Fn, bf2).used = 1
 		}
 		ts = ts + 1
 	}
@@ -3001,7 +3001,7 @@ fn x_gen_dyn_table_init() {
 		for j < fns[VEC_LEN] {
 			let f = vec_get(fns, j)
 			if f != 0 {
-				emit2(X_LEA, RAX, x64_mem_sym(x_sym(SK_FNDESC, f[F_INDEX])))
+				emit2(X_LEA, RAX, x64_mem_sym(x_sym(SK_FNDESC, cast(Fn, f).index)))
 				x_st(RAX, x64_mem_sym(x_sym(SK_VAR, base + j)), 3)
 			}
 			j = j + 1
@@ -3054,8 +3054,8 @@ fn x_finish_fn(f i64, nslots i64) {
 		r = r + 1
 	}
 	let frame = align_up(8 * (nslots + saved[VEC_LEN]), 16)
-	let frameless = i64(f[F_LEAF] != 0 && nslots == 0 && saved[VEC_LEN] == 0 && x_nstack == 0)
-	x_out4(X_LABEL, vec_get(x_fn_labels, f[F_INDEX]), 0, 0, 0)
+	let frameless = i64(cast(Fn, f).leaf != 0 && nslots == 0 && saved[VEC_LEN] == 0 && x_nstack == 0)
+	x_out4(X_LABEL, vec_get(x_fn_labels, cast(Fn, f).index), 0, 0, 0)
 	if frameless == 0 {
 		x_out4(X_PUSH, RBP, 0, 0, 0)
 		x_out4(X_MOV_RR, RBP, RSP, 0, 0)
@@ -3121,7 +3121,7 @@ fn generate_x64() {
 	x_fn_labels = vec_new()
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
-		vec_get(prog_fns, i)[F_INDEX] = i
+		cast(Fn, vec_get(prog_fns, i)).index = i
 		vec_push(x_fn_labels, new_label())
 		i = i + 1
 	}
@@ -3129,7 +3129,7 @@ fn generate_x64() {
 	i = 0
 	for i < prog_fns[VEC_LEN] {
 		let f = vec_get(prog_fns, i)
-		if f[F_EXTERN] == 0 && f[F_REACH] != 0 {
+		if cast(Fn, f).extern_ == 0 && cast(Fn, f).reach != 0 {
 			x_gen_fn(f)
 		}
 		i = i + 1
@@ -3142,11 +3142,11 @@ fn print_asm_x64() i64 {
 	mut i = 0
 	for i < prog_fns[VEC_LEN] {
 		let f = vec_get(prog_fns, i)
-		if f[F_EXTERN] == 0 && f[F_REACH] != 0 {
+		if cast(Fn, f).extern_ == 0 && cast(Fn, f).reach != 0 {
 			buf_str(b, cstr("# L"))
 			buf_int(b, vec_get(x_fn_labels, i))
 			buf_str(b, cstr(": "))
-			buf_str(b, f[F_QNAME])
+			buf_str(b, cast(Fn, f).qname)
 			buf_byte(b, '\n')
 		}
 		i = i + 1

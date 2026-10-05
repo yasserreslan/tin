@@ -235,10 +235,10 @@ fn pr_sym(b i64, sym i64) {
 		buf_int(b, i)
 	} else if kind == SK_FN {
 		buf_byte(b, '_')
-		buf_str(b, vec_get(prog_fns, i)[F_QNAME])
+		buf_str(b, cast(Fn, vec_get(prog_fns, i)).qname)
 	} else if kind == SK_FNDESC {
 		buf_byte(b, '_')
-		buf_str(b, vec_get(prog_fns, i)[F_QNAME])
+		buf_str(b, cast(Fn, vec_get(prog_fns, i)).qname)
 		buf_str(b, cstr("$desc"))
 	} else if kind == SK_BTRACE {
 		buf_str(b, cstr("l_.backtrace"))
@@ -298,11 +298,11 @@ fn print_ins(b i64, ins i64) {
 			k = k - 4
 		}
 	} else if op == I_FUNC {
-		if streq(x[F_QNAME], cstr("main")) != 0 {
+		if streq(cast(Fn, x).qname, cstr("main")) != 0 {
 			buf_str(b, cstr("\t.globl _main\n"))
 		}
 		buf_str(b, cstr("\t.p2align 2\n_"))
-		buf_str(b, x[F_QNAME])
+		buf_str(b, cast(Fn, x).qname)
 		buf_byte(b, ':')
 	} else if op == I_MOVZ || op == I_MOVN || op == I_MOVK {
 		if op == I_MOVZ {
@@ -488,7 +488,7 @@ fn print_ins(b i64, ins i64) {
 		pr_label(b, z)
 	} else if op == I_BL {
 		buf_str(b, cstr("\tbl _"))
-		buf_str(b, x[F_QNAME])
+		buf_str(b, cast(Fn, x).qname)
 	} else if op >= I_FADD && op <= I_FDIV {
 		let fnames = cstr("fadd\0fsub\0fmul\0fdiv")
 		pr_regs(b, fnames + 5 * (op - I_FADD), x, y, z)

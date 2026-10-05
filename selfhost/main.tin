@@ -423,7 +423,7 @@ fn load_imports() {
 						lock_has(path)
 					}
 					// Only the standard library (and a package granted unsafe) may use the raw operations.
-					load_unsafe = i64(std == 0 && cpkg != 0 && (cpkg[CP_CAPS] & CAP_UNSAFE) != 0)
+					load_unsafe = i64(std == 0 && cpkg != 0 && (cast(CapsRec, cpkg).caps & CAP_UNSAFE) != 0)
 					load_file_trusted(path, i64(std != 0 || load_unsafe != 0))
 					load_unsafe = 0
 					file_cap_pkg[VEC_DATA][files[VEC_LEN] - 1] = cpkg
