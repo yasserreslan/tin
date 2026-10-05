@@ -64,6 +64,8 @@ jobs:
         run: python3 tools/ci/heap_check.py
       - name: Map growth (no insert into a growing long-lived map takes a millisecond)
         run: python3 tools/ci/map_growth_check.py
+      - name: Reclamation with long-lived tasks (a parked WebSocket does not pin dropped blocks)
+        run: python3 tools/ci/limbo_check.py
       - name: Arena blocks (flat peak RSS in a batch loop, arenas in waiting handlers)
         run: python3 tools/ci/arena_check.py
       - name: Replay tapes (record, replay, divergence)
@@ -91,6 +93,8 @@ jobs:
       - name: Linux DNS caches (answers for their TTL, missing names, /etc/hosts re-read on change)
         if: runner.os == 'Linux'
         run: python3 tools/ci/dns_cache_check.py
+      - name: JSON decoding against encoding/json (strict mode, atomic faults, UTF-8)
+        run: python3 tools/ci/argo_twin_check.py
       - name: Cryptographic primitives (Wycheproof and hashlib vectors)
         run: python3 tools/ci/crypto_check.py
       - name: TLS 1.3 client (RFC 8448 trace, openssl and Python interop, https and wss)
