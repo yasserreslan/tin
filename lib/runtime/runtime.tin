@@ -2160,7 +2160,7 @@ fn rt_map_setk(m i64, k str, v i64) {
 // A full map whose entries are more than half dead is rebuilt instead (one O(n) pause, as
 // before): that is when the memory of deleted entries is returned. A map never shrinks.
 
-const mapHdr = 192
+const mapHdr = 208
 const mapChunkBits = 12
 const mapChunk = 4096
 const mapMigrate = 16
@@ -2293,6 +2293,7 @@ fn rt_cmap_setup(m i64, dirs i64, entries i64) {
 	m[21] = 0
 	m[22] = 0
 	m[23] = 0
+	m[24] = 0
 }
 
 // rt_cmap_free frees the arrays and chunks of a chunked map (not its header).
@@ -2409,6 +2410,14 @@ fn rt_cmap_rebuild(m i64) {
 // once would take a call a long time).
 fn rt_cmap_step(m i64) {
 	if m[16] != 0 {
+		// First touch the new index, one 2 MiB stride per call: where the kernel backs memory
+		// with huge pages, the first write to each costs the zeroing of 2 MiB, and entries
+		// moved into untouched memory would pay for sixteen of them in one call.
+		if m[24] < m[1]*8 {
+			(m[4] + m[24])[0] = 0
+			m[24] += 2097152
+			return
+		}
 		let end = m[20]
 		mut moved = 0
 		for moved < mapMigrate && m[19] < end {
@@ -2483,6 +2492,7 @@ fn rt_cmap_grow(m i64) {
 		m[7] = 0
 		m[19] = 0
 		m[20] = used
+		m[24] = 0
 	}
 }
 
