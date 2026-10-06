@@ -29,16 +29,16 @@ extern fn readdir(dir i64) i64
 extern fn closedir(dir i64) i64
 extern fn uname(buf i64) i64
 
-fn rt_sys_creat(path i64, mode i64) i64 {
-	return creat(path, mode)
+fn rt_sys_creat(path str, mode i64) i64 {
+	return creat(cstr(path), mode)
 }
 
-fn rt_sys_unlink(path i64) i64 {
-	return unlink(path)
+fn rt_sys_unlink(path str) i64 {
+	return unlink(cstr(path))
 }
 
-fn rt_sys_opendir(path i64) i64 {
-	return opendir(path)
+fn rt_sys_opendir(path str) i64 {
+	return opendir(cstr(path))
 }
 
 fn rt_sys_readdir(dir i64) i64 {
@@ -55,6 +55,6 @@ fn rt_sys_uname(buf i64) i64 {
 
 extern fn realpath(path i64, resolved i64) i64
 
-fn host_realpath(path i64, resolved i64) i64 {
-	return realpath(path, resolved)
+fn host_realpath(path str, resolved i64) i64 {
+	return realpath(cstr(path), resolved)
 }

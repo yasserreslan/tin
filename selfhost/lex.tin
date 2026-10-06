@@ -11,7 +11,7 @@ const TK_FLOAT = 6 // T_TEXT holds the literal text, T_VAL its IEEE-754 bits
 const T_TEXT = 1
 const T_VAL = 2
 
-shared mut lx_src i64
+shared mut lx_src str = ""
 shared mut lx_len i64
 shared mut lx_i i64
 shared mut lx_line i64
@@ -22,11 +22,11 @@ shared mut lx_newline i64
 shared mut lx_esc_rune i64
 shared mut lx_token_start i64
 
-fn lex(file i64, src i64, len_ i64, edition i64) i64 {
+fn lex(file i64, src str, edition i64) i64 {
 	lx_file = file
 	lx_edition = edition
 	lx_src = src
-	lx_len = len_
+	lx_len = len(src)
 	lx_i = 0
 	lx_line = 1
 	lx_col = 1
@@ -35,7 +35,7 @@ fn lex(file i64, src i64, len_ i64, edition i64) i64 {
 	for {
 		let t = cast(Token, lex_next())
 		if last != 0 && (lx_newline != 0 || t.kind == TK_EOF) && ends_statement(cast(Token, last)) != 0 {
-			let semi = cast(Token, token_new(TK_PUNCT, cstr(";"), 1, t.pos))
+			let semi = cast(Token, token_new(TK_PUNCT, ";", 1, t.pos))
 			semi.synth = 1
 			toks = append(toks, cast(i64, semi))
 		}
@@ -49,7 +49,7 @@ fn lex(file i64, src i64, len_ i64, edition i64) i64 {
 
 // T_TEXT holds the identifier, keyword, punctuation or decoded string bytes;
 // T_VAL holds an integer literal's value or a string literal's byte length.
-fn token_new(kind i64, text i64, val i64, pos i64) i64 {
+fn token_new(kind i64, text str, val i64, pos i64) i64 {
 	let t = cast(Token, malloc(80))
 	t.kind = kind
 	t.text = text
@@ -66,13 +66,13 @@ fn token_new(kind i64, text i64, val i64, pos i64) i64 {
 
 fn lx_peek(off i64) i64 {
 	if lx_i + off < lx_len {
-		return i64(load8(lx_src + lx_i + off))
+		return i64(lx_src[lx_i + off])
 	}
 	return 0
 }
 
 fn lx_advance() i64 {
-	let c = i64(load8(lx_src + lx_i))
+	let c = i64(lx_src[lx_i])
 	lx_i = lx_i + 1
 	if c == '\n' {
 		lx_line = lx_line + 1
@@ -112,30 +112,30 @@ fn hex_value(c i64) i64 {
 	return c - 'A' + 10
 }
 
-fn is_keyword(s i64) i64 {
+fn is_keyword(s str) i64 {
 	let words = "fn extern const var let if else while return break continue func type struct for range import package map true false nil switch case default go defer try mut "
-	let n = strlen(s)
+	let n = strlen(cstr(s))
 	mut i = 0
 	for i < len(words) {
 		mut j = 0
 		for i64(words[i + j]) != ' ' {
 			j = j + 1
 		}
-		if j == n && str_has_at(words, i, str_of(s)) {
+		if j == n && str_has_at(words, i, s) {
 			return 1
 		}
 		i = i + j + 1
 	}
 	if lx_edition != 0 {
 		let edition1 = "enum match within limit guard parallel detach secret shared fail catch keep "
-		let n = strlen(s)
+		let n = strlen(cstr(s))
 		mut i = 0
 		for i < len(edition1) {
 			mut j = 0
 			for i64(edition1[i + j]) != ' ' {
 				j = j + 1
 			}
-			if j == n && str_has_at(edition1, i, str_of(s)) {
+			if j == n && str_has_at(edition1, i, s) {
 				return 1
 			}
 			i = i + j + 1
@@ -216,9 +216,9 @@ fn ends_statement(t Token) i64 {
 	}
 	let s = t.text
 	if k == TK_KEYWORD {
-		return i64(streq(s, "break") != 0 || streq(s, "continue") != 0 || streq(s, "return") != 0 || streq(s, "true") != 0 || streq(s, "false") != 0 || streq(s, "nil") != 0)
+		return i64(s == "break" || s == "continue" || s == "return" || s == "true" || s == "false" || s == "nil")
 	}
-	return i64(k == TK_PUNCT && (streq(s, ")") != 0 || streq(s, "]") != 0 || streq(s, "}}") != 0 || streq(s, "++") != 0 || streq(s, "--") != 0))
+	return i64(k == TK_PUNCT && (streq(s, ")") != 0 || s == "]" || s == "}}" || s == "++" || s == "--"))
 }
 
 fn lex_next() i64 {
@@ -226,7 +226,7 @@ fn lex_next() i64 {
 	lx_token_start = lx_i
 	let pos = pos_make(lx_file, lx_line, lx_col)
 	if lx_i >= lx_len {
-		return token_new(TK_EOF, cstr(""), 0, pos)
+		return token_new(TK_EOF, "", 0, pos)
 	}
 	let c = lx_peek(0)
 	if lx_edition != 0 && c == ';' {
@@ -237,11 +237,11 @@ fn lex_next() i64 {
 		for is_letter(lx_peek(0)) != 0 || is_digit(lx_peek(0)) != 0 {
 			lx_advance()
 		}
-		let text = str_slice(lx_src + start, lx_i - start)
-		if is_keyword(cstr(text)) != 0 {
-			return token_new(TK_KEYWORD, cstr(text), 0, pos)
+		let text = lx_src[start:start + (lx_i - start)]
+		if is_keyword(text) != 0 {
+			return token_new(TK_KEYWORD, text, 0, pos)
 		}
-		return token_new(TK_IDENT, cstr(text), 0, pos)
+		return token_new(TK_IDENT, text, 0, pos)
 	}
 	if is_digit(c) != 0 || (c == '.' && is_digit(lx_peek(1)) != 0) {
 		return lex_number(pos)
@@ -250,11 +250,11 @@ fn lex_next() i64 {
 		return lex_raw_string(pos)
 	}
 	if lx_i + 2 < lx_len && is_three_char_punct(c, lx_peek(1), lx_peek(2)) != 0 {
-		let three = str_slice(lx_src + lx_i, 3)
+		let three = lx_src[lx_i:lx_i + 3]
 		lx_advance()
 		lx_advance()
 		lx_advance()
-		return token_new(TK_PUNCT, cstr(three), 0, pos)
+		return token_new(TK_PUNCT, three, 0, pos)
 	}
 	if c == '\'' {
 		return lex_char(pos)
@@ -263,15 +263,15 @@ fn lex_next() i64 {
 		return lex_string(pos)
 	}
 	if lx_i + 1 < lx_len && is_two_char_punct(c, lx_peek(1)) != 0 {
-		let two = str_slice(lx_src + lx_i, 2)
+		let two = lx_src[lx_i:lx_i + 2]
 		lx_advance()
 		lx_advance()
-		return token_new(TK_PUNCT, cstr(two), 0, pos)
+		return token_new(TK_PUNCT, two, 0, pos)
 	}
 	if is_one_char_punct(c) != 0 {
-		let one = str_slice(lx_src + lx_i, 1)
+		let one = lx_src[lx_i:lx_i + 1]
 		lx_advance()
-		return token_new(TK_PUNCT, cstr(one), 0, pos)
+		return token_new(TK_PUNCT, one, 0, pos)
 	}
 	let e = cast([]i64, err_code(pos, "E010 UNEXPECTED_CHARACTER"))
 	buf_str(cast([]u8, e), "unexpected character '")
@@ -302,28 +302,30 @@ fn lex_float(pos i64, start i64) i64 {
 		}
 	}
 	let number_end = lx_i
-	mut unit_ = 0
+	mut unit_ = ""
 	if lx_edition != 0 && is_letter(lx_peek(0)) != 0 {
 		let unit_start = lx_i
 		for is_letter(lx_peek(0)) != 0 {
 			lx_advance()
 		}
-		unit_ = unit_name(cstr(str_slice(lx_src + unit_start, lx_i - unit_start)))
-		if unit_ == 0 {
+		unit_ = unit_name(lx_src[unit_start:unit_start + (lx_i - unit_start)])
+		if len(unit_) == 0 {
 			lx_fail_code(pos, "E012 NUMERIC_UNIT", "unknown numeric unit suffix")
 		}
 	}
-	let text = str_slice(lx_src + start, number_end - start)
-	let t = cast(Token, token_new(TK_FLOAT, cstr(text), float_bits(cstr(text)), pos))
-	t.unit = unit_
+	let text = lx_src[start:start + (number_end - start)]
+	let t = cast(Token, token_new(TK_FLOAT, text, float_bits(text), pos))
+	if len(unit_) != 0 {
+		t.unit = cstr(unit_)
+	}
 	return cast(i64, t)
 }
 
-fn unit_name(s i64) i64 {
-	if streq(s, "ns") != 0 || streq(s, "us") != 0 || streq(s, "ms") != 0 || streq(s, "s") != 0 || streq(s, "m") != 0 || streq(s, "h") != 0 || streq(s, "b") != 0 || streq(s, "kb") != 0 || streq(s, "mb") != 0 || streq(s, "gb") != 0 {
+fn unit_name(s str) str {
+	if s == "ns" || s == "us" || s == "ms" || s == "s" || s == "m" || s == "h" || s == "b" || s == "kb" || s == "mb" || s == "gb" {
 		return s
 	}
-	return 0
+	return ""
 }
 
 fn lex_raw_string(pos i64) i64 {
@@ -340,7 +342,7 @@ fn lex_raw_string(pos i64) i64 {
 	}
 	lx_advance()
 	buf_byte(b, 0)
-	let rt = cast(Token, token_new(TK_STRING, cstr(buf_cstring(b)), len(b) - 1, pos))
+	let rt = cast(Token, token_new(TK_STRING, buf_cstring(b), len(b) - 1, pos))
 	rt.raw = 1
 	return cast(i64, rt)
 }
@@ -372,14 +374,14 @@ fn lex_number(pos i64) i64 {
 		}
 	}
 	let number_end = lx_i
-	mut unit_ = 0
+	mut unit_ = ""
 	if base == 10 && lx_edition != 0 && is_letter(lx_peek(0)) != 0 {
 		let unit_start = lx_i
 		for is_letter(lx_peek(0)) != 0 {
 			lx_advance()
 		}
-		unit_ = unit_name(cstr(str_slice(lx_src + unit_start, lx_i - unit_start)))
-		if unit_ == 0 {
+		unit_ = unit_name(lx_src[unit_start:unit_start + (lx_i - unit_start)])
+		if len(unit_) == 0 {
 			lx_fail_code(pos, "E012 NUMERIC_UNIT", "unknown numeric unit suffix")
 		}
 	} else {
@@ -387,9 +389,8 @@ fn lex_number(pos i64) i64 {
 			lx_advance()
 		}
 	}
-	let s = lx_src + start
-	mut n = lx_i - start
-	if unit_ != 0 {
+		mut n = lx_i - start
+	if len(unit_) != 0 {
 		n = number_end - start
 	}
 	mut val = 0
@@ -409,10 +410,10 @@ fn lex_number(pos i64) i64 {
 	}
 	mut prev_digit = 0
 	for i < n && ok != 0 {
-		let d = i64(load8(s + i))
+		let d = i64(lx_src[start + i])
 		if d == '_' {
 			// A separator must sit between two digits.
-			if prev_digit == 0 || i + 1 >= n || i64(load8(s + i + 1)) == '_' {
+			if prev_digit == 0 || i + 1 >= n || i64(lx_src[start + i + 1]) == '_' {
 				ok = 0
 			}
 			prev_digit = 0
@@ -441,15 +442,17 @@ fn lex_number(pos i64) i64 {
 	if prev_digit == 0 {
 		ok = 0
 	}
-	let text = str_slice(s, n)
+	let text = lx_src[start:start + n]
 	if ok == 0 {
 		let e = cast([]i64, err_code(pos, "E011 INVALID_NUMBER"))
 		buf_str(cast([]u8, e), "invalid number ")
 		buf_str(cast([]u8, e), text)
 		fatal(cast([]u8, e))
 	}
-	let t = cast(Token, token_new(TK_INT, cstr(text), val, pos))
-	t.unit = unit_
+	let t = cast(Token, token_new(TK_INT, text, val, pos))
+	if len(unit_) != 0 {
+		t.unit = cstr(unit_)
+	}
 	return cast(i64, t)
 }
 
@@ -502,7 +505,7 @@ fn lex_char(pos i64) i64 {
 		lx_fail_code(pos, "E014 CHAR_LITERAL", "unterminated character literal")
 	}
 	lx_advance()
-	return token_new(TK_INT, cstr(str_slice(lx_src + start, lx_i - start)), c, pos)
+	return token_new(TK_INT, lx_src[start:start + (lx_i - start)], c, pos)
 }
 
 // buf_utf8 appends rune r encoded as UTF-8.
@@ -536,7 +539,7 @@ fn lex_string(pos i64) i64 {
 		if c == '"' {
 			// The NUL makes T_TEXT usable as a C string; T_VAL keeps the real length.
 			buf_byte(b, 0)
-			let st = cast(Token, token_new(TK_STRING, cstr(buf_cstring(b)), len(b) - 1, pos))
+			let st = cast(Token, token_new(TK_STRING, buf_cstring(b), len(b) - 1, pos))
 			st.dbl = doubled
 			return cast(i64, st)
 		}
@@ -636,16 +639,16 @@ fn lx_escape(pos i64) i64 {
 // float_bits converts a float literal to IEEE-754 bits. Exact for the common case of at
 // most 15 significant digits and a decimal exponent within +-22 (Clinger's fast path),
 // with the same integer-only, correctly rounded conversion core at every stage.
-fn float_bits(text i64) i64 {
+fn float_bits(text str) i64 {
 	return parse_float_bits(text)
 }
 
 shared mut lexNumberScratch i64
 
 // parse_float_bits shares the exact integer conversion core with the runtime.
-fn parse_float_bits(text i64) i64 {
+fn parse_float_bits(text str) i64 {
 	if lexNumberScratch == 0 {
 		lexNumberScratch = calloc(1, 4096)
 	}
-	return num_parse_bits(text, lexNumberScratch, 0)
+	return num_parse_bits(cstr(text), lexNumberScratch, 0)
 }

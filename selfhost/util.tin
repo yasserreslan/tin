@@ -1,16 +1,6 @@
 // cstr is the address of a string literal's bytes: the untyped C-string word the compiler's records hold.
 // str_of is the str of a compiler string word (every one is a runtime str; the word is its bytes' address).
 fn str_of(p i64) str {
-	if p != 0 && p[-1] != strlen(p) {
-		rt_sys_write(2, p, strlen(p))
-		let bb = buf_new()
-		buf_int(bb, p[-1])
-		buf_byte(bb, 10)
-		buf_int(bb, strlen(p))
-		buf_byte(bb, 10)
-		rt_sys_write(2, slice_data(bb), len(bb))
-		rt_panic("bad compiler string")
-	}
 	return cast(str, p - 8)
 }
 
@@ -35,15 +25,24 @@ fn str_has_at(hay str, off i64, needle str) bool {
 	return true
 }
 
-fn streq(a i64, b str) i64 {
-	mut i = 0
-	for i64(load8(a + i)) == i64(load8(cstr(b) + i)) {
-		if i64(load8(a + i)) == 0 {
-			return 1
-		}
-		i = i + 1
+// byte_at is byte i of s, or 0 past its end (the NUL a C string ended with).
+fn byte_at(s str, i i64) i64 {
+	if i < len(s) {
+		return i64(s[i])
 	}
 	return 0
+}
+
+// or_empty is s, or the empty string when it is nil.
+fn or_empty(s ?str) str {
+	if let v = s {
+		return v
+	}
+	return ""
+}
+
+fn streq(a str, b str) i64 {
+	return i64(a == b)
 }
 
 // Data structures for the self-hosted compiler: word vectors, byte buffers, positions, errors.
@@ -180,7 +179,7 @@ fn write_all(fd i64, b []u8) {
 // A position packs file index, line and column into one word.
 const NO_POS = -1
 
-shared mut files []i64
+shared mut files []str
 shared mut tgt_linux i64 // the target OS is Linux (else macOS)
 shared mut tgt_x64 i64 // the target CPU is x86-64 (else arm64)
 shared mut error_count i64
@@ -190,7 +189,7 @@ fn pos_make(file i64, line i64, col i64) i64 {
 }
 
 fn buf_pos(b []u8, pos i64) {
-	buf_str(b, str_of(files[pos >> 48]))
+	buf_str(b, files[pos >> 48])
 	buf_byte(b, ':')
 	buf_int(b, (pos >> 16) & 0xffffffff)
 	buf_byte(b, ':')
@@ -230,11 +229,11 @@ fn err_code_at(pos i64, code str, msg str) {
 }
 
 // err_code_quoted reports a coded PREFIX 'NAME' SUFFIX.
-fn err_code_quoted(pos i64, code str, prefix str, name i64, suffix str) {
+fn err_code_quoted(pos i64, code str, prefix str, name str, suffix str) {
 	let e = err_code(pos, code)
 	buf_str(e, prefix)
 	buf_byte(e, '\'')
-	buf_str(e, str_of(name))
+	buf_str(e, name)
 	buf_byte(e, '\'')
 	buf_str(e, suffix)
 	err_end(cast([]u8, e))

@@ -11,7 +11,7 @@ type AssignStmt struct {
 type Binary struct {
 	w0 i64
 	w1 i64
-	op i64
+	op str
 	l i64
 	r i64
 }
@@ -41,13 +41,13 @@ type BoundaryStmt struct {
 type BreakStmt struct {
 	w0 i64
 	w1 i64
-	label i64
+	label str
 }
 
 type Call struct {
 	w0 i64
 	w1 i64
-	name i64
+	name str
 	args []i64
 	intrinsic i64
 	fn_ i64
@@ -63,7 +63,7 @@ type CatchExpr struct {
 	w0 i64
 	w1 i64
 	x i64
-	name i64
+	name str
 	body i64
 }
 
@@ -92,13 +92,13 @@ type Coalesce struct {
 type ContinueStmt struct {
 	w0 i64
 	w1 i64
-	label i64
+	label str
 }
 
 type CapsRec struct {
-	path i64
+	path str
 	caps i64
-	manifest i64
+	manifest str
 }
 
 type Conv struct {
@@ -114,7 +114,7 @@ type Conv struct {
 
 type Decl struct {
 	pos i64
-	name i64
+	name str
 	init i64
 	val i64
 	type_ i64
@@ -122,7 +122,7 @@ type Decl struct {
 	iota i64
 	sym i64
 	shared_ i64
-	tparams []i64
+	tparams []str
 	tcons []i64
 	insts []i64
 	methods []i64
@@ -152,8 +152,8 @@ type ExprStmt struct {
 
 type Fn struct {
 	pos i64
-	name i64
-	params []i64
+	name str
+	params []str
 	extern_ i64
 	body i64
 	slots i64
@@ -165,9 +165,9 @@ type Fn struct {
 	ptypes []i64
 	rtypes []i64
 	recv i64
-	recvname i64
+	recvname str
 	file i64
-	qname i64
+	qname str
 	generated i64
 	variadic i64
 	reach i64
@@ -179,7 +179,7 @@ type Fn struct {
 	recvmut i64
 	regsum i64
 	initwalk i64
-	tparams []i64
+	tparams []str
 	tcons []i64
 	toks []i64
 	tokat i64
@@ -207,7 +207,7 @@ type FloatLit struct {
 	w0 i64
 	w1 i64
 	bits i64
-	text i64
+	text str
 }
 
 type FuncRef struct {
@@ -226,7 +226,7 @@ type GoStmt struct {
 type IdentExpr struct {
 	w0 i64
 	w1 i64
-	name i64
+	name str
 	ref i64
 }
 
@@ -273,7 +273,7 @@ type IndexExpr struct {
 type LetStmt struct {
 	w0 i64
 	w1 i64
-	name i64
+	name str
 	init i64
 	sym i64
 	type_ i64
@@ -291,7 +291,7 @@ type FuncLit struct {
 	w1 i64
 	fn_ i64
 	escape i64
-	scoped i64
+	scoped str
 }
 
 type MatchExpr struct {
@@ -377,12 +377,12 @@ type RangeStmt struct {
 	expr i64
 	body i64
 	define i64
-	label i64
+	label str
 }
 
 type Sym struct {
 	kind i64
-	name i64
+	name str
 	pos i64
 	slot i64
 	val i64
@@ -422,7 +422,7 @@ type Sym struct {
 type ScopeStmt struct {
 	w0 i64
 	w1 i64
-	name i64
+	name str
 	body i64
 }
 
@@ -430,7 +430,7 @@ type SelectExpr struct {
 	w0 i64
 	w1 i64
 	x i64
-	name i64
+	name str
 }
 
 type SelectStmt struct {
@@ -457,7 +457,7 @@ type SliceExpr struct {
 type StrLit struct {
 	w0 i64
 	w1 i64
-	ptr i64
+	ptr str
 	len i64
 }
 
@@ -472,7 +472,7 @@ type SwitchStmt struct {
 
 type Token struct {
 	kind i64
-	text i64
+	text str
 	val i64
 	pos i64
 	raw i64
@@ -504,14 +504,14 @@ type Ty struct {
 	key i64
 	fields []i64
 	results []i64
-	name i64
+	name str
 	variadic i64
 	width i64
 	signed i64
 	size i64
 	targs []i64
 	gdecl i64
-	enum_ []i64
+	enum_ []EnumVariant
 	secret_ i64
 	bound i64
 	max i64
@@ -520,7 +520,7 @@ type Ty struct {
 type Unary struct {
 	w0 i64
 	w1 i64
-	op i64
+	op str
 	x i64
 }
 
@@ -529,14 +529,14 @@ type UnitExpr struct {
 	w1 i64
 	value i64
 	name i64
-	text i64
+	text str
 	float i64
 }
 
 type UseStmt struct {
 	w0 i64
 	w1 i64
-	name i64
+	name str
 	init i64
 	file i64
 	w5 i64
@@ -554,7 +554,7 @@ type WhileStmt struct {
 	init i64
 	w6 i64
 	once_ i64
-	label i64
+	label str
 }
 
 type WrapExpr struct {
@@ -589,7 +589,7 @@ type MatchArm struct {
 
 type SelectArm struct {
 	pos i64
-	name i64
+	name str
 	wait i64
 	body i64
 	block i64
@@ -615,4 +615,46 @@ type SliceHdr struct {
 	len i64
 	cap i64
 	data i64
+}
+
+// TypeName is a TypeExpr of kind TX_NAME: the package (empty when unqualified), the name and the type arguments.
+type TypeName struct {
+	w0 i64
+	w1 i64
+	pkg str
+	name str
+	args i64
+}
+
+// EnumVariant is one variant of an enum type: its name, the index of its first payload field in the type's fields, and how many fields it has.
+type EnumVariant struct {
+	name str
+	first i64
+	count i64
+}
+
+// LifeReg is a lifecycle handler or package-level use close: its kind, the function and the label.
+type LifeReg struct {
+	kind i64
+	fn_ Fn
+	label str
+}
+
+// EnumPat is the shape of an enum case pattern: the variant's name and the names it binds.
+type EnumPat struct {
+	name str
+	names []str
+}
+
+// AuditEntry is one place a secret leaves the checker's protection.
+type AuditEntry struct {
+	pos i64
+	text str
+	query i64 // sent in a query
+}
+
+// Import is one import of a file: the name the package goes by in it and its path.
+type Import struct {
+	alias str
+	path str
 }

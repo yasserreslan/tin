@@ -350,7 +350,7 @@ fn x64_pr_target(b []u8, addr i64, label i64, pc i64) {
 // listing; 0 for anything else (an indirect call's operand is not a symbol id). The
 // real lookup lives in gen_x64.tin, which owns the symbol table, so the encoder fuzzer
 // (which builds this file without the compiler) can stub it.
-fn x64_call_name(id i64) i64 {
+fn x64_call_name(id i64) str {
 	return x64_fn_name(id)
 }
 
@@ -438,7 +438,7 @@ fn x64_print(b []u8, ins i64, pc i64) {
 		buf_byte(cast([]u8, b), ',')
 		x64_pr_hex(cast([]u8, b), z)
 	} else if op == X_IDIV || op == X_DIV || op == X_IMULH || op == X_NEG || op == X_NOT || op == X_CALL_R || op == X_PUSH || op == X_POP {
-		buf_str(cast([]u8, b), str_of(x64_unary_name(op)))
+		buf_str(cast([]u8, b), x64_unary_name(op))
 		buf_byte(cast([]u8, b), ' ')
 		x64_pr_reg(cast([]u8, b), x, 3)
 	} else if op == X_CQO {
@@ -478,9 +478,9 @@ fn x64_print(b []u8, ins i64, pc i64) {
 			// Name the callee in the listing: the symbolic label alone hides which
 			// function a direct call reaches, which lit-style checks need to see.
 			let cn = x64_call_name(x)
-			if cn != 0 {
+			if len(cn) != 0 {
 				buf_str(cast([]u8, b), "  # ")
-				buf_str(cast([]u8, b), str_of(cn))
+				buf_str(cast([]u8, b), cn)
 			}
 		} else {
 			x64_pr_hex(cast([]u8, b), x64_sym_addr(x))
@@ -556,29 +556,29 @@ fn x64_alu_name(i i64) str {
 	return []str{"add", "sub", "and", "or", "xor", "cmp", "test"}[i]
 }
 
-fn x64_unary_name(op i64) i64 {
+fn x64_unary_name(op i64) str {
 	if op == X_IDIV {
-		return cstr("idiv")
+		return "idiv"
 	}
 	if op == X_DIV {
-		return cstr("div")
+		return "div"
 	}
 	if op == X_IMULH {
-		return cstr("imul")
+		return "imul"
 	}
 	if op == X_NEG {
-		return cstr("neg")
+		return "neg"
 	}
 	if op == X_NOT {
-		return cstr("not")
+		return "not"
 	}
 	if op == X_CALL_R {
-		return cstr("call")
+		return "call"
 	}
 	if op == X_PUSH {
-		return cstr("push")
+		return "push"
 	}
-	return cstr("pop")
+	return "pop"
 }
 
 // x64_pr_load prints the mov/movzx/movsx/movsxd form a sized load uses.

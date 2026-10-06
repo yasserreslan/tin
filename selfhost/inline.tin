@@ -103,10 +103,10 @@ fn ia_expr(e i64) {
 		ia_expr(cast(Call, e).callee)
 		ia_exprs(cast(Call, e).args)
 		let name = cast(Call, e).name
-		if cast(Call, e).intrinsic == 0 && name != 0 && cast(Fn, ia_fn).generated == 0 {
-			if (streq(name, "rt_append") != 0 || streq(name, "rt_append_rc") != 0) && len(cast(Call, e).args) == 3 && cast(Node, cast(Call, e).args[2]).kind == EX_INT {
+		if cast(Call, e).intrinsic == 0 && len(name) != 0 && cast(Fn, ia_fn).generated == 0 {
+			if (name == "rt_append" || name == "rt_append_rc") && len(cast(Call, e).args) == 3 && cast(Node, cast(Call, e).args[2]).kind == EX_INT {
 				ia_append(e)
-			} else if streq(name, "rt_append_str") != 0 && len(cast(Call, e).args) == 2 {
+			} else if name == "rt_append_str" && len(cast(Call, e).args) == 2 {
 				ia_append_str(e)
 			}
 		}
@@ -166,7 +166,7 @@ fn ia_append(e i64) {
 	let slot = mk_mem(pos, ia_hdr(h, 2), ia_ref(n), esz, 0, elem_type_of_size(esz))
 	els.stmts = append(els.stmts, assign_stmt(pos, slot, ia_ref(v)))
 	els.stmts = append(els.stmts, assign_stmt(pos, ia_hdr(h, 0), mk_bin(pos, "+", ia_ref(n), mk_int(pos, 1, ty_int), ty_int)))
-	if streq(cast(Call, e).name, "rt_append_rc") != 0 {
+	if cast(Call, e).name == "rt_append_rc" {
 		// A counted element in a long-lived slice gains its slot's count (#176).
 		let lived = cast(IfStmt, node_new(ST_IF, pos))
 		lived.cond = mk_bin(pos, "!=", ia_hdr(h, 3), mk_int(pos, 0, ty_int), ty_bool)
@@ -237,7 +237,7 @@ fn ia_append_str(e i64) {
 
 	let fallback = cast(Block, empty_block(pos))
 	let cp = node_new(EX_CALL, pos)
-	cast(Call, cp).name = cstr("memcpy")
+	cast(Call, cp).name = "memcpy"
 	cast(Call, cp).fn_ = cast(i64, memcpy_fn)
 	cast(Call, cp).args = cast([]i64, args3(mk_bin(pos, "+", ia_hdr(h, 2), ia_ref(n), ty_int), mk_bin(pos, "+", mk_conv(pos, ia_ref(t), CV_SAME, ty_int), mk_int(pos, 8, ty_int), ty_int), ia_ref(m)))
 	cast(Node, cp).type_ = ty_int
@@ -405,7 +405,7 @@ fn il_expr(e i64) {
 // For a non-float value x is always equal to itself. After generic inlining this removes
 // the NaN checks from ordered comparisons specialized for integers and strings.
 fn il_fold_reflexive_cmp(e i64) {
-	if e == 0 || cast(Node, e).kind != EX_BINARY || (streq(cast(Binary, e).op, "==") == 0 && streq(cast(Binary, e).op, "!=") == 0) {
+	if e == 0 || cast(Node, e).kind != EX_BINARY || (cast(Binary, e).op != "==" && cast(Binary, e).op != "!=") {
 		return
 	}
 	let l = cast(Binary, e).l
@@ -426,7 +426,7 @@ fn il_fold_boolean(e i64) {
 	let op = cast(Binary, e).op
 	let l = cast(Binary, e).l
 	let r = cast(Binary, e).r
-	if streq(op, "&&") != 0 {
+	if op == "&&" {
 		if is_const(l) != 0 {
 			if const_val(l) == 0 {
 				replace_node(e, mk_int(cast(Node, e).pos, 0, ty_bool))
@@ -436,7 +436,7 @@ fn il_fold_boolean(e i64) {
 		} else if is_const(r) != 0 && const_val(r) != 0 {
 			replace_node(e, l)
 		}
-	} else if streq(op, "||") != 0 {
+	} else if op == "||" {
 		if is_const(l) != 0 {
 			if const_val(l) != 0 {
 				replace_node(e, mk_int(cast(Node, e).pos, 1, ty_bool))
@@ -455,23 +455,23 @@ fn il_float_intrinsic(e i64, f Fn) {
 		return
 	}
 	let name = f.name
-	mut op = 0
-	if streq(name, "sqrt") != 0 {
-		op = cstr("__fsqrt")
-	} else if streq(name, "fabs") != 0 {
-		op = cstr("__fabs")
-	} else if streq(name, "floor") != 0 {
-		op = cstr("__frintm")
-	} else if streq(name, "ceil") != 0 {
-		op = cstr("__frintp")
-	} else if streq(name, "trunc") != 0 {
-		op = cstr("__frintz")
-	} else if streq(name, "round") != 0 {
-		op = cstr("__frinta")
-	} else if streq(name, "rint") != 0 || streq(name, "nearbyint") != 0 {
-		op = cstr("__frintn")
+	mut op = ""
+	if name == "sqrt" {
+		op = "__fsqrt"
+	} else if name == "fabs" {
+		op = "__fabs"
+	} else if name == "floor" {
+		op = "__frintm"
+	} else if name == "ceil" {
+		op = "__frintp"
+	} else if name == "trunc" {
+		op = "__frintz"
+	} else if name == "round" {
+		op = "__frinta"
+	} else if name == "rint" || name == "nearbyint" {
+		op = "__frintn"
 	}
-	if op != 0 {
+	if len(op) != 0 {
 		cast(Call, e).name = op
 		cast(Call, e).intrinsic = 1
 		cast(Call, e).fn_ = 0
@@ -505,10 +505,10 @@ fn il_inlinable(f Fn) i64 {
 // a placeholder, so inlining it would run the placeholder.
 fn il_substituted(f Fn) i64 {
 	let n = f.qname
-	if streq(n, "linux_raw") != 0 || streq(n, "linux_restorer") != 0 || streq(n, "mem_avx2_supported") != 0 || streq(n, "mem_copy64") != 0 || streq(n, "mem_fill64") != 0 || streq(n, "rt_task_swap") != 0 || streq(n, "seal.hw_blocks") != 0 {
+	if n == "linux_raw" || n == "linux_restorer" || n == "mem_avx2_supported" || n == "mem_copy64" || n == "mem_fill64" || n == "rt_task_swap" || n == "seal.hw_blocks" {
 		return 1
 	}
-	if streq(n, "memcpy") != 0 || streq(n, "memmove") != 0 || streq(n, "memset") != 0 || streq(n, "memcmp") != 0 || streq(n, "memchr") != 0 {
+	if n == "memcpy" || n == "memmove" || n == "memset" || n == "memcmp" || n == "memchr" {
 		return 1
 	}
 	return i64(syscall_fast_arm64(n) != 0 || syscall_fast_amd64(n) != 0 || aes_hw_arm64(n) != 0 || aes_hw_amd64(n) != 0)
@@ -534,7 +534,7 @@ fn il_size(e i64) i64 {
 		return 1
 	}
 	if k == EX_UNARY {
-		if streq(cast(Unary, e).op, "&") != 0 {
+		if cast(Unary, e).op == "&" {
 			return 1000
 		}
 		return 1 + il_size(cast(Unary, e).x)
@@ -626,7 +626,7 @@ fn il_pure(e i64) i64 {
 		return i64(cast(IdentExpr, e).ref != 0 && cast(Sym, cast(IdentExpr, e).ref).kind != SYM_GLOBAL)
 	}
 	if k == EX_UNARY {
-		return i64(streq(cast(Unary, e).op, "&") == 0 && il_pure(cast(Unary, e).x) != 0)
+		return i64(cast(Unary, e).op != "&" && il_pure(cast(Unary, e).x) != 0)
 	}
 	if k == EX_BINARY {
 		return i64(may_panic(cast(Binary, e)) == 0 && il_pure(cast(Binary, e).l) != 0 && il_pure(cast(Binary, e).r) != 0)
@@ -785,7 +785,7 @@ fn lit_word(lit StrLit, off i64, size i64) i64 {
 	mut v = 0
 	mut i = size - 1
 	for i >= 0 {
-		v = (v << 8) | i64(load8(lit.ptr + off + i))
+		v = (v << 8) | i64(lit.ptr[off + i])
 		i = i - 1
 	}
 	return v

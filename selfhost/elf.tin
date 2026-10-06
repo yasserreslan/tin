@@ -116,7 +116,7 @@ fn el_check_static() {
 		if f.extern_ != 0 && f.used != 0 {
 			let b = buf_new()
 			buf_str(b, "a Linux executable is static, but the program imports ")
-			buf_str(b, str_of(f.name))
+			buf_str(b, f.name)
 			buf_byte(b, 0)
 			link_fail(buf_cstring(b))
 		}
@@ -142,7 +142,7 @@ fn el_start_static(p i64, at i64, main_addr i64) {
 	put32(p + 48, 0xD4200000)
 }
 
-fn write_elf(path i64) {
+fn write_elf(path str) {
 	let nvars = len(prog_vars)
 	el_check_static()
 	lk_imports = cast([]Fn, []i64{})
@@ -160,7 +160,7 @@ fn write_elf(path i64) {
 			own = append(own, cast(Fn, f))
 			name_off = append(name_off, len(dstr))
 			buf_str(dstr, "tin.")
-			buf_str(dstr, str_of(f.qname))
+			buf_str(dstr, f.qname)
 			buf_byte(dstr, 0)
 		}
 		i = i + 1
@@ -290,14 +290,14 @@ fn write_elf(path i64) {
 	}
 	i = 0
 	for i < len(g_str_ptrs) {
-		memcpy(img + lk_strs[i], g_str_ptrs[i], g_str_lens[i])
+		memcpy(img + lk_strs[i], cstr(g_str_ptrs[i]), g_str_lens[i])
 		i = i + 1
 	}
 	i = 0
 	for i < len(g_tstr_ptrs) {
 		let at = img + lk_tstrs[i]
 		put64(at, g_tstr_lens[i])
-		memcpy(at + 8, g_tstr_ptrs[i], g_tstr_lens[i])
+		memcpy(at + 8, cstr(g_tstr_ptrs[i]), g_tstr_lens[i])
 		i = i + 1
 	}
 	i = 0
@@ -311,7 +311,7 @@ fn write_elf(path i64) {
 	if (fd & 0x80000000) != 0 {
 		let e = cast([]i64, err_code(NO_POS, "E904 CANNOT_CREATE"))
 		buf_str(cast([]u8, e), "cannot create ")
-		buf_str(cast([]u8, e), str_of(path))
+		buf_str(cast([]u8, e), path)
 		fatal(cast([]u8, e))
 	}
 	let outh = cast(SliceHdr, malloc(24))
