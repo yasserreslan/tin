@@ -666,9 +666,9 @@ fn bounded_of(t_in i64, max_ i64) i64 {
 	}
 	mut i = 0
 	for i < len(ty_bounds) {
-		let r = cast([]i64, ty_bounds)[i]
-		if cast(i64, cast(Ty, cast([]i64, r)[0])) == cast(i64, t) && cast([]i64, r)[1] == max_ {
-			return cast([]i64, r)[2]
+		let r = cast(Pair, cast([]i64, ty_bounds)[i])
+		if r.a == cast(i64, t) && r.b == max_ {
+			return r.c
 		}
 		i = i + 1
 	}
@@ -681,10 +681,10 @@ fn bounded_of(t_in i64, max_ i64) i64 {
 	buf_str(nb, " max ")
 	buf_int(nb, max_)
 	b.name = str(nb)
-	mut r = []i64{}
-	r = append(r, cast(i64, t))
-	r = append(r, max_)
-	r = append(r, cast(i64, b))
+	let r = cast(Pair, calloc(3, 8))
+	r.a = cast(i64, t)
+	r.b = max_
+	r.c = cast(i64, b)
 	mut vs1 = cast([]i64, ty_bounds)
 	vs1 = append(vs1, cast(i64, r))
 	return cast(i64, b)

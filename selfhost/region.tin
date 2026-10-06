@@ -1339,9 +1339,9 @@ fn rg_dyn_call(e i64, args []Node, b i64, pos i64) i64 {
 	mut found = 0
 	mut i = 0
 	for i < len(dyn_tables) {
-		let rec = cast([]i64, dyn_tables[i])
-		let methods = cast([]i64, rec[3])
-		if rec[1] == shape_ && index >= 0 && index < len(methods) {
+		let rec = cast(DynTable, dyn_tables[i])
+		let methods = rec.fns
+		if rec.dyn_ == shape_ && index >= 0 && index < len(methods) {
 			let f = methods[index]
 			if f != 0 {
 				found = 1
@@ -1349,7 +1349,7 @@ fn rg_dyn_call(e i64, args []Node, b i64, pos i64) i64 {
 				cast(Call, e).callee = 0
 				cast(Call, e).dyn_shape = 0
 				cast(Call, e).dyn_index = 0
-				args[0].type_ = rec[0]
+				args[0].type_ = rec.ty
 				result = result | rg_call(e)
 				mut ri = 0
 				for ri < 8 {

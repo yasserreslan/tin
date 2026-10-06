@@ -2241,14 +2241,13 @@ fn parse_switch() i64 {
 			p_next()
 			continue
 		}
-		let c = []i64{}
+		let c = cast(Pair, calloc(3, 8))
 		let cpos = p_peek().pos
 		if p_is("case") != 0 {
 			p_next()
-			c = append(c, cast(i64, parse_expr_list()))
+			c.a = cast(i64, parse_expr_list())
 		} else {
 			p_expect("default")
-			c = append(c, 0)
 		}
 		p_expect(":")
 		let body = cast(Block, empty_block(cpos))
@@ -2264,7 +2263,7 @@ fn parse_switch() i64 {
 				body.stmts = append(body.stmts, st)
 			}
 		}
-		c = append(c, cast(i64, body))
+		c.b = cast(i64, body)
 		cases = append(cases, cast(i64, c))
 	}
 	p_next()

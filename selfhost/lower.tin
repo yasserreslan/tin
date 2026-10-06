@@ -781,7 +781,7 @@ fn chk_binary(e i64, want i64) i64 {
 	if op == "&&" || op == "||" {
 		let a = chk(cast(Node, l), ty_bool)
 		// x != nil && x.f: the right side sees x narrowed.
-		mut narrowed = cast([]i64, 0)
+		mut narrowed = cast(Pair, 0)
 		if op == "&&" {
 			narrowed = narrow_begin(l, 1)
 		} else {
@@ -789,7 +789,7 @@ fn chk_binary(e i64, want i64) i64 {
 			narrowed = narrow_begin(l, 0)
 		}
 		let b = chk(cast(Node, r), ty_bool)
-		narrow_end(cast([]Sym, narrowed))
+		narrow_end(narrowed)
 		if is_bool_t(a) == 0 || is_bool_t(b) == 0 {
 			err_code_at(pos, "E236 OPERATOR", "operands of && and || must be bool")
 		}
@@ -2314,7 +2314,7 @@ fn chk_parallel(e i64) i64 {
 	mut args = []i64{}
 	i = 0
 	for i < len(cast([]i64, lits)) {
-		args = append(args, cast([]i64, lits[i])[0])
+		args = append(args, cast(Pair, lits[i]).a)
 		i = i + 1
 	}
 	cast(Call, c).args = cast([]i64, args)
@@ -2348,7 +2348,7 @@ fn parallel_wrapper(pos i64, lits []i64, vts []i64) i64 {
 	mut i = 0
 	for i < n {
 		f.params = append(f.params, "c")
-		f.ptypes = append(f.ptypes, cast([]i64, lits[i])[1])
+		f.ptypes = append(f.ptypes, cast(Pair, lits[i]).b)
 		f.rtypes = append(f.rtypes, vts[i])
 		i = i + 1
 	}
@@ -2363,7 +2363,7 @@ fn parallel_wrapper(pos i64, lits []i64, vts []i64) i64 {
 	i = 0
 	for i < n {
 		let cs = sym_new(SYM_LOCAL, "c", pos)
-		cs.type_ = cast([]i64, lits[i])[1]
+		cs.type_ = cast(Pair, lits[i]).b
 		cs.slot = i
 		mut vs5 = cast([]i64, f.locals)
 		vs5 = append(vs5, cast(i64, cs))
@@ -3335,7 +3335,7 @@ fn chk_call(e i64, want i64) i64 {
 // object word and whose callee is the method descriptor loaded from the table.
 fn lower_dyn_method_call(e i64, receiver i64, dt Ty, name str) i64 {
 	let pos = cast(Node, e).pos
-	let info = cast([]i64, dyn_shape_method(dt, name))
+	let info = cast(Pair, dyn_shape_method(dt, name))
 	if cast(i64, info) == 0 {
 		let m = err_code(pos, "E214 METHOD")
 		buf_str(m, "dyn shape ")
@@ -3345,12 +3345,12 @@ fn lower_dyn_method_call(e i64, receiver i64, dt Ty, name str) i64 {
 		err_end(cast([]u8, m))
 		return ty_int
 	}
-	let sig = cast([]i64, info[1])
-	let names = sig[0]
-	let ps = cast([]i64, sig[1])
-	let ms = cast([]i64, sig[2])
-	let rs = cast([]i64, sig[3])
-	let variadic = sig[4]
+	let sig = cast(ShapeSig, info.b)
+	let names = sig.names
+	let ps = sig.types
+	let ms = sig.muts
+	let rs = sig.results
+	let variadic = sig.variadic
 	mut mutmask = 0
 	mut i = 0
 	for i < len(ms) && i < 63 {
@@ -3384,7 +3384,7 @@ fn lower_dyn_method_call(e i64, receiver i64, dt Ty, name str) i64 {
 	}
 	let ft = func_of_m(cast([]i64, desc_params), rs, variadic, desc_mask)
 	let desc = cast(Conv, mk_conv(pos, receiver_ref, CV_DYN_DESC, ft))
-	desc.dyn_index = info[0]
+	desc.dyn_index = info.a
 
 	let inner = node_new(EX_CALL, pos)
 	cast(Call, inner).name = name
@@ -3397,7 +3397,7 @@ fn lower_dyn_method_call(e i64, receiver i64, dt Ty, name str) i64 {
 	cast(Call, inner).callee = cast(i64, desc)
 	cast(Call, inner).method = 1
 	cast(Call, inner).dyn_shape = cast(i64, dt)
-	cast(Call, inner).dyn_index = info[0]
+	cast(Call, inner).dyn_index = info.a
 	cast(Node, inner).type_ = func_result(cast(Ty, ft))
 	mut stmts = []i64{}
 	stmts = append(stmts, cast(i64, receiver_temp))
