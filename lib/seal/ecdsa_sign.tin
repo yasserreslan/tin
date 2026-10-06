@@ -9,7 +9,7 @@ import "say"
 
 // ec_mul_ct sets r = k*p for a big-endian scalar k of c.size bytes, in time that does not depend
 // on k or p (as p256_mul does for P-256).
-fn ec_mul_ct(c mut ecCurve, p ecpt, k secret []u8) ecpt {
+@wrap fn ec_mul_ct(c mut ecCurve, p ecpt, k secret []u8) ecpt {
 	mut table = make([]ecpt, 0, 16)
 	table = append(table, ec_identity(c))
 	for i in 1..16 {
@@ -32,7 +32,7 @@ fn ec_mul_ct(c mut ecCurve, p ecpt, k secret []u8) ecpt {
 		w = w & 15
 		for j in 0..16 {
 			let d = u64(j) ^ w
-			let bit = 1 ^ ((d | (u64(0) - d)) >> 63)
+			let bit = 1 ^ ((d | (u64(0) -% d)) >> 63)
 			let e = table[j]
 			c.f.sel(mut sel.x, e.x, sel.x, bit)
 			c.f.sel(mut sel.y, e.y, sel.y, bit)
@@ -95,7 +95,7 @@ fn rfc6979_nonce(n mut monty, size i64, h Hash, x secret []u8, digest []u8) []u8
 	if len(e) > size {
 		e = e[:size]
 	}
-	mut h1 = nat_to_be(ecdsa_reduce(n, monty_bytes(n, e)))
+	mut h1 = limbs_to_be(ecdsa_reduce(n, monty_bytes(n, e)))
 	h1 = h1[len(h1)-size:]
 	let hlen = Size(h)
 	mut v = make([]u8, hlen)
@@ -166,7 +166,7 @@ fn SignECDSA(k ECPrivateKey, h Hash, digest []u8) ![]u8 {
 	mut xr = []u8{}
 	if size == 32 {
 		let r = p256_identity()
-		p256_mul(mut r, p256_generator(), nonce)
+		p256_mul_base(mut r, nonce)
 		let (x, _, ok) = p256_affine(r)
 		if ok == 0 {
 			fail "seal: ECDSA nonce gave the point at infinity"
@@ -229,6 +229,10 @@ fn (k PrivateKey) SignTLS(scheme i64, msg []u8) ![]u8 {
 	let e = k.EC
 	if e != nil && ((scheme == 0x0403 && e.Curve == "P-256") || (scheme == 0x0503 && e.Curve == "P-384")) {
 		return try SignECDSA(e, h, Sum(h, str(msg)))
+	}
+	let ed = k.Ed
+	if ed != nil && scheme == 0x0807 {
+		return try SignEd25519(ed.seed, msg)
 	}
 	fail say.Fault("seal: the key cannot sign with TLS signature scheme 0x%04x", scheme)
 }

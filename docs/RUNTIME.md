@@ -221,7 +221,9 @@ fires. Messages are copied into the receiver's request pool.
 - The walk skips `rt_` frames and stops at the program entry.
 - On Linux the linker emits a read-only Tin table of function start/end/name records.
   Backtrace lookup uses image-relative ranges, including under ASLR; printed names stay unchanged.
-- `rt_bounds_fail2(i, n)` and `rt_div_fail()` are the cold paths of failed checks.
+- `rt_bounds_fail2(i, n)`, `rt_div_fail()` and `rt_overflow_fail(kind)` (integer overflow,
+  shift count or float conversion out of range, #362) are the cold paths of failed checks.
+  The runtime's own code is not overflow-checked: it computes with the machine's arithmetic.
 
 ## 8. The OS layer
 
@@ -365,6 +367,19 @@ reading resumes and buffered input is served.
   query; an empty path is `/`.
 - Bodies are limited to 64 MiB by default (413), a chunked body by its decoded length (and
   its chunk framing by the limit plus 64 KiB); `anvil.Limits` or `TIN_MAX_BODY` changes it.
+- **Bodies read as they arrive (#481):** a route registered with `Router.Stream(method, pattern,
+  h)` runs its handler as soon as the request's headers are in, and `q.BodyStream().Read(mut buf)`
+  waits in the request's task for the next bytes, so an upload is processed in the memory of one
+  read buffer and a gRPC client or bidirectional stream gets each message as it comes. The task
+  takes the socket out of the event loop (as a streamed response does) and reads it directly: a
+  Content-Length body up to its length (at most 1 TiB), a chunked one through a decoder of its
+  framing, with bytes read past its end (a pipelined request) given back to the connection. A
+  slow handler reads slowly, so TCP holds the client back. `100 Continue` goes out at the first
+  read that needs the socket. A handler that ends before the body does closes the connection
+  after its response, since what is left cannot be told from a next request. `TIN_MAX_BODY` does
+  not bound such a body (the handler decides what it keeps); each read waits at most the read
+  timeout, and the request deadline applies. On other routes the body has arrived whole when the
+  handler runs, and `BodyStream` reads it from memory.
 - **Timeouts** (`anvil.Timeouts`, or the environment): a request's line and headers must
   arrive within 10 s of its first byte (`TIN_HEADER_TIMEOUT_MS`), and the whole request
   within 60 s (`TIN_READ_TIMEOUT_MS`); a keep-alive connection with no request in progress
@@ -423,7 +438,7 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
 - Deadlines: each request's waits give up at `anvil.Deadline(ms)` / `TIN_DEADLINE_MS`
   (default 30 s) after it started: `tide.Wait` then fails with `deadline exceeded`.
 - Backpressure: at 4096 waiting requests on a core, new requests get 503.
-- A panic in a handler (an index out of range, a division by zero, `panic`) ends only its
+- A panic in a handler (an index out of range, a division by zero, an integer overflow, `panic`) ends only its
   request: `panic: ...` and the backtrace go to stderr, the task's cleanups run and its pool
   is reset, its stack is abandoned and reused, and the request gets 500 and its connection
   closes. Other requests, waiting ones on the same core included, go on. Before the cleanups,
@@ -476,17 +491,45 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   `rt_task_wait` on `EAGAIN`. `Conn.SetTimeout` bounds each wait; past it the call fails
   with `wire: read timed out` (or connect/write), past the deadline with `deadline exceeded`.
 - Linux DNS uses nonblocking UDP/TCP sockets and task waits (docs/STDLIB.md, wire contract).
-- Work with no non-blocking form (macOS DNS `getaddrinfo`, file reads and writes in `quarry`)
-  goes to shared helper threads: as many as there are cores, at least 4 (`TIN_HELPERS` sets the
+- Work with no non-blocking form (macOS DNS `getaddrinfo`, `quarry` file reads and writes that
+  do not go through io_uring (below), anvil's `SendFile`) goes to shared helper threads: as many
+  as there are cores, at least 4 (`TIN_HELPERS` sets the
   number, 1 to 256). `rt_helper_run(f, job, drop)` queues a heap-owned job, signals a
   non-blocking wake pipe and parks within the request deadline. A core may have 4096 jobs out
   at once; its next task waits for one to finish (woken by the completion on its own core),
-  within its deadline, instead of failing (#357). Not done: `io_uring` on Linux.
+  within its deadline, instead of failing (#357).
   A helper runs `f(job)` and writes the completion to the owning core's done pipe.
   Inputs and results live outside request pools, so an expired request may return and
   reuse its task safely. A late completion calls `drop(job)` and never resumes the old
   task. Already-running system calls can still finish after the caller's deadline;
   their results are discarded. Outside a task the helper runs synchronously.
+- File I/O through io_uring (Linux, #357, `lib/runtime/uring_linux.tin`): inside a server's
+  task, `quarry.ReadFile`, `WriteFile` and `AppendFile` use the core's own ring, made the first
+  time one of its tasks opens a file (256 submission and 4096 completion entries, no SQPOLL
+  thread; raw `io_uring_setup`/`enter`/`register`, 425 to 427 on both CPUs). Each operation
+  (openat, read, write, close) is one submission and one `io_uring_enter`; the task then takes
+  every completion already posted, so data in the page cache, read with a length of exactly
+  the file's size (a short read of a regular file would make the kernel finish it on a
+  worker), arrives without a wait. Otherwise the task parks (`rt_task_park`) until the core's
+  event loop sees the ring's descriptor readable (anvil watches it, level-triggered, through
+  `ringHook`) and `rt_ring_reap` wakes it. An open that creates or truncates, and any operation
+  the file system cannot do without blocking, runs on the kernel's io-wq workers, threads of
+  the process named `iou-wrk-*`. The ring's head and tail are u32 words read with acquire and
+  written with release order through the 64-bit atomics on their aligned words. Buffers the
+  kernel writes or reads are heap memory: a task whose deadline or cancel ends its wait leaves
+  the operation to the ring, whose completion frees the buffer and closes the descriptor (or
+  the one a late open made). A core has at most 4096 operations in flight; its next task
+  waits for one to end, within its deadline. The stat after the open and the close of a file
+  read run on the core (local file systems answer them from memory). Helper threads keep: a
+  FIFO, whose ring open does not wait for a writer (the helper's own open does, and the ring's
+  descriptor stays open until it returns, so a waiting writer always sees a reader); files on
+  FUSE, virtiofs, 9p and CIFS mounts, whose stat and close wait for a daemon or a server (mount
+  points from `/proc/self/mountinfo`, read once per core and matched by the path as written,
+  relative paths through `getcwd`); `TIN_IO_URING=0`; and kernels without io_uring, its
+  operations (5.6) or its features (5.5), or that refuse it (`io_uring_disabled`, or a seccomp
+  profile: the default ones of recent Docker and containerd releases refuse io_uring, so a
+  container under them uses the helper threads unless its profile allows the three calls).
+  With the ring a FIFO read may hold one descriptor per waiting request.
 - Standard input and streams (#316): inside a task, when the descriptor is a pipe, socket or
   terminal, `quarry.ReadStdin` and `flume.Reader` wait with `rt_task_wait(fd, 1, 0)` before
   each read and fail with `rt_wait_fault()`; a flume reader's wait fault is cleared by its next
@@ -637,6 +680,107 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   retain all messages must manage their pool lifetime explicitly; `Each` is the stream
   API that supplies a safe per-message lifetime.
 
+### HTTP/2: h2c, and the path for h2 over TLS (#360)
+
+`lib/anvil/h2.tin` (frames, streams, flow control) and `lib/anvil/hpack.tin` (RFC 7541). An HTTP/2
+connection is an ordinary connection record whose word `cH2` points at its HTTP/2 state; HTTP/1.1
+connections leave it 0, and the HTTP/1.1 path reads it once per read, never per request.
+
+**Entering HTTP/2.**
+- Prior knowledge: the client preface starts like a request line, so `serve_one` sees
+  `PRI * HTTP/2.0` only where it would answer 400, and hands the connection to `h2_enter`.
+- `Upgrade: h2c` (RFC 7540 3.2): `Connection` must list `upgrade` (the token loop notes it), `Upgrade`
+  must list `h2c` and there must be exactly one `HTTP2-Settings` (base64url, applied like a SETTINGS
+  frame). anvil writes `101 Switching Protocols`, the server preface, and serves the request as
+  stream 1 (half-closed by the client), its connection-specific fields left out. HTTP/1.0, a
+  chunked request, an unusable `HTTP2-Settings` or a draining core keep the request on HTTP/1.1.
+- h2 over TLS (#124): once the TLS server lands, a connection whose ALPN is `h2` enters at
+  `h2_start(c)`, the `start` given to `alpn_offer("h2", ...)`. TLS then goes in three places:
+  `conn_read` (decrypted input, with `tls_read`'s results: bytes, 0 at the end, -1 nothing now,
+  -2 broken), `conn_seal` (the output batch made into records before `h2_flush` writes it) and
+  `conn_write` (the socket write, also of pending output). Until then HTTP/2 is h2c only.
+
+**Reading.** In the core's event loop, as for HTTP/1.1: a read into the core's scratch buffer,
+whole frames served in order (`h2_feed`), a frame not fully arrived kept in the connection (at
+most 16 KiB and its header: larger frames are a FRAME_SIZE_ERROR). Responses produced while a read
+is served go out in one write; while the socket does not take them, reading stops (backpressure).
+
+**Settings and limits.** SETTINGS_MAX_CONCURRENT_STREAMS 100 (a stream past it is refused with
+REFUSED_STREAM), SETTINGS_INITIAL_WINDOW_SIZE 1 MiB, a 4 MiB connection window (one WINDOW_UPDATE
+after SETTINGS), frames up to 16 KiB, SETTINGS_MAX_HEADER_LIST_SIZE 64 KiB (past it 431, as for
+HTTP/1.1). A header block's fragments are limited to 256 KiB and 512 CONTINUATION frames
+(ENHANCE_YOUR_CALM). A connection with 200 request tasks still alive refuses new streams, so
+streams opened and reset at once ("rapid reset") cannot pile up tasks.
+
+**HPACK.** The decoder keeps the client's dynamic table (4096 bytes, a ring of 128 entries); a
+Huffman string decodes with one lookup of the next 8 bits per symbol of up to 8 bits (letters,
+digits, common signs) and bit by bit past that, rejecting EOS and padding that is longer than 7 bits
+or not all ones. A field name is classified once (pseudo-header, connection-specific, `te`,
+`content-length`, `cookie`, `host`, `expect`): the static entries at startup, a dynamic entry when
+it is added, with whether its value was checked, so an indexed field is copied and not checked
+again. Every header block is decoded, also one the stream then refuses, so the table stays in step.
+Responses are written with static-table names and literals that are not indexed and not
+Huffman-coded, so the encoder keeps no table: when the client lowers SETTINGS_HEADER_TABLE_SIZE,
+the next block starts with a size update to 0. `server` and `date` are coded once a second per core.
+
+**Requests.** A request's fields are checked as RFC 9113 8.2 and 8.3 ask (lower-case token names,
+no NUL, CR or LF in a value, pseudo-header fields first and once each, no connection-specific
+field, `te` only `trailers`, `:method`, `:scheme` and a non-empty `:path` that starts with `/` or is
+`*`, or CONNECT with `:authority` alone); a malformed one is reset with PROTOCOL_ERROR. The fields
+become field lines `name: value\r\n` (`:authority` as `host`, `cookie` fields joined with `; `),
+so `Req.Header` reads them as it reads HTTP/1.1's, and trailers come after them as a chunked
+request's do. The body is buffered (counted in `TIN_MAX_BUFFERED` until the request starts; past
+`TIN_MAX_BODY` 413, then RST_STREAM NO_ERROR to stop the client), a `content-length` must match it,
+and `expect: 100-continue` gets an interim `:status 100`. The stream and connection receive
+windows are opened again once half is used. When the client ends its side the request goes
+through the admission checks of `serve_one` and runs in its own task on the connection's core
+(`tArg` the connection, `tUser+2` the stream), with the request deadline and memory budget.
+Many streams of one connection run at once: one that waits does not hold the others. On a `Router.Stream` route
+(#481) the handler starts at the request's HEADERS instead, and the stream's DATA waits in a buffer
+of at most one stream window (1 MiB) that `BodyStream` reads from: its WINDOW_UPDATE goes out as
+the handler reads, so a slow handler slows its client and not the connection's other streams. A
+handler that ends before the client's END_STREAM resets the stream with NO_ERROR after its
+response.
+
+**Responses.** HEADERS (`:status`, `server`, `date`, `content-type` and `content-length` unless
+the status has no body, then the handler's fields with lower-case names; connection-specific
+fields are left out), split into CONTINUATION frames past the client's frame size, then DATA
+frames of at most the smaller window, the client's frame size and 64 KiB, END_STREAM on the last
+(or on HEADERS for an empty body or HEAD). A task whose window is used up writes what it has and
+parks (`rt_task_park`); a WINDOW_UPDATE, a larger SETTINGS_INITIAL_WINDOW_SIZE or a drained socket
+wakes it, and when none comes within the write timeout the stream is reset (CANCEL). Once the
+handler returned the request deadline no longer applies, as for a response in an HTTP/1.1
+connection's buffer. Pending output past 256 KiB parks a writer too, so a client that does not
+read cannot make the server buffer a response. `Out.Trailer` fields are a last HEADERS frame with
+END_STREAM. Streamed responses (#350) are DATA frames: `Length` sets `content-length`, `SendFile`
+reads 256 KiB pieces with `pread` on a helper thread and sends them as DATA, `Closed` is true once
+the stream was reset or the connection closed. A short `Length` body, `Abort` or a panic after the head reset
+the stream (INTERNAL_ERROR), a cancel or a deadline (CANCEL); a panic before the head is a 500 on
+its stream. The connection goes on in every case.
+
+**Cancels, errors and timeouts.** RST_STREAM from the client cancels the stream's task (its waits
+fail with `canceled: the client reset the stream`), a closed connection cancels all of them
+(`canceled: the connection closed`); the connection is freed when the last task ends. A connection
+error sends GOAWAY with its code and closes by lingering; frames still in flight for a stream this
+side reset are dropped. With no stream open the idle timeout applies; a stream whose request does
+not arrive within `TIN_READ_TIMEOUT_MS` is reset. `Req.Hijack` fails on a stream (WebSocket over
+HTTP/2, RFC 8441, is not supported). PRIORITY is checked and ignored (RFC 9113 5.3.2); the server
+never pushes.
+
+**Drain.** When a core starts draining, every HTTP/2 connection gets GOAWAY (NO_ERROR, the last
+stream the client opened) at once; idle ones close, the streams in flight finish, and new streams
+are ignored (the client retries them on another connection).
+
+**Replay.** An HTTP/2 request is recorded in its HTTP/1.1 form (#241): the request line, the field
+lines, a `content-length` for the body, the trailers. Replayed, it comes in over HTTP/1.1, so
+`Req.Proto` says `HTTP/1.1` there.
+
+**Conformance.** `tools/ci/h2_check.py` runs h2spec's generic, http2 and hpack cases but one:
+http2/3.5/2 sends `INVALID CONNECTION PREFACE` to a port that also speaks HTTP/1.1, where it is a
+malformed request line and gets 400, as any HTTP/1.1 server answers it. RFC 9113 3.4 makes an
+invalid preface a connection error on a connection known to be HTTP/2: after `PRI * HTTP/2.0`, and
+over TLS with ALPN `h2`.
+
 ### TLS connections: tls (#124)
 
 - `tls.Dial` connects with `wire` and runs the TLS 1.3 handshake on the socket; `tls.Client`
@@ -657,8 +801,11 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   2^24 records under one key the client sends KeyUpdate itself. Alerts are sent encrypted
   once the handshake keys exist; a fatal alert or fault closes the socket and every later
   call returns the same fault.
-- Verification is on by default and cannot be turned off by accident: until X.509 lands
-  (phase 2), `verify_peer` refuses every server unless `InsecureSkipVerify` is set.
+- Verification is on by default and cannot be turned off by accident: `verify_peer` builds the
+  chain to the system's roots plus `Config.RootCAs` (`Certificate.Verify`, section 12), checks the
+  host name, then the CertificateVerify signature (`CheckTLSSignature`); a failure is a
+  `tls: x509: ...` fault after a bad_certificate (or decrypt_error) alert. Only
+  `InsecureSkipVerify` skips it.
 - The database clients keep each connection's `tls.Conn` in a per-core global (`tlsLines` by
   client in redis, `tlsConns` by connection record in mysql and postgres) as a `keep()` copy:
   replacing or deleting the entry when a connection is dropped releases its memory through the
@@ -671,6 +818,150 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   is generic over a private `stream` shape, so the same code reads a `wire.Conn` and a
   `tls.Conn`. `websocket.Dial` takes `wss://` (`DialTLS` with a `tls.Config`): the
   connection's `fill` and `write_raw` go through the `tls.Conn` held in its state.
+- ALPN (#478, #480): `wire` offers `h2` and `http/1.1` unless `Options.NoH2` (then `http/1.1`
+  alone) or `Options.TLS` names other protocols, and fails a connection on which the server
+  chose another protocol. `websocket` always offers `http/1.1` alone, since its upgrade is an
+  HTTP/1.1 request. Some gateways refuse a client that offers no ALPN.
+- HTTP/2 client (#480, `lib/wire/h2.tin`). `wire` speaks HTTP/2 to an https:// origin whose
+  server chooses h2, and over cleartext when `Options.H2C` asks (prior knowledge, as gRPC
+  servers expect).
+  - Connections: each core keeps one connection per origin (the pool key: scheme, host and TLS
+    settings), and every concurrent call to it is a stream, up to the server's
+    SETTINGS_MAX_CONCURRENT_STREAMS. Past that, a new connection takes the new calls, and the
+    full one closes when its streams end. An idle connection is checked before it is used (what
+    the server sent meanwhile is handled) and closed after 30 s.
+  - Sharing: the calls of a core share the socket the way the redis and kafka clients do. One
+    task at a time drives it: it writes the queued frames, reads, and hands each frame to its
+    stream. The others wait on their stream, and a call whose stream ends passes the driving to
+    one still waiting. Connection and stream state are malloc'd records, so a connection
+    outlives the requests that used it. The HPACK decoder (package `hpack`) keeps its dynamic
+    table in malloc'd memory too.
+  - Requests: header blocks use static-table names and plain literals, never indexed, so the
+    encoder keeps no state; header names are lowercased, and the connection-specific ones
+    (Connection, Keep-Alive, Transfer-Encoding, Upgrade, Host; TE except `trailers`) are left
+    out. A block larger than the server's frame size goes in CONTINUATION frames.
+  - Flow control: this client announces 4 MiB per stream and raises the connection's window to
+    16 MiB; each is given back by WINDOW_UPDATE once half is read. A request body is sent as the
+    server's windows allow, and SETTINGS_INITIAL_WINDOW_SIZE changes move the open streams'
+    windows.
+  - Responses are read whole, up to `Options.MaxBody` (past it the stream is reset with CANCEL),
+    with their trailers (`Resp.Trailer`). 1xx responses are skipped.
+  - Failures: a call that runs out of time (its deadline, `Options.Timeout`, cancellation)
+    resets its stream with RST_STREAM CANCEL and leaves the connection to the other calls. A call
+    the server did not process (past a GOAWAY's last stream id, or REFUSED_STREAM) is sent again
+    on a new connection, as is one whose connection failed before any answer when its method can
+    be repeated. A protocol error from the server (a frame too large, bad padding, a broken header
+    block, PUSH_PROMISE although push is off) ends the connection with a GOAWAY.
+  - Not done: streaming a response body as it arrives (a whole body is returned), PRIORITY, and
+    server push (refused with SETTINGS_ENABLE_PUSH 0).
+- `SSLKEYLOGFILE` (#478): when it names a file, every handshake, client or server, appends its
+  four traffic secrets in the NSS key log format (`CLIENT_HANDSHAKE_TRAFFIC_SECRET`,
+  `SERVER_HANDSHAKE_TRAFFIC_SECRET`, `CLIENT_TRAFFIC_SECRET_0`, `SERVER_TRAFFIC_SECRET_0`), which
+  Wireshark reads to decrypt a capture. It is for debugging only, since it gives away the
+  traffic. A missing file is created with mode 0644: create it first to keep it private.
+
+### HTTPS: anvil.ServeTLS (#124)
+
+`anvil.ServeTLS(addr, certPEM, keyPEM, h)` and `Router.ServeTLS(addr, certPEM, keyPEM)` serve
+HTTP/1.1 over TLS 1.3 on the same per-core event loops (`lib/anvil/serve_tls.tin`).
+
+- **Configuration.** The certificate chain (leaf first) and the private key (RSA, ECDSA P-256 or
+  P-384; PKCS #8, PKCS #1 or SEC 1 PEM) are checked to belong together before anything listens,
+  and a bad pair fails `ServeTLS`. Every core parses its own copy of the key on its first
+  connection: an RSA key holds the Montgomery scratch space its signing writes.
+- **Handshake.** An accepted connection is not added to the poller: its handshake runs in a task
+  of its own (`tls.ServerOnFd`), with the request machinery around it (a boundary, so a drain
+  cancels it; a recovered panic only closes the connection). Each wait for the client is
+  `rt_task_wait`, so a slow or silent client holds no core: the task must finish within
+  `TIN_HANDSHAKE_TIMEOUT_MS` (default: the header timeout, 10 s), and a core runs at most 4096
+  handshakes at once (more connections are closed at accept). The CPU work (the key share, the
+  key schedule and the CertificateVerify signature) runs on the core.
+- **Resumption (#472).** After a full handshake the server sends one NewSessionTicket. The ticket
+  is stateless: it holds the resumption PSK, the cipher suite, the ALPN protocol and the issue
+  time, sealed with AES-256-GCM under the key of its issue day. Each day's key is derived (HKDF)
+  from one 32-byte secret per process, so any core opens any core's ticket. A core derives a
+  day's key the first time it needs it, and nothing is shared or written between cores. A
+  returning client's first PSK identity is accepted when it opens, is younger than
+  `TIN_TLS_TICKET_LIFETIME_S` (default and most: 7 days), names a cipher suite with the
+  negotiated hash and the protocol ALPN chose now, and its binder verifies (a bad binder ends
+  the handshake with decrypt_error). The resumed handshake skips Certificate and
+  CertificateVerify, so it needs no signature. Only psk_dhe_ke is accepted, so a new key
+  exchange still gives forward secrecy, and there is no 0-RTT. The secret is random per process
+  unless `TIN_TLS_TICKET_SECRET` (64 hex digits) or `tls.SetTicketSecret` sets it, which lets
+  processes behind one load balancer resume each other's sessions. `TIN_TLS_TICKETS=0` turns
+  tickets off.
+- **After the handshake** the `tls.Conn` is copied into long-lived memory: the per-core map
+  `tlsConns` holds it by connection record (deleting the entry when the record is freed releases
+  it through the long-lived reference counts, #176) and the record's `cTls` word its address.
+  `ReadRaw` and `SealRawTo` change it only in place (KeyUpdate rewrites keys, IVs and secrets in
+  their slices; failure texts are constants), so it never points into a pool. An idle HTTPS
+  connection holds about 43 KiB (its 16 KiB record buffers and the two AEADs) against a plain
+  connection's 232-byte record.
+- **ALPN and the protocol.** The record's `cProto` word is the protocol ALPN chose: its number in
+  the list `alpn_offer(name, start)` registers before the cores start (`tls_protocols` registers
+  `http/1.1`), or 0 when the client offered none. `tls_start` is the one place a connection
+  enters its protocol: it calls `start(c)` on the event loop. HTTP/1.1 (`tls_http1`) adds the
+  socket to the poller with the header timeout counted from the end of the handshake, and reads
+  at once what arrived with the client's Finished. HTTP/2 (#360) puts `alpn_offer("h2", ...)`
+  before `http/1.1` in `tls_protocols`; its entry reads decrypted bytes with `tls_read(c, p, n)`
+  and writes through `ob` and `flush(c)` like HTTP/1.1.
+- **Reads.** `on_read_serve` reads through `tls_read` instead of `read`: `ReadRaw` reads what
+  the socket has, decrypts whole records into the read buffer serve_one parses, answers a
+  KeyUpdate (its record joins the pending output) and returns 0 at the client's close_notify.
+  Part of a record already read counts as a request still arriving (the header and read
+  timeouts apply from its first byte). When writing blocked reading, `on_write` reads again if
+  TLS holds input (`PendingRaw`): the socket would not report it twice.
+- **Writes.** `flush` seals the batch of responses (`SealRawTo`, 16 KiB records) into a second
+  per-core buffer and swaps it with `ob`, then writes as before: pending output is ciphertext, so
+  `on_write` is unchanged. A stream's writes are sealed into a buffer freed after each write;
+  `SendFile` reads its file in 256 KiB pieces on a helper thread (`pread`) and seals them (no
+  `sendfile` over TLS). `seal.AEAD.SealTo` on the CPU's AES-GCM instructions allocates nothing, so
+  256 MiB streamed over TLS leaves the server's RSS flat (`tls_server_check.py`).
+- **`Out.Closed`** decrypts what has arrived (`ClosedRaw`, without waiting) instead of peeking
+  at the socket, which would see only a record: it reports the client's close_notify or alert,
+  or end of input. Application data it reads ahead stays in TLS, and the loop keeps reading
+  while TLS holds decrypted data (`tls_pending` 2).
+- **Close.** Every close with no output pending sends close_notify first: the end of a
+  `Connection: close` or HTTP/1.0 exchange, the idle and header timeouts, a drain, a lingering
+  close after an error response, and the end of a hijacked connection.
+- **Hijack.** `Req.TLSConn()` is the request's `tls.Conn` (also for its `ALPN()`,
+  `CipherSuite()` and `Group()`). After `Hijack`, every byte must go through it;
+  `websocket.Accept` does that, so `wss://` works on a TLS server, and its reads wait outside the
+  reclamation epochs as a plain WebSocket's do.
+- **Linking.** `anvil.tin` reaches `serve_tls.tin` only through function hooks (`gTlsRead`,
+  `gTlsSeal`, ...) that `ServeTLS` sets, each behind a test of `cTls`: a server that never calls
+  `ServeTLS` links no TLS code (`examples/api.tin` grew by 335 bytes) and its loop is unchanged.
+- **Client certificates (#475).** `ServeTLSConfig` with `TLSConfig.ClientAuth`
+  (`tls.RequestClientCert` or `tls.RequireClientCert`) and `ClientCAs` makes every full
+  handshake send a CertificateRequest. It lists the schemes the server verifies (ECDSA and
+  RSA-PSS; TLS 1.3 forbids PKCS #1 v1.5 there) and the subjects of the CAs
+  (certificate_authorities). The client's chain is verified against `ClientCAs` alone (not the
+  system's roots) for the clientAuth extended key usage, then its CertificateVerify. Refusals
+  have their own alerts: certificate_required for none when required, unknown_ca, and
+  certificate_expired; bad_certificate for anything else, such as a certificate for servers
+  only. A handler reads the verified chain in `q.TLSConn().PeerCertificates()`. A session
+  ticket carries the client's chain, so a resumed session keeps its identity. A server that
+  requires a certificate resumes only a session that had one, and only while the certificate is
+  still valid. The client side: `tls.Config.Certificate` and `Key` (PEM, parsed once per core)
+  are sent when a server asks, with a CertificateVerify in a scheme the server accepts, or an
+  empty Certificate when there is none. The database clients pass them through `Options.TLS`
+  (PostgreSQL `clientcert=verify-full`, MySQL `REQUIRE X509`, Redis `tls-auth-clients`).
+- **Keys.** RSA (PSS), ECDSA P-256 and P-384, and Ed25519 (#477; RFC 8410 PKCS #8 keys), for the
+  server's certificate and for a client's.
+- **Several certificates, and reloads (#476).** `TLSConfig.Certificates` adds certificates to
+  the default. A ClientHello's server_name chooses the first one whose leaf names it (exactly, or
+  by a one-label wildcard) and whose key signs a scheme the client accepts: an ECDSA and an RSA
+  certificate for one name serve both kinds of client. No SNI, or an unknown name, gets the
+  default. `anvil.ReloadCertificates` replaces the set from any core: every pair is checked
+  first, the set is published to the cores through a generation counter, and each core parses
+  its copy at its next handshake. The configuration a core replaces stays alive while handshakes
+  that use it run (the reclamation limbo), and the published PEM text is never freed, because
+  another core may still be reading an older set. A set given entirely as files
+  (`TLSCert.CertFile`, `KeyFile`) is read again by core 0 every `TIN_TLS_RELOAD_S` seconds
+  (default 60), and reloaded when the contents changed. A renewal on disk, from Let's Encrypt or
+  cert-manager, needs no restart; a broken pair is reported and the set in use stays.
+- **Not supported:** 0-RTT, and TLS 1.2 (#473). A
+  `TIN_REPLAY_CAPSULE` replay sends plain HTTP and cannot replay into a TLS server.
 
 ### Pooled clients: mysql (v0.4)
 
@@ -913,18 +1204,20 @@ functions keep that rule, and grows as phase 1 lands.
 | function | constant-time in | not constant-time in |
 |---|---|---|
 | `Sha256`, `Sha384`, `Sha512`, `Sum` | the message bytes | its length |
-| `tls`: record protection, the Finished check (`ConstantTimeEq`), the key schedule | keys, secrets, data and MACs | lengths, and the padding length of a received record |
+| `tls`: record protection (`SealRawTo` too), the Finished checks (`ConstantTimeEq`), the key schedule, on both sides | keys, secrets, data and MACs | lengths, and the padding length of a received record |
+| `tls` server: its key share (`X25519` or `P256ECDH` below) and its CertificateVerify, signed by `PrivateKey.SignTLS` (below: RFC 6979 ECDSA, blinded RSA CRT for PSS) with each core's own copy of the key | the private key, the ephemeral key and the shared secret | which scheme and group the client offered, which are public |
 | `Hmac`, `HmacSha256` | the key and message bytes | their lengths |
 | `HkdfExtract`, `HkdfExpand`, `HkdfExpandLabel` | the key material | lengths, `info`, labels |
 | `ConstantTimeEq`, `Equal` | the bytes | the lengths |
-| `X25519`, `X25519PublicKey` | the scalar and the point (ladder with masked swaps; ten-limb field) | the final all-zero check, whose result is public |
-| `ChaCha20`, `AEAD.Seal` and `AEAD.Open` for ChaCha20-Poly1305 | the key, the data and the tag (the tag is compared with `ConstantTimeEq`) | the lengths |
-| `NewAESGCM`, `AEAD.Seal` and `AEAD.Open` for AES-GCM: on the CPU's AES-NI/PCLMULQDQ or ARMv8 AESE/AESMC/PMULL instructions when it has them (`selfhost/aes_hw.tin`), else bitsliced AES with the S-box as GF(2^8) inversion and GHASH by multiplication with holes | the key, the data and the tag | the lengths, and which path the CPU allows |
-| `P256PublicKey`, `P256ECDH` and the field and point code under them (`field.tin`, `p256.tin`) | the private key and every coordinate | the validity checks of the key and the peer's point, whose results are public |
+| `X25519`, `X25519PublicKey` | the scalar and the point (ladder with masked swaps; five 51-bit limbs, products through `__mulhu`) | the final all-zero check, whose result is public |
+| `ChaCha20`, `AEAD.Seal`, `AEAD.SealTo` and `AEAD.Open` for ChaCha20-Poly1305 | the key, the data and the tag (the tag is compared with `ConstantTimeEq`) | the lengths |
+| `NewAESGCM`, `AEAD.Seal`, `AEAD.SealTo` and `AEAD.Open` for AES-GCM: on the CPU's AES-NI/PCLMULQDQ or ARMv8 AESE/AESMC/PMULL instructions when it has them (`selfhost/aes_hw.tin`), else bitsliced AES with the S-box as GF(2^8) inversion and GHASH by multiplication with holes | the key, the data and the tag | the lengths, and which path the CPU allows |
+| `P256PublicKey`, `P256ECDH` and the field and point code under them (`field.tin`: 64-bit limbs, carries by cset, high words by `__mulhu`; `p256.tin`: k·G from the per-core table of j·16^i·G read by touching every entry) | the private key and every coordinate | the validity checks of the key and the peer's point, whose results are public |
 
 | `monty_new` (`bignum.tin`: Montgomery constants for a modulus given at run time) | the modulus's value | its limb count and bit length |
-| `SignPKCS1v15`, `SignPSS` (`rsa_sign.tin`: CRT, base blinding by r^e, r^-1 by Fermat inversion in each prime, a public-key check of every signature) and `monty_exp_ct`, `monty_reduce`, `nat_mul_ct` under them | the private key, the message representative and r | the key's size; PSS's salt is random and public |
-| `SignECDSA`, `PrivateKey.SignTLS` (`ecdsa_sign.tin`: RFC 6979 nonces by `Hmac`, k·G by `p256_mul` or `ec_mul_ct`, k^-1 as k^(n-2) with the public exponent) | the private scalar and the nonce | the digest, and the (negligibly rare, public) retry when a nonce candidate is not below n |
+| `SignPKCS1v15`, `SignPSS` (`rsa_sign.tin`: CRT; base blinding by a pair (r^e, r^-1) kept with the key, squared after each signature and made fresh every 32, r^-1 by Fermat inversion in each prime; a public-key check of every signature) and `monty_exp_ct`, `monty_reduce`, `nat_mul_ct` under them | the private key, the message representative and r | the key's size; PSS's salt is random and public |
+| `SignECDSA`, `PrivateKey.SignTLS` (`ecdsa_sign.tin`: RFC 6979 nonces by `Hmac`, k·G by `p256_mul_base` or `ec_mul_ct`, k^-1 as k^(n-2) with the public exponent) | the private scalar and the nonce | the digest, and the (negligibly rare, public) retry when a nonce candidate is not below n |
+| `SignEd25519`, `Ed25519PublicKey`, `PrivateKey.SignTLS` with scheme 0x0807 (`ed25519_sign.tin`, #477: the clamped scalar and the nonce from SHA-512 of the seed, r·B and a·B from a per-core table of j·16^i·B read by copying every entry and swapping with a mask, S = r + k·a mod L in Montgomery arithmetic) | the seed, the scalar and the nonce | the message and its length |
 | `ParsePrivateKeyPEM`, `ParsePrivateKeyDER` | nothing: the key's encoding (lengths, tags) is parsed with ordinary branches | |
 
 `Sha1`, `Pbkdf2Sha256`, the hex and base64 codecs and the RSA-OAEP code are not

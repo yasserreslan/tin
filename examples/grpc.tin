@@ -1,0 +1,361 @@
+package main
+
+import "anvil"
+import "herald"
+import "say"
+import "twine"
+
+// A gRPC service over anvil's HTTP/2 (#360): helloworld.Greeter, the service of gRPC's own
+// examples, so any gRPC client can call it (grpcurl, or a client generated from helloworld.proto),
+// with a client-streaming and a bidirectional method beside it (#481).
+//
+//	service Greeter {
+//	  rpc SayHello (HelloRequest) returns (HelloReply) {}
+//	  rpc SayHelloAll (stream HelloRequest) returns (HelloReply) {}    // "Hello a, b, c"
+//	  rpc Chat (stream HelloRequest) returns (stream HelloReply) {}   // a reply to each, as it comes
+//	}
+//	message HelloRequest { string name = 1; }
+//	message HelloReply { string message = 1; }
+//
+// gRPC needs HTTP/2: clients speak it without TLS by prior knowledge (h2c), which anvil detects on
+// every port. A call is a POST to /helloworld.Greeter/SayHello with content-type application/grpc;
+// its body is one length-prefixed message (a compressed flag byte and a 4-byte big-endian length,
+// then the protobuf bytes), and the reply is the same framing with the status in the trailers
+// grpc-status and grpc-message, which w.Trailer sends in a HEADERS frame after the body. The two
+// messages here have one string field each, so the protobuf encoding is written out below; a
+// larger service would generate it. PORT is the port (default 50051).
+
+// gRPC status codes (google.golang.org/grpc/codes).
+const codeOK = 0
+const codeInvalidArgument = 3
+const codeUnimplemented = 12
+const codeInternal = 13
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Post("/helloworld.Greeter/SayHello", sayHello)
+	// Streaming methods read the call's messages as they arrive (Router.Stream, q.BodyStream).
+	r.Stream("POST", "/helloworld.Greeter/SayHelloAll", sayHelloAll)
+	r.Stream("POST", "/helloworld.Greeter/Chat", chat)
+	r.NotFound(unimplemented)
+	r.MethodNotAllowed(unimplemented)
+	r.Serve(":50051") catch err {
+		say.Line("server:", err)
+	}
+}
+
+// sayHello answers HelloRequest{name} with HelloReply{message: "Hello <name>"}.
+fn sayHello(q anvil.Req, w mut anvil.Out) {
+	let (msg, ok) = grpcRequest(q, mut w)
+	if !ok {
+		return
+	}
+	let (name, err) = stringField(msg, 1)
+	if err != "" {
+		grpcStatus(mut w, codeInvalidArgument, "HelloRequest: " + err)
+		return
+	}
+	if name == "" {
+		grpcStatus(mut w, codeInvalidArgument, "name is required")
+		return
+	}
+	herald.Log(herald.LInfo, "SayHello", []str{"name_bytes", say.Str(len(name))})
+	grpcReply(mut w, stringMessage(1, "Hello " + name))
+}
+
+// sayHelloAll answers a stream of HelloRequests with one HelloReply that greets every name.
+fn sayHelloAll(q anvil.Req, w mut anvil.Out) {
+	if !grpcContentType(q, mut w) {
+		return
+	}
+	mut ms = newMessages(q)
+	mut names = make([]u8, 0, 256)
+	for {
+		let (n, err) = ms.next()
+		if err != "" {
+			grpcStatus(mut w, codeInternal, err)
+			return
+		}
+		if n < 0 {
+			break
+		}
+		let (name, perr) = stringField(str(ms.buf[ms.lo-n : ms.lo]), 1)
+		if perr != "" {
+			grpcStatus(mut w, codeInvalidArgument, "HelloRequest: " + perr)
+			return
+		}
+		if len(names) > 0 {
+			names = append(names, ", "...)
+		}
+		names = append(names, name...)
+	}
+	grpcReply(mut w, stringMessage(1, "Hello " + str(names)))
+}
+
+// chat answers each HelloRequest as it arrives, before the next one: the reply streams while the
+// client's stream is still open. Each message is handled in an arena, so a long call runs in the
+// memory of one message however many it has.
+fn chat(q anvil.Req, w mut anvil.Out) {
+	if !grpcContentType(q, mut w) {
+		return
+	}
+	mut ms = newMessages(q)
+	w.Stream() catch _ {
+		return
+	}
+	mut out = w // an arena cannot capture the mut parameter itself
+	for {
+		let (n, err) = ms.next()
+		if err != "" {
+			grpcStatus(mut w, codeInternal, err)
+			return
+		}
+		if n < 0 {
+			break
+		}
+		let failed = arena {
+			mut res = ""
+			let (name, perr) = stringField(str(ms.buf[ms.lo-n : ms.lo]), 1)
+			if perr != "" {
+				res = "HelloRequest: " + perr
+			} else {
+				let reply = stringMessage(1, "Hello " + name)
+				let rn = len(reply)
+				mut frame = make([]u8, 0, 5+rn)
+				frame = append(frame, 0, u8(rn>>24), u8(rn>>16), u8(rn>>8), u8(rn))
+				frame = append(frame, reply...)
+				out.Write(frame) catch _ {
+					res = "!"
+				}
+			}
+			res
+		}
+		if failed == "!" {
+			return
+		}
+		if failed != "" {
+			grpcStatus(mut w, codeInvalidArgument, failed)
+			return
+		}
+		w.Flush() catch _ {
+			return
+		}
+	}
+	grpcStatus(mut w, codeOK, "")
+}
+
+// grpcContentType checks a streaming call's content type; false when it answered the call itself.
+fn grpcContentType(q anvil.Req, w mut anvil.Out) bool {
+	let ct = q.Header("content-type")
+	if ct != "application/grpc" && !twine.HasPrefix(ct, "application/grpc+") && !twine.HasPrefix(ct, "application/grpc;") {
+		w.Status(415)
+		w.Text("content-type must be application/grpc")
+		return false
+	}
+	w.Type("application/grpc")
+	return true
+}
+
+// messages reads a call's length-prefixed messages from its body as they arrive, in one buffer
+// that grows only for a message larger than it.
+type messages struct {
+	r anvil.BodyReader
+	rbuf []u8
+	buf []u8
+	lo i64 // buf[lo:hi] has arrived and is not taken yet
+	hi i64
+}
+
+fn newMessages(q anvil.Req) messages {
+	return messages{r: q.BodyStream(), rbuf: make([]u8, 16384), buf: make([]u8, 65536)}
+}
+
+// next reads the call's next message, which is then ms.buf[ms.lo-n : ms.lo] until the next call;
+// n is -1 at the end of the client's stream, and err says why the call is malformed.
+fn (m mut messages) next() (i64, str) {
+	for {
+		let have = m.hi - m.lo
+		if have >= 5 {
+			let b = m.buf
+			let lo = m.lo
+			if b[lo] != 0 {
+				return -1, "compressed messages are not supported"
+			}
+			let n = i64(b[lo+1])<<24 | i64(b[lo+2])<<16 | i64(b[lo+3])<<8 | i64(b[lo+4])
+			if n > 4194304 {
+				return -1, "a message larger than 4 MiB"
+			}
+			if have >= 5+n {
+				m.lo = lo + 5 + n
+				return n, ""
+			}
+		}
+		let k = m.r.Read(mut m.rbuf) catch e {
+			return -1, "reading the call: {e}"
+		}
+		if k == 0 {
+			if have > 0 {
+				return -1, "the client's stream ended inside a message"
+			}
+			return -1, ""
+		}
+		// Move what is left to the front, then make room for k more bytes.
+		if m.lo > 0 {
+			copy(m.buf, m.buf[m.lo:m.hi])
+			m.hi = have
+			m.lo = 0
+		}
+		if m.hi+k > len(m.buf) {
+			mut nb = make([]u8, 2*(m.hi+k))
+			copy(nb, m.buf[:m.hi])
+			m.buf = nb
+		}
+		copy(m.buf[m.hi:], m.rbuf[:k])
+		m.hi += k
+	}
+	return -1, ""
+}
+
+// unimplemented is every other path: gRPC's UNIMPLEMENTED.
+fn unimplemented(q anvil.Req, w mut anvil.Out) {
+	w.Status(200)
+	w.Type("application/grpc")
+	grpcStatus(mut w, codeUnimplemented, "unknown method " + q.Path)
+}
+
+// grpcRequest checks the call's framing and returns its one message; false when it answered the
+// call itself. (q.Proto() is "HTTP/2.0" for a real call; it is not checked, so that a call recorded
+// for replay, which replays over HTTP/1.1, gets the same answer.)
+fn grpcRequest(q anvil.Req, w mut anvil.Out) (str, bool) {
+	let ct = q.Header("content-type")
+	if ct != "application/grpc" && !twine.HasPrefix(ct, "application/grpc+") && !twine.HasPrefix(ct, "application/grpc;") {
+		w.Status(415)
+		w.Text("content-type must be application/grpc")
+		return "", false
+	}
+	w.Type("application/grpc")
+	let b = q.Body()
+	if len(b) < 5 {
+		grpcStatus(mut w, codeInternal, "the request has no message")
+		return "", false
+	}
+	if b[0] != 0 {
+		grpcStatus(mut w, codeUnimplemented, "compressed messages are not supported")
+		return "", false
+	}
+	let n = i64(b[1])<<24 | i64(b[2])<<16 | i64(b[3])<<8 | i64(b[4])
+	if n != len(b)-5 {
+		grpcStatus(mut w, codeInternal, "a unary call carries exactly one message")
+		return "", false
+	}
+	return b[5:], true
+}
+
+// grpcReply sends one message and status OK.
+fn grpcReply(w mut anvil.Out, msg str) {
+	let n = len(msg)
+	w.Body = append(w.Body, 0, u8(n>>24), u8(n>>16), u8(n>>8), u8(n))
+	w.Body = append(w.Body, msg...)
+	grpcStatus(mut w, codeOK, "")
+}
+
+// grpcStatus ends the call with a status code and message (percent-encoded, as gRPC requires).
+fn grpcStatus(w mut anvil.Out, code i64, message str) {
+	w.Trailer("grpc-status", say.Str(code))
+	if message != "" {
+		w.Trailer("grpc-message", percentEncode(message))
+	}
+}
+
+fn percentEncode(s str) str {
+	let hex = "0123456789ABCDEF"
+	mut b = make([]u8, 0, len(s))
+	for i in 0..len(s) {
+		let c = s[i]
+		if c < ' ' || c > '~' || c == '%' {
+			b = append(b, '%', hex[c>>4], hex[c&15])
+		} else {
+			b = append(b, c)
+		}
+	}
+	return str(b)
+}
+
+// ---- protobuf: a string field, and skipping the others ----
+
+// stringMessage encodes a message whose only field is string field number f.
+fn stringMessage(f i64, v str) str {
+	return putVarint(f<<3|2) + putVarint(len(v)) + v
+}
+
+// putVarint is v as a protobuf varint.
+fn putVarint(v i64) str {
+	mut b = make([]u8, 0, 10)
+	mut x = v
+	for x >= 128 {
+		b = append(b, u8(x&127|128))
+		x = x >> 7
+	}
+	b = append(b, u8(x))
+	return str(b)
+}
+
+// varint reads a varint at m[i:]: its value and the index after it, or -1 when it is cut short.
+fn varint(m str, i i64) (i64, i64) {
+	mut v = 0
+	mut shift = 0
+	mut j = i
+	for j < len(m) && shift < 64 {
+		let c = m[j]
+		v = v | i64(c&127)<<shift
+		j += 1
+		if c < 128 {
+			return v, j
+		}
+		shift += 7
+	}
+	return 0, -1
+}
+
+// stringField returns string field f of message m ("" when absent; the last one when repeated),
+// skipping the fields of other numbers whatever their wire type; the error is "" or why m is
+// not a valid message.
+fn stringField(m str, f i64) (str, str) {
+	mut out = ""
+	mut i = 0
+	for i < len(m) {
+		let (key, j) = varint(m, i)
+		if j < 0 {
+			return "", "a field key is cut short"
+		}
+		let wire = key & 7
+		mut k = j
+		if wire == 0 {
+			let (x, e) = varint(m, j)
+			if e < 0 || x < 0 {
+				return "", "a varint is cut short"
+			}
+			k = e
+		} else if wire == 1 {
+			k = j + 8
+		} else if wire == 5 {
+			k = j + 4
+		} else if wire == 2 {
+			let (n, e) = varint(m, j)
+			if e < 0 || n < 0 || n > len(m)-e {
+				return "", "a length-delimited field is cut short"
+			}
+			k = e + n
+			if key>>3 == f {
+				out = m[e:k]
+			}
+		} else {
+			return "", "unknown wire type " + say.Str(wire)
+		}
+		if k > len(m) {
+			return "", "a field is cut short"
+		}
+		i = k
+	}
+	return out, ""
+}

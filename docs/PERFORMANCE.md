@@ -498,6 +498,12 @@ their cost there is zero. `--nopolls` turns them off, `--polls` puts them everyw
 `lib/runtime/`, and a function opts out with `@nopoll`. The cost below is for polls in every
 loop (the `--polls` form): a tight loop in a handler pays it; anvil and the rest of `lib/` do not.
 
+The default form was measured in [run 37340338604](https://github.com/yasserreslan/tin/actions/runs/37340338604)
+(#341, head against main on the same runners, Linux 6.17.0-1022-azure, AMD EPYC and
+Neoverse-N2). HTTP head/base throughput of the anvil server programs, which now poll in
+their own code, was 1.012 (`/json`) and 1.003 (`/plaintext`) on amd64 and 0.994 and 0.996 on
+arm64; the CPU benchmarks, which start no cores, stayed between 0.982 and 1.018.
+
 The initial [native Linux run](https://github.com/yasserreslan/tin/actions/runs/37197260096)
 compared base `b6333ef` with head `9759a6b`, with polls enabled in strict Tin code.
 Both runners had four vCPUs, Linux 6.17.0-1022-azure and Go 1.26.8: Neoverse-N2
@@ -522,6 +528,133 @@ poll words. The ordinary poll is a context load and a cold branch (x86-64 also t
 loaded word). Cold stubs preserve registers, including leaf-function homes. The compiler
 keeps existing allocation and register-home decisions; the poll check stays inside loops.
 The watchdog is started only for an opted-in executable.
+
+## Integer overflow checks (Linux)
+
+`+`, `-`, `*`, negation, signed `/`, shifts and float to integer conversions are checked in
+user code and library packages (#362; `lib/runtime/` and the compiler are not). Each check is a
+flag test and a branch to a cold stub. The compiler drops the checks it can prove cannot fire
+(loop counters, and after inlining, constants, lengths, narrow types and locals defined once),
+and the crypto kernels are `@wrap`.
+
+[Run 37350166526](https://github.com/yasserreslan/tin/actions/runs/37350166526) measured head
+`1d07ed3` against main `c0145f2` on the same runners: Linux 6.17.0-1022-azure, AMD EPYC 9V45 on
+amd64, Neoverse-V3 on arm64, Go 1.26.8. CPU figures are medians of seven alternating runs per
+side; HTTP uses one server core and wrk `-t2 -c100` on the same runner. Only ratios on these
+shared runners are meaningful.
+
+| architecture, workload | main ms | checked ms | checked/main time |
+|---|---:|---:|---:|
+| arm64 spectral | 889.20 | 1201.88 | 1.352 |
+| arm64 ordered_less | 25.48 | 27.35 | 1.074 |
+| arm64 indexsum | 33.30 | 35.31 | 1.060 |
+| arm64 json | 1294.42 | 1344.69 | 1.039 |
+| arm64 sieve | 367.14 | 380.61 | 1.037 |
+| amd64 sha512 | 310.23 | 322.68 | 1.040 |
+| amd64 spectral | 6162.75 | 6138.30 | 0.996 |
+
+The other 41 benchmark and architecture pairs were within 3.5% (0.978 to 1.034). HTTP
+checked/main throughput was 0.997 (`/json`) and 0.994 (`/plaintext`) on amd64, and 0.979
+and 0.994 on arm64. Output equality is checked on every timed repetition.
+
+spectral is the one real cost. Its inner loop computes `(i+j)*(i+j+1)`, where `i` and `j` are
+bounded only by a slice length, so the multiply keeps its check. On arm64 that is an `smulh`
+and a compare in a loop of 0.73 ns an iteration. On x86-64 `imul` sets the overflow flag
+itself, so the check is free there. A program that has measured such a loop can write `*%`
+in it.
+
+Before the elision pass and `@wrap` on the crypto kernels, the same comparison
+([run 37344878578](https://github.com/yasserreslan/tin/actions/runs/37344878578), main
+`8b4e916`) cost 1.58 on arm64 x25519, 1.52 on tls13keys and 1.22 on p256ecdh. Those three are
+now 1.000, 1.002 and 1.006. Two probes with the checks off measure noise. All changes with the
+checks off ([run 37344888270](https://github.com/yasserreslan/tin/actions/runs/37344888270)) was
+within 3% on arm64. The same with 12 bytes of padding after `main`
+([run 37350044953](https://github.com/yasserreslan/tin/actions/runs/37350044953)) moved
+memory_16 by 1.197 on arm64 and aesgcm by 1.113 on amd64. A ratio of a few percent on one
+benchmark can be code placement.
+
+## HTTPS: anvil.ServeTLS against Go's crypto/tls (Linux)
+
+`bench/http/run_https.py` (a step of `.github/workflows/bench-linux.yml`) serves the same routes
+with `anvil.ServeTLS` (`bench/http/https.tin`) and with Go's net/http on crypto/tls
+(`bench/http/gotls`). Each server gets one core (TIN_CORES=1, GOMAXPROCS=1); wrk `-t2` runs on
+the same runner over TLS 1.3. The figures are medians of five alternating 5-second rounds. Full
+handshakes send `Connection: close` on every request, and neither server issues session tickets.
+[Run 37377650528](https://github.com/yasserreslan/tin/actions/runs/37377650528) used head
+`5efe54a` (#466) on Linux 6.17.0-1022-azure (AMD EPYC 9V74 on amd64, Neoverse-N2 on arm64),
+Go 1.26.8. Only ratios on these shared runners are meaningful.
+
+| scenario | amd64 anvil | amd64 Go | anvil/Go | arm64 anvil | arm64 Go | anvil/Go |
+|---|---:|---:|---:|---:|---:|---:|
+| full handshakes, ECDSA P-256 | 327/s | 2929/s | 0.11 | 480/s | 2679/s | 0.18 |
+| full handshakes, RSA-2048 | 29/s | 599/s | 0.05 | 42/s | 586/s | 0.07 |
+| keep-alive `/plaintext` | 101701 req/s | 59313 req/s | 1.71 | 135577 req/s | 60810 req/s | 2.23 |
+| 1 MiB bodies | 745 MiB/s | 1167 MiB/s | 0.64 | 743 MiB/s | 1587 MiB/s | 0.47 |
+
+Established connections are faster than Go's for small responses, since one batch of
+responses is sealed into records and written at once. Large bodies run at half to two thirds
+of Go's speed. Full handshakes are the gap.
+Their cost was seal's P-256 and RSA arithmetic (32-bit limbs, no fixed-base table).
+
+### Handshakes after the arithmetic work (#474)
+
+#474 changed four things in seal:
+- the high word of a 64×64 product is now an intrinsic (`umulh`, `mul`), so Montgomery arithmetic
+  runs on 64-bit limbs, with an unrolled four-limb multiplication for P-256 and one fused pass per
+  limb for RSA;
+- k·G reads a per-core table, so it needs no doubling;
+- RSA keeps its blinding pair, which removes two exponentiations per signature;
+- X25519 uses 51-bit limbs.
+
+[Run 37388993368](https://github.com/yasserreslan/tin/actions/runs/37388993368) measured them on
+Linux 6.17.0-1022-azure (AMD EPYC 7763 on amd64, Neoverse-N2 on arm64), with the same harness as
+above. These servers issue no session tickets, so every handshake is full.
+
+| full handshakes per second | before: anvil (anvil/Go) | after: anvil (anvil/Go) |
+|---|---:|---:|
+| arm64 ECDSA P-256 | 480 (0.18) | 1951 (0.65) |
+| arm64 RSA-2048 | 42 (0.07) | 255 (0.43) |
+| amd64 ECDSA P-256 | 327 (0.11) | 754 (0.34) |
+| amd64 RSA-2048 | 29 (0.05) | 100 (0.21) |
+
+The "before" figures are from run 37377650528 above, on another amd64 CPU (EPYC 9V74), so compare
+the ratios. In the same run, the CPU benchmarks against main (time, lower is faster) were:
+
+| benchmark | amd64 | arm64 |
+|---|---:|---:|
+| p256ecdh | 0.411 | 0.369 |
+| x25519 | 0.862 | 0.658 |
+| tls13keys | 0.893 | 0.686 |
+
+All the other benchmarks stayed within 5%. Plain HTTP was 1.078 and 0.981 (amd64) and 1.015 and
+0.995 (arm64).
+
+The remaining gap on amd64 comes from code generation: the x86-64 backend keeps the multiplication's
+limbs and carries on the stack (it has fewer temporaries than arm64's), and it computes the low half
+of a product with `imul` beside the `mul` that already gives both halves. #488 tracks that, and
+squaring for RSA. In the same run, plain HTTP/1.1 against main was 1.023 (`/json`) and 1.018
+(`/plaintext`) on amd64 and 0.983 and 1.012 on arm64, and every CPU benchmark stayed within 5%.
+
+### Resumed handshakes (session tickets, #472)
+
+With #472, `anvil.ServeTLS` issues a stateless session ticket after each full handshake, and the
+Go server keeps its tickets on. wrk resumes sessions once a server issues tickets, so
+`bench/http/tlsload` (Go) now measures both kinds. Each full handshake starts with a fresh client.
+Each resumed one offers the ticket of the previous connection and still runs X25519 (psk_dhe_ke),
+but it sends no certificate and makes no signature.
+[Run 37399178539](https://github.com/yasserreslan/tin/actions/runs/37399178539) used head `ea8b04b`,
+before the arithmetic work above was merged, on Linux 6.17.0-1022-azure (AMD EPYC 7763 on amd64,
+Neoverse-N2 on arm64), Go 1.26.8:
+
+| handshakes per second | amd64 anvil | amd64 Go | anvil/Go | arm64 anvil | arm64 Go | anvil/Go |
+|---|---:|---:|---:|---:|---:|---:|
+| full, ECDSA P-256 | 285 | 1952 | 0.15 | 492 | 3178 | 0.15 |
+| full, RSA-2048 | 35 | 614 | 0.06 | 57 | 570 | 0.10 |
+| resumed, ECDSA P-256 | 868 | 2095 | 0.41 | 2116 | 3575 | 0.59 |
+
+On anvil, a resumed handshake is 3.0 times as fast as a full one on amd64 and 4.3 times on arm64.
+On Go, the gain is 1.1 times: its signature costs little next to the rest. In the same run, every
+CPU benchmark against main stayed within 5%.
 
 ## Long-lived blocks above 4 KiB (Linux)
 
@@ -548,6 +681,31 @@ bytes of a slab each instead of a page-rounded 8192, and the memory of deleted v
 reused instead of unmapped. These are not same-machine before and after figures: run
 `.github/workflows/bench-linux.yml` for those.
 
+## File reads through io_uring (Linux)
+
+`quarry.ReadFile` in a request task goes through the core's own io_uring ring on Linux (#357);
+the helper threads are the fallback (`TIN_IO_URING=0`, kernels or seccomp profiles that refuse
+io_uring, FIFOs and network mounts). `bench/files` reads 10000 files of 4 KiB, 1000 per request
+over 4 connections per core, in 5 alternating rounds of 3 s per side; the table gives medians.
+[Run 37350232975](https://github.com/yasserreslan/tin/actions/runs/37350232975), GitHub's
+4-vCPU runners (Linux 6.17.0-1022-azure, AMD EPYC 9V74 and Neoverse-N2); only ratios mean anything there.
+
+| cores | amd64 helper files/s | amd64 io_uring files/s | io_uring/helper | arm64 helper files/s | arm64 io_uring files/s | io_uring/helper |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 158401 | 101909 | 0.64x | 181622 | 161346 | 0.89x |
+| 2 | 185771 | 195836 | 1.05x | 275430 | 292280 | 1.06x |
+| 4 | 76655 | 317049 | 4.14x | 136593 | 559164 | 4.09x |
+| 8 | 165514 | 303163 | 1.83x | 265550 | 550220 | 2.07x |
+
+- Scaling from one core to four: io_uring 3.11x (amd64) and 3.47x (arm64); the helper threads
+  0.48x and 0.75x, as every core queues on the same few threads. Eight cores on four vCPUs add
+  nothing to either.
+- CPU per 1000 files: io_uring 9.8 to 12.8 ms (amd64) and 6.2 to 7.0 ms (arm64), about half
+  of the helper path's 17.1 to 23.6 and 11.8 to 14.5 ms.
+- On one core io_uring is slower (0.64x, 0.89x): the helper path then runs the reads on other
+  CPUs in parallel with the core, which a 4-vCPU runner has to spare. Serving cores take
+  those CPUs away, so the multi-core rows are the production case.
+
 ## Map growth without stalls (Linux)
 
 A map rebuilt its entries and index when full, so inserting into a map of 2^21 entries stalled
@@ -566,3 +724,29 @@ the change:
 
 Lookups in a big map read an entry through a chunk directory; their cost against the old flat
 layout has not been measured on Linux, so no claim is made about it.
+
+## HTTP/2 against Go's net/http (Linux)
+
+anvil serves h2c (#360). [Run 37347324727](https://github.com/yasserreslan/tin/actions/runs/37347324727)
+(`.github/workflows/bench-linux.yml`, head `tin2/360-http2` against main `c0145f2`, GitHub-hosted
+runners with four vCPUs, Linux 6.17.0-1022-azure, Go 1.26.8, h2load nghttp2 1.59.0: AMD EPYC
+9V45 on amd64, Neoverse-N2 on arm64). One server core each (`TIN_CORES=1`, `GOMAXPROCS=1`),
+`h2load -t2 -c32 -m10` (h2c by prior knowledge) on the same runner, 10 s after a 2 s warm-up,
+medians of five alternating rounds (`bench/http/run_h2load.py`; Go is `bench/http/goh2c`,
+net/http with `Protocols.SetUnencryptedHTTP2`). Only the ratios are meaningful on these runners.
+
+| architecture, path | anvil req/s | net/http req/s | anvil / net/http |
+|---|---:|---:|---:|
+| amd64 /json | 727258 | 38315 | 18.98 |
+| amd64 /plaintext | 705675 | 38208 | 18.47 |
+| arm64 /json | 938356 | 31205 | 30.07 |
+| arm64 /plaintext | 939703 | 32056 | 29.31 |
+
+With 10 streams in flight on each of 32 connections, anvil reads a burst of frames from each
+connection in one read and answers it in one write. net/http's HTTP/2 server runs a goroutine per
+connection and another per stream and hands frames between them, which on one core costs it more
+than the requests. The harness counts only completed 2xx responses and checks each body, so
+the figure is the server's own, not a failing baseline.
+
+The same run compared the HTTP/1.1 path with main (wrk, as above): head/base 0.994 (`/json`) and
+0.998 (`/plaintext`) on amd64, 1.002 and 0.987 on arm64.

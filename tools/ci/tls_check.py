@@ -2,9 +2,10 @@
 """The TLS 1.3 client (lib/tls, #124): the RFC 8448 trace, interop with openssl s_server and
 Python's ssl module, KeyUpdate, timeouts, truncation, https:// in wire and wss:// in websocket.
 
-Certificates are generated here with the runner's openssl, so no key is checked in. Until
-X.509 verification lands (#124 phase 2) the interop runs use InsecureSkipVerify, and the
-default configuration must refuse every server."""
+Certificates are generated here with the runner's openssl, so no key is checked in. The interop
+runs use InsecureSkipVerify; the verified runs trust the generated certificate through RootCAs
+(chain, host name and CertificateVerify checked for RSA-PSS, ECDSA and Ed25519 keys), and the
+default configuration refuses it as signed by an unknown authority."""
 import argparse
 import base64
 import hashlib
@@ -62,6 +63,12 @@ def make_certs(openssl, work):
         if r.returncode == 0:
             certs[kind] = (cert, key)
     assert 'rsa' in certs and 'ecdsa' in certs, 'openssl could not make test certificates'
+    # other-root.pem, next to them, is a root that signed none of them, under its own name: the
+    # trusted roots of the unknown-authority case. It is not one of the kinds the servers use.
+    cert, key = work / 'other-root.pem', work / 'other-root.key'
+    r = subprocess.run([openssl, 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-keyout', str(key),
+                        '-out', str(cert), '-days', '30', '-nodes', '-subj', '/CN=tin unrelated root'], capture_output=True)
+    assert r.returncode == 0, r.stderr
     return certs
 
 
@@ -86,8 +93,9 @@ def wait_port(port, proc=None, limit=10):
     raise AssertionError(f'port {port} never opened')
 
 
-def run(exe, *args, timeout=30):
-    r = subprocess.run([str(exe), *map(str, args)], capture_output=True, text=True, timeout=timeout)
+def run(exe, *args, timeout=30, env=None):
+    r = subprocess.run([str(exe), *map(str, args)], capture_output=True, text=True, timeout=timeout,
+                       env=None if env is None else dict(os.environ, **env))
     assert r.returncode == 0, (args, r.returncode, r.stdout, r.stderr[-3000:])
     return r.stdout
 
@@ -163,6 +171,23 @@ def openssl_matrix(exe, openssl, certs):
     print('PASS ALPN chosen and absent; a TLS 1.2-only server is refused')
 
 
+def verified(exe, openssl, certs):
+    """Verification on (the default) with the server's certificate in RootCAs: each key type."""
+    for kind, cert in certs.items():
+        port = free_port()
+        proc = subprocess.Popen([openssl, 's_server', '-tls1_3', '-accept', str(port), '-cert', str(cert[0]), '-key', str(cert[1]),
+                                 '-www', '-quiet', '-ciphersuites', 'TLS_AES_128_GCM_SHA256'],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            wait_port(port, proc)
+            out = run(exe, 'resume', f'127.0.0.1:{port}', 1, cert[0])
+        finally:
+            proc.kill()
+            proc.wait()
+        assert out == 'resumed false TLS_AES_128_GCM_SHA256 X25519 1 true\n', (kind, out)
+    print(f'PASS verification against RootCAs: certificates {", ".join(certs)} (chain, name, CertificateVerify)')
+
+
 def resumption(exe, openssl, certs, work):
     """Session tickets (#348): the second and later connections of one client process resume."""
     # openssl s_server: every suite, X25519 and P-256 (a HelloRetryRequest with the PSK offered again).
@@ -221,6 +246,60 @@ def resumption(exe, openssl, certs, work):
         thread.join(timeout=2)
         srv.close()
     print('PASS resumption: a server that lost its ticket keys gets a full handshake, then resumption again')
+
+
+def client_certificate(exe, openssl, certs, work):
+    """Mutual TLS from the client (#475): openssl s_server requiring a certificate from the test
+    PKI's CA accepts the Tin client's (ECDSA and RSA keys) and refuses a client without one."""
+    pki = work / 'pki'
+    pki.mkdir(exist_ok=True)
+    subprocess.run(['go', 'run', str(ROOT / 'tools/ci/fixtures/mtlspki.go'), str(pki)], cwd=ROOT, check=True, timeout=300)
+    cert = certs['ecdsa']
+    port = free_port()
+    proc = subprocess.Popen([openssl, 's_server', '-tls1_3', '-accept', str(port), '-cert', str(cert[0]), '-key', str(cert[1]),
+                             '-www', '-quiet', '-Verify', '1', '-CAfile', str(pki / 'ca.pem'), '-verify_return_error'],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        wait_port(port, proc)
+        for name in ('alice', 'rsa', 'dave'):
+            out = run(exe, 'mtls', f'127.0.0.1:{port}', 1, cert[0], pki / f'{name}.pem', pki / f'{name}.key')
+            assert out.startswith('mtls false <HTML>') and 'TLSv1.3' in out, (name, out[:500])
+        out = run(exe, 'mtls', f'127.0.0.1:{port}', 1, cert[0])
+        assert out.startswith('fault tls: remote error: certificate required'), out
+    finally:
+        proc.kill()
+        proc.wait()
+    print('PASS client certificates: openssl s_server -Verify accepts the Tin client\'s ECDSA, RSA and Ed25519 certificates '
+          'and refuses a client without one')
+
+
+KEYLOG_LABELS = ('CLIENT_HANDSHAKE_TRAFFIC_SECRET', 'SERVER_HANDSHAKE_TRAFFIC_SECRET', 'CLIENT_TRAFFIC_SECRET_0',
+                 'SERVER_TRAFFIC_SECRET_0')
+
+
+def keylog_lines(path):
+    """The TLS 1.3 traffic-secret lines of an NSS key log, sorted (OpenSSL also writes EXPORTER_SECRET)."""
+    return sorted(l for l in path.read_text().splitlines() if l.split(' ', 1)[0] in KEYLOG_LABELS)
+
+
+def keylog(exe, openssl, certs, work):
+    """SSLKEYLOGFILE (#478): the client logs the same four secrets openssl s_server logs."""
+    cert = certs['ecdsa']
+    mine, theirs = work / 'keylog-client.txt', work / 'keylog-s_server.txt'
+    port = free_port()
+    proc = subprocess.Popen([openssl, 's_server', '-tls1_3', '-accept', str(port), '-cert', str(cert[0]), '-key', str(cert[1]),
+                             '-www', '-quiet', '-keylogfile', str(theirs)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        wait_port(port, proc)
+        out = run(exe, 'resume', f'127.0.0.1:{port}', 1, cert[0], env={'SSLKEYLOGFILE': str(mine)})
+        assert out.startswith('resumed false'), out
+    finally:
+        proc.kill()
+        proc.wait()
+    a, b = keylog_lines(mine), keylog_lines(theirs)
+    assert len(a) == 4 and a == b, (a, b)
+    print('PASS SSLKEYLOGFILE: the client logs the four TLS 1.3 traffic secrets openssl s_server logs for the connection')
 
 
 def keyupdate(exe, openssl, certs):
@@ -307,6 +386,9 @@ def python_servers(exe, certs):
     plain.close()
     # A server that closes TCP without close_notify: the read fails instead of a clean EOF.
     ctx = server_ctx(certs['ecdsa'])
+    # The servers below speak ALPN, to see what wire and websocket offer (#478).
+    ctx.set_alpn_protocols(['http/1.1'])
+    alpn_seen = []
     trunc = socket.socket()
     trunc.bind(('127.0.0.1', 0))
     trunc.listen(4)
@@ -323,13 +405,14 @@ def python_servers(exe, certs):
     out = run(exe, 'truncated', f'127.0.0.1:{trunc.getsockname()[1]}')
     assert out == 'fault tls: connection closed by the peer without close_notify 12\n', out
     trunc.close()
-    # Verification is the default: without X.509 support yet, every server is refused.
+    # Verification is the default: a server whose certificate no trusted root signed is refused.
     port = free_port()
 
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
         def do_GET(self):
+            alpn_seen.append(self.connection.selected_alpn_protocol())
             body = b'hello over tls ' * 4096
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
@@ -352,11 +435,14 @@ def python_servers(exe, certs):
     serve_in_thread(srv.serve_forever)
     try:
         wait_port(port)
-        out = run(exe, 'verify', f'127.0.0.1:{port}', 'localhost')
-        assert out.startswith('fault tls: certificate verification is not available yet'), out
+        # The trusted roots are an unrelated certificate (SSL_CERT_FILE), so the outcome does not
+        # depend on whether this machine has a CA bundle.
+        out = run(exe, 'verify', f'127.0.0.1:{port}', 'localhost', env={'SSL_CERT_FILE': str(certs['rsa'][0].with_name('other-root.pem'))})
+        assert out.startswith('fault tls: x509: certificate signed by unknown authority'), out
         want = hashlib.sha256(b'hello over tls ' * 4096).hexdigest()
         out = run(exe, 'https', f'https://127.0.0.1:{port}/x')
         assert out == f'get 200 {15 * 4096} {want}\npost 200 posted over tls\n', out
+        assert alpn_seen == ['http/1.1'], ('wire offers ALPN http/1.1', alpn_seen)
     finally:
         srv.shutdown()
     # wss:// with a small WebSocket echo server over TLS.
@@ -376,6 +462,7 @@ def python_servers(exe, certs):
     def wss_echo():
         c, _ = ws.accept()
         s = ctx.wrap_socket(c, server_side=True)
+        alpn_seen.append(s.selected_alpn_protocol())
         head = b''
         while b'\r\n\r\n' not in head:
             head += s.recv(1)
@@ -399,8 +486,10 @@ def python_servers(exe, certs):
     serve_in_thread(wss_echo)
     out = run(exe, 'wss', f'wss://127.0.0.1:{ws.getsockname()[1]}/chat')
     assert out == 'wss true echo: hello wss\n', out
+    assert alpn_seen == ['http/1.1', 'http/1.1'], ('websocket offers ALPN http/1.1', alpn_seen)
     ws.close()
-    print('PASS handshake timeout, a non-TLS server, truncation without close_notify, verification by default, https:// and wss://')
+    print('PASS handshake timeout, a non-TLS server, truncation without close_notify, verification by default, https:// and wss:// '
+          '(both offering ALPN http/1.1)')
 
 
 def http_get(port, path, timeout=10):
@@ -506,7 +595,10 @@ def main():
         request_tasks(compiler, work, certs)
         if openssl:
             openssl_matrix(exe, openssl, certs)
+            verified(exe, openssl, certs)
             resumption(exe, openssl, certs, work)
+            keylog(exe, openssl, certs, work)
+            client_certificate(exe, openssl, certs, work)
             keyupdate(exe, openssl, certs)
         else:
             print('SKIP openssl s_server interop: no OpenSSL 3 command line on this runner')

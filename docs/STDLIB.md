@@ -8,11 +8,13 @@ Generated from the comments in `lib/*/` by `tools/gendoc.py`.
 | [fault](#fault) | fault chains and standard sentinels (errors) |
 | [argo](#argo) | JSON (encoding/json) |
 | [io](#io) | streaming shapes (io) |
-| [anvil](#anvil) | HTTP/1.1 server (net/http) |
+| [anvil](#anvil) | HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http) |
 | [hearth](#hearth) | cores and threads (runtime) |
 | [relay](#relay) | messages between cores (channels) |
 | [task](#task) | deadline and cancellation of the running code (context) |
-| [wire](#wire) | TCP and HTTP client (net) |
+| [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
+| [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
+| [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
 | [twine](#twine) | strings (strings) |
 | [glyph](#glyph) | UTF-8 and Unicode (unicode/utf8, unicode) |
 | [mint](#mint) | number and string conversion (strconv) |
@@ -88,7 +90,7 @@ Package io declares the streaming shapes: a type satisfies Reader, Writer, Close
 
 ## anvil
 
-Package anvil is an HTTP/1.1 server: one event loop per core (kqueue), share-nothing.
+Package anvil is an HTTP/1.1 and HTTP/2 server: one event loop per core (epoll, kqueue), share-nothing. HTTP/2 without TLS (h2c) is served on the same port, by prior knowledge or after Upgrade: h2c, and over TLS (ServeTLS) to a client whose ALPN offers h2; handlers are the same for both, each request (or stream) in a task of its own.
 
 Core 0 accepts connections and deals them round-robin to every core through a pipe; from then on a connection belongs to one core for its whole life. Each core reads into one scratch buffer, parses requests in place, runs the handler, writes every response of the batch with one write, and wipes its request pool. Idle connections hold no buffers, only a 96-byte record.
 
@@ -146,6 +148,8 @@ The middleware writes one herald line per request, with the client's address as 
 
 q.ClientIP() is the connection's peer unless the peer is one of the TrustedProxies: behind a proxy of yours, call TrustedProxies first, or every line carries the proxy's address.
 
+ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain and key, each handshake in a task of its own, then the same event loop with records decrypted before parsing and sealed before writing (docs/RUNTIME.md). examples/https_server.tin.
+
 - `TrustedProxies(cidrs []str) !`: TrustedProxies sets the proxies whose X-Forwarded-For and Forwarded headers ClientIP believes, as networks ("10.0.0.0/8", "fd00::/8") or single addresses. Call it before Serve. With none (the default) ClientIP is the connection's peer: the headers are written by the client and prove nothing unless a proxy you run replaced them.
 - `(q Req) RemoteAddr() str`: RemoteAddr is the address the request's connection comes from, "ip:port" ("[ip]:port" for IPv6, and an IPv4 client of an IPv6 listener as IPv4), or "" for a request made in the process. It is read once per connection. A request replayed from a capsule (#242) gets the address it was recorded with, "" when the capsule is older than that (schema 1).
 - `(q Req) ClientIP() str`: ClientIP is the client's IP address: the connection's peer, or, when the peer is one of the TrustedProxies, the rightmost address of X-Forwarded-For (else Forwarded's for=) that is not a trusted proxy. A malformed entry ends the walk at the peer. "" for a request made in the process.
@@ -160,8 +164,9 @@ q.ClientIP() is the connection's peer unless the peer is one of the TrustedProxi
 - `Limits(maxBody i64, maxBuffered i64, maxConns i64)`: Limits sets the largest request body in bytes (413 past it), the bytes of requests still arriving that one core may buffer (a new partial request past it gets 503 and close), and the connections per core (more are closed at accept; 0: no limit). Defaults 64 MiB, 256 MiB and 16384; TIN_MAX_BODY, TIN_MAX_BUFFERED and TIN_MAX_CONNS override them. Call before Serve.
 - `Deadline(ms i64)`: Deadline makes every request's waits (tide.Wait, client calls) fail with "deadline exceeded" once ms have passed since the request started (0: no deadline; call before Serve). TIN_DEADLINE_MS sets it too; the default is 30000.
 - `(q Req) Header(name str) str`: Header returns the value of the request header name (any case), or "". A chunked request's trailer fields are read after the header block's.
-- `(q Req) Hijack() !i64`: Hijack takes the request's connection out of HTTP for a protocol of its own (the websocket package uses it): the responses before this request are written, the core stops reading the connection and the request's deadline no longer applies. It returns the non-blocking descriptor, for the caller's I/O until the handler returns; then anvil closes it. The handler's Out is not sent.
-- `(w mut Out) Stream() !`: Stream switches the response to streaming. The status, content type and headers set so far are sent with the first Write or Flush (set them before). The body is then written with Write and Flush, in chunks (Transfer-Encoding: chunked), or as a plain body of the size Length gave; an HTTP/1.0 client, which cannot read chunks, gets the body up to the end of the connection. Each write waits for a slow client within the write timeout (TIN_WRITE_TIMEOUT_MS), and the request deadline (TIN_DEADLINE_MS) counts from the last write, so a stream lives as long as it keeps writing. Calling Stream again does nothing.
+- `(q Req) Proto() str`: Proto is the protocol the request came in: "HTTP/2.0" (h2c, or h2 over TLS), "HTTP/1.1" or "HTTP/1.0". A request made with Router.Run is "HTTP/1.1".
+- `(q Req) Hijack() !i64`: Hijack takes the request's connection out of HTTP for a protocol of its own (the websocket package uses it): the responses before this request are written, the core stops reading the connection and the request's deadline no longer applies. It returns the non-blocking descriptor, for the caller's I/O until the handler returns; then anvil closes it. The handler's Out is not sent. An HTTP/2 stream cannot be hijacked: Hijack fails there.
+- `(w mut Out) Stream() !`: Stream switches the response to streaming. The status, content type and headers set so far are sent with the first Write or Flush (set them before). The body is then written with Write and Flush, in chunks (Transfer-Encoding: chunked), or as a plain body of the size Length gave; an HTTP/1.0 client, which cannot read chunks, gets the body up to the end of the connection. Each write waits for a slow client within the write timeout (TIN_WRITE_TIMEOUT_MS), and the request deadline (TIN_DEADLINE_MS) counts from the last write, so a stream lives as long as it keeps writing. Calling Stream again does nothing. On HTTP/2 the body goes in DATA frames within the client's flow-control windows, and Length sets content-length.
 - `(w mut Out) Length(n i64) !`: Length sets the size of the streamed body in bytes: the response then has a Content-Length header instead of chunks, and the handler must write exactly n bytes. Call it after Stream and before the first Write or Flush.
 - `(w mut Out) Write(b []u8) !`: Write sends b as part of the body, after the head if that is not out yet. It waits while the client does not read, and fails when the client has closed the connection, stopped reading for the write timeout, or the request was cancelled: the handler should stop then. Text appended to the body with Text or argo.Put(mut w.Body, v) is sent by the next Write or Flush.
 - `(w mut Out) WriteString(s str) !`: WriteString is Write for a str.
@@ -177,6 +182,7 @@ q.ClientIP() is the connection's peer unless the peer is one of the TrustedProxi
 - `(w mut Out) Status(code i64)`: Status sets the response status code.
 - `(w mut Out) Type(t str)`: Type sets the Content-Type header. CR, LF and NUL in t become spaces, so a value taken from the request cannot add header lines.
 - `(w mut Out) Head(k str, v str)`: Head adds a response header. A name that is not an HTTP token is ignored, and so are Content-Length, Transfer-Encoding and Connection: anvil writes the framing itself. CR, LF and NUL in the value become spaces, so a value taken from the request cannot add header lines or a body (response splitting), as Go's net/http does.
+- `(w mut Out) Trailer(k str, v str)`: Trailer adds a trailer field, sent after the body: on HTTP/2 in a HEADERS frame that ends the stream (gRPC's grpc-status and grpc-message), on HTTP/1.1 after the last chunk of a chunked stream (w.Stream() without Length). A response with a Content-Length cannot carry trailers in HTTP/1.1: they are dropped there. Like Head, a name that is not a token and the framing fields are ignored, and CR, LF and NUL in the value become spaces.
 - `(w mut Out) Text(s str)`: Text appends s to the body.
 - `(w mut Out) Json()`: Json sets the JSON content type; the body is then written with argo.Put(mut w.Body, v).
 - `(w Out) Code() i64`: Code returns the response status set so far (200 unless Status changed it).
@@ -195,6 +201,7 @@ q.ClientIP() is the connection's peer unless the peer is one of the TrustedProxi
 - `(r mut Router) Head(pattern str, h fn(Req, mut Out))`: Head routes HEAD requests for pattern to h (without it, they go to the GET route).
 - `(r mut Router) Options(pattern str, h fn(Req, mut Out))`: Options routes OPTIONS requests for pattern to h.
 - `(r mut Router) Handle(method str, pattern str, h fn(Req, mut Out))`: Handle routes requests with method (any HTTP method name, like "PROPFIND") for pattern to h.
+- `(r mut Router) Stream(method str, pattern str, h fn(Req, mut Out))`: Stream routes method requests for pattern to h, which runs as soon as the request's headers are in and reads the body as it arrives with q.BodyStream() (#481): large uploads in bounded memory, gRPC client and bidirectional streams. TIN_MAX_BODY does not bound such a body.
 - `(r mut Router) Any(pattern str, h fn(Req, mut Out))`: Any routes requests for pattern with every method to h; a route for the request's own method on the same pattern wins over it.
 - `(r mut Router) Use(mw fn(Req, mut Out, fn(Req, mut Out)))`: Use adds middleware mw to r. Middleware run in the order added, around every route of r and of the routers mounted in it, and around their 404 and 405 answers. Each gets next, the rest of the chain, and decides whether and when to call it.
 - `(r mut Router) Route(prefix str, build fn(mut Router))`: Route groups routes under prefix ("/api"): build adds them to a new router mounted there.
@@ -208,6 +215,17 @@ q.ClientIP() is the connection's peer unless the peer is one of the TrustedProxi
 - `(r Router) Match(method str, path str) str`: Match returns the pattern of the route that would serve method and path ("/users/{id}"), or "" when the request would get 404 or 405. Like Run, it panics if r has an error (see Check).
 - `StuckCores() i64`: StuckCores is how many cores have not turned their event loop for 1.5 seconds: each is running something that does not wait (a handler stuck in a loop, say). 0 while no server runs.
 - `StuckFor() i64`: StuckFor is how long, in milliseconds, the most stuck core's event loop has not turned (0: every core turns). A service can export it and alert before a stuck core is an outage.
+- `ServeTLS(addr str, certPEM str, keyPEM str, h fn(Req, mut Out)) !`: ServeTLS is Serve over TLS 1.3 (HTTPS): certPEM is the certificate chain (leaf first) and keyPEM the leaf's private key (RSA, or ECDSA P-256 or P-384), as PEM text. The pair is checked before listening. ALPN offers "h2" (HTTP/2) and then "http/1.1"; a client without ALPN gets HTTP/1.1. Each handshake runs in a task, so slow clients never hold a core; it must finish within TIN_HANDSHAKE_TIMEOUT_MS (default: the header timeout, 10 s). Clients without TLS 1.3 are refused with a protocol_version alert, and those whose ALPN offers neither protocol with no_application_protocol.
+- `(r Router) ServeTLS(addr str, certPEM str, keyPEM str) !`: ServeTLS is Serve over TLS 1.3, as anvil.ServeTLS: the routes are checked first, then the certificate and key.
+- `type TLSConfig struct`: TLSConfig configures ServeTLSConfig: the certificate chain and private key, as ServeTLS takes them, more certificates chosen by the client's server name (#476), and client certificates (mutual TLS, #475).
+- `type TLSCert struct`: TLSCert is one certificate chain (leaf first) and its private key: PEM text, or the paths of PEM files, which the server reads again when they change (#476).
+- `ReloadCertificates(certs []TLSCert) !`: ReloadCertificates replaces the server's certificates, from any core while it serves: the first is the default, the others are chosen by the client's server name. Every pair is checked first, and a bad one fails the call and changes nothing. Each core switches at its next handshake; connections already up keep their own. Pairs given as files are read now, and when the whole set was given as files, core 0 reads them again every TIN_TLS_RELOAD_S seconds (default 60) and reloads when they changed, so a renewal written to disk needs no call.
+- `ServeTLSConfig(addr str, cfg TLSConfig, h fn(Req, mut Out)) !`: ServeTLSConfig is ServeTLS with a TLSConfig. With ClientAuth set, every full handshake asks for a client certificate: RequireClientCert refuses a client without one (certificate_required), and both refuse one that does not chain to ClientCAs for client authentication. A handler finds the verified chain in q.TLSConn().PeerCertificates().
+- `(r Router) ServeTLSConfig(addr str, cfg TLSConfig) !`: ServeTLSConfig is Serve over TLS with a TLSConfig, as anvil.ServeTLSConfig.
+- `(q Req) TLSConn() ?tls.Conn`: TLSConn is the TLS connection the request arrived on, or nil over plain TCP: for its ALPN(), CipherSuite() and Group(). After Hijack every byte must go through it (Read, Write, Close), since the descriptor carries records.
+- `type BodyReader struct`: BodyReader reads a request body: Read fills buf with the next bytes. It is q.BodyStream().
+- `(q Req) BodyStream() BodyReader`: BodyStream is the request body as a stream: on a route registered with Router.Stream it arrives as the handler reads it; elsewhere it has arrived whole (and Body has it too). Read the body either with Body or with BodyStream, not with both.
+- `(r BodyReader) Read(buf mut []u8) !i64`: Read fills buf with the body's next bytes, waiting for them, and returns how many it wrote: 0 at the end of the body. It fails when the client ends the connection or resets the stream before the end of the body, when no byte comes within the read timeout, and at the request's deadline.
 
 ## hearth
 
@@ -255,7 +273,7 @@ Package task reads the deadline and cancellation of the running code, which belo
 
 ## wire
 
-Package wire is TCP networking and a small HTTP/1.1 client. Calls block the calling core (servers should use anvil); every connection can carry a read/write timeout.
+Package wire is TCP networking and an HTTP client: HTTP/1.1, and HTTP/2 to servers that choose it by ALPN or with Options.H2C (#480). Calls inside a request wait without blocking the core; every connection can carry a read/write timeout.
 
 ```tin body
 let c = try wire.Dial("127.0.0.1:6379")
@@ -290,6 +308,79 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `Do(method str, url str, headers []str, body str) !Resp`: Do sends one request: headers is a list of name, value pairs. The method and header names must be tokens, and the URL and header values must not hold CR, LF, NUL or other control bytes (the URL no spaces either), or Do fails instead of sending a request an input could have split. Response bodies over DefaultMaxBody fail; DoWith sets a timeout and the limit.  Connections are kept alive: after a response that ends cleanly (HTTP/1.1, framed by a length or chunks, no "Connection: close") the connection waits in a per-core pool, by scheme, host and port (and TLS settings), and the next call to that host uses it instead of dialing and, for https, doing a TLS handshake. A kept connection is checked before it is used, dropped after 30 s idle, and at most Options.MaxIdle are kept per host. One the server closed meanwhile is replaced by a new connection without the caller seeing it, for a GET, HEAD, PUT, DELETE, OPTIONS or TRACE; any other method (a POST) fails instead of being sent twice.
 - `DoWith(method str, url str, headers []str, body str, opt Options) !Resp`: DoWith is Do with options: an overall timeout and a response size limit.
 - `(r Resp) Header(name str) str`: Header returns the response header name (any case), or "".
+- `(r Resp) Trailer(name str) str`: Trailer returns the response trailer name (any case), or "": HTTP/2 responses carry trailers (gRPC's grpc-status, for one; #480).
+
+## tls
+
+Package tls is TLS 1.3 (RFC 8446). Clients: tls.Dial connects and handshakes, and Conn reads and writes like wire.Conn; the server's certificate is verified by default against the system's roots (plus Config.RootCAs). A server's NewSessionTicket is kept (per core, for the same name and settings) and offered on the next connection to it, which then resumes without the certificate messages (Conn.Resumed). Servers: anvil.ServeTLS serves HTTPS with this package; LoadServerConfig reads a certificate chain and its key (RSA, ECDSA P-256 or P-384), and Server runs the server side over an accepted wire.Conn. Cipher suites: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384 and TLS_CHACHA20_POLY1305_SHA256; key exchange X25519, or P-256 by HelloRetryRequest. No 0-RTT, no renegotiation and no TLS 1.2. Every wait lets the core serve other tasks and honours Config.Timeout during the handshake, SetTimeout afterwards and a request's deadline.
+
+```tin body
+let c = try tls.Dial("example.com:443", tls.Config{ALPN: []str{"http/1.1"}})
+try c.Write("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+```
+
+- `const NoClientCert = 0`: NoClientCert, RequestClientCert and RequireClientCert are ServerConfig.ClientAuth: ask for no client certificate; ask for one and verify it when the client sends one; require a verified one.
+- `const RequestClientCert = 1`
+- `const RequireClientCert = 2`
+- `CheckServerConfig(cfg ServerConfig) !`: CheckServerConfig checks the client-certificate settings of cfg before a server starts: a known ClientAuth, and ClientCAs that hold certificates when it asks for any.
+- `type Conn struct`: Conn is a TLS 1.3 connection over a wire.Conn. After the handshake its memory only changes in place (record buffers made once, keys rewritten by seal.AEAD.Rekey), so a Conn stays valid wherever it lives: a request's pool, or keep()'s long-lived heap for a client that holds connections across requests.
+- `const TLS_AES_128_GCM_SHA256 = 0x1301`: TLS_AES_128_GCM_SHA256 is cipher suite 0x1301 (Conn.CipherSuite).
+- `const TLS_AES_256_GCM_SHA384 = 0x1302`: TLS_AES_256_GCM_SHA384 is cipher suite 0x1302.
+- `const TLS_CHACHA20_POLY1305_SHA256 = 0x1303`: TLS_CHACHA20_POLY1305_SHA256 is cipher suite 0x1303.
+- `type ServerConfig struct`: ServerConfig configures a TLS server: its certificate chain and private key, and the application protocols it speaks.
+- `LoadServerConfig(certPEM str, keyPEM str) !ServerConfig`: LoadServerConfig reads a PEM certificate chain (leaf first) and the leaf's PEM private key and checks that they belong together.
+- `Server(conn wire.Conn, cfg ServerConfig) !Conn`: Server runs the server side of the handshake over an accepted connection. The Conn owns conn from then on: its Close closes conn. Every wait lets the core serve other tasks.
+- `ServerOnFd(fd i64, cfg ServerConfig) !Conn`: ServerOnFd runs the server handshake on a socket another package owns (anvil): the Conn never closes fd. Used with ReadRaw and SealRaw.
+- `(c mut Conn) ReadRaw(p i64, cap i64) (i64, []u8)`: ReadRaw reads what the socket has without waiting, decrypts whole records and copies up to cap bytes of application data to the raw buffer at p. It returns the bytes copied (more than 0; -1 when nothing is available yet; 0 once the peer closed with close_notify or end of input; -2 when the connection is broken) and ciphertext the caller must send next: a KeyUpdate answer, or for -2 the alert to send before closing. It never waits.
+- `(c mut Conn) ClosedRaw() (bool, []u8)`: ClosedRaw reports, without waiting, whether the peer has ended the connection: its close_notify or another alert arrived, the socket reached end of input, or it failed. It decrypts what the socket has, record by record, and stops at the first one of application data, which stays buffered for ReadRaw; a KeyUpdate answer (or the alert to send) is returned for the caller to send. For a stream that asks whether its client went away: a peek at the socket sees only ciphertext.
+- `SealRawSize(n i64) i64`: SealRawSize is the most bytes SealRawTo writes for n bytes of application data.
+- `(c mut Conn) SealRaw(p i64, n i64) ![]u8`: SealRaw encrypts n bytes of application data at the raw address p into records (16 KiB each, a KeyUpdate first when the write key is worn out) for the caller to send.
+- `(c mut Conn) SealRawTo(p i64, n i64, dst i64) !i64`: SealRawTo is SealRaw into raw memory at dst, which holds SealRawSize(n) bytes; it returns the bytes written. Each record is built and sealed in place there, so nothing it allocates grows with n: an event loop seals into a buffer it reuses.
+- `(c mut Conn) CloseNotifyRaw() []u8`: CloseNotifyRaw is the close_notify alert record to send before closing.
+- `(c Conn) PendingRaw() bool`: PendingRaw reports whether the Conn holds input ReadRaw has not returned yet: decrypted data, or bytes of a record read from the socket. An event loop that stopped reading (its output was blocked) calls ReadRaw again when this is true, since the socket will not report that input.
+- `(c mut Conn) ReleaseRaw()`: ReleaseRaw ends a Conn kept in long-lived memory before its owner drops it: it marks it closed and resets the failure text, which a failed Read or Write made in a request's pool, so releasing the Conn never follows a pointer into a pool that is gone. Nothing is sent.
+- `SetTicketSecret(key secret []u8) !`: SetTicketSecret sets the 32-byte secret the server's session-ticket keys are derived from. Servers that share it (several processes behind one load balancer) resume each other's sessions. Call it before the server starts; the default is a random secret per process, or the 64 hex digits of TIN_TLS_TICKET_SECRET.
+- `type Credential struct`: Credential is a certificate chain (DER, leaf first), its private key, and the names its leaf covers (its DNS names and IP addresses, lower case), for ServerConfig.Others.
+- `LoadCredential(certPEM str, keyPEM str) !Credential`: LoadCredential reads a PEM certificate chain (leaf first) and the leaf's PEM private key and checks that they belong together.
+- `type Config struct`: Config configures a client connection; the zero value verifies the server against the system's roots for the name in the address.
+- `Dial(addr str, cfg Config) !Conn`: Dial connects to "host:port" and runs the handshake. ServerName defaults to host.
+- `Client(conn wire.Conn, cfg Config) !Conn`: Client runs the handshake over an established connection, for protocols that switch to TLS mid-stream (MySQL, PostgreSQL). cfg.ServerName is required unless InsecureSkipVerify is set. The Conn owns conn from then on: its Close closes conn.
+- `(c mut Conn) SetTimeout(ns i64)`: SetTimeout limits every later read and write to ns nanoseconds (0: no limit).
+- `(c mut Conn) SetDeadline(at i64)`: SetDeadline makes every later wait fail once the monotonic clock (tide.Now) passes at (0: no deadline), whatever the per-call timeout: wire uses it for a whole HTTP call.
+- `(c Conn) ALPN() str`: ALPN is the application protocol the server chose ("" when none).
+- `(c Conn) CipherSuite() i64`: CipherSuite is the negotiated cipher suite (TLS_AES_128_GCM_SHA256 and so on).
+- `(c Conn) Group() str`: Group is the key exchange: "X25519", or "P-256" when the server asked for it.
+- `const VersionTLS13 = 0x0304`: VersionTLS13 is TLS 1.3's protocol version (Conn.Version).
+- `(c Conn) Version() i64`: Version is the negotiated protocol version: VersionTLS13.
+- `(c Conn) Resumed() bool`: Resumed reports whether the handshake resumed an earlier session with a ticket: the server's certificate was checked on that session, and PeerCertificates is empty.
+- `(c Conn) PeerCertificates() [][]u8`: PeerCertificates is the peer's certificate chain as sent (DER, leaf first): on a client the server's, on a server the client's when it sent one (mutual TLS, #475).
+- `(c Conn) Fd() i64`: Fd is the connection's descriptor (for waiting on it; never read or write it directly).
+- `(c Conn) Buffered() i64`: Buffered is how many decrypted bytes a Read returns without waiting.
+- `(c mut Conn) Read(buf mut []u8, max i64) !i64`: Read appends up to max bytes of application data to buf and returns how many; after the server's close_notify it fails with EOF (wire.IsEOF), and a connection the server drops without close_notify is a fault, not EOF (a truncation would otherwise look complete).
+- `(c mut Conn) ReadNow(buf mut []u8, max i64) !i64`: ReadNow is Read without waiting: it returns 0 when no application data can be had without waiting for the socket (then wait until Fd is readable and call it again). For clients that run their own non-blocking loop; data TLS has already buffered is always returned first.
+- `(c mut Conn) ReadNowTo(p i64, max i64) !i64`: ReadNowTo is ReadNow into the raw buffer at p, at most max bytes: for trusted code that keeps its own buffers (the kafka client reads frames of many megabytes this way, with no copy per record).
+- `(c mut Conn) ReadFull(n i64) !str`: ReadFull reads exactly n bytes.
+- `(c mut Conn) WriteBytes(b []u8) !`: WriteBytes sends all of b.
+- `(c mut Conn) Write(s str) !`: Write sends all of s.
+- `(c mut Conn) Close()`: Close sends close_notify and closes the connection; closing twice does nothing.
+
+## hpack
+
+Package hpack is HPACK (RFC 7541), HTTP/2's header compression, for HTTP/2 clients (wire, #480): a Decoder that keeps one connection's dynamic table and decodes Huffman-coded strings, and Encode, which writes a header list with static-table names and plain literals that are never indexed, so it keeps no state and adds nothing to the peer's table. anvil's server has its own decoder, which hands fields over without copying them.
+
+```tin body
+mut block = make([]u8, 0, 64)
+hpack.Encode(mut block, []hpack.Field{hpack.Field{Name: ":status", Value: "200"}})
+let d = hpack.NewDecoder(4096, 65536)
+let fields = try d.Decode(block)
+```
+
+- `type Field struct`: Field is one header field.
+- `type Decoder struct`: Decoder decodes the header blocks one peer sends on a connection, in order: its dynamic table carries from block to block. The table is in malloc'd memory, so a decoder kept with a connection outlives the requests that used it; Free releases it.
+- `NewDecoder(tableSize i64, listMax i64) Decoder`: NewDecoder is a decoder for a peer allowed a table of tableSize bytes (4096 unless the connection's settings say otherwise, at most 8192) whose header lists stay within listMax bytes.
+- `(d Decoder) Free()`: Free releases the decoder's table; the decoder must not be used again.
+- `(d Decoder) Decode(block []u8) ![]Field`: Decode decodes one header block (the fragments of a HEADERS frame and its CONTINUATIONs, joined). An error is a COMPRESSION_ERROR: the connection must end, since the table is no longer the peer's.
+- `Encode(b mut []u8, fields []Field)`: Encode appends the header block of fields to b: a static entry where one matches name and value exactly, else a literal without indexing (with a static name where there is one). Names must be lowercase, as HTTP/2 requires.
 
 ## twine
 
@@ -525,7 +616,7 @@ Package bits counts, rotates and reverses the bits of fixed-width unsigned integ
 - `Add32(x u32, y u32, carry u32) (u32, u32)`: Add32 returns the sum x + y + carry and the carry out (0 or 1).
 - `Sub64(x u64, y u64, borrow u64) (u64, u64)`: Sub64 returns the difference x - y - borrow and the borrow out. borrow must be 0 or 1, otherwise the behavior is undefined.
 - `Sub32(x u32, y u32, borrow u32) (u32, u32)`: Sub32 returns the difference x - y - borrow and the borrow out (0 or 1).
-- `Mul64(x u64, y u64) (u64, u64)`: Mul64 returns the 128-bit product of x and y as (high word, low word).
+- `Mul64(x u64, y u64) (u64, u64)`: Mul64 returns the 128-bit product of x and y as (high word, low word): two instructions, umulh and mul on arm64, one mul on x86-64 (#474).
 - `Mul32(x u32, y u32) (u32, u32)`: Mul32 returns the 64-bit product of x and y as (high word, low word).
 - `const Div64Mask32 = two32 - 1`
 - `Div64(hi u64, lo u64, y u64) (u64, u64)`: Div64 returns the quotient and remainder of (hi, lo) divided by y. It panics for y == 0 (division by zero) and for y <= hi (the quotient does not fit in 64 bits).
@@ -744,7 +835,7 @@ Package tide is clocks, durations and civil (calendar) time in UTC, like Go's ti
 - `CivilFromDays(z i64) (i64, i64, i64)`: CivilFromDays returns the (year, month, day) that is z days after 1970-01-01.
 - `UTCSec(sec i64) Civil`: UTCSec breaks Unix seconds into UTC calendar fields (Nano is 0); it covers every i64 second.
 - `UTC(ns i64) Civil`: UTC breaks the Unix-nanosecond instant ns into its UTC calendar fields.
-- `Date(year i64, month i64, day i64, hour i64, min i64, sec i64, nano i64) i64`: Date returns the Unix nanoseconds of the UTC civil time; out-of-range fields carry like Go's time.Date (month 13 is January of the next year).
+- `Date(year i64, month i64, day i64, hour i64, min i64, sec i64, nano i64) i64`: Date returns the Unix nanoseconds of the UTC civil time; out-of-range fields carry like Go's time.Date (month 13 is January of the next year), and a time outside the years 1677..2262 that i64 nanoseconds hold panics (integer overflow).
 - `Unix(c Civil) i64`: Unix returns the Unix nanoseconds of c (the inverse of UTC; Weekday and YearDay are ignored, other fields carry).
 - `UnixSec(c Civil) i64`: UnixSec returns the Unix seconds of c, rounded toward negative infinity.
 - `WeekdayName(d i64) str`: WeekdayName returns the English name of weekday d (0 = Sunday), or "%!Weekday(d)" with d unsigned like Go.
@@ -814,7 +905,7 @@ Package sift sorts and searches slices and has the generic functions on them (li
 - `UniqInts(xs mut []i64) i64`: UniqInts compacts runs of equal values in sorted xs to one element and returns the new length (xs[0:k] is the result).
 - `MinInts(xs []i64) !i64`: MinInts returns the smallest element of xs, or a fault when xs is empty.
 - `MaxInts(xs []i64) !i64`: MaxInts returns the largest element of xs, or a fault when xs is empty.
-- `SumInts(xs []i64) i64`: SumInts returns the sum of xs (wrapping on overflow, 0 for an empty slice).
+- `SumInts(xs []i64) i64`: SumInts returns the sum of xs (0 for an empty slice); it panics when the sum overflows i64.
 - `IndexInts(xs []i64, x i64) i64`: IndexInts returns the index of the first x in xs, or -1.
 - `ContainsStr(xs []str, x str) bool`: ContainsStr reports whether x occurs in xs.
 - `EqualInts(a []i64, b []i64) bool`: EqualInts reports whether a and b have the same length and elements.
@@ -988,6 +1079,7 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1), HMAC o
 - `(a AEAD) NonceSize() i64`: NonceSize is the nonce length in bytes (12).
 - `(a AEAD) Overhead() i64`: Overhead is the tag length in bytes (16).
 - `(a AEAD) Seal(nonce []u8, plaintext secret []u8, aad []u8) ![]u8`: Seal encrypts plaintext and authenticates it with aad under a 12-byte nonce, returning the ciphertext followed by the tag. A nonce must never be used twice with one key.
+- `(a AEAD) SealTo(nonce []u8, src i64, n i64, aad []u8, dst i64) !`: SealTo is Seal into raw memory: it encrypts the n bytes at src into dst and writes the 16-byte tag after them (dst may be src, to seal in place). Nothing it allocates grows with n, so a connection that streams can seal into a buffer of its own instead of its request's pool; AES-GCM on the CPU's instructions allocates nothing at all.
 - `(a AEAD) Open(nonce []u8, sealed []u8, aad []u8) ![]u8`: Open checks the tag of sealed (ciphertext then tag) against aad and the nonce and returns the plaintext; it fails, revealing nothing else, when anything was changed.
 - `(a mut AEAD) Rekey(key secret []u8) !`: Rekey replaces a's key with key, of the same algorithm and length, reusing a's memory: an AEAD kept in long-lived memory (a connection's state) can change keys without allocating there.
 - `AESHardware() bool`: AESHardware reports whether AES-GCM runs on the CPU's AES instructions here (AES-NI and PCLMULQDQ, or ARMv8 AES and PMULL); without them it runs a slower constant-time software path and ChaCha20-Poly1305 is the faster choice.
@@ -998,6 +1090,9 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1), HMAC o
 - `SignECDSA(k ECPrivateKey, h Hash, digest []u8) ![]u8`: SignECDSA signs digest (a hash of the message, made with h) with k and returns a DER ECDSA-Sig-Value. The nonce is RFC 6979's, derived with HMAC over h, so equal inputs give equal signatures.
 - `(k PrivateKey) SignTLS(scheme i64, msg []u8) ![]u8`: SignTLS signs msg (the bytes a TLS 1.3 CertificateVerify covers) with k under scheme: RSA-PSS 0x0804-0x0806 for RSA keys, 0x0403 for P-256 and 0x0503 for P-384.
 - `VerifyEd25519(pub []u8, msg []u8, sig []u8) !`: VerifyEd25519 checks an Ed25519 signature (64 bytes) of msg by the public key pub (32 bytes).
+- `type Ed25519PrivateKey struct`: Ed25519PrivateKey is an Ed25519 key: the 32-byte seed and the public key it gives.
+- `Ed25519PublicKey(seed secret []u8) ![]u8`: Ed25519PublicKey is the 32-byte public key of a 32-byte Ed25519 seed.
+- `SignEd25519(seed secret []u8, msg []u8) ![]u8`: SignEd25519 is the 64-byte Ed25519 signature of msg by the key with the 32-byte seed (pure Ed25519: msg is not hashed first).
 - `type Hash enum { SHA256, SHA384, SHA512 }`: Hash names a SHA-2 function for Hmac and HKDF.
 - `Sum(h Hash, s secret str) []u8`: Sum is the digest of s under h; s may be secret.
 - `Size(h Hash) i64`: Size is the length in bytes of h's digest.
@@ -1008,7 +1103,7 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1), HMAC o
 - `HkdfExpandLabel(h Hash, key secret str, label str, context str, n i64) ![]u8`: HkdfExpandLabel is TLS 1.3's HKDF-Expand-Label(secret, label, context, n) (RFC 8446 section 7.1); label is given without the "tls13 " prefix. key may be secret.
 - `type RSAPrivateKey struct`: RSAPrivateKey is an RSA key with its CRT values; the private parts can only be read by seal.
 - `type ECPrivateKey struct`: ECPrivateKey is an ECDSA key on P-256 or P-384: the curve, the scalar and the uncompressed public point.
-- `type PrivateKey struct`: PrivateKey is an RSA or ECDSA private key, as ParsePrivateKeyPEM reads it.
+- `type PrivateKey struct`: PrivateKey is an RSA, ECDSA or Ed25519 private key, as ParsePrivateKeyPEM reads it.
 - `ParsePrivateKeyDER(der []u8) !PrivateKey`: ParsePrivateKeyDER reads a PKCS #8 PrivateKeyInfo, a PKCS #1 RSAPrivateKey or a SEC 1 ECPrivateKey.
 - `ParsePrivateKeyPEM(pem str) !PrivateKey`: ParsePrivateKeyPEM reads the first "PRIVATE KEY", "RSA PRIVATE KEY" or "EC PRIVATE KEY" block of pem.
 - `(k PrivateKey) MatchesCertificate(c Certificate) bool`: MatchesCertificate reports whether k is the private key of c's public key.
@@ -1312,7 +1407,7 @@ A key picks the partition the way the Java client does (murmur2), so a key lands
 - `(c Client) DescribeConfigs(kind Resource, name str) ![]Config`: DescribeConfigs is the configuration of a topic or a broker (a broker by its node id).
 - `(c Client) SetConfig(kind Resource, name str, key str, value str) !`: SetConfig sets one config of a topic or a broker (IncrementalAlterConfigs: the others stay).
 - `(c Client) ResetConfig(kind Resource, name str, key str) !`: ResetConfig removes one config of a topic or a broker, back to its default.
-- `(c Client) Close()`: Close closes this core's connections of the client; the next request connects again. Requests waiting on them fail.
+- `(c Client) Close()`: Close closes this core's connections of the client; the next request connects again. Requests waiting on them fail, including one another task is waiting on (a held fetch).
 - `type Want struct`: Want names a partition and the offset to read it from.
 - `type Part struct`: Part is what a fetch learned about one partition.
 - `type Fetched struct`: Fetched is the records of a FetchAll, in partition order, and what it learned of each partition.
@@ -1385,7 +1480,7 @@ fn echo(ws websocket.Conn, m websocket.Message) ! {
 - `type Conn struct`: Conn is a WebSocket connection.
 - `Accept(q anvil.Req, w mut anvil.Out) !Conn`: Accept completes the opening handshake for request q and takes over its connection. A request that is not a WebSocket handshake gets a 400 (426 for another version) in w and fails. The connection and its buffers close when the handler returns.
 - `Dial(url str) !Conn`: Dial connects to a ws:// or wss:// URL ("ws://host:port/path"); wss:// verifies the server's certificate against the system's roots. Close it when finished; inside a request task, it is also closed automatically when its scope ends.
-- `DialTLS(url str, cfg tls.Config) !Conn`: DialTLS is Dial with the TLS configuration of a wss:// URL (RootCAs, Timeout for the handshake, InsecureSkipVerify for tests); the server name is the URL's host.
+- `DialTLS(url str, cfg tls.Config) !Conn`: DialTLS is Dial with the TLS configuration of a wss:// URL (RootCAs, Timeout for the handshake, InsecureSkipVerify for tests); the server name is the URL's host, and ALPN offers http/1.1 whatever cfg.ALPN says (the upgrade is HTTP/1.1).
 - `(c Conn) SetTimeout(ns i64)`: SetTimeout limits every later read and write to ns nanoseconds (0: no limit).
 - `(c Conn) SetMaxMessage(n i64)`: SetMaxMessage sets the largest message Read accepts (default 16 MiB); a bigger one closes the connection with 1009.
 - `(c Conn) WriteText(s str) !`: WriteText sends s as a text message.

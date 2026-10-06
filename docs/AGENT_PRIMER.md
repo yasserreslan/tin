@@ -34,9 +34,13 @@ the compiler: write a minimal repro to notes/compiler_bugs_NAME.md and work arou
   it, so `mut ys = xs` is one slice under two names: copy for a snapshot, sift.Clone; reading ys after append grew xs is E641), map[K]V (K = str, ints, bool, f64, or structs/enums of those, by value; insertion-ordered),
   struct (reference, never nil; == compares fields by value, same(a, b) is identity; a struct with a slice/map/func field cannot be compared, E237), ?T optional (may be nil; T a number, bool or reference: ?i64 is a boxed value, narrow it with != nil, store it in a global as keep(5)), fault (error;
   nil = ok), fn(A) R function values (top-level functions or literals, which may capture).
-- No implicit conversions: i64(x), u8(x), f64(x), str(c) for a rune/byte, str(bytes []u8). Untyped
-  constants adapt and must fit. Conditions must be bool. Integer overflow wraps; division by zero
-  panics; shift counts are taken mod 64. Literals: 0x, 0b, 0o, 1_000; units `200ms` `5s` `1h`
+- No implicit conversions: i64(x), u8(x) (truncates: the low byte), f64(x), str(c) for a rune/byte,
+  str(bytes []u8). Untyped constants adapt and must fit; constant arithmetic is exact (E223).
+  Conditions must be bool. Integer + - * and negation panic on overflow (`integer overflow: +`; in a
+  handler: 500, the core goes on), signed / panics on MIN / -1, division by zero panics, a shift
+  count must be below the width, i64(f) panics out of range or on NaN. Where wrapping is the intent
+  (hashes, checksums, PRNGs) write `h *%= prime`, `a +% b`, `a -% b`, or a whole `@wrap fn` kernel;
+  never rely on wrap otherwise. Literals: 0x, 0b, 0o, 1_000; units `200ms` `5s` `1h`
   (nanoseconds, for tide and `within`) and `64kb` `4mb` (bytes).
 - Structs: `type User struct {` one `name Type` per line `}`; literals always name fields:
   `User{id: 1, name: "a"}`. `@json("id") id i64` sets a JSON key. Methods:
@@ -110,6 +114,10 @@ the compiler: write a minimal repro to notes/compiler_bugs_NAME.md and work arou
   (sendfile, never read into memory), `w.Closed()` to see a client that left, `w.Abort()` when the data
   source fails half way. A write fails when the client stops reading (TIN_WRITE_TIMEOUT_MS) or the request
   is cancelled: return then. The deadline restarts after each write. See examples/sse.tin.
+- HTTP/2: anvil also serves h2c (prior knowledge, or `Upgrade: h2c`) on the same port; handlers,
+  the Router and streaming are unchanged, each stream in its own task. `w.Trailer(k, v)` adds a
+  trailer (HTTP/2, or after the last chunk of an HTTP/1.1 chunked stream); `q.Proto()` is
+  "HTTP/2.0", "HTTP/1.1" or "HTTP/1.0". A unary gRPC service: examples/grpc.tin.
 - Services route with `let r = anvil.NewRouter()` in main: ``r.Get(`/users/{id}`, user)`` (Post, Put,
   Patch, Delete, Head, Options, Handle(method, ...), Any), `q.PathParam("id")` (%-decoded), a last
   `{path...}` or `*` for the rest; patterns with {...} are raw strings. Static beats {name} beats the
@@ -121,7 +129,9 @@ the compiler: write a minimal repro to notes/compiler_bugs_NAME.md and work arou
   `r.NotFound(h)`, `r.MethodNotAllowed(h)`. `try r.Serve(":8080")` fails first on a bad or
   conflicting pattern (`r.Check()`). Test without a server: `let w = r.Run("GET", "/users/7", "")`
   then `w.Code()`, `w.Header("Allow")`, `str(w.Body)`; `r.Match(method, path)` is the pattern that
-  would serve.
+  would serve. HTTPS: `try r.ServeTLS(":8443", certPEM, keyPEM)` (or `anvil.ServeTLS(addr, certPEM,
+  keyPEM, h)`): PEM text, chain leaf first, RSA or ECDSA key; `q.TLSConn()` is the request's TLS
+  connection; `websocket.Accept` works on it (wss://). examples/https_server.tin.
 - Memory: no GC. Allocations during a request go to the core's request pool (wiped per request);
   globals live in the long-lived ingot heap. Storing request memory into a global (or anything a global
   holds) without `keep(x)` is a compile error. keep() deep-copies into the ingot heap.
@@ -160,11 +170,14 @@ differences go in NAME_darwin.tin / NAME_linux.tin (see docs/PORTING.md); never 
 flag value in shared code. Runtime helpers you may call: rt_str_from_raw(p, n) str, rt_str_new(n) i64
 (len set, bytes at +8), rt_append_str(cast(i64, b), s), rt_slice_grow(h, need, esz), rt_alloc(n),
 rt_ingot_alloc(n), rt_core_id(), rt_errno(). Prefer plain Tin over raw tricks unless speed demands it.
+Library packages are overflow-checked like user code: mark intended wraps (`+%`, `-%`, `*%`, or `@wrap fn`
+for a hash, PRNG or constant-time crypto kernel), and write the magnitude of a negative i64 as
+`u64(0 -% v)` (0 - v panics for the most negative value). Only lib/runtime/ keeps machine arithmetic.
 Keep comments one line, ending with a period.
 
 ## Standard library (import instead of re-implementing)
-say(fmt) fault(error chains) twine(strings) glyph(utf8) mint(strconv) argo(JSON) anvil(HTTP server,
-router) wire(TCP, HTTP(S) client) tls(TLS 1.3 client) hearth(cores) relay(cross-core messages)
+say(fmt) fault(error chains) twine(strings) glyph(utf8) mint(strconv) argo(JSON) anvil(HTTP/1.1 and HTTP/2 server,
+router, HTTPS) wire(TCP, HTTP(S) client) tls(TLS 1.3 client and server) hearth(cores) relay(cross-core messages)
 task(deadline, cancellation) lane(queues between tasks) policy(with policies) tide(time)
 quarry(os/files/env) trail(paths) lever(flags/args) sift(sort/search) atlas(maps) cairn(containers)
 gauge(math) dice(random) stamp(non-crypto hashes) squash(gzip, zlib, snappy, lz4, zstd) seal(SHA-2, HMAC, HKDF, AES-GCM,
