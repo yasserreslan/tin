@@ -282,7 +282,7 @@ fn adapt_int(e i64, want_in i64) i64 {
 fn chk_ident(e i64, want i64) i64 {
 	let name = cast(IdentExpr, e).name
 	if name == "true" || name == "false" {
-		replace_node(e, mk_int(cast(Node, e).pos, streq(name, "true"), 0))
+		replace_node(e, mk_int(cast(Node, e).pos, i64(name == "true"), 0))
 		return ty_bool
 	}
 	let s = lookup_name(name)
@@ -1328,7 +1328,7 @@ fn type_pkg(t Ty) str {
 	for i < len(n) && i64(n[i]) != '.' {
 		i = i + 1
 	}
-	return str_slice(cstr(n), i)
+	return n[:i]
 }
 
 // enum_type_of returns the enum type x names (Shape, geo.Shape, Option[i64]), or 0.
@@ -1579,9 +1579,9 @@ fn chk_composite(e i64, want i64) i64 {
 			} else if fi >= nf {
 				err_code_at(pos, "E216 COMPOSITE", "too many values in struct literal")
 				return cast(i64, t)
-			} else if foreign_type(t) != 0 && is_private(str_of(cast([]i64, t.fields[fi])[0])) != 0 {
+			} else if foreign_type(t) != 0 && is_private(cast(Field, t.fields[fi]).name) != 0 {
 				// A positional value sets the field as surely as its name would (#96).
-				private_use(cast(Node, elems[i]).pos, "field", str_of(cast([]i64, t.fields[fi])[0]), type_pkg(t))
+				private_use(cast(Node, elems[i]).pos, "field", cast(Field, t.fields[fi]).name, type_pkg(t))
 			}
 			set[fi] = 1
 			let ft = field_type(t, fi)
@@ -1665,10 +1665,10 @@ fn chk_composite(e i64, want i64) i64 {
 fn init_zero_field(pos i64, stmts []i64, obj i64, t Ty, fi i64) {
 	let ft = field_type(t, fi)
 	let k = kind_of(cast(Ty, ft))
-	let rec = cast([]i64, t.fields[fi])
-	if k == K_SLICE && len(rec) > 4 && rec[3] > 0 {
-		array_inner = rec[4]
-		stmts = append(stmts, assign_stmt(pos, field_store(pos, sym_ref_node(pos, cast(Sym, obj)), cast(i64, t), fi), array_make(pos, cast(Ty, ft), rec[3])))
+	let rec = cast(Field, t.fields[fi])
+	if k == K_SLICE && rec.arr > 0 {
+		array_inner = rec.inner
+		stmts = append(stmts, assign_stmt(pos, field_store(pos, sym_ref_node(pos, cast(Sym, obj)), cast(i64, t), fi), array_make(pos, cast(Ty, ft), rec.arr)))
 		return
 	}
 	if k == K_STRING || k == K_SLICE {
@@ -1676,7 +1676,7 @@ fn init_zero_field(pos i64, stmts []i64, obj i64, t Ty, fi i64) {
 	} else if k == K_STRUCT || k == K_MAP || k == K_FUNC || k == K_DYN {
 		let m = err_code(pos, "E203 NO_ZERO_VALUE")
 		buf_str(m, "field ")
-		buf_str(m, str_of(cast([]i64, t.fields[fi])[0]))
+		buf_str(m, cast(Field, t.fields[fi]).name)
 		buf_str(m, " of type ")
 		type_name(cast([]u8, m), cast(Ty, ft))
 		if k == K_DYN {
@@ -1723,9 +1723,8 @@ fn closure_keeper(pos i64, cf Fn) i64 {
 	let nb = buf_new()
 	buf_str(nb, "keep$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.file = cf.file
 	f.params = append(f.params, "d")
@@ -1782,8 +1781,7 @@ fn chk_funclit(e i64) i64 {
 	let b = buf_new()
 	buf_str(b, "func$")
 	buf_int(b, lifted_count)
-	buf_byte(b, 0)
-	f.name = buf_cstring(b)
+	f.name = str(b)
 	f.file = ck_file
 	f.lifted = 1
 	f.qname = f.name
@@ -1886,21 +1884,21 @@ fn chk_unit(e i64, want i64) i64 {
 		return ty_int
 	}
 	mut scale = 1
-	if str_of(u) == "us" {
+	if u == "us" {
 		scale = 1000
-	} else if str_of(u) == "ms" {
+	} else if u == "ms" {
 		scale = 1000000
-	} else if str_of(u) == "s" {
+	} else if u == "s" {
 		scale = 1000000000
-	} else if str_of(u) == "m" {
+	} else if u == "m" {
 		scale = 60000000000
-	} else if str_of(u) == "h" {
+	} else if u == "h" {
 		scale = 3600000000000
-	} else if str_of(u) == "kb" {
+	} else if u == "kb" {
 		scale = 1024
-	} else if str_of(u) == "mb" {
+	} else if u == "mb" {
 		scale = 1048576
-	} else if str_of(u) == "gb" {
+	} else if u == "gb" {
 		scale = 1073741824
 	}
 	let v = cast(UnitExpr, e).value
@@ -1944,15 +1942,15 @@ fn chk_boundary(e i64) i64 {
 		// limit memory n, tasks k: each bound at most once.
 		mut i = 0
 		for i < len(cast(BoundaryStmt, e).args) {
-			let item = cast([]i64, cast(BoundaryStmt, e).args[i])
-			let name = item[0]
-			let v = bound_int_arg(item[1])
-			if str_of(name) == "memory" {
+			let item = cast(NameBind, cast(BoundaryStmt, e).args[i])
+			let name = item.name
+			let v = bound_int_arg(item.val)
+			if name == "memory" {
 				arg = v
-			} else if str_of(name) == "tasks" {
+			} else if name == "tasks" {
 				arg2 = v
 			} else {
-				err_code_quoted(pos, "E650 BOUNDARY", "limit bounds are memory and tasks, not ", str_of(name), "")
+				err_code_quoted(pos, "E650 BOUNDARY", "limit bounds are memory and tasks, not ", name, "")
 			}
 			i = i + 1
 		}
@@ -2092,9 +2090,8 @@ fn parallel_wrapper(pos i64, lits []i64, vts []i64) i64 {
 	let nb = buf_new()
 	buf_str(nb, "parallel$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.file = ck_file
 	f.bang = 1
@@ -2218,9 +2215,8 @@ fn boundary_wrapper(pos i64, kind i64, ct i64, vt i64) i64 {
 	let nb = buf_new()
 	buf_str(nb, "boundary$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.file = ck_file
 	f.bang = 1
@@ -2398,9 +2394,8 @@ fn arena_wrapper(pos i64, ct i64, vt i64, fails i64) i64 {
 	let nb = buf_new()
 	buf_str(nb, "arena$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.file = ck_file
 	f.bang = fails
@@ -2632,9 +2627,8 @@ fn with_wrapper(pos i64, ct i64, pt i64, bt i64, tt i64, vt i64) i64 {
 	let nb = buf_new()
 	buf_str(nb, "with$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.done = 1
 	f.file = ck_file
@@ -2755,9 +2749,8 @@ fn with_adapter(pos i64, w Fn, ct i64, bt Ty, tt i64, vt i64) i64 {
 	let nb = buf_new()
 	buf_str(nb, w.name)
 	buf_str(nb, "$body")
-	buf_byte(nb, 0)
-	a.qname = buf_cstring(nb)
-	a.name = buf_cstring(nb)
+	a.qname = str(nb)
+	a.name = str(nb)
 	a.lifted = 2
 	a.done = 1
 	a.file = ck_file
@@ -3180,8 +3173,7 @@ fn overload(pkg str, name str, e Call) i64 {
 	buf_str(b, name)
 	buf_str(b, "__")
 	type_name(cast([]u8, b), cast(Ty, default_type(cast(i64, t))))
-	buf_byte(b, 0)
-	return cast(i64, find_fn(buf_cstring(b)))
+	return cast(i64, find_fn(str(b)))
 }
 
 fn indirect_call(e i64) i64 {
@@ -3860,9 +3852,8 @@ fn argo_fn(pos i64, t Ty) i64 {
 	let nb = buf_new()
 	buf_str(nb, "argo$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	let bt = ty_byte_slice()
 	f.params = append(f.params, "b")
@@ -3910,18 +3901,16 @@ fn argo_fn(pos i64, t Ty) i64 {
 				buf_byte(head, '"')
 				buf_str(head, vn)
 				buf_byte(head, '"')
-				buf_byte(head, 0)
-				argo_raw(pos, vb, cast(i64, b), buf_cstring(head))
+				argo_raw(pos, vb, cast(i64, b), str(head))
 			} else {
 				buf_str(head, "{{\"")
 				buf_str(head, vn)
 				buf_str(head, "\":")
-				buf_byte(head, 0)
-				argo_raw(pos, vb, cast(i64, b), buf_cstring(head))
+				argo_raw(pos, vb, cast(i64, b), str(head))
 				mut kk = 0
 				for kk < nfv {
 					let fi2 = v.first + kk
-					let full = cast([]i64, t.fields[fi2])[0]
+					let full = cast(Field, t.fields[fi2]).name
 					let piece = buf_new()
 					if kk == 0 {
 						buf_byte(piece, '{')
@@ -3929,10 +3918,9 @@ fn argo_fn(pos i64, t Ty) i64 {
 						buf_byte(piece, ',')
 					}
 					buf_byte(piece, '"')
-					buf_str(piece, str_of(full)[strlen(cstr(vn)) + 1:])
+					buf_str(piece, full[len(vn) + 1:])
 					buf_str(piece, "\":")
-					buf_byte(piece, 0)
-					argo_raw(pos, vb, cast(i64, b), buf_cstring(piece))
+					argo_raw(pos, vb, cast(i64, b), str(piece))
 					let ft2 = field_type(t, fi2)
 					argo_emit(pos, vb, cast(i64, b), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi2), ft2), cast(Ty, ft2))
 					kk = kk + 1
@@ -3947,19 +3935,18 @@ fn argo_fn(pos i64, t Ty) i64 {
 		mut fi = 0
 		mut lead = "{{"
 		for fi < nf {
-			mut fname = cast([]i64, t.fields[fi])[0]
-			let json_name = cast([]i64, t.fields[fi])[5]
-			if json_name != 0 {
+			mut fname = cast(Field, t.fields[fi]).name
+			let json_name = cast(Field, t.fields[fi]).json
+			if len(json_name) != 0 {
 				fname = json_name
 			}
 			let ft = field_type(t, fi)
 			let piece = buf_new()
 			buf_str(piece, lead)
 			buf_byte(piece, '"')
-			buf_str(piece, str_of(fname))
+			buf_str(piece, fname)
 			buf_str(piece, "\":")
-			buf_byte(piece, 0)
-			argo_raw(pos, body, cast(i64, b), buf_cstring(piece))
+			argo_raw(pos, body, cast(i64, b), str(piece))
 			argo_emit(pos, body, cast(i64, b), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi), ft), cast(Ty, ft))
 			lead = ","
 			fi = fi + 1
@@ -4427,10 +4414,10 @@ fn argo_denum(pos i64, body []i64, p i64, x i64, t Ty) {
 			mut kk = 0
 			for kk < nfv {
 				let fi = v.first + kk
-				let full = cast([]i64, t.fields[fi])[0]
+				let full = cast(Field, t.fields[fi]).name
 				let ft = field_type(t, fi)
 				let fb = cast(IfStmt, node_new(ST_IF, pos))
-				fb.cond = rt_call(pos, "rt_str_eq", args2(sym_ref_node(pos, cast(Sym, key.sym)), lit_string(pos, str_of(full)[strlen(cstr(vn)) + 1:])), ty_bool)
+				fb.cond = rt_call(pos, "rt_str_eq", args2(sym_ref_node(pos, cast(Sym, key.sym)), lit_string(pos, full[len(vn) + 1:])), ty_bool)
 				fb.then = empty_block(pos)
 				let fbb = cast(Block, fb.then).stmts
 				let fk = kind_of(cast(Ty, ft))
@@ -4523,9 +4510,8 @@ fn argo_dfn(pos i64, t Ty) i64 {
 	let nb = buf_new()
 	buf_str(nb, "argo$d")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.params = append(f.params, "p")
 	f.params = append(f.params, "x")
@@ -4575,14 +4561,14 @@ fn argo_dfn(pos i64, t Ty) i64 {
 		mut last = cast(IfStmt, 0)
 		mut fi = 0
 		for fi < len(t.fields) {
-			mut fname = cast([]i64, t.fields[fi])[0]
-			let json_name = cast([]i64, t.fields[fi])[5]
-			if json_name != 0 {
+			mut fname = cast(Field, t.fields[fi]).name
+			let json_name = cast(Field, t.fields[fi]).json
+			if len(json_name) != 0 {
 				fname = json_name
 			}
 			let ft = field_type(t, fi)
 			let br = cast(IfStmt, node_new(ST_IF, pos))
-			br.cond = rt_call(pos, "rt_str_eq", args2(sym_ref_node(pos, cast(Sym, key.sym)), lit_string(pos, str_of(fname))), ty_bool)
+			br.cond = rt_call(pos, "rt_str_eq", args2(sym_ref_node(pos, cast(Sym, key.sym)), lit_string(pos, fname)), ty_bool)
 			br.then = empty_block(pos)
 			let bb = cast(Block, br.then).stmts
 			let fk = kind_of(cast(Ty, ft))
@@ -4748,9 +4734,8 @@ fn argo_vfn(pos i64, t Ty) i64 {
 	let nb = buf_new()
 	buf_str(nb, "argo$v")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.params = append(f.params, "p")
 	f.ptypes = append(f.ptypes, pt)
@@ -4797,13 +4782,13 @@ fn argo_vfn(pos i64, t Ty) i64 {
 		mut last = cast(IfStmt, 0)
 		mut fi = 0
 		for fi < len(t.fields) {
-			mut fname = cast([]i64, t.fields[fi])[0]
-			let json_name = cast([]i64, t.fields[fi])[5]
-			if json_name != 0 {
+			mut fname = cast(Field, t.fields[fi]).name
+			let json_name = cast(Field, t.fields[fi]).json
+			if len(json_name) != 0 {
 				fname = json_name
 			}
 			let br = cast(IfStmt, node_new(ST_IF, pos))
-			br.cond = rt_call(pos, "rt_str_eq", args2(sym_ref_node(pos, cast(Sym, key.sym)), lit_string(pos, str_of(fname))), ty_bool)
+			br.cond = rt_call(pos, "rt_str_eq", args2(sym_ref_node(pos, cast(Sym, key.sym)), lit_string(pos, fname)), ty_bool)
 			br.then = empty_block(pos)
 			argo_vval(pos, cast(Block, br.then).stmts, p, cast(Ty, field_type(t, fi)))
 			if cast(i64, last) != 0 {
@@ -5033,7 +5018,7 @@ shared mut say_struct_fns []Fn
 
 // field_name is the declared name of field i of struct type t.
 fn field_name(t Ty, i i64) str {
-	return str_of(cast([]i64, t.fields[i])[0])
+	return cast(Field, t.fields[i]).name
 }
 
 // say_struct_fn returns the generated function that prints one (non-nil) struct of type t as
@@ -5049,8 +5034,8 @@ fn say_struct_fn(t Ty, prefix str) Fn {
 	}
 	mut i = 0
 	for i < len(say_struct_keys) {
-		let kp = cast([]i64, cast([]i64, say_struct_keys)[i])
-		if kp[0] == cast(i64, t) && str_of(kp[1]) == prefix {
+		let kp = cast(NameBind, cast([]i64, say_struct_keys)[i])
+		if kp.val == cast(i64, t) && kp.name == prefix {
 			return say_struct_fns[i]
 		}
 		i = i + 1
@@ -5060,11 +5045,9 @@ fn say_struct_fn(t Ty, prefix str) Fn {
 	mut types = []i64{}
 	types = append(types, cast(i64, t))
 	let f = lifted_fn("say", names, cast([]i64, types), cast(i64, []i64{}))
-	mut kp2 = []i64{}
-	kp2 = append(kp2, cast(i64, t))
-	kp2 = append(kp2, cstr(prefix))
+	let kp2 = name_bind(prefix, cast(i64, t))
 	mut vs1 = cast([]i64, say_struct_keys)
-	vs1 = append(vs1, cast(i64, kp2))
+	vs1 = append(vs1, kp2)
 	say_struct_fns = append(say_struct_fns, cast(Fn, f))
 	let saved_fn = ck_fn
 	ck_fn = cast(Fn, f)
@@ -5148,9 +5131,8 @@ fn lifted_fn(base str, names []str, types []i64, rtypes i64) Fn {
 	buf_str(nb, base)
 	buf_byte(nb, '$')
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.locals = cast([]Sym, []i64{})
 	mut i = 0
@@ -5368,8 +5350,8 @@ fn say_optnum_fn(t Ty, prefix str) Fn {
 	}
 	mut i = 0
 	for i < len(say_optnum_keys) {
-		let kp = cast([]i64, (cast([]i64, say_optnum_keys))[i])
-		if kp[0] == cast(i64, t) && str_of(kp[1]) == prefix {
+		let kp = cast(NameBind, (cast([]i64, say_optnum_keys))[i])
+		if kp.val == cast(i64, t) && kp.name == prefix {
 			return say_optnum_fns[i]
 		}
 		i = i + 1
@@ -5379,11 +5361,9 @@ fn say_optnum_fn(t Ty, prefix str) Fn {
 	mut types = []i64{}
 	types = append(types, cast(i64, t))
 	let f = lifted_fn("say", names, cast([]i64, types), cast(i64, []i64{}))
-	mut kp2 = []i64{}
-	kp2 = append(kp2, cast(i64, t))
-	kp2 = append(kp2, cstr(prefix))
+	let kp2 = name_bind(prefix, cast(i64, t))
 	mut vp7 = cast([]i64, say_optnum_keys)
-	vp7 = append(vp7, cast(i64, kp2))
+	vp7 = append(vp7, kp2)
 	say_optnum_fns = append(say_optnum_fns, cast(Fn, f))
 	let saved_fn = ck_fn
 	ck_fn = cast(Fn, f)
@@ -5410,8 +5390,8 @@ fn say_enum_fn(t Ty, prefix str) Fn {
 	}
 	mut i = 0
 	for i < len(say_enum_keys) {
-		let kp = cast([]i64, cast([]i64, say_enum_keys)[i])
-		if kp[0] == cast(i64, t) && str_of(kp[1]) == prefix {
+		let kp = cast(NameBind, cast([]i64, say_enum_keys)[i])
+		if kp.val == cast(i64, t) && kp.name == prefix {
 			return say_enum_fns[i]
 		}
 		i = i + 1
@@ -5421,11 +5401,9 @@ fn say_enum_fn(t Ty, prefix str) Fn {
 	mut types = []i64{}
 	types = append(types, cast(i64, t))
 	let f = lifted_fn("say", names, cast([]i64, types), cast(i64, []i64{}))
-	mut kp2 = []i64{}
-	kp2 = append(kp2, cast(i64, t))
-	kp2 = append(kp2, cstr(prefix))
+	let kp2 = name_bind(prefix, cast(i64, t))
 	mut vs1 = cast([]i64, say_enum_keys)
-	vs1 = append(vs1, cast(i64, kp2))
+	vs1 = append(vs1, kp2)
 	say_enum_fns = append(say_enum_fns, cast(Fn, f))
 	let saved_fn = ck_fn
 	ck_fn = cast(Fn, f)
@@ -5471,7 +5449,7 @@ fn say_enum_fn(t Ty, prefix str) Fn {
 fn lit_string(pos i64, s str) i64 {
 	let n = node_new(EX_STR, pos)
 	cast(StrLit, n).ptr = s
-	cast(StrLit, n).len = strlen(cstr(s))
+	cast(StrLit, n).len = len(s)
 	cast(Node, n).type_ = ty_string
 	return n
 }
@@ -5498,8 +5476,7 @@ fn say_hoist(pos i64, args []Node, first i64, stmts []i64) i64 {
 				let nb = buf_new()
 				buf_str(nb, "$say")
 				buf_int(nb, say_temps)
-				buf_byte(nb, 0)
-				let s = declare_local(a.pos, buf_cstring(nb), t)
+				let s = declare_local(a.pos, str(nb), t)
 				stmts = append(stmts, let_stmt(a.pos, cast(Sym, s), cast(i64, a)))
 				args[i] = cast(Node, sym_ref_node(a.pos, cast(Sym, s)))
 			}
@@ -5624,7 +5601,7 @@ fn chk_query(e i64, want i64) i64 {
 		let specs = cast(InterpExpr, e).specs
 		mut i = 0
 		for i < len(vals) {
-			if specs[i] != 0 {
+			if specs[i] != nil {
 				err_code_at(pos, "E280 QUERY", "a query value takes no format spec: it is sent as it is")
 			}
 			let a = cast(Node, vals[i])
@@ -5710,22 +5687,19 @@ fn chk_interp(e i64, want i64) i64 {
 				replace_node(a, mk_int(cast(Node, a).pos, 0, 0))
 			}
 			let t = chk(cast(Node, a), 0)
-			let spec = specs[i]
 			buf_byte(f, '%')
-			if spec == 0 {
-				buf_byte(f, 'v')
-			} else {
-				buf_str(f, str_of(spec))
-				let sl = strlen(spec)
+			if let spec = specs[i] {
+				buf_str(f, spec)
+				let sl = len(spec)
 				mut last = 0
 				if sl > 0 {
-					last = i64(load8(spec + sl - 1))
+					last = i64(spec[sl - 1])
 				}
 				if !((last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z')) {
 					mut dot = 0
 					mut q = 0
 					for q < sl {
-						if i64(load8(spec + q)) == '.' {
+						if i64(spec[q]) == '.' {
 							dot = 1
 						}
 						q = q + 1
@@ -5736,6 +5710,8 @@ fn chk_interp(e i64, want i64) i64 {
 						buf_byte(f, 'v')
 					}
 				}
+			} else {
+				buf_byte(f, 'v')
 			}
 			args = append(args, a)
 		}
@@ -5743,8 +5719,7 @@ fn chk_interp(e i64, want i64) i64 {
 	}
 	let fs = cast(StrLit, node_new(EX_STR, pos))
 	fs.len = len(f)
-	buf_byte(f, 0)
-	fs.ptr = buf_cstring(f)
+	fs.ptr = str(f)
 	cast([]i64, args)[0] = cast(i64, fs)
 	let call = cast(Call, node_new(EX_CALL, pos))
 	call.args = cast([]i64, args)
@@ -5891,9 +5866,8 @@ fn bound_wrapper(pos i64, target Ty) i64 {
 	let nb = buf_new()
 	buf_str(nb, "bound$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.file = ck_file
 	let plain = target.bound

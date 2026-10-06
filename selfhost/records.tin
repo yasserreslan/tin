@@ -256,7 +256,7 @@ type InterpExpr struct {
 	w1 i64
 	parts []i64
 	args []i64
-	specs []i64
+	specs []?str
 }
 
 type IndexExpr struct {
@@ -477,7 +477,7 @@ type Token struct {
 	pos i64
 	raw i64
 	dbl i64
-	unit i64
+	unit str
 	start i64
 	end i64
 	synth i64
@@ -528,7 +528,7 @@ type UnitExpr struct {
 	w0 i64
 	w1 i64
 	value i64
-	name i64
+	name str
 	text str
 	float i64
 }
@@ -657,4 +657,54 @@ type AuditEntry struct {
 type Import struct {
 	alias str
 	path str
+}
+
+// NameBind is a name and the value bound to it: a type parameter and its type, a qualified name and its
+// declaration. The value is a word of whatever the table holds (a type, a declaration).
+type NameBind struct {
+	name str
+	val i64
+}
+
+// ShapeMethod is one method of a flattened shape: its name, its signature (shape_sig_of), the method,
+// the bindings it was collected under and the shape that declares it.
+type ShapeMethod struct {
+	name str
+	sig i64
+	fn_ i64
+	bind_ i64
+	sd i64
+}
+
+// ParsedField is a struct or enum field as the parser reads it: its name, its type expression, the
+// attribute text of a legacy @json("name") ("" when there is none) and the edition 1 attribute list.
+type ParsedField struct {
+	name str
+	ty i64
+	attr str
+	attrs i64
+}
+
+// Field is a struct or enum field of a resolved type: its name, type and byte offset (layout_struct), the
+// length and element words of an array field, and the JSON name of an @json attribute ("" when none).
+type Field struct {
+	name str
+	ty i64
+	off i64
+	arr i64
+	inner i64
+	json str
+}
+
+// Attr is one edition 1 attribute (@name(args)): where it starts, its name and the list of its argument expressions.
+type Attr struct {
+	pos i64
+	name str
+	args i64
+}
+
+// Hoisted is a local constant tin fix moved to package level: its name and its value text.
+type Hoisted struct {
+	name str
+	text str
 }

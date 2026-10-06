@@ -413,7 +413,7 @@ fn il_fold_reflexive_cmp(e i64) {
 	if cast(Node, l).kind != EX_IDENT || cast(Node, r).kind != EX_IDENT || cast(IdentExpr, l).ref == 0 || cast(IdentExpr, l).ref != cast(IdentExpr, r).ref || cast(Sym, cast(IdentExpr, l).ref).kind != SYM_LOCAL || is_float_t(cast(Node, l).type_) != 0 {
 		return
 	}
-	let value = streq(cast(Binary, e).op, "==")
+	let value = i64(cast(Binary, e).op == "==")
 	replace_node(e, mk_int(cast(Node, e).pos, value, ty_bool))
 }
 

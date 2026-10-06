@@ -18,7 +18,7 @@ shared mut sc_marks []i64
 shared mut ck_fn Fn
 shared mut ck_loops i64
 shared mut ck_breaks i64 // loops plus switches
-shared mut ck_labels []i64 // the label of each enclosing loop of this function (0: none)
+shared mut ck_labels []str // the label of each enclosing loop of this function ("": none)
 shared mut ck_file i64
 shared mut ck_pkg str = ""
 shared mut init_stmts []i64 // global initializers run by __start
@@ -77,14 +77,6 @@ fn err_code_types(pos i64, code str, prefix str, a i64, mid str, b i64) {
 	buf_str(e, mid)
 	type_name(cast([]u8, e), cast(Ty, b))
 	err_end(cast([]u8, e))
-}
-
-fn str_cat3(a str, b str, c str) str {
-	let s = buf_new()
-	buf_str(s, a)
-	buf_str(s, b)
-	buf_str(s, c)
-	return buf_cstring(s)
 }
 
 // qual is the symbol name of a top-level name declared in package pkg.
@@ -513,24 +505,19 @@ fn resolve_fields(st Ty, tx TypeExpr) {
 	let src = cast([]i64, tx.a)
 	mut i = 0
 	for i < len(src) {
-		let f = cast([]i64, src[i])
-		mut rec = []i64{}
-		rec = append(rec, f[0])
-		rec = append(rec, resolve_type(f[1]))
-		if cast(Ty, f[1]).kind >= TX_NAME {
-			sb_forbid(cast(Node, f[1]).pos, rec[1], "a struct or enum field cannot hold ")
+		let f = cast(ParsedField, src[i])
+		let rec = cast(Field, calloc(6, 8))
+		rec.name = f.name
+		rec.ty = resolve_type(f.ty)
+		if cast(Ty, f.ty).kind >= TX_NAME {
+			sb_forbid(cast(Node, f.ty).pos, rec.ty, "a struct or enum field cannot hold ")
 		}
-		// Slot 2 is the offset (layout_struct); [N]T fields start with N zero elements.
-		rec = append(rec, 0)
-		rec = append(rec, array_len(f[1]))
-		rec = append(rec, array_inner)
+		// The offset is set by layout_struct; [N]T fields start with N zero elements.
+		rec.arr = array_len(f.ty)
+		rec.inner = array_inner
 		array_inner = 0
 		// Field metadata is compile-time only; it never enters the object layout.
-		mut attr = 0
-		if len(f) > 2 {
-			attr = f[2]
-		}
-		rec = append(rec, attr)
+		rec.json = f.attr
 		fs = append(fs, cast(i64, rec))
 		i = i + 1
 	}
@@ -2123,7 +2110,7 @@ fn check_fn(f Fn) {
 	ck_fn = cast(Fn, f)
 	ck_loops = 0
 	ck_breaks = 0
-	ck_labels = []i64{}
+	ck_labels = []str{}
 	ck_escaping_cells = []str{}
 	len_aliases = []i64{}
 	if f.body != 0 {
@@ -2820,7 +2807,7 @@ fn check_stmt(s i64) {
 		check_cond(cast(Node, cast(WhileStmt, s).cond))
 		ck_loops = ck_loops + 1
 		ck_breaks = ck_breaks + 1
-		ck_labels = append(ck_labels, cstr(cast(WhileStmt, s).label))
+		ck_labels = append(ck_labels, cast(WhileStmt, s).label)
 		check_scoped(cast(Block, cast(WhileStmt, s).body))
 		if cast(WhileStmt, s).post != 0 {
 			push_scope()
@@ -3119,8 +3106,7 @@ fn life_name(prefix str, i i64) str {
 	let nb = buf_new()
 	buf_str(nb, prefix)
 	buf_int(nb, i)
-	buf_byte(nb, 0)
-	return buf_cstring(nb)
+	return str(nb)
 }
 
 // life_event is the kind of an event expression (app.start ...), or 0 after an error.
@@ -3649,8 +3635,7 @@ fn sel_name(pos i64, kind str, i i64) str {
 	buf_int(nb, sel_seq)
 	buf_byte(nb, '_')
 	buf_int(nb, i)
-	buf_byte(nb, 0)
-	return buf_cstring(nb)
+	return str(nb)
 }
 
 shared mut sel_seq i64
@@ -4501,9 +4486,8 @@ fn defer_thunk(pos i64, call Call) i64 {
 	let nb = buf_new()
 	buf_str(nb, "defer$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.file = ck_fn.file
 	f.params = append(f.params, "r")
@@ -5410,8 +5394,7 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 			let nb = buf_new()
 			buf_str(nb, "$catch")
 			buf_int(nb, catch_seq)
-			buf_byte(nb, 0)
-			temps[0].name = buf_cstring(nb)
+			temps[0].name = str(nb)
 		}
 		if (mode == 3 || ((mode == 4 || mode == 1 || mode == 2) && nvals > 1)) && ends_in_jump(cast([]Node, cast(Block, cast(CatchExpr, handler).body).stmts)) == 0 {
 			err_code_at(cast(Node, handler).pos, "E415 CATCH_VALUE", "this catch block must leave (return, break, continue or fail): there is no single value to give")
@@ -5741,7 +5724,7 @@ fn lower_range(s i64) {
 	let saved = len(safe_pairs)
 	ck_loops = ck_loops + 1
 	ck_breaks = ck_breaks + 1
-	ck_labels = append(ck_labels, cstr(w.label))
+	ck_labels = append(ck_labels, w.label)
 	push_scope()
 	check_pre_stmts(nb.stmts)
 	if (k == K_SLICE || k == K_STRING) && key != 0 && cast(Node, key).kind == EX_IDENT && cast(RangeStmt, s).define != 0 && len(xname) != 0 && names_assigned(body, xname, cast(IdentExpr, key).name) == 0 {
@@ -5765,7 +5748,7 @@ fn check_loop_label(pos i64, what str, name str) {
 	mut i = len(ck_labels) - 1
 	for i >= 0 {
 		let l = ck_labels[i]
-		if l != 0 && str_of(l) == name {
+		if len(l) != 0 && l == name {
 			return
 		}
 		i = i - 1
@@ -6108,8 +6091,7 @@ fn lower_enum_switch(s i64, t Ty) {
 			buf_str(u, "switch on ")
 			type_name(cast([]u8, u), t)
 			buf_str(u, " does not handle ")
-			buf_byte(missing, 0)
-			buf_str(u, buf_cstring(missing))
+			buf_str(u, str(missing))
 			buf_str(u, " (add the cases, or a default)")
 			err_end(cast([]u8, u))
 		}
@@ -6184,8 +6166,7 @@ fn mt_name(prefix str) str {
 	let nb = buf_new()
 	buf_str(nb, prefix)
 	buf_int(nb, mt_seq)
-	buf_byte(nb, 0)
-	return buf_cstring(nb)
+	return str(nb)
 }
 
 fn mt_record(vs i64, mode i64, hint i64) i64 {
@@ -6738,42 +6719,43 @@ fn mt_value(pos i64, x i64, mode i64, rec i64) i64 {
 	return ms
 }
 
-// A path is how a pattern reaches its value: [local name or 0, symbol, [[offset, type]...]].
-fn mt_path(name str, sym i64) []i64 {
-	mut p = []i64{}
-	if len(name) != 0 {
-		p = append(p, cstr(name))
-	} else {
-		p = append(p, 0)
-	}
-	p = append(p, sym)
-	p = append(p, cast(i64, []i64{}))
+// A path is how a pattern reaches its value: a local name ("" when it is read through its symbol), the
+// symbol, and the [offset, type] steps taken from there.
+type MtPath struct {
+	name str
+	sym i64
+	steps []i64
+}
+
+fn mt_path(name str, sym i64) MtPath {
+	let p = cast(MtPath, calloc(3, 8))
+	p.name = name
+	p.sym = sym
+	p.steps = []i64{}
 	return p
 }
 
-fn mt_step(path []i64, off i64, t i64) i64 {
-	let steps = slice_clone(cast([]i64, path[2]))
-	steps = append(steps, pair(off, t))
-	mut p = []i64{}
-	p = append(p, path[0])
-	p = append(p, path[1])
-	p = append(p, cast(i64, steps))
-	return cast(i64, p)
+fn mt_step(path MtPath, off i64, t i64) MtPath {
+	let p = cast(MtPath, calloc(3, 8))
+	p.name = path.name
+	p.sym = path.sym
+	p.steps = slice_clone(path.steps)
+	p.steps = append(p.steps, pair(off, t))
+	return p
 }
 
 // mt_node reads the value at path. A named local is read by name, so nil arms narrow it.
-fn mt_node(pos i64, path []Sym) i64 {
+fn mt_node(pos i64, path MtPath) i64 {
 	mut n = cast(IdentExpr, 0)
-	if cast(i64, path[0]) != 0 {
+	if len(path.name) != 0 {
 		n = cast(IdentExpr, node_new(EX_IDENT, pos))
-		n.name = str_of(cast(i64, path[0]))
+		n.name = path.name
 	} else {
-		n = cast(IdentExpr, sym_ref_node(pos, path[1]))
+		n = cast(IdentExpr, sym_ref_node(pos, cast(Sym, path.sym)))
 	}
-	let steps = cast([]i64, path[2])
 	mut i = 0
-	for i < len(steps) {
-		let st = cast([]i64, steps[i])
+	for i < len(path.steps) {
+		let st = cast([]i64, path.steps[i])
 		n = cast(IdentExpr, mk_mem(pos, cast(i64, n), 0, 0, st[0], st[1]))
 		i = i + 1
 	}
@@ -6784,8 +6766,8 @@ fn mt_is_enum(t Ty) i64 {
 	return i64(kind_of(t) == K_STRUCT && cast(i64, t.enum_) != 0)
 }
 
-fn mt_compare(pos i64, path []i64, t i64, x i64) i64 {
-	let c = cast(Binary, binary_new(pos, "==", mt_node(pos, cast([]Sym, path)), x))
+fn mt_compare(pos i64, path MtPath, t i64, x i64) i64 {
+	let c = cast(Binary, binary_new(pos, "==", mt_node(pos, path), x))
 	if kind_of(cast(Ty, t)) == K_ERROR {
 		// A fault arm compares with fault.Is, walking the chain (notes/interface_faults.md).
 		c.op = "$is"
@@ -6796,7 +6778,7 @@ fn mt_compare(pos i64, path []i64, t i64, x i64) i64 {
 // mt_pattern returns the condition under which pattern p matches the value at path (of type
 // t), or 0 when it always does; its bindings are added to binds. top is 0 inside a variant,
 // where a bare name always binds, as in a switch case. It sets mt_variant and mt_bool.
-fn mt_pattern(p []i64, path []i64, t i64, binds []i64, top i64) i64 {
+fn mt_pattern(p []i64, path MtPath, t i64, binds []i64, top i64) i64 {
 	let pos = cast(Pattern, p).pos
 	let k = cast(Pattern, p).kind
 	mt_variant = -1
@@ -6823,8 +6805,8 @@ fn mt_pattern(p []i64, path []i64, t i64, binds []i64, top i64) i64 {
 			err_code_type(pos, "E290 MATCH_PATTERN", "a range pattern needs a number or a str, not ", t, "")
 			return 0
 		}
-		let lo = binary_new(pos, ">=", mt_node(pos, cast([]Sym, path)), cast(Pattern, p).a)
-		let hi = binary_new(pos, "<", mt_node(pos, cast([]Sym, path)), cast(Pattern, p).b)
+		let lo = binary_new(pos, ">=", mt_node(pos, path), cast(Pattern, p).a)
+		let hi = binary_new(pos, "<", mt_node(pos, path), cast(Pattern, p).b)
 		return binary_new(pos, "&&", lo, hi)
 	}
 	let x = cast(Pattern, p).name
@@ -6874,13 +6856,13 @@ fn mt_pattern(p []i64, path []i64, t i64, binds []i64, top i64) i64 {
 	}
 	let l = cast(LetStmt, node_new(ST_LET, pos))
 	l.name = name
-	l.init = mt_node(pos, cast([]Sym, path))
+	l.init = mt_node(pos, path)
 	binds = append(binds, cast(i64, l))
 	return 0
 }
 
 // mt_variant_test tests the tag of the enum value at path, then its values' patterns.
-fn mt_variant_test(pos i64, path []i64, t Ty, name str, kids []i64, binds []i64) i64 {
+fn mt_variant_test(pos i64, path MtPath, t Ty, name str, kids []i64, binds []i64) i64 {
 	let vi = enum_variant(t, name)
 	if vi < 0 {
 		let u = err_code(pos, "E290 MATCH_PATTERN")
@@ -6891,7 +6873,7 @@ fn mt_variant_test(pos i64, path []i64, t Ty, name str, kids []i64, binds []i64)
 		return 0
 	}
 	let v = t.enum_[vi]
-	let tag = mk_mem(pos, mt_node(pos, cast([]Sym, path)), 0, 0, field_offset(t, 0), ty_int)
+	let tag = mk_mem(pos, mt_node(pos, path), 0, 0, field_offset(t, 0), ty_int)
 	mut cond = mk_bin(pos, "==", tag, mk_int(pos, vi, ty_int), ty_bool)
 	mut whole = 1
 	if cast(i64, kids) != 0 && len(kids) > 0 {
@@ -6909,7 +6891,7 @@ fn mt_variant_test(pos i64, path []i64, t Ty, name str, kids []i64, binds []i64)
 		for j < len(kids) {
 			let fi = v.first + j
 			let ft = field_type(t, fi)
-			let c = mt_pattern(cast([]i64, kids[j]), cast([]i64, mt_step(path, field_offset(t, fi), ft)), ft, binds, 0)
+			let c = mt_pattern(cast([]i64, kids[j]), mt_step(path, field_offset(t, fi), ft), ft, binds, 0)
 			if c != 0 {
 				whole = 0
 				cond = binary_new(pos, "&&", cond, c)
@@ -6950,7 +6932,7 @@ fn lower_match(m i64, mode i64, rec []Sym) i64 {
 	}
 	// The subject is read once into a hidden local, or, a local optional, read in place, so
 	// that a nil arm narrows it for the arms after; optionals are read by name to narrow.
-	mut path = cast([]i64, 0)
+	mut path = cast(MtPath, 0)
 	if kind_of(st) == K_OPT && cast(Node, subj).kind == EX_IDENT && cast(IdentExpr, subj).ref != 0 && cast(Sym, cast(IdentExpr, subj).ref).kind == SYM_LOCAL {
 		path = mt_path(cast(IdentExpr, subj).name, 0)
 	} else if kind_of(st) == K_OPT {
@@ -7119,12 +7101,11 @@ fn lower_match(m i64, mode i64, rec []Sym) i64 {
 			}
 			v = v + 1
 		}
-		buf_byte(missing, 0)
 		let u = err_code(pos, "E291 MATCH_EXHAUSTIVE")
 		buf_str(u, "match on ")
 		type_name(cast([]u8, u), st)
 		buf_str(u, " does not handle ")
-		buf_str(u, buf_cstring(missing))
+		buf_str(u, str(missing))
 		buf_str(u, " (add the arms, or _)")
 		err_end(cast([]u8, u))
 	} else if exhaustive == 0 && (mode == MATCH_VALUE || mode == MATCH_RETURN || mode == MATCH_EXPR) {
@@ -7539,7 +7520,7 @@ fn lower_for_init(s i64) {
 	}
 	ck_loops = ck_loops + 1
 	ck_breaks = ck_breaks + 1
-	ck_labels = append(ck_labels, cstr(inner.label))
+	ck_labels = append(ck_labels, inner.label)
 	check_scoped(cast(Block, inner.body))
 	slice_truncate(safe_pairs, saved)
 	if inner.post != 0 {
@@ -7686,9 +7667,8 @@ fn keep_fn(t Ty) Fn {
 	let nb = buf_new()
 	buf_str(nb, "keep$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.params = append(f.params, "x")
 	f.ptypes = append(f.ptypes, cast(i64, t))
@@ -8164,9 +8144,8 @@ fn arenacopy_fn(t Ty) Fn {
 	let nb = buf_new()
 	buf_str(nb, "arenacopy$")
 	buf_int(nb, lifted_count)
-	buf_byte(nb, 0)
-	f.qname = buf_cstring(nb)
-	f.name = buf_cstring(nb)
+	f.qname = str(nb)
+	f.name = str(nb)
 	f.lifted = 2
 	f.params = append(f.params, "x")
 	f.ptypes = append(f.ptypes, cast(i64, t))

@@ -98,18 +98,15 @@ fn types_init() {
 }
 
 fn name_type(name str, t i64) {
-	mut rec = []i64{}
-	rec = append(rec, cstr(name))
-	rec = append(rec, t)
-	ty_named = append(ty_named, cast(i64, rec))
+	ty_named = append(ty_named, name_bind(name, t))
 }
 
 fn find_type(name str) i64 {
 	mut i = len(ty_named) - 1
 	for i >= 0 {
-		let rec = cast([]i64, ty_named[i])
-		if str_of(rec[0]) == name {
-			return rec[1]
+		let rec = cast(NameBind, ty_named[i])
+		if rec.name == name {
+			return rec.val
 		}
 		i = i - 1
 	}
@@ -199,13 +196,10 @@ fn box_of(s i64) i64 {
 	}
 	let t = cast(Ty, ty_new(K_STRUCT, cast(Ty, s).name))
 	mut fs = []i64{}
-	mut rec = []i64{}
-	rec = append(rec, cstr("v"))
-	rec = append(rec, s)
-	rec = append(rec, 0)
-	rec = append(rec, 0)
-	rec = append(rec, 0)
-	rec = append(rec, 0)
+	let rec = cast(Field, calloc(6, 8))
+	rec.name = "v"
+	rec.ty = s
+	rec.json = ""
 	fs = append(fs, cast(i64, rec))
 	t.fields = fs
 	layout_struct(t)
@@ -517,7 +511,7 @@ fn type_name(b []u8, t Ty) {
 				if i > 0 {
 					buf_byte(b, ',')
 				}
-				type_name(b, cast(Ty, cast([]i64, bind_[i])[1]))
+				type_name(b, cast(Ty, cast(NameBind, bind_[i]).val))
 				i = i + 1
 			}
 			buf_byte(b, ']')
@@ -579,7 +573,7 @@ fn struct_field(t Ty, name str) i64 {
 	let fs = t.fields
 	mut i = 0
 	for i < len(fs) {
-		if str_of(cast([]i64, fs[i])[0]) == name {
+		if cast(Field, fs[i]).name == name {
 			return i
 		}
 		i = i + 1
@@ -588,11 +582,11 @@ fn struct_field(t Ty, name str) i64 {
 }
 
 fn field_type(t Ty, i i64) i64 {
-	return cast([]i64, t.fields[i])[1]
+	return cast(Field, t.fields[i]).ty
 }
 
 fn field_offset(t Ty, i i64) i64 {
-	return cast([]i64, t.fields[i])[2]
+	return cast(Field, t.fields[i]).off
 }
 
 // layout_struct assigns field offsets: widest fields first, each naturally aligned, so
@@ -604,12 +598,9 @@ fn layout_struct(t Ty) {
 	for w >= 1 {
 		mut i = 0
 		for i < len(fs) {
-			let f = cast([]i64, fs[i])
-			if type_width(cast(Ty, f[1])) == w {
-				for len(f) < 3 {
-					f = append(f, 0)
-				}
-				f[2] = off
+			let f = cast(Field, fs[i])
+			if type_width(cast(Ty, f.ty)) == w {
+				f.off = off
 				off = off + w
 			}
 			i = i + 1
@@ -697,8 +688,7 @@ fn bounded_of(t_in i64, max_ i64) i64 {
 	type_name(cast([]u8, nb), t)
 	buf_str(nb, " max ")
 	buf_int(nb, max_)
-	buf_byte(nb, 0)
-	b.name = buf_cstring(nb)
+	b.name = str(nb)
 	mut r = []i64{}
 	r = append(r, cast(i64, t))
 	r = append(r, max_)

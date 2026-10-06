@@ -22,7 +22,7 @@ shared mut g_str_lens []i64
 shared mut g_tstr_ptrs []str // Tin string literals (length-prefixed)
 shared mut g_tstr_lens []i64
 shared mut g_loops []i64 // (continue, break) label pairs of the enclosing loops
-shared mut g_loop_labels []i64 // the source label of each g_loops pair (0: none)
+shared mut g_loop_labels []str // the source label of each g_loops pair ("": none)
 shared mut t_regs []i64 // integer temporaries of the current function, by depth
 shared mut t_count i64
 shared mut f_regs []i64 // float temporaries, by depth
@@ -477,7 +477,7 @@ fn e_unsigned(e Node) i64 {
 fn string_index(p str, n i64) i64 {
 	mut i = 0
 	for i < len(g_str_ptrs) {
-		if g_str_lens[i] == n && mem_eq(cstr(g_str_ptrs[i]), cstr(p), n) != 0 {
+		if g_str_lens[i] == n && g_str_ptrs[i][:n] == p[:n] {
 			return i
 		}
 		i = i + 1
@@ -490,7 +490,7 @@ fn string_index(p str, n i64) i64 {
 fn tstring_index(p str, n i64) i64 {
 	mut i = 0
 	for i < len(g_tstr_ptrs) {
-		if g_tstr_lens[i] == n && mem_eq(cstr(g_tstr_ptrs[i]), cstr(p), n) != 0 {
+		if g_tstr_lens[i] == n && g_tstr_ptrs[i][:n] == p[:n] {
 			return i
 		}
 		i = i + 1
@@ -2294,7 +2294,7 @@ fn gen_branch(e i64, target i64, d i64, when_true i64) {
 	}
 	if k == EX_BINARY {
 		let op = cast(Binary, e).op
-		let is_and = streq(op, "&&")
+		let is_and = i64(op == "&&")
 		if is_and != 0 || op == "||" {
 			// Branching on the operator's own sense chains; the other sense skips ahead.
 			if is_and != when_true {
@@ -2640,7 +2640,7 @@ fn loop_with_label(name str) i64 {
 	mut i = len(g_loop_labels) - 1
 	for i >= 0 {
 		let l = g_loop_labels[i]
-		if l != 0 && str_of(l) == name {
+		if len(l) != 0 && l == name {
 			return i
 		}
 		i = i - 1
@@ -2662,7 +2662,7 @@ fn gen_while(s WhileStmt) {
 		}
 		g_loops = append(g_loops, cont)
 		g_loops = append(g_loops, end_l)
-		g_loop_labels = append(g_loop_labels, 0)
+		g_loop_labels = append(g_loop_labels, "")
 		gen_stmts(cast(Block, s.body).stmts)
 		slice_truncate(g_loops, len(g_loops) - 2)
 		slice_truncate(g_loop_labels, len(g_loop_labels) - 1)
@@ -2687,7 +2687,7 @@ fn gen_while(s WhileStmt) {
 	gen_poll()
 	g_loops = append(g_loops, cont_l)
 	g_loops = append(g_loops, end_l)
-	g_loop_labels = append(g_loop_labels, cstr(s.label))
+	g_loop_labels = append(g_loop_labels, s.label)
 	gen_stmts(cast(Block, s.body).stmts)
 	slice_truncate(g_loops, len(g_loops) - 2)
 	slice_truncate(g_loop_labels, len(g_loop_labels) - 1)
@@ -3627,7 +3627,7 @@ fn fn_polls(f Fn) i64 {
 	let attrs = f.attrs
 	i = 0
 	for cast(i64, attrs) != 0 && i < len(attrs) {
-		if str_of(cast([]i64, attrs[i])[1]) == "nopoll" {
+		if cast(Attr, attrs[i]).name == "nopoll" {
 			return 0
 		}
 		i = i + 1
@@ -3723,11 +3723,11 @@ fn gen_fn(f Fn) {
 	}
 
 	if tgt_linux != 0 && (f.qname == "linux_raw" || f.qname == "linux_restorer") {
-		gen_raw_fn(cast(i64, f), cast([]i64, syscall_words(streq(f.qname, "linux_restorer"))))
+		gen_raw_fn(cast(i64, f), cast([]i64, syscall_words(i64(f.qname == "linux_restorer"))))
 		return
 	}
 	if f.qname == "mem_copy64" || f.qname == "mem_fill64" {
-		gen_raw_fn(cast(i64, f), cast([]i64, memory_words(streq(f.qname, "mem_fill64"))))
+		gen_raw_fn(cast(i64, f), cast([]i64, memory_words(i64(f.qname == "mem_fill64"))))
 		return
 	}
 	if f.qname == "seal.hw_blocks" {
@@ -4111,8 +4111,7 @@ fn dyn_layout() {
 			buf_str(b, "__dyn_global_")
 			buf_int(b, i)
 			buf_str(b, "_table")
-			buf_byte(b, 0)
-			s.words = append_dyn_slot(buf_cstring(b))
+			s.words = append_dyn_slot(str(b))
 		}
 		i = i + 1
 	}
@@ -4122,9 +4121,8 @@ fn dyn_layout() {
 		mut b = buf_new()
 		buf_str(b, "__dyn_table_")
 		buf_int(b, i)
-		buf_byte(b, 0)
 		rec[4] = len(prog_vars)
-		append_dyn_slot(buf_cstring(b))
+		append_dyn_slot(str(b))
 		let fs = cast([]i64, rec[3])
 		mut j = 0
 		for j < len(fs) {
@@ -4133,8 +4131,7 @@ fn dyn_layout() {
 			buf_int(b, i)
 			buf_byte(b, '_')
 			buf_int(b, j + 1)
-			buf_byte(b, 0)
-			append_dyn_slot(buf_cstring(b))
+			append_dyn_slot(str(b))
 			j = j + 1
 		}
 		i = i + 1
@@ -4154,7 +4151,7 @@ fn generate() {
 	g_tstr_ptrs = []str{}
 	g_tstr_lens = []i64{}
 	g_loops = []i64{}
-	g_loop_labels = []i64{}
+	g_loop_labels = []str{}
 	mut i = 0
 	for i < len(prog_fns) {
 		prog_fns[i].index = i
@@ -4210,7 +4207,7 @@ fn print_asm() i64 {
 			buf_str(b, "l_.str.")
 			buf_int(b, i)
 			buf_str(b, ":\n\t.asciz \"")
-			asm_escape(cast([]u8, b), cstr(g_str_ptrs[i]), g_str_lens[i])
+			asm_escape(cast([]u8, b), g_str_ptrs[i], g_str_lens[i])
 			buf_str(b, "\"\n")
 			i = i + 1
 		}
@@ -4224,7 +4221,7 @@ fn print_asm() i64 {
 			buf_str(b, ":\n\t.quad ")
 			buf_int(b, g_tstr_lens[i])
 			buf_str(b, "\n\t.asciz \"")
-			asm_escape(cast([]u8, b), cstr(g_tstr_ptrs[i]), g_tstr_lens[i])
+			asm_escape(cast([]u8, b), g_tstr_ptrs[i], g_tstr_lens[i])
 			buf_str(b, "\"\n")
 			i = i + 1
 		}
@@ -4238,10 +4235,10 @@ fn var_label(v Decl) str {
 }
 
 // asm_escape writes bytes the assembler's string syntax can't hold as octal escapes.
-fn asm_escape(b []u8, s i64, n i64) {
+fn asm_escape(b []u8, s str, n i64) {
 	mut i = 0
 	for i < n {
-		let c = i64(load8(s + i))
+		let c = i64(s[i])
 		if c == '"' || c == '\\' {
 			buf_byte(b, '\\')
 			buf_byte(b, c)

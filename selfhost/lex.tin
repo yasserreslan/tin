@@ -57,7 +57,7 @@ fn token_new(kind i64, text str, val i64, pos i64) i64 {
 	t.pos = pos
 	t.raw = 0
 	t.dbl = 0
-	t.unit = 0
+	t.unit = ""
 	t.start = lx_token_start
 	t.end = lx_i
 	t.synth = 0
@@ -114,7 +114,7 @@ fn hex_value(c i64) i64 {
 
 fn is_keyword(s str) i64 {
 	let words = "fn extern const var let if else while return break continue func type struct for range import package map true false nil switch case default go defer try mut "
-	let n = strlen(cstr(s))
+	let n = len(s)
 	mut i = 0
 	for i < len(words) {
 		mut j = 0
@@ -128,7 +128,7 @@ fn is_keyword(s str) i64 {
 	}
 	if lx_edition != 0 {
 		let edition1 = "enum match within limit guard parallel detach secret shared fail catch keep "
-		let n = strlen(cstr(s))
+		let n = len(s)
 		mut i = 0
 		for i < len(edition1) {
 			mut j = 0
@@ -218,7 +218,7 @@ fn ends_statement(t Token) i64 {
 	if k == TK_KEYWORD {
 		return i64(s == "break" || s == "continue" || s == "return" || s == "true" || s == "false" || s == "nil")
 	}
-	return i64(k == TK_PUNCT && (streq(s, ")") != 0 || s == "]" || s == "}}" || s == "++" || s == "--"))
+	return i64(k == TK_PUNCT && (s == ")" || s == "]" || s == "}}" || s == "++" || s == "--"))
 }
 
 fn lex_next() i64 {
@@ -316,7 +316,7 @@ fn lex_float(pos i64, start i64) i64 {
 	let text = lx_src[start:start + (number_end - start)]
 	let t = cast(Token, token_new(TK_FLOAT, text, float_bits(text), pos))
 	if len(unit_) != 0 {
-		t.unit = cstr(unit_)
+		t.unit = unit_
 	}
 	return cast(i64, t)
 }
@@ -341,8 +341,7 @@ fn lex_raw_string(pos i64) i64 {
 		}
 	}
 	lx_advance()
-	buf_byte(b, 0)
-	let rt = cast(Token, token_new(TK_STRING, buf_cstring(b), len(b) - 1, pos))
+	let rt = cast(Token, token_new(TK_STRING, str(b), len(b), pos))
 	rt.raw = 1
 	return cast(i64, rt)
 }
@@ -451,7 +450,7 @@ fn lex_number(pos i64) i64 {
 	}
 	let t = cast(Token, token_new(TK_INT, text, val, pos))
 	if len(unit_) != 0 {
-		t.unit = cstr(unit_)
+		t.unit = unit_
 	}
 	return cast(i64, t)
 }
@@ -537,9 +536,8 @@ fn lex_string(pos i64) i64 {
 		}
 		let c = lx_advance()
 		if c == '"' {
-			// The NUL makes T_TEXT usable as a C string; T_VAL keeps the real length.
-			buf_byte(b, 0)
-			let st = cast(Token, token_new(TK_STRING, buf_cstring(b), len(b) - 1, pos))
+			// T_VAL is the string's length: its text may hold NUL bytes.
+			let st = cast(Token, token_new(TK_STRING, str(b), len(b), pos))
 			st.dbl = doubled
 			return cast(i64, st)
 		}
@@ -650,5 +648,5 @@ fn parse_float_bits(text str) i64 {
 	if lexNumberScratch == 0 {
 		lexNumberScratch = calloc(1, 4096)
 	}
-	return num_parse_bits(cstr(text), lexNumberScratch, 0)
+	return num_parse_bits(rt_cstr(text), lexNumberScratch, 0)
 }

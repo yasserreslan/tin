@@ -12,9 +12,9 @@ fn tbind_lookup(name str) i64 {
 	}
 	mut i = 0
 	for i < len(ck_tbind) {
-		let p = cast([]i64, cast([]i64, ck_tbind)[i])
-		if str_of(p[0]) == name {
-			return p[1]
+		let p = cast(NameBind, cast([]i64, ck_tbind)[i])
+		if p.name == name {
+			return p.val
 		}
 		i = i + 1
 	}
@@ -25,7 +25,7 @@ fn tbind_pairs(names []str, types []i64) i64 {
 	mut v = []i64{}
 	mut i = 0
 	for i < len(names) {
-		v = append(v, pair(cstr(names[i]), types[i]))
+		v = append(v, name_bind(names[i], types[i]))
 		i = i + 1
 	}
 	return cast(i64, v)
@@ -71,7 +71,7 @@ fn generics_init() {
 			set_file(d.file)
 			d.insts = cast([]i64, cast(i64, []i64{}))
 			d.methods = cast([]i64, cast(i64, []i64{}))
-			ty_generics = append(ty_generics, pair(cstr(qual(ck_pkg, d.name)), cast(i64, d)))
+			ty_generics = append(ty_generics, name_bind(qual(ck_pkg, d.name), cast(i64, d)))
 		}
 		i = i + 1
 	}
@@ -95,9 +95,9 @@ fn generics_init() {
 fn find_generic(qname str) Decl {
 	mut i = 0
 	for i < len(ty_generics) {
-		let p = cast([]i64, ty_generics[i])
-		if str_of(p[0]) == qname {
-			return cast(Decl, p[1])
+		let p = cast(NameBind, ty_generics[i])
+		if p.name == qname {
+			return cast(Decl, p.val)
 		}
 		i = i + 1
 	}
@@ -222,8 +222,7 @@ fn instantiate_type(d Decl, targs []i64, pos i64) i64 {
 	let nb = buf_new()
 	buf_str(nb, qual(ck_pkg, d.name))
 	targs_name(cast([]u8, nb), cast([]Ty, targs))
-	buf_byte(nb, 0)
-	let name = buf_cstring(nb)
+	let name = str(nb)
 	mut t = cast(Ty, 0)
 	if cast(Node, d.type_).kind == TX_STRUCT {
 		t = cast(Ty, ty_new(K_STRUCT, name))
@@ -359,8 +358,7 @@ fn instantiate_fn(g Fn, targs []Ty, pos i64) Fn {
 		let nb = buf_new()
 		buf_str(nb, nf.name)
 		targs_name(cast([]u8, nb), targs)
-		buf_byte(nb, 0)
-		nf.name = buf_cstring(nb)
+		nf.name = str(nb)
 	}
 	g.insts = append(g.insts, pair(cast(i64, targs), cast(i64, nf)))
 	prog_fns = append(prog_fns, cast(Fn, nf))
@@ -633,7 +631,7 @@ fn shapes_init() {
 		if find_shape(q) != 0 {
 			err_code_quoted(d.pos, "E101 REDECLARED", "", d.name, " is declared as a shape twice")
 		} else {
-			ty_shapes = append(ty_shapes, pair(cstr(q), cast(i64, d)))
+			ty_shapes = append(ty_shapes, name_bind(q, cast(i64, d)))
 		}
 		i = i + 1
 	}
@@ -650,9 +648,9 @@ fn shapes_init() {
 fn find_shape(qname str) i64 {
 	mut i = len(ty_shapes) - 1
 	for i >= 0 {
-		let rec = cast([]i64, ty_shapes[i])
-		if str_of(rec[0]) == qname {
-			return rec[1]
+		let rec = cast(NameBind, ty_shapes[i])
+		if rec.name == qname {
+			return rec.val
 		}
 		i = i - 1
 	}
@@ -874,9 +872,9 @@ fn shape_member_symbolic(m TypeExpr, sd Decl, bind_ []i64) i64 {
 fn shape_bind_value(bind_ []i64, name str) i64 {
 	mut i = 0
 	for i < len(bind_) {
-		let p = cast([]i64, bind_[i])
-		if str_of(p[0]) == name {
-			return p[1]
+		let p = cast(NameBind, bind_[i])
+		if p.name == name {
+			return p.val
 		}
 		i = i + 1
 	}
@@ -921,7 +919,7 @@ fn shape_tx_mentions(tx i64, names []str) i64 {
 		let fields = cast(TypeExpr, tx).a
 		mut i = 0
 		for cast(i64, fields) != 0 && i < len(cast([]i64, fields)) {
-			if shape_tx_mentions(cast([]i64, cast([]i64, fields)[i])[1], names) != 0 {
+			if shape_tx_mentions(cast(ParsedField, cast([]i64, fields)[i]).ty, names) != 0 {
 				return 1
 			}
 			i = i + 1
@@ -956,7 +954,7 @@ fn shape_sym_bind(d Decl) i64 {
 		// A struct with no fields, not a null one: key_valid walks a map key's fields.
 		ph.fields = cast([]i64, cast(i64, []i64{}))
 		shape_placeholders = append(shape_placeholders, cast(i64, ph))
-		bind_ = append(bind_, pair(cstr(d.tparams[i]), cast(i64, ph)))
+		bind_ = append(bind_, name_bind(d.tparams[i], cast(i64, ph)))
 		i = i + 1
 	}
 	return cast(i64, bind_)
@@ -1029,7 +1027,7 @@ fn shape_bind_same(a []i64, b []i64) i64 {
 	}
 	mut i = 0
 	for i < len(a) {
-		if cast([]i64, a[i])[1] != cast([]i64, b[i])[1] {
+		if cast(NameBind, a[i]).val != cast(NameBind, b[i]).val {
 			return 0
 		}
 		i = i + 1
@@ -1116,8 +1114,8 @@ fn shape_collect(sd Decl, bind_ []i64, methods []i64, owner Decl, own []str) {
 		}
 		mut j = 0
 		for j < len(methods) {
-			let prev = cast([]i64, methods[j])
-			if str_of(prev[0]) == f.name && shape_sig_same(cast([]i64, prev[1]), sig) == 0 {
+			let prev = cast(ShapeMethod, methods[j])
+			if prev.name == f.name && shape_sig_same(cast([]i64, prev.sig), sig) == 0 {
 				let e = err_code(f.pos, "E525 SHAPE_METHOD_CONFLICT")
 				buf_str(e, "shape ")
 				buf_str(e, owner.name)
@@ -1129,12 +1127,12 @@ fn shape_collect(sd Decl, bind_ []i64, methods []i64, owner Decl, own []str) {
 			}
 			j = j + 1
 		}
-		mut rec = []i64{}
-		rec = append(rec, cstr(f.name))
-		rec = append(rec, cast(i64, sig))
-		rec = append(rec, cast(i64, f))
-		rec = append(rec, cast(i64, bind_))
-		rec = append(rec, cast(i64, sd))
+		let rec = cast(ShapeMethod, calloc(5, 8))
+		rec.name = f.name
+		rec.sig = cast(i64, sig)
+		rec.fn_ = cast(i64, f)
+		rec.bind_ = cast(i64, bind_)
+		rec.sd = cast(i64, sd)
 		methods = append(methods, cast(i64, rec))
 		i = i + 1
 	}
@@ -1161,15 +1159,15 @@ fn dyn_table_add(t Ty, dt Ty, pos i64) i64 {
 	mut fns = []i64{}
 	i = 0
 	for i < len(cast([]i64, flat)) {
-		let item = cast([]i64, flat[i])
-		let name = item[0]
-		if slice_has_str(names, str_of(name)) == 0 {
-			mut f = shape_method(t, str_of(name))
+		let item = cast(ShapeMethod, flat[i])
+		let name = item.name
+		if slice_has_str(names, name) == 0 {
+			mut f = shape_method(t, name)
 			if f != 0 && is_template(cast(Fn, f)) != 0 {
 				f = cast(i64, instantiate_fn(cast(Fn, f), cast([]Ty, t.targs), pos))
 			}
 			if f != 0 {
-				names = append(names, str_of(name))
+				names = append(names, name)
 				fns = append(fns, f)
 			}
 		}
@@ -1196,13 +1194,13 @@ fn dyn_shape_method(dt Ty, name str) i64 {
 	mut names = []str{}
 	mut i = 0
 	for i < len(cast([]i64, flat)) {
-		let item = cast([]i64, flat[i])
-		let method = item[0]
-		if slice_has_str(names, str_of(method)) == 0 {
-			if str_of(method) == name {
-				return pair(len(names) + 1, item[1])
+		let item = cast(ShapeMethod, flat[i])
+		let method = item.name
+		if slice_has_str(names, method) == 0 {
+			if method == name {
+				return pair(len(names) + 1, item.sig)
 			}
-			names = append(names, str_of(method))
+			names = append(names, method)
 		}
 		i = i + 1
 	}

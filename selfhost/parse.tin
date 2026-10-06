@@ -179,6 +179,7 @@ fn node_init_strs(n Node, kind i64) {
 		cast(ScopeStmt, n).name = ""
 	} else if kind == EX_UNIT {
 		cast(UnitExpr, n).text = ""
+		cast(UnitExpr, n).name = ""
 	}
 }
 
@@ -446,9 +447,9 @@ fn parse_attributes() i64 {
 	let attrs = []i64{}
 	for p_is("@") != 0 {
 		let pos = cast(Token, p_next()).pos
-		let attr = []i64{}
-		attr = append(attr, pos)
-		attr = append(attr, cstr(p_expect_ident().text))
+		let attr = cast(Attr, calloc(3, 8))
+		attr.pos = pos
+		attr.name = p_expect_ident().text
 		mut args = []i64{}
 		if p_is("(") != 0 {
 			p_next()
@@ -457,7 +458,7 @@ fn parse_attributes() i64 {
 			}
 			p_expect(")")
 		}
-		attr = append(attr, cast(i64, args))
+		attr.args = cast(i64, args)
 		attrs = append(attrs, cast(i64, attr))
 	}
 	return cast(i64, attrs)
@@ -608,7 +609,7 @@ fn parse_shape_decl() i64 {
 		let mpos = p_peek().pos
 		// Name( ... is a method signature; a bare name lists another shape (composition),
 		// and `=` above already took the union form.
-		if p_peek2().kind == TK_PUNCT && streq(p_peek2().text, "(") != 0 {
+		if p_peek2().kind == TK_PUNCT && p_peek2().text == "(" {
 			d.shape_ = append(d.shape_, parse_shape_method(mpos))
 		} else {
 			d.union = append(d.union, parse_type())
@@ -933,11 +934,12 @@ fn parse_enum_body(pos i64) i64 {
 	let st = cast(TypeExpr, node_new(TX_STRUCT, pos))
 	let fields = []i64{}
 	let variants = []EnumVariant{}
-	let tag = []i64{}
-	tag = append(tag, cstr("$tag"))
+	let tag = cast(ParsedField, calloc(4, 8))
+	tag.name = "$tag"
 	let tt = cast(TypeExpr, node_new(TX_NAME, pos))
 	cast(TypeName, tt).name = "i64"
-	tag = append(tag, cast(i64, tt))
+	tag.ty = cast(i64, tt)
+	tag.attr = ""
 	fields = append(fields, cast(i64, tag))
 	p_expect("{{")
 	for p_is("}}") == 0 {
@@ -953,10 +955,10 @@ fn parse_enum_body(pos i64) i64 {
 				mut field_index = 0
 				for p_is(")") == 0 {
 					let ty = parse_type()
-					let f = []i64{}
-					f = append(f, cstr(enum_field_name(vname, field_index)))
-					f = append(f, ty)
-					f = append(f, 0) // no attributes
+					let f = cast(ParsedField, calloc(4, 8))
+					f.name = enum_field_name(vname, field_index)
+					f.ty = ty
+					f.attr = "" // no attributes
 					fields = append(fields, cast(i64, f))
 					field_index = field_index + 1
 					if p_is(",") == 0 {
@@ -975,10 +977,10 @@ fn parse_enum_body(pos i64) i64 {
 					let ty = parse_type()
 					mut i = 0
 					for i < len(pending) {
-						let f = []i64{}
-						f = append(f, cstr(vname + "." + pending[i]))
-						f = append(f, ty)
-						f = append(f, 0) // no attributes
+						let f = cast(ParsedField, calloc(4, 8))
+						f.name = vname + "." + pending[i]
+						f.ty = ty
+						f.attr = "" // no attributes
 						fields = append(fields, cast(i64, f))
 						i = i + 1
 					}
@@ -1053,11 +1055,10 @@ fn enum_field_name(variant str, index i64) str {
 	}
 	mut i = len(digits) - 1
 	for i >= 0 {
-		buf_byte(out, i64(load8(slice_data(digits) + i)))
+		buf_byte(out, i64(digits[i]))
 		i = i - 1
 	}
-	buf_byte(out, 0)
-	return buf_cstring(out)
+	return str(out)
 }
 
 fn parse_struct_body(pos i64) i64 {
@@ -1080,24 +1081,20 @@ fn parse_struct_body(pos i64) i64 {
 			names = append(names, p_expect_ident().text)
 		}
 		let ty = parse_type()
-		mut attr_text = ""
+		mut attr = ""
 		if p_edition1 != 0 {
-			attr_text = struct_json_attr(attrs, pos)
+			attr = struct_json_attr(attrs, pos)
 		} else if p_is("@") != 0 {
-			attr_text = parse_struct_attr(pos)
-		}
-		mut attr = 0
-		if len(attr_text) != 0 {
-			attr = cstr(attr_text)
+			attr = parse_struct_attr(pos)
 		}
 		mut i = 0
 		for i < len(names) {
-			let f = []i64{}
-			f = append(f, cstr(names[i]))
-			f = append(f, ty)
-			f = append(f, attr)
+			let f = cast(ParsedField, calloc(4, 8))
+			f.name = names[i]
+			f.ty = ty
+			f.attr = attr
 			if p_edition1 != 0 {
-				f = append(f, cast(i64, attrs))
+				f.attrs = cast(i64, attrs)
 			}
 			fields = append(fields, cast(i64, f))
 			i = i + 1
@@ -1115,12 +1112,12 @@ fn struct_json_attr(attrs []i64, pos i64) str {
 	}
 	mut i = 0
 	for i < len(attrs) {
-		let attr = cast([]i64, attrs[i])
-		if str_of(attr[1]) != "json" {
-			p_fail_code(attr[0], "E041 UNKNOWN_ATTRIBUTE", "unknown struct attribute; supported attributes are @json(\"name\")")
+		let attr = cast(Attr, attrs[i])
+		if attr.name != "json" {
+			p_fail_code(attr.pos, "E041 UNKNOWN_ATTRIBUTE", "unknown struct attribute; supported attributes are @json(\"name\")")
 		}
-		if str_of(attr[1]) == "json" {
-			let args = cast([]i64, attr[2])
+		if attr.name == "json" {
+			let args = cast([]i64, attr.args)
 			if len(args) != 1 || cast(Node, args[0]).kind != EX_STR {
 				p_fail_code(pos, "E042 ATTRIBUTE_ARGS", "@json expects one string field name")
 			}
@@ -1666,8 +1663,7 @@ fn has_brace(p str, n i64) i64 {
 fn str_node(pos i64, b []u8) i64 {
 	let s = cast(StrLit, node_new(EX_STR, pos))
 	s.len = len(b)
-	buf_byte(b, 0)
-	s.ptr = buf_cstring(b)
+	s.ptr = str(b)
 	return cast(i64, s)
 }
 
@@ -1678,7 +1674,7 @@ fn parse_interp(t Token, pos i64) i64 {
 	let n = t.val
 	let parts = []i64{}
 	let args = []i64{}
-	let specs = []i64{}
+	let specs = []?str{}
 	mut cur = buf_new()
 	mut i = 0
 	for i < n {
@@ -1710,7 +1706,7 @@ fn parse_interp(t Token, pos i64) i64 {
 				p_fail_code(pos, "E030 INTERPOLATION", "a {{ in a string starts a value: close it with }}, or write {{{{ for a brace")
 			}
 			mut ee = j
-			mut spec = 0
+			mut spec ?str = nil
 			if colon >= 0 {
 				ee = colon
 				let sb = buf_new()
@@ -1719,8 +1715,7 @@ fn parse_interp(t Token, pos i64) i64 {
 					buf_byte(sb, i64(p[k]))
 					k = k + 1
 				}
-				buf_byte(sb, 0)
-				spec = cstr(buf_cstring(sb))
+				spec = str(sb)
 			}
 			parts = append(parts, str_node(pos, cast([]u8, cur)))
 			cur = buf_new()
@@ -1805,7 +1800,7 @@ fn is_assign_op(t Token) i64 {
 		return 0
 	}
 	let s = t.text
-	let n = strlen(cstr(s))
+	let n = len(s)
 	return i64(n >= 2 && i64(s[n - 1]) == '=' && s != "==" && s != "!=" && s != "<=" && s != ">=" && s != ":=")
 }
 
@@ -1850,7 +1845,7 @@ fn parse_simple_stmt(xs []i64) i64 {
 		let t = cast(Token, p_next()).text
 		let a = cast(AssignStmt, node_new(ST_ASSIGN, pos))
 		a.target = x
-		a.value = binary_new(pos, str_slice(cstr(t), strlen(cstr(t)) - 1), x, parse_expr(1))
+		a.value = binary_new(pos, t[:len(t) - 1], x, parse_expr(1))
 		return cast(i64, a)
 	}
 	if p_is("++") != 0 || p_is("--") != 0 {
@@ -2083,10 +2078,8 @@ fn parse_boundary() i64 {
 	} else if word == "limit" {
 		boundary.kind = BOUND_LIMIT
 		for p_is("{{") == 0 {
-			let item = []i64{}
-			item = append(item, cstr(p_expect_ident().text))
-			item = append(item, parse_expr(1))
-			boundary.args = append(boundary.args, cast(i64, item))
+			let item = name_bind(p_expect_ident().text, parse_expr(1))
+			boundary.args = append(boundary.args, item)
 			if p_is(",") == 0 {
 				break
 			}
@@ -2772,7 +2765,7 @@ fn parse_primary() i64 {
 	}
 	if k == TK_INT {
 		p_next()
-		if t.unit != 0 {
+		if len(t.unit) != 0 {
 			let unit_ = cast(UnitExpr, node_new(EX_UNIT, pos))
 			unit_.value = t.val
 			unit_.name = t.unit
@@ -2793,7 +2786,7 @@ fn parse_primary() i64 {
 	}
 	if k == TK_FLOAT {
 		p_next()
-		if t.unit != 0 {
+		if len(t.unit) != 0 {
 			let unit_ = cast(UnitExpr, node_new(EX_UNIT, pos))
 			unit_.value = t.val
 			unit_.name = t.unit
@@ -2889,7 +2882,7 @@ fn print_edition1(file i64, source str, toks []Token) i64 {
 	fx_triv = slice_filled[?str](len(toks), nil)
 	fx_lead = slice_filled(len(toks), "")
 	fx_ind = slice_filled(len(toks), 0)
-	fx_hoisted = []i64{}
+	fx_hoisted = []Hoisted{}
 	fx_rep = replacements
 	fx_pre = prefixes
 	fx_suf = suffixes
@@ -3172,7 +3165,7 @@ fn loop_post_text(source str, toks []Token, post_start i64, post_end i64, post_o
 		let last = toks[post_end].end
 		buf_str(b, source[first:first + last - first])
 	}
-	return str_slice(slice_data(b), len(b))
+	return str(b)
 }
 
 // rewrite_for_fallback moves a C loop's init out and post into its body when it is not a range.
@@ -3284,7 +3277,7 @@ fn rewrite_for_fallback(source str, toks []Token, for_at i64, replacements []?st
 			buf_byte(b, '\n')
 			buf_str(b, indent)
 			buf_str(b, extra)
-			prefixes[body_close] = str_slice(slice_data(b), len(b))
+			prefixes[body_close] = str(b)
 			i = body + 1
 			for i < body_close {
 				let c = toks[i]
@@ -3298,7 +3291,7 @@ fn rewrite_for_fallback(source str, toks []Token, for_at i64, replacements []?st
 						buf_byte(before, '\n')
 						buf_str(before, ind)
 						buf_str(before, extra)
-						prefixes[i] = str_slice(slice_data(before), len(before))
+						prefixes[i] = str(before)
 					}
 				}
 				i = i + 1
@@ -3407,7 +3400,7 @@ fn rewrite_switch(source str, toks []Token, switch_at i64, replacements []?str, 
 	i = 0
 	for i < len(arms) {
 		let at = arms[i]
-		let is_default = streq(toks[at].text, "default")
+		let is_default = i64(toks[at].text == "default")
 		mut next = close
 		if i + 1 < len(arms) {
 			next = arms[i + 1]
@@ -3732,7 +3725,7 @@ shared mut fx_trusted i64 // the file is a trusted library file: `secret` before
 shared mut fx_top i64 // the top-level declaration being printed
 shared mut fx_path str // the translated file's path (set by main): its package's other files share names
 shared mut fx_pkg_names []str // the names the package's other files declare or hoist (read when first needed)
-shared mut fx_hoisted []i64 // [name, text] of the local constants already hoisted
+shared mut fx_hoisted []Hoisted // the local constants already hoisted
 shared mut fx_fn_name str // the name of the function being printed (prefixes a clashing local constant)
 shared mut fx_rep []?str // the printer's replacements, prefixes and suffixes (print_edition1)
 shared mut fx_pre []?str
@@ -3963,7 +3956,7 @@ fn rewrite_local_const(source str, toks []Token, at i64, top i64, replacements [
 	mut k = 0
 	for k < len(fx_hoisted) {
 		let h = fx_hoisted[k]
-		if str_of(cast([]i64, h)[0]) == new_ && str_of(cast([]i64, h)[1]) != rest {
+		if h.name == new_ && h.text != rest {
 			conflict = 1
 		}
 		k = k + 1
@@ -3972,7 +3965,7 @@ fn rewrite_local_const(source str, toks []Token, at i64, top i64, replacements [
 		let up = buf_new()
 		buf_byte(up, i64(byte_at(nm, 0)) - 32 * i64((i64(byte_at(nm, 0)) >= 'a' && i64(byte_at(nm, 0)) <= 'z')))
 		buf_str(up, nm[1:])
-		new_ = fx_fn_name + str_slice(slice_data(up), len(up))
+		new_ = fx_fn_name + str(up)
 	}
 	if new_ != nm {
 		fx_rename_uses(toks, last + 1, nm, new_)
@@ -3980,7 +3973,7 @@ fn rewrite_local_const(source str, toks []Token, at i64, top i64, replacements [
 	k = 0
 	for k < len(fx_hoisted) {
 		let h = fx_hoisted[k]
-		if str_of(cast([]i64, h)[0]) == new_ {
+		if h.name == new_ {
 			// already hoisted with this value: the statement goes, a comment on its line stays
 			let next = fx_next(toks, last)
 			let note = fx_take_line_comment(source, toks, last)
@@ -3993,10 +3986,10 @@ fn rewrite_local_const(source str, toks []Token, at i64, top i64, replacements [
 		}
 		k = k + 1
 	}
-	let h = []i64{}
-	h = append(h, cstr(new_))
-	h = append(h, cstr(rest))
-	fx_hoisted = append(fx_hoisted, cast(i64, h))
+	let h = cast(Hoisted, calloc(2, 8))
+	h.name = new_
+	h.text = rest
+	fx_hoisted = append(fx_hoisted, h)
 	// a comment after the constant on its line moves with it
 	let note = fx_take_line_comment(source, toks, last)
 	if len(note) != 0 {
@@ -4029,7 +4022,7 @@ fn fx_value_text(source str, toks []Token, a i64, b i64) str {
 		}
 		i = i + 1
 	}
-	return str_slice(slice_data(out), len(out))
+	return str(out)
 }
 
 // fx_take_line_comment returns the // comment after token last on its line, or 0, and leaves
@@ -4096,11 +4089,11 @@ fn fx_top_declares(toks []i64, name str) i64 {
 		return 1
 	}
 	if cast(i64, fx_pkg_names) == 0 {
-		fx_pkg_names = cast([]str, fx_sibling_names(cast([]Token, toks)))
+		fx_pkg_names = fx_sibling_names(cast([]Token, toks))
 	}
 	mut i = 0
 	for i < len(fx_pkg_names) {
-		if str_of(cast([]i64, fx_pkg_names)[i]) == name {
+		if fx_pkg_names[i] == name {
 			return 1
 		}
 		i = i + 1
@@ -4110,19 +4103,19 @@ fn fx_top_declares(toks []i64, name str) i64 {
 
 // fx_sibling_names lists what the other .tin files in the translated file's directory declare
 // at package level, and the local constants they would hoist there, when the package is not main.
-fn fx_sibling_names(toks []Token) i64 {
+fn fx_sibling_names(toks []Token) []str {
 	let names = []str{}
 	mut p = 0
 	for p + 1 < len(toks) && fx_kw(toks[p], "package") == 0 {
 		p = p + 1
 	}
 	if len(fx_path) == 0 || p + 1 >= len(toks) || toks[p + 1].text == "main" {
-		return cast(i64, names)
+		return names
 	}
 	let dir = dir_of(fx_path)
 	let d = rt_sys_opendir(dir)
 	if d == 0 {
-		return cast(i64, names)
+		return names
 	}
 	let self = fx_base(fx_path)
 	for {
@@ -4131,7 +4124,7 @@ fn fx_sibling_names(toks []Token) i64 {
 			break
 		}
 		let dname = host_dirent_name(ent)
-		let name = str_slice(dname, strlen(dname))
+		let name = host_str(dname)
 		if ends_with(name, ".tin") != 0 && byte_at(name, 0) != '.' && name != self {
 			let src = cast([]u8, cast([]i64, try_read_file(cat_path(cat_path(dir, "/"), name))))
 			if cast(i64, src) != 0 {
@@ -4142,7 +4135,7 @@ fn fx_sibling_names(toks []Token) i64 {
 		}
 	}
 	rt_sys_closedir(d)
-	return cast(i64, names)
+	return names
 }
 
 fn fx_base(path str) str {
@@ -4203,26 +4196,26 @@ fn fx_file_declares(toks []Token, name str) i64 {
 }
 
 // fx_unit is the edition-1 unit of a tide duration constant, or 0.
-fn fx_unit(name str) i64 {
+fn fx_unit(name str) str {
 	if name == "Nanosecond" {
-		return cstr("ns")
+		return "ns"
 	}
 	if name == "Microsecond" {
-		return cstr("us")
+		return "us"
 	}
 	if name == "Millisecond" {
-		return cstr("ms")
+		return "ms"
 	}
 	if name == "Second" {
-		return cstr("s")
+		return "s"
 	}
 	if name == "Minute" {
-		return cstr("m")
+		return "m"
 	}
 	if name == "Hour" {
-		return cstr("h")
+		return "h"
 	}
-	return 0
+	return ""
 }
 
 // rewrite_tide_unit turns `n * tide.Millisecond` and `tide.Millisecond * n` (n an integer
@@ -4234,7 +4227,7 @@ fn rewrite_tide_unit(toks []Token, at i64, replacements []?str) i64 {
 		return 0
 	}
 	let unit_ = fx_unit(toks[name].text)
-	if unit_ == 0 {
+	if len(unit_) == 0 {
 		return 0
 	}
 	let prev = fx_prev(toks, at)
@@ -4244,19 +4237,19 @@ fn rewrite_tide_unit(toks []Token, at i64, replacements []?str) i64 {
 	let star = fx_prev(toks, at)
 	let lit = fx_prev(toks, star)
 	if lit >= 0 && tok_is(toks[star], "*") != 0 && toks[lit].kind == TK_INT && fx_binds_tighter(cast([]i64, toks), fx_prev(toks, lit)) == 0 {
-		replacements[lit] = fx_int_text(toks[lit]) + str_of(unit_)
+		replacements[lit] = fx_int_text(toks[lit]) + unit_
 		fx_span[lit] = name + 1
 		return 1
 	}
 	let star2 = fx_next(toks, name)
 	let lit2 = fx_next(toks, star2)
 	if lit2 < len(toks) && tok_is(toks[star2], "*") != 0 && toks[lit2].kind == TK_INT && fx_binds_tighter(cast([]i64, toks), prev) == 0 && fx_binds_tighter(cast([]i64, toks), fx_next(toks, lit2)) == 0 {
-		replacements[at] = fx_int_text(toks[lit2]) + str_of(unit_)
+		replacements[at] = fx_int_text(toks[lit2]) + unit_
 		fx_span[at] = lit2 + 1
 		return 1
 	}
 	if fx_binds_tighter(cast([]i64, toks), prev) == 0 && fx_binds_tighter(cast([]i64, toks), fx_next(toks, name)) == 0 {
-		replacements[at] = "1" + str_of(unit_)
+		replacements[at] = "1" + unit_
 		fx_span[at] = name + 1
 		return 1
 	}
@@ -4276,7 +4269,7 @@ fn fx_binds_tighter(toks []i64, i i64) i64 {
 fn fx_int_text(t Token) str {
 	let b = buf_new()
 	buf_int(b, t.val)
-	return str_slice(slice_data(b), len(b))
+	return str(b)
 }
 
 // fx_copy_trivia copies the source between tokens, turning /* block comments */ into
@@ -4353,7 +4346,7 @@ fn fx_copy_comments(out []u8, source str, a i64, b i64) {
 				}
 				i = i + 1
 			}
-			for len(out) > 0 && (i64(load8(slice_data(out) + len(out) - 1)) == ' ' || i64(load8(slice_data(out) + len(out) - 1)) == '\t') {
+			for len(out) > 0 && (i64(out[len(out) - 1]) == ' ' || i64(out[len(out) - 1]) == '\t') {
 				slice_truncate(out, len(out) - 1)
 			}
 			i = i + 2
@@ -4568,10 +4561,10 @@ fn rewrite_const_group(source str, toks []Token, at i64) i64 {
 		i = fx_next(toks, end)
 	}
 	fx_copy_dedent(cast([]u8, out), source, cursor, toks[close].start)
-	for len(out) > 0 && (i64(load8(slice_data(out) + len(out) - 1)) == '\n' || i64(load8(slice_data(out) + len(out) - 1)) == ' ' || i64(load8(slice_data(out) + len(out) - 1)) == '\t') {
+	for len(out) > 0 && (i64(out[len(out) - 1]) == '\n' || i64(out[len(out) - 1]) == ' ' || i64(out[len(out) - 1]) == '\t') {
 		slice_truncate(out, len(out) - 1)
 	}
-	fx_rep[at] = str_slice(slice_data(out), len(out))
+	fx_rep[at] = str(out)
 	fx_span[at] = close + 1
 	return 1
 }

@@ -1857,7 +1857,7 @@ fn x_gen_branch(e i64, target i64, d i64, when_true i64) {
 	}
 	if k == EX_BINARY {
 		let op = cast(Binary, e).op
-		let is_and = streq(op, "&&")
+		let is_and = i64(op == "&&")
 		if is_and != 0 || op == "||" {
 			// Branching on the operator's own sense chains; the other sense skips ahead.
 			if is_and != when_true {
@@ -2148,7 +2148,7 @@ fn x_gen_while(s WhileStmt) {
 		}
 		g_loops = append(g_loops, cont)
 		g_loops = append(g_loops, end_l)
-		g_loop_labels = append(g_loop_labels, 0)
+		g_loop_labels = append(g_loop_labels, "")
 		x_gen_stmts(cast(Block, s.body).stmts)
 		slice_truncate(g_loops, len(g_loops) - 2)
 		slice_truncate(g_loop_labels, len(g_loop_labels) - 1)
@@ -2173,7 +2173,7 @@ fn x_gen_while(s WhileStmt) {
 	x_gen_poll()
 	g_loops = append(g_loops, cont_l)
 	g_loops = append(g_loops, end_l)
-	g_loop_labels = append(g_loop_labels, cstr(s.label))
+	g_loop_labels = append(g_loop_labels, s.label)
 	x_gen_stmts(cast(Block, s.body).stmts)
 	slice_truncate(g_loops, len(g_loops) - 2)
 	slice_truncate(g_loop_labels, len(g_loop_labels) - 1)
@@ -2864,7 +2864,7 @@ fn x_gen_fn(f Fn) {
 
 	if tgt_linux != 0 && (f.qname == "linux_raw" || f.qname == "linux_restorer") {
 		x_out4(X_LABEL, x_fn_labels[f.index], 0, 0, 0)
-		let bs = cast([]i64, x_syscall_bytes(streq(f.qname, "linux_restorer")))
+		let bs = cast([]i64, x_syscall_bytes(i64(f.qname == "linux_restorer")))
 		mut i = 0
 		for i < len(bs) {
 			x_out4(X_RAWB, bs[i], 0, 0, 0)
@@ -2874,7 +2874,7 @@ fn x_gen_fn(f Fn) {
 	}
 	if f.qname == "mem_copy64" || f.qname == "mem_fill64" {
 		x_out4(X_LABEL, x_fn_labels[f.index], 0, 0, 0)
-		let bs = cast([]i64, x_memory_bytes(streq(f.qname, "mem_fill64")))
+		let bs = cast([]i64, x_memory_bytes(i64(f.qname == "mem_fill64")))
 		mut i = 0
 		for i < len(bs) {
 			x_out4(X_RAWB, bs[i], 0, 0, 0)
@@ -3126,7 +3126,7 @@ fn generate_x64() {
 	g_tstr_ptrs = []str{}
 	g_tstr_lens = []i64{}
 	g_loops = []i64{}
-	g_loop_labels = []i64{}
+	g_loop_labels = []str{}
 	x_syms = []i64{}
 	x_fn_labels = []i64{}
 	mut i = 0

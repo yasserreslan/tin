@@ -243,7 +243,7 @@ fn write_executable(path str) {
 		i = i + 1
 	}
 	let npages = (sig_off + SIG_PAGE - 1) / SIG_PAGE
-	let cd_size = 88 + strlen(cstr(ident)) + 1 + 32 * npages
+	let cd_size = 88 + len(ident) + 1 + 32 * npages
 	let sig_size = 20 + cd_size
 	let file_size = sig_off + sig_size
 	let link_size = file_size - link_off
@@ -355,14 +355,14 @@ fn write_executable(path str) {
 	}
 	i = 0
 	for i < len(g_str_ptrs) {
-		memcpy(mo + lk_strs[i] - TEXT_BASE, cstr(g_str_ptrs[i]), g_str_lens[i])
+		memcpy(mo + lk_strs[i] - TEXT_BASE, rt_cstr(g_str_ptrs[i]), g_str_lens[i])
 		i = i + 1
 	}
 	i = 0
 	for i < len(g_tstr_ptrs) {
 		let at = mo + lk_tstrs[i] - TEXT_BASE
 		put64(at, g_tstr_lens[i])
-		memcpy(at + 8, cstr(g_tstr_ptrs[i]), g_tstr_lens[i])
+		memcpy(at + 8, rt_cstr(g_tstr_ptrs[i]), g_tstr_lens[i])
 		i = i + 1
 	}
 	i = 0
@@ -389,7 +389,7 @@ fn write_executable(path str) {
 	put32be(sig + 12, 0)
 	put32be(sig + 16, 20)
 	let cd = sig + 20
-	let hash_off = 88 + strlen(cstr(ident)) + 1
+	let hash_off = 88 + len(ident) + 1
 	put32be(cd, 0xfade0c02)
 	put32be(cd + 4, cd_size)
 	put32be(cd + 8, 0x20400)
@@ -406,7 +406,7 @@ fn write_executable(path str) {
 	put64be(cd + 64, 0)
 	put64be(cd + 72, text_size)
 	put64be(cd + 80, 1)
-	memcpy(cd + 88, cstr(ident), strlen(cstr(ident)))
+	memcpy(cd + 88, rt_cstr(ident), len(ident))
 	i = 0
 	for i < npages {
 		mut n = SIG_PAGE

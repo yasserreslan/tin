@@ -117,8 +117,7 @@ fn el_check_static() {
 			let b = buf_new()
 			buf_str(b, "a Linux executable is static, but the program imports ")
 			buf_str(b, f.name)
-			buf_byte(b, 0)
-			link_fail(buf_cstring(b))
+			link_fail(str(b))
 		}
 		i = i + 1
 	}
@@ -290,14 +289,14 @@ fn write_elf(path str) {
 	}
 	i = 0
 	for i < len(g_str_ptrs) {
-		memcpy(img + lk_strs[i], cstr(g_str_ptrs[i]), g_str_lens[i])
+		memcpy(img + lk_strs[i], rt_cstr(g_str_ptrs[i]), g_str_lens[i])
 		i = i + 1
 	}
 	i = 0
 	for i < len(g_tstr_ptrs) {
 		let at = img + lk_tstrs[i]
 		put64(at, g_tstr_lens[i])
-		memcpy(at + 8, cstr(g_tstr_ptrs[i]), g_tstr_lens[i])
+		memcpy(at + 8, rt_cstr(g_tstr_ptrs[i]), g_tstr_lens[i])
 		i = i + 1
 	}
 	i = 0

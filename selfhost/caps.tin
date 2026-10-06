@@ -61,25 +61,23 @@ fn cap_list(b []u8, mask i64, sep str) {
 }
 
 // ---- manifests ----
-// cap_word copies the word of line starting at i into a C string; out[0] is it, out[1] the
-// position after it (0 when the line has no more words).
-fn cap_word(line str, i_in i64, out i64) {
-	mut i = i_in
-	for i < len(line) && (i64(line[i]) == ' ' || i64(line[i]) == '\t' || i64(line[i]) == '\r') {
-		i = i + 1
+// cap_words splits a line into its words (separated by spaces, tabs and carriage returns).
+fn cap_words(line str) []str {
+	let words = []str{}
+	mut i = 0
+	for i < len(line) {
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r') {
+			i = i + 1
+		}
+		let start = i
+		for i < len(line) && line[i] != ' ' && line[i] != '\t' && line[i] != '\r' {
+			i = i + 1
+		}
+		if i > start {
+			words = append(words, line[start:i])
+		}
 	}
-	if i >= len(line) {
-		out[0] = 0
-		return
-	}
-	let w = buf_new()
-	for i < len(line) && i64(line[i]) != ' ' && i64(line[i]) != '\t' && i64(line[i]) != '\r' {
-		buf_byte(w, i64(line[i]))
-		i = i + 1
-	}
-	buf_byte(w, 0)
-	out[0] = cstr(buf_cstring(w))
-	out[1] = i
+	return words
 }
 
 fn manifest_error(path str, line_no i64, msg str, word str) {
@@ -103,46 +101,34 @@ fn manifest_error(path str, line_no i64, msg str, word str) {
 
 // manifest_caps reads a tin.mod and returns the capabilities its caps lines declare.
 fn manifest_caps(src []u8, path str) i64 {
-	let data = slice_data(src)
-	let n = len(src)
+	let text = str(src)
 	mut caps = 0
 	mut line_no = 0
-	let out = calloc(2, 8)
 	mut i = 0
-	for i < n {
+	for i < len(text) {
 		line_no = line_no + 1
 		mut end = i
-		for end < n && i64(load8(data + end)) != '\n' {
+		for end < len(text) && text[end] != '\n' {
 			end = end + 1
 		}
-		let lb = buf_new()
-		mut j = i
-		for j < end {
-			buf_byte(lb, i64(load8(data + j)))
-			j = j + 1
-		}
-		buf_byte(lb, 0)
-		let line = buf_cstring(lb)
-		cap_word(line, 0, out)
-		let w = out[0]
-		if w != 0 && starts_with(str_of(w), "//") == 0 {
-			if str_of(w) == "caps" {
-				cap_word(line, out[1], out)
-				for out[0] != 0 {
-					let bit = cap_bit(str_of(out[0]))
+		let words = cap_words(text[i:end])
+		if len(words) > 0 && starts_with(words[0], "//") == 0 {
+			if words[0] == "caps" {
+				mut k = 1
+				for k < len(words) {
+					let bit = cap_bit(words[k])
 					if bit == 0 {
-						manifest_error(path, line_no, "unknown capability", str_of(out[0]))
+						manifest_error(path, line_no, "unknown capability", words[k])
 					}
 					caps = caps | bit
-					cap_word(line, out[1], out)
+					k = k + 1
 				}
-			} else if str_of(w) == "module" || str_of(w) == "require" {
-				cap_word(line, out[1], out)
-				if out[0] == 0 {
-					manifest_error(path, line_no, "missing path after", str_of(w))
+			} else if words[0] == "module" || words[0] == "require" {
+				if len(words) < 2 {
+					manifest_error(path, line_no, "missing path after", words[0])
 				}
 			} else {
-				manifest_error(path, line_no, "unknown line", str_of(w))
+				manifest_error(path, line_no, "unknown line", words[0])
 			}
 		}
 		i = end + 1
@@ -150,26 +136,18 @@ fn manifest_caps(src []u8, path str) i64 {
 	return caps
 }
 
-// lock_caps_line returns tin.lock's "caps PATH ..." line for an import path as a C string, or 0.
+// lock_caps_line returns tin.lock's "caps PATH ..." line for an import path, or "".
 fn lock_caps_line(ipath str) str {
-	let data = slice_data(project_lock)
-	let n = len(project_lock)
-	let m = strlen(cstr(ipath))
+	let text = str(project_lock)
+	let head = "caps " + ipath
 	mut i = 0
-	for i < n {
+	for i < len(text) {
 		mut end = i
-		for end < n && i64(load8(data + end)) != '\n' {
+		for end < len(text) && text[end] != '\n' {
 			end = end + 1
 		}
-		if end - i >= 5 + m && bytes_equal(data + i, "caps ", 5) != 0 && bytes_equal(data + i + 5, ipath, m) != 0 && (end - i == 5 + m || i64(load8(data + i + 5 + m)) == ' ') {
-			let b = buf_new()
-			mut j = i
-			for j < end {
-				buf_byte(b, i64(load8(data + j)))
-				j = j + 1
-			}
-			buf_byte(b, 0)
-			return buf_cstring(b)
+		if end - i >= len(head) && text[i:i + len(head)] == head && (end - i == len(head) || text[i + len(head)] == ' ') {
+			return text[i:end]
 		}
 		i = end + 1
 	}
@@ -211,9 +189,8 @@ fn vendored_package(ipath str, found []str) i64 {
 			buf_byte(want, ' ')
 			cap_list(cast([]u8, want), rec.caps, " ")
 		}
-		buf_byte(want, 0)
 		let got = lock_caps_line(ipath)
-		if (len(got) != 0 || cast(i64, src) != 0) && !(len(got) != 0 && got == buf_cstring(want)) {
+		if (len(got) != 0 || cast(i64, src) != 0) && !(len(got) != 0 && got == str(want)) {
 			let e = cast([]i64, err_code(NO_POS, "E115 LOCK_CAPS"))
 			buf_str(cast([]u8, e), "tin.lock ")
 			if len(got) != 0 {
@@ -226,7 +203,7 @@ fn vendored_package(ipath str, found []str) i64 {
 			buf_str(cast([]u8, e), " for ")
 			buf_str(cast([]u8, e), ipath)
 			buf_str(cast([]u8, e), ", its manifest declares \"")
-			buf_str(cast([]u8, e), buf_cstring(want))
+			buf_str(cast([]u8, e), str(want))
 			buf_str(cast([]u8, e), "\" (run tin vendor)")
 			fatal(cast([]u8, e))
 		}
@@ -670,7 +647,7 @@ fn print_capabilities() {
 	for i < len(names) {
 		order = append(order, i)
 		mut j = len(order) - 1
-		for j > 0 && c_positive(strcmp(cstr(names[order[j - 1]]), cstr(names[order[j]]))) != 0 {
+		for j > 0 && names[order[j - 1]] > names[order[j]] {
 			let t = order[j]
 			order[j] = order[j - 1]
 			order[j - 1] = t

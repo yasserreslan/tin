@@ -11,7 +11,7 @@ shared mut compiler_parse_only i64 // -parse-only: like -fix, a file under <root
 
 // read_file returns a buffer holding the whole file, or 0 if it cannot be opened.
 fn try_read_file(path str) i64 {
-	let fd = rt_sys_open(cstr(path), 0, 0)
+	let fd = rt_sys_open(rt_cstr(path), 0, 0)
 	// open returns a C int: only the low 32 bits of x0 are defined.
 	if (fd & 0x80000000) != 0 {
 		return 0
@@ -67,7 +67,7 @@ fn host_is_linux() i64 {
 fn host_is_x64() i64 {
 	let u = calloc(1280, 1)
 	rt_sys_uname(u)
-	return i64(i64(load8(u)) == 'L' && mem_eq(u + 4 * 65, cstr("x86_64"), 7) != 0)
+	return i64(i64(load8(u)) == 'L' && host_str(u + 4 * 65) == "x86_64")
 }
 
 // set_target parses darwin-arm64, linux-arm64 or linux-amd64.
@@ -103,33 +103,31 @@ fn real_path(path str) str {
 	if host_realpath(path, buf) == 0 {
 		return ""
 	}
-	return str_slice(buf, strlen(buf))
+	return host_str(buf)
 }
 
 // find_root locates the Tin tree (with lib/) from $TIN_ROOT or this executable's path.
 fn find_root() str {
 	let env = host_getenv("TIN_ROOT")
 	if env != 0 {
-		return str_slice(env, strlen(env))
+		return host_str(env)
 	}
 	let raw = calloc(4096, 1)
 	host_exe_path(raw, 4096)
-	let real = calloc(4096, 1)
-	if host_realpath(str_of(raw), real) == 0 {
+	let real = real_path(host_str(raw))
+	if len(real) == 0 {
 		return "."
 	}
 	// .../bin/tinc -> ...
-	let n = strlen(real)
 	mut cut = 0
-	mut i = n - 1
+	mut i = len(real) - 1
 	for i > 0 && cut < 2 {
-		if i64(load8(real + i)) == '/' {
+		if real[i] == '/' {
 			cut = cut + 1
-			store8(real + i, 0)
 		}
 		i = i - 1
 	}
-	return str_slice(real, strlen(real))
+	return real[:i + 1]
 }
 
 fn load_file(path str) {
@@ -153,8 +151,8 @@ fn path_in_root_dir(path str, dir str) i64 {
 		return 0
 	}
 	let prefix = cat_path(root, dir)
-	let n = strlen(cstr(prefix))
-	return i64(strlen(cstr(real)) > n && mem_eq(cstr(real), cstr(prefix), n) != 0)
+	let n = len(prefix)
+	return i64(len(real) > n && real[:n] == prefix)
 }
 
 // Standard library files may use the runtime's raw memory operations.
@@ -210,8 +208,8 @@ fn fix_in_lib(path str) i64 {
 		return 0
 	}
 	let lib = cat_path(root, "/lib/")
-	let n = strlen(cstr(lib))
-	return i64(strlen(cstr(real)) > n && mem_eq(cstr(real), cstr(lib), n) != 0)
+	let n = len(lib)
+	return i64(len(real) > n && real[:n] == lib)
 }
 
 fn is_loaded(path str) i64 {
@@ -229,13 +227,12 @@ fn cat_path(a str, b str) str {
 	let p = buf_new()
 	buf_str(p, a)
 	buf_str(p, b)
-	buf_byte(p, 0)
-	return buf_cstring(p)
+	return str(p)
 }
 
 // dir_of is the directory part of a file path ("." when there is none).
 fn dir_of(path str) str {
-	let n = strlen(cstr(path))
+	let n = len(path)
 	mut i = n - 1
 	for i >= 0 && i64(path[i]) != '/' {
 		i = i - 1
@@ -249,8 +246,7 @@ fn dir_of(path str) str {
 		buf_byte(b, i64(path[j]))
 		j = j + 1
 	}
-	buf_byte(b, 0)
-	return buf_cstring(b)
+	return str(b)
 }
 
 fn ends_with(s str, suffix str) i64 {
@@ -288,7 +284,7 @@ fn package_files(base str) i64 {
 			break
 		}
 		let dname = host_dirent_name(ent)
-		let name = str_slice(dname, strlen(dname))
+		let name = host_str(dname)
 		if ends_with(name, ".tin") != 0 && ends_with(name, "_test.tin") == 0 && i64(byte_at(name, 0)) != '.' && other_os_file(name) == 0 {
 			out = append(out, cat_path(cat_path(base, "/"), name))
 		}
@@ -298,7 +294,7 @@ fn package_files(base str) i64 {
 	mut i = 1
 	for i < len(out) {
 		mut j = i
-		for j > 0 && c_positive(strcmp(cstr(out[j - 1]), cstr(out[j]))) != 0 {
+		for j > 0 && out[j - 1] > out[j] {
 			let t = out[j]
 			out[j] = out[j - 1]
 			out[j - 1] = t
@@ -365,7 +361,7 @@ fn check_pkg_home(ipath str, found []str) {
 	if host_realpath(found[0], rbuf) == 0 {
 		return
 	}
-	let real = str_slice(rbuf, strlen(rbuf))
+	let real = host_str(rbuf)
 	mut i = 0
 	for i < len(pkg_homes) {
 		let h = cast([]str, pkg_homes[i])
@@ -499,8 +495,7 @@ fn digest_hex(d i64) str {
 		buf_byte(out, hex_nibble(v & 15))
 		i = i + 1
 	}
-	buf_byte(out, 0)
-	return buf_cstring(out)
+	return str(out)
 }
 
 // lock_entry returns the hash tin.lock records for a project-relative path (a C string of
@@ -508,7 +503,7 @@ fn digest_hex(d i64) str {
 fn lock_entry(rel str) str {
 	let data = slice_data(project_lock)
 	let n = len(project_lock)
-	let m = strlen(cstr(rel))
+	let m = len(rel)
 	mut i = 0
 	for i < n {
 		mut end = i
@@ -523,8 +518,7 @@ fn lock_entry(rel str) str {
 				buf_byte(h, i64(load8(data + i + j)))
 				j = j + 1
 			}
-			buf_byte(h, 0)
-			return buf_cstring(h)
+			return str(h)
 		}
 		i = end + 1
 	}
@@ -613,7 +607,7 @@ fn compiler_main(argc i64, argv i64) i64 {
 	let av = []str{}
 	mut ai = 0
 	for ai < argc {
-		av = append(av, str_slice(argv[ai], strlen(argv[ai])))
+		av = append(av, host_str(argv[ai]))
 		ai = ai + 1
 	}
 	if argc > 1 && av[1] == "-hash" {
