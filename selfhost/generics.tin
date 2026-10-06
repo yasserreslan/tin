@@ -520,7 +520,7 @@ fn generic_call(e i64, g Fn) i64 {
 fn expr_to_tx(e i64) i64 {
 	let k = cast(Node, e).kind
 	if k == EX_TYPE {
-		return e[TYX]
+		return cast(TypeNode, e).ty
 	}
 	if k == EX_IDENT {
 		let n = cast(TypeExpr, node_new(TX_NAME, cast(Node, e).pos))
@@ -904,7 +904,7 @@ fn shape_tx_mentions(tx i64, names []str) i64 {
 		return 0
 	}
 	if k == TX_SLICE || k == TX_ARRAY {
-		return shape_tx_mentions(tx[TX_A + i64((k == TX_ARRAY))], names)
+		return shape_tx_mentions(slice_or_array_elem(tx), names)
 	}
 	if k == TX_MAP {
 		return i64(shape_tx_mentions(cast(TypeExpr, tx).a, names) != 0 || shape_tx_mentions(cast(TypeExpr, tx).b, names) != 0)

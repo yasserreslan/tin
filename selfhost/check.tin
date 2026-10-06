@@ -7,8 +7,6 @@ const SYM_CONST = 2
 const SYM_FUNC = 3
 
 // Symbol layout.
-const S_REGION = 18
-const S_SCOPE_AT = 30 // how many scope blocks enclose its declaration (#232): task handles stay inside theirs
 
 const MAX_PARAMS = 8
 
@@ -258,7 +256,7 @@ fn resolve_type(tx i64) i64 {
 		return bounded_type(bounded_elem(cast(Node, tx)))
 	}
 	if k == TX_SLICE || k == TX_ARRAY {
-		let et = resolve_type(tx[TX_A + i64((k == TX_ARRAY))])
+		let et = resolve_type(slice_or_array_elem(tx))
 		if k == TX_ARRAY && kind_of(cast(Ty, et)) == K_DYN {
 			let e = err_code(cast(Node, tx).pos, "E203 NO_ZERO_VALUE")
 			buf_str(e, "an array of ")
@@ -374,21 +372,33 @@ fn bounded_type(tx i64) i64 {
 	return bounded_of(cast(i64, t), n)
 }
 
+// slice_or_array_elem is the element type expression of []T (its first operand) or [N]T (its second,
+// after the length).
+fn slice_or_array_elem(tx i64) i64 {
+	if cast(Node, tx).kind == TX_ARRAY {
+		return cast(TypeExpr, tx).b
+	}
+	return cast(TypeExpr, tx).a
+}
+
 // bounded_elem reads []T max n and map[K]V max n, whose max the parser gave the element, as
 // the bounded slice or map (design_syntax: Type "max" Expr); 0 when the element has none.
 // A slice of bounded values is written with a named element type ([]Name).
 fn bounded_elem(tx Node) i64 {
-	mut ei = TX_B
+	mut el = cast(TypeExpr, tx).b
 	if tx.kind == TX_SLICE {
-		ei = TX_A
+		el = cast(TypeExpr, tx).a
 	}
-	let el = cast(i64, tx)[ei]
 	if el == 0 || cast(Node, el).kind != TX_MAX {
 		return 0
 	}
 	let inner = node_new(tx.kind, tx.pos)
 	replace_node(inner, cast(i64, tx))
-	inner[ei] = cast(TypeExpr, el).a
+	if tx.kind == TX_SLICE {
+		cast(TypeExpr, inner).a = cast(TypeExpr, el).a
+	} else {
+		cast(TypeExpr, inner).b = cast(TypeExpr, el).a
+	}
 	let outer = cast(TypeExpr, node_new(TX_MAX, tx.pos))
 	outer.a = inner
 	outer.b = cast(TypeExpr, el).b
@@ -2888,7 +2898,7 @@ fn check_stmt(s i64) {
 		}
 	} else if k == ST_IF {
 		if cast(IfStmt, s).init != 0 {
-			lower_with_init(cast(Node, s), IF_INIT)
+			lower_with_init(cast(IfStmt, s))
 			return
 		}
 		check_cond(cast(Node, cast(IfStmt, s).cond))
@@ -4013,7 +4023,7 @@ fn is_stmt_kind(k i64) i64 {
 // the scope itself may be reachable after the scope block. They are second-class values: they
 // live in local variables and parameters (and local slices, maps and optionals of them), never
 // in a global, a struct field, a result, a type argument or a dyn value. Every local remembers
-// how many scope blocks enclose its declaration (S_SCOPE_AT); a value is as deep as the deepest
+// how many scope blocks enclose its declaration (Sym.scope_at); a value is as deep as the deepest
 // such variable it reads, and may only be stored where it lives no longer: by an assignment,
 // through an argument for a mut parameter or a scope parameter (the callee may spawn children
 // that capture the other arguments), and by append and copy. A closure that may outlive the
@@ -4757,12 +4767,12 @@ fn slice_len_of(v []i64) i64 {
 }
 
 // lower_with_init turns `if init; c {}` / `for init; c; post {}` into { init; stmt }.
-fn lower_with_init(s Node, field i64) {
-	let init = cast(i64, s)[field]
-	let inner = node_new(s.kind, s.pos)
+fn lower_with_init(s IfStmt) {
+	let init = s.init
+	let inner = node_new(cast(Node, s).kind, cast(Node, s).pos)
 	replace_node(inner, cast(i64, s))
-	inner[field] = 0
-	let b = cast(Block, empty_block(s.pos))
+	cast(IfStmt, inner).init = 0
+	let b = cast(Block, empty_block(cast(Node, s).pos))
 	b.stmts = append(b.stmts, init)
 	b.stmts = append(b.stmts, inner)
 	replace_node(cast(i64, s), cast(i64, b))

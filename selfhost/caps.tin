@@ -12,7 +12,7 @@ const CAP_UNSAFE = 16
 
 shared mut file_cap_pkg []CapsRec // per loaded file: its vendored package record, or 0 (not restricted)
 shared mut cap_pkgs []CapsRec // the vendored package records, one per import path
-shared mut cap_edges []i64 // per function (by F_INDEX during the pass): vec of [callee, position]
+shared mut cap_edges []i64 // per function (by Fn.index during the pass): vec of [callee, position]
 shared mut cap_masks []i64 // per function: the capabilities it can reach
 shared mut cap_cur []i64 // the edge list being filled by cap_walk_*
 shared mut caps_report i64 // tinc -caps: print each package's capabilities instead of building

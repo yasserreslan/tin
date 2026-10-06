@@ -711,3 +711,11 @@ type Hoisted struct {
 	name str
 	text str
 }
+
+// TypeNode is the expression that holds a type (an EX_TYPE node): the type expression of a conversion,
+// a make or new call, or an explicit type argument.
+type TypeNode struct {
+	w0 i64
+	w1 i64
+	ty i64
+}

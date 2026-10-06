@@ -1,6 +1,6 @@
 // Expression checking and lowering. chk(e, want) types e and rewrites it in place into
 // core nodes; want is the type the context expects (it settles untyped constants and
-// elided composite types). A node is checked once: N_TYPE marks it done.
+// elided composite types). A node is checked once: Node.type_ marks it done.
 //
 // Strict rules for package code: operands must have identical types (constants adapt
 // and must fit), conditions are bool, references are never nil (?T may be), faults must
@@ -1429,7 +1429,7 @@ fn map_read(pos i64, m Node, k i64, vt i64) i64 {
 }
 
 // mk_elem indexes a slice or string; the backend checks the index against the length
-// unless ELEM_SAFE is set (the checker proved it in range).
+// unless the index's safe flag is set (the checker proved it in range).
 fn mk_elem(pos i64, seq i64, index i64, t i64, isstr i64) ElemExpr {
 	let n = node_new(EX_ELEM, pos)
 	cast(ElemExpr, n).seq = seq
@@ -1774,8 +1774,8 @@ fn chk_composite(e i64, want i64) i64 {
 	if kind_of(t) == K_OPT {
 		t = cast(Ty, t.elem)
 	}
-	if cast(Node, tx).kind == EX_TYPE && tx[TYX] != 0 {
-		t = cast(Ty, resolve_type(tx[TYX]))
+	if cast(Node, tx).kind == EX_TYPE && cast(TypeNode, tx).ty != 0 {
+		t = cast(Ty, resolve_type(cast(TypeNode, tx).ty))
 	} else if cast(Node, tx).kind == EX_INDEX {
 		let gtx = expr_to_tx(tx)
 		if gtx != 0 {
@@ -3325,7 +3325,7 @@ fn chk_call(e i64, want i64) i64 {
 		return ty_int
 	}
 	if cast(Node, callee).kind == EX_TYPE {
-		return chk_conversion(e, cast(Ty, resolve_type(callee[TYX])))
+		return chk_conversion(e, cast(Ty, resolve_type(cast(TypeNode, callee).ty)))
 	}
 	return indirect_call(e)
 }
@@ -3630,7 +3630,7 @@ fn chk_builtin(e i64, name str, want i64) i64 {
 			err_code_at(pos, "E217 BUILTIN_ARGS", "make needs a slice or map type: make([]T, n), make([]T, n, capacity) or make(map[K]V)")
 			return ty_int
 		}
-		let t = cast(Ty, resolve_type(arg0(cast(Call, e))[TYX]))
+		let t = cast(Ty, resolve_type(cast(TypeNode, arg0(cast(Call, e))).ty))
 		let k = kind_of(t)
 		if k == K_SLICE {
 			if n < 2 {
@@ -3678,7 +3678,7 @@ fn chk_builtin(e i64, name str, want i64) i64 {
 			err_code_at(pos, "E217 BUILTIN_ARGS", "new needs one struct type: new(T)")
 			return ty_int
 		}
-		let t = cast(Ty, resolve_type(arg0(cast(Call, e))[TYX]))
+		let t = cast(Ty, resolve_type(cast(TypeNode, arg0(cast(Call, e))).ty))
 		if kind_of(t) != K_STRUCT {
 			err_code_type(pos, "E217 BUILTIN_ARGS", "new needs a struct type, not ", cast(i64, t), "")
 			return cast(i64, t)
@@ -3686,7 +3686,7 @@ fn chk_builtin(e i64, name str, want i64) i64 {
 		// new(T) is T{}: fields that cannot be nil must still be set.
 		let lit = cast(Composite, node_new(EX_COMPOSITE, pos))
 		let tyx = node_new(EX_TYPE, pos)
-		tyx[TYX] = arg0(cast(Call, e))[TYX]
+		cast(TypeNode, tyx).ty = cast(TypeNode, arg0(cast(Call, e))).ty
 		lit.type_ = tyx
 		lit.elems = []i64{}
 		lit.keys = []i64{}
@@ -3702,7 +3702,7 @@ fn chk_builtin(e i64, name str, want i64) i64 {
 			err_code_at(pos, "E217 BUILTIN_ARGS", "cast needs a type and a value")
 			return ty_int
 		}
-		let t = cast(Ty, resolve_type(arg0(cast(Call, e))[TYX]))
+		let t = cast(Ty, resolve_type(cast(TypeNode, arg0(cast(Call, e))).ty))
 		let x = args[1]
 		let from = chk(cast(Node, x), 0)
 		if is_untyped(from) != 0 {
