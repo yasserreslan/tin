@@ -1,6 +1,6 @@
 // The compiler's own Linux host calls (see host_darwin.tin).
 fn host_exe_path(buf i64, n i64) {
-	mut k = rt_sys_readlink("/proc/self/exe", buf, n - 1)
+	mut k = rt_sys_readlink(rt_cstr("/proc/self/exe"), buf, n - 1)
 	if (k & 0x80000000) != 0 {
 		k = 0
 	}
@@ -183,4 +183,16 @@ fn host_c_len(p i64) i64 {
 		n = n + 1
 	}
 	return n
+}
+
+fn host_creat(path str, mode i64) i64 {
+	return rt_sys_creat(rt_cstr(path), mode)
+}
+
+fn host_unlink(path str) i64 {
+	return rt_sys_unlink(rt_cstr(path))
+}
+
+fn host_opendir(path str) i64 {
+	return rt_sys_opendir(rt_cstr(path))
 }

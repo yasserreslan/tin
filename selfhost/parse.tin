@@ -4113,7 +4113,7 @@ fn fx_sibling_names(toks []Token) []str {
 		return names
 	}
 	let dir = dir_of(fx_path)
-	let d = rt_sys_opendir(dir)
+	let d = host_opendir(dir)
 	if d == 0 {
 		return names
 	}

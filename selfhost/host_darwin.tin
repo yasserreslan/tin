@@ -29,15 +29,15 @@ extern fn readdir(dir i64) i64
 extern fn closedir(dir i64) i64
 extern fn uname(buf i64) i64
 
-fn rt_sys_creat(path str, mode i64) i64 {
+fn host_creat(path str, mode i64) i64 {
 	return creat(rt_cstr(path), mode)
 }
 
-fn rt_sys_unlink(path str) i64 {
+fn host_unlink(path str) i64 {
 	return unlink(rt_cstr(path))
 }
 
-fn rt_sys_opendir(path str) i64 {
+fn host_opendir(path str) i64 {
 	return opendir(rt_cstr(path))
 }
 

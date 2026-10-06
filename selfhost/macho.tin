@@ -418,8 +418,8 @@ fn write_executable(path str) {
 	}
 
 	// A fresh inode keeps the kernel from reusing a stale cached signature.
-	rt_sys_unlink(path)
-	let fd = rt_sys_creat(path, 493)
+	host_unlink(path)
+	let fd = host_creat(path, 493)
 	if (fd & 0x80000000) != 0 {
 		let e = cast([]i64, err_code(NO_POS, "E904 CANNOT_CREATE"))
 		buf_str(cast([]u8, e), "cannot create ")

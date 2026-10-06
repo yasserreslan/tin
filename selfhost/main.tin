@@ -273,7 +273,7 @@ fn package_files(base str) i64 {
 		}
 		return cast(i64, one)
 	}
-	let d = rt_sys_opendir(base)
+	let d = host_opendir(base)
 	if d == 0 {
 		return 0
 	}
