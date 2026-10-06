@@ -1143,6 +1143,13 @@ fn x_gen_binary(e Binary, dst i64, d i64) {
 		x_gen_fbinary(e, dst, d)
 		return
 	}
+	let rc = rot_left(e)
+	if rc > 0 {
+		// x << c | x >> (64-c): one rol (#488).
+		x_gen_to(rot_x, dst, d)
+		emit2(X_ROLI, dst, rc)
+		return
+	}
 	if e.ovf == OVF_CHECK {
 		x_gen_checked_binary(e, dst, d)
 		return
@@ -1641,14 +1648,43 @@ fn x_gen_runtime_intrinsic(e Call, dst i64, d i64) i64 {
 		return 1
 	}
 	if streq(name, cstr("__st")) != 0 {
-		// __st(p, v, sizelog2): a raw sized store for the runtime.
+		// __st(p, v, sizelog2): a raw sized store for the runtime. A constant offset or a scaled
+		// index in p goes into the address (#488).
+		addr_split(args[0])
+		if as_index == 0 && as_base != args[0] && x64_fits32(as_off) != 0 {
+			x_gen_pair(as_base, args[1], d)
+			emit3(X_STORE, pr, x_mem1(pl, as_off), const_val(args[2]))
+			return 1
+		}
+		if as_index != 0 && x_scale_ok(as_scale) != 0 && contains_call(args[1]) == 0 && d+3 <= t_count {
+			let b = x_gen_val(as_base, d)
+			let d2 = next_depth(b, d)
+			let ix = x_gen_val(as_index, d2)
+			let v = x_gen_val(args[1], next_depth(ix, d2))
+			emit3(X_STORE, v, x64_mem(b, ix, as_scale, 0), const_val(args[2]))
+			return 1
+		}
 		x_gen_pair(args[0], args[1], d)
 		emit3(X_STORE, pr, x_mem1(pl, 0), const_val(args[2]))
 		return 1
 	}
 	if streq(name, cstr("__ld")) != 0 {
-		let p = x_gen_val(args[0], d)
 		let k = args[1]
+		mut kind = 3
+		if is_const(k) != 0 {
+			kind = const_val(k)
+		}
+		addr_split(args[0])
+		if as_index == 0 && as_base != args[0] && x64_fits32(as_off) != 0 {
+			emit3(X_LOAD, dst, x_mem1(x_gen_val(as_base, d), as_off), kind)
+			return 1
+		}
+		if as_index != 0 && x_scale_ok(as_scale) != 0 {
+			x_gen_pair(as_base, as_index, d)
+			emit3(X_LOAD, dst, x64_mem(pl, pr, as_scale, 0), kind)
+			return 1
+		}
+		let p = x_gen_val(args[0], d)
 		if is_const(k) != 0 {
 			emit3(X_LOAD, dst, x_mem1(p, 0), const_val(k))
 		} else {

@@ -549,6 +549,79 @@ fn add_carry(s1 i64, s2 i64) i64 {
 	return 1
 }
 
+// rot_left matches e as x << c | x >> (64-c), in either order and with | ^ or + between them,
+// for an unsigned 64-bit x without effects and 0 < c < 64: a rotation, ror on arm64 and rol on
+// x86-64 (#488). It returns c (0 for no match) and leaves x in rot_x.
+shared mut rot_x i64
+
+fn rot_left(e Binary) i64 {
+	let op = e.op
+	if (streq(op, cstr("|")) == 0 && streq(op, cstr("^")) == 0 && streq(op, cstr("+")) == 0) || cast(Node, e.l).kind != EX_BINARY || cast(Node, e.r).kind != EX_BINARY {
+		return 0
+	}
+	mut shl = cast(Binary, e.l)
+	mut shr = cast(Binary, e.r)
+	if streq(shl.op, cstr(">>")) != 0 {
+		shl = cast(Binary, e.r)
+		shr = cast(Binary, e.l)
+	}
+	if streq(shl.op, cstr("<<")) == 0 || streq(shr.op, cstr(">>")) == 0 || is_const(shl.r) == 0 || is_const(shr.r) == 0 {
+		return 0
+	}
+	let c = const_val(shl.r)
+	if c <= 0 || c >= 64 || const_val(shr.r) != 64-c || expr_equal(shl.l, shr.l) == 0 || has_effects(shl.l) != 0 {
+		return 0
+	}
+	let t = cast(Ty, cast(Node, shl.l).type_)
+	if word_int(t) == 0 || is_unsigned_t(t) == 0 {
+		return 0
+	}
+	rot_x = shl.l
+	return c
+}
+
+// addr_split splits the address of a raw load or store (__ld, __st) as base + off (a constant)
+// or base + index*scale, the addressing modes of both CPUs (#488); as_base is the address itself
+// when it is neither. An add with an overflow check stays as it is.
+shared mut as_base i64
+shared mut as_off i64
+shared mut as_index i64
+shared mut as_scale i64
+
+fn addr_split(e i64) {
+	as_base = e
+	as_off = 0
+	as_index = 0
+	as_scale = 1
+	if cast(Node, e).kind != EX_BINARY || streq(cast(Binary, e).op, cstr("+")) == 0 || cast(Binary, e).ovf == OVF_CHECK {
+		return
+	}
+	let l = cast(Binary, e).l
+	let r = cast(Binary, e).r
+	if is_const(r) != 0 {
+		as_base = l
+		as_off = const_val(r)
+		return
+	}
+	if cast(Node, r).kind != EX_BINARY || cast(Binary, r).ovf == OVF_CHECK {
+		return
+	}
+	let rop = cast(Binary, r).op
+	if streq(rop, cstr("*")) != 0 && is_const(cast(Binary, r).r) != 0 {
+		as_base = l
+		as_index = cast(Binary, r).l
+		as_scale = const_val(cast(Binary, r).r)
+	} else if streq(rop, cstr("*")) != 0 && is_const(cast(Binary, r).l) != 0 {
+		as_base = l
+		as_index = cast(Binary, r).r
+		as_scale = const_val(cast(Binary, r).l)
+	} else if streq(rop, cstr("<<")) != 0 && is_const(cast(Binary, r).r) != 0 && const_val(cast(Binary, r).r) >= 0 && const_val(cast(Binary, r).r) <= 3 {
+		as_base = l
+		as_index = cast(Binary, r).l
+		as_scale = 1 << const_val(cast(Binary, r).r)
+	}
+}
+
 // log2 of a positive power of two, else -1.
 fn pow2_log(c i64) i64 {
 	if c <= 0 || (c & (c - 1)) != 0 {
@@ -1121,6 +1194,13 @@ fn gen_binary(e Binary, dst i64, d i64) {
 	}
 	if is_fp(dst) != 0 {
 		gen_fbinary(e, dst, d)
+		return
+	}
+	let rc = rot_left(e)
+	if rc > 0 {
+		// x << c | x >> (64-c): one ror (#488).
+		let x = gen_val(rot_x, d)
+		emit4(I_EXTR, dst, x, x, 64-rc)
 		return
 	}
 	if e.ovf == OVF_CHECK {
@@ -2100,14 +2180,45 @@ fn gen_runtime_intrinsic(e Call, dst i64, d i64) i64 {
 		return 1
 	}
 	if streq(name, cstr("__st")) != 0 {
-		// __st(p, v, sizelog2): a raw sized store for the runtime.
+		// __st(p, v, sizelog2): a raw sized store for the runtime. A constant offset or a scaled
+		// index in p goes into the address (#488).
+		let size = const_val(args[2]) & 3
+		addr_split(args[0])
+		if as_index == 0 && as_base != args[0] && as_off >= 0 && (as_off & ((1 << size) - 1)) == 0 && (as_off >> size) < 4096 {
+			gen_pair(as_base, args[1], d)
+			emit4(I_ST, pr, pl, as_off, const_val(args[2]))
+			return 1
+		}
+		if as_index != 0 && as_scale == (1 << size) && contains_call(args[1]) == 0 && d+3 <= t_count {
+			let b = gen_val(as_base, d)
+			let d2 = next_depth(b, d)
+			let ix = gen_val(as_index, d2)
+			let v = gen_val(args[1], next_depth(ix, d2))
+			emit4(I_STX, v, b, ix, const_val(args[2]) | MK_SCALED)
+			return 1
+		}
 		gen_pair(args[0], args[1], d)
 		emit4(I_ST, pr, pl, 0, const_val(args[2]))
 		return 1
 	}
 	if streq(name, cstr("__ld")) != 0 {
-		let p = gen_val(args[0], d)
 		let k = args[1]
+		mut kind = 3
+		if is_const(k) != 0 {
+			kind = const_val(k)
+		}
+		let size = kind & 3
+		addr_split(args[0])
+		if as_index == 0 && as_base != args[0] && as_off >= 0 && (as_off & ((1 << size) - 1)) == 0 && (as_off >> size) < 4096 {
+			emit4(I_LD, dst, gen_val(as_base, d), as_off, kind)
+			return 1
+		}
+		if as_index != 0 && as_scale == (1 << size) {
+			gen_pair(as_base, as_index, d)
+			emit4(I_LDX, dst, pl, pr, kind | MK_SCALED)
+			return 1
+		}
+		let p = gen_val(args[0], d)
 		if is_const(k) != 0 {
 			emit4(I_LD, dst, p, 0, const_val(k))
 		} else {
