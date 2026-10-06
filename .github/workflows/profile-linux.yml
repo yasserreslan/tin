@@ -1,9 +1,9 @@
 name: Profile (Linux)
 
-# Where a TLS handshake spends its time in anvil, by perf, on both CPUs (#488). By hand only.
+# Where a TLS handshake spends its time in anvil, by perf, on both CPUs (#488). By hand only (a
+# workflow file must be on the default branch for "Run workflow"; to profile a branch before it
+# merges, add a temporary `push:` trigger for that branch).
 on:
-  push:
-    branches: [tin2/488-sha-ni]
   workflow_dispatch:
     inputs:
       seconds:
