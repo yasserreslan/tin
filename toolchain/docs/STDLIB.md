@@ -51,8 +51,8 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [replay](#replay) | recording and reading request capsules for tin replay |
 | [stencil](#stencil) | text templates loaded at run time (text/template) |
 | [scroll](#scroll) | XML tokenizer and writer (encoding/xml) |
+| [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
-| [textedit](#textedit) | the editing model behind Tinland (buffer, cursor, undo, highlighting) |
 
 ## say
 
@@ -487,6 +487,8 @@ Package glyph is UTF-8 (like Go's unicode/utf8) and Unicode: general categories,
 - `Valid(s str) bool`: Valid reports whether s is entirely valid UTF-8.
 - `const UnicodeVersion = "15.0.0"`: UnicodeVersion is the version of the Unicode Character Database the tables come from.
 - `type Table enum`: Table names a set of code points by Unicode's own name: a general category (Lu, Nd, P), a script (Latin, Han, Arabic) or a property (White_Space, Dash). Use it with Is.
+- `TableOf(name str) ?Table`: TableOf returns the table with a Unicode name: a general category (Lu, Nd, P), a script (Latin, Han, Arabic) or a property (White_Space, Dash). It returns nil for a name with no table, so a pattern like \p{Greek} can be refused.
+- `TableRanges(t Table) []i64`: TableRanges returns the table's code points as low, high pairs, with strides expanded, for a caller that builds its own classes (lasso's \p{...}).
 - `Is(t Table, r i32) bool`: Is reports whether r is in the set t.
 - `IsOneOf(sets []Table, r i32) bool`: IsOneOf reports whether r is in any of the sets.
 - `IsLetter(r i32) bool`: IsLetter reports whether r is a letter (category L).
@@ -801,7 +803,7 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 
 ## spawn
 
-Package spawn starts child processes, like Go's os/exec: Run a program and collect its output, or Start it, talk to it through pipes, signal it or kill it. A program is never run through a shell: write []str{"sh", "-c", script} for one. Linux is the target and is complete (#576); macOS is not implemented yet, so the package fails clearly there instead of compiling to something that cannot work.
+Package spawn starts child processes, like Go's os/exec: Run a program and collect its output, or Start it, talk to it through pipes, signal it or kill it. A program is never run through a shell: write []str{"sh", "-c", script} for one. Linux is the target; macOS is the last part of #576.
 
 - `type Stdio enum`: Stdio says where a child's standard descriptor points.
 - `type Env enum`: Env says which environment a child gets. A Tin slice has no nil, so where Go's exec.Cmd says "nil inherits and an empty list is empty", this package says so with a variant.
@@ -1833,58 +1835,22 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `(w mut Writer) Directive(s str)`: Directive writes a directive such as a doctype, passed through unchanged.
 - `(w mut Writer) WriteToken(t Token) !`: WriteToken writes one token, which must nest correctly.
 
-## textedit
+## lasso
 
-Package textedit is the editing model behind Tinland: a text buffer with a cursor, a selection, undo and redo, search, and the syntax highlighting of Tin source. It does no I/O and draws nothing, so it runs (and is tested) on every platform; the editor program supplies the keys, the pixels and the files.
-
-- `const KindPlain = 0`: Syntax classes of Tin source, from the edition 1 lexical rules (toolchain/docs/LANGUAGE.md): the reserved words, // comments, "strings", `raw strings` (which may run over several lines), runes, numbers with their units.
-- `const KindKeyword = 1`
-- `const KindString = 2`
-- `const KindNumber = 3`
-- `const KindComment = 4`
-- `const KindConstant = 5`
-- `const KindType = 6`
-- `const KindFunc = 7`
-- `type Span struct`: Span is the text from Start to End (byte offsets in the line) of one class.
-- `Highlight(line str, raw bool) ([]Span, bool)`: Highlight classifies one line. raw says the line starts inside a raw string; the second result says it ends inside one. Text that is not in any span is plain.
-- `type Pos struct`: Pos is a place in the text: a line and a byte offset in it (always on a rune boundary).
-- `type Buffer struct`: Buffer is the text being edited, split into lines (without their newlines), with the cursor and an optional selection from (SelRow, SelCol) to the cursor.
-- `New() Buffer`: New returns an empty buffer: one empty line, the cursor at its start.
-- `FromText(text str) Buffer`: FromText returns a buffer holding text; both \n and \r\n end a line.
-- `(b Buffer) Text() str`: Text is the whole text, lines joined with \n.
-- `(b Buffer) Cur() Pos`: Cur is the cursor.
-- `DisplayCol(line str, col i64, tabWidth i64) i64`: DisplayCol is the screen column of byte offset col in line: runes are one column, a tab goes to the next multiple of tabWidth.
-- `ColForDisplay(line str, dcol i64, tabWidth i64) i64`: before reports whether a comes before b in the text. ColForDisplay is the byte column of the character at display column dcol of line (tabs count to the next multiple of tabWidth): where a mouse click lands.
-- `(b Buffer) SelStart() Pos`: SelStart and SelEnd are the ends of the selection in text order (both the cursor when nothing is selected).
-- `(b Buffer) SelEnd() Pos`
-- `(b Buffer) SelectedText() str`: SelectedText is the text of the selection ("" when there is none).
-- `(b mut Buffer) Undo() bool`: Undo reverts the last edit; it reports whether there was one.
-- `(b mut Buffer) Redo() bool`: Redo re-applies the last undone edit; it reports whether there was one.
-- `(b mut Buffer) Insert(text str)`: Insert types text at the cursor, replacing the selection; text may hold newlines.
-- `(b mut Buffer) Newline()`: Newline splits the line at the cursor; the new line keeps the indentation, one more after an opening brace.
-- `(b mut Buffer) Backspace()`: Backspace deletes the selection, or the rune before the cursor, or joins the line to the one above.
-- `(b mut Buffer) Delete()`: Delete removes the selection, or the rune after the cursor, or joins the next line to this one.
-- `(b mut Buffer) Left(extend bool)`: Left moves one rune left (to the end of the line above at the line's start).
-- `(b mut Buffer) Right(extend bool)`: Right moves one rune right (to the start of the next line at the line's end).
-- `(b mut Buffer) Up(extend bool)`
-- `(b mut Buffer) Down(extend bool)`
-- `(b mut Buffer) PageUp(n i64, extend bool)`: PageUp and PageDown move n lines.
-- `(b mut Buffer) PageDown(n i64, extend bool)`
-- `(b mut Buffer) Home(extend bool)`: Home goes to the first non-blank character of the line, or to the start when already there.
-- `(b mut Buffer) End(extend bool)`: End goes to the end of the line.
-- `(b mut Buffer) DocStart(extend bool)`: DocStart and DocEnd go to the first and the last position of the text.
-- `(b mut Buffer) DocEnd(extend bool)`
-- `(b mut Buffer) WordLeft(extend bool)`: WordLeft and WordRight move to the previous start and the next end of a word.
-- `(b mut Buffer) WordRight(extend bool)`
-- `(b mut Buffer) SelectAll()`: SelectAll selects the whole text, the cursor at its end.
-- `(b mut Buffer) MoveTo(row i64, col i64, extend bool)`: MoveTo puts the cursor at row and col (clamped to the text), extending the selection when asked.
-- `(b mut Buffer) Indent()`: Indent adds a tab at the start of every selected line (or the cursor's line); Unindent removes one tab or up to four spaces from each.
-- `(b mut Buffer) Unindent()`
-- `(b mut Buffer) Find(needle str, forward bool) bool`: Find looks for needle after the cursor (before it when backward), wrapping around the end of the text, and selects the match; it reports whether there was one.
-- `(b mut Buffer) ReplaceSelection(text str)`: ReplaceSelection replaces the selection with text (a no-op without a selection).
-- `(b mut Buffer) ToggleComment()`: ToggleComment comments every touched line with "// ", or uncomments them when all of them are commented.
-- `(b mut Buffer) DeleteLine()`: DeleteLine removes the cursor's line (or every touched line).
-- `(b mut Buffer) DuplicateLine()`: DuplicateLine copies the touched lines below themselves and moves the cursor into the copy.
-- `(b mut Buffer) MoveLines(dir i64)`: MoveLines moves the touched lines up (dir -1) or down (dir 1) by one line, the cursor going with them.
-- `(b mut Buffer) ReplaceAll(needle str, repl str) i64`: ReplaceAll replaces every occurrence of needle with repl as one undo step and returns how many there were; the cursor goes to the start of the text.
-- `(b mut Buffer) SelectWordAt(row i64, col i64)`: SelectWordAt selects the word (letters, digits and underscores) around column col of row, or the one character there when it is not part of a word.
+- `type Match struct`: Match is one match's byte offsets: Start is the first byte and End is one past the last.
+- `type Regexp struct`: Regexp is a compiled pattern.
+- `Compile(pattern str) !Regexp`: Compile parses and compiles pattern, like Go's regexp.Compile. A bad pattern fails with a fault naming the byte offset.
+- `MustCompile(pattern str) Regexp`: MustCompile is Compile for a pattern that must be valid (a package-level global, say): it panics when the pattern is bad.
+- `(re Regexp) String() str`: String returns the pattern the Regexp was compiled from.
+- `(re Regexp) NumSubexp() i64`: NumSubexp returns the number of capturing groups, like Go's NumSubexp.
+- `(re Regexp) Named(name str) i64`: Named returns the group index of a named capture, or -1, like Go's SubexpIndex.
+- `(re Regexp) Match(s str) bool`: Match reports whether the pattern matches anywhere in s.
+- `(re Regexp) Find(s str) (i64, i64, bool)`: Find returns the byte offsets of the leftmost match, like Go's FindStringIndex.
+- `(re Regexp) FindAll(s str, n i64) []Match`: FindAll returns up to n matches (n < 0 for all), like Go's FindAllStringIndex.
+- `(re Regexp) FindAllSubmatchIndex(s str, n i64) []i64`: FindAllSubmatchIndex returns up to n matches (n < 0 for all) with their groups, flattened: 2*(groups+1) offsets per match, -1 for a group that did not take part, like Go's FindAllStringSubmatchIndex.
+- `(re Regexp) SubmatchIndex(s str) []i64`: SubmatchIndex returns the byte offsets of the leftmost match and its groups: 2*(n+1) values, -1 for a group that did not take part, like Go's FindStringSubmatchIndex.
+- `(re Regexp) Submatch(s str) []?str`: Submatch returns the text of the leftmost match and its groups, nil for a group that did not take part, like Go's FindStringSubmatch.
+- `(re Regexp) Replace(s str, tmpl str) str`: Replace returns a copy of s with every match replaced by tmpl, where $1, ${name} and $$ are expanded, like Go's ReplaceAllString.
+- `(re Regexp) ReplaceFunc(s str, f fn(str) str) str`: ReplaceFunc returns a copy of s with every match replaced by f(match), like Go's ReplaceAllStringFunc.
+- `(re Regexp) Split(s str, n i64) []str`: Split slices s around every match, like Go's Split: n < 0 returns every piece, n == 0 returns nothing, and n > 0 at most n pieces.
+- `QuoteMeta(s str) str`: QuoteMeta returns s with the metacharacters escaped, like Go's QuoteMeta.
