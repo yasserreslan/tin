@@ -984,7 +984,7 @@ Package atlas is the functions on maps (like Go's maps): keys, values, copies an
 
 ## cairn
 
-Package cairn is a set of containers for i64 and str values: heaps, a deque, a queue, hash sets, a bitset and an LRU cache.
+Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and an LRU cache for i64 and str values, and the generic Heap, Deque, Set and Cache over any element types.
 
 - `type IntHeap struct`: IntHeap is a binary min-heap of i64 values; IntHeap{} is ready to use.
 - `NewIntHeap(n i64) IntHeap`: NewIntHeap returns an empty min-heap with room for n values.
@@ -1047,6 +1047,41 @@ Package cairn is a set of containers for i64 and str values: heaps, a deque, a q
 - `(c LRU) Len() i64`: Len returns the number of cached entries.
 - `(c LRU) Cap() i64`: Cap returns the capacity.
 - `(c LRU) Keys() []str`: Keys returns the cached keys from most to least recently used.
+- `type Heap[T constraints.Any] struct`: Heap is a binary heap ordered by its less function; use NewHeap. less(a, b) = a < b makes a min-heap, a > b a max-heap, and any other order gives the corresponding priority queue.
+- `NewHeap[T constraints.Any](less fn(T, T) bool) Heap[T]`: NewHeap returns an empty heap ordered by less, with room for eight values.
+- `(h mut Heap[T]) Push(v T)`: Push adds v to the heap.
+- `(h mut Heap[T]) Pop() ?T`: Pop removes and returns the first value in less's order, or nil when the heap is empty.
+- `(h Heap[T]) Peek() ?T`: Peek returns the first value without removing it, or nil when the heap is empty.
+- `(h Heap[T]) Len() i64`: Len returns the number of values in the heap.
+- `(h mut Heap[T]) Clear()`: Clear removes every value.
+- `type Deque[T constraints.Any] struct`: Deque is a double-ended queue in a slice with a moving head; use NewDeque.
+- `NewDeque[T constraints.Any]() Deque[T]`: NewDeque returns an empty deque.
+- `(d Deque[T]) Len() i64`: Len returns the number of values in the deque.
+- `(d mut Deque[T]) PushBack(v T)`: PushBack appends v at the back.
+- `(d mut Deque[T]) PushFront(v T)`: PushFront prepends v at the front.
+- `(d mut Deque[T]) PopFront() ?T`: PopFront removes and returns the front value, or nil when the deque is empty.
+- `(d mut Deque[T]) PopBack() ?T`: PopBack removes and returns the back value, or nil when the deque is empty.
+- `(d Deque[T]) Front() ?T`: Front returns the front value, or nil when the deque is empty.
+- `(d Deque[T]) Back() ?T`: Back returns the back value, or nil when the deque is empty.
+- `(d Deque[T]) At(i i64) T`: At returns the i-th value from the front, panicking when i is out of range.
+- `type Set[K constraints.Comparable] struct`: Set is a set of comparable keys in insertion order; use NewSet.
+- `NewSet[K constraints.Comparable]() Set[K]`: NewSet returns an empty set.
+- `(s mut Set[K]) Add(k K) bool`: Add puts k in the set and reports whether it was absent.
+- `(s Set[K]) Has(k K) bool`: Has reports whether k is in the set.
+- `(s mut Set[K]) Remove(k K) bool`: Remove takes k out and reports whether it was present.
+- `(s Set[K]) Len() i64`: Len returns the number of keys.
+- `(s Set[K]) Items() []K`: Items returns the keys in insertion order.
+- `(s Set[K]) Union(o Set[K]) Set[K]`: Union returns a new set of the keys of s and o: s's keys in their order, then o's new ones.
+- `(s Set[K]) Intersect(o Set[K]) Set[K]`: Intersect returns a new set of the keys in both, in s's insertion order.
+- `type Cache[K constraints.Comparable, V constraints.Any] struct`: Cache is a least-recently-used cache from comparable keys to any values with a fixed capacity; use NewCache. It is the generic form of LRU (the str to str one); an empty slot holds no key and no value, so ?K and ?V storage.
+- `NewCache[K constraints.Comparable, V constraints.Any](capacity i64) Cache[K, V]`: NewCache returns an empty cache holding at most capacity entries (at least 1).
+- `(c mut Cache[K, V]) Get(k K) ?V`: Get returns the value for k and marks it most recently used, or nil.
+- `(c Cache[K, V]) Peek(k K) ?V`: Peek returns the value for k without touching its recency, or nil.
+- `(c Cache[K, V]) Has(k K) bool`: Has reports whether k is cached, without touching its recency.
+- `(c mut Cache[K, V]) Put(k K, v V)`: Put stores v under k as most recently used, evicting the least recently used entry when full.
+- `(c mut Cache[K, V]) Remove(k K) bool`: Remove takes k out and reports whether it was cached.
+- `(c Cache[K, V]) Len() i64`: Len returns the number of cached entries.
+- `(c Cache[K, V]) Keys() []K`: Keys returns the keys from the most to the least recently used.
 
 ## stamp
 
