@@ -2575,7 +2575,7 @@ fn get_cell_addr(pos i64, os Sym) i64 {
 // closure_keeper builds keep$N(d), which copies closure descriptor d and its captured
 // variables into the long-lived heap, each value kept by its type (a str, slice, struct or
 // closure deeply), so a kept closure never reads request memory (#170). It returns 0 when
-// no captured variable holds a reference.
+// no captured variable holds a reference and every cell is one word.
 fn closure_keeper(pos i64, cf Fn) i64 {
 	let caps = cast([]i64, cf.captures)
 	let k = len(caps)
@@ -2583,7 +2583,9 @@ fn closure_keeper(pos i64, cf Fn) i64 {
 	mut i = 0
 	for i < k {
 		let ct = cast(Sym, caps[i]).type_
-		if is_ref(ct) != 0 || is_dyn_value(cast(Ty, ct)) != 0 {
+		if is_ref(ct) != 0 || is_dyn_value(cast(Ty, ct)) != 0 || cell_bytes(ct) > 8 {
+			// A cell wider than a word (a value struct's bytes, #631) needs a keeper too: the
+			// runtime's own copy moves one word per cell.
 			refs = 1
 		}
 		i = i + 1

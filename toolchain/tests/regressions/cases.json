@@ -1073,5 +1073,15 @@
       "stdout": "",
       "stderr_contains": "this value contains a cycle"
     }
+  },
+  {
+    "source": "value-closure-keep.tin",
+    "issue": 669,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "30 8\n",
+      "stderr": ""
+    }
   }
 ]
