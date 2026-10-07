@@ -71,6 +71,8 @@ fn (ed Editor) dump() {
 //   type:TEXT        types TEXT (\n is a line break, \t a tab, \p a "|")
 //   key:SPEC         one key press, such as key:cmd+shift+z or key:left
 //   dump             prints the text and the cursor
+//   jump:TEXT        jumps to the place a compiler message names
+//   output           prints the output panel
 //   prompt           prints the find or go-to-line prompt
 //   open:PATH        loads a file
 //   snap:PATH        draws the editor and writes it as a PNG
@@ -100,6 +102,11 @@ fn runScript(ed mut Editor, script str) {
 			ed.handleKey(keyFor(step[4:]))
 		} else if step == "dump" {
 			ed.dump()
+		} else if twine.HasPrefix(step, "jump:") {
+			say.Line("jumped:", ed.jumpTo(step[5:]))
+		} else if step == "output" {
+			say.Line("output:", ed.OutputOpen)
+			say.Line(twine.Join(ed.Output, "\n"))
 		} else if step == "prompt" {
 			say.Line("prompt:", ed.Mode, ed.Prompt, ed.Message)
 		} else if twine.HasPrefix(step, "open:") {

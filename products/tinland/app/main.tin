@@ -29,8 +29,8 @@ fn main() {
 fn (ed mut Editor) mouseTo(x f64, y f64, extend bool) {
 	let px = x * ed.Scale
 	let py = ed.PtH * ed.Scale - y * ed.Scale
-	mut row = ed.Scroll + i64((py - ed.LineH * 0.2) / ed.LineH)
-	if py < ed.LineH * 0.2 {
+	mut row = ed.Scroll + i64((py - ed.LineH * 0.2 - ed.tabH()) / ed.LineH)
+	if py < ed.LineH * 0.2 + ed.tabH() {
 		row = ed.Scroll - 1
 	}
 	if row < 0 {
@@ -63,7 +63,13 @@ fn (ed mut Editor) handleEvent(e i64) {
 	if t == 1 || t == 6 {
 		// left mouse down, dragged
 		let (x, y) = appkit.EventLocation(e)
-		if y < ed.PtH {
+		if y < ed.PtH && ed.PtH * ed.Scale - y * ed.Scale < ed.tabH() {
+			if t == 1 {
+				ed.activate(ed.tabAt(x * ed.Scale))
+			}
+		} else if y < ed.PtH && t == 1 && ed.panelClick(ed.PtH * ed.Scale - y * ed.Scale) {
+			// a click in the output panel: a compiler message opens its place
+		} else if y < ed.PtH {
 			ed.Mode = modeEdit
 			let clicks = appkit.EventClicks(e)
 			ed.mouseTo(x, y, t == 6 && ed.dragging)

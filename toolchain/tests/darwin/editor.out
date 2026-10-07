@@ -83,4 +83,22 @@ fn main() {
 let yy = 1
 say.Line(yy)
 let é = "ü"
-message: replaced 2
+--- editor_sample.txt row 1 col 1 dirty true
+let yy = 1
+say.Line(yy)
+let é = "ü"
+--- untitled row 1 col 8 dirty true
+scratch
+--- editor_sample.txt row 1 col 1 dirty true
+let yy = 1
+say.Line(yy)
+let é = "ü"
+output: true
+-- editor_run.tin: exit 0
+run from the editor 42
+jumped: true
+--- editor_sample.txt row 3 col 5 dirty true
+let yy = 1
+say.Line(yy)
+let é = "ü"
+message: switched to toolchain/tests/darwin/editor_sample.txt

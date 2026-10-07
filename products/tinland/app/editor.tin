@@ -41,9 +41,18 @@ type Key struct {
 	Chars str
 }
 
+// Tab is one open file: its text and where its view is scrolled (the active tab's live copy is the editor's).
+type Tab struct {
+	Buf     textedit.Buffer
+	Scroll  i64
+	HScroll i64
+}
+
 // Editor is the application state: the text, where the view is scrolled, the mode, and the pixels.
 type Editor struct {
 	Buf      textedit.Buffer
+	Tabs     []Tab
+	Active   i64
 	Win      appkit.Window
 	Bmp      appkit.Bitmap
 	Open     bool
@@ -63,6 +72,8 @@ type Editor struct {
 	Replacement str
 	fresh    bool
 	Clip     str
+	Output   []str
+	OutputOpen bool
 	Redraw   bool
 	Blink    bool
 	Quit     bool
@@ -79,6 +90,7 @@ type Editor struct {
 fn newEditor(buf textedit.Buffer) Editor {
 	let ed = Editor{Buf: buf, Win: appkit.Window{}, Bmp: appkit.Bitmap{}, FindFrom: textedit.Pos{}, FontSize: 13.0, Scale: 2.0, PtW: 900.0, PtH: 600.0, Redraw: true, Blink: true}
 	ed.rawFor = -1
+	ed.Tabs = []Tab{Tab{Buf: buf}}
 	return ed
 }
 
@@ -96,19 +108,118 @@ fn (ed mut Editor) say(text str) {
 	ed.Redraw = true
 }
 
-// load replaces the text with the file at path.
+// stash keeps the live view state in the active tab.
+fn (ed mut Editor) stash() {
+	if ed.Active < 0 {
+		return
+	}
+	let t = ed.Tabs[ed.Active]
+	t.Buf = ed.Buf
+	t.Scroll = ed.Scroll
+	t.HScroll = ed.HScroll
+}
+
+// activate makes tab i the one shown.
+fn (ed mut Editor) activate(i i64) {
+	if i < 0 || i >= len(ed.Tabs) {
+		return
+	}
+	ed.stash()
+	ed.Active = i
+	ed.Buf = ed.Tabs[i].Buf
+	ed.Scroll = ed.Tabs[i].Scroll
+	ed.HScroll = ed.Tabs[i].HScroll
+	ed.rawFor = -1
+	ed.Mode = modeEdit
+	ed.Redraw = true
+}
+
+// newTab opens a tab holding buf and shows it.
+fn (ed mut Editor) newTab(buf textedit.Buffer) {
+	ed.stash()
+	ed.Tabs = append(ed.Tabs, Tab{Buf: buf})
+	ed.activate(len(ed.Tabs) - 1)
+}
+
+// tabName is the name shown for tab i.
+fn (ed Editor) tabName(i i64) str {
+	let b = ed.Tabs[i].Buf
+	if i == ed.Active {
+		return nameOf(ed.Buf)
+	}
+	return nameOf(b)
+}
+
+fn nameOf(b textedit.Buffer) str {
+	if len(b.Path) == 0 {
+		return "untitled"
+	}
+	let parts = twine.Split(b.Path, "/")
+	return parts[len(parts) - 1]
+}
+
+// load opens the file at path in a tab (switching to the tab that already has it, and reusing an untouched
+// empty tab).
 fn (ed mut Editor) load(path str) bool {
+	ed.stash()
+	mut i = 0
+	for i < len(ed.Tabs) {
+		if ed.Tabs[i].Buf.Path == path {
+			ed.activate(i)
+			ed.say("switched to " + path)
+			return true
+		}
+		i += 1
+	}
 	let text = quarry.ReadFile(path) catch _ {
 		ed.say("cannot read " + path)
 		return false
 	}
-	ed.Buf = textedit.FromText(text)
-	ed.Buf.Path = path
-	ed.Scroll = 0
-	ed.HScroll = 0
-	ed.rawFor = -1
+	let buf = textedit.FromText(text)
+	buf.Path = path
+	let cur = ed.Buf
+	if len(ed.Tabs) == 1 && len(cur.Path) == 0 && !cur.Dirty && len(cur.Lines) == 1 && len(cur.Lines[0]) == 0 {
+		ed.Tabs[0].Buf = buf
+		ed.Active = -1
+		ed.activate(0)
+		ed.Active = 0
+	} else {
+		ed.newTab(buf)
+	}
 	ed.say("opened " + path)
 	return true
+}
+
+// closeTab closes the active tab (asking about unsaved changes); closing the last one quits.
+fn (ed mut Editor) closeTab() {
+	if !ed.confirm() {
+		return
+	}
+	if len(ed.Tabs) == 1 {
+		ed.Quit = true
+		return
+	}
+	let at = ed.Active
+	mut rest = []Tab{}
+	mut j = 0
+	for j < len(ed.Tabs) {
+		if j != at {
+			rest = append(rest, ed.Tabs[j])
+		}
+		j += 1
+	}
+	ed.Tabs = rest
+	mut next = at
+	if next >= len(ed.Tabs) {
+		next = len(ed.Tabs) - 1
+	}
+	ed.Active = -1
+	ed.Buf = ed.Tabs[next].Buf
+	ed.Scroll = ed.Tabs[next].Scroll
+	ed.HScroll = ed.Tabs[next].HScroll
+	ed.Active = next
+	ed.rawFor = -1
+	ed.Redraw = true
 }
 
 // save writes the text to its file (asking for one when it has none).
@@ -134,9 +245,22 @@ fn (ed mut Editor) save(asNew bool) bool {
 	return true
 }
 
+// panelH is the height in pixels of the output panel (0 when closed).
+fn (ed Editor) panelH() f64 {
+	if !ed.OutputOpen {
+		return 0.0
+	}
+	return ed.LineH * f64(outputRows) + ed.LineH * 0.4
+}
+
+// tabH is the height in pixels of the tab bar.
+fn (ed Editor) tabH() f64 {
+	return ed.LineH * 1.5
+}
+
 // rows is how many text lines fit in the window.
 fn (ed Editor) rows() i64 {
-	let area = ed.PtH * ed.Scale - ed.LineH * 2.0 - ed.LineH * 0.4
+	let area = ed.PtH * ed.Scale - ed.LineH * 2.0 - ed.LineH * 0.4 - ed.tabH() - ed.panelH()
 	let n = i64(area / ed.LineH)
 	if n < 1 {
 		return 1
@@ -270,6 +394,18 @@ fn (ed mut Editor) handleKey(k Key) {
 		b.Backspace()
 	} else if k.Code == keyForwardDelete {
 		b.Delete()
+	} else if k.Code == keyTab && ctrl {
+		mut next = ed.Active + 1
+		if shift {
+			next = ed.Active - 1
+		}
+		if next < 0 {
+			next = len(ed.Tabs) - 1
+		}
+		if next >= len(ed.Tabs) {
+			next = 0
+		}
+		ed.activate(next)
 	} else if k.Code == keyTab {
 		if shift {
 			b.Unindent()
@@ -280,6 +416,7 @@ fn (ed mut Editor) handleKey(k Key) {
 		}
 	} else if k.Code == keyEscape {
 		b.HasSel = false
+		ed.OutputOpen = false
 	} else if ctrl {
 		ed.controlKey(k)
 	} else if typeable(k.Chars) {
@@ -325,17 +462,18 @@ fn (ed mut Editor) command(k Key, shift bool) {
 		b.DocStart(shift)
 	} else if k.Code == keyDown {
 		b.DocEnd(shift)
-	} else if c == 'q' || c == 'w' {
+	} else if c == 'q' {
 		ed.quit()
+	} else if c == 'w' {
+		ed.closeTab()
+	} else if c >= '1' && c <= '9' {
+		ed.activate(i64(c) - 49)
 	} else if c == 's' {
 		ed.save(shift)
 	} else if c == 'o' {
 		ed.openFile()
 	} else if c == 'n' {
-		ed.Buf = textedit.New()
-		ed.Scroll = 0
-		ed.HScroll = 0
-		ed.rawFor = -1
+		ed.newTab(textedit.New())
 	} else if c == 'z' {
 		if shift {
 			b.Redo()
@@ -365,6 +503,8 @@ fn (ed mut Editor) command(k Key, shift bool) {
 	} else if c == 'l' {
 		ed.Mode = modeGoto
 		ed.Prompt = ""
+	} else if c == 'r' {
+		ed.runFile()
 	} else if c == '/' {
 		b.ToggleComment()
 	} else if c == 'd' {
@@ -415,16 +555,31 @@ fn (ed mut Editor) openFile() {
 	}
 }
 
-// quit leaves the editor, asking first when there are unsaved changes.
+// confirm asks what to do with unsaved changes in the active tab before it goes away; it reports whether to go on.
+fn (ed mut Editor) confirm() bool {
+	if !ed.Buf.Dirty || ed.Headless {
+		return true
+	}
+	let answer = appkit.Alert("Save changes to " + ed.name() + "?", "Your changes will be lost if you don't save them.", []str{"Save", "Don't Save", "Cancel"})
+	if answer == 2 {
+		return false
+	}
+	return answer != 0 || ed.save(false)
+}
+
+// quit leaves the editor, asking first about every tab with unsaved changes.
 fn (ed mut Editor) quit() {
-	if ed.Buf.Dirty && !ed.Headless {
-		let answer = appkit.Alert("Save changes to " + ed.name() + "?", "Your changes will be lost if you don't save them.", []str{"Save", "Don't Save", "Cancel"})
-		if answer == 2 {
-			return
+	ed.stash()
+	let start = ed.Active
+	mut i = 0
+	for i < len(ed.Tabs) {
+		if ed.Tabs[i].Buf.Dirty {
+			ed.activate(i)
+			if !ed.confirm() {
+				return
+			}
 		}
-		if answer == 0 && !ed.save(false) {
-			return
-		}
+		i += 1
 	}
 	ed.Quit = true
 }

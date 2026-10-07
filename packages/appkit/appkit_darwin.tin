@@ -432,3 +432,29 @@ fn SetColor(b Bitmap, r f64, g f64, bl f64, a f64) {
 	b.B = bl
 	CGContextSetRGBFillColor(b.Ctx, r, g, bl, a)
 }
+
+extern fn popen(command i64, mode i64) i64
+
+extern fn fread(buf i64, size i64, n i64, stream i64) i64
+
+extern fn pclose(stream i64) i64
+
+// RunCapture runs a shell command line (standard error folded into standard output) and returns its exit code
+// and everything it printed (up to a megabyte).
+fn RunCapture(command str) (i64, str) {
+	let fp = popen(rt_cstr(command + " 2>&1"), rt_cstr("r"))
+	if fp == 0 {
+		return -1, "cannot run: " + command
+	}
+	let buf = calloc(65536, 1)
+	mut out = ""
+	for len(out) < 1 << 20 {
+		let n = fread(buf, 1, 65536, fp)
+		if n <= 0 {
+			break
+		}
+		out = out + rt_str_from_raw(buf, n)
+	}
+	let status = pclose(fp)
+	return (status >> 8) & 0xff, out
+}

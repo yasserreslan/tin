@@ -145,7 +145,7 @@ fn (ed mut Editor) ensureBitmap() {
 
 // textTop is the pixel row (from the top) where line number row (counted from the scroll position) starts.
 fn (ed Editor) rowTop(n i64) f64 {
-	return f64(n) * ed.LineH + ed.LineH * 0.2
+	return f64(n) * ed.LineH + ed.LineH * 0.2 + ed.tabH()
 }
 
 // rect fills a rectangle given from the window's top left.
@@ -254,6 +254,8 @@ fn (ed mut Editor) render() {
 			ed.rect(cx, ed.rowTop(cn), ed.Scale * 1.5, ed.LineH, 0.95, 0.95, 1.0)
 		}
 	}
+	ed.panel()
+	ed.tabBar()
 	ed.statusBar()
 }
 
@@ -286,4 +288,73 @@ fn (ed mut Editor) statusBar() {
 	ed.draw(ed.CharW, ty, left, 0.85, 0.87, 0.9)
 	let pos = "Ln " + mint.Itoa(ed.Buf.Row + 1) + ", Col " + mint.Itoa(textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4) + 1) + "   " + mint.Itoa(len(ed.Buf.Lines)) + " lines"
 	ed.draw(w - f64(len(pos) + 2) * ed.CharW, ty, pos, 0.6, 0.64, 0.72)
+}
+
+// tabBar draws the open files along the top.
+fn (ed mut Editor) tabBar() {
+	let w = f64(ed.Bmp.W)
+	ed.rect(0.0, 0.0, w, ed.tabH(), 0.09, 0.095, 0.12)
+	let ty = (ed.tabH() - ed.LineH) / 2.0
+	mut x = 0.0
+	mut i = 0
+	for i < len(ed.Tabs) {
+		mut name = ed.tabName(i)
+		let dirty = (i == ed.Active && ed.Buf.Dirty) || (i != ed.Active && ed.Tabs[i].Buf.Dirty)
+		if dirty {
+			name = name + " *"
+		}
+		let tw = f64(len(name) + 4) * ed.CharW
+		if i == ed.Active {
+			ed.rect(x, 0.0, tw, ed.tabH(), bgR, bgG, bgB)
+			ed.rect(x, 0.0, tw, ed.Scale * 2.0, 0.45, 0.65, 0.95)
+			ed.draw(x + ed.CharW * 2.0, ty, name, 0.9, 0.92, 0.95)
+		} else {
+			ed.draw(x + ed.CharW * 2.0, ty, name, 0.5, 0.54, 0.62)
+		}
+		x += tw
+		i += 1
+	}
+}
+
+// tabAt is the tab under pixel column px of the tab bar (-1 past the last one).
+fn (ed Editor) tabAt(px f64) i64 {
+	mut x = 0.0
+	mut i = 0
+	for i < len(ed.Tabs) {
+		mut len2 = len(ed.tabName(i))
+		if (i == ed.Active && ed.Buf.Dirty) || (i != ed.Active && ed.Tabs[i].Buf.Dirty) {
+			len2 += 2
+		}
+		x += f64(len2 + 4) * ed.CharW
+		if px < x {
+			return i
+		}
+		i += 1
+	}
+	return -1
+}
+
+// panel draws the output of the last Run above the status line.
+fn (ed mut Editor) panel() {
+	if !ed.OutputOpen {
+		return
+	}
+	let h = f64(ed.Bmp.H)
+	let w = f64(ed.Bmp.W)
+	let ph = ed.panelH()
+	let top = h - ed.LineH * 1.4 - ph
+	ed.rect(0.0, top, w, ph, 0.08, 0.085, 0.105)
+	ed.rect(0.0, top, w, ed.Scale, 0.3, 0.33, 0.4)
+	// the last lines that fit
+	mut first = len(ed.Output) - outputRows
+	if first < 0 {
+		first = 0
+	}
+	mut i = first
+	mut n = 0
+	for i < len(ed.Output) && n < outputRows {
+		ed.draw(ed.CharW, top + ed.LineH * 0.2 + f64(n) * ed.LineH, ed.Output[i], 0.8, 0.82, 0.86)
+		i += 1
+		n += 1
+	}
 }
