@@ -83,8 +83,8 @@ frame is reachable from outside it (that is the rule), so discarding the frame d
 
 A `for` loop whose body **allocates** (a literal, `make`, `append`, a concatenation or
 interpolation, or a call whose summary says it may allocate fresh memory) and whose iterations
-**contain** their allocations runs each iteration in an arena: `rt_arena_open` before the body,
-`rt_arena_close` after it and on every `continue`, `break` and `return` leaving it. An iteration
+**contain** their allocations gives back each iteration's memory: a pool mark before the body,
+released after it and on every `continue`, `break` and `return` leaving it (see Cost). An iteration
 contains its allocations when, treating everything made inside the body as `RG_FRESH` and
 everything made before it as `RG_OUT` (exactly the explicit arena check, #236):
 
@@ -99,10 +99,23 @@ everything made before it as `RG_OUT` (exactly the explicit arena check, #236):
   is already E270).
 
 When the check fails the loop is left as it is, with no diagnostic: the inference is an
-optimization, and `arena { }` stays the way to ask for one and be told why it cannot be.
+optimization, and `arena { }` stays the way to ask for one and be told why it cannot be. The
+check is a separate scan of the lowered body after the region fixed point, not the explicit
+arena's closure (which turns captured variables into cells): it reads the summaries the pass
+leaves (`rg_grows`, `rg_fstores`, `rg_pstores`, results and held pairs) for each call, and
+treats any store of a pointer-holding value into a local declared outside the body, or into
+a field, element or map entry of an object not made in the body, as an escape. A function
+literal in the body makes the loop ineligible in this phase.
 
-**Cost.** An arena open and close is a few loads and stores on the core context (#236); a loop
-whose body does not allocate is never wrapped. Inner loops are considered before outer ones; a
+**Cost.** The explicit arena's `rt_arena_open`/`rt_arena_close` are too heavy to run per
+iteration (a boundary record, its own pool record, a memset of what it used). An iteration needs
+less: nothing made in it survives, so it can allocate from the pool it is in and give the space
+back. A **pool mark** (`rt_pool_mark`: the bump pointer and the head of the core's extra-chunk
+list) is taken before the body, and `rt_pool_release` after it frees the chunks added since and
+puts the bump pointer back, zeroing the bytes the iteration used (the pool hands out zeroed
+memory). That is a handful of words and a memset proportional to what the iteration allocated,
+which the allocation already touched. Tasks have their own pool (`rt_pool_home`), so the mark
+is per task, like the arena's. A loop whose body does not allocate is never wrapped. Inner loops are considered before outer ones; a
 loop already inside an iteration arena is wrapped only if its own iterations allocate enough to
 matter (a body with a literal or call that allocates), to keep tight inner loops free of the
 overhead. bench-linux decides: no benchmark may move by more than its noise.
