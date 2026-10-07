@@ -1,0 +1,18 @@
+<idea-plugin>
+  <id>org.tin.tinland</id>
+  <name>Tinland</name>
+  <vendor>Tin</vendor>
+  <description><![CDATA[
+    Tin language support for IntelliJ IDEA: the Tin file type and syntax highlighting. Tinland is
+    the Tin IDE on the IntelliJ Platform; semantics come from the compiler (tinc), through tin lsp.
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <fileType name="Tin" language="Tin" implementationClass="org.tin.tinland.lang.TinFileType"
+              fieldName="INSTANCE" extensions="tin"/>
+    <lang.syntaxHighlighterFactory language="Tin"
+                                   implementationClass="org.tin.tinland.lang.TinSyntaxHighlighterFactory"/>
+  </extensions>
+</idea-plugin>
