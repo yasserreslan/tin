@@ -62,7 +62,9 @@ Neither is wrong, and Go's own results differ between its arm64 and amd64 builds
 f32bits, f32frombits, dim, remainder, nextafter, nextafter32, fma, erf, erfc, erfcinv and gamma are
 bit-identical, and expm1, asinh, acosh, atanh and erfinv stay within one ulp (on macOS arm64: 224,
 150, 76, 17 and 1 results of 120,077). lgamma goes through Log and Sin and cancels near its zero
-crossings, so it is checked with a 1e-14 absolute plus 1e-13 relative tolerance: 119,833 of 120,077
+crossings, so it is checked with a 1e-14 absolute plus 1e-13 relative tolerance (its Go twin uses
+pureLog, because math.Log is assembly on amd64 and its subnormal results differ from Go's own pure
+algorithm): 119,833 of 120,077
 results are bit-identical and the worst relative difference is 7.7e-15, the inherited Log
 difference amplified by cancellation. The special values are pinned in
 `toolchain/tests/v2/gauge_more.tin`, which agrees with Go's line for line.
