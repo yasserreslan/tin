@@ -148,6 +148,26 @@ fn main() {
 		say.Line("err", c, firstErr(c))
 	}
 
+	// The writer: escaping, indentation, and a round trip through the decoder.
+	mut w = scroll.NewWriter()
+	w.EscapeText(`a < b & c > d`)
+	w.Text(" | ")
+	w.EscapeAttr(`x" y' z\t`)
+	say.Line("writer escape", w.String())
+	mut wi = scroll.NewWriterIndent("  ")
+	wstart(mut wi, "r")
+	wattr(mut wi, "a", `1"2`)
+	wi.EscapeText("hi")
+	wend(mut wi, "a")
+	wend(mut wi, "r")
+	say.Line("writer indent", wi.String())
+	// The writer's output decodes back to the same tokens.
+	let doc = wi.String()
+	dump("roundtrip", doc)
+	// The writer refuses a mismatched end tag, a bad name and a comment with --.
+	mut we = scroll.NewWriter()
+	say.Line("writer errors", wendErr(mut we, "x"), wstartErr(mut we, "a b"), wcommentErr(mut we, "a--b"))
+
 	// The depth limit: 600 nested elements against the 512 bound.
 	let deep = "<a>" + repeat("<b>", 600) + repeat("</b>", 600) + "</a>"
 	say.Line("depth", limitErr(deep), firstErr("<a>" + repeat("<b>", 500) + repeat("</b>", 500) + "</a>"))
@@ -193,6 +213,54 @@ fn filler(n i64) str {
 		b[i] = 'x'
 	}
 	return str(b)
+}
+
+// wstart starts an element, reporting a failure.
+fn wstart(w mut scroll.Writer, name str) {
+	w.Start(name, []scroll.Attr{}) catch err {
+		say.Line("writer start failed", err)
+		return
+	}
+}
+
+// wattr starts an element with one attribute, reporting a failure.
+fn wattr(w mut scroll.Writer, name str, value str) {
+	w.Start(name, []scroll.Attr{scroll.Attr{Name: scroll.Name{Space: "", Local: "id"}, Value: value}}) catch err {
+		say.Line("writer start failed", err)
+		return
+	}
+}
+
+// wend ends an element, reporting a failure.
+fn wend(w mut scroll.Writer, name str) {
+	w.End(name) catch err {
+		say.Line("writer end failed", err)
+		return
+	}
+}
+
+// wendErr is End's error, or "".
+fn wendErr(w mut scroll.Writer, name str) str {
+	w.End(name) catch err {
+		return say.Fmt("%s", err)
+	}
+	return ""
+}
+
+// wstartErr is Start's error, or "".
+fn wstartErr(w mut scroll.Writer, name str) str {
+	w.Start(name, []scroll.Attr{}) catch err {
+		return say.Fmt("%s", err)
+	}
+	return ""
+}
+
+// wcommentErr is Comment's error, or "".
+fn wcommentErr(w mut scroll.Writer, s str) str {
+	w.Comment(s) catch err {
+		return say.Fmt("%s", err)
+	}
+	return ""
 }
 
 // lenientNames names the token for the lenient probe.
