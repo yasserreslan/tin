@@ -107,15 +107,32 @@ treats any store of a pointer-holding value into a local declared outside the bo
 a field, element or map entry of an object not made in the body, as an escape. A function
 literal in the body makes the loop ineligible in this phase.
 
+A call is judged by its callee's summary, which gets one more word: the function, or one it
+calls, **may keep memory past the call** other than through its parameters and results. The
+region pass sets it, and carries it to callers through the fixed point, for a store into
+long-lived memory (`RG_INGOT` or `RG_UNK`, stored or not reported in trusted code), the growth
+of a long-lived slice or map, an indirect or `dyn` call, a call of a function with no summary
+(extern, generated, other than the printing, comparing, key and `keep` helpers), and a runtime
+call outside a short list known to keep nothing (allocation, map reads, string building,
+formatting, system calls). Spawns, scopes, `defer`, `select`, `use`, `within`, `guard`, `limit`
+and arenas are all outside the list. A loop that makes such a call is left alone, and so is one
+that calls a function resetting the pool.
+
 **Cost.** The explicit arena's `rt_arena_open`/`rt_arena_close` are too heavy to run per
 iteration (a boundary record, its own pool record, a memset of what it used). An iteration needs
 less: nothing made in it survives, so it can allocate from the pool it is in and give the space
-back. A **pool mark** (`rt_pool_mark`: the bump pointer and the head of the core's extra-chunk
-list) is taken before the body, and `rt_pool_release` after it frees the chunks added since and
-puts the bump pointer back, zeroing the bytes the iteration used (the pool hands out zeroed
-memory). That is a handful of words and a memset proportional to what the iteration allocated,
-which the allocation already touched. Tasks have their own pool (`rt_pool_home`), so the mark
-is per task, like the arena's. A loop whose body does not allocate is never wrapped. Inner loops are considered before outer ones; a
+back. A **pool mark** (three context words read inline: the bump pointer, the head of the
+extra-chunk list and `ctxShareGen`, below) is taken before the body; after it, when either of
+the first two moved, `rt_pool_release` frees the chunks added since and puts the bump pointer
+back, zeroing the bytes the iteration used (the pool hands out zeroed memory) and refunding
+what `limit` budgets were charged for the freed chunks. That is a handful of words and a memset
+proportional to what the iteration allocated, which the allocation already touched. A detached
+task has a pool of its own, but a scope's children allocate from their parent's pool
+(`rt_pool_words`), so a child could allocate between a parent iteration's mark and its release
+(while the parent waits), or a sibling between a child's. The core counts the pool-sharing
+children alive (`poolSharers`) and bumps `ctxShareGen` whenever one starts or ends; the release
+does nothing while one is alive or when the word moved since the mark, as it does nothing
+inside an arena (`arenaLive`). A loop whose body makes no call is never wrapped. Inner loops are considered before outer ones; a
 loop already inside an iteration arena is wrapped only if its own iterations allocate enough to
 matter (a body with a literal or call that allocates), to keep tight inner loops free of the
 overhead. bench-linux decides: no benchmark may move by more than its noise.
