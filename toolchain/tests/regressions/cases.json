@@ -886,5 +886,14 @@
       "exit": 1,
       "stderr_contains": "E102 BUILTIN_NAME: 'min' is a builtin and cannot be redeclared"
     }
+  },
+  {
+    "source": "large-frame-overflow.tin",
+    "issue": 570,
+    "expected": {
+      "phase": "run",
+      "exit": 2,
+      "stderr_contains": "panic: stack overflow"
+    }
   }
 ]

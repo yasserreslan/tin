@@ -10,7 +10,10 @@ const CTX_WORDS = 32 // runtime context words before the per-core globals (toolc
 // x16/x17 and d31 are scratch.
 const REG_SLOT = -1
 const REG_DEAD = -2
-const MAX_FRAME = 4095
+// A slot is addressed as [fp, #off] with a scaled 12-bit offset (up to 32760); the limit leaves
+// room above the frame for the incoming stack parameters (#570).
+const MAX_FRAME = 31744
+const STACK_PAGE = 4096 // a frame larger than this touches each page on the way down (#570)
 const FPR = 64 // d0 is register 64
 const FSCR = 95 // d31, float scratch
 
@@ -1113,7 +1116,7 @@ fn gen_unary(e Unary, dst i64, d i64) {
 	if op == "&" {
 		let s = cast(Sym, cast(IdentExpr, e.x).ref)
 		if s.kind == SYM_LOCAL {
-			emit3(I_ADDI, dst, FP, s.off)
+			add_imm(dst, FP, s.off)
 		} else if s.tls != 0 {
 			load_imm(X17, tls_off(s))
 			emit3(I_ADD, dst, 28, X17)
@@ -4748,6 +4751,23 @@ fn emit_inverted(k i64, l i64) {
 	}
 }
 
+// grow_stack lowers sp by frame bytes. Past a page it goes one page at a time and stores to
+// each, so a stack overflow meets the guard page below the stack before anything else and is
+// reported as one (#531), however large the frame (#570).
+fn grow_stack(frame i64) {
+	mut rest = frame
+	for rest > STACK_PAGE {
+		out4(I_SUBI, SP, SP, 1, 12)
+		out4(I_STR, SP, SP, 0, 0) // register 31 as the stored value is xzr
+		rest = rest - STACK_PAGE
+	}
+	if rest == STACK_PAGE {
+		out4(I_SUBI, SP, SP, 1, 12)
+	} else {
+		out4(I_SUBI, SP, SP, rest, 0)
+	}
+}
+
 // finish_fn wraps the body in its prologue and epilogues and drops unreachable code.
 fn finish_fn(f Fn, nslots i64, pre []i64) {
 	mut saved = []i64{}
@@ -4776,7 +4796,14 @@ fn finish_fn(f Fn, nslots i64, pre []i64) {
 	}
 	let frameless = i64(f.leaf != 0 && nslots == 0 && len(cast([]i64, saved)) == 0 && len(incoming_stack_loads) == 0)
 	if frame > MAX_FRAME {
-		err_code_quoted(f.pos, "E905 TOO_MANY_LOCALS", "function ", f.name, " has too many local variables")
+		let m = err_code(f.pos, "E905 TOO_MANY_LOCALS")
+		buf_str(m, "function '")
+		buf_str(m, f.name)
+		buf_str(m, "' has too many local variables: its frame is ")
+		buf_int(m, frame)
+		buf_str(m, " bytes, at most ")
+		buf_int(m, MAX_FRAME)
+		err_end(cast([]u8, m))
 	}
 	out4(I_FUNC, cast(i64, f), 0, 0, 0)
 	j = 0
@@ -4788,7 +4815,7 @@ fn finish_fn(f Fn, nslots i64, pre []i64) {
 		if frame <= 504 {
 			out4(I_STPPRE, FP, LR, -frame, 0)
 		} else {
-			out4(I_SUBI, SP, SP, frame, 0)
+			grow_stack(frame)
 			out4(I_STP, FP, LR, SP, 0)
 		}
 		out4(I_ADDI, FP, SP, 0, 0)
@@ -4820,7 +4847,12 @@ fn finish_fn(f Fn, nslots i64, pre []i64) {
 					out4(I_LDPPOST, FP, LR, frame, 0)
 				} else {
 					out4(I_LDP, FP, LR, SP, 0)
-					out4(I_ADDI, SP, SP, frame, 0)
+					if frame >= STACK_PAGE {
+						out4(I_ADDI, SP, SP, frame >> 12, 12)
+					}
+					if (frame & 4095) != 0 {
+						out4(I_ADDI, SP, SP, frame & 4095, 0)
+					}
 				}
 			}
 			out4(I_RETX, 0, 0, 0, 0)

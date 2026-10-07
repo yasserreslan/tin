@@ -4027,7 +4027,10 @@ Fix: create the directory first, or choose a writable path.
 ### E905 TOO_MANY_LOCALS
 
 On arm64 a function's stack frame (its local variables, temporaries and saved registers) is
-at most 4095 bytes, about 500 eight-byte locals.
+at most 31744 bytes, about 3900 eight-byte locals: a slot is addressed as `[fp, #offset]`
+with a 12-bit scaled offset, and the space above it holds the incoming stack parameters. A
+frame larger than a page touches each page on the way down on both architectures, so a deep
+recursion through it still reports a stack overflow (#570). The message gives the frame's size.
 
 No example: it takes a function with hundreds of local variables.
 

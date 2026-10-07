@@ -6,7 +6,7 @@ const I_MOVZ = 3 // a=rd b=imm16 c=shift
 const I_MOVN = 4
 const I_MOVK = 5
 const I_MOV = 6 // a=rd b=rm
-const I_ADDI = 7 // a=rd b=rn c=imm12 (rd/rn may be SP)
+const I_ADDI = 7 // a=rd b=rn c=imm12 d=12 for lsl #12 (rd/rn may be SP)
 const I_SUBI = 8
 const I_ADD = 9 // a=rd b=rn c=rm d=shift (SH_* + amount)
 const I_SUB = 10
@@ -266,7 +266,12 @@ fn pr_mem(b []u8, name str, rt i64, rn i64, off i64) {
 	buf_byte(b, '\t')
 	buf_str(b, name)
 	buf_byte(b, ' ')
-	pr_reg(b, rt)
+	if rt == SP {
+		// Register 31 as a load or store's value is xzr (the stack probes store it, #570).
+		buf_str(b, "xzr")
+	} else {
+		pr_reg(b, rt)
+	}
 	buf_str(b, ", [")
 	pr_reg(b, rn)
 	if off != 0 {
@@ -333,9 +338,15 @@ fn print_ins(b []u8, ins i64) {
 	} else if op == I_ADDI {
 		pr_regs(b, "add", cast(i64, x), y, -1)
 		pr_imm(b, z)
+		if w == 12 {
+			buf_str(b, ", lsl #12")
+		}
 	} else if op == I_SUBI {
 		pr_regs(b, "sub", cast(i64, x), y, -1)
 		pr_imm(b, z)
+		if w == 12 {
+			buf_str(b, ", lsl #12")
+		}
 	} else if op >= I_ADD && op <= I_EOR {
 		let names = []str{"add", "sub", "and", "orr", "eor"}
 		pr_regs(b, names[op - I_ADD], cast(i64, x), y, z)
@@ -816,10 +827,10 @@ fn encode(ins i64, pc i64) i64 {
 		return enc_rrr(0xAA0003E0, x, 0, y)
 	}
 	if op == I_ADDI {
-		return 0x91000000 | (z << 10) | (rn(y) << 5) | rn(x)
+		return 0x91000000 | (i64(w == 12) << 22) | (z << 10) | (rn(y) << 5) | rn(x)
 	}
 	if op == I_SUBI {
-		return 0xD1000000 | (z << 10) | (rn(y) << 5) | rn(x)
+		return 0xD1000000 | (i64(w == 12) << 22) | (z << 10) | (rn(y) << 5) | rn(x)
 	}
 	if op == I_ADD {
 		return enc_shift(0x8B000000, x, y, z, w)
