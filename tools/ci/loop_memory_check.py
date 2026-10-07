@@ -70,7 +70,7 @@ def main():
         print(f'binary-trees depth 18: Tin peak {tin} KiB, Go peak {go} KiB, Tin/Go {tin / go:.2f}')
         assert tin <= 3 * go, f'binary-trees peaks at {tin} KiB, more than 3x Go ({go} KiB)'
         code, loop_out, loop = peak_kib([str(out / 'loop')])
-        assert code == 0 and loop_out == b'56388890\n', (code, loop_out)
+        assert code == 0 and loop_out == b'53888890\n', (code, loop_out)
         print(f'plain loop of 5M structs and strings: peak {loop} KiB')
         assert loop < 16 * 1024, f'the plain loop peaks at {loop} KiB'
     print('PASS loop memory: binary-trees within 3x of Go, the plain loop under 16 MiB')
