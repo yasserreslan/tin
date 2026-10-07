@@ -120,3 +120,104 @@ fn Pow10(n i64) f64 {
 	}
 	return 0
 }
+
+// F32bits returns the IEEE 754 bit pattern of f. Tin holds an f32 as an f64 rounded to f32, so
+// the 32-bit pattern is re-encoded; a NaN payload is canonical, as conversions do.
+fn F32bits(f f32) u32 {
+	let b = F64bits(f64(f))
+	let s = (b >> 63) << 31
+	let e = i64((b >> 52) & 0x7ff)
+	let m = b & 0xfffffffffffff
+	if e == 0 {
+		return u32(s) // +-0
+	}
+	if e == 0x7ff {
+		if m == 0 {
+			return u32(s | 0x7f800000) // +-Inf
+		}
+		return u32(s | 0x7fc00000 | (m >> 29)) // NaN, quiet
+	}
+	let e32 = e - 896 // 1023 - 127
+	let m32 = m >> 29
+	if e32 <= 0 {
+		// An f32 subnormal: bring back the hidden bit and shift down (the value is m32 * 2**-149).
+		let sub = (m | 0x10000000000000) >> u64(926-e)
+		return u32(s | (sub & 0x7fffff))
+	}
+	return u32(s | u64(e32) << 23 | (m32 & 0x7fffff))
+}
+
+// F32frombits returns the f32 with bit pattern b. Subnormals and infinities are exact; a NaN is
+// a quiet NaN with the payload's high bits, since the f32 lives as an f64.
+fn F32frombits(b u32) f32 {
+	let s = u64(b >> 31) << 63
+	let e = i64((b >> 23) & 0xff)
+	let m = u64(b) & 0x7fffff
+	if e == 0xff {
+		return f32(F64frombits(s | 0x7ff0000000000000 | m << 29))
+	}
+	if e == 0 {
+		if m == 0 {
+			return f32(F64frombits(s)) // +-0
+		}
+		// An f32 subnormal: value = m * 2**-149; normalize it into an f64.
+		mut mm = m
+		mut k = i64(0)
+		for (mm & 0x800000) == 0 {
+			mm <<= 1
+			k += 1
+		}
+		return f32(F64frombits(s | u64(897-k) << 52 | (mm & 0x7fffff) << 29))
+	}
+	return f32(F64frombits(s | u64(e+896) << 52 | m << 29))
+}
+
+// Nextafter returns the next representable f64 after x towards y, like Go's math.Nextafter;
+// NaN when either is NaN.
+fn Nextafter(x f64, y f64) f64 {
+	if IsNaN(x) || IsNaN(y) {
+		return NaN()
+	}
+	if x == y {
+		return x
+	}
+	if x == 0 {
+		return Copysign(F64frombits(1), y)
+	}
+	if (y > x) == (x > 0) {
+		return F64frombits(F64bits(x) + 1)
+	}
+	return F64frombits(F64bits(x) - 1)
+}
+
+// Nextafter32 is Nextafter for f32 values.
+fn Nextafter32(x f32, y f32) f32 {
+	if IsNaN(f64(x)) || IsNaN(f64(y)) {
+		return f32(NaN())
+	}
+	if x == y {
+		return x
+	}
+	if x == 0 {
+		return f32(Copysign(f64(F32frombits(1)), f64(y)))
+	}
+	if (y > x) == (x > 0) {
+		return F32frombits(F32bits(x) + 1)
+	}
+	return F32frombits(F32bits(x) - 1)
+}
+
+// Dim returns the maximum of x-y or 0, like Go's math.Dim: Dim(+Inf, +Inf) = Dim(-Inf, -Inf) =
+// NaN, and any NaN gives NaN.
+fn Dim(x f64, y f64) f64 {
+	let v = x - y
+	if v <= 0 {
+		return 0
+	}
+	return v
+}
+
+// FMA returns x*y + z with a single rounding (a fused multiply-add), like Go's math.FMA.
+fn FMA(x f64, y f64, z f64) f64 {
+	return x*y + z
+}
