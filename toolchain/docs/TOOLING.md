@@ -118,7 +118,7 @@ tests and the examples) and formatting twice changes nothing. The rules:
 - **Blank lines**: at most one in a row, none at the start of the file, after an opening bracket or before a closing one.
 - **`//`** is followed by one space (`///` and `////` are left alone) and preceded by one space after code.
 - **Commas** are followed by one space and not preceded by one.
-- **Operators** `=`, `:=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `+%=`, `-%=`, `*%=`, `==`, `!=`,
+- **Operators** `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `+%=`, `-%=`, `*%=`, `==`, `!=`,
   `<=`, `>=`, `&&`, `||` and `=>` have one space on each side where there was none. Arithmetic operators are left as written.
 - **Left as written**: the spaces inside a line (so aligned fields and aligned trailing comments stay aligned), strings, raw
   strings (every line of one, including its indentation), rune literals, the order and line breaks of the code.
