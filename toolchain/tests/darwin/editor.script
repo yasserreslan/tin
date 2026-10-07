@@ -1,0 +1,1 @@
+open:toolchain/tests/darwin/editor_sample.txt|key:down|key:down|key:end|key:return|type:let y = 2|dump|key:cmd+z|dump|key:cmd+shift+z|key:cmd+/|dump|key:cmd+d|key:alt+up|dump|key:cmd+f|type:say|key:return|prompt|key:escape|dump|key:cmd+l|type:2|key:return|dump|key:cmd+a|key:cmd+x|dump|key:cmd+v|key:cmd+v|key:shift+up|dump|snap:@PNG@

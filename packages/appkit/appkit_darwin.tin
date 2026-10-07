@@ -3,6 +3,8 @@
 // tools import it; libraries and servers never do (AGENTS.md, "Platforms").
 package appkit
 
+import "twine"
+
 @framework("CoreGraphics")
 extern fn CGMainDisplayID() i64
 
@@ -192,4 +194,208 @@ fn FillRect(b Bitmap, x f64, y f64, w f64, h f64, r f64, g f64, bl f64, a f64) {
 // Pixel is byte i of the bitmap's pixel data.
 fn Pixel(b Bitmap, i i64) i64 {
 	return i64(load8(b.Pixels + i))
+}
+
+// SendDouble sends the message name with no arguments and returns its double result.
+fn SendDouble(recv i64, name str) f64 {
+	return msgDouble(recv, Sel(name))
+}
+
+// SendWithDouble sends the message name with one double argument and returns its pointer or integer result.
+fn SendWithDouble(recv i64, name str, v f64) i64 {
+	return msgWithDouble(recv, Sel(name), v)
+}
+
+// ParseNumbers is the numbers (integers and decimals, with an optional minus sign) in s, in order: AppKit prints
+// its structures as text ("NSRect: {{0, 0}, {640, 400}}"), and a struct result cannot be read from Tin directly.
+fn ParseNumbers(s str) []f64 {
+	mut out = []f64{}
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		let digit = c >= '0' && c <= '9'
+		let negative = c == '-' && i + 1 < len(s) && s[i + 1] >= '0' && s[i + 1] <= '9'
+		if !digit && !negative {
+			i += 1
+			continue
+		}
+		mut neg = false
+		if negative {
+			neg = true
+			i += 1
+		}
+		mut v = 0.0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			v = v * 10.0 + f64(i64(s[i]) - 48)
+			i += 1
+		}
+		if i + 1 < len(s) && s[i] == '.' && s[i + 1] >= '0' && s[i + 1] <= '9' {
+			i += 1
+			mut scale = 0.1
+			for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+				v = v + f64(i64(s[i]) - 48) * scale
+				scale = scale / 10.0
+				i += 1
+			}
+		}
+		if neg {
+			v = 0.0 - v
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// The autorelease pool: the objects the messages return are autoreleased, so a loop that sends many messages
+// wraps each pass in PoolPush and PoolPop.
+@framework("/usr/lib/libobjc.A.dylib")
+extern fn objc_autoreleasePoolPush() i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+extern fn objc_autoreleasePoolPop(pool i64)
+
+fn PoolPush() i64 {
+	return objc_autoreleasePoolPush()
+}
+
+fn PoolPop(pool i64) {
+	objc_autoreleasePoolPop(pool)
+}
+
+// Scale is how many pixels a point is on the window's screen (2 on a Retina display).
+fn Scale(win Window) f64 {
+	return SendDouble(win.Win, "backingScaleFactor")
+}
+
+// ContentSize is the size in points of the window's content view (read through key-value coding, which hands
+// back the NSRect as an NSValue that prints as text).
+fn ContentSize(win Window) (f64, f64) {
+	let frame = Send1(win.View, "valueForKey:", NewString("frame"))
+	let nums = ParseNumbers(StringOf(Send(frame, "description")))
+	if len(nums) < 4 {
+		return 0.0, 0.0
+	}
+	return nums[2], nums[3]
+}
+
+// SetTitle sets the window's title.
+fn SetTitle(win Window, title str) {
+	Send1(win.Win, "setTitle:", NewString(title))
+}
+
+// EventLocation is where a mouse event happened, in points from the content area's bottom left (the event
+// prints its position as "loc=(x,y)").
+fn EventLocation(e i64) (f64, f64) {
+	let d = StringOf(Send(e, "description"))
+	let at = twine.Index(d, "loc=(")
+	if at < 0 {
+		return 0.0, 0.0
+	}
+	let nums = ParseNumbers(d[at + 5:])
+	if len(nums) < 2 {
+		return 0.0, 0.0
+	}
+	return nums[0], nums[1]
+}
+
+// EventScrollY is the vertical scroll of a scroll-wheel event in points (positive: content moves down).
+fn EventScrollY(e i64) f64 {
+	return SendDouble(e, "scrollingDeltaY")
+}
+
+// ClipboardText is the text on the general pasteboard ("" when there is none).
+fn ClipboardText() str {
+	let pb = Send(Class("NSPasteboard"), "generalPasteboard")
+	return StringOf(Send1(pb, "stringForType:", NewString("public.utf8-plain-text")))
+}
+
+// SetClipboard puts text on the general pasteboard.
+fn SetClipboard(text str) {
+	let pb = Send(Class("NSPasteboard"), "generalPasteboard")
+	Send(pb, "clearContents")
+	Send2(pb, "setString:forType:", NewString(text), NewString("public.utf8-plain-text"))
+}
+
+// OpenPanel asks for a file to open ("" when cancelled).
+fn OpenPanel() str {
+	let panel = Send(Class("NSOpenPanel"), "openPanel")
+	// NSModalResponseOK is 1
+	if Send(panel, "runModal") != 1 {
+		return ""
+	}
+	return StringOf(Send(Send(panel, "URL"), "path"))
+}
+
+// SavePanel asks where to save, offering name ("" when cancelled).
+fn SavePanel(name str) str {
+	let panel = Send(Class("NSSavePanel"), "savePanel")
+	Send1(panel, "setNameFieldStringValue:", NewString(name))
+	if Send(panel, "runModal") != 1 {
+		return ""
+	}
+	return StringOf(Send(Send(panel, "URL"), "path"))
+}
+
+// Alert shows a message with buttons (the first is the default) and returns the index of the one pressed.
+fn Alert(message str, detail str, buttons []str) i64 {
+	let alert = Send(Send(Class("NSAlert"), "alloc"), "init")
+	Send1(alert, "setMessageText:", NewString(message))
+	Send1(alert, "setInformativeText:", NewString(detail))
+	mut i = 0
+	for i < len(buttons) {
+		Send1(alert, "addButtonWithTitle:", NewString(buttons[i]))
+		i += 1
+	}
+	// the first button returns NSAlertFirstButtonReturn (1000), the next 1001, ...
+	return Send(alert, "runModal") - 1000
+}
+
+// ImageIO writes the bitmap as a PNG: the editor's pixels, to a file (a snapshot for tests and bug reports).
+@framework("CoreFoundation")
+extern fn CFStringCreateWithCString(alloc i64, text i64, encoding i64) i64
+
+@framework("CoreFoundation")
+extern fn CFURLCreateWithFileSystemPath(alloc i64, path i64, style i64, isDirectory i64) i64
+
+@framework("CoreFoundation")
+extern fn CFRelease(object i64)
+
+@framework("ImageIO")
+extern fn CGImageDestinationCreateWithURL(url i64, kind i64, count i64, options i64) i64
+
+@framework("ImageIO")
+extern fn CGImageDestinationAddImage(dest i64, image i64, properties i64)
+
+@framework("ImageIO")
+extern fn CGImageDestinationFinalize(dest i64) i64
+
+// SavePNG writes the bitmap to path as a PNG; it reports whether the file was written.
+fn SavePNG(b Bitmap, path str) bool {
+	// 0x08000100 is kCFStringEncodingUTF8
+	let image = CGBitmapContextCreateImage(b.Ctx)
+	let cfpath = CFStringCreateWithCString(0, rt_cstr(path), 0x08000100)
+	// style 0 is kCFURLPOSIXPathStyle
+	let url = CFURLCreateWithFileSystemPath(0, cfpath, 0, 0)
+	let kind = CFStringCreateWithCString(0, rt_cstr("public.png"), 0x08000100)
+	let dest = CGImageDestinationCreateWithURL(url, kind, 1, 0)
+	CGImageDestinationAddImage(dest, image, 0)
+	let ok = CGImageDestinationFinalize(dest) & 0xff
+	CFRelease(dest)
+	CFRelease(kind)
+	CFRelease(url)
+	CFRelease(cfpath)
+	CGImageRelease(image)
+	return ok != 0
+}
+
+// FreeBitmap releases the bitmap's context and pixels.
+fn FreeBitmap(b Bitmap) {
+	CGContextRelease(b.Ctx)
+	CGColorSpaceRelease(b.space)
+	free(b.Pixels)
+}
+
+// SetColor sets the color the next text is drawn in (components 0 to 1).
+fn SetColor(b Bitmap, r f64, g f64, bl f64, a f64) {
+	CGContextSetRGBFillColor(b.Ctx, r, g, bl, a)
 }

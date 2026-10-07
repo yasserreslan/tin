@@ -53,11 +53,17 @@ fn IsOpen(win Window) bool {
 	return Send(win.Win, "isVisible") & 0xff != 0
 }
 
-// PollEvent waits up to ten milliseconds for an event and returns it, or 0 when there was none.
-fn PollEvent(win Window) i64 {
-	let until = msgWithDouble(Class("NSDate"), Sel("dateWithTimeIntervalSinceNow:"), 0.01)
+// WaitEvent waits up to seconds for an event and returns it, or 0 when none came (a window that has nothing to
+// animate waits for half a second, so an idle editor costs no processor time).
+fn WaitEvent(win Window, seconds f64) i64 {
+	let until = msgWithDouble(Class("NSDate"), Sel("dateWithTimeIntervalSinceNow:"), seconds)
 	// the mask is every event type (NSUIntegerMax), dequeue is YES
 	return Send4(win.App, "nextEventMatchingMask:untilDate:inMode:dequeue:", -1, until, win.Mode, 1)
+}
+
+// PollEvent waits up to ten milliseconds for an event and returns it, or 0 when there was none.
+fn PollEvent(win Window) i64 {
+	return WaitEvent(win, 0.01)
 }
 
 // Dispatch hands an event to AppKit (window dragging, closing, focus). Key events the editor handles itself are

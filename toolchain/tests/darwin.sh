@@ -16,3 +16,10 @@ for name in display objc number bitmap; do
 	cmp "$tmp/$name.out" "toolchain/tests/darwin/$name.out" || { echo "FAIL darwin $name"; exit 1; }
 	echo "PASS darwin $name"
 done
+# the editor app, driven by its script (no window): the text it ends up with, and a snapshot of its pixels
+"$compiler" -o "$tmp/tinland" products/tinland/app/*.tin
+script=$(sed "s|@PNG@|$tmp/editor.png|" toolchain/tests/darwin/editor.script)
+TINLAND_SCRIPT="$script" "$tmp/tinland" > "$tmp/editor.out"
+cmp "$tmp/editor.out" toolchain/tests/darwin/editor.out || { echo "FAIL darwin editor"; exit 1; }
+[ "$(head -c 4 "$tmp/editor.png" | od -An -c | tr -d ' ')" = '211PNG' ] || { echo "FAIL darwin editor snapshot"; exit 1; }
+echo "PASS darwin editor"
