@@ -48,6 +48,7 @@ type Server struct {
 	docs     map[str]str
 	syms     map[str][]Sym
 	counter  i64
+	dir      str // a directory only this user can use, for the text of the documents being checked ("" when there is none)
 	shutdown bool
 }
 
@@ -282,25 +283,47 @@ fn position(text str, line i64, col i64) str {
 
 // ---- running the compiler ----
 
-// overlayPath is a file name for the text of a document being checked.
-fn (s mut Server) overlayPath() str {
-	s.counter += 1
-	let dir = quarry.Getenv("TMPDIR")
+// privateDir creates a new directory that only this user can use, in $TMPDIR (or /tmp). mkdir fails when the name is
+// taken, also by a symbolic link someone else put there, so the directory is always one this process made. "" when none
+// could be made: documents are then checked as saved, never through a file in a shared directory.
+fn privateDir() str {
 	mut base = "/tmp"
+	let dir = quarry.Getenv("TMPDIR")
 	if len(dir) > 0 {
 		base = twine.TrimSuffix(dir, "/")
 	}
-	return base + "/tinlsp-" + mint.Itoa(s.counter % 4) + ".tin"
+	for attempt in 0..50 {
+		let path = base + "/tinlsp-" + mint.Itoa((tide.Now() + attempt * 7919) % 2147483647)
+		if makeDir(path) {
+			return path
+		}
+	}
+	return ""
+}
+
+// overlayPath is a file name for the text of a document being checked ("" when there is no private directory).
+fn (s mut Server) overlayPath() str {
+	if len(s.dir) == 0 {
+		return ""
+	}
+	s.counter += 1
+	return s.dir + "/buf-" + mint.Itoa(s.counter % 4) + ".tin"
 }
 
 // check runs the compiler on the document and keeps its symbols; it returns the diagnostics.
 fn (s mut Server) check(path str) []Diag {
 	let text = s.docs[path]
 	let tmp = s.overlayPath()
-	quarry.WriteFile(tmp, text) catch _ {
-		return []Diag{}
+	mut argv = []str{s.tinc, "-symbols", "-json"}
+	if len(tmp) > 0 {
+		quarry.WriteFile(tmp, text) catch _ {
+			return []Diag{}
+		}
+		argv = append(argv, "-overlay")
+		argv = append(argv, path + "=" + tmp)
 	}
-	let (code, out) = run([]str{s.tinc, "-symbols", "-json", "-overlay", path + "=" + tmp, path})
+	argv = append(argv, path)
+	let (code, out) = run(argv)
 	mut diags = []Diag{}
 	mut syms = []Sym{}
 	for line in twine.Split(out, "\n") {
@@ -680,7 +703,7 @@ fn main() {
 	if len(tinc) == 0 {
 		tinc = quarry.Getenv("TIN_ROOT") + "/bin/tinc"
 	}
-	let s = Server{tinc: tinc, docs: map[str]str{}, syms: map[str][]Sym{}, counter: 0, shutdown: false}
+	let s = Server{tinc: tinc, docs: map[str]str{}, syms: map[str][]Sym{}, counter: 0, dir: privateDir(), shutdown: false}
 	let r = reader{buf: []u8{}, at: 0}
 	for {
 		let (body, ok) = r.message()
@@ -693,6 +716,10 @@ fn main() {
 		}
 		if !s.handle(msg) {
 			break
+		}
+	}
+	if len(s.dir) > 0 {
+		quarry.RemoveAll(s.dir) catch _ {
 		}
 	}
 	if !s.shutdown {

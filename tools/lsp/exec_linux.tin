@@ -10,3 +10,8 @@ fn run(argv []str) (i64, str) {
 	}
 	return res.Code, res.Stdout
 }
+
+// makeDir creates the directory path with mode 0700; it fails when path exists (also as a symbolic link).
+fn makeDir(path str) bool {
+	return (rt_sys_mkdir(rt_cstr(path), 448) & 0xffffffff) == 0
+}
