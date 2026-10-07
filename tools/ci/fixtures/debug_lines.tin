@@ -14,8 +14,23 @@ fn pick(n i64) i64 {
 	return n
 }
 
+type Point struct {
+	X i64
+	Y i64
+	name str
+}
+
+fn describe(p Point, xs []i64, scale f64, ok bool) i64 {
+	let total = p.X + p.Y
+	let label = p.name
+	say.Line(label, scale, ok, len(xs))
+	return total
+}
+
 fn main() {
 	let x = add(2, 3)
 	let y = pick(x)
 	say.Line("lines", x, y)
+	let z = describe(Point{X: 1, Y: 2, name: "pt"}, []i64{4, 5, 6}, 1.5, true)
+	say.Line("z", z)
 }

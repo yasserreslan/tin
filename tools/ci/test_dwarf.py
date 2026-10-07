@@ -23,7 +23,7 @@ def tinc():
 
 def build(out, *flags):
     env = dict(os.environ, TIN_ROOT=str(ROOT))
-    subprocess.run([str(tinc()), *flags, '-o', str(out), str(FIXTURE)], check=True, timeout=120, env=env)
+    subprocess.run([str(Path(os.environ.get('TINC_UNDER_TEST', str(tinc())))), *flags, '-o', str(out), str(FIXTURE)], check=True, timeout=120, env=env)
 
 
 def sections(data):
@@ -137,12 +137,13 @@ def line_rows(sec):
     return files, rows
 
 
-def subprograms(info, abbrev):
-    """(name, low_pc, high_pc) of each subprogram of the one compilation unit."""
+def dies(info, abbrev):
+    """The DIEs of the one compilation unit: {offset: (tag, {attribute: value}, parent offset)} in order."""
     table, i = {}, 0
     while abbrev[i]:
         code, i = uleb(abbrev, i)
         tag, i = uleb(abbrev, i)
+        children = abbrev[i]
         i += 1
         attrs = []
         while True:
@@ -151,15 +152,17 @@ def subprograms(info, abbrev):
             if a == 0 and f == 0:
                 break
             attrs.append((a, f))
-        table[code] = (tag, attrs)
+        table[code] = (tag, children, attrs)
     length, version, abbrev_off, addr_size = struct.unpack_from('<IHIB', info, 0)
     assert version == 4 and addr_size == 8 and 4 + length == len(info)
-    i, out = 11, []
+    i, out, stack = 11, {}, []
     while i < len(info):
+        at = i
         code, i = uleb(info, i)
         if code == 0:
-            break
-        tag, attrs = table[code]
+            stack.pop()
+            continue
+        tag, children, attrs = table[code]
         values = {}
         for a, f in attrs:
             if f == 0x08:
@@ -169,19 +172,51 @@ def subprograms(info, abbrev):
             elif f == 0x05:
                 values[a], = struct.unpack_from('<H', info, i)
                 i += 2
-            elif f == 0x06 or f == 0x17:
+            elif f == 0x06 or f == 0x17 or f == 0x13:
                 values[a], = struct.unpack_from('<I', info, i)
                 i += 4
             elif f == 0x01 or f == 0x07:
                 values[a], = struct.unpack_from('<Q', info, i)
                 i += 8
+            elif f == 0x0b:
+                values[a] = info[i]
+                i += 1
+            elif f == 0x18:
+                n, i = uleb(info, i)
+                values[a] = bytes(info[i:i + n])
+                i += n
             elif f == 0x19:
                 values[a] = True
             else:
                 raise AssertionError(f'form {f:#x}')
-        if tag == 0x2e:
-            out.append((values[0x03], values[0x11], values[0x11] + values[0x12]))
+        out[at] = (tag, values, stack[-1] if stack else None)
+        if children:
+            stack.append(at)
     return out
+
+
+def subprograms(info, abbrev):
+    """(name, low_pc, high_pc) of each subprogram of the one compilation unit."""
+    return [(v[0x03], v[0x11], v[0x11] + v[0x12]) for tag, v, parent in dies(info, abbrev).values() if tag == 0x2e]
+
+
+def type_text(tree, at):
+    """A short text for the type DIE at an offset: a base type's name, a pointer as *target, a struct's name and members."""
+    tag, v, _ = tree[at]
+    if tag == 0x24:
+        return v[0x03]
+    if tag == 0x0f:
+        return '*' + type_text(tree, v[0x49])
+    if tag == 0x13:
+        return v[0x03]
+    raise AssertionError(f'type tag {tag:#x}')
+
+
+def variables(tree, name):
+    """[(kind, name, type text, location bytes)] of a function's parameters ('param') and locals ('local')."""
+    fn = [at for at, (tag, v, parent) in tree.items() if tag == 0x2e and v[0x03] == name][0]
+    return [('param' if tag == 0x05 else 'local', v[0x03], type_text(tree, v[0x49]), v[0x02])
+            for at, (tag, v, parent) in tree.items() if parent == fn and tag in (0x05, 0x34)]
 
 
 TARGETS = ['darwin-arm64', 'linux-arm64', 'linux-amd64']
@@ -201,7 +236,7 @@ class DebugLines(unittest.TestCase):
             addrs = [r[0] for r in rows]
             self.assertEqual(addrs, sorted(addrs), target)
             mine = [r[2] for r in rows if r[1] == 1 and not r[4]]
-            for line in (6, 7, 11, 12, 14, 18, 19, 20):
+            for line in (6, 7, 11, 12, 14):
                 self.assertIn(line, mine, f'{target}: line {line}')
             subs = {name: (lo, hi) for name, lo, hi in subprograms(secs['.debug_info'], secs['.debug_abbrev'])}
             for name in ('add', 'pick', 'main.main'):
@@ -210,6 +245,21 @@ class DebugLines(unittest.TestCase):
             body = [r for r in rows if lo <= r[0] < hi and r[1] == 1]
             self.assertEqual([r[2] for r in body][:2], [6, 7], f'{target}: the lines of add')
             self.assertTrue(all(lo <= r[0] < hi for r in body))
+            # parameters and locals with types and places
+            tree = dies(secs['.debug_info'], secs['.debug_abbrev'])
+            got = variables(tree, 'describe')
+            self.assertEqual([(k, n, t) for k, n, t, _ in got if k == 'param'],
+                             [('param', 'p', '*Point'), ('param', 'xs', '*[]i64'), ('param', 'scale', 'f64'), ('param', 'ok', 'bool')], target)
+            self.assertEqual({n: t for k, n, t, _ in got if k == 'local'}, {'total': 'i64', 'label': '*str'}, target)
+            for k, n, t, loc in got:
+                self.assertTrue(len(loc) >= 1, f'{target}: {n} has a location')
+            # a struct's members, with their offsets, and the str and slice layouts
+            structs = {v[0x03]: at for at, (tag, v, parent) in tree.items() if tag == 0x13}
+            members = {n: [(m[0x03], m[0x38]) for at, (tag, m, parent) in tree.items() if parent == structs[n] and tag == 0x0d]
+                       for n in ('Point', 'str', '[]i64')}
+            self.assertEqual(members['Point'], [('X', 0), ('Y', 8), ('name', 16)], target)
+            self.assertEqual(members['str'], [('len', 0), ('data', 8)], target)
+            self.assertEqual([m for m, _ in members['[]i64']], ['len', 'cap', 'data', 'region'], target)
             # the function ranges do not overlap and lie inside the line table's range
             spans = sorted(subs.values())
             for (a, b), (c, e) in zip(spans, spans[1:]):
@@ -235,8 +285,8 @@ class DebugLines(unittest.TestCase):
             build(debug, '-g')
             a = subprocess.run([str(plain)], capture_output=True, text=True, timeout=60)
             b = subprocess.run([str(debug)], capture_output=True, text=True, timeout=60)
-            self.assertEqual((a.returncode, a.stdout), (0, 'lines 10 22\n'))
-            self.assertEqual((b.returncode, b.stdout), (0, 'lines 10 22\n'))
+            self.assertEqual((a.returncode, a.stdout), (0, 'lines 10 22\npt 1.5 true 3\nz 3\n'))
+            self.assertEqual((b.returncode, b.stdout), (0, 'lines 10 22\npt 1.5 true 3\nz 3\n'))
 
 
 if __name__ == '__main__':

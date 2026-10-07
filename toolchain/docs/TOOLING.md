@@ -369,8 +369,31 @@ lldb prog -o "breakpoint set -f prog.tin -l 12" -o run -o bt     # stops at the 
 perf annotate -s main.main                                       # Linux: the source beside the machine code
 ```
 
-Not in the debug information: variables and types (a debugger shows frames and lines, not values; #411), inlined calls and
-lexical blocks. `tools/ci/test_dwarf.py` reads the sections back for all three targets without a debugger.
+Each subprogram lists its parameters and local variables with their types and where they live: a register (a
+callee-saved register, or a float register) or a slot of the frame, addressed from the frame pointer (`x29`, `rbp`). The
+types follow the layouts of RUNTIME.md section 1: integers, `bool` and floats are base types; a `str` is a pointer to
+`{len, data}`; a slice a pointer to `{len, cap, data, region}`; a struct a pointer to its fields with their offsets (a value
+struct is the structure itself); anything else (a map, a function, an enum, an optional number) is its word, shown as a
+number. A debugger shows them as it does a C program's:
+
+```text
+(lldb) frame variable
+(Point *) p = 0x000000016fdfe3d0
+([]i64 *) xs = 0x0000000104cd0010
+(long) a = 40
+(lldb) p *p
+(Point) { X = 10, Y = 20, name = 0x000000010000e338 }
+(lldb) p label->len
+(long) 5
+```
+
+Limits: a variable's place is the one the backend gave it for the whole function, and a register or slot shared by
+variables whose lifetimes do not overlap shows the other's value outside its own; a variable captured by a closure (it lives in
+a heap cell), a `dyn` value and a `?T` over a number have no place yet; there is no unwinding information (frame pointers
+are followed), no lexical blocks and no inlined calls; `lldb` shows `str` as a pointer to its length and first byte
+(`p label->len`, `memory read`). The language of the unit is C, which is what debuggers need to print values.
+
+`tools/ci/test_dwarf.py` reads the sections back for all three targets without a debugger.
 
 ### 8.1 Replaying a recorded request: `tin replay`
 
