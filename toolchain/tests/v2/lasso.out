@@ -16,6 +16,7 @@ replace func <a=b> <c=d>
 split  "" " " ""
 split n  "" " c=d e=f"
 quote a\.b\*c\(d\)\[e\]\{f\}\|g\^h\$i\\j
+global  1-2 3-5 6-9
 find abc xxabcxx 2 5 true
 find a.c xabc 1 4 true
 find [a-c]+ zzabcabz 2 7 true

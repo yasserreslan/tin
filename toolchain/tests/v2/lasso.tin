@@ -64,6 +64,10 @@ fn all(pattern str, s str, n i64) {
 	say.Line("all", pattern, s, n, out, "|", sub)
 }
 
+// digits is a package-level compiled pattern: a Regexp lives in long-lived memory, so this works
+// on every core.
+let digits = lasso.MustCompile(`\d+`)
+
 fn main() {
 	// The API: Match, Find, Named, Submatch and SubmatchIndex.
 	let re = lasso.MustCompile(`(?P<key>\w+)=(?P<val>[^&]*)`)
@@ -92,6 +96,13 @@ fn main() {
 	say.Line("split", splitOf(words, "a=b c=d", -1))
 	say.Line("split n", splitOf(words, "a=b c=d e=f", 2))
 	say.Line("quote", lasso.QuoteMeta(`a.b*c(d)[e]{f}|g^h$i\j`))
+
+	// A package-level Regexp.
+	mut offs = ""
+	for _, m in digits.FindAll("a1b22c333", -1) {
+		offs += say.Fmt(" %d-%d", m.Start, m.End)
+	}
+	say.Line("global", offs)
 
 	// The syntax: literals, classes, POSIX and Unicode classes, anchors and boundaries.
 	find(`abc`, "xxabcxx")
