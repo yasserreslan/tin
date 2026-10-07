@@ -75,6 +75,7 @@ type Editor struct {
 	Output   []str
 	Diags    []Diag
 	DiagFor  i64
+	TmpDir   str
 	OutputOpen bool
 	Redraw   bool
 	Blink    bool
@@ -713,4 +714,24 @@ fn parseInt(s str) i64 {
 		i += 1
 	}
 	return n
+}
+
+// tmp is a file name inside this editor's private temporary directory (made on first use), or "" when there is none:
+// nothing is written to a fixed name in a shared directory.
+fn (ed mut Editor) tmp(name str) str {
+	if len(ed.TmpDir) == 0 {
+		ed.TmpDir = appkit.PrivateDir("tinland")
+	}
+	if len(ed.TmpDir) == 0 {
+		return ""
+	}
+	return ed.TmpDir + "/" + name
+}
+
+// cleanup removes the private temporary directory.
+fn (ed Editor) cleanup() {
+	if len(ed.TmpDir) > 0 {
+		quarry.RemoveAll(ed.TmpDir) catch _ {
+		}
+	}
 }

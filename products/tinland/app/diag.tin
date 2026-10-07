@@ -84,7 +84,10 @@ fn (ed mut Editor) checkNow() {
 		ed.Diags = []Diag{}
 		return
 	}
-	let overlay = "/tmp/tinland-overlay.tin"
+	let overlay = ed.tmp("overlay.tin")
+	if len(overlay) == 0 {
+		return
+	}
 	quarry.WriteFile(overlay, ed.Buf.Text()) catch _ {
 		return
 	}

@@ -22,9 +22,11 @@ fn main() {
 		ed.Scale = 1.0
 		ed.fontFor()
 		runScript(mut ed, script)
+		ed.cleanup()
 		return
 	}
 	run(mut ed)
+	ed.cleanup()
 }
 
 // pointToCell moves the caret to where the mouse is (x and y in points from the window's bottom left).
