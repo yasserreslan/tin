@@ -1,0 +1,309 @@
+package stencil
+
+// Contextual HTML escaping, as Go's html/template does: an action's escaping depends on where it
+// sits in the surrounding markup. The contexts this mode understands are element text, attribute
+// values, URL attributes (href, src, action, formaction, poster and background, where a
+// javascript: URL becomes the #ZgotmplZ sentinel), and JavaScript inside <script>. Anything it
+// cannot judge is refused at parse time: <style>, <title> and actions inside comments or event
+// handler attributes.
+
+import "say"
+
+// The escape modes of an action.
+const escNone = 0 // text/template: no escaping
+
+const escHTML = 1 // element text and ordinary attribute values
+
+const escURL = 2 // URL attributes
+
+const escJS = 3 // inside <script>
+
+// The scanner's states.
+const stText = 0
+
+const stTag = 1
+
+const stAttrValue = 2
+
+const stScript = 3
+
+// htmlState is the scanner's position in the markup.
+type htmlState struct {
+	state    i64
+	quote    u8
+	attr     str // the current attribute's lowercased name
+	closing  bool
+	tagName  str
+	inAttr   bool
+}
+
+// annotateHTML walks the parsed nodes and sets each action's escape mode from the surrounding
+// text. It refuses the contexts the mode does not support.
+fn annotateHTML(nodes []Node, st htmlState) !htmlState {
+	mut s = copyState(st)
+	for i in 0..len(nodes) {
+		match nodes[i] {
+			Text(t) => {
+				s = try scanHTML(t, s)
+			}
+			Action(p, _) => {
+				if s.state == stTag && !s.inAttr && len(s.tagName) == 0 {
+					fail say.Fault("stencil: an action as a tag name is not supported")
+				}
+				let mode = modeFor(s)
+				nodes[i] = Node.Action(p, mode)
+			}
+			If(b) => {
+				let s1 = try annotateHTML(b.then, s)
+				let s2 = try annotateHTML(b.otherwise, s)
+				if s1.state != s.state || s2.state != s.state {
+					fail say.Fault("stencil: an if block crosses an HTML context boundary")
+				}
+			}
+			Range(r) => {
+				let s1 = try annotateHTML(r.body, s)
+				let s2 = try annotateHTML(r.otherwise, s)
+				if s1.state != s.state || s2.state != s.state {
+					fail say.Fault("stencil: a range block crosses an HTML context boundary")
+				}
+			}
+			With(b) => {
+				let s1 = try annotateHTML(b.then, s)
+				let s2 = try annotateHTML(b.otherwise, s)
+				if s1.state != s.state || s2.state != s.state {
+					fail say.Fault("stencil: a with block crosses an HTML context boundary")
+				}
+			}
+			Call(_) => {
+				// A called template starts and ends in text; see the note in ParseHTML.
+			}
+		}
+	}
+	return s
+}
+
+// modeFor is the escape mode for an action at state s.
+fn modeFor(s htmlState) i64 {
+	if s.state == stScript {
+		return escJS
+	}
+	if s.state == stAttrValue || s.inAttr {
+		if isURLAttr(s.attr) {
+			return escURL
+		}
+		return escHTML
+	}
+	return escHTML
+}
+
+// isURLAttr reports the attributes whose values are URLs.
+fn isURLAttr(name str) bool {
+	return name == "href" || name == "src" || name == "action" || name == "formaction" ||
+		name == "poster" || name == "background"
+}
+
+// isRefusedAttr reports the attributes the mode refuses (event handlers and style).
+fn isRefusedAttr(name str) bool {
+	return name == "style" || len(name) > 2 && name[0] == 'o' && name[1] == 'n'
+}
+
+// copyState is a fresh copy: a struct is a reference in Tin, so the scanner must not write
+// through its caller's state.
+fn copyState(st htmlState) htmlState {
+	return htmlState{state: st.state, quote: st.quote, attr: st.attr, closing: st.closing, tagName: st.tagName, inAttr: st.inAttr}
+}
+
+// scanHTML advances the scanner over one text segment.
+fn scanHTML(t str, st htmlState) !htmlState {
+	mut s = copyState(st)
+	mut i = 0
+	for i < len(t) {
+		if s.state == stText {
+			if t[i] == '<' {
+				if i + 3 < len(t) && t[i+1] == '!' && t[i+2] == '-' && t[i+3] == '-' {
+					// A comment: actions inside are refused.
+					fail say.Fault("stencil: an action inside an HTML comment is not supported")
+				}
+				s.closing = i + 1 < len(t) && t[i+1] == '/'
+				s.state = stTag
+				s.tagName = ""
+				s.attr = ""
+				s.inAttr = false
+				s.quote = 0
+			}
+			i += 1
+			continue
+		}
+		if s.state == stTag {
+			let c = t[i]
+			if c == '"' || c == '\'' {
+				s.quote = c
+				s.state = stAttrValue
+				i += 1
+				continue
+			}
+			if c == '>' {
+				if isRefusedTag(s.tagName) {
+					if s.tagName == "style" {
+						fail say.Fault("stencil: <style> is not supported")
+					}
+				}
+				if !s.closing && s.tagName == "script" {
+					s.state = stScript
+				} else if !s.closing && s.tagName == "title" {
+					fail say.Fault("stencil: <title> is not supported")
+				} else {
+					s.state = stText
+				}
+				s.tagName = ""
+				s.attr = ""
+				s.inAttr = false
+				i += 1
+				continue
+			}
+			if c == '=' {
+				s.inAttr = true
+				i += 1
+				// The value may be quoted or unquoted.
+				if i < len(t) && (t[i] == '"' || t[i] == '\'') {
+					s.quote = t[i]
+					s.state = stAttrValue
+					i += 1
+				}
+				continue
+			}
+			if isNameByte(c) {
+				mut j = i
+				for j < len(t) && isNameByte(t[j]) {
+					j += 1
+				}
+				let word = t[i:j]
+				if len(s.tagName) == 0 && !s.closing {
+					s.tagName = lower(word)
+				} else if len(s.attr) == 0 {
+					s.attr = lower(word)
+					if isRefusedAttr(s.attr) {
+						fail say.Fault("stencil: the %s attribute is not supported", s.attr)
+					}
+				}
+				i = j
+				continue
+			}
+			i += 1
+			continue
+		}
+		if s.state == stAttrValue {
+			if s.quote != 0 && t[i] == s.quote {
+				s.state = stTag
+				s.quote = 0
+				i += 1
+				continue
+			}
+			if s.quote == 0 && (t[i] == ' ' || t[i] == '>' || t[i] == '\t' || t[i] == '\n') {
+				s.state = stTag
+				i += 1
+				continue
+			}
+			i += 1
+			continue
+		}
+		// stScript: wait for </script.
+		if t[i] == '<' && i + 7 < len(t) && lower(t[i+1:i+8]) == "/script" {
+			s.state = stText
+			s.closing = true
+			s.tagName = "script"
+			i += 1
+			continue
+		}
+		i += 1
+	}
+	return s
+}
+
+// isNameByte is a tag or attribute name byte.
+fn isNameByte(c u8) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_'
+}
+
+// lower lowercases ASCII.
+fn lower(s str) str {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		mut c = s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		out = append(out, c)
+	}
+	return rt_str_from_raw(cast(i64, out)[2], len(out))
+}
+
+// isRefusedTag reports the tags the mode refuses.
+fn isRefusedTag(name str) bool {
+	return name == "style" || name == "title"
+}
+
+// escapeFor applies an action's mode to its value.
+fn escapeFor(mode i64, s str) str {
+	if mode == escNone {
+		return s
+	}
+	if mode == escURL {
+		return escapeURLAttr(s)
+	}
+	if mode == escJS {
+		return escapeJS(s)
+	}
+	return escapeHTML(s)
+}
+
+// escapeURLAttr escapes a URL attribute value, as Go does: a URL whose scheme is not safe becomes
+// the #ZgotmplZ sentinel.
+fn escapeURLAttr(s str) str {
+	let t = trimSpaceASCII(s)
+	if len(t) == 0 {
+		return s
+	}
+	if !isSafeURL(t) {
+		return "#ZgotmplZ"
+	}
+	return escapeHTML(s)
+}
+
+// isSafeURL accepts relative URLs and the http, https and mailto schemes.
+fn isSafeURL(s str) bool {
+	let colon = indexOfByte(s, ':')
+	if colon < 0 {
+		return true // relative
+	}
+	// A colon before any slash is a scheme.
+	let slash = indexOfByte(s, '/')
+	if slash >= 0 && slash < colon {
+		return true
+	}
+	let scheme = lower(s[0:colon])
+	return scheme == "http" || scheme == "https" || scheme == "mailto"
+}
+
+// indexOfByte returns the first position of c, or -1.
+fn indexOfByte(s str, c u8) i64 {
+	for i in 0..len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// trimSpaceASCII trims ASCII spaces.
+fn trimSpaceASCII(s str) str {
+	mut a = 0
+	mut b = len(s)
+	for a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r') {
+		a += 1
+	}
+	for b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\n' || s[b-1] == '\r') {
+		b -= 1
+	}
+	return s[a:b]
+}
