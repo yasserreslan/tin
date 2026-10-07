@@ -1,0 +1,305 @@
+// DWARF for the executables (tinc -g): a line table and the functions' names and extents, so a debugger and perf show
+// source lines and names (#409 macOS, #370 Linux). Code generation puts an I_LINE marker (the position of the
+// statement) before each statement; once branches are relaxed and the addresses are known, dwarf_extract reads the
+// addresses off, takes the markers out of the code, and dwarf_sections writes .debug_line, .debug_info and
+// .debug_abbrev (DWARF 4; addresses are the final virtual addresses, so there is nothing to relocate).
+shared mut debug_lines i64 // -g
+shared mut dw_addr []i64 // address of each marker
+shared mut dw_pos []i64 // and the source position it stands for
+shared mut dw_fname []str // each function: name, start, end and position of its declaration
+shared mut dw_flow []i64
+shared mut dw_fend []i64
+shared mut dw_fpos []i64
+shared mut dw_lo i64 // the code's first and last address
+shared mut dw_hi i64
+shared mut dw_sec_line []u8 // the sections, built by dwarf_build
+shared mut dw_sec_info []u8
+shared mut dw_sec_abbrev []u8
+
+fn dwarf_reset() {
+	dw_addr = []i64{}
+	dw_pos = []i64{}
+	dw_fname = []str{}
+	dw_flow = []i64{}
+	dw_fend = []i64{}
+	dw_fpos = []i64{}
+}
+
+// dwarf_extract takes the I_LINE markers out of the ARM64 code, which starts at address base, and records where they were
+// and where each function starts and ends.
+fn dwarf_extract(base i64) {
+	dwarf_reset()
+	mut out = []Fn{}
+	mut pc = base
+	mut cur = -1
+	mut i = 0
+	for i < len(code) {
+		let op = cast(i64, code[i])
+		if op == I_LINE {
+			dw_addr = append(dw_addr, pc)
+			dw_pos = append(dw_pos, cast(i64, code[i + 1]))
+			i = i + 5
+			continue
+		}
+		if op == I_FUNC {
+			if cur >= 0 {
+				dw_fend[cur] = pc
+			}
+			let f = cast(Fn, code[i + 1])
+			dw_fname = append(dw_fname, f.qname)
+			dw_flow = append(dw_flow, pc)
+			dw_fend = append(dw_fend, pc)
+			dw_fpos = append(dw_fpos, f.pos)
+			cur = len(dw_fname) - 1
+		} else if op != I_LABEL {
+			pc = pc + 4
+		}
+		out = relax_put(out, op, cast(i64, code[i + 1]), cast(i64, code[i + 2]), cast(i64, code[i + 3]), cast(i64, code[i + 4]))
+		i = i + 5
+	}
+	if cur >= 0 {
+		dw_fend[cur] = pc
+	}
+	dw_lo = base
+	dw_hi = pc
+	code = out
+}
+
+fn dw_u16(b []u8, v i64) {
+	buf_byte(b, v & 255)
+	buf_byte(b, (v >> 8) & 255)
+}
+
+fn dw_u32(b []u8, v i64) {
+	dw_u16(b, v & 0xffff)
+	dw_u16(b, (v >> 16) & 0xffff)
+}
+
+fn dw_u64(b []u8, v i64) {
+	dw_u32(b, v & 0xffffffff)
+	dw_u32(b, (v >> 32) & 0xffffffff)
+}
+
+fn dw_uleb(b []u8, v_in i64) {
+	mut v = v_in
+	for v >= 128 {
+		buf_byte(b, (v & 127) | 128)
+		v = v >> 7
+	}
+	buf_byte(b, v)
+}
+
+fn dw_sleb(b []u8, v_in i64) {
+	mut v = v_in
+	mut more = 1
+	for more != 0 {
+		let byte = v & 127
+		v = v >> 7
+		if (v == 0 && (byte & 64) == 0) || (v == -1 && (byte & 64) != 0) {
+			more = 0
+			buf_byte(b, byte)
+		} else {
+			buf_byte(b, byte | 128)
+		}
+	}
+}
+
+fn dw_cstr(b []u8, s str) {
+	buf_str(b, s)
+	buf_byte(b, 0)
+}
+
+// dw_line builds .debug_line: the header with every loaded file, then one sequence over all the code.
+fn dw_line() []u8 {
+	let hdr = buf_new()
+	buf_byte(hdr, 1) // minimum instruction length
+	buf_byte(hdr, 1) // maximum operations per instruction
+	buf_byte(hdr, 1) // default is_stmt
+	buf_byte(hdr, 251) // line base -5
+	buf_byte(hdr, 14) // line range
+	buf_byte(hdr, 13) // opcode base
+	let lens = []i64{0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1}
+	for l in lens {
+		buf_byte(hdr, l)
+	}
+	buf_byte(hdr, 0) // no include directories: file names are as loaded, relative to the compilation directory
+	for f in files {
+		dw_cstr(hdr, f)
+		buf_byte(hdr, 0)
+		buf_byte(hdr, 0)
+		buf_byte(hdr, 0)
+	}
+	buf_byte(hdr, 0)
+	let prog = buf_new()
+	buf_byte(prog, 0)
+	dw_uleb(prog, 9)
+	buf_byte(prog, 2)
+	dw_u64(prog, dw_lo)
+	mut addr = dw_lo
+	mut line = 1
+	mut file = 1
+	mut col = 0
+	mut k = 0
+	for k < len(dw_addr) {
+		let pos = dw_pos[k]
+		let f = (pos >> 48) + 1
+		let l = (pos >> 16) & 0xffffffff
+		let c = pos & 0xffff
+		// the last marker at an address wins: the statement that really starts there
+		if k + 1 < len(dw_addr) && dw_addr[k + 1] == dw_addr[k] {
+			k = k + 1
+			continue
+		}
+		if f != file {
+			buf_byte(prog, 4)
+			dw_uleb(prog, f)
+			file = f
+		}
+		if c != col {
+			buf_byte(prog, 5)
+			dw_uleb(prog, c)
+			col = c
+		}
+		if l != line {
+			buf_byte(prog, 3)
+			dw_sleb(prog, l - line)
+			line = l
+		}
+		if dw_addr[k] != addr {
+			buf_byte(prog, 2)
+			dw_uleb(prog, dw_addr[k] - addr)
+			addr = dw_addr[k]
+		}
+		buf_byte(prog, 1)
+		k = k + 1
+	}
+	buf_byte(prog, 2)
+	dw_uleb(prog, dw_hi - addr)
+	buf_byte(prog, 0)
+	dw_uleb(prog, 1)
+	buf_byte(prog, 1)
+	let b = buf_new()
+	dw_u32(b, 2 + 4 + len(hdr) + len(prog))
+	dw_u16(b, 4)
+	dw_u32(b, len(hdr))
+	for x in hdr {
+		buf_byte(b, i64(x))
+	}
+	for x in prog {
+		buf_byte(b, i64(x))
+	}
+	return b
+}
+
+// dw_abbrev builds .debug_abbrev: the compile unit (abbreviation 1) and a subprogram (2).
+fn dw_abbrev() []u8 {
+	let b = buf_new()
+	dw_uleb(b, 1)
+	dw_uleb(b, 0x11)
+	buf_byte(b, 1)
+	let cu = []i64{0x25, 0x08, 0x13, 0x05, 0x03, 0x08, 0x1b, 0x08, 0x11, 0x01, 0x12, 0x07, 0x10, 0x17}
+	for x in cu {
+		dw_uleb(b, x)
+	}
+	buf_byte(b, 0)
+	buf_byte(b, 0)
+	dw_uleb(b, 2)
+	dw_uleb(b, 0x2e)
+	buf_byte(b, 0)
+	let sub = []i64{0x03, 0x08, 0x11, 0x01, 0x12, 0x07, 0x3f, 0x19, 0x3a, 0x05, 0x3b, 0x06}
+	for x in sub {
+		dw_uleb(b, x)
+	}
+	buf_byte(b, 0)
+	buf_byte(b, 0)
+	buf_byte(b, 0)
+	return b
+}
+
+// dw_info builds .debug_info: one compile unit holding a subprogram for each function.
+fn dw_info() []u8 {
+	let body = buf_new()
+	dw_uleb(body, 1)
+	dw_cstr(body, "tinc")
+	dw_u16(body, 0x8001)
+	mut name = ""
+	if len(files) > 0 {
+		name = files[0]
+	}
+	dw_cstr(body, name)
+	let pwd = host_getenv("PWD")
+	if pwd != 0 {
+		dw_cstr(body, host_str(pwd))
+	} else {
+		dw_cstr(body, "")
+	}
+	dw_u64(body, dw_lo)
+	dw_u64(body, dw_hi - dw_lo)
+	dw_u32(body, 0)
+	mut i = 0
+	for i < len(dw_fname) {
+		dw_uleb(body, 2)
+		dw_cstr(body, dw_fname[i])
+		dw_u64(body, dw_flow[i])
+		dw_u64(body, dw_fend[i] - dw_flow[i])
+		dw_u16(body, (dw_fpos[i] >> 48) + 1)
+		dw_u32(body, (dw_fpos[i] >> 16) & 0xffffffff)
+		i = i + 1
+	}
+	buf_byte(body, 0)
+	let b = buf_new()
+	dw_u32(b, 2 + 4 + 1 + len(body))
+	dw_u16(b, 4)
+	dw_u32(b, 0)
+	buf_byte(b, 8)
+	for x in body {
+		buf_byte(b, i64(x))
+	}
+	return b
+}
+
+// dwarf_build makes the three sections from what dwarf_extract recorded; the executable writers lay them out.
+fn dwarf_build() {
+	dw_sec_line = dw_line()
+	dw_sec_info = dw_info()
+	dw_sec_abbrev = dw_abbrev()
+}
+
+// dwarf_size is the bytes of the three sections together.
+fn dwarf_size() i64 {
+	return len(dw_sec_line) + len(dw_sec_info) + len(dw_sec_abbrev)
+}
+
+// dwarf_collect_x64 records the markers of the x86-64 code, laid out from base (x64_layout has fixed every size): each
+// marker's address, and where each function in own starts and ends (end is where the code ends). The markers stay in the
+// code: they encode to nothing.
+fn dwarf_collect_x64(base i64, own []Fn, end i64) {
+	dwarf_reset()
+	mut pc = base
+	mut i = 0
+	for i < len(code) {
+		let ins = slice_data(code) + 8 * i
+		if ins[0] == X_LINE {
+			dw_addr = append(dw_addr, pc)
+			dw_pos = append(dw_pos, ins[1])
+		} else {
+			pc = pc + x64_size(ins, pc)
+		}
+		i = i + 5
+	}
+	i = 0
+	for i < len(own) {
+		let f = own[i]
+		dw_fname = append(dw_fname, f.qname)
+		dw_flow = append(dw_flow, f.addr)
+		if i + 1 < len(own) {
+			dw_fend = append(dw_fend, own[i + 1].addr)
+		} else {
+			dw_fend = append(dw_fend, end)
+		}
+		dw_fpos = append(dw_fpos, f.pos)
+		i = i + 1
+	}
+	dw_lo = base
+	dw_hi = end
+}

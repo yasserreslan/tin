@@ -32,7 +32,7 @@ moving or deleting the tree breaks it.
 |---|---|
 | `tin FILE.tin [ARGS...]` | compile and run (temporary executable, removed after) |
 | `tin run A.tin B.tin -- ARGS` | compile several files as one program and run it |
-| `tin build FILE.tin... [-o OUT] [--target T] [--strip]` | write an executable (default name: the first file without `.tin`); `--strip` leaves out a Linux executable's symbol table (§8) |
+| `tin build FILE.tin... [-o OUT] [--target T] [--strip] [-g]` | write an executable (default name: the first file without `.tin`); `--strip` leaves out a Linux executable's symbol table (§8); `-g` adds DWARF line tables and function names (§8.2) |
 | `tin asm FILE.tin...` | print the generated ARM64 assembly (clang syntax) |
 | `tin fix -edition 1 FILE.tin...` | rewrite edition-0 (Go-like) files to edition 1 in place (LANGUAGE.md §22) |
 | `tin audit secrets [-edition 1] FILE.tin...` | check the program and list every place a `secret` leaves the checker's protection: each `reveal(x)` and each secret passed to a library parameter declared `secret`, as `file:line:col: ...` sorted by position, then a count; exit status 1 (with the errors) when the program does not check |
@@ -102,6 +102,7 @@ tinc [-o OUT] [-S] [-edition 1] [-target darwin-arm64|linux-arm64|linux-amd64] F
 - `-symbols`: check the program and print every declaration of every loaded file (the program's, its packages' and the
   runtime's) as JSON lines on standard output instead of building (§3.3). Errors, if any, print as usual on standard
   error and the exit status is 1, but the declarations are printed too.
+- `-g`: put a DWARF line table and the functions' names in the executable (§8.2); the code is the same as without it.
 - `-caps`: check the program and print the capabilities each package can reach instead of
   building (`tin caps`; PACKAGES.md, "Capabilities").
 - `-fix -edition 1 FILE.tin` prints the file translated to edition 1 (`tin fix`, which also
@@ -349,8 +350,27 @@ perf report --sort symbol                         # time per Tin function
 ```
 
 Frames are walked with the frame pointers Tin always keeps (`perf record -g`, or
-`--call-graph fp`). Source lines need DWARF `.debug_line`, which is not emitted yet:
-`perf annotate` and `gdb list` show machine code only.
+`--call-graph fp`). Source lines come from DWARF, which `-g` adds (§8.2): `perf annotate` and
+`gdb list` then show the source.
+
+### 8.2 Source lines for a debugger and a profiler: `-g`
+
+`tin build -g` (`tinc -g`) adds three DWARF 4 sections to the executable, `.debug_line`, `.debug_info` and `.debug_abbrev`,
+on macOS (a `__DWARF` segment with `__debug_line`, `__debug_info` and `__debug_abbrev`), Linux arm64 and Linux amd64. The
+line table has a row for each statement (file, line and column, 1-based, as in the compiler's messages); `.debug_info` has
+one compilation unit with a subprogram for each function, named as in the symbol table (`pkg.Name`), with its address range
+and the line it is declared on. The addresses are the final ones, so there is nothing to relocate and a position-independent
+macOS executable is slid by the debugger. The code is the same as without `-g` except that a statement boundary stops the
+backend from fusing across it, so an optimized sequence can differ in a few instructions; `-S` ignores the flag.
+
+```sh
+tin build -g prog.tin -o prog
+lldb prog -o "breakpoint set -f prog.tin -l 12" -o run -o bt     # stops at the line, backtrace with names and lines
+perf annotate -s main.main                                       # Linux: the source beside the machine code
+```
+
+Not in the debug information: variables and types (a debugger shows frames and lines, not values; #411), inlined calls and
+lexical blocks. `tools/ci/test_dwarf.py` reads the sections back for all three targets without a debugger.
 
 ### 8.1 Replaying a recorded request: `tin replay`
 
