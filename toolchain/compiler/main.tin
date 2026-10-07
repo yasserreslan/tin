@@ -376,6 +376,7 @@ fn load_file_trusted(path str, trusted_in i64) {
 	}
 	let toks = lex(cur_file, text, edition)
 	file_sources = append(file_sources, text)
+	json_sources = append(json_sources, text)
 	file_tokens = append(file_tokens, toks)
 	if edition == 1 {
 		parse_edition1(cast([]i64, toks))
@@ -797,6 +798,7 @@ fn compiler_main(argc i64, argv i64) i64 {
 		return print_hashes(argc, av)
 	}
 	files = []str{}
+	json_sources = []str{}
 	overlay_files = []str{}
 	overlay_paths = []str{}
 	file_trusted = []i64{}

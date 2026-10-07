@@ -138,6 +138,7 @@ shared mut tgt_linux i64 // the target OS is Linux (else macOS)
 shared mut tgt_x64 i64 // the target CPU is x86-64 (else arm64)
 shared mut error_count i64
 shared mut json_diag i64 // -json: errors print as one JSON object per line on standard output (#393)
+shared mut json_sources []str // each loaded file's text, for the end of the token an error is at (set by load_file_trusted)
 
 fn pos_make(file i64, line i64, col i64) i64 {
 	return (file << 48) | (line << 16) | col
@@ -215,10 +216,10 @@ fn json_number(s str) i64 {
 // json_token_end is the column just past the token that starts at (line, col) of file's source: an identifier or
 // number run, a string or rune literal on the line, a comment's line, or one character.
 fn json_token_end(file i64, line i64, col i64) i64 {
-	if file < 0 || file >= len(file_sources) {
+	if file < 0 || file >= len(json_sources) {
 		return col + 1
 	}
-	let src = file_sources[file]
+	let src = json_sources[file]
 	mut at = 0
 	mut l = 1
 	for l < line && at < len(src) {
