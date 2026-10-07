@@ -48,7 +48,7 @@ def main():
             detail = first_difference(env, go, tin)
             raise AssertionError(f'abacus: results differ from math/big: {detail}')
         ops = [line.split()[0] for line in got]
-        assert len(ops) == 11, f'abacus: {len(ops)} operations, want 11'
+        assert len(ops) == 16, f'abacus: {len(ops)} operations, want 16'
         print(f'PASS abacus: {len(ops)} operations on {PAIRS} operand pairs match Go\'s math/big '
               f'({", ".join(ops)})')
 

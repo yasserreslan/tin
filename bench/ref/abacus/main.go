@@ -100,7 +100,8 @@ func main() {
 	}
 	dump := len(os.Args) > 1 && os.Args[1] == "dump"
 	r := &rng{s: 88172645463325252}
-	ops := []string{"add", "sub", "mul", "cmp", "text10", "text16", "text36", "bytes", "i64", "u64", "f64"}
+	ops := []string{"add", "sub", "mul", "cmp", "text10", "text16", "text36", "bytes", "i64", "u64", "f64",
+		"quo", "rem", "div", "mod", "exp"}
 	hash := make(map[string]*hasher, len(ops))
 	for _, op := range ops {
 		hash[op] = &hasher{h: 14695981039346656037}
@@ -111,7 +112,32 @@ func main() {
 		if dump {
 			fmt.Printf("operands %d %s %s\n", i, hexInt(a), hexInt(b))
 		}
+		// Division needs a nonzero divisor.
+		d := b
+		if d.Sign() == 0 {
+			d = big.NewInt(1)
+		}
+		q, r := new(big.Int).QuoRem(a, d, new(big.Int))
+		dd, mm := new(big.Int).DivMod(a, d, new(big.Int))
+		// A small exponent and a 256-bit modulus (zero means a tiny plain power).
+		e := new(big.Int).Mod(new(big.Int).Abs(b), big.NewInt(65))
+		m := new(big.Int).Mod(new(big.Int).Abs(b), new(big.Int).Lsh(big.NewInt(1), 256))
+		var xp *big.Int
+		if m.Sign() == 0 {
+			small := e
+			if small.Cmp(big.NewInt(8)) > 0 {
+				small = big.NewInt(8)
+			}
+			xp = new(big.Int).Exp(a, small, nil)
+		} else {
+			xp = new(big.Int).Exp(a, e, m)
+		}
 		results := map[string]string{
+			"quo":    hexInt(q),
+			"rem":    hexInt(r),
+			"div":    hexInt(dd),
+			"mod":    hexInt(mm),
+			"exp":    hexInt(xp),
 			"add":    hexInt(new(big.Int).Add(a, b)),
 			"sub":    hexInt(new(big.Int).Sub(a, b)),
 			"mul":    hexInt(new(big.Int).Mul(a, b)),
