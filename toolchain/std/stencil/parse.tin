@@ -71,13 +71,13 @@ type Arg enum {
 // renders its own template in element text, so a called template cannot open a tag.
 fn ParseHTML(name str, text str) !Template {
 	let t = try Parse(name, text)
-	let st = htmlState{state: stText, quote: 0, attr: "", closing: false, tagName: "", inAttr: false}
+	let st = newHTMLState()
 	let end = try annotateHTML(t.root, st)
 	if end.state != stText {
 		fail say.Fault("stencil: %s: the template ends inside an HTML context", name)
 	}
 	for _, body in t.defs {
-		let st2 = htmlState{state: stText, quote: 0, attr: "", closing: false, tagName: "", inAttr: false}
+		let st2 = newHTMLState()
 		let e2 = try annotateHTML(body, st2)
 		if e2.state != stText {
 			fail say.Fault("stencil: %s: a defined template ends inside an HTML context", name)

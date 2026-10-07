@@ -45,6 +45,14 @@ fn main() {
 	// JavaScript inside <script>.
 	html("js", `<script>var x = "{{.}}";</script>`, `</script><script>alert(1)</script>`)
 	html("js quote", `<script>var x = '{{.}}';</script>`, `a'b\c`)
+	// A trailing backslash cannot escape the closing quote.
+	html("js backslash", `<script>var x = "{{.}}";</script>`, `\`)
+	// An unquoted value cannot grow a new attribute.
+	html("unquoted space", `<a title={{.}}>x</a>`, `x onmouseover=alert(1)`)
+	html("unquoted eq", `<a title={{.}}>x</a>`, "a=b`c")
+	html("unquoted href space", `<a href={{.}}>x</a>`, `https://a.example/ onmouseover=alert(1)`)
+	html("unquoted then attr", `<a title={{.}} id=z>x</a>`, `p q`)
+	html("quoted then onclick ok", `<a href="/x" title="{{.}}">x</a>`, `v`)
 	// After the script closes, text escaping is back.
 	html("after script", `<script>var x = 1;</script>{{.}}`, `<b>`)
 	// The html, urlquery and js builtins still work in either mode.
@@ -55,7 +63,9 @@ fn main() {
 	// Refused contexts are parse errors.
 	for _, bad in []str{`<style>{{.}}</style>`, `<a onclick="{{.}}">x</a>`, `<!-- {{.}} -->`,
 		`<title>{{.}}</title>`, `<{{.}}>`, `{{if .}}<p{{end}}>`, `{{if .}}{{else}}<p{{end}}`, `{{range .}}<p{{end}}`,
-		`<p class="`} {
+		`<p class="`, `<script>var x = {{.}};</script>`, `<script>var x = "a" / 2; var y = "{{.}}";</script>`,
+		`<script>var x = ` + str(u8(96)) + `${ {{.}} }` + str(u8(96)) + `;</script>`, `<a href="/x" onclick="{{.}}">x</a>`,
+		`<a {{.}}>x</a>`, `<a b {{.}}>x</a>`} {
 		say.Line("refused", bad, htmlErr("bad", bad))
 	}
 	// A whole tag inside a block is fine; the context is the same on both paths.
