@@ -37,11 +37,12 @@ def compare(exe, inputs, expected, directory, label):
 # "<name> <i> <input bits...> <result bits>" lines; both sides generate the inputs from the same
 # seed, GAUGE_N random values plus the edge cases.
 GAUGE_FUNCS = [
-    # expm1's and the inverse hyperbolics' arithmetic is Go's, but both compilers fuse
-    # multiply-adds differently on arm64 (design/stdlib_verified.md, "gauge: the corpus check"),
-    # so these four are allowed exactly one ulp, and never more.
-    ('expm1', 1, 1), ('asinh', 1, 1), ('acosh', 1, 1), ('atanh', 1, 1),
-    ('logb', 1, 0), ('sincos', 2, 0), ('f32bits', 1, 0), ('f32frombits', 1, 0),
+    # expm1's, the inverse hyperbolics' and sincos' arithmetic is Go's, but the compilers fuse
+    # multiply-adds differently (arm64 fuses, x86-64 does not, and Go and Tin do not fuse the
+    # same products: design/stdlib_verified.md, "gauge: the corpus check"), so these five are
+    # allowed exactly one ulp, and never more. FMA is exact everywhere (the software port).
+    ('expm1', 1, 1), ('asinh', 1, 1), ('acosh', 1, 1), ('atanh', 1, 1), ('sincos', 2, 1),
+    ('logb', 1, 0), ('f32bits', 1, 0), ('f32frombits', 1, 0),
     ('dim', 1, 0), ('remainder', 1, 0), ('nextafter', 1, 0), ('nextafter32', 1, 0), ('fma', 1, 0),
 ]
 
