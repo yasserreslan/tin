@@ -145,8 +145,12 @@ fn framework_of(f Fn) str {
 	return ""
 }
 
-// framework_path is the path dyld loads a system framework from.
+// framework_path is the path dyld loads a system framework from; a name that starts with / is a dylib's
+// path, as libobjc.A.dylib is (it is not re-exported by libSystem).
 fn framework_path(name str) str {
+	if name[0] == '/' {
+		return name
+	}
 	return "/System/Library/Frameworks/" + name + ".framework/" + name
 }
 

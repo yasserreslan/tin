@@ -10,3 +10,35 @@ extern fn CGMainDisplayID() i64
 fn MainDisplayID() i64 {
 	return CGMainDisplayID() & 0xffffffff
 }
+
+// The Objective-C runtime, in libobjc. Messages with integer and pointer arguments and
+// results go through objc_msgSend directly; the double and struct results need their own entry points
+// (not bound yet).
+@framework("/usr/lib/libobjc.A.dylib")
+extern fn objc_getClass(name i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+extern fn sel_registerName(name i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+extern fn objc_msgSend(recv i64, sel i64) i64
+
+// Class is the Objective-C class named name, or 0 when no loaded image defines it.
+fn Class(name str) i64 {
+	return objc_getClass(rt_cstr(name))
+}
+
+// Send sends the message name with no arguments to recv and returns its pointer or integer result.
+fn Send(recv i64, name str) i64 {
+	return objc_msgSend(recv, sel_registerName(rt_cstr(name)))
+}
+
+// Load registers AppKit's classes with the Objective-C runtime (NSApplicationLoad, which the framework
+// exports for this purpose). Call it before Class("NSApplication") or any other AppKit class.
+@framework("AppKit")
+extern fn NSApplicationLoad() i64
+
+// LoadAppKit reports whether AppKit loaded.
+fn LoadAppKit() bool {
+	return NSApplicationLoad() & 0xff != 0
+}
