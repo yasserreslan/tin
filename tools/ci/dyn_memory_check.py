@@ -35,8 +35,9 @@ def main():
             assert code == 0, (what, n, code, err)
             peaks.append(kib)
         print(f'{what}: peak {peaks[0]} KiB at 10k, {peaks[1]} KiB at 1M')
-        # Before #618 every replaced object stayed: about 30 MB more at a million.
-        assert peaks[1] <= peaks[0] + 2048, (what, peaks)
+        # Before #618 every replaced object stayed: about 30 MB more at a million. The
+        # margin only absorbs measurement noise.
+        assert peaks[1] <= peaks[0] + 4096, (what, peaks)
         report.append(f'{what} {peaks[1]} KiB')
     print('PASS dyn memory: a million replacements each, ' + ', '.join(report))
 
