@@ -964,7 +964,7 @@
     "expected": {
       "phase": "run",
       "exit": 0,
-      "stdout": "9888890\n",
+      "stdout": "9888890 1000000\n",
       "stderr_contains": "a loop that allocates on every step grows it without bound"
     }
   },
