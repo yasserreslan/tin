@@ -1,0 +1,12 @@
+package main
+
+import "spawn"
+
+// run starts a program with no standard input and returns its exit status and what it printed on standard output.
+fn run(argv []str) (i64, str) {
+	let cmd = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Null, MaxOutput: 256 * 1024 * 1024}
+	let res = spawn.Run(cmd) catch _ {
+		return -1, ""
+	}
+	return res.Code, res.Stdout
+}
