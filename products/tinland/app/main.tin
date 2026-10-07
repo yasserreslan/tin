@@ -65,8 +65,19 @@ fn (ed mut Editor) handleEvent(e i64) {
 		let (x, y) = appkit.EventLocation(e)
 		if y < ed.PtH {
 			ed.Mode = modeEdit
+			let clicks = appkit.EventClicks(e)
 			ed.mouseTo(x, y, t == 6 && ed.dragging)
+			if t == 1 && clicks == 2 {
+				ed.Buf.SelectWordAt(ed.Buf.Row, ed.Buf.Col)
+			} else if t == 1 && clicks >= 3 {
+				ed.Buf.MoveTo(ed.Buf.Row, 0, false)
+				ed.Buf.MoveTo(ed.Buf.Row, len(ed.Buf.Lines[ed.Buf.Row]), true)
+			}
 			ed.dragging = true
+		} else if t == 1 && x < 22.0 && ed.Buf.Dirty {
+			// the close button: unsaved changes are asked about first
+			ed.quit()
+			return
 		}
 	} else if t == 2 {
 		ed.dragging = false

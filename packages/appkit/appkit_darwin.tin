@@ -154,6 +154,30 @@ extern fn CGBitmapContextCreateImage(ctx i64) i64
 extern fn CGContextSelectFont(ctx i64, name i64, size f64, encoding i64)
 
 @framework("CoreGraphics")
+extern fn CGContextSetTextPosition(ctx i64, x f64, y f64)
+
+@framework("CoreGraphics")
+extern fn CGContextSetTextDrawingMode(ctx i64, mode i64)
+
+@framework("CoreGraphics")
+extern fn CGContextSetTextMatrix(ctx i64, a f64, b f64, c f64, d f64, tx f64, ty f64)
+
+@framework("CoreGraphics")
+extern fn CGColorCreateGenericRGB(r f64, g f64, b f64, a f64) i64
+
+@framework("CoreGraphics")
+extern fn CGColorRelease(color i64)
+
+@framework("CoreText")
+extern fn CTFontCreateWithName(name i64, size f64, matrix i64) i64
+
+@framework("CoreText")
+extern fn CTLineCreateWithAttributedString(text i64) i64
+
+@framework("CoreText")
+extern fn CTLineDraw(line i64, ctx i64)
+
+@framework("CoreGraphics")
 extern fn CGContextShowTextAtPoint(ctx i64, x f64, y f64, text i64, n i64)
 
 @framework("CoreGraphics")
@@ -173,6 +197,12 @@ type Bitmap struct {
 	Pixels i64
 	Ctx i64
 	space i64
+	Font i64
+	FontName str
+	FontSize f64
+	R f64
+	G f64
+	B f64
 }
 
 // NewBitmap makes a w by h bitmap, cleared to transparent black.
@@ -397,5 +427,8 @@ fn FreeBitmap(b Bitmap) {
 
 // SetColor sets the color the next text is drawn in (components 0 to 1).
 fn SetColor(b Bitmap, r f64, g f64, bl f64, a f64) {
+	b.R = r
+	b.G = g
+	b.B = bl
 	CGContextSetRGBFillColor(b.Ctx, r, g, bl, a)
 }

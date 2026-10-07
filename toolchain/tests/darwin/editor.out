@@ -79,3 +79,8 @@ fn main() {
 	say.Line(x)
 }
 
+--- editor_sample.txt row 1 col 1 dirty true
+let yy = 1
+say.Line(yy)
+let é = "ü"
+message: replaced 2

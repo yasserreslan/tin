@@ -924,3 +924,50 @@ fn (b mut Buffer) MoveLines(dir i64) {
 	b.Dirty = true
 	b.Version += 1
 }
+
+// ReplaceAll replaces every occurrence of needle with repl as one undo step and returns how many there were;
+// the cursor goes to the start of the text.
+fn (b mut Buffer) ReplaceAll(needle str, repl str) i64 {
+	if len(needle) == 0 {
+		return 0
+	}
+	let text = b.Text()
+	let n = twine.Count(text, needle)
+	if n == 0 {
+		return 0
+	}
+	b.record(kindOther)
+	let fresh = FromText(twine.ReplaceAll(text, needle, repl))
+	b.Lines = fresh.Lines
+	b.Row = 0
+	b.Col = 0
+	b.HasSel = false
+	b.want = -1
+	b.Dirty = true
+	b.Version += 1
+	b.last = kindNone
+	return n
+}
+
+// SelectWordAt selects the word (letters, digits and underscores) around column col of row, or the one
+// character there when it is not part of a word.
+fn (b mut Buffer) SelectWordAt(row i64, col i64) {
+	let line = b.Lines[row]
+	mut from = col
+	mut to = col
+	if col < len(line) && isWordByte(line[col]) || col > 0 && col == len(line) && isWordByte(line[col - 1]) {
+		if col == len(line) {
+			from = col - 1
+		}
+		for from > 0 && isWordByte(line[from - 1]) {
+			from -= 1
+		}
+		to = max0(from)
+		for to < len(line) && isWordByte(line[to]) {
+			to += 1
+		}
+	} else if col < len(line) {
+		to = nextBoundary(line, col)
+	}
+	b.selectSpan(row, from, to - from)
+}

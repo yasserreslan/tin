@@ -1,6 +1,7 @@
 package main
 
 import "appkit"
+import "mint"
 import "quarry"
 import "textedit"
 import "twine"
@@ -15,6 +16,7 @@ const flagCmd = 1 << 20
 const modeEdit = 0
 const modeFind = 1
 const modeGoto = 2
+const modeReplace = 3
 
 // Hardware key codes (the ANSI layout; the editor reads text from the event, codes only for keys that type none).
 const keyReturn = 36
@@ -58,6 +60,8 @@ type Editor struct {
 	Message  str
 	FindFrom textedit.Pos
 	Needle   str
+	Replacement str
+	fresh    bool
 	Clip     str
 	Redraw   bool
 	Blink    bool
@@ -68,6 +72,8 @@ type Editor struct {
 	rawFor   i64
 	acc      f64
 	dragging bool
+	clicks   i64
+	lastClick f64
 }
 
 fn newEditor(buf textedit.Buffer) Editor {
@@ -350,6 +356,7 @@ fn (ed mut Editor) command(k Key, shift bool) {
 	} else if c == 'f' {
 		ed.Mode = modeFind
 		ed.Prompt = ed.Needle
+		ed.fresh = true
 		ed.FindFrom = b.SelStart()
 	} else if c == 'g' {
 		if len(ed.Needle) > 0 && !b.Find(ed.Needle, !shift) {
@@ -430,6 +437,43 @@ fn (ed mut Editor) promptKey(k Key) {
 		ed.Mode = modeEdit
 		return
 	}
+	if k.Code == keyTab && ed.Mode == modeFind {
+		// Tab moves from the search text to the replacement text
+		ed.Needle = ed.Prompt
+		ed.Prompt = ed.Replacement
+		ed.fresh = true
+		ed.Mode = modeReplace
+		return
+	}
+	if k.Code == keyTab && ed.Mode == modeReplace {
+		ed.Replacement = ed.Prompt
+		ed.Prompt = ed.Needle
+		ed.fresh = true
+		ed.Mode = modeFind
+		return
+	}
+	if (k.Code == keyReturn || k.Code == keyEnter) && ed.Mode == modeReplace {
+		ed.Replacement = ed.Prompt
+		if (k.Flags & flagCmd) != 0 {
+			let n = b.ReplaceAll(ed.Needle, ed.Prompt)
+			ed.say("replaced " + mint.Itoa(n))
+			ed.Mode = modeEdit
+			return
+		}
+		// replace the match the cursor is on (finding it first when it is not selected), then go to the next
+		if !b.HasSel || b.SelectedText() != ed.Needle {
+			b.Find(ed.Needle, true)
+		}
+		if b.HasSel && b.SelectedText() == ed.Needle {
+			b.ReplaceSelection(ed.Prompt)
+			if !b.Find(ed.Needle, true) {
+				ed.say("no more matches")
+			}
+		} else {
+			ed.say("not found: " + ed.Needle)
+		}
+		return
+	}
 	if k.Code == keyReturn || k.Code == keyEnter {
 		if ed.Mode == modeGoto {
 			let n = parseInt(ed.Prompt)
@@ -446,15 +490,26 @@ fn (ed mut Editor) promptKey(k Key) {
 		return
 	}
 	if k.Code == keyBackspace {
-		if len(ed.Prompt) > 0 {
+		if ed.fresh {
+			ed.Prompt = ""
+		} else if len(ed.Prompt) > 0 {
 			ed.Prompt = ed.Prompt[:len(ed.Prompt) - 1]
 		}
+		ed.fresh = false
 	} else if (k.Flags & flagCmd) != 0 {
 		if len(k.Chars) > 0 && k.Chars[0] == 'g' && len(ed.Needle) > 0 {
 			b.Find(ed.Needle, !shift)
+		} else if len(k.Chars) > 0 && k.Chars[0] == 'f' {
+			ed.Mode = modeFind
+			ed.Prompt = ed.Needle
+			ed.fresh = true
 		}
 		return
 	} else if typeable(k.Chars) {
+		if ed.fresh {
+			ed.Prompt = ""
+			ed.fresh = false
+		}
 		ed.Prompt = ed.Prompt + k.Chars
 	} else {
 		return
