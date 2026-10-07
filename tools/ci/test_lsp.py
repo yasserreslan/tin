@@ -10,6 +10,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def tinc():
+    """bin/tinc, built from the seed first when it is not there yet (the unit tests run before the bootstrap step)."""
+    path = ROOT / 'bin/tinc'
+    if not path.exists():
+        subprocess.run(['make', '-s', '-C', str(ROOT), 'bin/tinc'], check=True, timeout=600)
+    return path
+
 PROGRAM = '''package main
 
 import "say"
@@ -40,7 +48,7 @@ fn main() {
 
 class Client:
     def __init__(self, exe, cwd):
-        env = dict(os.environ, TIN_ROOT=str(ROOT), TINLSP_TINC=str(ROOT / 'bin/tinc'))
+        env = dict(os.environ, TIN_ROOT=str(ROOT), TINLSP_TINC=str(tinc()))
         self.p = subprocess.Popen([str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, cwd=cwd)
         self.next = 1
 
@@ -92,7 +100,7 @@ class LanguageServer(unittest.TestCase):
         cls.work = tempfile.TemporaryDirectory()
         cls.exe = Path(cls.work.name) / 'tinlsp'
         os_name = 'darwin' if platform.system() == 'Darwin' else 'linux'
-        subprocess.run([str(ROOT / 'bin/tinc'), '-o', str(cls.exe), str(ROOT / 'tools/lsp/main.tin'), str(ROOT / 'tools/lsp/json.tin'),
+        subprocess.run([str(tinc()), '-o', str(cls.exe), str(ROOT / 'tools/lsp/main.tin'), str(ROOT / 'tools/lsp/json.tin'),
                         str(ROOT / f'tools/lsp/exec_{os_name}.tin')], check=True, timeout=300, env=dict(os.environ, TIN_ROOT=str(ROOT)))
 
     @classmethod

@@ -7,6 +7,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def tinc():
+    """bin/tinc, built from the seed first when it is not there yet (the unit tests run before the bootstrap step)."""
+    path = ROOT / 'bin/tinc'
+    if not path.exists():
+        subprocess.run(['make', '-s', '-C', str(ROOT), 'bin/tinc'], check=True, timeout=600)
+    return path
+
 PROGRAM = '''package main
 
 import "say"
@@ -48,7 +56,7 @@ fn main() {
 
 
 def symbols(path, *flags):
-    r = subprocess.run([str(ROOT / 'bin/tinc'), '-symbols', *flags, str(path)], capture_output=True, text=True,
+    r = subprocess.run([str(tinc()), '-symbols', *flags, str(path)], capture_output=True, text=True,
                        env={'TIN_ROOT': str(ROOT), 'PATH': '/usr/bin:/bin'}, timeout=60)
     return r.returncode, [json.loads(line) for line in r.stdout.splitlines()], r.stderr
 
@@ -88,7 +96,7 @@ class Symbols(unittest.TestCase):
         self.assertEqual([m['name'] for m in mine[('type', 'Shape')]['members']], ['Circle', 'Empty'])
 
     def test_packages_come_with_their_names(self):
-        twine = subprocess.run([str(ROOT / 'bin/tinc'), '-symbols', '-edition', '1', str(ROOT / 'toolchain/tests/v2/twine.tin')],
+        twine = subprocess.run([str(tinc()), '-symbols', '-edition', '1', str(ROOT / 'toolchain/tests/v2/twine.tin')],
                                capture_output=True, text=True, env={'TIN_ROOT': str(ROOT)}, timeout=60).stdout
         names = {(json.loads(l)['pkg'], json.loads(l)['name']) for l in twine.splitlines()}
         self.assertIn(('twine', 'Split'), names)
