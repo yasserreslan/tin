@@ -42,3 +42,154 @@ extern fn NSApplicationLoad() i64
 fn LoadAppKit() bool {
 	return NSApplicationLoad() & 0xff != 0
 }
+
+// Double results and arguments. On arm64 both go through plain objc_msgSend: a double result comes back in
+// d0 and a double argument goes in d0 (the _fpret and _stret entry points are x86-64 only, and an arm64
+// struct result is returned through x8, which objc_msgSend passes on).
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msgDouble(recv i64, sel i64) f64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msgWithDouble(recv i64, sel i64, v f64) i64
+
+// NumberWith returns an NSNumber holding v (+[NSNumber numberWithDouble:]).
+fn NumberWith(v f64) i64 {
+	return msgWithDouble(Class("NSNumber"), sel_registerName(rt_cstr("numberWithDouble:")), v)
+}
+
+// DoubleValue is the value of the NSNumber n (-[NSNumber doubleValue]).
+fn DoubleValue(n i64) f64 {
+	return msgDouble(n, sel_registerName(rt_cstr("doubleValue")))
+}
+
+// Foundation supplies NSNumber, NSString and the rest of the basic classes. NSHomeDirectory is a C function
+// Foundation exports; calling it loads the framework, so its classes are registered.
+@framework("Foundation")
+extern fn NSHomeDirectory() i64
+
+// LoadFoundation reports whether Foundation loaded.
+fn LoadFoundation() bool {
+	return NSHomeDirectory() != 0
+}
+
+// Messages with more arguments. Each shape is its own declaration of objc_msgSend, because the calling
+// convention depends on the argument types: integers and pointers fill x2, x3, ... and doubles fill d0, d1, ...
+// independently of each other.
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg1(recv i64, sel i64, a i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg2(recv i64, sel i64, a i64, b i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg3(recv i64, sel i64, a i64, b i64, c i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg4(recv i64, sel i64, a i64, b i64, c i64, d i64) i64
+
+// A message whose first argument is an NSRect (four doubles, passed in d0 to d3) followed by three integers:
+// -[NSWindow initWithContentRect:styleMask:backing:defer:].
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msgRect3(recv i64, sel i64, x f64, y f64, w f64, h f64, a i64, b i64, c i64) i64
+
+// Sel is the selector named name.
+fn Sel(name str) i64 {
+	return sel_registerName(rt_cstr(name))
+}
+
+// Send1 to Send4 send the message name with one to four integer or pointer arguments.
+fn Send1(recv i64, name str, a i64) i64 {
+	return msg1(recv, Sel(name), a)
+}
+
+fn Send2(recv i64, name str, a i64, b i64) i64 {
+	return msg2(recv, Sel(name), a, b)
+}
+
+fn Send3(recv i64, name str, a i64, b i64, c i64) i64 {
+	return msg3(recv, Sel(name), a, b, c)
+}
+
+fn Send4(recv i64, name str, a i64, b i64, c i64, d i64) i64 {
+	return msg4(recv, Sel(name), a, b, c, d)
+}
+
+// SendRect3 sends a message whose arguments are an NSRect and three integers.
+fn SendRect3(recv i64, name str, x f64, y f64, w f64, h f64, a i64, b i64, c i64) i64 {
+	return msgRect3(recv, Sel(name), x, y, w, h, a, b, c)
+}
+
+// NewString makes an NSString from s (+[NSString stringWithUTF8String:]); Foundation must be loaded.
+fn NewString(s str) i64 {
+	return Send1(Class("NSString"), "stringWithUTF8String:", rt_cstr(s))
+}
+
+// CoreGraphics: a bitmap to draw into. The functions that take a CGRect, CGPoint or CGFloat take doubles in
+// d0, d1, ...; the context, pointers and sizes are integers in x0, x1, ...
+@framework("CoreGraphics")
+extern fn CGColorSpaceCreateDeviceRGB() i64
+
+@framework("CoreGraphics")
+extern fn CGBitmapContextCreate(data i64, w i64, h i64, bitsPerComponent i64, bytesPerRow i64, space i64, info i64) i64
+
+@framework("CoreGraphics")
+extern fn CGContextSetRGBFillColor(ctx i64, r f64, g f64, b f64, a f64)
+
+@framework("CoreGraphics")
+extern fn CGContextFillRect(ctx i64, x f64, y f64, w f64, h f64)
+
+@framework("CoreGraphics")
+extern fn CGBitmapContextCreateImage(ctx i64) i64
+
+@framework("CoreGraphics")
+extern fn CGContextSelectFont(ctx i64, name i64, size f64, encoding i64)
+
+@framework("CoreGraphics")
+extern fn CGContextShowTextAtPoint(ctx i64, x f64, y f64, text i64, n i64)
+
+@framework("CoreGraphics")
+extern fn CGContextRelease(ctx i64)
+
+@framework("CoreGraphics")
+extern fn CGImageRelease(image i64)
+
+@framework("CoreGraphics")
+extern fn CGColorSpaceRelease(space i64)
+
+// Bitmap is a w by h RGBA bitmap (premultiplied alpha, 8 bits per component) the editor draws into: Pixels is
+// where the bytes are, Ctx the CoreGraphics context drawing to them.
+type Bitmap struct {
+	W i64
+	H i64
+	Pixels i64
+	Ctx i64
+	space i64
+}
+
+// NewBitmap makes a w by h bitmap, cleared to transparent black.
+fn NewBitmap(w i64, h i64) Bitmap {
+	let b = Bitmap{W: w, H: h}
+	b.Pixels = calloc(w * h, 4)
+	b.space = CGColorSpaceCreateDeviceRGB()
+	// kCGImageAlphaPremultipliedLast: red, green, blue, alpha bytes
+	b.Ctx = CGBitmapContextCreate(b.Pixels, w, h, 8, w * 4, b.space, 1)
+	return b
+}
+
+// FillRect fills the rectangle with the color (components 0 to 1).
+fn FillRect(b Bitmap, x f64, y f64, w f64, h f64, r f64, g f64, bl f64, a f64) {
+	CGContextSetRGBFillColor(b.Ctx, r, g, bl, a)
+	CGContextFillRect(b.Ctx, x, y, w, h)
+}
+
+// Pixel is byte i of the bitmap's pixel data.
+fn Pixel(b Bitmap, i i64) i64 {
+	return i64(load8(b.Pixels + i))
+}
