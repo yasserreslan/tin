@@ -94,6 +94,20 @@ fn (d mut Decoder) LimitToken(n i64) {
 	d.maxToken = n
 }
 
+// badCDATAEnd reports whether s holds the sequence ]]>, which XML 1.0 forbids in character data
+// (Go's decoder refuses it too).
+fn badCDATAEnd(s str) bool {
+	if len(s) < 3 {
+		return false
+	}
+	for i in 0..len(s)-2 {
+		if s[i] == ']' && s[i+1] == ']' && s[i+2] == '>' {
+			return true
+		}
+	}
+	return false
+}
+
 // failAt makes a fault with the current position.
 fn (d Decoder) failAt(msg str) ! {
 	fail say.Fault("scroll: %d:%d: %s", d.line, d.col, msg)
@@ -120,6 +134,9 @@ fn (d mut Decoder) Next() !Token {
 			fail fault.Wrap(fault.LimitExceeded, say.Fmt("scroll: token over %d bytes", d.maxToken))
 		}
 		let text = d.text[start:d.pos]
+		if d.strict && badCDATAEnd(text) {
+			fail say.Fault("scroll: %d:%d: the sequence ]]> is not allowed in character data", startLine, startCol)
+		}
 		let decoded = try decodeText(text, startLine, startCol)
 		return Token.CharData(decoded)
 	}

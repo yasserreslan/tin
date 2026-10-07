@@ -65,6 +65,16 @@ err <a b=c/> scroll: 1:6: expected a quoted attribute value
 err <a:x xmlns:a="u" xmlns:b="u"></b:x> ok
 err <a><!-- a -- b --></a> ok
 err <a><!-- a ---></a> ok
+malformed 39 39
+chars 0 scroll: 1:1: character 18 is not allowed in XML
+chars 1 scroll: 1:22: character 11 is not allowed in XML
+chars 2 scroll: 1:1: character 65534 is not allowed in XML
+chars 3 scroll: 2:8: character 7 is not allowed in XML
+chars 4 scroll: 1:27: expected a name
+chars 5 scroll: 1:6: unknown entity &abc;
+chars 6 scroll: 1:6: unknown entity &;
+chars 7 scroll: 1:6: unknown entity &￾;
+chars 8 scroll: 1:6: unknown entity &hello;
 writer escape a &lt; b &amp; c &gt; d | x&#34; y&#39; z\t
 writer indent <r>
   <a id="1&#34;2">hi

@@ -62,6 +62,23 @@ fn firstErr(xml str) str {
 	return "too many tokens"
 }
 
+// fails reports whether the decoder faults on the document.
+fn fails(xml str) bool {
+	mut d = scroll.NewDecoder(xml)
+	for i in 0..2000 {
+		let t = d.Next() catch _ {
+			return true
+		}
+		match t {
+			Done => {
+				return false
+			}
+			_ => {}
+		}
+	}
+	return false
+}
+
 // limitErr reports whether a document fails with fault.LimitExceeded.
 fn limitErr(xml str) bool {
 	mut d = scroll.NewDecoder(xml)
@@ -146,6 +163,43 @@ fn main() {
 	}
 	for _, c in cases {
 		say.Line("err", c, firstErr(c))
+	}
+
+	// Go's encoding/xml xml_test.go cases, applicable as they stand: every document of its
+	// xmlInput table (the malformed inputs TestSyntax feeds the decoder) is refused, and its
+	// characterTests table (disallowed characters and broken entities) is refused with a
+	// position. The inputs are Go's; the fault texts are scroll's.
+	let malformed = []str{
+		// unexpected EOF
+		"<", "<t", "<t ", "<t/", "<!", "<!-", "<!--", "<!--c-", "<!--c--", "<!d", "<t></", "<t></t",
+		"<?", "<?p", "<t a", "<t a=", "<t a='", "<t a=''", "<t/><![", "<t/><![C", "<t/><![CDATA[d",
+		"<t/><![CDATA[d]", "<t/><![CDATA[d]]",
+		// other syntax errors
+		"<>", "<t/a", "<0 />", "<?0 >", "</0>", "<t 0=''>", "<t a='&'>", "<t a='<'>", "<t>&nbspc;</t>",
+		"<t a>", "<t a=>", "<t a=v>", "<t></e>", "<t></>", "<t></t!", "<t>cdata]]></t>",
+	}
+	mut refused = 0
+	for _, c in malformed {
+		if fails(c) {
+			refused += 1
+		} else {
+			say.Line("malformed accepted", c)
+		}
+	}
+	say.Line("malformed", refused, len(malformed))
+	let chars = []str{
+		"\x12<doc/>",
+		"<?xml version=\"1.0\"?>\x0b<doc/>",
+		"\xef\xbf\xbe<doc/>",
+		"<?xml version=\"1.0\"?><doc>\r\n<hiya/>\x07<toots/></doc>",
+		"<?xml version=\"1.0\"?><doc \x12='value'>what's up</doc>",
+		"<doc>&abc\x01;</doc>",
+		"<doc>&\x01;</doc>",
+		"<doc>&\xef\xbf\xbe;</doc>",
+		"<doc>&hello;</doc>",
+	}
+	for i, c in chars {
+		say.Line("chars", i, firstErr(c))
 	}
 
 	// The writer: escaping, indentation, and a round trip through the decoder.
