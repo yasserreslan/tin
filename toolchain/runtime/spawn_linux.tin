@@ -47,7 +47,7 @@ fn rt_spawn_free(rec i64) {
 }
 
 // rt_spawn_fail writes the positive errno to the error pipe and exits 127, as a failed execve
-// must not return into the child.
+// must not return into the child. r is the raw syscall result, -errno.
 fn rt_spawn_fail(rec i64, r i64) {
 	__st(rec[spawnErrBuf], 0 - r, 4)
 	rt_sys_write(rec[spawnErrPipe], rec[spawnErrBuf], 4)
@@ -72,7 +72,7 @@ fn rt_spawn_child(rec i64) {
 		rt_sys_dup3(rec[spawnErr], 2, 0)
 	}
 	if rec[spawnDir] != 0 {
-		let r = rt_sys_chdir(rec[spawnDir])
+		let r = linux_raw(linux_nr_chdir(), rec[spawnDir], 0, 0, 0, 0, 0)
 		if r < 0 {
 			rt_spawn_fail(rec, r)
 		}
@@ -80,14 +80,15 @@ fn rt_spawn_child(rec i64) {
 	// Every runtime descriptor is already close-on-exec; mark any other descriptor so too
 	// (Linux 5.9+; an older kernel returns EINVAL and the fds stay, as they were before #576).
 	rt_sys_close_range(3, -1, 4) // CLOSE_RANGE_CLOEXEC
+	// The child's whole point: execve, raw, and never return.
 	let r = rt_sys_execve(rec[spawnPath], rec[spawnArgv], rec[spawnEnvp])
 	rt_spawn_fail(rec, r)
 }
 
-// rt_spawn_start starts the child and returns (pid, errno). With CLONE_VFORK the parent returns
-// from the clone only after the child execs or exits, so the error pipe tells which: 4 bytes is
-// the exec errno, EOF is success.
-fn rt_spawn_start(rec i64) (i64, i64) {
+// rt_sys_posix_spawn starts the child and returns (pid, errno). With CLONE_VFORK the parent
+// returns from the clone only after the child execs or exits, so the error pipe tells which: 4
+// bytes is the exec errno, EOF is success. The name is the tagged spawn entry point (#576).
+fn rt_sys_posix_spawn(rec i64) (i64, i64) {
 	let errp = calloc(2, 4)
 	let pr = rt_sys_pipe(errp)
 	if pr < 0 {
@@ -98,6 +99,7 @@ fn rt_spawn_start(rec i64) (i64, i64) {
 	let size = 8 * rt_page_size()
 	let stack = mem_map(size, MAP_STACK)
 	let pid = rt_sys_clone(spawnCloneFlags, stack+size, 0, 0, cast(i64, rt_spawn_child), rec)
+	let cloneErrno = rt_errno()
 	// The parent continues here: the child has execd or exited.
 	rt_sys_close(i64(i32(__ld(errp+4, 4))))
 	mut childErrno = i64(0)
@@ -109,7 +111,7 @@ fn rt_spawn_start(rec i64) (i64, i64) {
 	free(errp)
 	rt_sys_munmap(stack, size)
 	if pid < 0 {
-		return pid, 0 - pid
+		return pid, cloneErrno
 	}
 	return pid, childErrno
 }
@@ -133,7 +135,8 @@ fn rt_spawn_reap(pid i64, pidfd i64, killFirst bool) (i64, i64) {
 		return -1, 0
 	}
 	let code = i64(i32(__ld(info+8, 4)))  // si_code
-	let status = i64(i32(__ld(info+16, 4))) // si_status
+	// SIGCHLD's siginfo: si_pid at 16, si_uid at 20, si_status at 24.
+	let status = i64(i32(__ld(info+24, 4))) // si_status
 	free(info)
 	if code == 1 { // CLD_EXITED
 		return status, 0

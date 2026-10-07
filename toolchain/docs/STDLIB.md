@@ -24,6 +24,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [ore](#ore) | byte slices (bytes) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
+| [spawn](#spawn) | starting child processes (os/exec) |
 | [trail](#trail) | paths (path/filepath) |
 | [lever](#lever) | command-line flags (flag) |
 | [tide](#tide) | time (time) |
@@ -559,7 +560,7 @@ Package gauge is floating-point math and a few integer helpers (like Go's math);
 - `Nextafter(x f64, y f64) f64`: Nextafter returns the next representable f64 after x towards y, like Go's math.Nextafter; NaN when either is NaN.
 - `Nextafter32(x f32, y f32) f32`: Nextafter32 is Nextafter for f32 values.
 - `Dim(x f64, y f64) f64`: Dim returns the maximum of x-y or 0, like Go's math.Dim: Dim(+Inf, +Inf) = Dim(-Inf, -Inf) = NaN, and any NaN gives NaN.
-- `FMA(x f64, y f64, z f64) f64`: FMA returns x*y + z with a single rounding (a fused multiply-add), like Go's math.FMA.
+- `FMA(x f64, y f64, z f64) f64`
 - `Frexp(f f64) (f64, i64)`: Frexp breaks f into a fraction in [0.5, 1) and a power of two: f = frac * 2**exp. Frexp(0), Frexp(±Inf) and Frexp(NaN) return f and 0.
 - `Ldexp(frac f64, exp i64) f64`: Ldexp returns frac * 2**exp, the inverse of Frexp.
 - `Modf(f f64) (f64, f64)`: Modf returns the integer and fractional parts of f, both with the sign of f.
@@ -786,6 +787,22 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `Exit(code i64)`: Exit flushes stdout and ends the program with status code.
 - `Eprint(s str)`: Eprint writes s to stderr.
 - `Eprintln(s str)`: Eprintln writes s and a newline to stderr in one write.
+
+## spawn
+
+Package spawn starts child processes, like Go's os/exec: Start a program with inherited, null or file standard descriptors, wait for it, signal it or kill it. A program is never run through a shell: write []str{"sh", "-c", script} for one. Linux is the target; macOS is the last part of #576, and pipes, Run and maxOutput are the next one.
+
+- `type Stdio enum`: Stdio says where a child's standard descriptor points.
+- `type Env enum`: Env says which environment a child gets. A Tin slice has no nil, so where Go's exec.Cmd says "nil inherits and an empty list is empty", this package says so with a variant.
+- `type Cmd struct`: Cmd describes a program to start. Argv[0] is the program: a name without a slash is looked up in PATH.
+- `type Process struct`: Process is a running child. Wait reaps it; a Process that is never waited for leaves a zombie.
+- `const SIGKILL = 9`: SIGKILL and SIGTERM are the signals Signal and Kill send.
+- `const SIGTERM = 15`
+- `Start(c Cmd) !Process`: Start starts c and returns the running child. A start error names the program, like Go's exec.Error.
+- `(p mut Process) Wait() !i64`: Wait waits for the child, reaps it and returns its exit code, or -1 when a signal killed it. A task deadline (within) interrupts the wait, kills the child and reaps it.
+- `(p Process) Signal(sig i64) !`: Signal sends sig to the child.
+- `(p Process) Kill() !`: Kill sends SIGKILL to the child.
+- `LookPath(name str) !str`: LookPath finds name like Go's exec.LookPath: a name with a slash is used as it is, otherwise each PATH entry is tried in order and the first executable file wins.
 
 ## trail
 
