@@ -2,8 +2,17 @@ package packfile
 
 import "../object"
 import "fault"
+import "flume"
+import "pack"
+import "quarry"
+import "seal"
+import "sift"
+import "squash"
+import "stamp"
 
-// Packs and their indexes (design/tit.md section 6; #778).
+// Packs and their indexes (design/tit.md section 6; #778). A pack holds many objects, some as deltas against an earlier
+// entry (by distance back) or against an object by id; every entry records its compressed length. The index maps ids
+// to entries through a fan-out table and a sorted list. A Pack is a read-only ObjectStore.
 
 // ErrBadPack is the fault of a pack or index that breaks the format.
 let ErrBadPack = fault("bad pack")
@@ -11,18 +20,289 @@ let ErrBadPack = fault("bad pack")
 // MaxDeltaDepth is the longest delta chain a pack may hold.
 const MaxDeltaDepth = 50
 
-// Pack is an open pack with its index.
+const typeBlob = 1
+const typeTree = 2
+const typeCommit = 3
+const typeTag = 4
+const typeOfsDelta = 8
+const typeRefDelta = 9
+
+fn typeOf(k object.Kind) i64 {
+	return match k {
+		Blob => typeBlob
+		Tree => typeTree
+		Commit => typeCommit
+		Tag => typeTag
+	}
+}
+
+fn kindOf(t i64) !object.Kind {
+	if t == typeBlob {
+		return object.Kind.Blob
+	}
+	if t == typeTree {
+		return object.Kind.Tree
+	}
+	if t == typeCommit {
+		return object.Kind.Commit
+	}
+	if t == typeTag {
+		return object.Kind.Tag
+	}
+	fail fault.Wrap(ErrBadPack, "entry type {t}")
+}
+
+// Pack is an open pack with its index, read into memory.
 type Pack struct {
-	Path  str
-	Count i64
+	Path   str
+	Count  i64
+	data   str
+	ids    str
+	offs   []i64
+	crcs   []u32
+	fanout []i64
+	cache  map[i64]str
+	kinds  map[i64]object.Kind
 }
 
-// Open opens the pack at path and its index (#778).
+fn le32(s str, at i64) i64 {
+	return i64(pack.LE.U32([]u8(s[at:at + 4])))
+}
+
+fn le64(s str, at i64) i64 {
+	return i64(pack.LE.U64([]u8(s[at:at + 8])))
+}
+
+// Open opens the pack at path (ending in .pack) and its index (the same name ending in .idx), checking both.
 fn Open(path str) !Pack {
-	fail fault.Wrap(ErrBadPack, "packfile.Open: not implemented yet (#778)")
+	let data = try flume.ReadFile(path)
+	if len(data) < 20 + 32 || data[0:8] != "TITPACK\x00" || le32(data, 8) != 1 {
+		fail fault.Wrap(ErrBadPack, "{path}: not a version 1 pack")
+	}
+	let count = le64(data, 12)
+	let sum = seal.Sha256(data[0:len(data) - 32])
+	if str(sum) != data[len(data) - 32:] {
+		fail fault.Wrap(ErrBadPack, "{path}: its trailing hash does not match")
+	}
+	let idxPath = path[0:len(path) - 5] + ".idx"
+	let idx = try flume.ReadFile(idxPath)
+	let want = 8 + 4 + 8 + 1024 + count * 44 + 64
+	if count < 0 || count > len(data) || len(idx) != want || idx[0:8] != "TITIDX\x00\x00" || le32(idx, 8) != 1 || le64(idx, 12) != count {
+		fail fault.Wrap(ErrBadPack, "{idxPath}: not the index of this pack")
+	}
+	if str(seal.Sha256(idx[0:len(idx) - 32])) != idx[len(idx) - 32:] || idx[len(idx) - 64:len(idx) - 32] != data[len(data) - 32:] {
+		fail fault.Wrap(ErrBadPack, "{idxPath}: its hashes do not match the pack")
+	}
+	mut fanout = make([]i64, 256)
+	mut prev = 0
+	for i in 0..256 {
+		fanout[i] = le32(idx, 20 + 4 * i)
+		if fanout[i] < prev {
+			fail fault.Wrap(ErrBadPack, "{idxPath}: the fan-out table goes down")
+		}
+		prev = fanout[i]
+	}
+	if fanout[255] != count {
+		fail fault.Wrap(ErrBadPack, "{idxPath}: the fan-out table does not end at the count")
+	}
+	let idsAt = 20 + 1024
+	let ids = idx[idsAt:idsAt + 32 * count]
+	for i in 1..count {
+		if !(ids[32 * (i - 1):32 * i] < ids[32 * i:32 * (i + 1)]) {
+			fail fault.Wrap(ErrBadPack, "{idxPath}: ids are not in order")
+		}
+	}
+	mut offs = make([]i64, count)
+	mut crcs = make([]u32, count)
+	let offAt = idsAt + 32 * count
+	let crcAt = offAt + 8 * count
+	for i in 0..count {
+		offs[i] = le64(idx, offAt + 8 * i)
+		crcs[i] = u32(le32(idx, crcAt + 4 * i))
+		if offs[i] < 20 || offs[i] >= len(data) - 32 {
+			fail fault.Wrap(ErrBadPack, "{idxPath}: an offset outside the pack")
+		}
+	}
+	return Pack{Path: path, Count: count, data: data, ids: ids, offs: offs, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}}
 }
 
-// Find is the offset of the object in the pack, or nil (#778).
-fn (p Pack) Find(id object.Id) ?i64 {
-	return nil
+// Find is the position of the object in the index, or -1.
+fn (p Pack) Find(id object.Id) i64 {
+	let raw = id.Bytes()
+	let first = i64(raw[0])
+	mut lo = 0
+	if first > 0 {
+		lo = p.fanout[first - 1]
+	}
+	mut hi = p.fanout[first]
+	for lo < hi {
+		let mid = (lo + hi) / 2
+		let at = p.ids[32 * mid:32 * mid + 32]
+		if at == raw {
+			return mid
+		}
+		if at < raw {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return -1
+}
+
+// Has reports whether the pack holds the object.
+fn (p Pack) Has(id object.Id) bool {
+	return p.Find(id) >= 0
+}
+
+// IdAt is the id of the object at position i of the index.
+fn (p Pack) IdAt(i i64) object.Id {
+	let id = object.IdOf(p.ids[32 * i:32 * i + 32]) catch _ {
+		object.NoId
+	}
+	return id
+}
+
+fn (p Pack) uvarint(at i64) !(i64, i64) {
+	if at >= len(p.data) - 32 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	let (v, n) = pack.Uvarint([]u8(p.data[at:min(len(p.data) - 32, at + 10)])) catch _ {
+		fail fault.Wrap(ErrBadPack, "a bad varint at {at}")
+	}
+	if v > u64(1) << 40 {
+		fail fault.Wrap(ErrBadPack, "a size too large at {at}")
+	}
+	return i64(v), at + n
+}
+
+// entryAt reads the object at offset off, resolving deltas up to MaxDeltaDepth.
+fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
+	if depth > MaxDeltaDepth {
+		fail fault.Wrap(ErrBadPack, "a delta chain longer than {MaxDeltaDepth}")
+	}
+	let (cached, hit) = p.cache[off]
+	if hit {
+		return p.kinds[off], cached
+	}
+	let t = i64(p.data[off])
+	let (size, a) = try p.uvarint(off + 1)
+	mut baseOff = -1
+	mut at = a
+	if t == typeOfsDelta {
+		let (dist, b) = try p.uvarint(at)
+		baseOff = off - dist
+		if dist <= 0 || baseOff < 20 {
+			fail fault.Wrap(ErrBadPack, "a delta at {off} against no earlier entry")
+		}
+		at = b
+	} else if t == typeRefDelta {
+		if at + 32 > len(p.data) - 32 {
+			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+		}
+		let baseId = try object.IdOf(p.data[at:at + 32])
+		let pos = p.Find(baseId)
+		if pos < 0 {
+			fail fault.Wrap(ErrBadPack, "a delta at {off} against {baseId.Hex()}, which this pack lacks")
+		}
+		baseOff = p.offs[pos]
+		if baseOff == off {
+			fail fault.Wrap(ErrBadPack, "a delta at {off} against itself")
+		}
+		at += 32
+	}
+	let (clen, c) = try p.uvarint(at)
+	if c + clen > len(p.data) - 32 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	let zbytes = p.data[c:c + clen]
+	let budget = 2 * size + 4194304
+	// budget * 1: a bare name before { would read as a struct literal.
+	let body = limit memory budget * 1 {
+		try squash.Unzlib(zbytes, size + 1)
+	} catch err {
+		fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
+	}
+	if baseOff < 0 {
+		if len(body) != size {
+			fail fault.Wrap(ErrBadPack, "entry at {off}: {len(body)} bytes, not {size}")
+		}
+		let kind = try kindOf(t)
+		return kind, body
+	}
+	let (kind, base) = try p.entryAt(baseOff, depth + 1)
+	let out = try ApplyDelta(base, body, size)
+	if len(p.cache) < 256 {
+		p.cache[off] = out
+		p.kinds[off] = kind
+	}
+	return kind, out
+}
+
+// GetRaw is the object's kind and body, checked against its id.
+fn (p mut Pack) GetRaw(id object.Id) !(object.Kind, str) {
+	let pos = p.Find(id)
+	if pos < 0 {
+		fail fault.Wrap(ErrBadPack, "{id.Hex()} is not in {p.Path}")
+	}
+	let (kind, body) = try p.entryAt(p.offs[pos], 0)
+	if object.Hash(kind, body) != id {
+		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()} in {p.Path}: the content does not match the id")
+	}
+	return kind, body
+}
+
+// Get is the decoded object.
+fn (p mut Pack) Get(id object.Id) !object.Object {
+	let (kind, body) = try p.GetRaw(id)
+	return try object.Decode(kind, body)
+}
+
+// PutRaw fails: a pack is written once, by Write.
+fn (p mut Pack) PutRaw(kind object.Kind, body str) !object.Id {
+	fail fault.Wrap(ErrBadPack, "{p.Path} is read-only")
+}
+
+// Put fails: a pack is written once, by Write.
+fn (p mut Pack) Put(o object.Object) !object.Id {
+	fail fault.Wrap(ErrBadPack, "{p.Path} is read-only")
+}
+
+// Deltas is how many entries are stored as deltas.
+fn (p Pack) Deltas() i64 {
+	mut n = 0
+	for off in p.offs {
+		let t = i64(p.data[off])
+		if t == typeOfsDelta || t == typeRefDelta {
+			n += 1
+		}
+	}
+	return n
+}
+
+// Verify reads every entry, checks its CRC and that its content matches its id.
+fn (p mut Pack) Verify() ! {
+	mut sorted = make([]i64, len(p.offs))
+	copy(sorted, p.offs)
+	sift.Sort(mut sorted)
+	mut next = map[i64]i64{}
+	for k in 0..len(sorted) {
+		if k + 1 < len(sorted) {
+			next[sorted[k]] = sorted[k + 1]
+		} else {
+			next[sorted[k]] = len(p.data) - 32
+		}
+	}
+	for i in 0..p.Count {
+		let id = p.IdAt(i)
+		let off = p.offs[i]
+		let end = next[off]
+		if stamp.Crc32(p.data[off:end]) != p.crcs[i] {
+			fail fault.Wrap(ErrBadPack, "{id.Hex()}: its CRC does not match")
+		}
+		let (_, _, err) = p.GetRaw(id)
+		if err != nil {
+			fail err
+		}
+	}
 }
