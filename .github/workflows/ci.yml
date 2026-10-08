@@ -92,7 +92,7 @@ jobs:
       - name: Arena blocks and CSV streaming (flat peak RSS; a 1 GiB file in a 64 KiB window)
         run: sh tools/ci/tin.sh arena_check
       - name: Replay tapes (record, replay, divergence)
-        run: python3 tools/ci/replay_check.py
+        run: sh tools/ci/tin.sh replay_check
       - name: Scheduling replay (select winners)
         run: sh tools/ci/tin.sh sched_check
       - name: Raw Linux syscall ABI, signals, errors and directory iteration

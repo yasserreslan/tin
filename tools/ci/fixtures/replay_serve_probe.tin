@@ -1,6 +1,6 @@
 package replayserve
 
-// Copied into a temporary lib/replayserve by replay_check.py: an effect made the way a client
+// Copied into a temporary lib/replayserve by replay_check.tin: an effect made the way a client
 // library makes one (rt_effect around its live call), so replay mode (#242) can be checked
 // before the clients record (#241).
 

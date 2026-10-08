@@ -10,7 +10,7 @@ import "seal"
 import "tide"
 import "wire"
 
-// Copied into a temporary lib/replayclients by replay_check.py: one task records what the clients
+// Copied into a temporary lib/replayclients by replay_check.tin: one task records what the clients
 // do against live servers (#241), then the same code replays from that tape with no live call.
 
 let cache = redis.Open(redis.Options{Addr: quarry.Getenv("REDIS_ADDR"), Password: "r3d1s-pass"})
