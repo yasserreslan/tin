@@ -10,7 +10,7 @@ import "tide"
 // core's io_uring on Linux, else helper threads) and counts the successes; /writes does the same
 // with WriteFile; /check reads and writes files of many sizes and reports what it got; /park
 // ends a WriteFile parked on a FIFO with a within deadline and with a scope cancel; /ok answers.
-// file_io_check.py runs it.
+// file_io_check.tin runs it.
 
 fn readAll(n i64, path str) !str {
 	mut ok i64 = 0

@@ -158,7 +158,7 @@ jobs:
       - name: File I/O through io_uring (Linux) and helper threads (concurrent reads, contents, FIFO deadlines, helper thread count)
         env:
           TIN_REQUIRE_IO_URING: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: python3 tools/ci/file_io_check.py
+        run: sh tools/ci/tin.sh file_io_check
       - name: Server lifecycle (use, on, startup faults, drain then stop events)
         run: sh tools/ci/tin.sh lifecycle_check
       - name: Streaming responses (chunks, Content-Length, SendFile, server-sent events, flat memory)

@@ -1,0 +1,334 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+
+// File I/O in request tasks (#357). On Linux, quarry's reads and writes go through each core's io_uring when the kernel has it, and
+// through helper threads otherwise or with TIN_IO_URING=0; on macOS through helper threads. Each path runs here (both on Linux):
+// thousands of concurrent reads on one core all succeed (a core may have 4096 operations out and the next tasks wait for one instead
+// of failing); reads and writes give the same content and the same faults; reads that never finish (a FIFO nobody writes) and writes
+// that never start (a FIFO nobody reads) end at the deadline while the core goes on serving, and release their descriptors once the
+// FIFO's other side comes; a within deadline and a scope cancel end a parked write. With io_uring, one ring is made on the core and no
+// helper thread starts for a regular file; with helper threads, as many start as the cores, at least 4, or TIN_HELPERS. Files under
+// FUSE, virtiofs, 9p and CIFS mounts keep the helper threads (the mountinfo parsing and path matching are checked through a probe).
+
+fn get(port i64, path str, seconds i64) nettest.Reply {
+	return nettest.Parse(nettest.Raw(port, nettest.GetRequest(path), seconds))
+}
+
+fn answer(port i64, path str) (i64, str) {
+	let r = get(port, path, 60)
+	return r.Status, r.Body
+}
+
+// threads is the process's thread count.
+fn threads(pid i64) i64 {
+	let p = mint.Itoa(pid)
+	if ci.Exists("/proc/" + p + "/status") {
+		let o = ci.Sh("grep '^Threads:' /proc/" + p + "/status", "", 5)
+		return ci.Num(twine.Fields(o.Stdout)[1])
+	}
+	let o = ci.Sh("ps -M -p " + p + " | wc -l", "", 5)
+	return ci.Num(twine.TrimSpace(o.Stdout)) - 1
+}
+
+// ownThreads are the threads that are not the kernel's io_uring workers (iou-wrk-*), or -1 without /proc.
+fn ownThreads(pid i64) i64 {
+	let p = mint.Itoa(pid)
+	if !ci.Exists("/proc/" + p + "/task") {
+		return -1
+	}
+	let o = ci.Sh("for t in /proc/" + p + "/task/*; do cat $t/comm 2>/dev/null; done | grep -vc '^iou-'", "", 5)
+	return ci.Num(twine.TrimSpace(o.Stdout))
+}
+
+// descriptors are the process's open descriptors, or -1 without /proc.
+fn descriptors(pid i64) i64 {
+	let p = mint.Itoa(pid)
+	if !ci.Exists("/proc/" + p + "/fd") {
+		return -1
+	}
+	let o = ci.Sh("ls /proc/" + p + "/fd | wc -l", "", 5)
+	return ci.Num(twine.TrimSpace(o.Stdout))
+}
+
+// rings are the process's io_uring instances, or -1 without /proc.
+fn rings(pid i64) i64 {
+	let p = mint.Itoa(pid)
+	if !ci.Exists("/proc/" + p + "/fd") {
+		return -1
+	}
+	let o = ci.Sh("ls -l /proc/" + p + "/fd 2>/dev/null | grep -c io_uring", "", 5)
+	return ci.Num(twine.TrimSpace(o.Stdout))
+}
+
+// uringAvailable is whether this kernel lets a process make an io_uring with the operations Tin uses.
+fn uringAvailable(out str) bool {
+	if !ci.Linux() {
+		return false
+	}
+	let exe = ci.Join(out, "uring_available")
+	ci.BuildTin("tools/ci/fixtures/uring_available.tin", exe, "", []str{})
+	let o = ci.Exec([]str{exe}, "", 20)
+	return twine.TrimSpace(o.Stdout) == "yes"
+}
+
+fn start(exe str, cores i64, set []str, log str) nettest.Server {
+	let port = nettest.Port()
+	mut env = []str{"TIN_CORES=" + mint.Itoa(cores)}
+	for e in set {
+		env = append(env, e)
+	}
+	let server = nettest.Start(exe, []str{}, env, log, port)
+	server.Ready(10)
+	return server
+}
+
+fn expectedCheck(linux bool) str {
+	mut lines = []str{}
+	for n in []i64{0, 1, 511, 512, 513, 4095, 4096, 4097, 65536, 3145731} {
+		lines = append(lines, "size " + mint.Itoa(n) + ": write ok, read ok, same true")
+	}
+	lines = append(lines, "append: ok ok ok ok ok true")
+	lines = append(lines, "truncate: ok ok ok short")
+	lines = append(lines, "missing: open D/missing: no such file or directory")
+	lines = append(lines, "directory: read D: is a directory")
+	lines = append(lines, "write into a missing directory: open D/nodir/x: no such file or directory")
+	lines = append(lines, "write a directory: open D: is a directory")
+	lines = append(lines, "append to a directory: open D: is a directory")
+	if linux {
+		lines = append(lines, "proc: ok true")
+	} else {
+		lines = append(lines, "proc: none")
+	}
+	lines = append(lines, "500 tasks: bad 0 ")
+	return twine.Join(lines, "\n") + "\n"
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn secondsText(v f64) str {
+	let tenths = i64(v * 10.0 + 0.5)
+	return mint.Itoa(tenths / 10) + "." + mint.Itoa(tenths % 10)
+}
+
+// concurrentReads: more concurrent reads than the 4096 operations one core may have out: every one succeeds.
+fn concurrentReads(exe str, name str, env []str, q str, uring bool, out str) {
+	mut set = []str{"TIN_DEADLINE_MS=120000"}
+	for e in env {
+		set = append(set, e)
+	}
+	let server = start(exe, 1, set, ci.Join(out, "reads.log"))
+	let before = ownThreads(server.Pid)
+	for n in []i64{100, 5000, 9000} {
+		let t0 = tide.Now()
+		let r = get(server.Port, "/files?n=" + mint.Itoa(n) + q, 120)
+		ci.Check(r.Status == 200 && r.Body == "ok=" + mint.Itoa(n) + " bad=0 first=", name + ": " + mint.Itoa(n) + " reads answered " + mint.Itoa(r.Status) + " " + r.Body)
+		say.Line(name + ": " + mint.Itoa(n) + " concurrent file reads on one core: all ok in " + secondsText(seconds(t0)) + " s")
+	}
+	let r = rings(server.Pid)
+	if r >= 0 {
+		mut want = 0
+		if uring {
+			want = 1
+		}
+		ci.Check(r == want, name + ": io_uring instances " + mint.Itoa(r))
+	}
+	if uring {
+		let after = ownThreads(server.Pid)
+		ci.Check(after == before, name + ": helper threads started for a regular file: " + mint.Itoa(before) + " then " + mint.Itoa(after))
+		say.Line(name + ": the reads went through one ring on the core; no helper thread started")
+	} else if r >= 0 {
+		say.Line(name + ": no io_uring instance was made")
+	}
+	server.Stop()
+}
+
+// contents: reads and writes of many sizes, appends, truncation and faults: the same on every path.
+fn contents(exe str, name str, env []str, out str, linux bool) {
+	let server = start(exe, 1, env, ci.Join(out, "contents.log"))
+	let d = ci.TempDir(out, "check-")
+	let r = get(server.Port, "/check?dir=" + d, 120)
+	ci.Check(r.Status == 200 && r.Body == expectedCheck(linux), name + ": " + mint.Itoa(r.Status) + " " + r.Body)
+	ci.Remove(d)
+	say.Line(name + ": contents of 0 B to 3 MiB, appends, truncation, faults, /proc and 500 tasks at once agree")
+	server.Stop()
+}
+
+fn makeFifo(path str) {
+	ci.Remove(path)
+	ci.Must(ci.Exec([]str{"mkfifo", path}, "", 10), "mkfifo")
+}
+
+// reader opens the FIFO for reading and keeps it open (the other side of parked writes) until it is stopped.
+fn reader(fifo str, log str) nettest.Server {
+	return nettest.Start("sh", []str{"-c", "exec 3<\"$0\"; exec sleep 300", fifo}, []str{}, log, 0)
+}
+
+// fifoReads: reads that never finish (a FIFO nobody writes to): the tasks past 4096 operations wait, all end at the request's
+// deadline, and the core goes on serving.
+fn fifoReads(exe str, name str, env []str, out str) {
+	let fifo = ci.Join(out, "fifo")
+	makeFifo(fifo)
+	mut set = []str{"TIN_HELPERS=2", "TIN_DEADLINE_MS=1500"}
+	for e in env {
+		set = append(set, e)
+	}
+	let server = start(exe, 1, set, ci.Join(out, "fiforeads.log"))
+	let t0 = tide.Now()
+	let r = get(server.Port, "/files?n=5000&file=" + fifo, 30)
+	let took = seconds(t0)
+	ci.Check(r.Status == 200 && r.Body == "ok=0 bad=5000 first=deadline exceeded" && took > 1.2 && took < 6.0, name + ": FIFO reads answered " + mint.Itoa(r.Status) + " " + r.Body + " after " + secondsText(took) + " s")
+	let t1 = tide.Now()
+	let (status, body) = answer(server.Port, "/ok")
+	ci.Check(status == 200 && body == "ok", "the core did not answer /ok")
+	ci.Check(seconds(t1) < 1.0, "the core did not serve after the waiting tasks ended")
+	say.Line(name + ": 5000 reads of a FIFO nobody writes: every one ends with \"deadline exceeded\" after " + secondsText(took) + " s, and /ok answers at once")
+	server.Stop()
+}
+
+// fifoWrites: writes that never start (a FIFO nobody reads): 5000 tasks end at the deadline (those past 4096 operations waited for
+// room); once a reader comes the late opens finish, their descriptors are closed, and the core reads files again.
+fn fifoWrites(exe str, name str, env []str, out str, data str) {
+	let fifo = ci.Join(out, "wfifo")
+	makeFifo(fifo)
+	mut set = []str{"TIN_HELPERS=2", "TIN_DEADLINE_MS=1500"}
+	for e in env {
+		set = append(set, e)
+	}
+	let server = start(exe, 1, set, ci.Join(out, "fifowrites.log"))
+	// Make the ring or the helper threads first, so the descriptor count below is the base.
+	let (s1, b1) = answer(server.Port, "/files?n=1&file=" + data)
+	ci.Check(s1 == 200 && b1 == "ok=1 bad=0 first=", "first read: " + b1)
+	let (s2, b2) = answer(server.Port, "/writes?n=1&file=" + ci.Join(out, "written"))
+	ci.Check(s2 == 200 && b2 == "ok=1 bad=0 first=", "first write: " + b2)
+	let base = descriptors(server.Pid)
+	let t0 = tide.Now()
+	let r = get(server.Port, "/writes?n=5000&file=" + fifo, 30)
+	let took = seconds(t0)
+	ci.Check(r.Status == 200 && r.Body == "ok=0 bad=5000 first=deadline exceeded" && took > 1.2 && took < 6.0, name + ": FIFO writes answered " + mint.Itoa(r.Status) + " " + r.Body + " after " + secondsText(took) + " s")
+	let t1 = tide.Now()
+	let (s3, b3) = answer(server.Port, "/ok")
+	ci.Check(s3 == 200 && b3 == "ok" && seconds(t1) < 1.0, "the core did not serve after the waiting tasks ended")
+	let rd = reader(fifo, ci.Join(out, "fiforeader.log"))
+	nettest.Eventually(10.0, fn() bool {
+		let n = descriptors(server.Pid)
+		return n < 0 || n == base
+	})
+	let n = descriptors(server.Pid)
+	ci.Check(n < 0 || n == base, name + ": descriptors of the late opens were not closed: " + mint.Itoa(base) + " then " + mint.Itoa(n))
+	let (s4, b4) = answer(server.Port, "/files?n=100&file=" + data)
+	ci.Check(s4 == 200 && b4 == "ok=100 bad=0 first=", name + ": reads after the late opens: " + b4)
+	say.Line(name + ": 5000 writes to a FIFO nobody reads end with \"deadline exceeded\" after " + secondsText(took) + " s; /ok answers at once; when a reader comes the late opens are closed and reads work again")
+	rd.Stop()
+	server.Stop()
+}
+
+// parked: a write parked on a FIFO ends at a within deadline and at a scope cancel.
+fn parked(exe str, name str, env []str, out str) {
+	let fifo = ci.Join(out, "pfifo")
+	makeFifo(fifo)
+	let server = start(exe, 1, env, ci.Join(out, "parked.log"))
+	let r = get(server.Port, "/park?file=" + fifo, 30)
+	ci.Check(r.Status == 200 && r.Body == "within: deadline exceeded true; cancel: canceled: stop (scope: canceled: stop)", name + ": park answered " + mint.Itoa(r.Status) + " " + r.Body)
+	let rd = reader(fifo, ci.Join(out, "parkreader.log"))
+	let (status, body) = answer(server.Port, "/ok")
+	ci.Check(status == 200 && body == "ok", "the core did not answer /ok after the parked write")
+	say.Line(name + ": a parked write ends with \"deadline exceeded\" at a 300 ms within and \"canceled: stop\" at a scope cancel")
+	rd.Stop()
+	server.Stop()
+}
+
+// helperThreads: the larger of 4 and the cores, or TIN_HELPERS.
+fn helperThreads(exe str, q str, out str) {
+	let cores = []i64{2, 2, 8, 1}
+	let helpers = []str{"3", "9", "", ""}
+	let want = []i64{3, 9, 8, 4}
+	for i in 0..4 {
+		mut env = []str{"TIN_IO_URING=0"}
+		if len(helpers[i]) > 0 {
+			env = append(env, "TIN_HELPERS=" + helpers[i])
+		}
+		let server = start(exe, cores[i], env, ci.Join(out, "helpers.log"))
+		// The listener takes connections before the other cores and the monitor thread start; a served request means every core has
+		// started (hearth's start barrier).
+		let (status, body) = answer(server.Port, "/ok")
+		ci.Check(status == 200 && body == "ok", "helpers: /ok answered " + body)
+		let before = threads(server.Pid)
+		let (s2, _) = answer(server.Port, "/files?n=20" + q)
+		ci.Check(s2 == 200, "helpers: /files answered " + mint.Itoa(s2))
+		tide.Sleep(300000000)
+		let started = threads(server.Pid) - before
+		ci.Check(started == want[i], "helper threads for " + mint.Itoa(cores[i]) + " cores TIN_HELPERS=" + helpers[i] + ": " + mint.Itoa(started) + ", want " + mint.Itoa(want[i]))
+		server.Stop()
+	}
+	say.Line("helper threads started: TIN_HELPERS=3 -> 3, 9 -> 9; 8 cores -> 8; 1 core -> 4")
+}
+
+fn expectedMounts() str {
+	let lines = []str{"slow: [/mnt/s3]", "slow: [/mnt/my files]", "slow: [/srv/share]", "slow: [/src]", "slow: [/9]", "slow: [/blk]", "/mnt/s3: true", "/mnt/s3/a.txt: true", "/mnt/s3x/a.txt: false", "/mnt/my files/b: true", "/srv/share/c: true", "/src/lib/x.tin: true", "/data/d: false", "/tmp/e: false", "/9/f: true", "/blk/g: true", "/fusex/h: false", "/: false", "a slow root holds every path: true", "empty mountinfo: 0"}
+	return twine.Join(lines, "\n") + "\n"
+}
+
+// mounts: which mounts keep the helper threads: FUSE (fuse, fuse.*, fuseblk), virtiofs, 9p and CIFS mount points from mountinfo, octal
+// escapes undone, matched by whole path components.
+fn mounts(out str) {
+	let tmp = ci.TempDir(out, "mounts-")
+	let lib = ci.Join(tmp, "lib")
+	ci.CopyLib(ci.Root(), lib)
+	let quarryFile = ci.Join(lib, "quarry/quarry.tin")
+	ci.Write(quarryFile, ci.Read(quarryFile) + "\n" + ci.Read(ci.Join(ci.Root(), "tools/ci/fixtures/mounts_probe.tin")))
+	let exe = ci.Join(tmp, "mounts")
+	ci.BuildTin("tools/ci/fixtures/mounts.tin", exe, tmp, []str{})
+	let got = ci.Exec([]str{exe}, ci.Root(), 60)
+	ci.Check(got.Stdout == expectedMounts(), "mounts: " + got.Stdout)
+	ci.Remove(tmp)
+	say.Line("slow mounts: FUSE, virtiofs, 9p and CIFS mount points are found and matched by path")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/files")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "files")
+	ci.BuildTin("tools/ci/fixtures/files.tin", exe, "", []str{})
+	mounts(out)
+	// The files live in the system's temporary directory: a checkout can be on a FUSE share (Docker Desktop), whose files keep the
+	// helper threads.
+	let work = ci.TempDir("/tmp", "tin-files-")
+	let data = ci.Join(work, "data.txt")
+	ci.Write(data, "hello from a helper thread\n")
+	let q = "&file=" + data
+	let linux = ci.Linux()
+	let uring = uringAvailable(out)
+	if linux && !uring {
+		ci.Check(ci.Env("TIN_REQUIRE_IO_URING") != "1", "TIN_REQUIRE_IO_URING=1 but this kernel refuses io_uring")
+		say.Line("io_uring: not available on this kernel; only the helper threads are checked")
+	}
+	mut names = []str{}
+	mut envs = [][]str{}
+	mut rings = []bool{}
+	if uring {
+		names = append(names, "io_uring")
+		envs = append(envs, []str{})
+		rings = append(rings, true)
+	}
+	names = append(names, "helper threads")
+	envs = append(envs, []str{"TIN_IO_URING=0"})
+	rings = append(rings, false)
+	for i in 0..len(names) {
+		concurrentReads(exe, names[i], envs[i], q, rings[i], out)
+		contents(exe, names[i], envs[i], work, linux)
+		fifoReads(exe, names[i], envs[i], work)
+		fifoWrites(exe, names[i], envs[i], work, data)
+		parked(exe, names[i], envs[i], work)
+	}
+	helperThreads(exe, q, out)
+	ci.Remove(work)
+	ci.Pass("file I/O: concurrent reads, contents and faults, FIFO deadlines, parked writes, helper threads and slow mounts")
+}
