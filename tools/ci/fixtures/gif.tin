@@ -39,7 +39,7 @@ fn main() {
 }
 
 fn digest(g gif.GIF) str {
-	let config = gif.DecodeConfig(gif.EncodeAll(g)) catch _ { image.Config{} }
+	let config = gif.DecodeConfig(gif.EncodeAll(g)) catch _ { gif.Config{} }
 	mut out = say.Fmt("%dx%d/%d/%d/", config.Width, config.Height, g.LoopCount, len(g.Image))
 	for i, frame in g.Image {
 		let r = frame.Bounds()

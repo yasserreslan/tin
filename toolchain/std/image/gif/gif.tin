@@ -19,6 +19,17 @@ type GIF struct {
 	LoopCount i64
 }
 
+// Config is a GIF's logical screen size and color model. It is a plain struct, not image.Config: a failing call returning
+// that value struct crashes on linux-amd64, and its ColorModel field is not stored in its own slot (#939, #847).
+type Config struct {
+	// ColorModel is color.PaletteModel: a GIF's pixels are palette indices.
+	ColorModel color.Model
+	// Width is the logical screen width in pixels.
+	Width i64
+	// Height is the logical screen height in pixels.
+	Height i64
+}
+
 // Decode reads the first image in a GIF stream.
 fn Decode(data str) !dyn image.Image {
 	let all = try DecodeAll(data)
@@ -29,7 +40,7 @@ fn Decode(data str) !dyn image.Image {
 }
 
 // DecodeConfig reads a GIF's logical screen dimensions and color model.
-fn DecodeConfig(data str) !image.Config {
+fn DecodeConfig(data str) !Config {
 	if len(data) < 13 || (data[0:6] != "GIF87a" && data[0:6] != "GIF89a") {
 		fail "gif: invalid header"
 	}
@@ -38,7 +49,7 @@ fn DecodeConfig(data str) !image.Config {
 	if w <= 0 || h <= 0 || w*h > maxPixels {
 		fail "gif: image dimensions exceed limit"
 	}
-	return image.Config{ColorModel: color.PaletteModel, Width: w, Height: h}
+	return Config{ColorModel: color.PaletteModel, Width: w, Height: h}
 }
 
 // DecodeAll reads every image, delay, disposal method and loop count in a GIF stream.

@@ -39,5 +39,12 @@ fn main() {
 	}
 	let (_, err) = gif.DecodeAll("GIF89a")
 	if err == nil { panic("GIF accepted malformed stream") }
+	let config = gif.DecodeConfig(data) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	if config.Width != 3 || config.Height != 2 || config.ColorModel != color.PaletteModel { panic("GIF DecodeConfig") }
+	let (missing, configErr) = gif.DecodeConfig("GIF89a")
+	if configErr == nil || missing.Width != 0 || missing.Height != 0 { panic("GIF DecodeConfig accepted malformed stream") }
 	say.Line("gif frames, delays, disposal, transparency pass", len(data))
 }
