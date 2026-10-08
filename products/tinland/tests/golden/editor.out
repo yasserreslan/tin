@@ -134,6 +134,8 @@ shown: 1 fn a() {|    if x {|    }|    z|}|last row 1
 shown: 1 fn a() {|}|last row 0
 shown: 1 fn a() {|}|last! row 6
 shown: 0 fn a() {|    if x {|        y|    }|    z|}|last! row 6
+shown: 1 |fn a() {|    if x {|    }|    z|}|last! row 1
+shown: 1 |fn a() {|    if x {|    }|    z|}|last!|end row 8
 diags: 0
 --- nav.tin row 7 col 4 dirty false
 package main
