@@ -1439,6 +1439,139 @@ fn sym_members(o []u8, file i64, line i64, sig str) {
 	buf_byte(o, ']')
 }
 
+// decl_end is where the declaration starting on line n of file ends: the line and the column just past its last
+// token (a block's closing brace, or the last token of the line where its brackets close). It skips comments,
+// strings with their interpolations, raw strings and character literals, so brackets inside them do not count.
+fn decl_end(file i64, n i64) (i64, i64) {
+	if file < 0 || file >= len(json_sources) {
+		return n, 1
+	}
+	let src = json_sources[file]
+	mut at = 0
+	mut l = 1
+	for l < n && at < len(src) {
+		if src[at] == '\n' {
+			l = l + 1
+		}
+		at = at + 1
+	}
+	mut line = n
+	mut lineStart = at
+	mut lastLine = n
+	mut lastCol = 1
+	mut stack = []u8{}
+	for at < len(src) {
+		let c = src[at]
+		mut next = u8(0)
+		if at + 1 < len(src) {
+			next = src[at + 1]
+		}
+		let depth = len(stack)
+		mut top = u8(0)
+		if depth > 0 {
+			top = stack[depth - 1]
+		}
+		if top == '"' {
+			if c == '\\' {
+				at = at + 2
+			} else if (c == '{' && next == '{') || (c == '}' && next == '}') {
+				at = at + 2
+			} else if c == '{' {
+				stack = append(stack, 'i')
+				at = at + 1
+			} else if c == '"' {
+				stack = stack[:depth - 1]
+				at = at + 1
+				lastLine = line
+				lastCol = at - lineStart + 1
+			} else {
+				if c == '\n' {
+					line = line + 1
+					lineStart = at + 1
+				}
+				at = at + 1
+			}
+			continue
+		}
+		if c == '/' && next == '/' {
+			for at < len(src) && src[at] != '\n' {
+				at = at + 1
+			}
+			continue
+		}
+		if c == '\n' {
+			if depth == 0 {
+				return lastLine, lastCol
+			}
+			line = line + 1
+			lineStart = at + 1
+			at = at + 1
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\r' {
+			at = at + 1
+			continue
+		}
+		if c == '"' {
+			stack = append(stack, '"')
+			at = at + 1
+			continue
+		}
+		if c == '`' {
+			at = at + 1
+			for at < len(src) && src[at] != '`' {
+				if src[at] == '\n' {
+					line = line + 1
+					lineStart = at + 1
+				}
+				at = at + 1
+			}
+			at = at + 1
+		} else if c == '\'' {
+			at = at + 1
+			if at < len(src) && src[at] == '\\' {
+				at = at + 1
+			}
+			at = at + 1
+			for at < len(src) && src[at] != '\'' && src[at] != '\n' {
+				at = at + 1
+			}
+			at = at + 1
+		} else if c == '(' || c == '[' || c == '{' {
+			stack = append(stack, c)
+			at = at + 1
+		} else if c == ')' || c == ']' || c == '}' {
+			if depth > 0 {
+				stack = stack[:depth - 1]
+			}
+			at = at + 1
+		} else {
+			at = at + 1
+		}
+		lastLine = line
+		lastCol = at - lineStart + 1
+	}
+	return lastLine, lastCol
+}
+
+// doc_line is the first line of the comment directly above line n of file, or n when there is none.
+fn doc_line(file i64, n i64) i64 {
+	mut k = n - 1
+	for k >= 1 {
+		let l = src_line(file, k)
+		mut t = 0
+		for t < len(l) && (l[t] == ' ' || l[t] == '\t') {
+			t = t + 1
+		}
+		if t + 1 < len(l) && l[t] == '/' && l[t + 1] == '/' {
+			k = k - 1
+		} else {
+			break
+		}
+	}
+	return k + 1
+}
+
 // print_symbol prints one declaration: kind, name, package, file, the place of its name, signature and doc comment.
 fn print_symbol(kind str, name str, pos i64, extra_recv i64) {
 	if pos == NO_POS || len(name) == 0 {
@@ -1464,6 +1597,13 @@ fn print_symbol(kind str, name str, pos i64, extra_recv i64) {
 	buf_int(o, col)
 	buf_str(o, ",\"endCol\":")
 	buf_int(o, col + len(name))
+	let (endLine, endCol) = decl_end(file, line)
+	buf_str(o, ",\"declEndLine\":")
+	buf_int(o, endLine)
+	buf_str(o, ",\"declEndCol\":")
+	buf_int(o, endCol)
+	buf_str(o, ",\"docLine\":")
+	buf_int(o, doc_line(file, line))
 	buf_str(o, ",\"recv\":")
 	if extra_recv != 0 {
 		json_quote(o, sym_recv(sig))
