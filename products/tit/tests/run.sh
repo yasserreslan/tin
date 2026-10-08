@@ -17,6 +17,10 @@ for dir in products/tit/*/; do
 	sh ./tin test "$dir" > "$tmp/test.out" 2>&1 || { cat "$tmp/test.out"; echo "FAIL tit tests $dir"; exit 1; }
 	echo "PASS tit tests $dir"
 done
+# every place a secret (a private key) leaves the checker's protection is reviewed: a new one fails here
+sh ./tin audit secrets products/tit/main.tin 2>&1 | sed 's/:[0-9]*:[0-9]*:/:/' > "$tmp/reveals.txt"
+cmp "$tmp/reveals.txt" products/tit/tests/reveals.txt || { diff "$tmp/reveals.txt" products/tit/tests/reveals.txt; echo "FAIL tit reveals: review the change, then update products/tit/tests/reveals.txt"; exit 1; }
+echo "PASS tit reveals"
 "$compiler" -o "$tmp/tit" products/tit/main.tin
 "$tmp/tit" version -v > "$tmp/version.out"
 cmp "$tmp/version.out" products/tit/tests/golden/version.out || { echo "FAIL tit version"; exit 1; }

@@ -315,3 +315,11 @@ fn TestHashBlob(t mut crucible.T) {
 	let (_, e2) = HashBlob(mut long, 4)
 	t.True("more bytes than declared", e2 != nil && fault.Is(e2, ErrCorrupt))
 }
+
+fn TestTagSigningPayloadKeepsTheTag(t mut crucible.T) {
+	mut r = dice.New(4)
+	let tg = TagData{Object: Hash(Kind.Blob, "x"), Kind: Kind.Blob, Name: "v1", Tagger: person(mut r), Signature: str(r.Bytes(64)), Message: "m\n"}
+	let (_, err) = TagSigningPayload(tg)
+	t.NoFault("payload", err)
+	crucible.Equal(mut t, "the tag keeps its signature", len(tg.Signature), 64)
+}
