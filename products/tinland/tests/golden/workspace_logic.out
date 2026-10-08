@@ -12,6 +12,10 @@ match opened main.tin 0 12 main
 invalid regular expression
 created true fresh.tin
 rename starts with fresh.tin
+split 2 1 main.tin
+right pane notes.md left pane main.tin
+active main.tin
+closed split 1 0
 marks [2 9]
 git [ M main.tin]
 shell running true 2 3

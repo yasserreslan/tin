@@ -34,8 +34,17 @@ fn (ws Workspace) Build(t mut ui.Tree) {
 		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
 	}
 	t.Open(ui.VBox().Flex(1.0).Fill(th.Editor), 0)
-	ws.tabBar(mut t)
-	t.Custom(ui.Box().Flex(1.0), idEditor)
+	t.Open(ui.HBox().Flex(1.0), 0)
+	for p in 0..len(ws.Panes) {
+		if p > 0 {
+			t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), 0)
+		}
+		t.Open(ui.VBox().Flex(1.0), 0)
+		ws.tabBar(mut t, p)
+		t.Custom(ui.Box().Flex(1.0), paneId(p))
+		t.Close()
+	}
+	t.Close()
 	if ws.Bottom != BottomNone {
 		ws.bottomPanel(mut t)
 	}
@@ -200,24 +209,24 @@ fn panelName(p i64) str {
 }
 
 // tabBar is the open files, the active one joined to the editor below it.
-fn (ws Workspace) tabBar(t mut ui.Tree) {
+fn (ws Workspace) tabBar(t mut ui.Tree, pane i64) {
 	let th = ws.Th
 	t.Open(ui.HBox().High(tabH).Fill(th.TabBar), 0)
-	for i in 0..len(ws.Ed.Tabs) {
+	for i in 0..len(ws.Panes[pane].Tabs) {
 		mut bg = ui.None()
 		mut color = th.Muted
-		if i == ws.Ed.Active {
+		if i == ws.Panes[pane].Active {
 			bg = th.TabActive
 			color = th.Text
 		}
-		t.Open(ui.HBox().Items(ui.Center).Spacing(8.0).PadXY(12.0, 0.0).Fill(bg).Hover(th.Hover), idTabBase + i)
-		t.Text(ws.Ed.TabName(i), render.FontUI, color, ui.Box())
-		if ws.Ed.TabDirty(i) {
-			t.Open(ui.Box().Size(14.0, 14.0).Content(ui.JustifyCenter).Items(ui.Center), idTabClose + i)
+		t.Open(ui.HBox().Items(ui.Center).Spacing(8.0).PadXY(12.0, 0.0).Fill(bg).Hover(th.Hover), idTabBase + pane * tabsPerPane + i)
+		t.Text(ws.Panes[pane].TabName(i), render.FontUI, color, ui.Box())
+		if ws.Panes[pane].TabDirty(i) {
+			t.Open(ui.Box().Size(14.0, 14.0).Content(ui.JustifyCenter).Items(ui.Center), idTabClose + pane * tabsPerPane + i)
 			t.Leaf(ui.Box().Size(7.0, 7.0).Round(3.5).Fill(th.Muted), 0)
 			t.Close()
 		} else {
-			t.Open(ui.HBox().Size(14.0, 14.0).Items(ui.Center).Content(ui.JustifyCenter).Round(3.0).Hover(th.Selected), idTabClose + i)
+			t.Open(ui.HBox().Size(14.0, 14.0).Items(ui.Center).Content(ui.JustifyCenter).Round(3.0).Hover(th.Selected), idTabClose + pane * tabsPerPane + i)
 			t.Icon(render.IconClose, 9.0, th.Faint, ui.Box())
 			t.Close()
 		}

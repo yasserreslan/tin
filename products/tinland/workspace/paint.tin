@@ -6,7 +6,13 @@ import "../ui"
 
 // NeedsFrame reports whether anything changed since the last frame (the workspace's own state or the editor's).
 fn (ws Workspace) NeedsFrame() bool {
-	return ws.Dirty || ws.Ed.Redraw
+	mut redraw = false
+	for p in ws.Panes {
+		if p.Redraw {
+			redraw = true
+		}
+	}
+	return ws.Dirty || redraw
 }
 
 // Resize tells the workspace the window's size in points and reports whether it changed.
@@ -31,7 +37,9 @@ fn (ws mut Workspace) Prepare() {
 	if ws.HasProj && (ws.Ed.Buf.Path != ws.Ed.MarksPath || ws.Ed.Saves != ws.Ed.MarksSaves) {
 		ws.RefreshMarks()
 	}
-	ws.Ed.Prepare()
+	for i in 0..len(ws.Panes) {
+		ws.Panes[i].Prepare()
+	}
 }
 
 // Paint lays the window out for its size (ws.W by ws.H points) and draws it into the scene. It records where everything is for
@@ -47,11 +55,11 @@ fn (ws mut Workspace) Paint(scene mut metal.Scene) {
 	// the editor and the terminal paint their own areas: draw what comes before each, then it, then the rest
 	mut from = 0
 	for i in 0..len(cmds) {
-		if cmds[i].Kind == ui.CmdCustom && (cmds[i].Arg == idEditor || cmds[i].Arg == idTerminal) {
+		if cmds[i].Kind == ui.CmdCustom && (cmds[i].Arg == idEditor || cmds[i].Arg == idEditor2 || cmds[i].Arg == idTerminal) {
 			render.Draw(cmds[from:i], t.Texts, mut scene, noCustom)
 			let c = cmds[i]
-			if c.Arg == idEditor {
-				ws.Ed.Paint(th, c.X, c.Y, c.W, c.H, mut scene)
+			if c.Arg == idEditor || c.Arg == idEditor2 {
+				ws.Panes[paneOf(c.Arg)].Paint(th, c.X, c.Y, c.W, c.H, mut scene)
 			} else {
 				ws.paintTerminal(c.X, c.Y, c.W, c.H, mut scene)
 			}
@@ -60,7 +68,9 @@ fn (ws mut Workspace) Paint(scene mut metal.Scene) {
 	}
 	render.Draw(cmds[from:len(cmds)], t.Texts, mut scene, noCustom)
 	ws.Dirty = false
-	ws.Ed.Redraw = false
+	for i in 0..len(ws.Panes) {
+		ws.Panes[i].Redraw = false
+	}
 	ws.Frames += 1
 }
 

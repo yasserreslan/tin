@@ -24,6 +24,8 @@ const CmdZoomIn = 114
 const CmdZoomOut = 115
 const CmdZoomReset = 116
 const CmdToggleTerminal = 117
+const CmdSplit = 118
+const CmdCloseSplit = 119
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
@@ -115,7 +117,14 @@ fn (ws mut Workspace) scroll(dx f64, dy f64) {
 	} else if ws.Hits.At(ws.MouseX, ws.MouseY) == idTerminal {
 		ws.TermScroll = max(0, min(ws.TermScroll + i64(dy / ws.Ed.LineH), ws.Term.HistoryLines()))
 	} else {
-		ws.Ed.Wheel(dx, dy)
+		let over = ws.Hits.At(ws.MouseX, ws.MouseY)
+		if over == idEditor2 && len(ws.Panes) > 1 {
+			ws.Panes[1].Wheel(dx, dy)
+		} else if over == idEditor {
+			ws.Panes[0].Wheel(dx, dy)
+		} else {
+			ws.Ed.Wheel(dx, dy)
+		}
 	}
 	ws.Dirty = true
 }
@@ -124,8 +133,9 @@ fn (ws mut Workspace) scroll(dx f64, dy f64) {
 fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 	let id = ws.Hits.At(x, y)
 	ws.Dirty = true
-	if id == idEditor {
-		let (ex, ey, ew, eh) = ws.Hits.Rect(idEditor)
+	if id == idEditor || id == idEditor2 {
+		ws.SetActive(paneOf(id))
+		let (ex, ey, ew, eh) = ws.Hits.Rect(id)
 		ws.Ed.MouseDown(x - ex, y - ey, clicks, flags)
 		ws.Drag = dragText
 		return
@@ -165,10 +175,12 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.Drag = DragTitle
 	} else if id >= idRow && id < idOutputLine {
 		ws.clickRow(id - idRow)
-	} else if id >= idTabClose && id < idRow {
-		ws.Ed.CloseTab(id - idTabClose)
-	} else if id >= idTabBase && id < idTabClose {
-		ws.Ed.Activate(id - idTabBase)
+	} else if id >= idTabClose && id < idTabClose + 2 * tabsPerPane {
+		ws.SetActive((id - idTabClose) / tabsPerPane)
+		ws.Ed.CloseTab((id - idTabClose) % tabsPerPane)
+	} else if id >= idTabBase && id < idTabBase + 2 * tabsPerPane {
+		ws.SetActive((id - idTabBase) / tabsPerPane)
+		ws.Ed.Activate((id - idTabBase) % tabsPerPane)
 	} else if id >= idPanelBase && id < idTabBase {
 		ws.togglePanel(id - idPanelBase)
 	} else if id >= idOutputLine && id < idPickerItem {
@@ -203,7 +215,7 @@ fn (ws mut Workspace) drag(x f64, y f64) {
 		ws.LeftW = w
 		ws.Dirty = true
 	} else if ws.Drag == dragText {
-		let (ex, ey, ew, eh) = ws.Hits.Rect(idEditor)
+		let (ex, ey, ew, eh) = ws.Hits.Rect(paneId(ws.Active))
 		ws.Ed.MouseDrag(x - ex, y - ey)
 		ws.Dirty = true
 	}
@@ -268,6 +280,12 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		} else {
 			ws.Bottom = BottomOutput
 		}
+	} else if cmd == editor.CmdQuit {
+		ws.RequestQuit()
+	} else if cmd == CmdSplit {
+		ws.Split()
+	} else if cmd == CmdCloseSplit {
+		ws.CloseSplit()
 	} else if cmd == CmdToggleTerminal {
 		ws.ToggleTerminal()
 	} else if cmd == CmdRefresh {
@@ -353,6 +371,21 @@ fn (ws mut Workspace) zoom(points f64) {
 	}
 	ws.CodeSize = p
 	render.SetCodeSize(p)
-	ws.Ed.UseFont()
+	ws.UseFont()
 	ws.Dirty = true
+}
+
+// paneOf is the pane an editor area id belongs to, and paneId the id of a pane's editor area.
+fn paneOf(id i64) i64 {
+	if id == idEditor2 {
+		return 1
+	}
+	return 0
+}
+
+fn paneId(pane i64) i64 {
+	if pane == 1 {
+		return idEditor2
+	}
+	return idEditor
 }

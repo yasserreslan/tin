@@ -31,7 +31,7 @@ fn Run(paths []str) bool {
 		return false
 	}
 	render.Init(gpu, appkit.Scale(win.Win), ws.CodeSize)
-	ws.Ed.UseFont()
+	ws.UseFont()
 	BuildMenus(win)
 	mut idle = 0
 	for !ws.Quit {
@@ -62,7 +62,7 @@ fn Run(paths []str) bool {
 		let scale = appkit.Scale(win.Win)
 		if scale != render.Scale() {
 			render.Init(gpu, scale, ws.CodeSize)
-			ws.Ed.UseFont()
+			ws.UseFont()
 			ws.Dirty = true
 		}
 		let (cw, ch) = appkit.ContentSize(win.Win)
@@ -99,8 +99,7 @@ fn take(ws mut workspace.Workspace, win gpuwin.Window) {
 		} else if kind == gpuwin.KindCommand {
 			ws.Perform(payload)
 		} else if kind == gpuwin.KindQuit {
-			ws.Ed.Perform(editor.CmdQuit)
-			ws.Quit = ws.Ed.Quit
+			ws.RequestQuit()
 		}
 		let (k, p) = gpuwin.Next()
 		kind = k

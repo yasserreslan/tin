@@ -94,6 +94,16 @@ fn main2() {}
 	ws.OpenPicker(workspace.PickRename)
 	say.Line("rename starts with", ws.Picker.Query)
 	key(mut ws, 53, "")
+	// split panes
+	ws.OpenFile(root + "/main.tin")
+	ws.Split()
+	say.Line("split", len(ws.Panes), ws.Active, ws.Ed.Name())
+	ws.OpenFile(root + "/notes.md")
+	say.Line("right pane", ws.Panes[1].Name(), "left pane", ws.Panes[0].Name())
+	ws.SetActive(0)
+	say.Line("active", ws.Ed.Name())
+	ws.CloseSplit()
+	say.Line("closed split", len(ws.Panes), ws.Active)
 	// git: the marks in the gutter and the panel's list of changed files
 	appkit.RunCapture("git -C '" + root + "' init -q && git -C '" + root + "' add -A && git -C '" + root + "' -c user.email=t@t -c user.name=t commit -qm first")
 	put(root + "/main.tin", `package changed
