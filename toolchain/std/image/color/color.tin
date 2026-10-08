@@ -1,0 +1,321 @@
+// Package color is Go's image/color: the colors images store, each a small value struct (no allocation), and the
+// conversions between them, with Go's exact arithmetic. Every color gives its alpha-premultiplied red, green, blue and
+// alpha as 16-bit values through RGBA(); RGBA64 is that form as a value, the one image.Image's At returns.
+//
+//	let c = color.NRGBA{R: 255, G: 128, B: 0, A: 128}
+//	let (r, g, b, a) = c.RGBA()
+//	let y = color.ToGray(c)
+//
+// Differences from Go: a Palette holds NRGBA entries (8-bit, not premultiplied: what PNG and GIF store), a Model is a
+// value naming the model rather than an interface, and ToX(c) converts through c.RGBA() even when c already is an X (Go returns
+// it unchanged, which only matters for NRGBA, NRGBA64, YCbCr, NYCbCrA and CMYK values).
+package color
+
+// Color is any color that gives its alpha-premultiplied red, green, blue and alpha, each 0..0xffff (Go's color.Color).
+shape Color {
+	RGBA() (u32, u32, u32, u32)
+}
+
+// RGBA is an 8-bit alpha-premultiplied color.
+type RGBA value struct {
+	R u8
+	G u8
+	B u8
+	A u8
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c RGBA) RGBA() (u32, u32, u32, u32) {
+	return u32(c.R) * 0x101, u32(c.G) * 0x101, u32(c.B) * 0x101, u32(c.A) * 0x101
+}
+
+// RGBA64 is a 16-bit alpha-premultiplied color.
+type RGBA64 value struct {
+	R u16
+	G u16
+	B u16
+	A u16
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c RGBA64) RGBA() (u32, u32, u32, u32) {
+	return u32(c.R), u32(c.G), u32(c.B), u32(c.A)
+}
+
+// NRGBA is an 8-bit color that is not alpha-premultiplied.
+type NRGBA value struct {
+	R u8
+	G u8
+	B u8
+	A u8
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c NRGBA) RGBA() (u32, u32, u32, u32) {
+	let a = u32(c.A)
+	return u32(c.R) * 0x101 * a / 0xff, u32(c.G) * 0x101 * a / 0xff, u32(c.B) * 0x101 * a / 0xff, a * 0x101
+}
+
+// NRGBA64 is a 16-bit color that is not alpha-premultiplied.
+type NRGBA64 value struct {
+	R u16
+	G u16
+	B u16
+	A u16
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c NRGBA64) RGBA() (u32, u32, u32, u32) {
+	let a = u32(c.A)
+	return u32(c.R) * a / 0xffff, u32(c.G) * a / 0xffff, u32(c.B) * a / 0xffff, a
+}
+
+// Alpha is an 8-bit alpha (a mask value).
+type Alpha value struct {
+	A u8
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c Alpha) RGBA() (u32, u32, u32, u32) {
+	let a = u32(c.A) * 0x101
+	return a, a, a, a
+}
+
+// Alpha16 is a 16-bit alpha.
+type Alpha16 value struct {
+	A u16
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c Alpha16) RGBA() (u32, u32, u32, u32) {
+	let a = u32(c.A)
+	return a, a, a, a
+}
+
+// Gray is an 8-bit gray.
+type Gray value struct {
+	Y u8
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c Gray) RGBA() (u32, u32, u32, u32) {
+	let y = u32(c.Y) * 0x101
+	return y, y, y, 0xffff
+}
+
+// Gray16 is a 16-bit gray.
+type Gray16 value struct {
+	Y u16
+}
+
+// RGBA is the color's 16-bit premultiplied channels.
+fn (c Gray16) RGBA() (u32, u32, u32, u32) {
+	let y = u32(c.Y)
+	return y, y, y, 0xffff
+}
+
+// Black, White, Transparent and Opaque are Go's standard colors.
+let Black = Gray16{Y: 0}
+
+// White is opaque white.
+let White = Gray16{Y: 0xffff}
+
+// Transparent is the fully transparent color.
+let Transparent = Alpha16{A: 0}
+
+// Opaque is the fully opaque alpha.
+let Opaque = Alpha16{A: 0xffff}
+
+// ---- conversions ----
+
+// ToRGBA64 is c as a 16-bit premultiplied value.
+fn ToRGBA64[C Color](c C) RGBA64 {
+	let (r, g, b, a) = c.RGBA()
+	return RGBA64{R: u16(r), G: u16(g), B: u16(b), A: u16(a)}
+}
+
+// ToRGBA is c in the RGBA model.
+fn ToRGBA[C Color](c C) RGBA {
+	let (r, g, b, a) = c.RGBA()
+	return RGBA{R: u8(r >> 8), G: u8(g >> 8), B: u8(b >> 8), A: u8(a >> 8)}
+}
+
+// ToNRGBA is c in the NRGBA model (premultiplication undone).
+fn ToNRGBA[C Color](c C) NRGBA {
+	let (r, g, b, a) = c.RGBA()
+	return nrgbaOf(r, g, b, a)
+}
+
+@wrap fn nrgbaOf(r u32, g u32, b u32, a u32) NRGBA {
+	if a == 0xffff {
+		return NRGBA{R: u8(r >> 8), G: u8(g >> 8), B: u8(b >> 8), A: 0xff}
+	}
+	if a == 0 {
+		return NRGBA{}
+	}
+	return NRGBA{R: u8((r * 0xffff / a) >> 8), G: u8((g * 0xffff / a) >> 8), B: u8((b * 0xffff / a) >> 8), A: u8(a >> 8)}
+}
+
+// ToNRGBA64 is c in the NRGBA64 model.
+fn ToNRGBA64[C Color](c C) NRGBA64 {
+	let (r, g, b, a) = c.RGBA()
+	return nrgba64Of(r, g, b, a)
+}
+
+@wrap fn nrgba64Of(r u32, g u32, b u32, a u32) NRGBA64 {
+	if a == 0xffff {
+		return NRGBA64{R: u16(r), G: u16(g), B: u16(b), A: 0xffff}
+	}
+	if a == 0 {
+		return NRGBA64{}
+	}
+	return NRGBA64{R: u16(r * 0xffff / a), G: u16(g * 0xffff / a), B: u16(b * 0xffff / a), A: u16(a)}
+}
+
+// ToAlpha is c's alpha, 8 bits.
+fn ToAlpha[C Color](c C) Alpha {
+	let (_, _, _, a) = c.RGBA()
+	return Alpha{A: u8(a >> 8)}
+}
+
+// ToAlpha16 is c's alpha, 16 bits.
+fn ToAlpha16[C Color](c C) Alpha16 {
+	let (_, _, _, a) = c.RGBA()
+	return Alpha16{A: u16(a)}
+}
+
+// ToGray is c's luminance, 8 bits (Go's weights 0.299, 0.587, 0.114).
+fn ToGray[C Color](c C) Gray {
+	let (r, g, b, _) = c.RGBA()
+	return Gray{Y: u8(luma(r, g, b) >> 24)}
+}
+
+// ToGray16 is c's luminance, 16 bits.
+fn ToGray16[C Color](c C) Gray16 {
+	let (r, g, b, _) = c.RGBA()
+	return Gray16{Y: u16(luma(r, g, b) >> 16)}
+}
+
+// luma is Go's weighted sum, rounded, before the final shift (u32 arithmetic, as Go's).
+@wrap fn luma(r u32, g u32, b u32) u32 {
+	return 19595*r + 38470*g + 7471*b + (1 << 15)
+}
+
+// Model names a color model: what an image keeps per pixel (Go's color.Model values). Models compare with ==.
+type Model value struct {
+	id i64
+}
+
+// RGBAModel is the model of RGBA colors.
+let RGBAModel = Model{id: 1}
+
+// RGBA64Model is the model of RGBA64 colors.
+let RGBA64Model = Model{id: 2}
+
+// NRGBAModel is the model of NRGBA colors.
+let NRGBAModel = Model{id: 3}
+
+// NRGBA64Model is the model of NRGBA64 colors.
+let NRGBA64Model = Model{id: 4}
+
+// AlphaModel is the model of Alpha colors.
+let AlphaModel = Model{id: 5}
+
+// Alpha16Model is the model of Alpha16 colors.
+let Alpha16Model = Model{id: 6}
+
+// GrayModel is the model of Gray colors.
+let GrayModel = Model{id: 7}
+
+// Gray16Model is the model of Gray16 colors.
+let Gray16Model = Model{id: 8}
+
+// YCbCrModel is the model of YCbCr colors.
+let YCbCrModel = Model{id: 9}
+
+// NYCbCrAModel is the model of NYCbCrA colors.
+let NYCbCrAModel = Model{id: 10}
+
+// CMYKModel is the model of CMYK colors.
+let CMYKModel = Model{id: 11}
+
+// PaletteModel is the model of a Paletted image: the nearest color of its Palette (Go uses the Palette itself).
+let PaletteModel = Model{id: 12}
+
+// String is the model's Go name, such as "RGBAModel" ("Model" for the zero value).
+fn (m Model) String() str {
+	return match m.id {
+		1 => "RGBAModel"
+		2 => "RGBA64Model"
+		3 => "NRGBAModel"
+		4 => "NRGBA64Model"
+		5 => "AlphaModel"
+		6 => "Alpha16Model"
+		7 => "GrayModel"
+		8 => "Gray16Model"
+		9 => "YCbCrModel"
+		10 => "NYCbCrAModel"
+		11 => "CMYKModel"
+		12 => "PaletteModel"
+		_ => "Model"
+	}
+}
+
+// Convert is c as the model keeps it, read back as 16-bit premultiplied (PaletteModel and the zero Model give c).
+fn (m Model) Convert(c RGBA64) RGBA64 {
+	return match m.id {
+		1 => ToRGBA64(ToRGBA(c))
+		3 => ToRGBA64(ToNRGBA(c))
+		4 => ToRGBA64(ToNRGBA64(c))
+		5 => ToRGBA64(ToAlpha(c))
+		6 => ToRGBA64(ToAlpha16(c))
+		7 => ToRGBA64(ToGray(c))
+		8 => ToRGBA64(ToGray16(c))
+		9 => ToRGBA64(ToYCbCr(c))
+		10 => ToRGBA64(ToNYCbCrA(c))
+		11 => ToRGBA64(ToCMYK(c))
+		_ => c
+	}
+}
+
+// ---- palettes ----
+
+// Palette is a list of at most 256 colors, each 8-bit and not premultiplied (what PNG's PLTE and tRNS and GIF's color
+// tables hold; Go's color.Palette holds any color).
+type Palette []NRGBA
+
+// Index is the index of the palette color nearest to c (Euclidean in premultiplied R, G, B, A), the first on a tie.
+fn (p Palette) Index(c RGBA64) i64 {
+	let (cr, cg, cb, ca) = c.RGBA()
+	mut best = i64(0)
+	mut bestSum = u32(0xffffffff)
+	for i, v in p {
+		let (vr, vg, vb, va) = v.RGBA()
+		let sum = sumSq(cr, cg, cb, ca, vr, vg, vb, va)
+		if sum < bestSum {
+			if sum == 0 {
+				return i
+			}
+			best = i
+			bestSum = sum
+		}
+	}
+	return best
+}
+
+// Convert is the palette color nearest to c (the zero color for an empty palette, where Go gives nil).
+fn (p Palette) Convert(c RGBA64) NRGBA {
+	if len(p) == 0 {
+		return NRGBA{}
+	}
+	return p[p.Index(c)]
+}
+
+// sumSq is Go's distance: each squared difference shifted right by 2, in wrapping u32 arithmetic.
+@wrap fn sumSq(ar u32, ag u32, ab u32, aa u32, br u32, bg u32, bb u32, ba u32) u32 {
+	let dr = ar - br
+	let dg = ag - bg
+	let db = ab - bb
+	let da = aa - ba
+	return ((dr * dr) >> 2) + ((dg * dg) >> 2) + ((db * db) >> 2) + ((da * da) >> 2)
+}

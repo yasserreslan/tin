@@ -1,0 +1,312 @@
+package image
+
+import "image/color"
+
+// luma is Go's weighted luminance sum, rounded, before the final shift.
+@wrap fn luma(c color.RGBA64) u32 {
+	return 19595*u32(c.R) + 38470*u32(c.G) + 7471*u32(c.B) + (1 << 15)
+}
+
+// Gray is an image of 8-bit grays, one byte per pixel.
+type Gray struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewGray is a black Gray image of r.
+fn NewGray(r Rectangle) Gray {
+	return Gray{Pix: make([]u8, pixelBufferLength(1, r, "Gray")), Stride: r.Dx(), Rect: r}
+}
+
+// ColorModel is GrayModel.
+fn (p Gray) ColorModel() color.Model {
+	return color.GrayModel
+}
+
+// Bounds is the image's rectangle.
+fn (p Gray) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p Gray) Layout() Layout {
+	return Layout{Kind: KindGray, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of pixel (x, y).
+fn (p Gray) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x - p.Rect.Min.X)
+}
+
+// At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+fn (p Gray) At(x i64, y i64) color.RGBA64 {
+	let v = u16(p.GrayAt(x, y).Y) * 0x101
+	return color.RGBA64{R: v, G: v, B: v, A: 0xffff}
+}
+
+// GrayAt is the pixel at (x, y) (zero outside the bounds).
+fn (p Gray) GrayAt(x i64, y i64) color.Gray {
+	if !Pt(x, y).In(p.Rect) {
+		return color.Gray{}
+	}
+	return color.Gray{Y: p.Pix[p.PixOffset(x, y)]}
+}
+
+// Set stores c's luminance at (x, y) (nothing outside the bounds).
+fn (p mut Gray) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	p.Pix[p.PixOffset(x, y)] = u8(luma(c) >> 24)
+}
+
+// SetGray stores c at (x, y) (nothing outside the bounds).
+fn (p mut Gray) SetGray(x i64, y i64, c color.Gray) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	p.Pix[p.PixOffset(x, y)] = c.Y
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p Gray) SubImage(r Rectangle) Gray {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return Gray{}
+	}
+	return Gray{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque is true: a gray image has no alpha.
+fn (p Gray) Opaque() bool {
+	return true
+}
+
+// Gray16 is an image of 16-bit grays, two big-endian bytes per pixel.
+type Gray16 struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewGray16 is a black Gray16 image of r.
+fn NewGray16(r Rectangle) Gray16 {
+	return Gray16{Pix: make([]u8, pixelBufferLength(2, r, "Gray16")), Stride: 2 * r.Dx(), Rect: r}
+}
+
+// ColorModel is Gray16Model.
+fn (p Gray16) ColorModel() color.Model {
+	return color.Gray16Model
+}
+
+// Bounds is the image's rectangle.
+fn (p Gray16) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p Gray16) Layout() Layout {
+	return Layout{Kind: KindGray16, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of the first byte of pixel (x, y).
+fn (p Gray16) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*2
+}
+
+// At is the pixel at (x, y) (zero outside the bounds).
+fn (p Gray16) At(x i64, y i64) color.RGBA64 {
+	let v = p.Gray16At(x, y).Y
+	return color.RGBA64{R: v, G: v, B: v, A: 0xffff}
+}
+
+// Gray16At is the pixel at (x, y) (zero outside the bounds).
+fn (p Gray16) Gray16At(x i64, y i64) color.Gray16 {
+	if !Pt(x, y).In(p.Rect) {
+		return color.Gray16{}
+	}
+	return color.Gray16{Y: be16(p.Pix, p.PixOffset(x, y))}
+}
+
+// Set stores c's luminance at (x, y) (nothing outside the bounds).
+fn (p mut Gray16) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	put16(mut p.Pix, p.PixOffset(x, y), luma(c) >> 16)
+}
+
+// SetGray16 stores c at (x, y) (nothing outside the bounds).
+fn (p mut Gray16) SetGray16(x i64, y i64, c color.Gray16) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	put16(mut p.Pix, p.PixOffset(x, y), u32(c.Y))
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p Gray16) SubImage(r Rectangle) Gray16 {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return Gray16{}
+	}
+	return Gray16{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque is true: a gray image has no alpha.
+fn (p Gray16) Opaque() bool {
+	return true
+}
+
+// Alpha is an image of 8-bit alphas (a mask), one byte per pixel.
+type Alpha struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewAlpha is a transparent Alpha image of r.
+fn NewAlpha(r Rectangle) Alpha {
+	return Alpha{Pix: make([]u8, pixelBufferLength(1, r, "Alpha")), Stride: r.Dx(), Rect: r}
+}
+
+// ColorModel is AlphaModel.
+fn (p Alpha) ColorModel() color.Model {
+	return color.AlphaModel
+}
+
+// Bounds is the image's rectangle.
+fn (p Alpha) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p Alpha) Layout() Layout {
+	return Layout{Kind: KindAlpha, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of pixel (x, y).
+fn (p Alpha) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x - p.Rect.Min.X)
+}
+
+// At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+fn (p Alpha) At(x i64, y i64) color.RGBA64 {
+	let a = u16(p.AlphaAt(x, y).A) * 0x101
+	return color.RGBA64{R: a, G: a, B: a, A: a}
+}
+
+// AlphaAt is the pixel at (x, y) (zero outside the bounds).
+fn (p Alpha) AlphaAt(x i64, y i64) color.Alpha {
+	if !Pt(x, y).In(p.Rect) {
+		return color.Alpha{}
+	}
+	return color.Alpha{A: p.Pix[p.PixOffset(x, y)]}
+}
+
+// Set stores c's alpha at (x, y) (nothing outside the bounds).
+fn (p mut Alpha) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	p.Pix[p.PixOffset(x, y)] = u8(c.A >> 8)
+}
+
+// SetAlpha stores c at (x, y) (nothing outside the bounds).
+fn (p mut Alpha) SetAlpha(x i64, y i64, c color.Alpha) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	p.Pix[p.PixOffset(x, y)] = c.A
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p Alpha) SubImage(r Rectangle) Alpha {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return Alpha{}
+	}
+	return Alpha{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque reports whether every pixel is fully opaque.
+fn (p Alpha) Opaque() bool {
+	return opaque8(p.Pix, p.Stride, p.Rect, 1, 0)
+}
+
+// Alpha16 is an image of 16-bit alphas, two big-endian bytes per pixel.
+type Alpha16 struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewAlpha16 is a transparent Alpha16 image of r.
+fn NewAlpha16(r Rectangle) Alpha16 {
+	return Alpha16{Pix: make([]u8, pixelBufferLength(2, r, "Alpha16")), Stride: 2 * r.Dx(), Rect: r}
+}
+
+// ColorModel is Alpha16Model.
+fn (p Alpha16) ColorModel() color.Model {
+	return color.Alpha16Model
+}
+
+// Bounds is the image's rectangle.
+fn (p Alpha16) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p Alpha16) Layout() Layout {
+	return Layout{Kind: KindAlpha16, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of the first byte of pixel (x, y).
+fn (p Alpha16) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*2
+}
+
+// At is the pixel at (x, y) (zero outside the bounds).
+fn (p Alpha16) At(x i64, y i64) color.RGBA64 {
+	let a = p.Alpha16At(x, y).A
+	return color.RGBA64{R: a, G: a, B: a, A: a}
+}
+
+// Alpha16At is the pixel at (x, y) (zero outside the bounds).
+fn (p Alpha16) Alpha16At(x i64, y i64) color.Alpha16 {
+	if !Pt(x, y).In(p.Rect) {
+		return color.Alpha16{}
+	}
+	return color.Alpha16{A: be16(p.Pix, p.PixOffset(x, y))}
+}
+
+// Set stores c's alpha at (x, y) (nothing outside the bounds).
+fn (p mut Alpha16) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	put16(mut p.Pix, p.PixOffset(x, y), u32(c.A))
+}
+
+// SetAlpha16 stores c at (x, y) (nothing outside the bounds).
+fn (p mut Alpha16) SetAlpha16(x i64, y i64, c color.Alpha16) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	put16(mut p.Pix, p.PixOffset(x, y), u32(c.A))
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p Alpha16) SubImage(r Rectangle) Alpha16 {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return Alpha16{}
+	}
+	return Alpha16{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque reports whether every pixel is fully opaque.
+fn (p Alpha16) Opaque() bool {
+	return opaque16(p.Pix, p.Stride, p.Rect, 2, 0)
+}
