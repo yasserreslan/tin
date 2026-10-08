@@ -108,17 +108,26 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 		crcs[i] = stamp.Crc32(str(e))
 		out = append(out, e...)
 	}
-	let sum = str(seal.Sha256(str(out)))
-	appendStr(mut out, sum)
+	appendStr(mut out, str(seal.Sha256(str(out))))
+	mut packed = make([]object.Id, 0, len(items))
+	for it in items {
+		packed = append(packed, it.id)
+	}
+	return try finish(dir, tmp, str(out), packed, offs, crcs)
+}
+
+// finish writes a pack (its bytes, trailing hash included) and its index: the ids sorted, with their offsets and CRCs;
+// both go to temporary files, synced, then renamed to the pack's hash.
+fn finish(dir str, tmp str, pack str, ids []object.Id, offs []i64, crcs []u32) !Pack {
+	let sum = pack[len(pack) - 32:]
 	let hex = seal.Hex([]u8(sum))
-	// the index: ids sorted, with their offsets and CRCs
-	mut order = make([]i64, 0, len(items))
-	for i in 0..len(items) {
+	mut order = make([]i64, 0, len(ids))
+	for i in 0..len(ids) {
 		order = append(order, i)
 	}
 	sift.SortFunc(mut order, fn(a i64, b i64) i64 {
-		let x = items[a].id.Bytes()
-		let y = items[b].id.Bytes()
+		let x = ids[a].Bytes()
+		let y = ids[b].Bytes()
 		if x < y {
 			return -1
 		}
@@ -130,10 +139,10 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 	mut idx = []u8{}
 	appendStr(mut idx, "TITIDX\x00\x00")
 	appendLE32(mut idx, 1)
-	appendLE64(mut idx, len(items))
+	appendLE64(mut idx, len(ids))
 	mut counts = make([]i64, 256)
 	for i in order {
-		counts[i64(items[i].id.Bytes()[0])] += 1
+		counts[i64(ids[i].Bytes()[0])] += 1
 	}
 	mut total = 0
 	for b in 0..256 {
@@ -141,7 +150,7 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 		appendLE32(mut idx, total)
 	}
 	for i in order {
-		appendStr(mut idx, items[i].id.Bytes())
+		appendStr(mut idx, ids[i].Bytes())
 	}
 	for i in order {
 		appendLE64(mut idx, offs[i])
@@ -151,7 +160,7 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 	}
 	appendStr(mut idx, sum)
 	appendStr(mut idx, str(seal.Sha256(str(idx))))
-	try writeSynced(tmp + ".pack", str(out))
+	try writeSynced(tmp + ".pack", pack)
 	try writeSynced(tmp + ".idx", str(idx))
 	let final = dir + "/" + hex
 	crash.Point()

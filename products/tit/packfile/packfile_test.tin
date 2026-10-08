@@ -444,3 +444,54 @@ fn TestReuse(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// Keep writes a received pack as it is and indexes it (#795): every object reads back from it with its content, the
+// pack verifies, and a damaged or cut pack is refused with nothing written.
+fn TestKeep(t mut crucible.T) {
+	let d = fresh("keep")
+	mut s = store.NewMem()
+	mut ids = []object.Id{}
+	mut text = ""
+	for i in 0..60 {
+		text = text + "line {i} of a file that grows a line at a time, so each version deltas well against the last\n"
+		let id = s.PutRaw(object.Kind.Blob, text) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	let p0 = Write(mut s, ids, d + "/src") catch e {
+		t.Error("write: {e}")
+		return
+	}
+	mut packs = []Pack{p0}
+	let data = Reuse(mut s, mut packs, ids) catch e {
+		t.Error("reuse: {e}")
+		return
+	}
+	mut p = Keep(data, d + "/kept", 1 << 20) catch e {
+		t.Error("keep: {e}")
+		return
+	}
+	crucible.Equal(mut t, "count", p.Count, len(ids))
+	for id in ids {
+		let (_, want) = s.GetRaw(id) catch _ {
+			return
+		}
+		let (_, have) = p.GetRaw(id) catch e {
+			t.Error("{id.Hex()}: {e}")
+			return
+		}
+		t.True("content", have == want)
+	}
+	let verr = p.Verify()
+	t.True("the pack verifies", verr == nil)
+	mut b = []u8(data)
+	b[len(b) / 2] = b[len(b) / 2] ^ 0x41
+	let (_, e1) = Keep(str(b), d + "/bad", 1 << 20)
+	t.HasFault("a damaged pack", e1)
+	let (_, e2) = Keep(data[0:len(data) / 2], d + "/cut", 1 << 20)
+	t.HasFault("a cut pack", e2)
+	t.True("nothing written for them", !quarry.Exists(d + "/bad") && !quarry.Exists(d + "/cut"))
+	quarry.RemoveAll(d) catch _ {
+	}
+}
