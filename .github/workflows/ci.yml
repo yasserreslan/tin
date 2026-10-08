@@ -85,6 +85,8 @@ jobs:
         run: sh tools/ci/tin.sh utf16_check
       - name: Path rules against Go's path (Clean, Split, Join and Match)
         run: sh tools/ci/tin.sh path_check
+      - name: MIME, quoted-printable and multipart against Go
+        run: python3 tools/ci/mime_check.py
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)

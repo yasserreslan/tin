@@ -1,0 +1,543 @@
+package multipart
+
+// Package multipart reads and writes MIME multipart bodies (RFC 2046), as Go's mime/multipart
+// does: the "multipart/form-data" bodies a browser posts, and the multipart bodies mail carries.
+//
+//	let r = multipart.NewReader(body, boundary)
+//	mut part = try r.NextPart()
+//	for part != nil {
+//		print(part.FormName(), part.FileName(), try part.Text())
+//		part = try r.NextPart()
+//	}
+//
+// A part's body is decoded from its Content-Transfer-Encoding (quoted-printable or base64) by
+// Text and Read. The reader works on the whole body it is given; a streaming reader for very
+// large uploads over a file is the follow-up noted in #735.
+
+import "mime"
+import "mime/quotedprintable"
+import "say"
+import "twine"
+
+// maxBoundary and friend are the boundary bounds Go enforces.
+const minBoundary = 1
+const maxBoundary = 70
+
+// Reader parses the parts of a multipart body.
+type Reader struct {
+	body     str
+	boundary str
+	at       i64
+	done     bool
+}
+
+// NewReader parses body, whose parts are delimited by boundary.
+fn NewReader(body str, boundary str) !Reader {
+	if len(boundary) < minBoundary || len(boundary) > maxBoundary {
+		fail say.Fault("multipart: a boundary of %d bytes is out of range", len(boundary))
+	}
+	return Reader{body: body, boundary: boundary, at: 0, done: false}
+}
+
+// NextPart returns the next part with true, or a zero part with false when the body ends. The
+// first boundary may follow a preamble, which is ignored, and the epilogue after the final
+// "--boundary--" is ignored too.
+fn (r mut Reader) NextPart() !(Part, bool) {
+	if r.done {
+		return blankPart(), false
+	}
+	// The delimiter is the boundary line; the first one may lack the leading CRLF.
+	mut delimAt = i64(0)
+	mut delimLen = i64(0)
+	if r.at == 0 && twine.HasPrefix(r.body, "--"+r.boundary) {
+		delimAt = 0
+		delimLen = 2 + len(r.boundary)
+	} else {
+		// The delimiter line starts at the line ending, which may be CRLF or LF alone.
+		let at = twine.Index(r.body[r.at:len(r.body)], "\n--"+r.boundary)
+		if at < 0 {
+			r.done = true
+			if r.at == 0 {
+				fail say.Fault("multipart: no boundary in the body")
+			}
+			return blankPart(), false
+		}
+		delimAt = r.at + at
+		delimLen = 3 + len(r.boundary)
+	}
+	mut p = delimAt + delimLen
+	// The final delimiter ends the body.
+	if twine.HasPrefix(r.body[p:len(r.body)], "--") {
+		r.done = true
+		return blankPart(), false
+	}
+	if twine.HasPrefix(r.body[p:len(r.body)], "\r\n") {
+		p += 2
+	} else if twine.HasPrefix(r.body[p:len(r.body)], "\n") {
+		p += 1
+	} else {
+		r.done = true
+		fail say.Fault("multipart: the boundary is not followed by a line ending")
+	}
+	// The headers run to the first empty line.
+	mut h = p
+	mut headerEnd = i64(-1)
+	mut bodyAt = i64(-1)
+	for h < i64(len(r.body)) {
+		let nl = twine.IndexByte(r.body[h:len(r.body)], '\n')
+		if nl < 0 {
+			break
+		}
+		let end = h + nl
+		mut lineEnd = end
+		if lineEnd > h && r.body[lineEnd-1] == '\r' {
+			lineEnd -= 1
+		}
+		if lineEnd == h {
+			headerEnd = h
+			bodyAt = end + 1
+			break
+		}
+		h = end + 1
+	}
+	if headerEnd < 0 {
+		r.done = true
+		fail say.Fault("multipart: a part's headers are not terminated")
+	}
+	let header = try parseHeader(r.body[p:headerEnd])
+	// The body runs to the next delimiter, whose leading line ending is not part of it.
+	let next = twine.Index(r.body[bodyAt:len(r.body)], "\n--"+r.boundary)
+	if next < 0 {
+		r.done = true
+		fail say.Fault("multipart: a part's body is not terminated by a boundary")
+	}
+	mut rawEnd = bodyAt + next
+	if rawEnd > bodyAt && r.body[rawEnd-1] == '\r' {
+		rawEnd -= 1
+	}
+	let raw = r.body[bodyAt:rawEnd]
+	r.at = bodyAt + next
+	return Part{Header: header, raw: raw, at: 0, decoded: "", haveDecoded: false}, true
+}
+
+// blankPart is the "no more parts" result.
+fn blankPart() Part {
+	return Part{Header: make(map[str]str), raw: "", at: 0, decoded: "", haveDecoded: false}
+}
+
+// Part is one part of a multipart body.
+type Part struct {
+	Header      map[str]str
+	raw         str
+	at          i64
+	decoded     str
+	haveDecoded bool
+}
+
+// Read reads the part's body, decoded from its Content-Transfer-Encoding.
+fn (p mut Part) Read(buf mut []u8) !i64 {
+	if !p.haveDecoded {
+		p.decoded = try decodePart(p.raw, p.Header)
+		p.haveDecoded = true
+	}
+	mut n = i64(0)
+	for p.at < i64(len(p.decoded)) && n < i64(len(buf)) {
+		buf[n] = p.decoded[p.at]
+		p.at += 1
+		n += 1
+	}
+	return n
+}
+
+// Text returns the whole decoded body of the part.
+fn (p mut Part) Text() !str {
+	if !p.haveDecoded {
+		p.decoded = try decodePart(p.raw, p.Header)
+		p.haveDecoded = true
+	}
+	return p.decoded
+}
+
+// FormName returns the part's form field name, from Content-Disposition, or "".
+fn (p Part) FormName() str {
+	let (name, _) = formDisposition(p.Header)
+	return name
+}
+
+// FileName returns the part's file name, from Content-Disposition, or "" (an empty name with a
+// filename means the field is a file upload).
+fn (p Part) FileName() str {
+	let (_, filename) = formDisposition(p.Header)
+	return filename
+}
+
+// formDisposition parses the Content-Disposition header's name and filename parameters.
+fn formDisposition(header map[str]str) (str, str) {
+	let (disp, have) = header["content-disposition"]
+	if !have {
+		return "", ""
+	}
+	let (kind, params) = parseDisposition(disp)
+	if kind != "form-data" {
+		return "", ""
+	}
+	mut name = ""
+	let (n, haveName) = params["name"]
+	if haveName {
+		name = n
+	}
+	mut filename = ""
+	let (f, haveFile) = params["filename"]
+	if haveFile {
+		filename = f
+	}
+	return name, filename
+}
+
+// parseDisposition parses a Content-Disposition value: its kind and its parameters. It is the
+// media-type grammar with the kind taken as it is, since "form-data" has no slash.
+fn parseDisposition(v str) (str, map[str]str) {
+	mut kind = lower(trimSpace(v))
+	mut rest = ""
+	let semi = twine.IndexByte(v, ';')
+	if semi >= 0 {
+		kind = lower(trimSpace(v[0:semi]))
+		rest = v[semi+1:len(v)]
+	}
+	mut params = make(map[str]str)
+	for {
+		rest = trimSpace(rest)
+		for len(rest) > 0 && rest[0] == ';' {
+			rest = rest[1:len(rest)]
+			rest = trimSpace(rest)
+		}
+		if len(rest) == 0 {
+			return kind, params
+		}
+		let eq = twine.IndexByte(rest, '=')
+		if eq <= 0 {
+			return kind, params
+		}
+		let name = lower(trimSpace(rest[0:eq]))
+		mut value = ""
+		mut after = i64(0)
+		let tail = trimSpace(rest[eq+1:len(rest)])
+		if len(tail) > 0 && tail[0] == '"' {
+			mut j = 1
+			for j < len(tail) {
+				if tail[j] == '\\' && j+1 < len(tail) {
+					value += tail[j+1:j+2]
+					j += 2
+				} else if tail[j] == '"' {
+					j += 1
+					break
+				} else {
+					value += tail[j:j+1]
+					j += 1
+				}
+			}
+			after = j
+		} else {
+			let semi2 = twine.IndexByte(tail, ';')
+			if semi2 < 0 {
+				value = trimSpace(tail)
+				after = len(tail)
+			} else {
+				value = trimSpace(tail[0:semi2])
+				after = semi2
+			}
+		}
+		params[name] = value
+		// Continue after the value: find the next ';' in the untrimmed rest.
+		let consumedTail = i64(len(rest[eq+1:len(rest)])) - i64(len(tail))
+		let at = eq + 1 + consumedTail + after
+		rest = rest[at:len(rest)]
+	}
+}
+
+// decodePart decodes a part's body per its Content-Transfer-Encoding.
+fn decodePart(raw str, header map[str]str) !str {
+	let (cte, have) = header["content-transfer-encoding"]
+	if !have {
+		return raw
+	}
+	let enc = lower(trimSpace(cte))
+	if enc == "quoted-printable" {
+		return try quotedprintable.Decode(raw)
+	}
+	if enc == "base64" {
+		return try decodeBase64(raw)
+	}
+	if enc == "7bit" || enc == "8bit" || enc == "binary" || len(enc) == 0 {
+		return raw
+	}
+	fail say.Fault("multipart: unsupported Content-Transfer-Encoding %q", cte)
+}
+
+// parseHeader reads the part's header lines: "Name: value", continuation lines folded, repeated
+// names joined with ", ", and names lowercased.
+fn parseHeader(text str) !map[str]str {
+	mut header = make(map[str]str)
+	mut lines = splitLines(text)
+	mut i = i64(0)
+	for i < len(lines) {
+		let line0 = lines[i]
+		if len(line0) == 0 {
+			i += 1
+			continue
+		}
+		// A continuation line starts with whitespace and belongs to the previous name.
+		if line0[0] == ' ' || line0[0] == '\t' {
+			i += 1
+			continue
+		}
+		let colon = twine.IndexByte(line0, ':')
+		if colon <= 0 {
+			fail say.Fault("multipart: a header line has no colon")
+		}
+		let name = lower(trimSpace(line0[0:colon]))
+		mut value = trimSpace(line0[colon+1:len(line0)])
+		mut j = i + 1
+		for j < len(lines) && len(lines[j]) > 0 && (lines[j][0] == ' ' || lines[j][0] == '\t') {
+			value += " " + trimSpace(lines[j])
+			j += 1
+		}
+		let (old, found) = header[name]
+		if found {
+			header[name] = old + ", " + value
+		} else {
+			header[name] = value
+		}
+		i = j
+	}
+	return header
+}
+
+// splitLines splits on \r\n or \n.
+fn splitLines(s str) []str {
+	let crlf = twine.Split(s, "\r\n")
+	if len(crlf) > 1 {
+		return crlf
+	}
+	return twine.Split(s, "\n")
+}
+
+// Writer builds a multipart body.
+type Writer struct {
+	out      []u8
+	boundary str
+	havePart bool
+	open     bool
+	closed   bool
+}
+
+// NewWriter builds a body with the given boundary (SetBoundary may change it before the first
+// part).
+fn NewWriter(boundary str) !Writer {
+	if len(boundary) == 0 {
+		boundary = "tin.multipart.boundary"
+	}
+	if len(boundary) > maxBoundary {
+		fail say.Fault("multipart: a boundary of %d bytes is over the maximum", len(boundary))
+	}
+	return Writer{out: []u8{}, boundary: boundary, havePart: false, open: false, closed: false}
+}
+
+// Boundary returns the boundary the parts are delimited with.
+fn (w Writer) Boundary() str {
+	return w.boundary
+}
+
+// SetBoundary sets the boundary; it must be done before the first part.
+fn (w mut Writer) SetBoundary(boundary str) ! {
+	if w.havePart {
+		fail say.Fault("multipart: the boundary cannot change after the first part")
+	}
+	if len(boundary) == 0 || len(boundary) > maxBoundary {
+		fail say.Fault("multipart: the boundary is not 1 to %d bytes", maxBoundary)
+	}
+	w.boundary = boundary
+}
+
+// CreatePart starts a part with the given header fields and returns a writer for its body.
+fn (w mut Writer) CreatePart(header map[str]str) ! {
+	try w.closePart()
+	// A boundary is CRLF + "--" + boundary; the first one has no leading CRLF.
+	if w.havePart {
+		w.out = append(w.out, '\r', '\n')
+	}
+	w.out = append(w.out, []u8("--" + w.boundary + "\r\n")...)
+	// Go sorts the header names; a map of str has no stable order, so sort them.
+	mut names = []str{}
+	for k, _ in header {
+		names = append(names, k)
+	}
+	names = sortStrings(names)
+	for _, k in names {
+		w.out = append(w.out, []u8(k + ": " + header[k] + "\r\n")...)
+	}
+	w.out = append(w.out, '\r', '\n')
+	w.havePart = true
+	w.open = true
+}
+
+// CreateFormField starts a form field part (Content-Disposition: form-data; name="name").
+fn (w mut Writer) CreateFormField(fieldname str) ! {
+	mut h = make(map[str]str)
+	h["content-disposition"] = "form-data; name=\"" + escapeQuotes(fieldname) + "\""
+	try w.CreatePart(h)
+}
+
+// CreateFormFile starts a file upload part with the field and file names.
+fn (w mut Writer) CreateFormFile(fieldname str, filename str) ! {
+	mut h = make(map[str]str)
+	h["content-disposition"] = "form-data; name=\"" + escapeQuotes(fieldname) + "\"; filename=\"" + escapeQuotes(filename) + "\""
+	h["content-type"] = "application/octet-stream"
+	try w.CreatePart(h)
+}
+
+// Write writes the current part's body.
+fn (w mut Writer) Write(data []u8) !i64 {
+	if !w.open {
+		fail say.Fault("multipart: no part is open")
+	}
+	w.out = append(w.out, data...)
+	return i64(len(data))
+}
+
+// WriteField writes a whole form field: CreateFormField and the value.
+fn (w mut Writer) WriteField(fieldname str, value str) ! {
+	try w.CreateFormField(fieldname)
+	try w.Write([]u8(value))
+	try w.closePart()
+}
+
+// closePart ends the open part.
+fn (w mut Writer) closePart() ! {
+	w.open = false
+}
+
+// Close ends the body with the final boundary and returns it.
+fn (w mut Writer) Close() !str {
+	if w.closed {
+		fail say.Fault("multipart: the writer is closed")
+	}
+	if w.havePart {
+		w.out = append(w.out, '\r', '\n')
+	}
+	w.out = append(w.out, []u8("--" + w.boundary + "--\r\n")...)
+	w.closed = true
+	return str(w.out)
+}
+
+// ---- small helpers ----
+
+// escapeQuotes escapes the quotes and backslashes of a quoted parameter.
+fn escapeQuotes(s str) str {
+	mut out = ""
+	for i in 0..len(s) {
+		if s[i] == '"' || s[i] == '\\' {
+			out += "\\"
+		}
+		out += s[i:i+1]
+	}
+	return out
+}
+
+// sortStrings sorts a copy of the slice bytewise.
+fn sortStrings(xs []str) []str {
+	mut a = []str{}
+	for _, x in xs {
+		a = append(a, x)
+	}
+	mut i = 1
+	for i < len(a) {
+		let x = a[i]
+		mut j = i - 1
+		for j >= 0 && a[j] > x {
+			a[j+1] = a[j]
+			j -= 1
+		}
+		a[j+1] = x
+		i += 1
+	}
+	return a
+}
+
+// lower lowercases ASCII letters.
+fn lower(s str) str {
+	mut out = ""
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 'A' && c <= 'Z' {
+			out += "abcdefghijklmnopqrstuvwxyz"[i64(c)-65:i64(c)-64]
+		} else {
+			out += s[i:i+1]
+		}
+	}
+	return out
+}
+
+// trimSpace trims ASCII whitespace.
+fn trimSpace(s str) str {
+	mut a = i64(0)
+	mut b = i64(len(s))
+	for a < b && (s[a] == ' ' || s[a] == '\t') {
+		a += 1
+	}
+	for b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\r') {
+		b -= 1
+	}
+	return s[a:b]
+}
+
+// decodeBase64 decodes standard base64, ignoring whitespace.
+fn decodeBase64(s str) !str {
+	mut clean = ""
+	for i in 0..len(s) {
+		let c = s[i]
+		if c != '\r' && c != '\n' && c != ' ' && c != '\t' {
+			clean += s[i:i+1]
+		}
+	}
+	mut acc = i64(0)
+	mut bits = i64(0)
+	mut out = []u8{}
+	for i in 0..len(clean) {
+		let c = clean[i]
+		if c == '=' {
+			break
+		}
+		let v = b64Val(c)
+		if v < 0 {
+			fail say.Fault("multipart: invalid base64 in a part")
+		}
+		acc = acc<<6 | v
+		bits += 6
+		if bits >= 8 {
+			bits -= 8
+			out = append(out, u8((acc>>bits)&0xff))
+		}
+	}
+	return str(out)
+}
+
+// b64Val is a standard base64 character's value, or -1.
+fn b64Val(c u8) i64 {
+	if c >= 'A' && c <= 'Z' {
+		return i64(c - 'A')
+	}
+	if c >= 'a' && c <= 'z' {
+		return i64(c-'a') + 26
+	}
+	if c >= '0' && c <= '9' {
+		return i64(c-'0') + 52
+	}
+	if c == '+' {
+		return 62
+	}
+	if c == '/' {
+		return 63
+	}
+	return -1
+}

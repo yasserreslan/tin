@@ -1,0 +1,167 @@
+package main
+
+// mime: media types and their parameters, the extension table, RFC 2047 encoded words,
+// quoted-printable and multipart bodies.
+
+import "say"
+import "mime"
+import "mime/multipart"
+import "mime/quotedprintable"
+
+fn main() {
+	// Media types: the type and subtype are lowercased, the parameters unquoted and sorted.
+	let (t, params) = mime.ParseMediaType(`Text/HTML; Charset="UTF-8"; a=b`) catch err {
+		say.Line("parse failed", err)
+		return
+	}
+	say.Line("type", t, params["charset"], params["a"])
+	say.Line("format", mime.FormatMediaType("text/plain", mime.Params{"charset": "utf-8", "a b": "c"}))
+	say.Line("lone", parseType("text"))
+	say.Line("bad", parseType("text/plain; =v"), parseType("/plain"), parseType("text/plain extra"))
+
+	// The extension table.
+	say.Line("ext", mime.TypeByExtension(".png"), mime.TypeByExtension(".JSON"), mime.TypeByExtension(".nope"))
+	mime.AddExtensionType(".tinz", "application/x-tinz") catch err {
+		say.Line("add failed", err)
+		return
+	}
+	say.Line("added", mime.TypeByExtension(".tinz"), extList(mime.ExtensionsByType("image/png")))
+
+	// RFC 2047 words: Q and B forms, latin-1 widening, and the text around them.
+	say.Line("word", wordOf("=?utf-8?q?caf=C3=A9?="), wordOf("=?utf-8?b?Y2Fmw6k=?="), wordOf("=?iso-8859-1?q?caf=E9?="))
+	say.Line("word bad", wordErr("=?utf-8?x?abc?="), wordErr("=?nope?q?abc?="))
+	say.Line("header", headerOf("Subject: =?utf-8?q?caf=C3=A9?= =?utf-8?q?_time?="))
+	say.Line("encode word", mime.WordEncoder{}.EncodeWord("utf-8", "café"), mime.WordEncoder{}.EncodeWord("utf-8", "plain"))
+
+	// Quoted-printable: soft breaks, escapes, the literal "=", and the line-ending rules.
+	say.Line("qp", qpOf("caf=C3=A9 =\r\nsuite"), qpOf("=3D =20 =09\n"), qpOf("a\r\nb\r\n"), qpOf("=zz"), qpOf("trailing=\n"))
+	say.Line("qp bad", qpErr("=4"), qpErr("="), qpErr("a\x01b"))
+	say.Line("qp enc", hex(qpEnc("hello world\n")), hex(qpEnc("trailing \n")), hex(qpEnc("=x")))
+	say.Line("qp enc long", len(qpEnc(many("x", 200))), len(qpEnc(many("=", 40))))
+
+	// Multipart: a written body read back, a hand-written body with LF endings, and an encoded
+	// part.
+	mut w = multipart.NewWriter("bnd") catch err {
+		say.Line("writer failed", err)
+		return
+	}
+	w.CreateFormField("name") catch _ {}
+	w.Write([]u8("value")) catch _ {}
+	w.CreateFormFile("f", "a.txt") catch _ {}
+	w.Write([]u8("caf\xc3\xa9")) catch _ {}
+	let body = w.Close() catch err {
+		say.Line("close failed", err)
+		return
+	}
+	say.Line("multipart parts", partsOf(body, "bnd"))
+	say.Line("multipart lf", partsOf("--b\nContent-Disposition: form-data; name=\"a\"\n\nx\n--b--\n", "b"))
+	let encoded = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\ncaf=C3=A9\r\n--b--\r\n"
+	say.Line("multipart qp", partsOf(encoded, "b"))
+	say.Line("multipart bad", partErr("garbage without a boundary", "b"), partErr("--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ny", "b"))
+}
+
+// parseType is the parsed media type, or the fault.
+fn parseType(v str) str {
+	let (t, _) = mime.ParseMediaType(v) catch err {
+		return say.Fmt("%s", err)
+	}
+	return t
+}
+
+// wordOf is an encoded word decoded, or the fault.
+fn wordOf(v str) str {
+	let s = mime.WordDecoder{}.Decode(v) catch err {
+		return say.Fmt("%s", err)
+	}
+	return s
+}
+
+// wordErr decodes a word that must fail and prints the fault.
+fn wordErr(v str) str {
+	let s = mime.WordDecoder{}.Decode(v) catch err {
+		return say.Fmt("%s", err)
+	}
+	return "ok " + s
+}
+
+// headerOf decodes a header value.
+fn headerOf(v str) str {
+	let s = mime.WordDecoder{}.DecodeHeader(v) catch err {
+		return say.Fmt("%s", err)
+	}
+	return s
+}
+
+// qpOf decodes a quoted-printable text, or the fault.
+fn qpOf(v str) str {
+	let s = quotedprintable.Decode(v) catch err {
+		return say.Fmt("%s", err)
+	}
+	return s
+}
+
+// qpErr decodes a text that must fail and prints the fault.
+fn qpErr(v str) str {
+	let s = quotedprintable.Decode(v) catch err {
+		return say.Fmt("%s", err)
+	}
+	return "ok " + s
+}
+
+// qpEnc encodes a text.
+fn qpEnc(v str) str {
+	return quotedprintable.Encode(v)
+}
+
+// partsOf reads a multipart body and renders its parts.
+fn partsOf(body str, boundary str) str {
+	mut r = multipart.NewReader(body, boundary) catch err {
+		return say.Fmt("%s", err)
+	}
+	mut out = ""
+	for {
+		let (p0, more) = r.NextPart() catch err {
+			return out + " " + say.Fmt("%s", err)
+		}
+		if !more {
+			return out
+		}
+		mut p = p0
+		let text = p.Text() catch err {
+			return out + " " + say.Fmt("%s", err)
+		}
+		out += say.Fmt(" [%s|%s|%s]", p.FormName(), p.FileName(), text)
+	}
+}
+
+// partErr reads a body that must fail and prints the fault.
+fn partErr(body str, boundary str) str {
+	return partsOf(body, boundary)
+}
+
+// extList renders a list of extensions.
+fn extList(xs []str) str {
+	mut out = ""
+	for _, x in xs {
+		out += x + " "
+	}
+	return out
+}
+
+// hex is the hex of a string's bytes.
+fn hex(s str) str {
+	mut out = ""
+	for i in 0..len(s) {
+		out += say.Fmt("%02x", i64(s[i]))
+	}
+	return out
+}
+
+// many repeats s n times.
+fn many(s str, n i64) str {
+	mut out = ""
+	for i in 0..n {
+		out += s
+	}
+	return out
+}

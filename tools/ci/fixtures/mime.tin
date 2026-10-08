@@ -1,0 +1,163 @@
+package main
+
+// The mime twin, Tin side: read the hex corpus of bench/ref/mime (Go's mime,
+// mime/quotedprintable and mime/multipart) on stdin and print the same lines, so
+// tools/ci/mime_check.py can compare them (#735).
+//
+//	P <hex>                       a media type string: the parsed type and parameters
+//	Q <hex>                       text: quoted-printable decode, and the encoding of the decoded
+//	M <boundary-hex> <body-hex>   a multipart body: its parts (name, filename, type, body)
+
+import "say"
+import "mime"
+import "mime/multipart"
+import "mime/quotedprintable"
+import "quarry"
+import "seal"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(body)) {
+		if i < i64(len(body)) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		if len(line) == 0 {
+			continue
+		}
+		run(line)
+	}
+}
+
+// run handles one corpus line.
+fn run(line str) {
+	let parts = splitSpace(line)
+	if len(parts) == 0 {
+		return
+	}
+	if parts[0] == "P" {
+		let raw = unhex(argOf(parts, 1))
+		let (t, params) = mime.ParseMediaType(raw) catch _ {
+			say.Line("P fault")
+			return
+		}
+		// Sorted "name=value" pairs, as the Go side's.
+		mut keys = []str{}
+		for k, _ in params {
+			keys = append(keys, k)
+		}
+		keys = sortStrs(keys)
+		mut list = []str{}
+		for _, k in keys {
+			list = append(list, k + "=" + params[k])
+		}
+		say.Line("P", t, joinWith(list, "&"))
+	} else if parts[0] == "Q" {
+		let raw = unhex(argOf(parts, 1))
+		let dec = quotedprintable.Decode(raw) catch _ {
+			say.Line("Q fault")
+			return
+		}
+		let enc = quotedprintable.Encode(dec)
+		say.Line("Q", seal.Hex([]u8(dec)), seal.Hex([]u8(enc)))
+	} else if parts[0] == "M" {
+		let boundary = unhex(argOf(parts, 1))
+		let raw = unhex(argOf(parts, 2))
+		mut r = multipart.NewReader(raw, boundary) catch _ {
+			say.Line("M fault")
+			return
+		}
+		mut pieces = []str{}
+		for {
+			let (p0, more) = r.NextPart() catch _ {
+				pieces = append(pieces, "fault")
+				break
+			}
+			if !more {
+				break
+			}
+			mut p = p0
+			let data = p.Text() catch _ {
+				pieces = append(pieces, "fault")
+				break
+			}
+			let ct = p.Header["content-type"]
+			pieces = append(pieces, p.FormName() + "|" + p.FileName() + "|" + ct + "|" + seal.Hex([]u8(data)))
+		}
+		say.Line("M", joinWith(pieces, " "))
+	}
+}
+
+// argOf is the argument at i, or "" when the line has none (an empty hex field).
+fn argOf(parts []str, i i64) str {
+	if i < i64(len(parts)) {
+		return parts[i]
+	}
+	return ""
+}
+
+// splitSpace splits a line on spaces.
+fn splitSpace(line str) []str {
+	mut out = []str{}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(line)) {
+		if i == i64(len(line)) || line[i] == ' ' {
+			if i > start {
+				out = append(out, line[start:i])
+			}
+			start = i + 1
+		}
+		i += 1
+	}
+	return out
+}
+
+// unhex decodes a lowercase hex string.
+fn unhex(s str) str {
+	let b = seal.HexDecode(s) catch _ {
+		return ""
+	}
+	return str(b)
+}
+
+// joinWith joins the pieces with sep.
+fn joinWith(parts []str, sep str) str {
+	mut out = ""
+	for i, p in parts {
+		if i > 0 {
+			out += sep
+		}
+		out += p
+	}
+	return out
+}
+
+// sortStrs sorts a copy bytewise.
+fn sortStrs(xs []str) []str {
+	mut a = []str{}
+	for _, x in xs {
+		a = append(a, x)
+	}
+	mut i = 1
+	for i < len(a) {
+		let x = a[i]
+		mut j = i - 1
+		for j >= 0 && a[j] > x {
+			a[j+1] = a[j]
+			j -= 1
+		}
+		a[j+1] = x
+		i += 1
+	}
+	return a
+}
