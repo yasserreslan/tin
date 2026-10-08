@@ -10,6 +10,7 @@ import "twine"
 //	font_size = 13            code font size in points
 //	code_font = Menlo-Regular PostScript name of the code font
 //	ui_font = .AppleSystemUIFont
+//	autosave = on             write the files with changes when the window has been quiet for a moment (default off)
 //	key.toggle-terminal = ctrl+`      a menu item's key: its title in lower case with dashes, then the modifiers (cmd, shift, alt,
 //	                                  ctrl) and the key; `none` removes the key
 type Settings struct {
@@ -17,6 +18,7 @@ type Settings struct {
 	FontSize f64
 	CodeFont str
 	UIFont str
+	AutoSave bool
 	Keys map[str]str
 }
 
@@ -58,6 +60,8 @@ fn LoadSettings() Settings {
 			s.CodeFont = v
 		} else if n == "ui_font" {
 			s.UIFont = v
+		} else if n == "autosave" {
+			s.AutoSave = v == "on" || v == "true" || v == "yes"
 		} else if twine.HasPrefix(n, "key.") {
 			s.Keys[n[4:]] = v
 		}
@@ -115,7 +119,7 @@ fn (s Settings) Binding(title str, key str, mods i64) (str, i64) {
 
 // Template is the text of a settings file that has not been written yet.
 fn Template() str {
-	return "# Tinland settings: restart Tinland to apply them.\n# theme = dark\n# font_size = 13\n# code_font = Menlo-Regular\n# ui_font = .AppleSystemUIFont\n# key.toggle-terminal = ctrl+`\n# key.go-to-file = cmd+t\n"
+	return "# Tinland settings: restart Tinland to apply them.\n# theme = dark\n# font_size = 13\n# code_font = Menlo-Regular\n# ui_font = .AppleSystemUIFont\n# autosave = on\n# key.toggle-terminal = ctrl+`\n# key.go-to-file = cmd+t\n"
 }
 
 // EnsureSettingsFile writes the template when there is no settings file yet, and returns the path.

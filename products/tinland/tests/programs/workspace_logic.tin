@@ -167,6 +167,17 @@ added
 	// the terminal: a shell on a pseudo terminal, its output in the screen
 	quarry.Setenv("SHELL", "/bin/sh") catch _ {
 	}
+	// auto-save: a file with changes is written, a tab without a name is not
+	ws.OpenFile(root + "/notes.md")
+	ws.Ed.Buf.MoveTo(0, 0, false)
+	ws.Ed.KeyDown(-1, 0, "A")
+	say.Line("dirty before", ws.Ed.Buf.Dirty)
+	let written = ws.Ed.SaveDirty()
+	let onDisk = quarry.ReadFile(root + "/notes.md") catch _ {
+		"?"
+	}
+	say.Line("auto-saved", written, ws.Ed.Buf.Dirty, twine.TrimSpace(onDisk))
+	say.Line("nothing left", ws.Ed.SaveDirty())
 	ws.ToggleTerminal()
 	say.Line("shell running", ws.TermUp, ws.Bottom, ws.Focus)
 	appkit.RunCapture("sleep 0.5")
