@@ -1453,7 +1453,7 @@ Package atlas is the functions on maps (like Go's maps): keys, values, copies an
 
 ## cairn
 
-Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and an LRU cache for i64 and str values, and the generic Heap, Deque, Set and Cache over any element types.
+Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and an LRU cache for i64 and str values, and the generic Heap, Deque, Set and Cache over any element types, with Go's container/list (List, Element) and container/ring (Ring) over any element types too.
 
 - `type IntHeap struct`: IntHeap is a binary min-heap of i64 values; IntHeap{} is ready to use.
 - `NewIntHeap(n i64) IntHeap`: NewIntHeap returns an empty min-heap with room for n values.
@@ -1551,6 +1551,32 @@ Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and
 - `(c mut Cache[K, V]) Remove(k K) bool`: Remove takes k out and reports whether it was cached.
 - `(c Cache[K, V]) Len() i64`: Len returns the number of cached entries.
 - `(c Cache[K, V]) Keys() []K`: Keys returns the keys from the most to the least recently used.
+- `type Element[T constraints.Any] struct`: Element is a node of a List: Value is its value, and Next and Prev walk the list it is in.
+- `type List[T constraints.Any] struct`: List is a doubly linked list of Elements; use NewList.
+- `NewList[T constraints.Any]() List[T]`: NewList returns an empty list.
+- `(l List[T]) Len() i64`: Len returns the number of elements in the list.
+- `(l List[T]) Front() ?Element[T]`: Front returns the first element, or nil when the list is empty.
+- `(l List[T]) Back() ?Element[T]`: Back returns the last element, or nil when the list is empty.
+- `(e Element[T]) Next() ?Element[T]`: Next returns the element after e, or nil at the back of its list and after Remove.
+- `(e Element[T]) Prev() ?Element[T]`: Prev returns the element before e, or nil at the front of its list and after Remove.
+- `(l mut List[T]) PushFront(v T) Element[T]`: PushFront inserts v at the front and returns its element.
+- `(l mut List[T]) PushBack(v T) Element[T]`: PushBack inserts v at the back and returns its element.
+- `(l mut List[T]) InsertBefore(v T, mark mut Element[T]) ?Element[T]`: InsertBefore inserts v in front of mark and returns its element, or nil when mark is not in l.
+- `(l mut List[T]) InsertAfter(v T, mark mut Element[T]) ?Element[T]`: InsertAfter inserts v after mark and returns its element, or nil when mark is not in l.
+- `(l mut List[T]) Remove(e mut Element[T]) T`: Remove takes e out of l and returns its value; e is left alone when it is not in l.
+- `(l mut List[T]) MoveToFront(e mut Element[T])`: MoveToFront moves e to the front of l; it does nothing when e is not in l or is already first.
+- `(l mut List[T]) MoveToBack(e mut Element[T])`: MoveToBack moves e to the back of l; it does nothing when e is not in l or is already last.
+- `(l mut List[T]) PushBackList(other List[T])`: PushBackList appends a copy of each value of other, in order, to the back of l; other is unchanged, and other may be l itself.
+- `(l mut List[T]) PushFrontList(other List[T])`: PushFrontList prepends a copy of each value of other to the front of l, keeping their order; other is unchanged, and other may be l itself.
+- `type Ring[T constraints.Any] struct`: Ring is an element of a circular list: Value is its value, and Next and Prev move around the ring. A ring always has at least one element; NewRing builds one.
+- `NewRing[T constraints.Any](values []T) ?Ring[T]`: NewRing returns a ring with one element per value, in order, or nil when values is empty. (Go's ring.New gives nil values; a type parameter has no zero value, so the values come in a slice.)
+- `(r Ring[T]) Next() Ring[T]`: Next returns the element after r in its ring.
+- `(r Ring[T]) Prev() Ring[T]`: Prev returns the element before r in its ring.
+- `(r Ring[T]) Len() i64`: Len returns the number of elements in r's ring.
+- `(r Ring[T]) Move(n i64) Ring[T]`: Move returns the element n steps after r, or -n steps before it when n is negative.
+- `(r Ring[T]) Do(f fn(T))`: Do calls f with each value of r's ring, starting at r and going forward.
+- `(r mut Ring[T]) Link(s mut Ring[T]) Ring[T]`: Link makes s follow r: r.Next() becomes s and the rest of s's ring follows s, and it returns r's old next. Within one ring it splits the ring; between two rings it joins them.
+- `(r mut Ring[T]) Unlink(n i64) ?Ring[T]`: Unlink removes the n elements after r from their ring and returns them as a ring, or nil when n <= 0.
 
 ## stamp
 

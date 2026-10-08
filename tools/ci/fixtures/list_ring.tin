@@ -116,22 +116,22 @@ fn (s mut state) nodeRef(r ?cairn.Ring[i64]) str {
 	return "nil"
 }
 
-// elem resolves an element handle token.
-fn (s state) elem(tok str) (cairn.Element[i64], bool) {
+// elem resolves an element handle token; nil when it names no handle the case has seen.
+fn (s state) elem(tok str) ?cairn.Element[i64] {
 	let (k, ok) = handle(tok, "e", i64(len(s.elems)))
 	if !ok {
-		return s.elems[0], false
+		return nil
 	}
-	return s.elems[k], true
+	return s.elems[k]
 }
 
-// node resolves a ring node handle token.
-fn (s state) node(tok str) (cairn.Ring[i64], bool) {
+// node resolves a ring node handle token; nil when it names no handle the case has seen.
+fn (s state) node(tok str) ?cairn.Ring[i64] {
 	let (k, ok) = handle(tok, "r", i64(len(s.nodes)))
 	if !ok {
-		return s.nodes[0], false
+		return nil
 	}
-	return s.nodes[k], true
+	return s.nodes[k]
 }
 
 // exec runs one operation and returns its result text, or "?" for an unknown handle.
@@ -144,16 +144,15 @@ fn (s mut state) exec(f []str) str {
 		return s.elemRef(s.list(f[1]).PushBack(num(f[2])))
 	}
 	if op == "ib" || op == "ia" {
-		let (mark, ok) = s.elem(f[2])
-		if !ok {
-			return "?"
+		if let mark = s.elem(f[2]) {
+			mut m = mark
+			mut l = s.list(f[1])
+			if op == "ib" {
+				return s.elemRef(l.InsertBefore(num(f[3]), mut m))
+			}
+			return s.elemRef(l.InsertAfter(num(f[3]), mut m))
 		}
-		mut m = mark
-		mut l = s.list(f[1])
-		if op == "ib" {
-			return s.elemRef(l.InsertBefore(num(f[3]), mut m))
-		}
-		return s.elemRef(l.InsertAfter(num(f[3]), mut m))
+		return "?"
 	}
 	if op == "pfl" {
 		mut l = s.list(f[1])
@@ -166,27 +165,25 @@ fn (s mut state) exec(f []str) str {
 		return "-"
 	}
 	if op == "rm" {
-		let (e, ok) = s.elem(f[2])
-		if !ok {
-			return "?"
+		if let e = s.elem(f[2]) {
+			mut x = e
+			mut l = s.list(f[1])
+			return mint.Itoa(l.Remove(mut x))
 		}
-		mut x = e
-		mut l = s.list(f[1])
-		return mint.Itoa(l.Remove(mut x))
+		return "?"
 	}
 	if op == "mtf" || op == "mtb" {
-		let (e, ok) = s.elem(f[2])
-		if !ok {
-			return "?"
+		if let e = s.elem(f[2]) {
+			mut x = e
+			mut l = s.list(f[1])
+			if op == "mtf" {
+				l.MoveToFront(mut x)
+			} else {
+				l.MoveToBack(mut x)
+			}
+			return "-"
 		}
-		mut x = e
-		mut l = s.list(f[1])
-		if op == "mtf" {
-			l.MoveToFront(mut x)
-		} else {
-			l.MoveToBack(mut x)
-		}
-		return "-"
+		return "?"
 	}
 	if op == "fr" {
 		return s.elemRef(s.list(f[1]).Front())
@@ -195,29 +192,26 @@ fn (s mut state) exec(f []str) str {
 		return s.elemRef(s.list(f[1]).Back())
 	}
 	if op == "nx" || op == "pv" {
-		let (e, isElem) = s.elem(f[1])
-		if isElem {
+		if let e = s.elem(f[1]) {
 			if op == "nx" {
 				return s.elemRef(e.Next())
 			}
 			return s.elemRef(e.Prev())
 		}
-		let (r, isNode) = s.node(f[1])
-		if !isNode {
-			return "?"
+		if let r = s.node(f[1]) {
+			if op == "nx" {
+				return s.nodeRef(r.Next())
+			}
+			return s.nodeRef(r.Prev())
 		}
-		if op == "nx" {
-			return s.nodeRef(r.Next())
-		}
-		return s.nodeRef(r.Prev())
+		return "?"
 	}
 	if op == "new" {
 		mut vals = []i64{}
 		for tok in f[1:] {
 			vals = append(vals, num(tok))
 		}
-		let made = cairn.NewRing(vals)
-		if let r = made {
+		if let r = cairn.NewRing(vals) {
 			let first = len(s.nodes)
 			mut p = r
 			for i in 0..len(vals) {
@@ -229,47 +223,43 @@ fn (s mut state) exec(f []str) str {
 		return "nil"
 	}
 	if op == "link" {
-		let (r, ok1) = s.node(f[1])
-		let (t, ok2) = s.node(f[2])
-		if !ok1 || !ok2 {
-			return "?"
+		if let r = s.node(f[1]) {
+			if let t = s.node(f[2]) {
+				mut rr = r
+				mut tt = t
+				return s.nodeRef(rr.Link(mut tt))
+			}
 		}
-		mut rr = r
-		mut tt = t
-		return s.nodeRef(rr.Link(mut tt))
+		return "?"
 	}
 	if op == "unlink" {
-		let (r, ok) = s.node(f[1])
-		if !ok {
-			return "?"
+		if let r = s.node(f[1]) {
+			mut rr = r
+			return s.nodeRef(rr.Unlink(num(f[2])))
 		}
-		mut rr = r
-		return s.nodeRef(rr.Unlink(num(f[2])))
+		return "?"
 	}
 	if op == "move" {
-		let (r, ok) = s.node(f[1])
-		if !ok {
-			return "?"
+		if let r = s.node(f[1]) {
+			return s.nodeRef(r.Move(num(f[2])))
 		}
-		return s.nodeRef(r.Move(num(f[2])))
+		return "?"
 	}
 	if op == "do" {
-		let (r, ok) = s.node(f[1])
-		if !ok {
-			return "?"
+		if let r = s.node(f[1]) {
+			mut vals = []str{}
+			r.Do(fn(v i64) {
+				vals = append(vals, mint.Itoa(v))
+			})
+			return "[" + twine.Join(vals, " ") + "]"
 		}
-		mut vals = []str{}
-		r.Do(fn(v i64) {
-			vals = append(vals, mint.Itoa(v))
-		})
-		return "[" + twine.Join(vals, " ") + "]"
+		return "?"
 	}
 	if op == "len" {
-		let (r, ok) = s.node(f[1])
-		if !ok {
-			return "?"
+		if let r = s.node(f[1]) {
+			return mint.Itoa(r.Len())
 		}
-		return mint.Itoa(r.Len())
+		return "?"
 	}
 	return "?"
 }

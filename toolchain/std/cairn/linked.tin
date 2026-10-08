@@ -267,8 +267,8 @@ fn (r Ring[T]) Do(f fn(T)) {
 	}
 }
 
-// Link makes s follow r: r.Next() becomes s, and the rest of s's ring follows s. It returns r's old next
-// element. Rings that are one ring are split by it, and two rings are joined.
+// Link makes s follow r: r.Next() becomes s and the rest of s's ring follows s, and it returns r's old next.
+// Within one ring it splits the ring; between two rings it joins them.
 fn (r mut Ring[T]) Link(s mut Ring[T]) Ring[T] {
 	let n = r.Next()
 	let p = s.Prev()

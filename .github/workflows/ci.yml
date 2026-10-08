@@ -94,6 +94,8 @@ jobs:
         run: sh tools/ci/tin.sh mime_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
+      - name: container/list and container/ring against Go (generated and exhaustive small cases)
+        run: sh tools/ci/tin.sh list_ring_check
       - name: IP addresses, ports and prefixes against Go's net/netip (38,094 generated and edge cases)
         run: sh tools/ci/tin.sh netip_check
       - name: Tokens against Go's text/scanner (5,649 source texts, mode flags and Scan/Next/Peek orders)
