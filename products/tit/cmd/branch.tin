@@ -70,6 +70,12 @@ fn commitText(id object.Id) str {
 	return change.TargetText(change.Target.Commit(id))
 }
 
+// headChange is the ref change that moves the workspace's HEAD to h.
+fn headChange(r Repo, h change.Head) !oplog.RefChange {
+	let cur = try change.ReadHead(r.Ws.State())
+	return oplog.RefChange{Name: oplog.HeadRef(r.Ws.Name), Before: oplog.HeadText(cur), After: oplog.HeadText(h)}
+}
+
 // recordRefs writes one operation that moves refs.
 fn recordRefs(r Repo, command str, op oplog.Op, moves []oplog.RefChange) ! {
 	_ = try oplog.Run(r.Ws.Store, r.Ws.Name, command, op, moves)
@@ -143,10 +149,12 @@ fn doBranch(g Global, a BranchArgs, o mut Out) ! {
 			fail "a branch {a.Names[1]} exists already"
 		}
 		let text = change.TargetText(ref.Target)
-		try recordRefs(r, "tit branch -m", oplog.Op.Branch(a.Names[1]), []oplog.RefChange{oplog.RefChange{Name: to, Before: "", After: text}, oplog.RefChange{Name: from, Before: text, After: ""}})
+		mut moves = []oplog.RefChange{oplog.RefChange{Name: to, Before: "", After: text}, oplog.RefChange{Name: from, Before: text, After: ""}}
 		if from == current {
-			try change.WriteHead(r.Ws.State(), change.Head.Branch(to))
+			let headMove = try headChange(r, change.Head.Branch(to))
+			moves = append(moves, headMove)
 		}
+		try recordRefs(r, "tit branch -m", oplog.Op.Branch(a.Names[1]), moves)
 		return
 	}
 	// create: tit branch <name> [start]
@@ -175,30 +183,38 @@ fn headTree(r mut Repo) !object.Id {
 	return try r.treeOf(head)
 }
 
+// checkMove fails, changing nothing, when moving the working directory and the index from the tree from to the tree
+// to would lose changes: unsaved ones (worktree.ErrDirty names the files) or staged ones.
+fn checkMove(r mut Repo, from object.Id, to object.Id) ! {
+	let idx = try r.readIndex()
+	let changes = try diff.TreeDiff(mut r.Store, from, to, false)
+	mut staged = []str{}
+	for c in changes {
+		let e = idx.Find(c.Path)
+		if c.Kind == diff.Kind.Added {
+			if e != nil && e.Hash != c.NewHash {
+				staged = append(staged, c.Path)
+			}
+		} else if e == nil || e.Hash != c.OldHash {
+			if e != nil || quarry.Exists(r.Ws.Root + "/" + c.Path) {
+				staged = append(staged, c.Path)
+			}
+		}
+	}
+	if len(staged) > 0 {
+		fail fault.Wrap(worktree.ErrDirty, "staged: " + twine.Join(staged, ", "))
+	}
+	try worktree.Check(mut r.Store, r.Ws, idx, from, to)
+}
+
 // moveTo changes the working directory and the index from the tree from to the tree to. It refuses, changing
 // nothing, when a file it would change has uncommitted changes, on the disk (worktree.ErrDirty) or staged.
 fn moveTo(r mut Repo, from object.Id, to object.Id, force bool) ! {
-	mut idx = try r.readIndex()
 	if !force {
-		let changes = try diff.TreeDiff(mut r.Store, from, to, false)
-		mut staged = []str{}
-		for c in changes {
-			let e = idx.Find(c.Path)
-			if c.Kind == diff.Kind.Added {
-				if e != nil && e.Hash != c.NewHash {
-					staged = append(staged, c.Path)
-				}
-			} else if e == nil || e.Hash != c.OldHash {
-				if e != nil || quarry.Exists(r.Ws.Root + "/" + c.Path) {
-					staged = append(staged, c.Path)
-				}
-			}
-		}
-		if len(staged) > 0 {
-			fail fault.Wrap(worktree.ErrDirty, "staged: " + twine.Join(staged, ", "))
-		}
+		try checkMove(mut r, from, to)
 	}
-	try worktree.Checkout(mut r.Store, r.Ws, mut idx, from, to, force)
+	mut idx = try r.readIndex()
+	try worktree.Checkout(mut r.Store, r.Ws, mut idx, from, to, true)
 	try idx.Write(r.Ws.IndexPath())
 }
 
@@ -218,18 +234,18 @@ fn doSwitch(g Global, a SwitchArgs, o mut Out) ! {
 		}
 		let id = try r.resolve(a.Start)
 		let to = try r.treeOf(id)
+		let headMove = try headChange(r, change.Head.Branch(full))
 		try moveTo(mut r, from, to, false)
-		try recordRefs(r, "tit switch -c " + a.Target, oplog.Op.Switch(a.Target), []oplog.RefChange{oplog.RefChange{Name: full, Before: "", After: commitText(id)}})
-		try change.WriteHead(r.Ws.State(), change.Head.Branch(full))
+		try recordRefs(r, "tit switch -c " + a.Target, oplog.Op.Switch(a.Target), []oplog.RefChange{oplog.RefChange{Name: full, Before: "", After: commitText(id)}, headMove})
 		o.Line("Switched to a new branch " + a.Target + ".")
 		return
 	}
 	if a.Detach {
 		let id = try r.resolve(a.Target)
 		let to = try r.treeOf(id)
+		let headMove = try headChange(r, change.Head.Detached(change.Target.Commit(id)))
 		try moveTo(mut r, from, to, false)
-		try change.WriteHead(r.Ws.State(), change.Head.Detached(change.Target.Commit(id)))
-		try recordRefs(r, "tit switch --detach " + a.Target, oplog.Op.Switch(id.Hex()), []oplog.RefChange{})
+		try recordRefs(r, "tit switch --detach " + a.Target, oplog.Op.Switch(id.Hex()), []oplog.RefChange{headMove})
 		o.Line("HEAD is now at " + id.Hex()[0:12] + ".")
 		return
 	}
@@ -240,9 +256,9 @@ fn doSwitch(g Global, a SwitchArgs, o mut Out) ! {
 	}
 	let id = try r.resolve(full)
 	let to = try r.treeOf(id)
+	let headMove = try headChange(r, change.Head.Branch(full))
 	try moveTo(mut r, from, to, false)
-	try change.WriteHead(r.Ws.State(), change.Head.Branch(full))
-	try recordRefs(r, "tit switch " + a.Target, oplog.Op.Switch(a.Target), []oplog.RefChange{})
+	try recordRefs(r, "tit switch " + a.Target, oplog.Op.Switch(a.Target), []oplog.RefChange{headMove})
 	o.Line("Switched to branch " + a.Target + ".")
 }
 

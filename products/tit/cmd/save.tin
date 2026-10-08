@@ -487,11 +487,12 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 			detached = true
 		}
 	}
+	if detached {
+		let move = try headChange(r, change.Head.Detached(change.Target.Commit(id)))
+		refChanges = append(refChanges, move)
+	}
 	use tx = oplog.Begin(r.Ws.Store, r.Ws.Name, commandLine(a), op, refChanges)
 	try tx.Apply()
-	if detached {
-		try change.WriteHead(r.Ws.State(), change.Head.Detached(change.Target.Commit(id)))
-	}
 	try change.AddVersion(r.Ws.Store, changeId, change.NewVersion(tx.Number(), id, when))
 	try idx.Write(r.Ws.IndexPath())
 	if merging != nil {

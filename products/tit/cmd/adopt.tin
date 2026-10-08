@@ -132,11 +132,12 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 		}
 		return
 	}
+	if moveHead {
+		let hm = try headChange(r, change.Head.Branch(headName))
+		moves = append(moves, hm)
+	}
 	use tx = oplog.Begin(r.Ws.Store, r.Ws.Name, "tit adopt " + gitPath, oplog.Op.Adopt(gr.GitDir), moves)
 	try tx.Apply()
-	if moveHead {
-		try change.WriteHead(r.Ws.State(), change.Head.Branch(headName))
-	}
 	// a workspace with an empty index starts from HEAD's tree: git checked those files out already
 	if len(idx.Entries) == 0 {
 		mut fresh = try open(at)

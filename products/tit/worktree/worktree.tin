@@ -102,30 +102,8 @@ fn dirty(root str, e index.Entry) !bool {
 fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from object.Id, to object.Id, force bool) ! {
 	let changes = try diff.TreeDiff(mut s, from, to, false)
 	// first every check, so a refused checkout changes nothing
-	mut blocked = []str{}
-	for c in changes {
-		let e = idx.Find(c.Path)
-		if e != nil {
-			let d = try dirty(w.Root, e)
-			if d {
-				blocked = append(blocked, c.Path)
-			}
-		} else if c.Kind == diff.Kind.Added && quarry.Exists(w.Root + "/" + c.Path) {
-			// an untracked file stands where the checkout would write
-			let existing = quarry.Lstat(w.Root + "/" + c.Path) catch _ {
-				continue
-			}
-			if existing.Type != quarry.FileType.Dir {
-				let id = try cores.HashPath(w.Root + "/" + c.Path)
-				if id.Bytes() != c.NewHash {
-					blocked = append(blocked, c.Path)
-				}
-			}
-		}
-	}
-	if len(blocked) > 0 && !force {
-		sift.Sort(mut blocked)
-		fail fault.Wrap(ErrDirty, twine.Join(blocked, ", "))
+	if !force {
+		try check(w, idx, changes)
 	}
 	// deletions first (a file may become a directory), then the new and changed files, written in parallel tasks so
 	// their I/O overlaps
@@ -184,6 +162,41 @@ fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from
 				}
 			}
 		}
+	}
+}
+
+// Check is Checkout's test alone: it fails with ErrDirty, naming every file, when moving the working directory from
+// the tree from to the tree to would lose changes, and changes nothing either way.
+fn Check[S store.ObjectStore](s mut S, w Workspace, idx index.Index, from object.Id, to object.Id) ! {
+	let changes = try diff.TreeDiff(mut s, from, to, false)
+	try check(w, idx, changes)
+}
+
+fn check(w Workspace, idx index.Index, changes []diff.FileChange) ! {
+	mut blocked = []str{}
+	for c in changes {
+		let e = idx.Find(c.Path)
+		if e != nil {
+			let d = try dirty(w.Root, e)
+			if d {
+				blocked = append(blocked, c.Path)
+			}
+		} else if c.Kind == diff.Kind.Added && quarry.Exists(w.Root + "/" + c.Path) {
+			// an untracked file stands where the checkout would write
+			let existing = quarry.Lstat(w.Root + "/" + c.Path) catch _ {
+				continue
+			}
+			if existing.Type != quarry.FileType.Dir {
+				let id = try cores.HashPath(w.Root + "/" + c.Path)
+				if id.Bytes() != c.NewHash {
+					blocked = append(blocked, c.Path)
+				}
+			}
+		}
+	}
+	if len(blocked) > 0 {
+		sift.Sort(mut blocked)
+		fail fault.Wrap(ErrDirty, twine.Join(blocked, ", "))
 	}
 }
 
