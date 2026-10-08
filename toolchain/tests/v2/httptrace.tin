@@ -1,0 +1,21 @@
+package main
+
+import "httptrace"
+import "say"
+
+fn main() {
+	mut seen i64 = 0
+	let trace = httptrace.ClientTrace{
+		GetConn: fn(host str) { seen = seen * 10 + 1 },
+		TLSHandshakeStart: fn() { seen = seen * 10 + 2 },
+		TLSHandshakeDone: fn(err fault) { seen = seen * 10 + 3 },
+		WroteRequest: fn(err fault) { seen = seen * 10 + 4 },
+		GotFirstResponseByte: fn() { seen = seen * 10 + 5 },
+	}
+	trace.GetConn("example.test:80")
+	trace.TLSHandshakeStart()
+	trace.TLSHandshakeDone(nil)
+	trace.WroteRequest(nil)
+	trace.GotFirstResponseByte()
+	say.Line(seen)
+}

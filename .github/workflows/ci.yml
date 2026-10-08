@@ -256,6 +256,8 @@ jobs:
         run: sh tools/ci/tin.sh http_check
       - name: HTTP request and response dumps against Go's httputil
         run: sh tools/ci/tin.sh dump_check
+      - name: HTTP client trace hooks against Go net/http
+        run: sh tools/ci/tin.sh httptrace_check
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

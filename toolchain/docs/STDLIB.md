@@ -14,6 +14,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [relay](#relay) | messages between cores (channels) |
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
+| [httptrace](#httptrace) | observable HTTP client phase hooks (net/http/httptrace) |
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
 | [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
@@ -483,6 +484,12 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `(r Resp) Fields() []str`: Fields returns every header field of the response as "Name: value", in the order they came, the name as sent and the value without the blanks around it: all the Set-Cookie fields, for a cookie jar, and the whole head, for a dump (#739).
 - `(r Resp) Proto() str`: Proto is the protocol of the response: "HTTP/1.1" or "HTTP/1.0" as its status line says, "HTTP/2.0" for HTTP/2.
 - `(r Resp) Reason() str`: Reason is the reason phrase of the status line ("OK" in "HTTP/1.1 200 OK"), "" when there is none (HTTP/2 has none).
+
+## httptrace
+
+Package httptrace provides the HTTP client hooks wire can observe on HTTP/1.1 and TLS. DNS and connect hooks are unavailable because wire's platform resolver combines those phases. HTTP/2 requests currently use a separate path and report only GetConn and TLS handshake hooks.
+
+- `type ClientTrace struct`: ClientTrace contains callbacks for observable HTTP client phases.
 
 ## jar
 

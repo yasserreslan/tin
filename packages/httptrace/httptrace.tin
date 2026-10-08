@@ -1,0 +1,13 @@
+// Package httptrace provides the HTTP client hooks wire can observe on HTTP/1.1 and TLS.
+// DNS and connect hooks are unavailable because wire's platform resolver combines those phases.
+// HTTP/2 requests currently use a separate path and report only GetConn and TLS handshake hooks.
+package httptrace
+
+// ClientTrace contains callbacks for observable HTTP client phases.
+type ClientTrace struct {
+	GetConn              fn(str)   // GetConn runs before wire acquires a connection.
+	TLSHandshakeStart     fn()      // TLSHandshakeStart runs before a new TLS handshake.
+	TLSHandshakeDone      fn(fault) // TLSHandshakeDone receives nil on success or the handshake fault.
+	WroteRequest         fn(fault) // WroteRequest receives nil when the request write succeeds.
+	GotFirstResponseByte fn()      // GotFirstResponseByte runs when response data first arrives.
+}

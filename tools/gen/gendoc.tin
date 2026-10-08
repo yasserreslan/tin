@@ -31,6 +31,7 @@ fn packages() []str {
 		"relay", "messages between cores (channels)",
 		"task", "deadline and cancellation of the running code (context)",
 		"wire", "TCP and HTTP/1.1 and HTTP/2 client (net, net/http)",
+		"httptrace", "observable HTTP client phase hooks (net/http/httptrace)",
 		"jar", "HTTP cookie jar for wire clients (net/http/cookiejar)",
 		"dump", "HTTP request and response dumps (net/http/httputil)",
 		"proxy", "streaming HTTP reverse proxy (net/http/httputil)",

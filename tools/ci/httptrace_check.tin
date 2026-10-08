@@ -1,0 +1,33 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "twine"
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/httptrace")
+	ci.Mkdirs(out)
+	let cert = tlsutil.Of(tlsutil.MakeCerts(tlsutil.Openssl3(), out, []str{"ecdsa"}), "ecdsa")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(out, "reference"), "./bench/ref/httptrace/main.go"}, ci.Root(), 300), "build Go reference")
+	ci.BuildTin("tools/ci/fixtures/httptrace.tin", ci.Join(out, "client"), "", []str{})
+	let plainPort = nettest.Port()
+	let tlsPort = nettest.Port()
+	let server = nettest.Start(ci.Join(out, "reference"), []str{"serve", "-plain", ":" + mint.Itoa(plainPort), "-tls", ":" + mint.Itoa(tlsPort), "-cert", cert.Cert, "-key", cert.Key}, []str{}, ci.Join(out, "server.log"), 0)
+	nettest.Server{Pid: server.Pid, Port: plainPort, Log: server.Log}.Ready(10)
+	nettest.Server{Pid: server.Pid, Port: tlsPort, Log: server.Log}.Ready(10)
+	let expected = ci.Exec([]str{ci.Join(out, "reference")}, ci.Root(), 30)
+	ci.Must(expected, "Go httptrace reference")
+	let got = ci.Exec([]str{ci.Join(out, "client"), "http://127.0.0.1:" + mint.Itoa(plainPort) + "/", "https://localhost:" + mint.Itoa(tlsPort) + "/"}, ci.Root(), 30)
+	ci.Must(got, "Tin httptrace client")
+	let want = twine.Split(twine.TrimSpace(expected.Stdout), "\n")
+	let lines = twine.Split(twine.TrimSpace(got.Stdout), "\n")
+	ci.Check(len(want) == 2 && len(lines) == 2, "expected two Go and Tin trace results")
+	for i in 0..2 {
+		ci.Check(lines[i] == want[i], "trace differs from Go: got " + lines[i] + ", want " + want[i])
+	}
+	server.Stop()
+	say.Line("PASS httptrace: HTTP and TLS hook order and responses match Go")
+}
