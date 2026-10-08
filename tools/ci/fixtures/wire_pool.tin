@@ -7,7 +7,7 @@ import "say"
 import "tls"
 import "wire"
 
-// #348: a client service for wire_pool_check.py. UPSTREAM is the server it calls (http:// or
+// #348: a client service for wire_pool_check.tin. UPSTREAM is the server it calls (http:// or
 // https://, INSECURE=1 skips the certificate check). Routes:
 //   /seq?n=N&path=P&method=M&idle=I   N calls one after the other; "ok=.. err=.. last=.."
 //   /par?n=N&path=P&idle=I            N calls at once, each in its own task

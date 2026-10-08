@@ -171,7 +171,7 @@ jobs:
       - name: Request bodies read as they arrive (Router.Stream, 1 GiB uploads in flat memory, slow handlers, h2 and HTTPS)
         run: sh tools/ci/tin.sh stream_body_check
       - name: HTTP client keep-alive pool (connections reused, stale ones replaced, MaxIdle, https on one handshake)
-        run: python3 tools/ci/wire_pool_check.py
+        run: sh tools/ci/tin.sh wire_pool_check
       - name: HTTP/2 client (wire against Go's net/http and anvil over TLS and h2c, GOAWAY)
         run: python3 tools/ci/wire_h2_check.py
       - name: Held cores (stuck-core counters; SIGTERM while core 0 is held, Linux)

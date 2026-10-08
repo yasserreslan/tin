@@ -1,0 +1,176 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "twine"
+
+// wire's HTTP client keeps connections alive (#348).
+//
+// A client service (tools/ci/fixtures/wire_pool.tin) calls an upstream (tools/ci/fixtures/wire_upstream.go), which counts the
+// connections it accepts and what happens on them. A hundred sequential calls to one host use one connection, over http and over https
+// (one TLS handshake); a response that says "close", has no length, or is a HTTP/1.0 one is not reused; chunked bodies and bodiless
+// responses are; a kept connection the server drops is replaced without the caller seeing it (for requests that can be repeated); at
+// most Options.MaxIdle connections stay open after a burst.
+
+// Upstream is one upstream the control server made.
+type Upstream struct {
+	Control i64
+	Port str
+}
+
+fn newUpstream(control i64, tls bool) Upstream {
+	mut t = "0"
+	if tls {
+		t = "1"
+	}
+	return Upstream{Control: control, Port: nettest.Get(control, "/new?tls=" + t)}
+}
+
+// Stats are the counts since the last reset.
+type Stats struct {
+	Accepted i64
+	Open i64
+	Handshakes i64
+	Requests str
+}
+
+fn (u Upstream) Stats() Stats {
+	let text = nettest.Get(u.Control, "/stats?port=" + u.Port)
+	mut s = Stats{Accepted: 0, Open: 0, Handshakes: 0, Requests: ""}
+	for w in twine.Fields(text) {
+		let kv = twine.Split(w, "=")
+		if kv[0] == "accepted" {
+			s.Accepted = ci.Num(kv[1])
+		} else if kv[0] == "open" {
+			s.Open = ci.Num(kv[1])
+		} else if kv[0] == "handshakes" {
+			s.Handshakes = ci.Num(kv[1])
+		} else if kv[0] == "requests" {
+			s.Requests = kv[1]
+		}
+	}
+	return s
+}
+
+fn (u Upstream) Reset() {
+	nettest.Get(u.Control, "/reset?port=" + u.Port)
+}
+
+fn (u Upstream) Base() str {
+	return "http://127.0.0.1:" + u.Port
+}
+
+// seq makes n calls one after the other through the service (extra is "&name=value" pairs).
+fn seq(svc i64, u Upstream, path str, n i64, extra str) str {
+	u.Reset()
+	return nettest.Get(svc, "/seq?n=" + mint.Itoa(n) + "&path=" + path + "&base=" + u.Base() + extra)
+}
+
+fn expect(got str, want str, what str) {
+	ci.Check(got == want, what + ": " + got + ", want " + want)
+}
+
+fn expectAccepted(u Upstream, want i64, what str) {
+	let s = u.Stats()
+	ci.Check(s.Accepted == want, what + ": accepted " + mint.Itoa(s.Accepted) + ", want " + mint.Itoa(want))
+}
+
+fn checkHttp(svc i64, control i64) {
+	// Each group calls its own upstream (a port of its own), so no kept connection of an earlier group answers its first call.
+	mut u = newUpstream(control, false)
+	expect(seq(svc, u, "/ok", 100, ""), "ok=100 err=0 last=200:ok", "100 calls")
+	mut s = u.Stats()
+	ci.Check(s.Accepted == 1 && s.Requests == "100", "100 calls on one connection: " + mint.Itoa(s.Accepted) + " " + s.Requests)
+	// the next burst reuses the connection the last one left
+	seq(svc, u, "/ok", 5, "")
+	s = u.Stats()
+	ci.Check(s.Accepted == 0 && s.Requests == "5", "a kept connection serves the next burst: " + mint.Itoa(s.Accepted) + " " + s.Requests)
+	say.Line("keep-alive: 100 sequential calls on 1 connection, and the next 5 on the same one")
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/close", 5, ""), "ok=5 err=0 last=200:ok", "Connection: close")
+	expectAccepted(u, 5, "Connection: close is honoured")
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/eof", 3, ""), "ok=3 err=0 last=200:until the end", "a body that ends with the connection")
+	expectAccepted(u, 3, "a body that ends with the connection")
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/old", 3, ""), "ok=3 err=0 last=200:old", "HTTP/1.0")
+	expectAccepted(u, 3, "HTTP/1.0 is not kept")
+	say.Line("not kept: Connection: close, a body without a length, HTTP/1.0")
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/chunked", 10, ""), "ok=10 err=0 last=200:abcde", "chunked")
+	expectAccepted(u, 1, "chunked bodies are reused")
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/nobody", 10, ""), "ok=10 err=0 last=204:", "204")
+	expectAccepted(u, 1, "204 is reused")
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/ok", 10, "&method=HEAD"), "ok=10 err=0 last=200:", "HEAD")
+	expectAccepted(u, 1, "HEAD is reused")
+	say.Line("kept: chunked bodies, 204, HEAD")
+	// A kept connection the server closes before answering is replaced, for GET; not for POST.
+	u = newUpstream(control, false)
+	expect(seq(svc, u, "/flaky", 10, ""), "ok=10 err=0 last=200:ok", "a stale kept connection is retried")
+	expectAccepted(u, 10, "a stale kept connection is retried")
+	u = newUpstream(control, false)
+	let post = seq(svc, u, "/flaky", 4, "&method=POST")
+	ci.Check(twine.HasPrefix(post, "ok=2 err=2"), "a POST is not repeated: " + post)
+	say.Line("stale kept connections: GET retried on a new one, POST not repeated")
+	// A burst of 20 at once opens 20; MaxIdle 3 keeps 3 of them.
+	u = newUpstream(control, false)
+	expect(nettest.Get(svc, "/par?n=20&path=/slow&idle=3&base=" + u.Base()), "ok=20 err=0", "20 at once")
+	expectAccepted(u, 20, "20 at once open 20 connections")
+	nettest.Eventually(5.0, fn() bool {
+		return u.Stats().Open == 3
+	})
+	ci.Check(u.Stats().Open == 3, "MaxIdle 3 kept " + mint.Itoa(u.Stats().Open) + " open")
+	seq(svc, u, "/ok", 6, "&idle=3")
+	expectAccepted(u, 0, "after the burst the 3 kept connections serve")
+	// a negative MaxIdle keeps none and asks the server to close
+	u = newUpstream(control, false)
+	seq(svc, u, "/ok", 4, "&idle=-1")
+	expectAccepted(u, 4, "MaxIdle -1 dials every call")
+	say.Line("MaxIdle: 20 at once, 3 stay open; -1 keeps none")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/wire_pool")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "wire_pool")
+	ci.BuildTin("tools/ci/fixtures/wire_pool.tin", exe, "", []str{})
+	let upstreamExe = ci.Join(out, "wire_upstream")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", upstreamExe, "tools/ci/fixtures/wire_upstream.go"}, ci.Root(), 300), "go build wire_upstream.go")
+	mut openssl = tlsutil.Openssl3()
+	if len(openssl) == 0 {
+		openssl = "openssl"
+	}
+	let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+	let cert = tlsutil.Of(certs, "ecdsa")
+	let control = nettest.Port()
+	let ups = nettest.Start(upstreamExe, []str{cert.Cert, cert.Key}, []str{}, ci.Join(out, "upstream.log"), control)
+	ups.Ready(10)
+	let svcPort = nettest.Port()
+	let svc = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_GRACE=1", "UPSTREAM=http://127.0.0.1:1"}, ci.Join(out, "service.log"), svcPort)
+	svc.Ready(10)
+	checkHttp(svcPort, control)
+	svc.Stop()
+	// https: one TCP connection and one TLS handshake for many calls.
+	let tlsUp = newUpstream(control, true)
+	let tlsSvcPort = nettest.Port()
+	let tlsSvc = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_GRACE=1", "UPSTREAM=https://127.0.0.1:" + tlsUp.Port, "INSECURE=1"}, ci.Join(out, "service_tls.log"), tlsSvcPort)
+	tlsSvc.Ready(10)
+	expect(nettest.Get(tlsSvcPort, "/seq?n=50&path=/ok"), "ok=50 err=0 last=200:ok", "50 https calls")
+	let s = tlsUp.Stats()
+	ci.Check(s.Accepted == 1 && s.Handshakes == 1 && s.Requests == "50", "50 https calls on one TLS connection: " + mint.Itoa(s.Accepted) + " " + mint.Itoa(s.Handshakes) + " " + s.Requests)
+	tlsUp.Reset()
+	// the first call still rides the connection the 50 left; the other nine each dial
+	expect(nettest.Get(tlsSvcPort, "/seq?n=10&path=/close"), "ok=10 err=0 last=200:ok", "https close")
+	expectAccepted(tlsUp, 9, "https Connection: close")
+	tlsUp.Reset()
+	expect(nettest.Get(tlsSvcPort, "/seq?n=10&path=/flaky"), "ok=10 err=0 last=200:ok", "https flaky")
+	say.Line("https: 50 calls on 1 TLS connection and 1 handshake; close and a stale connection handled")
+	tlsSvc.Stop()
+	ups.Stop()
+	ci.Pass("wire pool: keep-alive, close, chunked, stale connections, MaxIdle and TLS")
+}
