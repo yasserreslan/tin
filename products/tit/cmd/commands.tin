@@ -228,13 +228,15 @@ fn doStatus(g Global, short bool, o mut Out) ! {
 	let head = try r.headCommit()
 	mut tree = object.NoId
 	if head != nil {
-		tree = try r.treeOf(head)
+		tree = try r.headTreeOf(head)
 	}
 	mut rules = try ignore.Load(r.Ws.Root)
 	let full = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
 	let rep = focused(r, full)
 	// unchanged files' new stat goes back into the index, so the next status skips them
-	try idx.Write(r.Ws.IndexPath())
+	if rep.Restat {
+		try idx.Write(r.Ws.IndexPath())
+	}
 	let untracked = collapse(rep.Untracked, idx)
 	let renames = try stagedRenames(mut r, idx, tree, rep)
 	if short && !g.Json {
@@ -296,7 +298,7 @@ fn focused(r Repo, rep index.Report) index.Report {
 			untracked = append(untracked, p)
 		}
 	}
-	return index.Report{Staged: rep.Staged, Unstaged: unstaged, Untracked: untracked}
+	return index.Report{Staged: rep.Staged, Unstaged: unstaged, Untracked: untracked, Restat: rep.Restat}
 }
 
 fn dateText(p object.Person) str {

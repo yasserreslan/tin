@@ -103,7 +103,9 @@ fn workChanges(r mut Repo) !([]str, object.Id) {
 	mut rules = try ignore.Load(r.Ws.Root)
 	let full = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
 	let rep = focused(r, full)
-	try idx.Write(r.Ws.IndexPath())
+	if rep.Restat {
+		try idx.Write(r.Ws.IndexPath())
+	}
 	mut seen = map[str]bool{}
 	mut paths = []str{}
 	for f in rep.Staged {

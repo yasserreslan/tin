@@ -145,6 +145,14 @@ fn (r mut Repo) headCommit() !?object.Id {
 			if ref == nil {
 				return nil
 			}
+			// a branch names its commit: no object is read (resolving would read it, to peel a tag)
+			match ref.Target {
+				Commit(id) => {
+					return id
+				}
+				Change(_) => {
+				}
+			}
 			let id = try r.resolve(name)
 			return id
 		}
@@ -164,6 +172,31 @@ fn (r mut Repo) treeOf(commit object.Id) !object.Id {
 		Tree(_) => try notCommitTree(commit)
 		Tag(_) => try notCommitTree(commit)
 	}
+}
+
+// headTreeOf is the tree of head, the commit HEAD names, remembered in the workspace (head-tree: "<commit> <tree>"),
+// so that status and the commands that compare with the last commit need not read it (reading one object of a pack
+// reads the pack). A commit's tree never changes: the file is only a cache, and one that does not match is ignored.
+fn (r mut Repo) headTreeOf(head object.Id) !object.Id {
+	let path = r.Ws.State() + "/head-tree"
+	if quarry.Exists(path) {
+		let text = quarry.ReadFile(path) catch _ {
+			""
+		}
+		let parts = twine.Split(twine.TrimSpace(text), " ")
+		if len(parts) == 2 && parts[0] == head.Hex() {
+			let t = object.ParseId(parts[1]) catch _ {
+				object.NoId
+			}
+			if t != object.NoId {
+				return t
+			}
+		}
+	}
+	let tree = try r.treeOf(head)
+	quarry.WriteFile(path, head.Hex() + " " + tree.Hex() + "\n") catch _ {
+	}
+	return tree
 }
 
 fn notCommitTree(id object.Id) !object.Id {

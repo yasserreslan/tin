@@ -183,7 +183,7 @@ fn headTree(r mut Repo) !object.Id {
 	if head == nil {
 		return object.NoId
 	}
-	return try r.treeOf(head)
+	return try r.headTreeOf(head)
 }
 
 // checkMove fails, changing nothing, when moving the working directory and the index from the tree from to the tree

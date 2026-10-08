@@ -22,6 +22,8 @@ type Report struct {
 	Staged    []FileStatus
 	Unstaged  []FileStatus
 	Untracked []str
+	// Restat says that idx got new stats (files found unchanged after all), worth writing back
+	Restat bool
 }
 
 // flatten is the commit tree's files as their index entries, by path (a map of Entry rather than of a small struct
@@ -68,7 +70,7 @@ fn isLink(m object.Mode) bool {
 // Status compares the commit tree head (object.NoId before the first commit), the index and the working directory
 // at root. idx gets the new stat of files found unchanged.
 fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index, rules mut ignore.Rules) !Report {
-	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}}
+	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}, Restat: false}
 	// the index as a tree, hashed in memory: when it is the last commit's tree, nothing is staged and the commit's
 	// trees need not be read at all
 	mut conflictedAny = false
@@ -157,6 +159,7 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 			rep.Unstaged = append(rep.Unstaged, FileStatus.Modified(e.Path))
 		} else {
 			idx.Entries[i] = Entry{Path: e.Path, Hash: e.Hash, Mode: e.Mode, Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device}
+			rep.Restat = true
 		}
 	}
 	sortStatus(mut rep.Staged)
