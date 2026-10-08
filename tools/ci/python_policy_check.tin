@@ -1,0 +1,37 @@
+package main
+
+import "./ci"
+import "quarry"
+import "say"
+import "twine"
+
+// The repository has no Python programs: the only .py files are the two lldb plugins (lldb loads Python), and no workflow, Makefile or
+// script runs python3.
+
+fn allowed(path str) bool {
+	return path == "tools/dev/tin_lldb.py" || path == "tools/dev/tinbt.py"
+}
+
+fn main() {
+	let files = ci.Lines(ci.Sh("git ls-files", ci.Root(), 30).Stdout)
+	mut bad = []str{}
+	for f in files {
+		if twine.HasSuffix(f, ".py") && !allowed(f) {
+			bad = append(bad, f + ": a Python file; write it in Tin")
+		}
+		let scanned = twine.HasPrefix(f, ".github/workflows/") || f == "Makefile" || twine.HasSuffix(f, ".sh") || twine.HasSuffix(f, ".Dockerfile") || twine.HasPrefix(f, "tools/ci/")
+		if scanned && !twine.HasSuffix(f, ".tin") && ci.Exists(ci.Join(ci.Root(), f)) {
+			let text = quarry.ReadFile(ci.Join(ci.Root(), f)) catch _ {
+				""
+			}
+			for line in twine.Split(text, "\n") {
+				if twine.Contains(line, "python3 ") || twine.Contains(line, "python ") && twine.Contains(line, "-c") {
+					bad = append(bad, f + ": runs Python: " + twine.TrimSpace(line))
+				}
+			}
+		}
+	}
+	ci.Check(len(bad) == 0, twine.Join(bad, "\n"))
+	say.Line("no Python programs: the only .py files are the lldb plugins")
+	ci.Pass("python policy: none")
+}

@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      # Go is still needed by tools/ci/http_check.py (the conformance client and the graceful
+      # Go is still needed by tools/ci/http_check.tin (the conformance client and the graceful
       # shutdown test). Remove this step when those are rewritten in Tin.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -49,6 +49,10 @@ jobs:
       - name: Test the test harness
         run: |
           for t in tools/ci/test_*.tin; do sh tools/ci/tin.sh $t; done
+      - name: No Python programs, and STDLIB.md matches the sources
+        run: |
+          sh tools/ci/tin.sh python_policy_check
+          sh tools/ci/tin.sh tools/gen/gendoc.tin --check
       - name: Build from seed and verify self-hosting fixed point
         run: make bootstrap
       - name: Strict language and standard library suite

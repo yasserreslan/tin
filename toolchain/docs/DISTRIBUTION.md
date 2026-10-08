@@ -28,8 +28,8 @@ directory. Running `sh install-tin.sh` without a version selects the latest stab
 For a manual install, download `tin-0.4.0-<target>.tar.gz` and `SHA256SUMS` from the
 same release, verify the SHA-256 digest, extract it and put its root directory on PATH.
 The archive includes `bin/tinc`, all libraries, compiler sources, tests and the matching
-seed. Moving the whole extracted tree is safe. Python 3 and make are needed for the
-compiler's suites/bootstrap; Go is needed only for the HTTP conformance tools and Go benchmarks.
+seed. Moving the whole extracted tree is safe. make is needed for the
+compiler's suites/bootstrap; Go is needed only for the protocol checks' Go peers, the HTTP conformance tools and Go benchmarks.
 
 ## Compile with Docker
 
@@ -79,7 +79,7 @@ docker run --rm -p 9180:8080 tin-api:dev
 
 Every merge into main is released automatically once its CI gate is green:
 `.github/workflows/auto-release.yml` tags the merged commit and runs the release workflow.
-The version comes from `VERSION` and the existing tags (`tools/ci/next_version.py`): the
+The version comes from `VERSION` and the existing tags (`tools/ci/next_version.tin`): the
 first merge after `VERSION` changes is released as `VERSION` itself, and later merges as
 the next patch of its major.minor (`0.4.1`, `0.4.2`, ...). To start a new series, bump
 `VERSION`'s major or minor (`0.5.0`) in a PR; a prerelease `VERSION` (`0.6.0-rc.1`) is

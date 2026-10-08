@@ -1314,4 +1314,4 @@ label over at least two more labels, IP literals against IP SANs. The parser is 
 rejects every certificate Go's `crypto/x509` rejects (`tools/ci/x509_check.tin` checks this on
 byte-flipped certificates).
 the instructions (for tests). Vectors: `tools/ci/crypto_check.tin` runs the Wycheproof files in `toolchain/tests/wycheproof/`
-(including the invalid inputs) and random inputs checked against Python's `hashlib`.
+(including the invalid inputs) and random inputs checked against Go's standard library.

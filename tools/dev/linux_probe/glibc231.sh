@@ -2,7 +2,7 @@
 # glibc231.sh: the same template + stat/unversioned checks on an older glibc (Ubuntu 20.04 = glibc 2.31).
 # docker run --rm --platform linux/<arch> -v $PWD:/p -w /p ubuntu:20.04 sh glibc231.sh
 export DEBIAN_FRONTEND=noninteractive
-apt-get update > /dev/null 2>&1 && apt-get install -y --no-install-recommends gcc libc6-dev binutils python3 > /dev/null 2>&1
+apt-get update > /dev/null 2>&1 && apt-get install -y --no-install-recommends gcc libc6-dev binutils > /dev/null 2>&1
 ARCH=$(uname -m); case "$ARCH" in aarch64) PLAT=linux-arm64; ASM=start_arm64.S;; x86_64) PLAT=linux-amd64; ASM=start_amd64.S;; esac
 GL=$(ldd --version | head -1 | awk '{print $NF}'); OUT=/p/out/$PLAT-glibc$GL; T=/tmp/probe; mkdir -p $T "$OUT"
 {
