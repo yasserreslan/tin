@@ -48,6 +48,7 @@ type Command enum {
 	Stack(StackArgs)
 	Sync(ShareArgs)
 	Rewrite(RewriteArgs)
+	Bench(BenchArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -196,6 +197,8 @@ commands:
   rewrite [--stack|--all] <cmd>
                              run cmd on every change of the stack (or of every branch); what it leaves is each
                              change's new version, the changes above follow; one undo reverses it all
+  bench record <name> <value> [--unit u] | bench log <name> | bench compare <name> <A> <B>
+                             benchmark results kept with the change and the machine (macOS never against Linux)
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -738,6 +741,36 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Rewrite(ra)
 	}
+	if name == "bench" {
+		mut ba = BenchArgs{Action: "", Name: "", Value: "", Unit: "", A: "", B: ""}
+		mut pos = []str{}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--unit" && k + 1 < len(rest) {
+				k += 1
+				ba.Unit = rest[k]
+			} else {
+				pos = append(pos, rest[k])
+			}
+			k += 1
+		}
+		if len(pos) == 3 && pos[0] == "record" {
+			ba.Action = "record"
+			ba.Name = pos[1]
+			ba.Value = pos[2]
+		} else if len(pos) == 2 && pos[0] == "log" {
+			ba.Action = "log"
+			ba.Name = pos[1]
+		} else if len(pos) == 4 && pos[0] == "compare" {
+			ba.Action = "compare"
+			ba.Name = pos[1]
+			ba.A = pos[2]
+			ba.B = pos[3]
+		} else {
+			fail fault.Wrap(ErrUsage, "bench record <name> <value> [--unit u] | bench log <name> | bench compare <name> <A> <B>")
+		}
+		return g, Command.Bench(ba)
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -870,6 +903,7 @@ fn commandName(c Command) str {
 		Stack(sa) => sa.Action
 		Sync(_) => "sync"
 		Rewrite(_) => "rewrite"
+		Bench(_) => "bench"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -986,6 +1020,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Rewrite(ra) => {
 			try doRewrite(g, ra, mut o)
+		}
+		Bench(ba) => {
+			try doBench(g, ba, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
