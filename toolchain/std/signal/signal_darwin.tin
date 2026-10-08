@@ -1,0 +1,135 @@
+package signal
+
+// The macOS signal numbers and Go's descriptions of them (syscall's signal table).
+
+extern fn getpid() i64
+
+// SIGHUP is the hangup signal.
+const SIGHUP Signal = 1
+
+// SIGINT is the interrupt signal (Ctrl-C).
+const SIGINT Signal = 2
+
+// SIGQUIT is the quit signal (Ctrl-\).
+const SIGQUIT Signal = 3
+
+// SIGILL is an illegal instruction; Notify refuses it.
+const SIGILL Signal = 4
+
+// SIGTRAP is a trace or breakpoint trap; Notify refuses it.
+const SIGTRAP Signal = 5
+
+// SIGABRT is the abort signal.
+const SIGABRT Signal = 6
+
+// SIGFPE is a floating-point exception; Notify refuses it.
+const SIGFPE Signal = 8
+
+// SIGKILL kills the process; it cannot be caught or ignored.
+const SIGKILL Signal = 9
+
+// SIGBUS is a bus error; the runtime owns it.
+const SIGBUS Signal = 10
+
+// SIGSEGV is a segmentation fault; the runtime owns it.
+const SIGSEGV Signal = 11
+
+// SIGSYS is a bad system call.
+const SIGSYS Signal = 12
+
+// SIGPIPE is a write to a pipe or socket with no reader.
+const SIGPIPE Signal = 13
+
+// SIGALRM is the alarm clock.
+const SIGALRM Signal = 14
+
+// SIGTERM is the termination request.
+const SIGTERM Signal = 15
+
+// SIGURG is urgent data on a socket.
+const SIGURG Signal = 16
+
+// SIGSTOP stops the process; it cannot be caught or ignored.
+const SIGSTOP Signal = 17
+
+// SIGTSTP is the terminal stop signal (Ctrl-Z).
+const SIGTSTP Signal = 18
+
+// SIGCONT continues a stopped process.
+const SIGCONT Signal = 19
+
+// SIGCHLD is a child process that stopped or ended.
+const SIGCHLD Signal = 20
+
+// SIGTTIN is a background read from the terminal.
+const SIGTTIN Signal = 21
+
+// SIGTTOU is a background write to the terminal.
+const SIGTTOU Signal = 22
+
+// SIGIO is input or output possible on a descriptor.
+const SIGIO Signal = 23
+
+// SIGXCPU is the CPU time limit exceeded.
+const SIGXCPU Signal = 24
+
+// SIGXFSZ is the file size limit exceeded.
+const SIGXFSZ Signal = 25
+
+// SIGVTALRM is the virtual timer.
+const SIGVTALRM Signal = 26
+
+// SIGPROF is the profiling timer.
+const SIGPROF Signal = 27
+
+// SIGWINCH is a change of the terminal's window size.
+const SIGWINCH Signal = 28
+
+// SIGUSR1 is the first user-defined signal.
+const SIGUSR1 Signal = 30
+
+// SIGUSR2 is the second user-defined signal.
+const SIGUSR2 Signal = 31
+
+// sigName is Go's description of signal n on macOS, "" for a number without one.
+fn sigName(n i64) str {
+	return match n {
+		1 => "hangup"
+		2 => "interrupt"
+		3 => "quit"
+		4 => "illegal instruction"
+		5 => "trace/BPT trap"
+		6 => "abort trap"
+		7 => "EMT trap"
+		8 => "floating point exception"
+		9 => "killed"
+		10 => "bus error"
+		11 => "segmentation fault"
+		12 => "bad system call"
+		13 => "broken pipe"
+		14 => "alarm clock"
+		15 => "terminated"
+		16 => "urgent I/O condition"
+		17 => "suspended (signal)"
+		18 => "suspended"
+		19 => "continued"
+		20 => "child exited"
+		21 => "stopped (tty input)"
+		22 => "stopped (tty output)"
+		23 => "I/O possible"
+		24 => "cputime limit exceeded"
+		25 => "filesize limit exceeded"
+		26 => "virtual timer expired"
+		27 => "profiling timer expired"
+		28 => "window size changes"
+		29 => "information request"
+		30 => "user defined signal 1"
+		31 => "user defined signal 2"
+		_ => ""
+	}
+}
+
+// sigPid is this process's id.
+fn sigPid() i64 {
+	return i64(i32(getpid()))
+}

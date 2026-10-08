@@ -159,6 +159,37 @@ fn rt_fault_handlers(h i64) {
 	free(act)
 }
 
+// rt_sig_action gives signal sig handler h (0 SIG_DFL, 1 SIG_IGN, else a function of the signal
+// number, run on the signal stack, with interrupted calls restarted: SA_ONSTACK 0x1 |
+// SA_RESTART 0x2); h -1 only asks. It returns the previous handler, -1 when the call fails.
+fn rt_sig_action(sig i64, h i64) i64 {
+	let act = calloc(1, 16)
+	let old = calloc(1, 16)
+	act[0] = h
+	__st(act+12, 0x3, 2)
+	mut p = act
+	if h == -1 {
+		p = 0
+	}
+	let r = i64(i32(sigaction(sig, p, old)))
+	let prev = old[0]
+	free(act)
+	free(old)
+	if r < 0 {
+		return -1
+	}
+	return prev
+}
+
+// rt_sig_write writes the byte at p to fd from a signal handler, keeping the interrupted
+// thread's errno.
+fn rt_sig_write(fd i64, p i64) {
+	let e = __error()
+	let saved = __ld(e, 2)
+	rt_sys_write(fd, p, 1)
+	__st(e, saved, 2)
+}
+
 // rt_fault_addr is siginfo_t's si_addr.
 fn rt_fault_addr(info i64) i64 {
 	return (info + 24)[0]

@@ -548,6 +548,7 @@ fn core(id i64) {
 		for i in 0..n {
 			let fd = ev_fd(i)
 			if ev_signal(i) {
+				ev_signal_forward(i) // a Chan listening for the signal gets it too (#737); the drain goes on
 				on_signal()
 			} else if fd == pr {
 				take_handoffs(pr)

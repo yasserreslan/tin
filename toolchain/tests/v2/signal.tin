@@ -1,0 +1,268 @@
+package main
+
+// The signal package (#737). The program starts itself as children (spawn) and signals them,
+// so the test is self-contained: a child catches SIGINT sent by its parent and prints it; a
+// signal with no listener, and one whose listener stopped (Stop, Reset, Close), takes its
+// default action and the exit status shows it (sh prints 128 + the number); Ignore discards
+// one. A child that runs in process checks task delivery, deadlines, a listener on another
+// core and the refused signals. Fatal signals use numbers that are the same on Linux and macOS
+// (SIGTERM 15, SIGALRM 14), and none that a shell may have set to ignored (SIGINT under &).
+
+import "say"
+import "signal"
+import "spawn"
+import "quarry"
+import "flume"
+import "hearth"
+import "tide"
+import "twine"
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) > 1 {
+		child(args[1]) catch err {
+			say.Line("child fault:", err)
+		}
+		return
+	}
+	let self = selfPath(args[0])
+	parentCatch(self) catch err {
+		say.Line("catch fault:", err)
+	}
+	for mode in []str{"unhandled", "stop", "reset", "close", "ignore", "inproc"} {
+		viaShell(self, mode) catch err {
+			say.Line(mode, "fault:", err)
+		}
+	}
+}
+
+// selfPath is the path this program was started as, usable by spawn.
+fn selfPath(arg0 str) str {
+	if twine.Contains(arg0, "/") {
+		return arg0
+	}
+	return spawn.LookPath(arg0) catch err {
+		say.Line("lookpath:", err)
+		arg0
+	}
+}
+
+// parentCatch starts a child that listens for SIGINT, waits until it says so, sends SIGINT
+// through spawn and prints what the child printed and its exit code.
+fn parentCatch(self str) ! {
+	say.Line("== catch: SIGINT sent by the parent")
+	mut p = try spawn.Start(spawn.Cmd{Argv: []str{self, "catch"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Inherit, MaxOutput: 0})
+	mut out = ""
+	let buf = make([]u8, 256)
+	mut signaled = false
+	for {
+		let n = try p.Read(mut buf)
+		if n == 0 {
+			break
+		}
+		out += str(buf[0:n])
+		if !signaled && twine.Contains(out, "listening\n") {
+			try p.Signal(i64(signal.SIGINT))
+			signaled = true
+		}
+	}
+	let code = try p.Wait()
+	for line in twine.Split(twine.TrimSuffix(out, "\n"), "\n") {
+		say.Line("  " + line)
+	}
+	say.Line("  exit", code)
+}
+
+// viaShell runs the child in mode under sh, which prints the child's exit status (128 + the
+// signal's number when a signal ended it).
+fn viaShell(self str, mode str) ! {
+	say.Line("== " + mode)
+	let r = try spawn.Run(spawn.Cmd{Argv: []str{"sh", "-c", `"$0" "$1"; echo "status $?"`, self, mode}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Pipe, MaxOutput: 0})
+	for line in twine.Split(twine.TrimSuffix(r.Stdout, "\n"), "\n") {
+		say.Line("  " + line)
+	}
+}
+
+// flush sends what say buffered so far, so it is not lost when a signal ends the process.
+fn flush() ! {
+	mut w = flume.Stdout()
+	try w.Flush()
+}
+
+fn child(mode str) ! {
+	match mode {
+		"catch" => try childCatch()
+		"unhandled" => try childUnhandled()
+		"stop" => try childStop()
+		"reset" => try childReset()
+		"close" => try childClose()
+		"ignore" => try childIgnore()
+		"inproc" => try childInproc()
+		_ => say.Line("unknown mode", mode)
+	}
+}
+
+// childCatch listens for SIGINT, says so and waits for its parent's.
+fn childCatch() ! {
+	let c = try signal.New()
+	try signal.Notify(c, signal.Interrupt)
+	say.Line("child: listening")
+	try flush()
+	let s = try c.Recv()
+	say.Line("child: caught", s.String(), i64(s), s == signal.Interrupt)
+}
+
+// childUnhandled raises SIGTERM with nobody listening: the default action ends it.
+fn childUnhandled() ! {
+	say.Line("notified", signal.Notified(signal.SIGTERM), "ignored", signal.Ignored(signal.SIGTERM))
+	say.Line("raising SIGTERM")
+	try flush()
+	try signal.Raise(signal.SIGTERM)
+	tide.Sleep(2000000000)
+	say.Line("survived SIGTERM (wrong)")
+}
+
+// childStop catches SIGTERM, stops listening, and the next SIGTERM ends it.
+fn childStop() ! {
+	let c = try signal.New()
+	try signal.Notify(c, signal.SIGTERM)
+	try signal.Raise(signal.SIGTERM)
+	let s = try c.Recv()
+	say.Line("caught", s.String())
+	signal.Stop(c)
+	say.Line("stopped: notified", signal.Notified(signal.SIGTERM))
+	try flush()
+	try signal.Raise(signal.SIGTERM)
+	tide.Sleep(2000000000)
+	say.Line("survived SIGTERM (wrong)")
+}
+
+// childReset catches SIGALRM on two Chans, resets it, and the next SIGALRM ends it.
+fn childReset() ! {
+	let a = try signal.New()
+	let b = try signal.New()
+	try signal.Notify(a, signal.SIGALRM, signal.SIGTERM)
+	try signal.Notify(b, signal.SIGALRM)
+	try signal.Raise(signal.SIGALRM)
+	let x = try a.Recv()
+	let y = try b.Recv()
+	say.Line("both caught", x.String(), y.String())
+	try signal.Reset(signal.SIGALRM)
+	say.Line("reset: alarm notified", signal.Notified(signal.SIGALRM), "term notified", signal.Notified(signal.SIGTERM))
+	try flush()
+	try signal.Raise(signal.SIGALRM)
+	tide.Sleep(2000000000)
+	say.Line("survived SIGALRM (wrong)")
+}
+
+// childClose listens for SIGTERM on two Chans; closing one leaves the other listening, closing
+// both gives SIGTERM its default action back.
+fn childClose() ! {
+	mut a = try signal.New()
+	mut b = try signal.New()
+	try signal.Notify(a, signal.SIGTERM)
+	try signal.Notify(b, signal.SIGTERM)
+	try signal.Raise(signal.SIGTERM)
+	let x = try a.Recv()
+	let y = try b.Recv()
+	say.Line("both caught", x.String(), y.String())
+	a.Close()
+	try signal.Raise(signal.SIGTERM)
+	let z = try b.Recv()
+	say.Line("after closing a: b caught", z.String(), "notified", signal.Notified(signal.SIGTERM))
+	let (_, ok) = a.TryRecv()
+	say.Line("closed a has a signal:", ok)
+	signal.Notify(a, signal.SIGTERM) catch err {
+		say.Line("notify closed:", err)
+	}
+	b.Close()
+	say.Line("closed both: notified", signal.Notified(signal.SIGTERM))
+	try flush()
+	try signal.Raise(signal.SIGTERM)
+	tide.Sleep(2000000000)
+	say.Line("survived SIGTERM (wrong)")
+}
+
+// childIgnore ignores SIGINT and SIGTERM: raising them does nothing; a Chan never sees them.
+fn childIgnore() ! {
+	let c = try signal.New()
+	try signal.Notify(c, signal.SIGTERM)
+	try signal.Ignore(signal.Interrupt, signal.SIGTERM)
+	say.Line("ignored", signal.Ignored(signal.Interrupt), signal.Ignored(signal.SIGTERM), "notified", signal.Notified(signal.SIGTERM))
+	try signal.Raise(signal.Interrupt)
+	try signal.Raise(signal.SIGTERM)
+	let (_, ok) = c.TryRecv()
+	say.Line("survived both; the Chan got one:", ok)
+	try signal.Notify(c, signal.SIGTERM)
+	say.Line("notify again: ignored", signal.Ignored(signal.SIGTERM))
+	try signal.Raise(signal.SIGTERM)
+	let s = try c.Recv()
+	say.Line("caught", s.String())
+}
+
+// childInproc checks delivery to a task, a deadline on Recv, a listener on another core,
+// Notify with no signals and the refused signals.
+fn childInproc() ! {
+	let c = try signal.New()
+	try signal.Notify(c, signal.SIGUSR2)
+	let got = try inTask(c)
+	say.Line("task got", got.String(), got == signal.SIGUSR2)
+	let r = within 50ms {
+		try c.Recv()
+	} catch err {
+		say.Line("Recv within 50ms:", err)
+		signal.Signal(0)
+	}
+	say.Line("value after the deadline", i64(r))
+	hearth.Run(3, fn(id i64) {
+		if id != 2 {
+			return
+		}
+		onCore(id) catch err {
+			say.Line("core fault:", err)
+		}
+	})
+	say.Line("hangup notified after the core closed its Chan", signal.Notified(signal.SIGHUP))
+	let all = try signal.New()
+	try signal.Notify(all)
+	say.Line("notify all: term", signal.Notified(signal.SIGTERM), "hup", signal.Notified(signal.SIGHUP), "segv", signal.Notified(signal.SIGSEGV), "kill", signal.Notified(signal.Kill))
+	signal.Stop(all)
+	say.Line("stopped: term", signal.Notified(signal.SIGTERM), "usr2", signal.Notified(signal.SIGUSR2))
+	let labels = []str{"SIGKILL", "SIGSTOP", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGTRAP", "0", "64"}
+	for i, s in []signal.Signal{signal.Kill, signal.SIGSTOP, signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE, signal.SIGTRAP, signal.Signal(0), signal.Signal(64)} {
+		mut refused = false
+		signal.Notify(c, s) catch err {
+			refused = twine.HasPrefix(say.Str(err), "signal: ")
+		}
+		say.Line("notify", labels[i], "refused", refused)
+	}
+	signal.Ignore(signal.SIGSEGV) catch err {
+		say.Line("ignore segv refused", twine.HasPrefix(say.Str(err), "signal: "))
+	}
+	say.Line("strings", signal.Interrupt.String(), signal.SIGTERM.String(), signal.SIGHUP.String(), signal.Signal(99).String())
+}
+
+// inTask waits for SIGUSR2 in one task while another raises it.
+fn inTask(c signal.Chan) !signal.Signal {
+	mut got = signal.Signal(0)
+	scope s {
+		s.spawn(fn() ! {
+			got = try c.Recv()
+		})
+		s.spawn(fn() ! {
+			tide.Sleep(20000000)
+			try signal.Raise(signal.SIGUSR2)
+		})
+	}
+	return got
+}
+
+// onCore makes a Chan on core id, takes a SIGHUP there and closes it.
+fn onCore(id i64) ! {
+	mut d = try signal.New()
+	try signal.Notify(d, signal.SIGHUP)
+	try signal.Raise(signal.SIGHUP)
+	let x = try d.Recv()
+	say.Line("core", id, "got", x.String())
+	d.Close()
+}

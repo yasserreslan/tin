@@ -92,6 +92,11 @@ fn ev_signal(i i64) bool {
 fn ev_signal_ack() {
 }
 
+// ev_signal_forward hands signal event i (its ident is the number) to the signal package's listeners (#737).
+fn ev_signal_forward(i i64) {
+	rt_sig_deliver((evs + i*evSize)[0])
+}
+
 // ev_wait waits for events, at most ms milliseconds (-1: no limit).
 fn ev_wait(ms i64) i64 {
 	if ms < 0 {
