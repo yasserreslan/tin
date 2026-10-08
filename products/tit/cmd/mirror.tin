@@ -105,7 +105,8 @@ fn doMirror(g Global, path str, o mut Out) ! {
 		updates = append(updates, git.RefPush{Name: names[k], New: back.Git(tips[k].Bytes())})
 	}
 	let pushed = try git.Open(gitDir)
-	let (moved, sent) = try git.PushHttp(pushed, pushTo, quarry.Getenv("TIT_MIRROR_TOKEN"), updates)
+	let token secret str = quarry.Getenv("TIT_MIRROR_TOKEN")
+	let (moved, sent) = try git.PushHttp(pushed, pushTo, token, updates)
 	if moved == 0 {
 		o.Line("Everything is mirrored: " + pushTo + " holds every branch and tag already.")
 		return

@@ -211,14 +211,16 @@ fn appendBE32(out mut []u8, v i64) {
 // PushHttp sets the refs on the git server at url (https://github.com/owner/repo.git) from the git directory local,
 // sending what the server lacks. token, when not "", goes as HTTP basic credentials (GitHub: a token as the password).
 // It gives how many refs moved and how many objects went.
-fn PushHttp(local Repo, url str, token str, refs []RefPush) !(i64, i64) {
+fn PushHttp(local Repo, url str, token secret str, refs []RefPush) !(i64, i64) {
 	mut base = url
 	for twine.HasSuffix(base, "/") {
 		base = base[0:len(base) - 1]
 	}
 	mut headers = []str{"User-Agent", "git/2.45.0 (tit)"}
 	if len(token) > 0 {
-		headers = append(headers, "Authorization", "Basic " + seal.B64([]u8("x-access-token:" + token)))
+		// the one place the token is revealed: into the request's Authorization header, for the server alone
+		let credentials = reveal("x-access-token:" + token)
+		headers = append(headers, "Authorization", "Basic " + seal.B64([]u8(credentials)))
 	}
 	let remote = try remoteRefs(base, headers)
 	mut commands = []str{}
