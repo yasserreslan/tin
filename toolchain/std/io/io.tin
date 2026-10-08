@@ -1,12 +1,18 @@
 // Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or
 // Seeker by having the methods, with no declaration, and compositions like
-// ReadWriteCloser by satisfying every listed shape. The helpers (Copy, ReadAll, Pipe,
-// MultiWriter, ...) and EOF as a sentinel fault land with the io port (roadmap #141);
-// the byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...) and Go's
-// ReaderFrom and WriterTo (which need dyn) are not declared yet. Reading, writing, closing and
-// seeking change the stream, so those methods are mut (#644): a type's method may take its
-// receiver mut, and a call through a dyn value needs a mut one (w mut dyn io.Writer).
+// ReadWriteCloser by satisfying every listed shape. The helpers read and write over any
+// reader or writer: ReadAll, ReadFull, ReadAtLeast, Copy, CopyN, CopyBuffer, LimitReader,
+// TeeReader, MultiReader, MultiWriter, WriteString and Discard. A stream ends when Read
+// returns 0 (flume's and ledger's readers do), not with a sentinel fault.
+//
+// The byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...), Go's
+// ReaderFrom and WriterTo, and Pipe and the file system interface (io/fs) are the next steps
+// of #736. Reading, writing, closing and seeking change the stream, so those methods are mut
+// (#644): a type's method may take its receiver mut, and a call through a dyn value needs a
+// mut one (w mut dyn io.Writer).
 package io
+
+import "say"
 
 // Reader is anything with Read: it fills buf and returns how many bytes it wrote.
 shape Reader { mut Read(buf mut []u8) !i64 }
@@ -75,4 +81,216 @@ shape ReadWriteSeeker {
 	Reader
 	Writer
 	Seeker
+}
+
+// ---- helpers ----
+
+// ReadAll reads until the stream ends and returns what it read.
+fn ReadAll[R Reader](src R) !str {
+	mut s = src
+	mut out = []u8{}
+	mut buf = make([]u8, 512)
+	for {
+		let n = try s.Read(mut buf)
+		if n <= 0 {
+			break
+		}
+		out = append(out, buf[0:n]...)
+	}
+	return str(out)
+}
+
+// ReadFull reads exactly len(buf) bytes; a stream that ends first fails with "unexpected end of
+// stream". A zero-length buffer reads nothing.
+fn ReadFull[R Reader](src R, buf mut []u8) !i64 {
+	return try ReadAtLeast(src, mut buf, len(buf))
+}
+
+// ReadAtLeast reads at least min bytes (or until the stream ends) into buf; fewer than min bytes
+// is the "unexpected end of stream" fault.
+fn ReadAtLeast[R Reader](src R, buf mut []u8, min i64) !i64 {
+	if min > i64(len(buf)) {
+		fail say.Fault("io: ReadAtLeast: %d bytes do not fit a buffer of %d", min, len(buf))
+	}
+	mut s = src
+	mut n = i64(0)
+	for n < min {
+		mut rest = buf[n:len(buf)]
+		let k = try s.Read(mut rest)
+		if k <= 0 {
+			break
+		}
+		n += k
+	}
+	if n < min {
+		fail say.Fault("io: unexpected end of stream: %d of %d bytes", n, min)
+	}
+	return n
+}
+
+// Copy reads from src and writes every chunk to dst until the stream ends, and returns how many
+// bytes it copied. The scratch buffer is 32 KiB, as Go's is.
+fn Copy[W Writer, R Reader](dst W, src R) !i64 {
+	mut buf = make([]u8, 32768)
+	return try CopyBuffer(dst, src, mut buf)
+}
+
+// CopyBuffer is Copy with the caller's scratch buffer, which must not be empty.
+fn CopyBuffer[W Writer, R Reader](dst W, src R, buf mut []u8) !i64 {
+	if len(buf) == 0 {
+		fail say.Fault("io: CopyBuffer: the buffer is empty")
+	}
+	mut d = dst
+	mut s = src
+	mut total = i64(0)
+	for {
+		let n = try s.Read(mut buf)
+		if n <= 0 {
+			break
+		}
+		let chunk = buf[0:n]
+		let k = try d.Write(chunk)
+		if k != n {
+			fail say.Fault("io: short write: %d of %d bytes", k, n)
+		}
+		total += n
+	}
+	return total
+}
+
+// CopyN copies exactly n bytes; fewer means the stream ended first, which is the "unexpected end
+// of stream" fault.
+fn CopyN[W Writer, R Reader](dst W, src R, n i64) !i64 {
+	mut s = src
+	let limited = LimitReader(s, n)
+	mut d = dst
+	let k = try Copy(d, limited)
+	if k < n {
+		fail say.Fault("io: unexpected end of stream: %d of %d bytes", k, n)
+	}
+	return k
+}
+
+// WriteString writes s to dst.
+fn WriteString[W Writer](dst W, s str) !i64 {
+	mut d = dst
+	return try d.Write([]u8(s))
+}
+
+// LimitedReader reads at most n bytes from r; it is what LimitReader returns.
+type LimitedReader[R Reader] struct {
+	r R
+	n i64
+}
+
+// LimitReader returns a reader that yields at most n bytes of src and then ends.
+fn LimitReader[R Reader](src R, n i64) LimitedReader[R] {
+	return LimitedReader[R]{r: src, n: n}
+}
+
+// Left returns how many bytes the limit has left.
+fn (l LimitedReader[R]) Left() i64 {
+	return l.n
+}
+
+// Read reads at most what the limit has left; it returns 0 once the limit is reached.
+fn (l mut LimitedReader[R]) Read(buf mut []u8) !i64 {
+	if l.n <= 0 {
+		return 0
+	}
+	mut b = buf
+	if i64(len(b)) > l.n {
+		b = buf[0:l.n]
+	}
+	let k = try l.r.Read(mut b)
+	if k > 0 {
+		l.n -= k
+	}
+	return k
+}
+
+// TeeReader reads from r and writes what it read to w, like Go's TeeReader.
+type TeeReader[R Reader, W Writer] struct {
+	r R
+	w W
+}
+
+// NewTeeReader returns a reader that writes everything it reads from src to dst.
+fn NewTeeReader[R Reader, W Writer](src R, dst W) TeeReader[R, W] {
+	return TeeReader[R, W]{r: src, w: dst}
+}
+
+// Read reads from the underlying reader and writes the same bytes to the tee.
+fn (t mut TeeReader[R, W]) Read(buf mut []u8) !i64 {
+	let k = try t.r.Read(mut buf)
+	if k <= 0 {
+		return k
+	}
+	let wrote = try t.w.Write(buf[0:k])
+	if wrote != k {
+		fail say.Fault("io: short write: %d of %d bytes", wrote, k)
+	}
+	return k
+}
+
+// MultiReader reads several readers in turn, as one stream; it is what NewMultiReader returns
+// and takes dyn values, so the readers may have different types.
+type MultiReader struct {
+	rs []dyn Reader
+	at i64
+}
+
+// NewMultiReader reads the readers in order.
+fn NewMultiReader(rs []dyn Reader) MultiReader {
+	return MultiReader{rs: rs, at: 0}
+}
+
+// Read reads from the current reader; when one ends, the next is used, and the last one's end is
+// the stream's end.
+fn (m mut MultiReader) Read(buf mut []u8) !i64 {
+	for m.at < i64(len(m.rs)) {
+		mut r = m.rs[m.at]
+		let k = try r.Read(mut buf)
+		if k > 0 {
+			return k
+		}
+		m.at += 1
+	}
+	return 0
+}
+
+// MultiWriter writes to every writer in turn; it is what NewMultiWriter returns and takes dyn
+// values, so the writers may have different types.
+type MultiWriter struct {
+	ws []dyn Writer
+}
+
+// NewMultiWriter writes each chunk to every writer, and fails when one takes less than all of it.
+fn NewMultiWriter(ws []dyn Writer) MultiWriter {
+	return MultiWriter{ws: ws}
+}
+
+// Write writes data to every writer.
+fn (m mut MultiWriter) Write(data []u8) !i64 {
+	for i in 0..len(m.ws) {
+		mut w = m.ws[i]
+		let k = try w.Write(data)
+		if k != i64(len(data)) {
+			fail say.Fault("io: short write: %d of %d bytes", k, len(data))
+		}
+	}
+	return i64(len(data))
+}
+
+// DiscardWriter is a writer that throws everything away, like Go's io.Discard.
+type DiscardWriter struct{}
+
+// Discard returns the writer that throws everything away.
+fn Discard() DiscardWriter {
+	return DiscardWriter{}
+}
+
+// Write takes data and reports all of it written.
+fn (d mut DiscardWriter) Write(data []u8) !i64 {
+	return i64(len(data))
 }

@@ -1,0 +1,13 @@
+readall hello world! hello world!
+copy 12 hello world!
+readfull 6 abcdef
+readfull short -1 io: unexpected end of stream: 3 of 6 bytes
+readatleast 4 abcd
+limit abc
+copyn 5 abcde
+copyn fault abc
+copyn short -1
+tee abcd abcd
+multireader onetwo
+multiwriter 2 xy xy
+small 1 xyz 1
