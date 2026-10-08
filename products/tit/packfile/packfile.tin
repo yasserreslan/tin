@@ -52,11 +52,16 @@ fn kindOf(t i64) !object.Kind {
 	fail fault.Wrap(ErrBadPack, "entry type {t}")
 }
 
-// Pack is an open pack with its index, read into memory.
+// Pack is an open pack with its index. Its bytes are read the first time an object of it is (a command that needs
+// none of its objects reads only its index) and checked then against the hash the index names; every object read is
+// checked against its id, and Verify checks the whole pack.
 type Pack struct {
-	Path   str
-	Count  i64
-	data   str
+	Path    str
+	Count   i64
+	size    i64
+	trailer str
+	loaded  bool
+	data    str
 	ids    str
 	offs   []i64
 	crcs   []u32
@@ -73,25 +78,41 @@ fn le64(s str, at i64) i64 {
 	return i64(pack.LE.U64([]u8(s[at:at + 8])))
 }
 
+// readHead is the first n bytes of a file (fewer when it is shorter).
+fn readHead(path str, n i64) !str {
+	mut r = try flume.Open(path)
+	mut buf = make([]u8, n)
+	mut got = 0
+	for got < n {
+		let k = r.Read(mut buf[got:]) catch e {
+			r.Close()
+			fail e
+		}
+		if k == 0 {
+			break
+		}
+		got += k
+	}
+	r.Close()
+	return str(buf[0:got])
+}
+
 // Open opens the pack at path (ending in .pack) and its index (the same name ending in .idx), checking both.
 fn Open(path str) !Pack {
-	let data = try flume.ReadFile(path)
-	if len(data) < 20 + 32 || data[0:8] != "TITPACK\x00" || le32(data, 8) != 1 {
+	let info = try quarry.Lstat(path)
+	let head = try readHead(path, 20)
+	if info.Size < 20 + 32 || len(head) < 20 || head[0:8] != "TITPACK\x00" || le32(head, 8) != 1 {
 		fail fault.Wrap(ErrBadPack, "{path}: not a version 1 pack")
 	}
-	let count = le64(data, 12)
-	let sum = seal.Sha256(data[0:len(data) - 32])
-	if str(sum) != data[len(data) - 32:] {
-		fail fault.Wrap(ErrBadPack, "{path}: its trailing hash does not match")
-	}
+	let count = le64(head, 12)
 	let idxPath = path[0:len(path) - 5] + ".idx"
 	let idx = try flume.ReadFile(idxPath)
 	let want = 8 + 4 + 8 + 1024 + count * 44 + 64
-	if count < 0 || count > len(data) || len(idx) != want || idx[0:8] != "TITIDX\x00\x00" || le32(idx, 8) != 1 || le64(idx, 12) != count {
+	if count < 0 || count > info.Size || len(idx) != want || idx[0:8] != "TITIDX\x00\x00" || le32(idx, 8) != 1 || le64(idx, 12) != count {
 		fail fault.Wrap(ErrBadPack, "{idxPath}: not the index of this pack")
 	}
-	if str(seal.Sha256(idx[0:len(idx) - 32])) != idx[len(idx) - 32:] || idx[len(idx) - 64:len(idx) - 32] != data[len(data) - 32:] {
-		fail fault.Wrap(ErrBadPack, "{idxPath}: its hashes do not match the pack")
+	if str(seal.Sha256(idx[0:len(idx) - 32])) != idx[len(idx) - 32:] {
+		fail fault.Wrap(ErrBadPack, "{idxPath}: its hash does not match")
 	}
 	mut fanout = make([]i64, 256)
 	mut prev = 0
@@ -119,11 +140,11 @@ fn Open(path str) !Pack {
 	for i in 0..count {
 		offs[i] = le64(idx, offAt + 8 * i)
 		crcs[i] = u32(le32(idx, crcAt + 4 * i))
-		if offs[i] < 20 || offs[i] >= len(data) - 32 {
+		if offs[i] < 20 || offs[i] >= info.Size - 32 {
 			fail fault.Wrap(ErrBadPack, "{idxPath}: an offset outside the pack")
 		}
 	}
-	return Pack{Path: path, Count: count, data: data, ids: ids, offs: offs, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}}
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", ids: ids, offs: offs, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}}
 }
 
 // Find is the position of the object in the index, or -1.
@@ -163,6 +184,19 @@ fn (p Pack) IdAt(i i64) object.Id {
 	return id
 }
 
+// load reads the pack's bytes the first time they are needed, and checks them against the hash its index names.
+fn (p mut Pack) load() ! {
+	if p.loaded {
+		return
+	}
+	let data = try flume.ReadFile(p.Path)
+	if len(data) != p.size || data[len(data) - 32:] != p.trailer || data[0:8] != "TITPACK\x00" {
+		fail fault.Wrap(ErrBadPack, "{p.Path}: the pack does not match its index")
+	}
+	p.data = keep(data)
+	p.loaded = true
+}
+
 fn (p Pack) uvarint(at i64) !(i64, i64) {
 	if at >= len(p.data) - 32 {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
@@ -178,6 +212,7 @@ fn (p Pack) uvarint(at i64) !(i64, i64) {
 
 // entryAt reads the object at offset off, resolving deltas up to MaxDeltaDepth.
 fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
+	try p.load()
 	if depth > MaxDeltaDepth {
 		fail fault.Wrap(ErrBadPack, "a delta chain longer than {MaxDeltaDepth}")
 	}
@@ -271,7 +306,10 @@ fn (p mut Pack) Put(o object.Object) !object.Id {
 }
 
 // Deltas is how many entries are stored as deltas.
-fn (p Pack) Deltas() i64 {
+fn (p mut Pack) Deltas() i64 {
+	p.load() catch _ {
+		return 0
+	}
 	mut n = 0
 	for off in p.offs {
 		let t = i64(p.data[off])
@@ -282,8 +320,12 @@ fn (p Pack) Deltas() i64 {
 	return n
 }
 
-// Verify reads every entry, checks its CRC and that its content matches its id.
+// Verify checks the pack's hash, then reads every entry, checks its CRC and that its content matches its id.
 fn (p mut Pack) Verify() ! {
+	try p.load()
+	if str(seal.Sha256(p.data[0:len(p.data) - 32])) != p.data[len(p.data) - 32:] {
+		fail fault.Wrap(ErrBadPack, "{p.Path}: its trailing hash does not match")
+	}
 	mut sorted = make([]i64, len(p.offs))
 	copy(sorted, p.offs)
 	sift.Sort(mut sorted)

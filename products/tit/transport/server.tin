@@ -357,6 +357,8 @@ fn (s Server) fetch(body str) !str {
 		return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(ids)}), odata)
 	}
 	mut wants = []object.Id{}
+	// an annotated tag is sent itself, and the commit it tags is walked
+	mut tags = []object.Id{}
 	for w in req.Wants {
 		let id = object.ParseId(w) catch _ {
 			try refusal(Code.BadRequest, "{w} is not an id")
@@ -365,7 +367,31 @@ fn (s Server) fetch(body str) !str {
 		if !st.Has(id) {
 			try refusal(Code.NotFound, "no commit {w} here")
 		}
-		wants = append(wants, id)
+		mut cur = id
+		for k in 0..16 {
+			let (kind, body) = try st.GetRaw(cur)
+			if kind != object.Kind.Tag {
+				break
+			}
+			tags = append(tags, cur)
+			let o = try object.Decode(kind, body)
+			match o {
+				Tag(t) => {
+					cur = t.Object
+				}
+				Commit(_) => {
+				}
+				Tree(_) => {
+				}
+				Blob(_) => {
+				}
+			}
+		}
+		let (ck, _) = try st.GetRaw(cur)
+		if ck != object.Kind.Commit {
+			try refusal(Code.BadRequest, "{w} does not name a commit")
+		}
+		wants = append(wants, cur)
 	}
 	mut haves = []object.Id{}
 	for h in req.Haves {
@@ -385,6 +411,13 @@ fn (s Server) fetch(body str) !str {
 	}
 	mut send = []object.Id{}
 	mut seen = map[str]bool{}
+	for t in tags {
+		let (_, dup) = seen[t.Bytes()]
+		if !dup {
+			seen[t.Bytes()] = true
+			send = append(send, t)
+		}
+	}
 	for id in commits {
 		send = append(send, id)
 		let c = try commitOf(mut st, id)

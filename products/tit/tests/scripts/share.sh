@@ -112,6 +112,11 @@ grep -q "^- Add five (" "$d/out.txt" || fail "the second changelog: $(cat "$d/ou
 [ "$(t -C "$d/server" tag | tr '\n' ' ')" = "v1.0 v1.1 " ] || fail "the server's tags: $(t -C "$d/server" tag)"
 t ship v1.1 > "$d/out.txt" 2>&1 && fail "a tag shipped twice"
 echo "ok ship"
+# a clone takes the annotated tags along with the commits they tag
+t clone "$url" "$d/tagged" > /dev/null || fail "a clone of a repository with annotated tags"
+[ "$(t -C "$d/tagged" tag | tr '\n' ' ')" = "v1.0 v1.1 " ] || fail "the clone's tags: $(t -C "$d/tagged" tag)"
+[ "$(t -C "$d/tagged" log --format=subject -n 1 v1.0)" = "Add dirty" ] || fail "the clone's v1.0"
+echo "ok a clone takes the annotated tags"
 
 # a client with no key is refused
 mkdir "$d/stranger"
