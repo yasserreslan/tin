@@ -145,7 +145,13 @@ fn (p Pack) header(at i64) !entryHeader {
 
 // inflate is the zlib stream at offset at, which must give size bytes.
 fn (p Pack) inflate(at i64, size i64) !str {
-	let (body, _) = squash.UnzlibPrefix(p.data[at:len(p.data) - 20], size) catch e {
+	// a slice of a str is a copy: take only what the compressed object can span (deflate never needs more than
+	// 15 bits a byte, plus headers), not the rest of the pack, which made adopting a large pack quadratic
+	mut end = len(p.data) - 20
+	if at + 2 * size + 1024 < end {
+		end = at + 2 * size + 1024
+	}
+	let (body, _) = squash.UnzlibPrefix(p.data[at:end], size) catch e {
 		fail fault.Wrap(ErrBadObject, "{p.path} at {at}: {fault.Message(e)}")
 	}
 	if len(body) != size {

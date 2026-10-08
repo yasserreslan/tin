@@ -226,3 +226,17 @@ Anything that touches the OS must also run on Linux (cross-compile and run in ti
   verifying every line, and the order, by hand. The suite compares output exactly; only a test whose order
   truly varies (cores finishing in any order) saves sorted output and adds NAME.sorted saying why (#626).
 - The package's README: API list, design notes, known gaps.
+
+## Parallel work with tit
+tit (`products/tit`, commands in toolchain/docs/TIT.md) gives each agent its own workspace on one store:
+`tit workspace new <issue>` makes `../<repo>-<issue>` on its own branch from main, with its own HEAD, index and
+undo; `tit undo` there reverses only that workspace's operations and refuses, naming the other workspace, when
+another one moved the same branch since. Keep an issue's work as a stack of small changes: `tit absorb` sends fixes
+to the change that wrote the lines, `tit edit <change>` then `tit commit --amend` rewrites one in the middle, and
+`tit sync` rebases the stack onto main and pushes it (a conflict is recorded in its change, never left half-done).
+`tit overlap` names the other branches changing the same declarations, before two agents collide.
+
+Cutover of the Tin repository: `tit adopt` brings the git history in (deterministic, rerun for new commits),
+`tit mirror` writes tit's branches back as git objects (adopted commits keep their git ids, so GitHub and CI keep
+working), and only then does tit become the source, with the mirror kept for CI. Until then git stays the source:
+do not push tit-made commits to GitHub except through `tit mirror`.

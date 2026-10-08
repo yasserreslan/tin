@@ -21,6 +21,30 @@ Output longer than the terminal goes through `$PAGER` (`less -FRX`); `TIT_NO_PAG
 status is 0, 1 for a failure, 2 for a usage error, 130 after Ctrl-C. `tit help <command>` (or `tit <command> --help`)
 prints one command's usage.
 
+## A session
+
+<!-- tests/scripts/docs.sh runs this block, line by line, in an empty directory: keep it working. -->
+
+```sh
+tit init
+tit config set user.name "Ada Lovelace"
+tit config set user.email ada@example.com
+printf 'one\n' > notes.txt
+tit add notes.txt
+tit commit -m "first"
+tit switch -c idea
+printf 'two\n' >> notes.txt
+tit commit -am "second"
+tit stack
+tit switch main
+tit merge idea
+tit log --oneline
+tit undo
+tit timeline notes.txt
+tit park --help
+tit status -s
+```
+
 ## Revisions
 
 `HEAD`; a branch, tag or remote-tracking branch (`main`, `v1`, `origin/main`); a full or short commit id; a change id
@@ -99,6 +123,26 @@ the new version records it, `tit stack` shows it, and `tit edit` puts git's mark
 | `tit split <change> <paths> [-m msg]` | a new change, just below, holding what the change did to these paths |
 | `tit absorb` | each uncommitted hunk goes into the change that wrote those lines; a hunk no single change owns stays (listed) |
 | `tit sync [remote]` | fetch, rebase the stack onto `<remote>/<trunk>` (the local trunk follows), push the branch; nothing that records a conflict is pushed |
+| `tit rewrite [--stack\|--all] <cmd>` | run `cmd` (through `/bin/sh`) on each change's own files, in a temporary directory: what it leaves is the change's new version, and the changes above follow. `--stack` (the default) is this branch's stack, `--all` every branch above the trunk; a change where it fails is listed and kept; one undo reverses it all |
+
+## Tin declarations
+
+| command | |
+|---|---|
+| `tit diff --semantic [A B]` | the changes as declarations: added, removed, changed, moved (to another file) and renamed (same body, new name); a reformat is no change |
+| `tit history <[package.]Name\|Type.Method> [-n N]` | the commits that changed one declaration, newest first, following its renames and moves (in the last N commits) |
+| `tit overlap` | the other branches (and fetched remote ones) above the trunk that change declarations this branch changes, and which |
+
+A merge of `.tin` files whose lines conflict is tried again declaration by declaration (design/tit.md): different
+declarations added or changed on each side merge cleanly, and a conflict names the declaration both sides changed.
+
+## Benchmarks
+
+| command | |
+|---|---|
+| `tit bench record <name> <value> [--unit u]` | keep a result for HEAD's change, with this machine (OS, architecture, CPU, cores, kernel) |
+| `tit bench log <name>` | every result of a benchmark |
+| `tit bench compare <name> <A> <B>` | the newest result of each revision's change and their ratio; refuses macOS against Linux, and two machines |
 
 ## Undo
 
