@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - run: python3 -m unittest discover -s tools/ci -p 'test_distribution.py' -v
+      - run: sh tools/ci/tin.sh test_distribution
       - run: make bootstrap dist
       - name: Verify archive and Linux containers
         env:
