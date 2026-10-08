@@ -1,0 +1,135 @@
+package packfile
+
+import "../object"
+import "../store"
+import "seal"
+import "sift"
+import "squash"
+
+// Packing what is packed already (#778, #795): a fetch or a clone sends objects the server mostly holds in its own
+// packs, so their entries are copied as they are, compressed bytes and deltas alike, as git reuses its packs. An
+// offset delta becomes a delta by its base's id (the new pack's offsets differ); a delta whose base is not sent, or
+// comes later, is sent whole instead; a loose object is compressed afresh. Entries go out in each pack's order, so
+// a base comes before its deltas. Nothing is decompressed but what has to be, and no index is written: Unpack reads
+// the pack in order.
+
+// reused is where one object to send is: in packs[pack] at index position pos, or loose (pack -1).
+type reused struct {
+	pack i64
+	off  i64
+	pos  i64
+	raw  str
+}
+
+// Reuse is a pack of the objects ids (each once), from the packs where they are and s for the rest.
+fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
+	mut seen = map[str]bool{}
+	mut list = []reused{}
+	for id in ids {
+		let raw = id.Bytes()
+		if seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		mut found = false
+		for k in 0..len(packs) {
+			let pos = packs[k].Find(id)
+			if pos >= 0 {
+				list = append(list, reused{pack: k, off: packs[k].offs[pos], pos: pos, raw: raw})
+				found = true
+				break
+			}
+		}
+		if !found {
+			list = append(list, reused{pack: -1, off: 0, pos: -1, raw: raw})
+		}
+	}
+	// each pack's entries in its order (bases before their deltas), the loose ones last
+	sift.SortStableFunc(mut list, fn(a reused, b reused) i64 {
+		let pa = packRank(a.pack)
+		let pb = packRank(b.pack)
+		if pa != pb {
+			return pa - pb
+		}
+		return a.off - b.off
+	})
+	// each pack's entries by offset, to name an offset delta's base
+	mut posOf = []map[i64]i64{}
+	for k in 0..len(packs) {
+		mut m = map[i64]i64{}
+		for i in 0..len(packs[k].offs) {
+			m[packs[k].offs[i]] = i
+		}
+		posOf = append(posOf, m)
+	}
+	mut out = []u8{}
+	appendStr(mut out, "TITPACK\x00")
+	appendLE32(mut out, 1)
+	appendLE64(mut out, len(list))
+	mut sent = map[str]bool{}
+	for r in list {
+		mut e = []u8{}
+		if r.pack >= 0 {
+			mut p = packs[r.pack]
+			let (t, size, baseOff, baseId, z) = try p.entry(r.pos)
+			mut base = baseId
+			if baseOff >= 0 {
+				let (bpos, known) = posOf[r.pack][baseOff]
+				if known {
+					base = p.ids[32 * bpos:32 * bpos + 32]
+				}
+			}
+			if t != typeOfsDelta && t != typeRefDelta {
+				e = append(e, u8(t))
+				appendUv(mut e, size)
+				appendUv(mut e, len(z))
+				appendStr(mut e, z)
+			} else if len(base) == 32 && sent[base] {
+				e = append(e, u8(typeRefDelta))
+				appendUv(mut e, size)
+				appendStr(mut e, base)
+				appendUv(mut e, len(z))
+				appendStr(mut e, z)
+			} else {
+				// the base is not in this pack, or not sent: the object goes whole
+				let id = try object.IdOf(r.raw)
+				let (kind, body) = try p.GetRaw(id)
+				e = try wholeEntry(kind, body)
+			}
+			packs[r.pack] = p
+		} else {
+			let id = try object.IdOf(r.raw)
+			let (kind, body) = try s.GetRaw(id)
+			e = try wholeEntry(kind, body)
+		}
+		out = append(out, e...)
+		sent[r.raw] = true
+	}
+	appendStr(mut out, str(seal.Sha256(str(out))))
+	return str(out)
+}
+
+// packRank orders the packs, loose objects (-1) last.
+fn packRank(k i64) i64 {
+	if k < 0 {
+		return 1 << 40
+	}
+	return k
+}
+
+// wholeEntry is an object as a whole entry: commits and trees stored, blobs compressed (as Write does).
+fn wholeEntry(kind object.Kind, body str) ![]u8 {
+	mut e = []u8{u8(typeOf(kind))}
+	appendUv(mut e, len(body))
+	mut level = squash.Default
+	if kind != object.Kind.Blob {
+		level = 0
+	}
+	let lv = level
+	let z = arena {
+		squash.Zlib(body, lv)
+	}
+	appendUv(mut e, len(z))
+	appendStr(mut e, z)
+	return e
+}

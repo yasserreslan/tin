@@ -394,3 +394,53 @@ fn TestUnpack(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// Reuse sends packed entries as they are (#778): every object comes back from Unpack with its content, whether its
+// delta base is sent (a delta by id), not sent (whole), or the object is only loose.
+fn TestReuse(t mut crucible.T) {
+	let d = fresh("reuse")
+	mut s = store.NewMem()
+	mut ids = []object.Id{}
+	mut text = ""
+	for i in 0..40 {
+		text = text + "line {i} of a file that grows a line at a time, so each version deltas well against the last\n"
+		let id = s.PutRaw(object.Kind.Blob, text) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	mut p = Write(mut s, ids, d + "/pack") catch e {
+		t.Error("write: {e}")
+		return
+	}
+	t.True("the pack has deltas", p.Deltas() > 0)
+	let lone = s.PutRaw(object.Kind.Blob, "only loose\n") catch _ {
+		object.NoId
+	}
+	mut packs = []Pack{p}
+	let cases = [][]object.Id{ids, ids[30:], []object.Id{ids[5], lone}}
+	for k in 0..len(cases) {
+		let data = Reuse(mut s, mut packs, cases[k]) catch e {
+			t.Error("reuse {k}: {e}")
+			return
+		}
+		mut m = store.NewMem()
+		let got = Unpack(data, mut m, 1 << 20) catch e {
+			t.Error("unpack {k}: {e}")
+			return
+		}
+		crucible.Equal(mut t, "objects ({k})", len(got), len(cases[k]))
+		for id in cases[k] {
+			let (_, want) = s.GetRaw(id) catch _ {
+				return
+			}
+			let (_, have) = m.GetRaw(id) catch _ {
+				t.Error("{id.Hex()} missing ({k})")
+				return
+			}
+			t.True("content ({k})", have == want)
+		}
+	}
+	quarry.RemoveAll(d) catch _ {
+	}
+}

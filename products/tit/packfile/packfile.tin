@@ -350,3 +350,34 @@ fn (p mut Pack) Verify() ! {
 		}
 	}
 }
+
+// entry is the stored form of the object at position pos: its entry type, its size, the offset of its base (an
+// offset delta) or its base's id (a ref delta), and its compressed bytes, as they are in the pack.
+fn (p mut Pack) entry(pos i64) !(i64, i64, i64, str, str) {
+	try p.load()
+	let off = p.offs[pos]
+	let t = i64(p.data[off])
+	let (size, a) = try p.uvarint(off + 1)
+	mut at = a
+	mut baseOff = -1
+	mut baseId = ""
+	if t == typeOfsDelta {
+		let (dist, b) = try p.uvarint(at)
+		baseOff = off - dist
+		if dist <= 0 || baseOff < 20 {
+			fail fault.Wrap(ErrBadPack, "a delta at {off} against no earlier entry")
+		}
+		at = b
+	} else if t == typeRefDelta {
+		if at + 32 > len(p.data) - 32 {
+			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+		}
+		baseId = p.data[at:at + 32]
+		at += 32
+	}
+	let (clen, c) = try p.uvarint(at)
+	if c + clen > len(p.data) - 32 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	return t, size, baseOff, baseId, p.data[c:c + clen]
+}
