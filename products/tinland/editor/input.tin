@@ -8,9 +8,22 @@ import "twine"
 
 // mouseTo moves the caret to the character cell at (x, y).
 fn (ed mut Editor) mouseTo(x f64, y f64, extend bool) {
-	mut row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
+	mut row = 0
+	mut seg = 0
 	if y < 0.0 {
-		row = ed.prevVisible(ed.Scroll)
+		if wrapOn {
+			let (r, s) = ed.prevRow(ed.Scroll, ed.ScrollSeg)
+			row = r
+			seg = s
+		} else {
+			row = ed.prevVisible(ed.Scroll)
+		}
+	} else if wrapOn {
+		let (r, s) = ed.rowAt(i64(y / ed.LineH))
+		row = r
+		seg = s
+	} else {
+		row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
 	}
 	if row < 0 {
 		row = 0
@@ -18,7 +31,14 @@ fn (ed mut Editor) mouseTo(x f64, y f64, extend bool) {
 	if row >= len(ed.Buf.Lines) {
 		row = len(ed.Buf.Lines) - 1
 	}
-	mut dcol = ed.HScroll + i64((x - ed.gutterW()) / ed.CharW + 0.5)
+	mut base = ed.HScroll
+	if wrapOn {
+		base = seg * ed.cols()
+	}
+	mut dcol = base + i64((x - ed.gutterW()) / ed.CharW + 0.5)
+	if wrapOn && dcol >= base + ed.cols() {
+		dcol = base + ed.cols() - 1
+	}
 	if dcol < 0 {
 		dcol = 0
 	}
@@ -107,7 +127,9 @@ fn (ed mut Editor) Wheel(dx f64, dy f64) {
 	let lines = i64(ed.acc / ed.LineH)
 	if lines != 0 {
 		ed.acc -= f64(lines) * ed.LineH
-		if lines > 0 {
+		if wrapOn {
+			ed.scrollRows(0 - lines)
+		} else if lines > 0 {
 			ed.Scroll = ed.shownBefore(ed.Scroll, lines)
 		} else {
 			ed.Scroll = ed.shownAfter(ed.Scroll, 0 - lines)

@@ -174,7 +174,13 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 	let pad = (lh - render.LineHeight(render.FontCode)) / 2.0
 	mut n = 0
 	mut row = ed.Scroll
+	mut seg = ed.ScrollSeg
+	if !wrapOn {
+		seg = 0
+	}
 	for n <= rows && row < len(b.Lines) {
+		let hs = ed.HScroll + seg * ed.cols()
+		let first = seg == 0
 		let line = b.Lines[row]
 		let top = y + ed.rowTop(n)
 		mut state = 0
@@ -195,9 +201,10 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 			if row == sel1.Row {
 				to = textedit.DisplayCol(line, sel1.Col, 4)
 			}
-			let x0 = textX + f64(from - ed.HScroll) * ed.CharW
-			let x1 = textX + f64(to - ed.HScroll) * ed.CharW
-			if x1 > x0 {
+			let (f2, t2, inRow) = ed.clampSpan(from, to, hs)
+			let x0 = textX + f64(f2 - hs) * ed.CharW
+			let x1 = textX + f64(t2 - hs) * ed.CharW
+			if inRow && x1 > x0 {
 				render.Fill(mut scene, x0, top, x1 - x0, lh, th.Selection)
 			}
 		}
@@ -212,13 +219,19 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 				}
 				let c0 = textedit.DisplayCol(line, from + at, 4)
 				let c1 = textedit.DisplayCol(line, from + at + len(needle), 4)
-				render.Fill(mut scene, textX + f64(c0 - ed.HScroll) * ed.CharW, top, f64(c1 - c0) * ed.CharW, lh, th.Match)
+				let (m0, m1, inRow) = ed.clampSpan(c0, c1, hs)
+				if inRow {
+					render.Fill(mut scene, textX + f64(m0 - hs) * ed.CharW, top, f64(m1 - m0) * ed.CharW, lh, th.Match)
+				}
 				from = from + at + len(needle)
 			}
 		}
 		// the text, in runs of one syntax class
-		mut i = ed.HScroll
-		let last = ed.HScroll + ed.cols() + 2
+		mut i = hs
+		mut last = hs + ed.cols() + 2
+		if wrapOn {
+			last = hs + ed.cols()
+		}
 		for i < len(cells) && i < last {
 			mut j = i + 1
 			for j < len(cells) && j < last && cells[j].kind == cells[i].kind {
@@ -232,12 +245,12 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 					for m < j && cells[m].ascii() {
 						m += 1
 					}
-					render.Pen(mut scene, render.FontCode, textX + f64(k - ed.HScroll) * ed.CharW, top + pad, textOf(cells, k, m), color)
+					render.Pen(mut scene, render.FontCode, textX + f64(k - hs) * ed.CharW, top + pad, textOf(cells, k, m), color)
 				} else if len(cells[k].text) == 0 {
 					m = k + 1
 				} else {
 					m = k + 1
-					render.Pen(mut scene, render.FontCode, textX + f64(k - ed.HScroll) * ed.CharW, top + pad, cells[k].text, color)
+					render.Pen(mut scene, render.FontCode, textX + f64(k - hs) * ed.CharW, top + pad, cells[k].text, color)
 				}
 				k = m
 			}
@@ -250,13 +263,13 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 				let ch = line[k]
 				if ch == '\t' {
 					let stop = 4 - col % 4
-					if col >= ed.HScroll && col < last {
-						render.Pen(mut scene, render.FontCode, textX + f64(col - ed.HScroll) * ed.CharW, top + pad, "\u2192", th.Gutter)
+					if col >= hs && col < last {
+						render.Pen(mut scene, render.FontCode, textX + f64(col - hs) * ed.CharW, top + pad, "\u2192", th.Gutter)
 					}
 					col += stop
 				} else if ch == ' ' {
-					if col >= ed.HScroll && col < last {
-						render.Pen(mut scene, render.FontCode, textX + f64(col - ed.HScroll) * ed.CharW, top + pad, "\u00b7", th.Gutter)
+					if col >= hs && col < last {
+						render.Pen(mut scene, render.FontCode, textX + f64(col - hs) * ed.CharW, top + pad, "\u00b7", th.Gutter)
 					}
 					col += 1
 				} else if ch < 128 || ch >= 192 {
@@ -265,7 +278,7 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 			}
 		}
 		// errors on this line: a bar in the gutter and a line under the offending text
-		if ed.diagAt(row) >= 0 {
+		if ed.diagAt(row) >= 0 && first {
 			render.Fill(mut scene, x, top, 3.0, lh, th.Error)
 			for d in ed.Diags {
 				if d.Line == row + 1 {
@@ -277,12 +290,18 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 					if to <= from {
 						to = from + 1
 					}
-					render.Fill(mut scene, textX + f64(from - ed.HScroll) * ed.CharW, top + lh - 2.0, f64(to - from) * ed.CharW, 1.5, th.Error)
+					let (d0, d1, inRow) = ed.clampSpan(from, to, hs)
+					if inRow {
+						render.Fill(mut scene, textX + f64(d0 - hs) * ed.CharW, top + lh - 2.0, f64(d1 - d0) * ed.CharW, 1.5, th.Error)
+					}
 				}
 			}
 		}
 		// what git says about this line: a bar in the gutter's edge
-		let mark = ed.markAt(row)
+		mut mark = ed.markAt(row)
+		if !first {
+			mark = 0
+		}
 		if mark == 1 {
 			render.Fill(mut scene, x + 2.0, top, 3.0, lh, ui.Hex(0x8fd1b0))
 		} else if mark == 2 {
@@ -297,9 +316,11 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 		if row == b.Row {
 			numColor = th.GutterActive
 		}
-		render.Pen(mut scene, render.FontCode, lx, top + pad, label, numColor)
+		if first {
+			render.Pen(mut scene, render.FontCode, lx, top + pad, label, numColor)
+		}
 		// the fold arrow: open (down) on a line that starts a block, closed (right) on a folded one, and an ellipsis after its text
-		if ed.foldable(row) {
+		if ed.foldable(row) && first {
 			let folded = ed.foldAt(row) >= 0
 			mut arrow = "\u25be"
 			if folded {
@@ -307,18 +328,21 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 			}
 			render.Pen(mut scene, render.FontCode, x + gutter - ed.CharW * 1.4, top + pad, arrow, th.Gutter)
 			if folded {
-				let ex = textX + f64(foldCols(line) - ed.HScroll + 1) * ed.CharW
+				let ex = textX + f64(foldCols(line) - hs + 1) * ed.CharW
 				render.FillRound(mut scene, ex, top + lh * 0.2, ed.CharW * 3.0, lh * 0.6, 3.0, th.Selection)
 				render.Pen(mut scene, render.FontCode, ex + ed.CharW * 0.5, top + pad, "\u2026", th.Gutter)
 			}
 		}
-		row = ed.nextVisible(row)
+		let (nr, ns) = ed.nextRowIn(row, seg)
+		row = nr
+		seg = ns
 		n += 1
 	}
 	// the caret: a bar between two characters, blinking
 	if ed.Blink && ed.Mode == modeEdit {
-		let cx = textX + f64(textedit.DisplayCol(b.Lines[b.Row], b.Col, 4) - ed.HScroll) * ed.CharW
-		let cn = ed.dispRow(b.Row)
+		let cdc = textedit.DisplayCol(b.Lines[b.Row], b.Col, 4)
+		let cx = textX + f64(cdc - ed.baseOf(cdc)) * ed.CharW
+		let cn = ed.visRow(b.Row, cdc)
 		if cn >= 0 && cn <= rows {
 			render.Fill(mut scene, cx, y + ed.rowTop(cn), 1.5, lh, th.Cursor)
 		}
@@ -331,9 +355,10 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 	}
 	// the other carets
 	for p in ed.Extra {
-		let en = ed.dispRow(p.Row)
+		let edc = textedit.DisplayCol(b.Lines[p.Row], p.Col, 4)
+		let en = ed.visRow(p.Row, edc)
 		if en >= 0 && en <= rows && p.Row < len(b.Lines) {
-			let ex = textX + f64(textedit.DisplayCol(b.Lines[p.Row], p.Col, 4) - ed.HScroll) * ed.CharW
+			let ex = textX + f64(edc - ed.baseOf(edc)) * ed.CharW
 			render.Fill(mut scene, ex, y + ed.rowTop(en), 1.5, lh, th.Cursor)
 		}
 	}
@@ -442,8 +467,9 @@ fn (ed Editor) popups(th theme.Theme, x f64, y f64, w f64, h f64, scene mut meta
 	}
 	widest = min(widest, 100)
 	let b = ed.Buf
-	let cn = ed.dispRow(b.Row)
-	let cx = x + ed.gutterW() + f64(textedit.DisplayCol(b.Lines[b.Row], b.Col, 4) - ed.HScroll) * ed.CharW
+	let pdc = textedit.DisplayCol(b.Lines[b.Row], b.Col, 4)
+	let cn = ed.visRow(b.Row, pdc)
+	let cx = x + ed.gutterW() + f64(pdc - ed.baseOf(pdc)) * ed.CharW
 	let boxW = f64(widest + 2) * ed.CharW
 	let boxH = f64(len(lines)) * ed.LineH + 8.0
 	mut px = cx
@@ -529,13 +555,13 @@ fn (ed Editor) markAt(row i64) i64 {
 
 // markCell outlines the character at byte col of line row.
 fn (ed Editor) markCell(th theme.Theme, textX f64, y f64, row i64, col i64, scene mut metal.Scene) {
-	let n = ed.dispRow(row)
+	let line = ed.Buf.Lines[row]
+	let c0 = textedit.DisplayCol(line, col, 4)
+	let n = ed.visRow(row, c0)
 	if n < 0 || n > ed.rows() {
 		return
 	}
-	let line = ed.Buf.Lines[row]
-	let c0 = textedit.DisplayCol(line, col, 4)
-	render.Stroke(mut scene, textX + f64(c0 - ed.HScroll) * ed.CharW, y + ed.rowTop(n), ed.CharW, ed.LineH, 2.0, 1.0, th.Muted)
+	render.Stroke(mut scene, textX + f64(c0 - ed.baseOf(c0)) * ed.CharW, y + ed.rowTop(n), ed.CharW, ed.LineH, 2.0, 1.0, th.Muted)
 }
 
 fn opener(c u8) bool {

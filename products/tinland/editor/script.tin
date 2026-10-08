@@ -84,6 +84,7 @@ fn (ed Editor) dump() {
 //   open:PATH        loads a file
 //   fold, unfold, unfoldall  fold the block at the caret, open the fold there, open all
 //   shown            prints the folds' count and the lines on screen
+//   wrap             toggles word wrap (prints the new state); rowof prints the caret's row on the screen
 //   whitespace       toggles the whitespace marks (prints the new state)
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
@@ -202,6 +203,12 @@ fn RunScript(ed mut Editor, script str) {
 				r = ed.nextVisible(r)
 			}
 			say.Line("shown:", len(ed.Folds), twine.Join(shown, "|"), "row", ed.Buf.Row)
+		} else if step == "wrap" {
+			say.Line("wrap:", ed.ToggleWrapView())
+		} else if step == "rowof" {
+			// where the caret is on the screen: its row from the top and its column in that row
+			let dc = textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4)
+			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
 		} else if twine.HasPrefix(step, "snap:") {

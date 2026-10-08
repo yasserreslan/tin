@@ -301,6 +301,9 @@ fn foldCols(line str) i64 {
 
 // moveVertical moves the caret one line up (-1) or down (1), over the lines a fold hides.
 fn (ed mut Editor) moveVertical(dir i64, shift bool) {
+	if wrapOn && ed.moveWrapped(dir, shift) {
+		return
+	}
 	if len(ed.Folds) > 0 {
 		mut target = ed.nextVisible(ed.Buf.Row)
 		if dir < 0 {
