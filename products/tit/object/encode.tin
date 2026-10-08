@@ -2,6 +2,7 @@ package object
 
 import "fault"
 import "seal"
+import "twine"
 
 // The canonical encoding (design/tit.md section 3): Body writes it, Decode reads it back and rejects every other
 // form, so equal content always has one encoding and one id.
@@ -312,11 +313,17 @@ fn commitHeaders(c CommitData) !str {
 	for h in c.GitHeaders {
 		let (name, value) = try checkGitHeader(h)
 		appendStr(mut out, "git-{name} ")
-		for i in 0..len(value) {
-			out = append(out, value[i])
-			if value[i] == '\n' {
-				out = append(out, ' ')
+		// each line of the value, the ones after the first continued with a space
+		mut from = 0
+		for {
+			let nl = indexFrom(value, from, '\n')
+			if nl < 0 {
+				appendStr(mut out, value[from:])
+				break
 			}
+			appendStr(mut out, value[from:nl + 1])
+			out = append(out, ' ')
+			from = nl + 1
 		}
 		out = append(out, '\n')
 	}
@@ -449,13 +456,14 @@ fn decodeCommit(body str) !CommitData {
 		k += 1
 	}
 	for k < len(ls) && len(ls[k]) > 4 && ls[k][0:4] == "git-" {
-		mut value = ls[k][4:]
+		// a header's continuation lines joined once (a signature has dozens: adding them one by one was quadratic)
+		mut parts = []str{ls[k][4:]}
 		k += 1
 		for k < len(ls) && len(ls[k]) > 0 && ls[k][0] == ' ' {
-			value = value + "\n" + ls[k][1:]
+			parts = append(parts, ls[k][1:])
 			k += 1
 		}
-		c.GitHeaders = append(c.GitHeaders, value)
+		c.GitHeaders = append(c.GitHeaders, twine.Join(parts, "\n"))
 	}
 	if k < len(ls) {
 		let sig = field(ls[k], "signature")
@@ -551,9 +559,7 @@ fn indexFrom(s str, from i64, c u8) i64 {
 }
 
 fn appendStr(out mut []u8, s str) {
-	for i in 0..len(s) {
-		out = append(out, s[i])
-	}
+	out = append(out, []u8(s)...)
 }
 
 // parseDecimal reads a non-negative decimal with no sign and no leading zero.
