@@ -1,0 +1,54 @@
+package main
+
+import "mint"
+import "quarry"
+import "say"
+import "suffixarray"
+import "twine"
+
+fn unhex(s str) []u8 {
+	if s == "-" { return []u8{} }
+	mut out = []u8{}
+	mut i = i64(0)
+	for i < len(s) {
+		out = append(out, u8(hexval(s[i])*16+hexval(s[i+1])))
+		i += 2
+	}
+	return out
+}
+
+fn hexval(c u8) i64 {
+	if c >= '0' && c <= '9' { return i64(c-'0') }
+	if c >= 'a' && c <= 'f' { return i64(c-'a')+10 }
+	return i64(c-'A')+10
+}
+
+fn show(xs []i64) str {
+	mut out = []str{}
+	for x in xs { out = append(out, mint.Itoa(x)) }
+	return "[" + twine.Join(out, " ") + "]"
+}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= len(body) {
+		if i < len(body) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		if len(line) == 0 { continue }
+		let fields = twine.Split(line, " ")
+		let x = suffixarray.New(unhex(fields[0]))
+		let pattern = unhex(fields[1])
+		let n = mint.Atoi(fields[2]) catch _ { -1 }
+		say.Line(show(x.Lookup(pattern, n)) + "|" + show(x.FindAllIndex(pattern)))
+	}
+}

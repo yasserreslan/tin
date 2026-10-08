@@ -84,6 +84,8 @@ jobs:
         run: sh tools/ci/tin.sh iofs_check
       - name: CRC-64 and LZW against Go's hash/crc64 and compress/lzw (a generated corpus)
         run: sh tools/ci/tin.sh hash_check
+      - name: Suffix array postings against Go's index/suffixarray (generated text and pattern corpus)
+        run: sh tools/ci/tin.sh suffixarray_check
       - name: bzip2 against Go's compress/bzip2 (libbzip2 streams, cut, flipped and back to back)
         run: sh tools/ci/tin.sh bzip2_check
       - name: UTF-16 against Go's unicode/utf16 (a generated rune corpus)

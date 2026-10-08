@@ -1,0 +1,91 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+const SEED = 914
+
+fn hex(b []u8) str {
+	if len(b) == 0 { return "-" }
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut out = []str{}
+	let fixed = []str{"", "a", "aaaa", "ababababab", "banana", "mississippi", "the quick brown fox"}
+	for text in fixed {
+		let data = []u8(text)
+		let patterns = []str{"", text, "a", "aa", "ab", "aba", "na", "z", "issi"}
+		for pattern in patterns {
+			for n in []i64{-1, 0, 1, 3, 20} {
+				out = append(out, hex(data) + " " + hex([]u8(pattern)) + " " + mint.Itoa(n))
+			}
+		}
+	}
+	for ix in 0..250 {
+		let alphabet = []u8{'a', 'b', 'c', 'd'}
+		mut data = []u8{}
+		for k in 0..rng.Range(0, 90) {
+			data = append(data, alphabet[rng.Range(0, len(alphabet))])
+		}
+		mut patterns = [][]u8{}
+		patterns = append(patterns, []u8{})
+		patterns = append(patterns, data)
+		for k in 0..8 {
+			mut p = []u8{}
+			for j in 0..rng.Range(1, 8) {
+				p = append(p, alphabet[rng.Range(0, len(alphabet))])
+			}
+			patterns = append(patterns, p)
+		}
+		for pattern in patterns {
+			let limits = []i64{-1, 0, 1, 4}
+			for n in limits {
+				out = append(out, hex(data) + " " + hex(pattern) + " " + mint.Itoa(n))
+			}
+		}
+	}
+	return out
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 300, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let dir = ci.Join(ci.Root(), "bin/ci/suffixarray")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "suffixarray-")
+	let tin = ci.Join(work, "suffixarray-tin")
+	ci.BuildTin("tools/ci/fixtures/suffixarray.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "suffixarray-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/suffixarray"}, ci.Root(), 300), "go build suffixarray")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "suffixarray: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("case " + mint.Itoa(i+1) + ": Go " + want[i] + " Tin " + got[i])
+			bad += 1
+			if bad == 8 { break }
+		}
+	}
+	ci.Check(bad == 0, "suffixarray: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " outputs differ")
+	ci.Remove(work)
+	ci.Pass("suffixarray: " + mint.Itoa(len(want)) + " generated queries match Go's index/suffixarray")
+}
