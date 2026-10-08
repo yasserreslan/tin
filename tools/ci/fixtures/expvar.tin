@@ -1,0 +1,87 @@
+package main
+
+// The expvar twin, Tin side (#923): publishes the variables that bench/ref/expvar publishes with
+// Go's expvar, and serves them through an anvil server on PORT at /debug/vars. Every GET /hit adds
+// one to requests, so the check can compare the counts after a known number of requests.
+
+import "anvil"
+import "atomic"
+import "expvar"
+import "gauge"
+import "quarry"
+import "say"
+
+// requests counts GET /hit requests; it is made once, before the cores start.
+shared let requests = expvar.NewInt("requests")
+
+// readyFlag is 1 once register has set it: the Func published as "ready" reads it at each read.
+shared let readyFlag = atomic.NewInt(0)
+
+fn main() {
+	register()
+	let r = anvil.NewRouter()
+	r.Get("/hit", hit)
+	r.Get("/debug/vars", expvar.Handler)
+	say.Line("server:", r.Serve(":" + quarry.Getenv("PORT")))
+}
+
+// hit counts one request.
+fn hit(q anvil.Req, w mut anvil.Out) {
+	requests.Add(1)
+	w.Text("ok")
+}
+
+// register publishes the variables that bench/ref/expvar publishes, with the same values.
+fn register() {
+	let errors = expvar.NewInt("errors")
+	errors.Set(-7)
+	expvar.Publish("errors_alias", errors)
+	let wrap = expvar.NewInt("wrap")
+	wrap.Set(9223372036854775807)
+	wrap.Add(1)
+
+	let ratio = expvar.NewFloat("ratio")
+	ratio.Set(0.1)
+	let load = expvar.NewFloat("load")
+	load.Add(0.5)
+	load.Add(0.5)
+	load.Add(0.5)
+	expvar.NewFloat("big").Set(1e21)
+	expvar.NewFloat("tiny").Set(0.00000015)
+	expvar.NewFloat("inf").Set(gauge.Inf(1))
+	expvar.NewFloat("nan").Set(gauge.NaN())
+
+	let build = expvar.NewString("build")
+	build.Set("tin \"1\"\n\t<&>  é 日本 \x01 \\ end")
+	expvar.NewString("invalid").Set("\xff\xfe ok")
+	expvar.NewString("empty").Set("")
+
+	// Go's expvar has no Bool: a flag is a Func. The Func for "ready" reads readyFlag when it is
+	// served, so the value is the one set after publishing.
+	expvar.Publish("ready", expvar.Func(fn() bool { return readyFlag.Load() != 0 }))
+	readyFlag.Store(1)
+	expvar.Publish("flag", expvar.Func(fn() bool { return false }))
+	expvar.Publish("hits", expvar.Func(fn() i64 { return requests.Value() }))
+	expvar.Publish("label", expvar.Func(fn() str { return "x<y & \"z\"\x08\x0c" }))
+	expvar.Publish("scale", expvar.Func(fn() f64 { return 1234567.5 }))
+	expvar.Publish("gap", expvar.Func(fn() f64 { return gauge.NaN() }))
+
+	let h = expvar.NewMap("http")
+	h.Add("ok", 120)
+	h.Add("err", 3)
+	h.AddFloat("latency", 0.25)
+	h.AddFloat("latency", 0.5)
+	h.SetString("node", "a-1")
+	h.Set("up", expvar.Func(fn() bool { return true }))
+	h.Set("requests", requests)
+	h.Add("err", 1)
+
+	expvar.NewMap("nomap")
+	let gone = expvar.NewMap("gone")
+	gone.Add("x", 1)
+	gone.Delete("x")
+	let reset = expvar.NewMap("reset")
+	reset.Add("a", 1)
+	reset.Init()
+	reset.Add("b", 2)
+}

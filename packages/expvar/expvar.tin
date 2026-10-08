@@ -1,0 +1,706 @@
+// Package expvar publishes named variables that a running program can read back, as Go's expvar
+// does: integers, floats, strings, flags and maps of them, plus computed values (Func) and
+// variables published under a second name (Publish). The registry is process-wide, so a variable
+// made on one core is seen by every core. Integer and float updates are atomic; the lists and
+// string values are changed under a short lock. Handler serves the registry as Go's JSON at
+// /debug/vars.
+//
+//	let requests = expvar.NewInt("requests")   // made before the cores start, or in a shared let
+//	requests.Add(1)
+//	let r = anvil.NewRouter()
+//	r.Get("/debug/vars", expvar.Handler)
+//
+// Nothing is freed while a handle may still use it (there is no collector): see README.md.
+package expvar
+
+import "anvil"
+import "argo"
+import "atomic"
+import "gauge"
+import "mint"
+import "sift"
+
+const kindInt = 1
+const kindFloat = 2
+const kindString = 3
+const kindBool = 4
+const kindMap = 5
+const kindFunc = 6
+const hexDigits = "0123456789abcdef"
+
+// regLock guards the registry's lists and the string values; the atomics below need no lock.
+shared let regLock = atomic.NewInt(0)
+
+// regTop is the first entry of the registry, 0 while it is empty.
+shared let regTop = atomic.NewInt(0)
+
+// Var is a published variable: what Get returns and Map.Set takes. Only this package's types
+// implement it.
+shape Var {
+	String() str
+	ref() i64
+}
+
+// KeyValue is one variable of the registry or of a map, as Do passes it.
+type KeyValue struct {
+	Key   str
+	Value dyn Var
+}
+
+// Int is an integer variable; the handle is a pointer to its node, so copies share it.
+type Int struct {
+	n i64
+}
+
+// Float is a float variable; the handle is a pointer to its node, so copies share it.
+type Float struct {
+	n i64
+}
+
+// String is a string variable; the handle is a pointer to its node, so copies share it.
+type String struct {
+	n i64
+}
+
+// Bool is a flag variable; the handle is a pointer to its node, so copies share it. Go's
+// expvar has no Bool (it publishes a flag with Func over a variable that is read, not shared);
+// this package adds it because a flag that several cores set and read needs an atomic word.
+type Bool struct {
+	n i64
+}
+
+// Map is a map of variables; the handle is a pointer to its node, so copies share it.
+type Map struct {
+	n i64
+}
+
+// funcVar is a computed variable made by Func; the handle is a pointer to its node, whose word 1
+// holds the closure that computes and encodes the value at each read.
+type funcVar struct {
+	n i64
+}
+
+// entryRef is one entry of a list, copied out under the lock.
+type entryRef struct {
+	key str
+	v   i64
+}
+
+// NewInt publishes a new integer variable named name, starting at 0. It panics if the name is
+// taken, as Go's Publish does.
+fn NewInt(name str) Int {
+	return Int{n: publish(name, kindInt)}
+}
+
+// NewFloat publishes a new float variable named name, starting at 0. It panics if the name is
+// taken.
+fn NewFloat(name str) Float {
+	return Float{n: publish(name, kindFloat)}
+}
+
+// NewString publishes a new string variable named name, starting as "". It panics if the name
+// is taken.
+fn NewString(name str) String {
+	return String{n: publish(name, kindString)}
+}
+
+// NewBool publishes a new flag named name, starting as false. It panics if the name is taken.
+fn NewBool(name str) Bool {
+	return Bool{n: publish(name, kindBool)}
+}
+
+// NewMap publishes a new, empty map named name. It panics if the name is taken.
+fn NewMap(name str) Map {
+	return Map{n: publish(name, kindMap)}
+}
+
+// Publish publishes v under name, as Go's Publish does. v is shared, not copied: a variable
+// published under two names is one variable, and a later change shows under both. It panics if
+// the name is taken.
+fn Publish(name str, v dyn Var) {
+	publishRef(name, v.ref())
+}
+
+// Func returns a variable whose value is f's result, computed and encoded as JSON at each read,
+// as Go's expvar.Func does: f runs again whenever the variable is served or read. Go's any has no
+// Tin equivalent, so T is bool, i64, f64 or str. A NaN or an infinity has no JSON form and reads
+// as an empty value, as in Go. Publish the result, or Set it in a Map.
+fn Func[T bool | i64 | f64 | str](f fn() T) dyn Var {
+	let render = fn() str {
+		mut buf = []u8{}
+		argo.Put(mut buf, f())
+		let text = str(buf)
+		if text == "null" {
+			return ""
+		}
+		return goJSON(text)
+	}
+	let n = newVar(kindFunc)
+	n[1] = cast(i64, keep(render))
+	return funcVar{n: n}
+}
+
+// Get returns the variable published as name, or nil when there is none.
+fn Get(name str) ?dyn Var {
+	lock()
+	let e = find(regTop.Load(), name)
+	mut v = 0
+	if e != 0 {
+		v = e[2]
+	}
+	unlock()
+	if v == 0 {
+		return nil
+	}
+	return wrap(v)
+}
+
+// Do calls f for each published variable, in name order.
+fn Do(f fn(KeyValue)) {
+	for kv in topVars() {
+		f(kv)
+	}
+}
+
+// Handler serves every published variable as JSON in Go's format: one "name": value line per
+// variable, in name order, with the application/json content type.
+fn Handler(q anvil.Req, w mut anvil.Out) {
+	w.Type("application/json; charset=utf-8")
+	w.Text(render(topVars(), true))
+}
+
+// Add adds delta to the integer variable, wrapping on overflow as Go's expvar does.
+fn (v Int) Add(delta i64) {
+	__atomic_add(cell(v.n)+8, delta)
+}
+
+// Set stores value in the integer variable.
+fn (v Int) Set(value i64) {
+	__atomic_store(cell(v.n)+8, value)
+}
+
+// Value returns the integer variable's value.
+fn (v Int) Value() i64 {
+	return __atomic_load(cell(v.n) + 8)
+}
+
+// String returns the value in decimal, as Go's expvar writes it.
+fn (v Int) String() str {
+	return mint.FormatInt(v.Value(), 10)
+}
+
+fn (v Int) ref() i64 {
+	return cell(v.n)
+}
+
+// Add adds delta to the float variable; concurrent adds are not lost.
+fn (v Float) Add(delta f64) {
+	addFloat(cell(v.n)+8, delta)
+}
+
+// Set stores value in the float variable.
+fn (v Float) Set(value f64) {
+	__atomic_store(cell(v.n)+8, i64(gauge.F64bits(value)))
+}
+
+// Value returns the float variable's value.
+fn (v Float) Value() f64 {
+	return gauge.F64frombits(u64(__atomic_load(cell(v.n) + 8)))
+}
+
+// String returns the value as Go's expvar writes it: the shortest form that reads back exactly.
+fn (v Float) String() str {
+	return mint.FormatFloat(v.Value(), u8('g'), -1)
+}
+
+fn (v Float) ref() i64 {
+	return cell(v.n)
+}
+
+// Set stores value in the string variable. The value is copied, so the caller may change its own.
+fn (v String) Set(value str) {
+	storeString(cell(v.n), value)
+}
+
+// Value returns the string variable's value.
+fn (v String) Value() str {
+	return stringOf(cell(v.n))
+}
+
+// String returns the value quoted the way Go's expvar writes it (JSON escapes).
+fn (v String) String() str {
+	return quoteJSON(stringOf(cell(v.n)))
+}
+
+fn (v String) ref() i64 {
+	return cell(v.n)
+}
+
+// Set stores value in the flag.
+fn (v Bool) Set(value bool) {
+	mut bits = i64(0)
+	if value {
+		bits = 1
+	}
+	__atomic_store(cell(v.n)+8, bits)
+}
+
+// Value returns the flag.
+fn (v Bool) Value() bool {
+	return __atomic_load(cell(v.n)+8) != 0
+}
+
+// String returns "true" or "false".
+fn (v Bool) String() str {
+	if v.Value() {
+		return "true"
+	}
+	return "false"
+}
+
+fn (v Bool) ref() i64 {
+	return cell(v.n)
+}
+
+// String computes the value now and returns it as JSON.
+fn (v funcVar) String() str {
+	let render = cast(fn() str, v.n[1])
+	return render()
+}
+
+fn (v funcVar) ref() i64 {
+	return cell(v.n)
+}
+
+// Add adds delta to the integer under key, creating it at 0 when the key is new. A key that
+// holds another kind of variable is left alone, as in Go.
+fn (m Map) Add(key str, delta i64) {
+	let v = child(m, key, kindInt)
+	if v != 0 {
+		__atomic_add(v+8, delta)
+	}
+}
+
+// AddFloat adds delta to the float under key, creating it at 0 when the key is new. A key that
+// holds another kind of variable is left alone, as in Go.
+fn (m Map) AddFloat(key str, delta f64) {
+	let v = child(m, key, kindFloat)
+	if v != 0 {
+		addFloat(v+8, delta)
+	}
+}
+
+// Set stores av under key, replacing whatever the key held. av is shared, not copied: later
+// changes to it show in the map, as in Go.
+fn (m Map) Set(key str, av dyn Var) {
+	setVar(cell(m.n), key, av.ref())
+}
+
+// SetString stores a new string variable holding value under key. This package's helper: Go
+// makes such a value with new(String), which has no handle here.
+fn (m Map) SetString(key str, value str) {
+	let v = newVar(kindString)
+	storeString(v, value)
+	setVar(cell(m.n), key, v)
+}
+
+// SetBool stores a new flag holding value under key. This package's helper, as SetString.
+fn (m Map) SetBool(key str, value bool) {
+	let b = Bool{n: newVar(kindBool)}
+	b.Set(value)
+	setVar(cell(m.n), key, b.n)
+}
+
+// Get returns the variable under key, or nil when there is none.
+fn (m Map) Get(key str) ?dyn Var {
+	let root = cell(m.n)
+	lock()
+	let e = find(root[4], key)
+	mut v = 0
+	if e != 0 {
+		v = e[2]
+	}
+	unlock()
+	if v == 0 {
+		return nil
+	}
+	return wrap(v)
+}
+
+// Delete removes key from m. The variable stays valid for any handle that holds it.
+fn (m Map) Delete(key str) {
+	let root = cell(m.n)
+	lock()
+	mut prev = 0
+	mut e = root[4]
+	for e != 0 && cast(str, e[1]) != key {
+		prev = e
+		e = e[0]
+	}
+	if e != 0 {
+		if prev == 0 {
+			root[4] = e[0]
+		} else {
+			prev[0] = e[0]
+		}
+	}
+	unlock()
+	if e != 0 {
+		free(e)
+	}
+}
+
+// Init removes every key from m and returns m.
+fn (m Map) Init() Map {
+	let root = cell(m.n)
+	lock()
+	mut e = root[4]
+	root[4] = 0
+	unlock()
+	for e != 0 {
+		let next = e[0]
+		free(e)
+		e = next
+	}
+	return m
+}
+
+// Do calls f for each variable of m, in key order.
+fn (m Map) Do(f fn(KeyValue)) {
+	for kv in mapVars(cell(m.n)) {
+		f(kv)
+	}
+}
+
+// String returns m as Go's expvar writes it on one line: {"a": 1, "b": "x"}.
+fn (m Map) String() str {
+	return render(mapVars(cell(m.n)), false)
+}
+
+fn (m Map) ref() i64 {
+	return cell(m.n)
+}
+
+// cell returns the node of a variable, and panics for a zero handle (one not made by a New
+// function or a map helper).
+fn cell(n i64) i64 {
+	if n == 0 {
+		panic("expvar: a zero variable: make it with a New function or in a Map")
+	}
+	return n
+}
+
+// lock takes the registry lock, spinning while another core holds it. Nothing done under the lock
+// waits, so the holder always finishes.
+fn lock() {
+	for !regLock.CompareSwap(0, 1) {
+		__yield()
+	}
+}
+
+// unlock releases the registry lock.
+fn unlock() {
+	regLock.Store(0)
+}
+
+// newVar allocates a variable node of kind: word 0 kind, 1 value (integer, flag or float bits,
+// or a computed variable's closure), 2 string bytes, 3 string length, 4 the first entry of a map.
+fn newVar(kind i64) i64 {
+	let v = calloc(5, 8)
+	v[0] = kind
+	return v
+}
+
+// newEntry allocates a list entry for key: word 0 next, 1 key (a str kept for good), 2 variable.
+fn newEntry(key str, v i64) i64 {
+	let e = calloc(3, 8)
+	e[1] = cast(i64, keep(key))
+	e[2] = v
+	return e
+}
+
+// push returns a list with a new entry for key at its front.
+fn push(head i64, key str, v i64) i64 {
+	let e = newEntry(key, v)
+	e[0] = head
+	return e
+}
+
+// find returns the entry for key in the list at head, or 0. The caller holds the lock.
+fn find(head i64, key str) i64 {
+	mut e = head
+	for e != 0 && cast(str, e[1]) != key {
+		e = e[0]
+	}
+	return e
+}
+
+// publish makes a variable of kind under name in the registry and returns its node. It panics
+// if the name is taken.
+fn publish(name str, kind i64) i64 {
+	let v = newVar(kind)
+	publishRef(name, v)
+	return v
+}
+
+// publishRef adds the node v to the registry under name. It panics if the name is taken.
+fn publishRef(name str, v i64) {
+	lock()
+	let taken = find(regTop.Load(), name) != 0
+	if !taken {
+		regTop.Store(push(regTop.Load(), name, v))
+	}
+	unlock()
+	if taken {
+		panic("Reuse of exported var name: " + name)
+	}
+}
+
+// child returns the variable under key in map m. A new key gets a variable of kind. It returns
+// 0 when the key holds a variable of another kind.
+fn child(m Map, key str, kind i64) i64 {
+	let root = cell(m.n)
+	lock()
+	mut v = 0
+	let e = find(root[4], key)
+	if e == 0 {
+		v = newVar(kind)
+		root[4] = push(root[4], key, v)
+	} else {
+		v = e[2]
+	}
+	unlock()
+	if v[0] != kind {
+		return 0
+	}
+	return v
+}
+
+// setVar makes v the variable under key in the map whose node is root.
+fn setVar(root i64, key str, v i64) {
+	lock()
+	let e = find(root[4], key)
+	if e == 0 {
+		root[4] = push(root[4], key, v)
+	} else {
+		e[2] = v
+	}
+	unlock()
+}
+
+// addFloat adds delta to the float whose bits are at p, with a compare-and-swap loop.
+fn addFloat(p i64, delta f64) {
+	for {
+		let old = __atomic_load(p)
+		let next = i64(gauge.F64bits(gauge.F64frombits(u64(old)) + delta))
+		if __atomic_cas(p, old, next) == old {
+			return
+		}
+	}
+}
+
+// storeString replaces the bytes of the string variable v with a copy of value.
+fn storeString(v i64, value str) {
+	let n = len(value)
+	let fresh = malloc(n + 1)
+	memcpy(fresh, cast(i64, value)+8, n)
+	lock()
+	let old = v[2]
+	v[2] = fresh
+	v[3] = n
+	unlock()
+	if old != 0 {
+		free(old)
+	}
+}
+
+// stringOf returns a copy of the string variable v's value.
+fn stringOf(v i64) str {
+	lock()
+	mut s = ""
+	if v[3] > 0 {
+		s = rt_str_from_raw(v[2], v[3])
+	}
+	unlock()
+	return s
+}
+
+// wrap returns the handle of the variable node v, as a Var.
+fn wrap(v i64) dyn Var {
+	let k = v[0]
+	if k == kindInt {
+		return Int{n: v}
+	}
+	if k == kindFloat {
+		return Float{n: v}
+	}
+	if k == kindString {
+		return String{n: v}
+	}
+	if k == kindBool {
+		return Bool{n: v}
+	}
+	if k == kindFunc {
+		return funcVar{n: v}
+	}
+	return Map{n: v}
+}
+
+// topVars returns the registry's variables in name order.
+fn topVars() []KeyValue {
+	lock()
+	let refs = listOf(regTop.Load())
+	unlock()
+	return sortedVars(refs)
+}
+
+// mapVars returns the variables of the map whose node is root, in key order.
+fn mapVars(root i64) []KeyValue {
+	lock()
+	let refs = listOf(root[4])
+	unlock()
+	return sortedVars(refs)
+}
+
+// listOf copies the entries of a list. The caller holds the lock.
+fn listOf(head i64) []entryRef {
+	mut out = []entryRef{}
+	mut e = head
+	for e != 0 {
+		out = append(out, entryRef{key: cast(str, e[1]), v: e[2]})
+		e = e[0]
+	}
+	return out
+}
+
+// sortedVars wraps copied entries as KeyValues sorted by key.
+fn sortedVars(refs []entryRef) []KeyValue {
+	mut kvs = []KeyValue{}
+	for r in refs {
+		kvs = append(kvs, KeyValue{Key: r.key, Value: wrap(r.v)})
+	}
+	sift.SortFunc(mut kvs, byKey)
+	return kvs
+}
+
+// byKey orders two KeyValues by key, bytewise.
+fn byKey(a KeyValue, b KeyValue) i64 {
+	if a.Key < b.Key {
+		return -1
+	}
+	if a.Key > b.Key {
+		return 1
+	}
+	return 0
+}
+
+// render writes kvs as Go's expvar does: expanded (Handler's form, one entry per line) or on one
+// line, with ", " between entries.
+fn render(kvs []KeyValue, expand bool) str {
+	mut out = "{{"
+	if expand {
+		out += "\n"
+	}
+	for i, kv in kvs {
+		if i > 0 {
+			if expand {
+				out += ",\n"
+			} else {
+				out += ", "
+			}
+		}
+		out += quoteJSON(kv.Key) + ": " + kv.Value.String()
+	}
+	if expand {
+		out += "\n"
+	}
+	out += "}}"
+	if expand {
+		out += "\n"
+	}
+	return out
+}
+
+// quoteJSON quotes s as Go's expvar does: JSON escapes, \u escapes for control characters, <, >,
+// &, U+2028 and U+2029, and U+FFFD for invalid UTF-8.
+fn quoteJSON(s str) str {
+	mut out = []u8{}
+	out = append(out, u8('"'))
+	for c in s {
+		if c == '"' || c == '\\' {
+			out = append(out, u8('\\'))
+			out = append(out, u8(c))
+		} else if c == '\n' {
+			out = append(out, "\\n"...)
+		} else if c == '\r' {
+			out = append(out, "\\r"...)
+		} else if c == '\t' {
+			out = append(out, "\\t"...)
+		} else if c < 0x20 || c == '<' || c == '>' || c == '&' || c == 0x2028 || c == 0x2029 {
+			out = appendU(out, i64(c))
+		} else {
+			out = append(out, str(c)...)
+		}
+	}
+	out = append(out, u8('"'))
+	return str(out)
+}
+
+// appendU appends \u and the four lowercase hex digits of n, which is below 0x10000.
+fn appendU(out []u8, n i64) []u8 {
+	mut o = append(out, "\\u"...)
+	o = append(o, hexDigits[(n>>12)&15])
+	o = append(o, hexDigits[(n>>8)&15])
+	o = append(o, hexDigits[(n>>4)&15])
+	o = append(o, hexDigits[n&15])
+	return o
+}
+
+// goJSON rewrites JSON that argo.Put wrote into the form encoding/json writes, as Func's values
+// are: the bytes <, > and & in a string become \u003c, \u003e and \u0026, and the
+// escapes \u0008 and \u000c become \b and \f. argo writes numbers and booleans with none of
+// those bytes, so they pass unchanged.
+fn goJSON(s str) str {
+	mut out = []u8{}
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c == '\\' && i+1 < len(s) {
+			let short = shortEscape(s, i)
+			if short != 0 {
+				out = append(out, '\\')
+				out = append(out, short)
+				i += 6
+				continue
+			}
+			out = append(out, c, s[i+1])
+			i += 2
+			continue
+		}
+		if c == '<' {
+			out = append(out, "\\u003c"...)
+		} else if c == '>' {
+			out = append(out, "\\u003e"...)
+		} else if c == '&' {
+			out = append(out, "\\u0026"...)
+		} else {
+			out = append(out, c)
+		}
+		i += 1
+	}
+	return str(out)
+}
+
+// shortEscape returns b or f when s holds \u0008 or \u000c at byte i, and 0 otherwise.
+fn shortEscape(s str, i i64) u8 {
+	if i+5 >= len(s) || s[i+1] != 'u' || s[i+2] != '0' || s[i+3] != '0' || s[i+4] != '0' {
+		return 0
+	}
+	if s[i+5] == '8' {
+		return 'b'
+	}
+	if s[i+5] == 'c' {
+		return 'f'
+	}
+	return 0
+}

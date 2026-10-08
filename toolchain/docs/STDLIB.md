@@ -49,6 +49,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
 | [herald](#herald) | logging (log/slog) |
+| [expvar](#expvar) | published variables and their JSON handler (expvar) |
 | [crucible](#crucible) | testing helpers (testing) |
 | [constraints](#constraints) | named generic constraint shapes |
 | [policy](#policy) | with policies and slots (context values, retry/cache/trace middleware) |
@@ -2054,6 +2055,62 @@ Package herald writes leveled log lines, one write(2) per line so cores never in
 - `Info2(msg str, k str, v str)`: Info2 logs msg with one key/value pair.
 - `Info4(msg str, k1 str, v1 str, k2 str, v2 str)`: Info4 logs msg with two key/value pairs.
 - `Error2(msg str, k str, v str)`: Error2 logs msg with one key/value pair at error level.
+
+## expvar
+
+Package expvar publishes named variables that a running program can read back, as Go's expvar does: integers, floats, strings, flags and maps of them, plus computed values (Func) and variables published under a second name (Publish). The registry is process-wide, so a variable made on one core is seen by every core. Integer and float updates are atomic; the lists and string values are changed under a short lock. Handler serves the registry as Go's JSON at /debug/vars.
+
+```tin body
+let requests = expvar.NewInt("requests")   // made before the cores start, or in a shared let
+requests.Add(1)
+let r = anvil.NewRouter()
+r.Get("/debug/vars", expvar.Handler)
+```
+
+Nothing is freed while a handle may still use it (there is no collector): see README.md.
+
+- `shape Var`: Var is a published variable: what Get returns and Map.Set takes. Only this package's types implement it.
+- `type KeyValue struct`: KeyValue is one variable of the registry or of a map, as Do passes it.
+- `type Int struct`: Int is an integer variable; the handle is a pointer to its node, so copies share it.
+- `type Float struct`: Float is a float variable; the handle is a pointer to its node, so copies share it.
+- `type String struct`: String is a string variable; the handle is a pointer to its node, so copies share it.
+- `type Bool struct`: Bool is a flag variable; the handle is a pointer to its node, so copies share it. Go's expvar has no Bool (it publishes a flag with Func over a variable that is read, not shared); this package adds it because a flag that several cores set and read needs an atomic word.
+- `type Map struct`: Map is a map of variables; the handle is a pointer to its node, so copies share it.
+- `NewInt(name str) Int`: NewInt publishes a new integer variable named name, starting at 0. It panics if the name is taken, as Go's Publish does.
+- `NewFloat(name str) Float`: NewFloat publishes a new float variable named name, starting at 0. It panics if the name is taken.
+- `NewString(name str) String`: NewString publishes a new string variable named name, starting as "". It panics if the name is taken.
+- `NewBool(name str) Bool`: NewBool publishes a new flag named name, starting as false. It panics if the name is taken.
+- `NewMap(name str) Map`: NewMap publishes a new, empty map named name. It panics if the name is taken.
+- `Publish(name str, v dyn Var)`: Publish publishes v under name, as Go's Publish does. v is shared, not copied: a variable published under two names is one variable, and a later change shows under both. It panics if the name is taken.
+- `Func[T bool | i64 | f64 | str](f fn() T) dyn Var`: Func returns a variable whose value is f's result, computed and encoded as JSON at each read, as Go's expvar.Func does: f runs again whenever the variable is served or read. Go's any has no Tin equivalent, so T is bool, i64, f64 or str. A NaN or an infinity has no JSON form and reads as an empty value, as in Go. Publish the result, or Set it in a Map.
+- `Get(name str) ?dyn Var`: Get returns the variable published as name, or nil when there is none.
+- `Do(f fn(KeyValue))`: Do calls f for each published variable, in name order.
+- `Handler(q anvil.Req, w mut anvil.Out)`: Handler serves every published variable as JSON in Go's format: one "name": value line per variable, in name order, with the application/json content type.
+- `(v Int) Add(delta i64)`: Add adds delta to the integer variable, wrapping on overflow as Go's expvar does.
+- `(v Int) Set(value i64)`: Set stores value in the integer variable.
+- `(v Int) Value() i64`: Value returns the integer variable's value.
+- `(v Int) String() str`: String returns the value in decimal, as Go's expvar writes it.
+- `(v Float) Add(delta f64)`: Add adds delta to the float variable; concurrent adds are not lost.
+- `(v Float) Set(value f64)`: Set stores value in the float variable.
+- `(v Float) Value() f64`: Value returns the float variable's value.
+- `(v Float) String() str`: String returns the value as Go's expvar writes it: the shortest form that reads back exactly.
+- `(v String) Set(value str)`: Set stores value in the string variable. The value is copied, so the caller may change its own.
+- `(v String) Value() str`: Value returns the string variable's value.
+- `(v String) String() str`: String returns the value quoted the way Go's expvar writes it (JSON escapes).
+- `(v Bool) Set(value bool)`: Set stores value in the flag.
+- `(v Bool) Value() bool`: Value returns the flag.
+- `(v Bool) String() str`: String returns "true" or "false".
+- `(v funcVar) String() str`: String computes the value now and returns it as JSON.
+- `(m Map) Add(key str, delta i64)`: Add adds delta to the integer under key, creating it at 0 when the key is new. A key that holds another kind of variable is left alone, as in Go.
+- `(m Map) AddFloat(key str, delta f64)`: AddFloat adds delta to the float under key, creating it at 0 when the key is new. A key that holds another kind of variable is left alone, as in Go.
+- `(m Map) Set(key str, av dyn Var)`: Set stores av under key, replacing whatever the key held. av is shared, not copied: later changes to it show in the map, as in Go.
+- `(m Map) SetString(key str, value str)`: SetString stores a new string variable holding value under key. This package's helper: Go makes such a value with new(String), which has no handle here.
+- `(m Map) SetBool(key str, value bool)`: SetBool stores a new flag holding value under key. This package's helper, as SetString.
+- `(m Map) Get(key str) ?dyn Var`: Get returns the variable under key, or nil when there is none.
+- `(m Map) Delete(key str)`: Delete removes key from m. The variable stays valid for any handle that holds it.
+- `(m Map) Init() Map`: Init removes every key from m and returns m.
+- `(m Map) Do(f fn(KeyValue))`: Do calls f for each variable of m, in key order.
+- `(m Map) String() str`: String returns m as Go's expvar writes it on one line: {"a": 1, "b": "x"}.
 
 ## crucible
 
