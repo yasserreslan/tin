@@ -57,6 +57,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
+| [scan](#scan) | a scanner and tokenizer for UTF-8 text (text/scanner) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
 | [metal](#metal) | Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor |
 | [gpuwin](#gpuwin) | a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU |
@@ -2152,6 +2153,62 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `(d WordDecoder) DecodeHeader(v str) !str`: DecodeHeader decodes every encoded word in a header value, like Go's DecodeHeader: the plain text around the words is kept, the whitespace between two encoded words is dropped, and a word that cannot be decoded is kept as it was.
 - `type WordEncoder struct{}`: WordEncoder encodes header text as encoded words when it needs to be, like Go's WordEncoder.
 - `(e WordEncoder) EncodeWord(charset str, s str) str`: EncodeWord returns the text as an RFC 2047 encoded word when it has bytes that are not printable ASCII, and the text itself when it does not.
+
+## scan
+
+Package scan is a scanner and tokenizer for UTF-8 text, Go's text/scanner: it reads Go-style identifiers, numbers, char, string and raw string literals and comments, with Go's white space and position rules, for tokenizing source code, configuration files and small languages.
+
+```tin body
+mut s = scan.New("let x = 1.5 + y // the sum")
+s.Filename = "example"
+for {
+	let tok = s.Scan()
+	if tok == scan.EOF {
+		break
+	}
+	say.Line(s.Position().String(), scan.TokenString(tok), s.TokenText())
+}
+```
+
+The Scanner reads a whole str (a stream is read with io.ReadAll first), so a token's text is a slice of the source and positions are byte offsets into it. Scan returns a token kind (EOF, Ident, Int, Float, Char, String, RawString, Comment, all negative) or the rune itself for any other character. Mode selects the tokens recognized (GoTokens by default: comments are skipped), Whitespace the characters skipped, and SetIdentRune the identifier characters. Errors (a literal not terminated, a bad escape, invalid UTF-8, a NUL) do not stop the scan: they are counted in ErrorCount and the first thousand are kept with their positions, read with Errors and Err. Lines and columns are 1-based, a column counts characters, and a leading byte order mark is skipped; the Go twin (bench/ref/scan and tools/ci/scan_check.tin) checks every token, position and error against Go's.
+
+- `const EOF = -1`: EOF is the end of the source. The token kinds are negative, so a character Scan returns is never one.
+- `const Ident = -2`: Ident is an identifier.
+- `const Int = -3`: Int is an integer literal.
+- `const Float = -4`: Float is a floating-point literal.
+- `const Char = -5`: Char is a character literal.
+- `const String = -6`: String is an interpreted string literal.
+- `const RawString = -7`: RawString is a raw (backquoted) string literal.
+- `const Comment = -8`: Comment is a comment, returned when ScanComments is set without SkipComments.
+- `const ScanIdents = 4`: ScanIdents recognizes identifiers (the Mode bit 1 << -Ident).
+- `const ScanInts = 8`: ScanInts recognizes integer literals.
+- `const ScanFloats = 16`: ScanFloats recognizes floating-point literals, integers and hexadecimal floats included.
+- `const ScanChars = 32`: ScanChars recognizes character literals.
+- `const ScanStrings = 64`: ScanStrings recognizes interpreted string literals.
+- `const ScanRawStrings = 128`: ScanRawStrings recognizes raw string literals.
+- `const ScanComments = 256`: ScanComments recognizes comments.
+- `const SkipComments = 512`: SkipComments, with ScanComments, makes comments white space instead of Comment tokens.
+- `const GoTokens = ScanIdents | ScanFloats | ScanChars | ScanStrings | ScanRawStrings | ScanComments | SkipComments`: GoTokens is every Go literal token with comments skipped: the Mode Init sets.
+- `const GoWhitespace = 1<<9 | 1<<10 | 1<<13 | 1<<32`: GoWhitespace is the Whitespace Init sets: tab, newline, carriage return and space.
+- `type Position value struct`: Position is a place in the source: valid when Line > 0.
+- `(p Position) IsValid() bool`: IsValid reports whether the position is valid (Line > 0).
+- `(p Position) String() str`: String is "file:line:column", with "<input>" for an empty file name and no numbers when invalid.
+- `type Error value struct`: Error is one error the scanner met: where, as Go reports it, and what.
+- `(e Error) String() str`: String is "position: message", the line Go prints when no Error function is set.
+- `type Scanner struct`: Scanner reads the characters and tokens of a source text; make one with New.
+- `New(src str) Scanner`: New returns a Scanner over src, initialized as Init does.
+- `(s mut Scanner) Init(src str)`: Init restarts s on src: no errors, Mode GoTokens, Whitespace GoWhitespace and no token position; Filename and the identifier predicate stay.
+- `(s mut Scanner) SetIdentRune(f fn(i32, i64) bool)`: SetIdentRune makes f decide the characters of identifiers: f(ch, i) accepts ch as the i-th rune (from 0) of one. It must not accept white space characters.
+- `(s mut Scanner) ResetIdentRune()`: ResetIdentRune goes back to Go identifiers: a letter or '_', then letters, digits and '_'.
+- `(s mut Scanner) Next() i32`: Next reads and returns the next character (EOF at the end) and makes Position invalid; Pos is the position after it.
+- `(s mut Scanner) Peek() i32`: Peek returns the next character without advancing (EOF at the end).
+- `(s Scanner) Errors() []Error`: Errors returns the errors met since Init, at most the first thousand (ErrorCount counts them all).
+- `(s Scanner) Err() !`: Err fails with the first error ("position: message") when there was one.
+- `(s mut Scanner) Scan() i32`: Scan reads the next token or character and returns it: a token kind for a token Mode recognizes, EOF at the end, or else the character itself. Position is where it starts, TokenText its text.
+- `(s Scanner) Position() Position`: Position is where the token Scan last returned starts; Init and Next make it invalid.
+- `(s Scanner) Pos() Position`: Pos is the position just after the character or token Next or Scan last returned.
+- `(s Scanner) TokenText() str`: TokenText is the text of the token Scan last returned ("" after Next).
+- `TokenString(tok i32) str`: TokenString is a printable form of a token kind ("EOF", "Ident", ...) or character (Go-quoted).
 
 ## textedit
 
