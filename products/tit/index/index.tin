@@ -362,3 +362,10 @@ fn Add[S store.ObjectStore](idx mut Index, s mut S, root str, path str) ! {
 	let id = try s.PutRaw(object.Kind.Blob, body)
 	idx.Set(Entry{Path: path, Hash: id.Bytes(), Mode: ModeOf(info), Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device})
 }
+
+// AddStat stages a file whose blob is already stored (as bytes, hash), reading only its stat: for checkout, which has
+// just written it.
+fn AddStat(idx mut Index, root str, path str, hash str, mode object.Mode) ! {
+	let info = try quarry.Lstat(root + "/" + path)
+	idx.Set(Entry{Path: path, Hash: hash, Mode: mode, Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device})
+}

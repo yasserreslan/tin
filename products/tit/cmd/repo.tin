@@ -1,0 +1,123 @@
+package cmd
+
+import "../change"
+import "../identity"
+import "../index"
+import "../object"
+import "../packfile"
+import "../revwalk"
+import "../store"
+import "../worktree"
+import "fault"
+import "quarry"
+import "twine"
+
+// Opening a repository: the workspace around the current directory (or -C), its objects (loose files and every pack,
+// one layered store), and what resolving revisions needs.
+
+// Repo is an open repository.
+type Repo struct {
+	Ws    worktree.Workspace
+	Store store.Layered
+	ids   objects
+}
+
+// objects finds ids by prefix in the loose store and the packs.
+type objects struct {
+	loose store.Loose
+	packs []packfile.Pack
+}
+
+// Match is every object whose id starts with the hex prefix.
+fn (m objects) Match(prefix str) ![]object.Id {
+	mut out = try m.loose.Match(prefix)
+	for p in m.packs {
+		for i in 0..p.Count {
+			let id = p.IdAt(i)
+			let h = id.Hex()
+			if len(h) >= len(prefix) && h[0:len(prefix)] == prefix {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+fn open(g Global) !Repo {
+	mut dir = g.Dir
+	if len(dir) == 0 {
+		dir = try quarry.Getwd()
+	}
+	let ws = try worktree.Find(dir)
+	let loose = store.NewLoose(ws.Store + "/objects")
+	mut layers = []dyn store.ObjectStore{loose}
+	mut packs = []packfile.Pack{}
+	let pdir = ws.Store + "/packs"
+	if quarry.IsDir(pdir) {
+		let names = try quarry.ReadDir(pdir)
+		for n in names {
+			if twine.HasSuffix(n, ".pack") {
+				let p = try packfile.Open(pdir + "/" + n)
+				packs = append(packs, p)
+				layers = append(layers, p)
+			}
+		}
+	}
+	return Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}}
+}
+
+// resolve is the commit a revision names.
+fn (r mut Repo) resolve(rev str) !object.Id {
+	let parsed = try revwalk.Parse(rev)
+	mut rr = revwalk.Repo[store.Layered]{Dir: r.Ws.Store, WsDir: r.Ws.State(), Store: r.Store}
+	return try revwalk.Resolve(mut rr, r.ids, parsed)
+}
+
+// resolveRev is the commit a parsed revision names.
+fn (r mut Repo) resolveRev(rev revwalk.Rev) !object.Id {
+	mut rr = revwalk.Repo[store.Layered]{Dir: r.Ws.Store, WsDir: r.Ws.State(), Store: r.Store}
+	return try revwalk.Resolve(mut rr, r.ids, rev)
+}
+
+// headCommit is the commit HEAD names, or nil before the first commit.
+fn (r mut Repo) headCommit() !?object.Id {
+	let h = try change.ReadHead(r.Ws.State())
+	match h {
+		Branch(name) => {
+			let refs = change.NewRefs(r.Ws.Store)
+			let ref = try refs.Get(name)
+			if ref == nil {
+				return nil
+			}
+			let id = try r.resolve(name)
+			return id
+		}
+		Detached(_) => {
+			let id = try r.resolve("HEAD")
+			return id
+		}
+	}
+}
+
+// treeOf is a commit's tree.
+fn (r mut Repo) treeOf(commit object.Id) !object.Id {
+	let o = try r.Store.Get(commit)
+	return match o {
+		Commit(c) => c.Tree
+		Blob(_) => try notCommitTree(commit)
+		Tree(_) => try notCommitTree(commit)
+		Tag(_) => try notCommitTree(commit)
+	}
+}
+
+fn notCommitTree(id object.Id) !object.Id {
+	fail fault.Wrap(revwalk.ErrBadRev, "{id.Hex()} is not a commit")
+}
+
+fn (r Repo) config() !identity.Config {
+	return try identity.Load(r.Ws.Store)
+}
+
+fn (r Repo) readIndex() !index.Index {
+	return try index.Read(r.Ws.IndexPath())
+}
