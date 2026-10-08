@@ -934,7 +934,7 @@ From the tightest to the loosest; binary operators of one level associate to the
 | 2 | `&&` |
 | 1 | `\|\|` |
 | suffix | `e wrap "msg"` (after `try`, section 8) |
-| statement | `e catch err { ... }`, on a whole initializer, assignment, return value or statement |
+| statement | `e catch err { ... }`, on a whole initializer, assignment (`x = e catch ...` and `x += e catch ...`), return value or statement |
 
 `a < b > c` is `(a < b) > c`, a type error: generic brackets are square (`f[T](x)`), never
 angle brackets, so a comparison never depends on what its operands are.

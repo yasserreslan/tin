@@ -1,0 +1,17 @@
+package main
+
+import "say"
+
+fn main() {
+	mut b = ""
+	for i in 0..3 {
+		b = b + match i {
+			0 => "zero"
+			_ => {
+				let s = "n"
+				s + "!"
+			}
+		}
+	}
+	say.Line(b)
+}

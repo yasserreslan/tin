@@ -1,0 +1,33 @@
+package main
+
+import "mint"
+import "say"
+
+fn main() {
+	mut b = ""
+	for i in 0..3 {
+		b += match i {
+			0 => "zero"
+			_ => {
+				let s = "n"
+				s + "!"
+			}
+		}
+	}
+	say.Line(b)
+	mut total = 10
+	total += mint.Atoi("zz") catch _ {
+		-100
+	}
+	total -= mint.Atoi("4") catch _ {
+		0
+	}
+	total *= mint.Atoi("q") catch _ {
+		2
+	}
+	mut bits = 1
+	bits |= mint.Atoi("zz") catch _ {
+		6
+	}
+	say.Line(total, bits)
+}

@@ -1,0 +1,1 @@
+toolchain/tests/v2/catch_tuple_bad.tin:11:5: error E020 UNEXPECTED: a tuple is not a value: a catch block that stands for several results leaves instead (return, break, continue or fail), and a call's results are bound with let (a, b) = f()

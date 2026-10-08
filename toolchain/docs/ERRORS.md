@@ -2222,6 +2222,10 @@ example.tin:10:7: error E293 MATCH_VALUE: this arm gives no value
 
 Fix: end each block arm with its value, or leave from it.
 
+A `match` whose arms are blocks stands on its own: `let v = match ...`, `v = match ...` or
+`total += match ...` (a compound assignment binds the value first, then does `total = total + v`).
+Inside a larger expression (`b = b + match ...`) only expression arms are allowed.
+
 ### E295 NOT_YET
 
 A form the parser reads but the checker does not build yet: a generic tuple alias, or a value
