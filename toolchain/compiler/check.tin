@@ -1124,6 +1124,7 @@ fn check() {
 		i = i + 1
 	}
 	generics_declared()
+	closure_prepass()
 	i = 0
 	for i < len(prog_consts) {
 		let c = prog_consts[i]
@@ -2978,6 +2979,551 @@ fn scan_idents_in_expr(e i64, inner_params []str, outer_names []str, cells []str
 			ai = ai + 1
 		}
 	}
+}
+
+
+// ---- closures passed to the program's own functions (#816) ----
+//
+// A closure literal passed to a function that only calls it (or hands it on to such a function) cannot be kept, so it lives on its maker's
+// frame like one passed to sift.Each: it may store request memory in the variables it captures. The parser decides this by name for the
+// library functions; here it is decided for every function of the program, before any body is checked (the closure's shape, and the cells
+// of what it captures, are fixed when its maker is checked). cobits of a function says which of its function-typed parameters (by argument
+// position, the receiver not counted) are only called, or passed in an argument position of a function that has the bit too: a greatest
+// fixed point over the whole program, from the syntax alone. The walk gives up (the parameter may be kept) on a bare use of the name, on
+// any use inside a function literal or a detach block (that closure may be kept), on a call it cannot resolve, and on a kind of node it
+// does not know. A call is resolved by name: a plain name to the package's function, pkg.F to that package's, and x.m(...) to every method
+// called m, unless some struct has a field called m (it could be a function value).
+shared mut co_name str = "" // the parameter being judged
+shared mut co_bad i64 // it may be kept
+shared mut co_lit i64 // depth of function literals and detach blocks around the walk
+shared mut co_mark i64 // 1: the walk marks closure arguments instead of judging a parameter
+shared mut co_shadow []str // names declared in the function walked and the literals around the walk
+shared mut co_fns []Fn // the functions with a function-typed parameter
+shared mut co_fields []str // every struct field name
+shared mut co_fields_done i64
+shared mut co_why_fn []i64 // the closures left as they were, with the reason (E310 and E311 give it)
+shared mut co_why_text []str
+shared mut co_ready i64 // closure_prepass has run
+
+// co_why_of is why the closure literal whose function is f may be kept, or "".
+fn co_why_of(f i64) str {
+	mut i = 0
+	for i < len(co_why_fn) {
+		if co_why_fn[i] == f {
+			return co_why_text[i]
+		}
+		i = i + 1
+	}
+	return ""
+}
+
+// co_why says why argument position j of call c is not handed to a parameter that is only called: the first function that may keep it,
+// or that the callee cannot be told.
+fn co_why(c i64, j i64) str {
+	let ts = co_targets(c)
+	if len(ts) == 0 {
+		return "passed to a call whose function the compiler cannot tell from its syntax (a function value, a builtin or a method it cannot match)"
+	}
+	mut i = 0
+	for i < len(ts) {
+		let g = cast(Fn, ts[i])
+		if g.extern_ != 0 || g.body == 0 {
+			return "passed to " + g.name + ", which has no body to look at"
+		}
+		let off = co_param_off(g)
+		if j + off >= len(g.params) {
+			return "passed to " + g.name + " past its parameters"
+		}
+		if j >= 62 || (g.cobits & (1 << j)) == 0 {
+			return "passed to " + g.name + ", which may keep its parameter " + g.params[j + off] + " (it stores, returns or passes it on, or uses it in a function literal)"
+		}
+		i = i + 1
+	}
+	return ""
+}
+
+// co_collect_fields lists the names of all struct fields of the program, once.
+fn co_collect_fields() {
+	if co_fields_done != 0 {
+		return
+	}
+	co_fields_done = 1
+	co_fields = []str{}
+	mut i = 0
+	for i < len(prog_types) {
+		let d = prog_types[i]
+		if cast(Node, d.type_).kind == TX_STRUCT {
+			let src = cast([]i64, cast(TypeExpr, d.type_).a)
+			if cast(i64, src) != 0 {
+				mut j = 0
+				for j < len(src) {
+					co_fields = append(co_fields, cast(ParsedField, src[j]).name)
+					j = j + 1
+				}
+			}
+		}
+		i = i + 1
+	}
+}
+
+fn co_args(c i64) []i64 {
+	let a = cast(Call, c).args
+	if cast(i64, a) == 0 {
+		return []i64{}
+	}
+	return a
+}
+
+// co_arg_pos is the parameter slot of function g that argument position j fills.
+fn co_param_off(g Fn) i64 {
+	if g.recv != 0 && is_template(g) == 0 {
+		return 1
+	}
+	return 0
+}
+
+// co_fn_param is the mask of function-typed parameters of g (bit j: argument position j).
+fn co_fn_param_mask(g Fn) i64 {
+	let off = co_param_off(g)
+	mut mask = 0
+	mut j = 0
+	for j + off < len(g.params) && j < 62 {
+		let t = g.ptypes[j + off]
+		if t != 0 {
+			if is_template(g) != 0 {
+				if cast(Node, t).kind == TX_FUNC {
+					mask = mask | (1 << j)
+				}
+			} else if kind_of(cast(Ty, t)) == K_FUNC {
+				mask = mask | (1 << j)
+			}
+		}
+		j = j + 1
+	}
+	return mask
+}
+
+// co_targets lists the functions call c may run (as Fn words), none when it cannot be told by name.
+fn co_targets(c i64) []i64 {
+	mut out = []i64{}
+	let callee = cast(Call, c).callee
+	mut plain = ""
+	mut pkgfn = 0
+	mut meth = ""
+	if callee == 0 {
+		plain = cast(Call, c).name
+	} else {
+		let k = cast(Node, callee).kind
+		if k == EX_IDENT {
+			plain = cast(IdentExpr, callee).name
+		} else if k == EX_INDEX && cast(Node, cast(IndexExpr, callee).x).kind == EX_IDENT {
+			plain = cast(IdentExpr, cast(IndexExpr, callee).x).name
+		} else if k == EX_SELECT || (k == EX_INDEX && cast(Node, cast(IndexExpr, callee).x).kind == EX_SELECT) {
+			mut sel = callee
+			if k == EX_INDEX {
+				sel = cast(IndexExpr, callee).x
+			}
+			let x = cast(SelectExpr, sel).x
+			let m = cast(SelectExpr, sel).name
+			if cast(Node, x).kind == EX_IDENT && slice_has_str(co_shadow, cast(IdentExpr, x).name) == 0 && len(import_pkg(cast(IdentExpr, x).name)) != 0 {
+				pkgfn = pkg_member(import_pkg(cast(IdentExpr, x).name), m)
+				if pkgfn == 0 {
+					return out
+				}
+			} else {
+				meth = m
+			}
+		}
+	}
+	if len(plain) != 0 {
+		if slice_has_str(co_shadow, plain) != 0 {
+			return out
+		}
+		let s = lookup_global(qual(ck_pkg, plain))
+		if cast(i64, s) != 0 && s.kind == SYM_FUNC && s.fn_ != 0 {
+			out = append(out, s.fn_)
+		}
+		return out
+	}
+	if pkgfn != 0 {
+		let s = cast(Sym, pkgfn)
+		if s.kind == SYM_FUNC && s.fn_ != 0 {
+			out = append(out, s.fn_)
+		}
+		return out
+	}
+	if len(meth) != 0 {
+		co_collect_fields()
+		if slice_has_str(co_fields, meth) != 0 {
+			return out
+		}
+		mut i = 0
+		for i < len(prog_fns) {
+			let f = prog_fns[i]
+			if f.recv != 0 && f.name == meth {
+				out = append(out, cast(i64, f))
+			}
+			i = i + 1
+		}
+	}
+	return out
+}
+
+// co_passes reports whether every function call c may run has argument position j only called or handed on.
+fn co_passes(c i64, j i64) i64 {
+	let ts = co_targets(c)
+	if len(ts) == 0 || j >= 62 {
+		return 0
+	}
+	mut i = 0
+	for i < len(ts) {
+		let g = cast(Fn, ts[i])
+		if g.extern_ != 0 || g.body == 0 || (g.cobits & (1 << j)) == 0 {
+			return 0
+		}
+		i = i + 1
+	}
+	return 1
+}
+
+fn co_stmts(v []i64) {
+	if cast(i64, v) == 0 {
+		return
+	}
+	mut i = 0
+	for i < len(v) {
+		co_stmt(v[i])
+		i = i + 1
+	}
+}
+
+fn co_exprs(v []i64) {
+	if cast(i64, v) == 0 {
+		return
+	}
+	mut i = 0
+	for i < len(v) {
+		co_expr(v[i])
+		i = i + 1
+	}
+}
+
+// co_block walks a block node (or nothing).
+fn co_block(b i64) {
+	if b == 0 {
+		return
+	}
+	if cast(Node, b).kind == ST_BLOCK {
+		co_stmts(cast(Block, b).stmts)
+	} else {
+		co_stmt(b)
+	}
+}
+
+// co_fn_body walks the body of function literal (or function) f with its parameters and locals as shadowing names.
+fn co_fn_body(f Fn) {
+	if cast(i64, f) == 0 || f.body == 0 {
+		return
+	}
+	let mark = len(co_shadow)
+	for p in f.params {
+		co_shadow = append(co_shadow, p)
+	}
+	collect_local_decls(cast(Block, f.body).stmts, co_shadow)
+	co_stmts(cast(Block, f.body).stmts)
+	slice_truncate(co_shadow, mark)
+}
+
+fn co_stmt(s i64) {
+	if s == 0 {
+		return
+	}
+	let k = cast(Node, s).kind
+	if k == ST_BLOCK {
+		co_stmts(cast(Block, s).stmts)
+	} else if k == ST_LIST {
+		co_stmts(cast(ListStmt, s).stmts)
+	} else if k == ST_LET {
+		co_expr(cast(LetStmt, s).init)
+	} else if k == ST_USE {
+		co_expr(cast(UseStmt, s).init)
+	} else if k == ST_ASSIGN {
+		co_expr(cast(AssignStmt, s).target)
+		co_expr(cast(AssignStmt, s).value)
+	} else if k == ST_MULTI {
+		co_exprs(cast(MultiStmt, s).targets)
+		co_exprs(cast(MultiStmt, s).values)
+	} else if k == ST_EXPR {
+		co_expr(cast(ExprStmt, s).x)
+	} else if k == ST_IF {
+		co_stmt(cast(IfStmt, s).init)
+		co_expr(cast(IfStmt, s).cond)
+		co_block(cast(IfStmt, s).then)
+		co_block(cast(IfStmt, s).else_)
+	} else if k == ST_WHILE {
+		co_stmt(cast(WhileStmt, s).init)
+		co_expr(cast(WhileStmt, s).cond)
+		co_block(cast(WhileStmt, s).body)
+		co_stmt(cast(WhileStmt, s).post)
+		co_expr(cast(WhileStmt, s).step)
+	} else if k == ST_RANGE {
+		co_expr(cast(RangeStmt, s).expr)
+		co_block(cast(RangeStmt, s).body)
+	} else if k == ST_SWITCH {
+		co_stmt(cast(SwitchStmt, s).init)
+		co_expr(cast(SwitchStmt, s).tag)
+		let cases = cast(SwitchStmt, s).cases
+		if cast(i64, cases) != 0 {
+			mut ci = 0
+			for ci < len(cases) {
+				let c = cast(Pair, cases[ci])
+				co_exprs(cast([]i64, c.a))
+				co_block(c.b)
+				ci = ci + 1
+			}
+		}
+	} else if k == ST_RETURN {
+		co_expr(cast(ReturnStmt, s).value)
+		co_exprs(cast(ReturnStmt, s).values)
+	} else if k == ST_FAIL {
+		co_expr(cast(FailStmt, s).x)
+	} else if k == ST_DEFER {
+		co_expr(cast(GoStmt, s).call)
+	} else if k == ST_GO {
+		// A task that outlives the statement: what it uses may be kept.
+		co_lit = co_lit + 1
+		co_expr(cast(GoStmt, s).call)
+		co_lit = co_lit - 1
+	} else if k == ST_SCOPE {
+		let mark = len(co_shadow)
+		co_shadow = append(co_shadow, cast(ScopeStmt, s).name)
+		co_block(cast(ScopeStmt, s).body)
+		slice_truncate(co_shadow, mark)
+	} else if k == ST_DETACH {
+		co_lit = co_lit + 1
+		co_block(cast(BodyStmt, s).block)
+		co_lit = co_lit - 1
+	} else if k == ST_ONCE {
+		co_block(cast(BodyStmt, s).block)
+	} else if k == ST_SELECT {
+		let arms = cast(SelectStmt, s).arms
+		mut ai = 0
+		for ai < len(arms) {
+			let arm = cast(SelectArm, arms[ai])
+			let mark = len(co_shadow)
+			co_shadow = append(co_shadow, arm.name)
+			co_expr(arm.wait)
+			co_block(arm.body)
+			slice_truncate(co_shadow, mark)
+			ai = ai + 1
+		}
+	} else if k == ST_BREAK || k == ST_CONTINUE || k == ST_CONST {
+		return
+	} else {
+		// A statement this walk does not know: the parameter may be used in it.
+		co_bad = 1
+	}
+}
+
+fn co_expr(e i64) {
+	if e == 0 {
+		return
+	}
+	let k = cast(Node, e).kind
+	if k == EX_INT || k == EX_STR || k == EX_FLOAT || k == EX_NIL || k == EX_TYPE || k == EX_UNIT {
+		return
+	}
+	if k == EX_IDENT {
+		if co_mark == 0 && cast(IdentExpr, e).name == co_name {
+			co_bad = 1
+		}
+	} else if k == EX_UNARY {
+		co_expr(cast(Unary, e).x)
+	} else if k == EX_BINARY {
+		co_expr(cast(Binary, e).l)
+		co_expr(cast(Binary, e).r)
+	} else if k == EX_INDEX {
+		co_expr(cast(IndexExpr, e).x)
+		co_expr(cast(IndexExpr, e).i)
+	} else if k == EX_SELECT {
+		co_expr(cast(SelectExpr, e).x)
+	} else if k == EX_SLICE {
+		co_expr(cast(SliceExpr, e).x)
+		co_expr(cast(SliceExpr, e).lo)
+		co_expr(cast(SliceExpr, e).hi)
+	} else if k == EX_MUTARG {
+		co_expr(cast(MutArg, e).x)
+	} else if k == EX_TRY {
+		co_expr(cast(TryExpr, e).x)
+	} else if k == EX_WRAP {
+		co_expr(cast(WrapExpr, e).x)
+		co_expr(cast(WrapExpr, e).message)
+	} else if k == EX_COALESCE {
+		co_expr(cast(Coalesce, e).x)
+		co_expr(cast(Coalesce, e).fallback)
+	} else if k == EX_CATCH {
+		co_expr(cast(CatchExpr, e).x)
+		let mark = len(co_shadow)
+		co_shadow = append(co_shadow, cast(CatchExpr, e).name)
+		co_block(cast(CatchExpr, e).body)
+		slice_truncate(co_shadow, mark)
+	} else if k == EX_INTERP {
+		co_exprs(cast(InterpExpr, e).args)
+	} else if k == EX_COMPOSITE {
+		co_exprs(cast(Composite, e).elems)
+		co_exprs(cast(Composite, e).keys)
+	} else if k == EX_FUNCLIT {
+		co_lit = co_lit + 1
+		co_fn_body(cast(Fn, cast(FuncLit, e).fn_))
+		co_lit = co_lit - 1
+	} else if k == EX_BOUNDARY {
+		co_exprs(cast(BoundaryStmt, e).args)
+		co_block(cast(BoundaryStmt, e).body)
+	} else if k == EX_MATCH {
+		co_expr(cast(MatchExpr, e).subject)
+		let arms = cast(MatchExpr, e).arms
+		mut ai = 0
+		for ai < len(arms) {
+			let arm = cast([]i64, arms[ai])
+			co_expr(cast(MatchArm, arm).guard_)
+			if cast(MatchArm, arm).block != 0 {
+				co_block(cast(MatchArm, arm).body)
+			} else {
+				co_expr(cast(MatchArm, arm).body)
+			}
+			ai = ai + 1
+		}
+	} else if k == EX_CALL {
+		co_call(e)
+	} else {
+		co_bad = 1
+	}
+}
+
+// co_call walks a call: the parameter being judged may be called (outside literals) or passed on to a parameter that is only called.
+fn co_call(c i64) {
+	let callee = cast(Call, c).callee
+	let args = co_args(c)
+	if co_mark == 0 {
+		mut called = 0
+		if callee == 0 && cast(Call, c).name == co_name {
+			called = 1
+		} else if callee != 0 && cast(Node, callee).kind == EX_IDENT && cast(IdentExpr, callee).name == co_name {
+			called = 1
+		}
+		if called != 0 {
+			if co_lit > 0 {
+				co_bad = 1
+			}
+		} else if callee != 0 {
+			co_expr(callee)
+		}
+	} else if callee != 0 {
+		co_expr(callee)
+	}
+	mut i = 0
+	for i < len(args) {
+		mut a = args[i]
+		if cast(Node, a).kind == EX_MUTARG {
+			a = cast(MutArg, a).x
+		}
+		if co_mark != 0 {
+			if cast(Node, a).kind == EX_FUNCLIT && cast(FuncLit, a).escape != 0 {
+				if co_passes(c, i) != 0 {
+					cast(FuncLit, a).escape = 0
+				} else {
+					co_why_fn = append(co_why_fn, cast(FuncLit, a).fn_)
+					co_why_text = append(co_why_text, co_why(c, i))
+				}
+			}
+			co_expr(a)
+		} else if cast(Node, a).kind == EX_IDENT && cast(IdentExpr, a).name == co_name {
+			if co_lit > 0 || co_passes(c, i) == 0 {
+				co_bad = 1
+			}
+		} else {
+			co_expr(a)
+		}
+		i = i + 1
+	}
+}
+
+// co_param_ok reports whether parameter j (argument position) of g is only called or handed on, from g's syntax.
+fn co_param_ok(g Fn, j i64) i64 {
+	let off = co_param_off(g)
+	if j + off >= len(g.params) {
+		return 0
+	}
+	set_file(g.file)
+	co_mark = 0
+	co_name = g.params[j + off]
+	co_bad = 0
+	co_lit = 0
+	co_shadow = []str{}
+	co_fn_body(g)
+	if co_bad != 0 {
+		return 0
+	}
+	return 1
+}
+
+// closure_prepass sets cobits of every function and marks the closure literals passed to parameters that are only called, before any
+// body is checked (#816).
+fn closure_prepass() {
+	co_fns = []Fn{}
+	co_why_fn = []i64{}
+	co_why_text = []str{}
+	let n = len(prog_fns)
+	mut i = 0
+	for i < n {
+		let g = prog_fns[i]
+		g.cobits = 0
+		if g.extern_ == 0 && g.body != 0 && g.lifted != 2 && g.generated == 0 {
+			set_file(g.file)
+			g.cobits = co_fn_param_mask(g)
+			if g.cobits != 0 {
+				co_fns = append(co_fns, g)
+			}
+		}
+		i = i + 1
+	}
+	mut changed = 1
+	for changed != 0 {
+		changed = 0
+		mut a = 0
+		for a < len(co_fns) {
+			let g = co_fns[a]
+			mut j = 0
+			for j < 62 {
+				if (g.cobits & (1 << j)) != 0 && co_param_ok(g, j) == 0 {
+					g.cobits = g.cobits & ~(1 << j)
+					changed = 1
+				}
+				j = j + 1
+			}
+			a = a + 1
+		}
+	}
+	i = 0
+	for i < n {
+		co_mark_fn(prog_fns[i])
+		i = i + 1
+	}
+	co_ready = 1
+}
+
+// co_mark_fn marks the closure literals in the body of g that are passed to parameters that are only called.
+fn co_mark_fn(g Fn) {
+	if g.extern_ != 0 || g.body == 0 || g.lifted == 2 || g.generated != 0 {
+		return
+	}
+	set_file(g.file)
+	co_mark = 1
+	co_bad = 0
+	co_lit = 0
+	co_shadow = []str{}
+	co_fn_body(g)
+	co_mark = 0
 }
 
 fn scan_captures(f Fn, cells []str) {

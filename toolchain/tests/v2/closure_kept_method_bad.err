@@ -1,0 +1,1 @@
+toolchain/tests/v2/closure_kept_method_bad.tin:31:9: error E310 REQUEST_ESCAPE: request memory stored into 'all', a captured variable of a closure that may outlive the request (passed to each, which may keep its parameter f (it stores, returns or passes it on, or uses it in a function literal); keep() copies its variables into long-lived memory): wrap the value in keep()
