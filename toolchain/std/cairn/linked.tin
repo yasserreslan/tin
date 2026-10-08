@@ -1,0 +1,289 @@
+package cairn
+
+import "constraints"
+
+// The linked containers, Go's container/list and container/ring, over any element type. An Element and a
+// Ring node are struct references: a handle returned by a push stays the same object until it is removed,
+// so same() is Go's pointer identity. The links are optional references (nil at the ends of a List), so no
+// sentinel node is needed. An operation that changes an element's links takes that element as a mut
+// parameter (Go's pointer argument), and a Go nil argument is an absent value (?T).
+
+// Element is a node of a List: Value is its value, and Next and Prev walk the list it is in.
+type Element[T constraints.Any] struct {
+	Value T
+	next  ?Element[T]
+	prev  ?Element[T]
+	list  ?List[T]
+}
+
+// List is a doubly linked list of Elements; use NewList.
+type List[T constraints.Any] struct {
+	front ?Element[T]
+	back  ?Element[T]
+	count i64
+}
+
+// NewList returns an empty list.
+fn NewList[T constraints.Any]() List[T] {
+	return List[T]{front: nil, back: nil, count: 0}
+}
+
+// Len returns the number of elements in the list.
+fn (l List[T]) Len() i64 {
+	return l.count
+}
+
+// Front returns the first element, or nil when the list is empty.
+fn (l List[T]) Front() ?Element[T] {
+	return l.front
+}
+
+// Back returns the last element, or nil when the list is empty.
+fn (l List[T]) Back() ?Element[T] {
+	return l.back
+}
+
+// Next returns the element after e, or nil at the back of its list and after Remove.
+fn (e Element[T]) Next() ?Element[T] {
+	return e.next
+}
+
+// Prev returns the element before e, or nil at the front of its list and after Remove.
+fn (e Element[T]) Prev() ?Element[T] {
+	return e.prev
+}
+
+// owns reports whether e is an element of l.
+fn (l List[T]) owns(e Element[T]) bool {
+	if let o = e.list {
+		return same(o, l)
+	}
+	return false
+}
+
+// place makes e an element of l between before and after (nil for the front or the back) and fixes the
+// links of its neighbours; the caller counts it.
+fn (l mut List[T]) place(e mut Element[T], before ?Element[T], after ?Element[T]) {
+	e.prev = before
+	e.next = after
+	e.list = l
+	if let p = e.prev {
+		p.next = e
+	} else {
+		l.front = e
+	}
+	if let n = e.next {
+		n.prev = e
+	} else {
+		l.back = e
+	}
+}
+
+// lift takes e out of l, joining its neighbours; e keeps its own links, and the caller counts it.
+fn (l mut List[T]) lift(e mut Element[T]) {
+	if let p = e.prev {
+		p.next = e.next
+	} else {
+		l.front = e.next
+	}
+	if let n = e.next {
+		n.prev = e.prev
+	} else {
+		l.back = e.prev
+	}
+}
+
+// PushFront inserts v at the front and returns its element.
+fn (l mut List[T]) PushFront(v T) Element[T] {
+	mut e = Element[T]{Value: v, next: nil, prev: nil, list: nil}
+	l.place(mut e, nil, l.front)
+	l.count += 1
+	return e
+}
+
+// PushBack inserts v at the back and returns its element.
+fn (l mut List[T]) PushBack(v T) Element[T] {
+	mut e = Element[T]{Value: v, next: nil, prev: nil, list: nil}
+	l.place(mut e, l.back, nil)
+	l.count += 1
+	return e
+}
+
+// InsertBefore inserts v in front of mark and returns its element, or nil when mark is not in l.
+fn (l mut List[T]) InsertBefore(v T, mark mut Element[T]) ?Element[T] {
+	if !l.owns(mark) {
+		return nil
+	}
+	mut e = Element[T]{Value: v, next: nil, prev: nil, list: nil}
+	l.place(mut e, mark.prev, mark)
+	l.count += 1
+	return e
+}
+
+// InsertAfter inserts v after mark and returns its element, or nil when mark is not in l.
+fn (l mut List[T]) InsertAfter(v T, mark mut Element[T]) ?Element[T] {
+	if !l.owns(mark) {
+		return nil
+	}
+	mut e = Element[T]{Value: v, next: nil, prev: nil, list: nil}
+	l.place(mut e, mark, mark.next)
+	l.count += 1
+	return e
+}
+
+// Remove takes e out of l and returns its value; e is left alone when it is not in l.
+fn (l mut List[T]) Remove(e mut Element[T]) T {
+	if l.owns(e) {
+		l.lift(mut e)
+		e.next = nil
+		e.prev = nil
+		e.list = nil
+		l.count -= 1
+	}
+	return e.Value
+}
+
+// MoveToFront moves e to the front of l; it does nothing when e is not in l or is already first.
+fn (l mut List[T]) MoveToFront(e mut Element[T]) {
+	if !l.owns(e) || e.prev == nil {
+		return
+	}
+	l.lift(mut e)
+	l.place(mut e, nil, l.front)
+}
+
+// MoveToBack moves e to the back of l; it does nothing when e is not in l or is already last.
+fn (l mut List[T]) MoveToBack(e mut Element[T]) {
+	if !l.owns(e) || e.next == nil {
+		return
+	}
+	l.lift(mut e)
+	l.place(mut e, l.back, nil)
+}
+
+// PushBackList appends a copy of each value of other, in order, to the back of l; other is unchanged,
+// and other may be l itself.
+fn (l mut List[T]) PushBackList(other List[T]) {
+	mut n = other.count
+	mut e = other.front
+	for n > 0 {
+		if let x = e {
+			l.PushBack(x.Value)
+			e = x.next
+		}
+		n -= 1
+	}
+}
+
+// PushFrontList prepends a copy of each value of other to the front of l, keeping their order; other is
+// unchanged, and other may be l itself.
+fn (l mut List[T]) PushFrontList(other List[T]) {
+	mut n = other.count
+	mut e = other.back
+	for n > 0 {
+		if let x = e {
+			l.PushFront(x.Value)
+			e = x.prev
+		}
+		n -= 1
+	}
+}
+
+// Ring is an element of a circular list: Value is its value, and Next and Prev move around the ring.
+// A ring always has at least one element; NewRing builds one.
+type Ring[T constraints.Any] struct {
+	Value T
+	next  ?Ring[T]
+	prev  ?Ring[T]
+}
+
+// NewRing returns a ring with one element per value, in order, or nil when values is empty. (Go's ring.New
+// gives nil values; a type parameter has no zero value, so the values come in a slice.)
+fn NewRing[T constraints.Any](values []T) ?Ring[T] {
+	if len(values) == 0 {
+		return nil
+	}
+	let r = Ring[T]{Value: values[0], next: nil, prev: nil}
+	mut p = r
+	for i in 1..len(values) {
+		let q = Ring[T]{Value: values[i], next: nil, prev: p}
+		p.next = q
+		p = q
+	}
+	p.next = r
+	r.prev = p
+	return r
+}
+
+// Next returns the element after r in its ring.
+fn (r Ring[T]) Next() Ring[T] {
+	if let n = r.next {
+		return n
+	}
+	return r
+}
+
+// Prev returns the element before r in its ring.
+fn (r Ring[T]) Prev() Ring[T] {
+	if let p = r.prev {
+		return p
+	}
+	return r
+}
+
+// Len returns the number of elements in r's ring.
+fn (r Ring[T]) Len() i64 {
+	mut n = i64(1)
+	mut p = r.Next()
+	for !same(p, r) {
+		n += 1
+		p = p.Next()
+	}
+	return n
+}
+
+// Move returns the element n steps after r, or -n steps before it when n is negative.
+fn (r Ring[T]) Move(n i64) Ring[T] {
+	mut p = r
+	mut k = n
+	for k < 0 {
+		p = p.Prev()
+		k += 1
+	}
+	for k > 0 {
+		p = p.Next()
+		k -= 1
+	}
+	return p
+}
+
+// Do calls f with each value of r's ring, starting at r and going forward.
+fn (r Ring[T]) Do(f fn(T)) {
+	f(r.Value)
+	mut p = r.Next()
+	for !same(p, r) {
+		f(p.Value)
+		p = p.Next()
+	}
+}
+
+// Link makes s follow r: r.Next() becomes s, and the rest of s's ring follows s. It returns r's old next
+// element. Rings that are one ring are split by it, and two rings are joined.
+fn (r mut Ring[T]) Link(s mut Ring[T]) Ring[T] {
+	let n = r.Next()
+	let p = s.Prev()
+	r.next = s
+	s.prev = r
+	n.prev = p
+	p.next = n
+	return n
+}
+
+// Unlink removes the n elements after r from their ring and returns them as a ring, or nil when n <= 0.
+fn (r mut Ring[T]) Unlink(n i64) ?Ring[T] {
+	if n <= 0 {
+		return nil
+	}
+	mut m = r.Move(n + 1)
+	return r.Link(mut m)
+}
