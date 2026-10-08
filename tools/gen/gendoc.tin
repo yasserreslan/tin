@@ -33,6 +33,7 @@ fn packages() []str {
 		"wire", "TCP and HTTP/1.1 and HTTP/2 client (net, net/http)",
 		"jar", "HTTP cookie jar for wire clients (net/http/cookiejar)",
 		"dump", "HTTP request and response dumps (net/http/httputil)",
+		"proxy", "streaming HTTP reverse proxy (net/http/httputil)",
 		"assay", "HTTP test requests, recorders and local test servers (net/http/httptest)",
 		"tls", "TLS 1.3 client and server (crypto/tls)",
 		"hpack", "HTTP/2 header compression (golang.org/x/net/http2/hpack)",

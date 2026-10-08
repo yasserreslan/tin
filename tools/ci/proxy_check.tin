@@ -1,0 +1,195 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./rawconn"
+import "mint"
+import "say"
+import "twine"
+import "wire"
+
+// proxy_check compares Tin and Go headers, streams request and response bodies, and runs the strict error test.
+fn main() {
+	let root = ci.Root()
+	let out = ci.Join(root, "bin/ci/proxy")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "proxy")
+	ci.BuildTin("tools/ci/fixtures/proxy.tin", exe, "", []str{})
+	let strict = ci.Join(out, "strict")
+	ci.BuildTin("toolchain/tests/v2/proxy.tin", strict, "", []str{})
+	let backendPort = nettest.Port()
+	let frontPort = nettest.Port()
+	let goPort = nettest.Port()
+	let backend = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "PROXY_ROLE=backend"}, ci.Join(out, "backend.log"), backendPort)
+	backend.Ready(10)
+	let front = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "UPSTREAM=http://127.0.0.1:" + mint.Itoa(backendPort)}, ci.Join(out, "front.log"), frontPort)
+	front.Ready(10)
+	let goExe = ci.Join(out, "proxy-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goExe, "tools/ci/fixtures/proxy_go.go"}, root, 120), "build Go ReverseProxy oracle")
+	let goProxy = nettest.Start(goExe, []str{}, []str{"UPSTREAM=http://127.0.0.1:" + mint.Itoa(backendPort)}, ci.Join(out, "go.log"), goPort)
+	goProxy.Ready(10)
+	let (metaStatus, metaHeaders, metaBody) = metaRequest(frontPort)
+	let (goStatus, goHeaders, goBody) = metaRequest(goPort)
+	ci.Check(metaStatus == 200 && metaBody == "ok", "proxy metadata route: " + mint.Itoa(metaStatus) + " body=" + say.Fmt("%q", metaBody) + " head=" + say.Fmt("%q", metaHeaders["transfer-encoding"]))
+	ci.Check(metaStatus == goStatus && metaBody == goBody, "Tin and Go ReverseProxy metadata responses differ")
+	ci.Check(metaHeaders["x-seen-secret"] == goHeaders["x-seen-secret"] && metaHeaders["x-seen-secret"] == "", "Tin and Go ReverseProxy differed on Connection-nominated headers")
+	ci.Check(metaHeaders["x-seen-proxy-hop"] == goHeaders["x-seen-proxy-hop"] && metaHeaders["x-seen-proxy-hop"] == "", "Tin and Go ReverseProxy differed on Proxy-* hop headers")
+	ci.Check(twine.HasPrefix(metaHeaders["x-seen-forwarded-for"], "203.0.113.9, 127.0.0.1"), "proxy did not append the peer to X-Forwarded-For")
+	ci.Check(metaHeaders["x-seen-forwarded-for"] == goHeaders["x-seen-forwarded-for"], "Tin and Go ReverseProxy differed on X-Forwarded-For")
+	let echoRequest = "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n"
+	mut chunked = rawconn.Open(frontPort, 10)
+	chunked.Send(echoRequest)
+	let (chunkStatus, chunkHeaders) = chunked.Head()
+	let chunkBody = bodyOf(mut chunked, chunkHeaders)
+	chunked.Close()
+	ci.Check(chunkStatus == 200 && chunkBody == "len=7", "proxy passed a chunked request and answered with the upstream's body")
+	// The upstream's Content-Length is kept, not re-chunked: the framing matches Go's ReverseProxy (#739).
+	mut goChunked = rawconn.Open(goPort, 10)
+	goChunked.Send(echoRequest)
+	let (goChunkStatus, goChunkHeaders) = goChunked.Head()
+	let goChunkBody = bodyOf(mut goChunked, goChunkHeaders)
+	goChunked.Close()
+	ci.Check(goChunkStatus == chunkStatus && goChunkBody == chunkBody && goChunkHeaders["content-length"] == chunkHeaders["content-length"] && goChunkHeaders["transfer-encoding"] == chunkHeaders["transfer-encoding"], "Tin and Go ReverseProxy framed the /echo response differently")
+	let size = 4 * 1024 * 1024
+	let body = repeated(size)
+	let echoed = wire.Post("http://127.0.0.1:" + mint.Itoa(frontPort) + "/echo", "application/octet-stream", body) catch err {
+		front.Stop()
+		backend.Stop()
+		ci.Fail("proxy streaming upload failed: " + say.Str(err))
+		return
+	}
+	ci.Check(echoed.Status == 200 && echoed.Body == "len=" + mint.Itoa(size), "proxy streamed a 4 MiB request")
+	let large = wire.Get("http://127.0.0.1:" + mint.Itoa(frontPort) + "/large") catch err {
+		front.Stop()
+		backend.Stop()
+		ci.Fail("proxy streaming response failed: " + say.Str(err))
+		return
+	}
+	ci.Check(large.Status == 200 && len(large.Body) == size && large.Body[0] == 'x' && large.Body[size-1] == 'x', "proxy streamed a 4 MiB response")
+	// The Content-Type comes from the upstream once: anvil's default is replaced, never repeated (#739).
+	let (mStatus, mLines, mBody) = parts(exchange(frontPort, "GET", "/meta"))
+	let (gmStatus, gmLines, gmBody) = parts(exchange(goPort, "GET", "/meta"))
+	ci.Check(len(values(mLines, "content-type")) == 1 && len(values(gmLines, "content-type")) == 1, "the /meta Content-Type lines: proxy " + mint.Itoa(len(values(mLines, "content-type"))) + ", Go " + mint.Itoa(len(values(gmLines, "content-type"))) + " (want one each)")
+	ci.Check(values(mLines, "content-type")[0] == values(gmLines, "content-type")[0] && mStatus == gmStatus && mBody == gmBody, "Tin and Go ReverseProxy differ on the /meta response")
+	let (tStatus, tLines, tBody) = parts(exchange(frontPort, "GET", "/typed"))
+	let (gtStatus, gtLines, gtBody) = parts(exchange(goPort, "GET", "/typed"))
+	ci.Check(len(values(tLines, "content-type")) == 1 && len(values(gtLines, "content-type")) == 1, "the /typed Content-Type lines differ from one each")
+	ci.Check(values(tLines, "content-type")[0] == "application/json" && values(gtLines, "content-type")[0] == "application/json", "the /typed Content-Type is not the upstream's application/json")
+	ci.Check(tStatus == 200 && gtStatus == 200 && tBody == "{{}}" && tBody == gtBody, "Tin and Go ReverseProxy differ on the /typed response")
+	// HEAD has the upstream's headers and no body, and the proxy does not wait for one.
+	let (hStatus, hLines, hBody) = parts(exchange(frontPort, "HEAD", "/typed"))
+	let (ghStatus, ghLines, ghBody) = parts(exchange(goPort, "HEAD", "/typed"))
+	ci.Check(hStatus == 200 && ghStatus == 200 && hBody == "" && ghBody == "", "a HEAD response has a body: proxy " + say.Fmt("%q", hBody) + ", Go " + say.Fmt("%q", ghBody))
+	ci.Check(len(values(hLines, "content-length")) == 1 && len(values(ghLines, "content-length")) == 1 && values(hLines, "content-length")[0] == "2" && values(ghLines, "content-length")[0] == "2", "a HEAD response lost the upstream's Content-Length")
+	// A body cut short ends the response early: the client gets the chunk that arrived and no last chunk, and one log line.
+	let frontCut = bodyErrors(ci.Join(out, "front.log"))
+	let goCut = bodyErrors(ci.Join(out, "go.log"))
+	let (cStatus, cLines, cBody) = parts(exchange(frontPort, "GET", "/cut"))
+	let (gcStatus, gcLines, gcBody) = parts(exchange(goPort, "GET", "/cut"))
+	ci.Check(cStatus == 200 && gcStatus == 200 && cBody == "5\r\nhello\r\n" && cBody == gcBody, "the /cut body differs: proxy " + say.Fmt("%q", cBody) + ", Go " + say.Fmt("%q", gcBody) + " (want the chunk and no last chunk)")
+	ci.Check(len(values(cLines, "content-type")) == 1 && len(values(gcLines, "content-type")) == 1, "the /cut Content-Type lines differ from one each")
+	ci.Check(bodyErrors(ci.Join(out, "front.log")) - frontCut == 1, "the proxy did not log the cut body exactly once")
+	ci.Check(bodyErrors(ci.Join(out, "go.log")) - goCut == 1, "Go's ReverseProxy did not log the cut body exactly once")
+	// A short Content-Length body keeps its length: the head declares 10 bytes and the client gets the 5 that arrived. Go's
+	// ReverseProxy sends nothing for this one (its response writer holds the head back), so only its log line is compared.
+	let frontLength = bodyErrors(ci.Join(out, "front.log"))
+	let goLength = bodyErrors(ci.Join(out, "go.log"))
+	let lengthRaw = exchange(frontPort, "GET", "/cut-length")
+	let (lStatus, lLines, lBody) = parts(lengthRaw)
+	ci.Check(lStatus == 200 && lBody == "hello" && len(values(lLines, "content-length")) == 1 && values(lLines, "content-length")[0] == "10", "the /cut-length response is not a 10-byte head with the 5 bytes that arrived: " + say.Fmt("%q", lengthRaw))
+	ci.Check(bodyErrors(ci.Join(out, "front.log")) - frontLength == 1, "the proxy did not log the short Content-Length body exactly once")
+	exchange(goPort, "GET", "/cut-length")
+	ci.Check(bodyErrors(ci.Join(out, "go.log")) - goLength == 1, "Go's ReverseProxy did not log the short Content-Length body exactly once")
+	// With the upstream refused, both proxies answer 502 with no body, as Go's default error handler does (#739). anvil adds its
+	// text/plain Content-Type to every response, which Go's 502 lacks; the strict test pins that header.
+	let deadPort = nettest.Port()
+	let goDeadPort = nettest.Port()
+	let dead = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "UPSTREAM=http://127.0.0.1:1"}, ci.Join(out, "dead.log"), deadPort)
+	dead.Ready(10)
+	let goDead = nettest.Start(goExe, []str{}, []str{"UPSTREAM=http://127.0.0.1:1"}, ci.Join(out, "go-dead.log"), goDeadPort)
+	goDead.Ready(10)
+	let (deadStatus, deadHeaders, deadBody) = metaRequest(deadPort)
+	let (goDeadStatus, goDeadHeaders, goDeadBody) = metaRequest(goDeadPort)
+	ci.Check(deadStatus == 502 && deadStatus == goDeadStatus, "Tin and Go ReverseProxy differed on the 502 status for an unreachable upstream")
+	ci.Check(deadBody == "" && deadBody == goDeadBody, "Tin and Go ReverseProxy differed on the 502 body for an unreachable upstream")
+	ci.Check(deadHeaders["content-length"] == goDeadHeaders["content-length"] && deadHeaders["content-length"] == "0", "Tin and Go ReverseProxy differed on the 502 content length")
+	ci.Check(deadHeaders["x-content-type-options"] == "" && goDeadHeaders["x-content-type-options"] == "", "the 502 for an unreachable upstream sent X-Content-Type-Options, which Go's does not")
+	dead.Stop()
+	goDead.Stop()
+	front.Stop()
+	goProxy.Stop()
+	backend.Stop()
+	let got = ci.Exec([]str{strict}, root, 30)
+	ci.Must(got, "run strict proxy error test")
+	let expected = ci.Read(ci.Join(root, "toolchain/tests/v2/proxy.out"))
+	let actual = got.Stdout
+	ci.Check(actual == expected, "strict proxy output differs: " + actual)
+	ci.Pass("proxy: Go header comparison, chunked request, 4 MiB streaming, one Content-Type, HEAD without a body, a body cut short aborted and logged once, Go's 502 for an unreachable upstream, and the exact strict output passed")
+}
+
+fn metaRequest(port i64) (i64, map[str]str, str) {
+	mut c = rawconn.Open(port, 10)
+	c.Send("GET /meta HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9\r\nX-Secret: private\r\nConnection: X-Secret, keep-alive\r\nConnection: Proxy-Hop\r\nProxy-Hop: private\r\n\r\n")
+	let (status, headers) = c.Head()
+	mut body = ""
+	if headers["transfer-encoding"] == "chunked" {
+		body = twine.Join(c.Chunked(), "")
+	} else {
+		body = c.Body(headers)
+	}
+	c.Close()
+	return status, headers, body
+}
+
+// exchange sends a request with method for path to the port and returns every byte the server sent before it closed the connection.
+fn exchange(port i64, method str, path str) str {
+	mut c = rawconn.Open(port, 10)
+	c.Send(method + " " + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	let all = c.Rest()
+	c.Close()
+	return all
+}
+
+// parts splits a raw response into its status, its header lines (a repeated name included) and its body.
+fn parts(raw str) (i64, []str, str) {
+	let end = twine.Index(raw, "\r\n\r\n")
+	if end < 0 {
+		ci.Fail("no complete response head: " + say.Fmt("%q", raw))
+		return 0, []str{}, ""
+	}
+	let lines = twine.Split(raw[:end], "\r\n")
+	let first = twine.Fields(lines[0])
+	ci.Check(len(first) >= 2, "no status line: " + say.Fmt("%q", lines[0]))
+	return ci.Num(first[1]), lines[1:], raw[end+4:]
+}
+
+// bodyOf reads the body after a response head: its chunks, or the bytes its Content-Length gives.
+fn bodyOf(c mut rawconn.Conn, headers map[str]str) str {
+	if headers["transfer-encoding"] == "chunked" {
+		return twine.Join(c.Chunked(), "")
+	}
+	return c.Body(headers)
+}
+
+// values is the value of every header line named name (in lower case), in order.
+fn values(lines []str, name str) []str {
+	mut out = []str{}
+	for l in lines {
+		let k = twine.IndexByte(l, ':')
+		if k > 0 && twine.ToLower(l[:k]) == name {
+			out = append(out, twine.TrimSpace(l[k+1:]))
+		}
+	}
+	return out
+}
+
+// bodyErrors is how many body read errors a log holds, one line each.
+fn bodyErrors(path str) i64 {
+	return twine.Count(ci.Read(path), "read error during body copy")
+}
+
+fn repeated(n i64) str {
+	mut b = make([]u8, n)
+	for i in 0..n { b[i] = u8(i % 251) }
+	return str(b)
+}
