@@ -1,0 +1,576 @@
+package zip
+
+import "fault"
+import "quarry"
+import "squash"
+import "stamp"
+
+// Reading (#751), Go's reader.go step for step: the end record is looked for in the last 1 KiB and then the last
+// 65 KiB, a ZIP64 end record through its locator, the central directory read until a header does not parse (the
+// count is only compared modulo 65536, as Go does for archives that wrapped it), and a prefix before the archive (a
+// self-extracting stub) found from where the directory ends.
+
+// Reader is an archive's entries, in the central directory's order, and its comment.
+type Reader struct {
+	File    []File
+	Comment str
+	data    str
+	base    i64
+}
+
+// File is one entry: its header, and where its bytes are in the archive.
+type File struct {
+	Header FileHeader
+	data   str
+	offset i64
+}
+
+// NewReader reads the archive in data (all of it, as Go's NewReader(r, size) reads one of size bytes).
+fn NewReader(data str) !Reader {
+	let (records, dirSize, dirOffset, comment, base) = try readDirectoryEnd(data)
+	let size = len(data)
+	mut r = Reader{File: []File{}, Comment: comment, data: data, base: base}
+	if dirSize < u64(size) && (u64(size) - dirSize) / 30 >= records {
+		r.File = make([]File, 0, i64(records))
+	}
+	mut pos = base +% i64(dirOffset)
+	mut last = ErrFormat
+	for {
+		let d = readDirectoryHeader(data, pos, size)
+		if d.status == statusFormat {
+			last = ErrFormat
+			break
+		}
+		if d.status == statusShort {
+			last = ErrUnexpectedEOF
+			break
+		}
+		if d.status == statusEnd {
+			fail ErrUnexpectedEOF
+		}
+		r.File = append(r.File, File{Header: d.h, data: data, offset: d.offset +% base})
+		pos = d.next
+	}
+	if u16(len(r.File)) != u16(records) {
+		fail last
+	}
+	return r
+}
+
+// OpenReader reads the archive in the file at path (at most 64 MiB, as quarry.ReadFile; quarry.ReadFileBound and
+// NewReader read a larger one).
+fn OpenReader(path str) !Reader {
+	let data = try quarry.ReadFile(path)
+	return try NewReader(data)
+}
+
+// CheckPaths fails with ErrInsecurePath if an entry's name is absolute, climbs out with "..", or has a backslash
+// (Go's NewReader with GODEBUG=zipinsecurepath=0); empty names are allowed. Check before extracting to disk.
+fn (r Reader) CheckPaths() ! {
+	for f in r.File {
+		let name = f.Header.Name
+		if name == "" {
+			continue
+		}
+		if !IsLocal(name) || hasBackslash(name) {
+			fail fault.Wrap(ErrInsecurePath, "zip: {name}")
+		}
+	}
+}
+
+fn hasBackslash(s str) bool {
+	for i in 0..len(s) {
+		if s[i] == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+// findSignatureInBlock is where the end record starts in data[from:], searching back from the end, or -1; a record
+// whose comment runs past the end stops the search (Go's findSignatureInBlock).
+fn findSignatureInBlock(data str, from i64) i64 {
+	let n = len(data) - from
+	mut i = n - directoryEndLen
+	for i >= 0 {
+		let p = from + i
+		if data[p] == 'P' && data[p + 1] == 'K' && data[p + 2] == 5 && data[p + 3] == 6 {
+			let c = i64(data[p + directoryEndLen - 2]) | i64(data[p + directoryEndLen - 1]) << 8
+			if c + directoryEndLen + i > n {
+				return -1
+			}
+			return p
+		}
+		i -= 1
+	}
+	return -1
+}
+
+// readDirectoryEnd finds the end record (and the ZIP64 one) and gives the number of entries, the directory's size
+// and offset, the archive comment and the offset of the archive in data.
+fn readDirectoryEnd(data str) !(u64, u64, u64, str, i64) {
+	let size = len(data)
+	mut endOffset = -1
+	for k, want in []i64{1024, 65 * 1024} {
+		let blen = min(want, size)
+		let p = findSignatureInBlock(data, size - blen)
+		if p >= 0 {
+			endOffset = p
+			break
+		}
+		if k == 1 || blen == size {
+			fail ErrFormat
+		}
+	}
+	let b = endOffset + 4
+	mut records = u64(le16(data, b + 6))
+	mut dirSize = u64(le32(data, b + 8))
+	mut dirOffset = u64(le32(data, b + 12))
+	let commentLen = i64(le16(data, b + 16))
+	if commentLen > size - (b + 18) {
+		fail "zip: invalid comment length"
+	}
+	let comment = data[b + 18:b + 18 + commentLen]
+	if records == 0xffff || dirSize == 0xffffffff || dirOffset == 0xffffffff {
+		let p = findDirectory64End(data, endOffset)
+		if p >= 0 {
+			endOffset = p
+			if p > size - directory64EndLen {
+				fail ErrUnexpectedEOF
+			}
+			if le32(data, p) != directory64EndSignature {
+				fail ErrFormat
+			}
+			records = le64(data, p + 32)
+			dirSize = le64(data, p + 40)
+			dirOffset = le64(data, p + 48)
+		}
+	}
+	if dirSize > maxInt64 || dirOffset > maxInt64 {
+		fail ErrFormat
+	}
+	mut base = endOffset -% i64(dirSize) -% i64(dirOffset)
+	let o = base +% i64(dirOffset)
+	if o < 0 || o >= size {
+		fail ErrFormat
+	}
+	// Some archives' end records give a wrong prefix; if a header parses at the offset as it is, there is none.
+	if base > 0 {
+		let d = readDirectoryHeader(data, i64(dirOffset), size)
+		if d.status == statusOK {
+			base = 0
+		}
+	}
+	return records, dirSize, dirOffset, comment, base
+}
+
+// findDirectory64End is the offset of the ZIP64 end record its locator before the end record names, -1 when there
+// is no valid locator.
+fn findDirectory64End(data str, endOffset i64) i64 {
+	let loc = endOffset - directory64LocLen
+	if loc < 0 {
+		return -1
+	}
+	if le32(data, loc) != directory64LocSignature || le32(data, loc + 4) != 0 || le32(data, loc + 16) != 1 {
+		return -1
+	}
+	// An offset past what i64 holds is no locator, as in Go (its p >= 0 test).
+	return max(-1, i64(le64(data, loc + 8)))
+}
+
+const statusOK = 0
+const statusFormat = 1
+const statusShort = 2
+const statusEnd = 3
+
+// dirHeader is one central directory header read at an offset: the header, the entry's local header offset (before
+// the archive's own offset is added), where the next header starts, and how the read went: statusOK, statusFormat
+// (not a header), statusShort (cut off, Go's io.ErrUnexpectedEOF) or statusEnd (nothing left, Go's io.EOF).
+type dirHeader struct {
+	h      FileHeader
+	offset i64
+	next   i64
+	status i64
+}
+
+fn badHeader(status i64) dirHeader {
+	return dirHeader{h: FileHeader{}, offset: 0, next: 0, status: status}
+}
+
+// readDirectoryHeader reads the central directory header at pos, with the bytes up to stop available.
+fn readDirectoryHeader(data str, pos i64, stop i64) dirHeader {
+	if pos < 0 {
+		return badHeader(statusEnd)
+	}
+	if pos >= stop {
+		return badHeader(statusEnd)
+	}
+	if stop - pos < directoryHeaderLen {
+		return badHeader(statusShort)
+	}
+	if le32(data, pos) != directoryHeaderSignature {
+		return badHeader(statusFormat)
+	}
+	mut h = FileHeader{}
+	h.CreatorVersion = le16(data, pos + 4)
+	h.ReaderVersion = le16(data, pos + 6)
+	h.Flags = le16(data, pos + 8)
+	h.Method = le16(data, pos + 10)
+	h.ModifiedTime = le16(data, pos + 12)
+	h.ModifiedDate = le16(data, pos + 14)
+	h.CRC32 = le32(data, pos + 16)
+	h.CompressedSize = le32(data, pos + 20)
+	h.UncompressedSize = le32(data, pos + 24)
+	h.CompressedSize64 = u64(h.CompressedSize)
+	h.UncompressedSize64 = u64(h.UncompressedSize)
+	let nameLen = i64(le16(data, pos + 28))
+	let extraLen = i64(le16(data, pos + 30))
+	let commentLen = i64(le16(data, pos + 32))
+	h.ExternalAttrs = le32(data, pos + 38)
+	mut offset = i64(le32(data, pos + 42))
+	let at = pos + directoryHeaderLen
+	let total = nameLen + extraLen + commentLen
+	if total > 0 {
+		if at >= stop {
+			return badHeader(statusEnd)
+		}
+		if stop - at < total {
+			return badHeader(statusShort)
+		}
+	}
+	h.Name = data[at:at + nameLen]
+	h.Extra = data[at + nameLen:at + nameLen + extraLen]
+	h.Comment = data[at + nameLen + extraLen:at + total]
+
+	let (valid1, require1) = detectUTF8(h.Name)
+	let (valid2, require2) = detectUTF8(h.Comment)
+	if !valid1 || !valid2 {
+		h.NonUTF8 = true
+	} else if !require1 && !require2 {
+		h.NonUTF8 = false
+	} else {
+		h.NonUTF8 = h.Flags & 0x800 == 0
+	}
+
+	// The extra fields, as far as they parse: ZIP64 sizes and offset, and the NTFS, Unix and extended times.
+	let extra = h.Extra
+	mut modified = 0
+	mut haveModified = false
+	mut e = 0
+	for len(extra) - e >= 4 {
+		let tag = le16(extra, e)
+		let fieldSize = i64(le16(extra, e + 2))
+		e += 4
+		if len(extra) - e < fieldSize {
+			break
+		}
+		mut f = e
+		let fend = e + fieldSize
+		e = fend
+		if tag == zip64ExtraID {
+			if h.UncompressedSize == 0xffffffff {
+				if fend - f < 8 {
+					return badHeader(statusFormat)
+				}
+				h.UncompressedSize64 = le64(extra, f)
+				f += 8
+			}
+			if h.CompressedSize == 0xffffffff {
+				if fend - f < 8 {
+					return badHeader(statusFormat)
+				}
+				h.CompressedSize64 = le64(extra, f)
+				f += 8
+			}
+			if offset == 0xffffffff {
+				if fend - f < 8 {
+					return badHeader(statusFormat)
+				}
+				offset = i64(le64(extra, f))
+				f += 8
+			}
+		} else if tag == ntfsExtraID {
+			if fend - f < 4 {
+				continue
+			}
+			f += 4
+			for fend - f >= 4 {
+				let attrTag = le16(extra, f)
+				let attrSize = i64(le16(extra, f + 2))
+				f += 4
+				if fend - f < attrSize {
+					break
+				}
+				let a = f
+				f += attrSize
+				if attrTag != 1 || attrSize != 24 {
+					continue
+				}
+				// Windows ticks of 100 ns since 1601; a time i64 nanoseconds cannot hold is skipped.
+				let ts = i64(le64(extra, a))
+				let secs = ts / 10000000
+				let nsecs = 100 * (ts % 10000000)
+				let unixSecs = secs - 11644473600
+				if unixSecs > -9223372036 && unixSecs < 9223372035 {
+					modified = unixSecs * second + nsecs
+					haveModified = true
+				}
+			}
+		} else if tag == unixExtraID || tag == infoZipUnixExtraID {
+			if fend - f < 8 {
+				continue
+			}
+			modified = i64(le32(extra, f + 4)) * second
+			haveModified = true
+		} else if tag == extTimeExtraID {
+			if fend - f < 5 || extra[f] & 1 == 0 {
+				continue
+			}
+			modified = i64(le32(extra, f + 1)) * second
+			haveModified = true
+		}
+	}
+
+	let dos = msDosTimeToTime(h.ModifiedDate, h.ModifiedTime)
+	h.Modified = dos
+	h.ModifiedOffset = 0
+	if haveModified {
+		h.Modified = modified
+		if h.ModifiedTime != 0 || h.ModifiedDate != 0 {
+			h.ModifiedOffset = zoneOffset(diffNs(dos, modified))
+		}
+	}
+	return dirHeader{h: h, offset: offset, next: at + total, status: statusOK}
+}
+
+// diffNs is a - b, saturated like Go's Time.Sub.
+fn diffNs(a i64, b i64) i64 {
+	if b < 0 && a > maxInt64 + b {
+		return maxInt64
+	}
+	if b > 0 && a < (0 - maxInt64 - 1) + b {
+		return 0 - maxInt64 - 1
+	}
+	return a - b
+}
+
+// bodyOffset is where the entry's data starts after its local header, relative to the header.
+fn (f File) bodyOffset() !i64 {
+	if f.offset < 0 {
+		fail "zip: negative offset of a local header"
+	}
+	if f.offset > len(f.data) - fileHeaderLen {
+		fail ErrUnexpectedEOF
+	}
+	if le32(f.data, f.offset) != fileHeaderSignature {
+		fail ErrFormat
+	}
+	let nameLen = i64(le16(f.data, f.offset + 26))
+	let extraLen = i64(le16(f.data, f.offset + 28))
+	return fileHeaderLen + nameLen + extraLen
+}
+
+// DataOffset is where the entry's (possibly compressed) bytes start in the archive.
+fn (f File) DataOffset() !i64 {
+	let body = try f.bodyOffset()
+	return f.offset + body
+}
+
+// sectionEnd is the end of size bytes from start as Go's io.NewSectionReader sets it (clamped at the largest
+// offset), clamped again at the end of data.
+fn sectionEnd(data str, start i64, size u64) i64 {
+	if size > u64(maxInt64 - start) {
+		return len(data)
+	}
+	return min(start + i64(size), len(data))
+}
+
+const modeDirOK = 0
+const modeDirBad = 1
+const modeStore = 2
+const modeDeflate = 3
+const modeRaw = 4
+
+// FileReader reads an entry's bytes: Read, then 0 at the end, where the size and the CRC-32 (and the data
+// descriptor's) are checked.
+type FileReader struct {
+	data    str
+	pos     i64
+	end     i64
+	mode    i64
+	inf     squash.InflateReader
+	crc     u32
+	nread   u64
+	size    u64
+	want    u32
+	desc    bool
+	descPos i64
+	err     fault
+	done    bool
+}
+
+// Open opens the entry's bytes for reading, decompressed as they are read. A directory reads nothing (or fails
+// with ErrFormat when it claims a size); an unknown method fails with ErrAlgorithm.
+fn (f File) Open() !FileReader {
+	let body = try f.bodyOffset()
+	let h = f.Header
+	if h.IsDir() {
+		mut mode = modeDirOK
+		if h.UncompressedSize64 != 0 {
+			mode = modeDirBad
+		}
+		return newFileReader(f.data, 0, 0, mode, h)
+	}
+	let start = f.offset + body
+	let end = sectionEnd(f.data, start, h.CompressedSize64)
+	if h.Method != Store && h.Method != Deflate {
+		fail ErrAlgorithm
+	}
+	mut mode = modeStore
+	if h.Method == Deflate {
+		mode = modeDeflate
+	}
+	mut r = newFileReader(f.data, start, end, mode, h)
+	if h.Flags & 0x8 != 0 {
+		r.desc = true
+		r.descPos = start +% i64(h.CompressedSize64)
+	}
+	return r
+}
+
+// OpenRaw opens the entry's bytes as they are stored, with no decompression and no checks.
+fn (f File) OpenRaw() !FileReader {
+	let body = try f.bodyOffset()
+	let start = f.offset + body
+	return newFileReader(f.data, start, sectionEnd(f.data, start, f.Header.CompressedSize64), modeRaw, f.Header)
+}
+
+fn newFileReader(data str, start i64, end i64, mode i64, h FileHeader) FileReader {
+	mut inf = squash.NewInflateReader(data, 0, 0)
+	if mode == modeDeflate {
+		inf = squash.NewInflateReader(data, start, end)
+	}
+	return FileReader{data: data, pos: start, end: end, mode: mode, inf: inf, crc: 0, nread: 0, size: h.UncompressedSize64, want: h.CRC32, desc: false, descPos: 0, err: nil, done: false}
+}
+
+// ReadAll is the entry's whole content, at most most bytes: past that it fails with fault.LimitExceeded, having
+// held no more than most bytes (an entry that inflates past its declared size fails sooner, with ErrFormat).
+fn (f File) ReadAll(most i64) !str {
+	mut r = try f.Open()
+	mut out = make([]u8, 0, max(0, min(most, i64(min(f.Header.UncompressedSize64, u64(1 << 26))))))
+	mut buf = make([]u8, 32768)
+	for {
+		let n = try r.Read(mut buf)
+		if n == 0 {
+			break
+		}
+		if len(out) + n > most {
+			fail fault.Wrap(fault.LimitExceeded, "zip: {f.Header.Name} is over {most} bytes")
+		}
+		out = append(out, buf[0:n]...)
+	}
+	return str(out)
+}
+
+// Read fills buf with the entry's next bytes and returns how many, 0 at the end. More bytes than the header's
+// size fail with ErrFormat, fewer with ErrUnexpectedEOF, a CRC-32 that does not match with ErrChecksum; a fault
+// repeats on every later Read.
+fn (r mut FileReader) Read(buf mut []u8) !i64 {
+	if r.err != nil {
+		fail r.err
+	}
+	if r.done {
+		return 0
+	}
+	if r.mode == modeDirOK {
+		r.done = true
+		return 0
+	}
+	if r.mode == modeDirBad {
+		r.err = ErrFormat
+		fail r.err
+	}
+	mut n = 0
+	if r.mode == modeDeflate {
+		n = r.inf.Read(mut buf) catch err {
+			if fault.Is(err, squash.ErrUnexpectedEOF) {
+				r.err = ErrUnexpectedEOF
+			} else {
+				r.err = err
+			}
+			fail r.err
+		}
+	} else {
+		let k = min(len(buf), r.end - r.pos)
+		if k > 0 {
+			let h = cast(i64, buf)
+			memcpy(h[2], cast(i64, r.data) + 8 + r.pos, k)
+			r.pos += k
+			n = k
+		}
+	}
+	if r.mode == modeRaw {
+		if n == 0 {
+			r.done = true
+		}
+		return n
+	}
+	if n > 0 {
+		r.crc = stamp.Crc32UpdateBytes(r.crc, buf[0:n])
+		r.nread += u64(n)
+		if r.nread > r.size {
+			r.err = ErrFormat
+			fail r.err
+		}
+		return n
+	}
+	// The end: the size, then the data descriptor's CRC-32 or the header's.
+	if r.nread != r.size {
+		r.err = ErrUnexpectedEOF
+		fail r.err
+	}
+	if r.desc {
+		r.readDataDescriptor() catch err {
+			r.err = err
+			fail r.err
+		}
+		if r.crc != r.want {
+			r.err = ErrChecksum
+			fail r.err
+		}
+	} else if r.crc != r.want {
+		r.err = ErrChecksum
+		fail r.err
+	}
+	r.done = true
+	return 0
+}
+
+// Close ends reading; the archive stays in memory, so there is nothing to release.
+fn (r mut FileReader) Close() !i64 {
+	return 0
+}
+
+// readDataDescriptor checks the CRC-32 of the data descriptor after the entry's bytes (with or without its
+// signature) against the header's; the sizes in it are not used, as in Go.
+fn (r FileReader) readDataDescriptor() ! {
+	if r.descPos < 0 {
+		fail "zip: negative offset of a data descriptor"
+	}
+	let avail = max(0, min(dataDescriptorLen, len(r.data) - r.descPos))
+	if avail < 4 {
+		fail ErrUnexpectedEOF
+	}
+	mut p = r.descPos
+	if le32(r.data, p) == dataDescriptorSignature {
+		if avail < 16 {
+			fail ErrUnexpectedEOF
+		}
+		p += 4
+	} else if avail < 12 {
+		fail ErrUnexpectedEOF
+	}
+	if le32(r.data, p) != r.want {
+		fail ErrChecksum
+	}
+}

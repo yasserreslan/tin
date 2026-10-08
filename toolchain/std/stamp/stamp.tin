@@ -33,9 +33,12 @@ fn crc_tables(poly u32) []u32 {
 }
 
 fn crc_update(crc u32, t []u32, s str) u32 {
+	return crc_update_at(crc, t, cast(i64, s) + 8, len(s))
+}
+
+// crc_update_at continues a CRC over the n bytes at p (a string's or a byte slice's data).
+fn crc_update_at(crc u32, t []u32, p i64, n i64) u32 {
 	mut c = ^crc
-	let p = cast(i64, s) + 8
-	let n = len(s)
 	mut i = 0
 	for i+8 <= n {
 		let lo = u32(__ld(p+i, 2)) ^ c
@@ -58,6 +61,15 @@ fn Crc32(s str) u32 {
 // Crc32Update continues an IEEE CRC-32 over more data.
 fn Crc32Update(crc u32, s str) u32 {
 	return crc_update(crc, ieee, s)
+}
+
+// Crc32UpdateBytes continues an IEEE CRC-32 over the bytes of b, read in place (no string is made).
+fn Crc32UpdateBytes(crc u32, b []u8) u32 {
+	if len(b) == 0 {
+		return crc
+	}
+	let h = cast(i64, b)
+	return crc_update_at(crc, ieee, h[2], len(b))
 }
 
 // Crc32C is the Castagnoli CRC-32 of s (as in iSCSI, ext4 and many databases).
