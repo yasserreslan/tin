@@ -429,7 +429,10 @@ reading resumes and buffered input is served.
   still sending its body would lose the response.
 - **Memory and connections:** the partial requests one core buffers are limited to 256 MiB
   (`TIN_MAX_BUFFERED`): a new partial request past it gets 503 and close. Each core takes at
-  most 16384 connections (`TIN_MAX_CONNS`); more are closed at accept.
+  most 16384 connections (`TIN_MAX_CONNS`). Up to 64 connections past that are still accepted,
+  and each request on them gets 503 with `Retry-After: 1` and `Connection: close` (a load
+  balancer reads an answer, not a reset, #749); only past that margin is a new connection closed
+  at accept.
 - **Memory bounds by default (#356):** every request has a memory budget (see Budgets below):
   `TIN_REQUEST_MEMORY` bytes, or when it is unset a quarter of the memory limit per core (the
   cgroup's `memory.max`, else the machine's physical memory), at least 64 MiB; 256 MiB on one

@@ -88,6 +88,8 @@ type Req struct {
 	tp     i64 // a chunked body's trailer field lines (#349), read by Header after the header block
 	tn     i64
 	cn     i64 // the connection record, for RemoteAddr and ClientIP (0: a request made in-process)
+	ap     i64 // an absolute-form target's authority, which Header("host") answers with (#749)
+	an     i64
 }
 
 // Out is the response being built. Body is the response body; the status defaults to
@@ -142,7 +144,12 @@ const cHs = 27       // its handshake: 1 running in the task in cTask, 2 done (u
 const cProto = 28    // the protocol ALPN chose: its number in the offered list (alpn_offer), 0 none
 const cH2 = 29       // the connection speaks HTTP/2 (#360): its state (h2.tin), 0 for HTTP/1.1
 const cBody = 30     // a request body its handler reads as it arrives (#481): the reader's record (stream_body.tin), 0 none
-const cWords = 31
+const cOver = 31     // accepted past TIN_MAX_CONNS (#749): its first request gets 503 and the connection closes
+const cWords = 32
+
+// overConns is how many connections past TIN_MAX_CONNS a core still accepts, to answer each one 503
+// instead of resetting it; past that margin a new connection is closed at accept (#749).
+const overConns = 64
 
 shared mut gListen i64
 shared mut gIP i64
@@ -172,7 +179,7 @@ shared mut gWriteMs i64    // a response the client does not read: no progress f
 shared mut gTimeoutsSet bool
 shared mut gMaxBody i64     // largest request body (413 past it)
 shared mut gMaxBuffered i64 // bytes of requests still arriving a core may hold (503 past it)
-shared mut gMaxConns i64    // connections per core; more are closed at accept (0: no limit)
+shared mut gMaxConns i64    // connections per core; more get 503 and close, or are closed at accept past overConns (0: no limit)
 shared mut gLimitsSet bool
 
 mut myID i64
@@ -227,6 +234,8 @@ mut pTn i64
 mut pKeep10 bool // an HTTP/1.0 request asked for keep-alive: the response must say so
 mut pClose bool  // the connection closes after this request's response, which says so (RFC 9112 9.6)
 mut pHttp10 bool // the request is HTTP/1.0
+mut pAu i64      // an absolute-form target's authority: offset in the request bytes and length (0: none, #749)
+mut pAn i64
 mut pTr i64      // a chunked request's trailer lines: offset in the request bytes and length (#349)
 mut pTrLen i64
 
@@ -738,8 +747,17 @@ fn accept_all() {
 			rr += 1
 		}
 		if gMaxConns > 0 && __atomic_load(gLoad+target*128) >= gMaxConns {
-			// Full: close at once rather than let one client hold every descriptor.
-			rt_sys_close(fd)
+			// Full: the connection is kept on this core only to answer its first request with
+			// 503, Retry-After and Connection: close, which a load balancer reads as "try another
+			// backend" where a reset reads as a dead one (#749). Past overConns more it is closed
+			// at once, so one client cannot hold every descriptor.
+			if __atomic_load(gLoad+myID*128) >= gMaxConns+overConns {
+				rt_sys_close(fd)
+				continue
+			}
+			add_conn(fd, true)
+			let oc = conns[fd]
+			oc[cOver] = 1
 			continue
 		}
 		if target == myID {
@@ -975,7 +993,15 @@ fn on_read_serve(c i64) bool {
 			need = cap * 2
 		}
 		if need > gMaxBody+2*maxLine {
-			close_conn(c)
+			// A body past the limit whose length was not known up front (chunked): 413 and a
+			// lingering close, so a client still sending reads the answer (#749).
+			if big {
+				c[cIn] = buf
+				c[cInLen] = 0
+				c[cInCap] = cap
+			}
+			bad(c, 413)
+			flush(c)
 			return false
 		}
 		mut grow = need
@@ -1242,8 +1268,11 @@ fn serve_one(c i64, p i64, n i64) i64 {
 	mut alive = !http10
 	mut ts = sp1 + 1
 	mut tn = sp2 - sp1 - 1
+	pAu = 0
+	pAn = 0
 	if tn > 7 && (load8(p+ts) == 'h' || load8(p+ts) == 'H') {
-		// Absolute-form ("http://host/path?q", RFC 9112 3.2.2): route on the path.
+		// Absolute-form ("http://host/path?q", RFC 9112 3.2.2): route on the path. Its authority
+		// replaces the Host field (q.Header("host")), as the RFC says (#749).
 		mut k = 0
 		if name_is(p+ts, 7, "http://") {
 			k = 7
@@ -1251,9 +1280,16 @@ fn serve_one(c i64, p i64, n i64) i64 {
 			k = 8
 		}
 		if k > 0 {
+			let a = k
 			for k < tn && load8(p+ts+k) != '/' && load8(p+ts+k) != '?' {
 				k += 1
 			}
+			if k == a || !host_ok(p+ts+a, k-a) {
+				bad(c, 400)
+				return -1
+			}
+			pAu = ts + a
+			pAn = k - a
 			ts += k
 			tn -= k
 		}
@@ -1451,6 +1487,12 @@ fn serve_one(c i64, p i64, n i64) i64 {
 			return n // the connection speaks HTTP/2 now; the request is its stream 1 (#360)
 		}
 	}
+	if c[cOver] != 0 {
+		// Accepted past TIN_MAX_CONNS (#749): answered 503 and closed once the answer is out.
+		shed(c, sp1 == 4 && load8(p) == 'H' && bytes_are(p, 4, "HEAD"), false, true)
+		c[cClose] = 1
+		return total
+	}
 	if waiting >= maxWaiting {
 		// Backpressure: too many requests already wait on this core.
 		bad(c, 503)
@@ -1566,7 +1608,7 @@ fn run_request(c i64) {
 	let p = pReq
 	let t = p + pTs
 	let tn = pTn
-	let q = Req{Method: method_str(p, pSp1), Path: "", Query: "", hp: p + pLe + 1, hn: pHend - pLe - 1, bp: p + pHend, bn: pCl, tp: p + pTr, tn: pTrLen, cn: c}
+	let q = Req{Method: method_str(p, pSp1), Path: "", Query: "", hp: p + pLe + 1, hn: pHend - pLe - 1, bp: p + pHend, bn: pCl, tp: p + pTr, tn: pTrLen, cn: c, ap: p + pAu, an: pAn}
 	let qm = memchr(t, '?', tn)
 	if qm == 0 {
 		q.Path = rt_str_from_raw(t, tn)
@@ -1928,9 +1970,11 @@ fn shed(c i64, hd bool, keep10 bool, closes bool) {
 
 // Limits sets the largest request body in bytes (413 past it), the bytes of requests still
 // arriving that one core may buffer (a new partial request past it gets 503 and close), and
-// the connections per core (more are closed at accept; 0: no limit). Defaults 64 MiB,
-// 256 MiB and 16384; TIN_MAX_BODY, TIN_MAX_BUFFERED and TIN_MAX_CONNS override them. Call
-// before Serve.
+// the connections per core (0: no limit). Past maxConns a core still accepts up to 64 more
+// connections and answers each request on them 503 with Retry-After and Connection: close, so a
+// load balancer reads an answer instead of a reset; only past that margin is a new connection
+// closed at accept. Defaults 64 MiB, 256 MiB and 16384; TIN_MAX_BODY, TIN_MAX_BUFFERED and
+// TIN_MAX_CONNS override them. Call before Serve.
 fn Limits(maxBody i64, maxBuffered i64, maxConns i64) {
 	gMaxBody = maxBody
 	gMaxBuffered = maxBuffered
@@ -2370,8 +2414,15 @@ fn str_int(v i64) str {
 }
 
 // Header returns the value of the request header name (any case), or "". A chunked request's
-// trailer fields are read after the header block's.
+// trailer fields are read after the header block's, whether or not a Trailer field announced
+// them: a field of the header block wins, and the framing fields (Host, Content-Length,
+// Transfer-Encoding) are never taken from trailers. Go keeps trailers apart, in Request.Trailer.
+// For an absolute-form target ("GET http://host/path", as proxies send), "host" is the target's
+// authority, which replaces the Host field (RFC 9112 3.2.2, #749).
 fn (q Req) Header(name str) str {
+	if q.an > 0 && name_is(cast(i64, name)+8, len(name), "host") {
+		return rt_str_from_raw(q.ap, q.an) // an absolute-form target's authority wins (#749)
+	}
 	let v = header_in(q.hp, q.hn, name)
 	if len(v) == 0 && q.tn > 0 {
 		// a chunked body's trailer fields come after the header block's (#349)
