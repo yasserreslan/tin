@@ -42,6 +42,18 @@ fn main() {
 	html("href mailto", `<a href="{{.}}">x</a>`, `mailto:a@b.c`)
 	html("src", `<img src="{{.}}">`, `x" onerror="alert(1)`)
 	html("unquoted href", `<a href={{.}}>x</a>`, `javascript:alert(1)`)
+	// A URL attribute is escaped by position (#813): filtered and normalized at the start, normalized in the path,
+	// query-escaped after "?" or "#", so a value cannot add a query parameter.
+	html("url query", `<a href="/s?q={{.}}">x</a>`, `http://ok/a b?c=d&e`)
+	html("url query scheme", `<a href="/s?q={{.}}">x</a>`, `javascript:alert(1)`)
+	html("url query param", `<a href="/s?q={{.}}">x</a>`, `x&admin=1`)
+	html("url start quote", `<a href="{{.}}">x</a>`, `" onmouseover="x`)
+	html("url start space", `<a href="{{.}}">x</a>`, `http://ok/a b?c=d&e`)
+	html("url unquoted", `<img src={{.}}>`, `a'b\c`)
+	html("url unquoted empty", `<img src={{.}}>`, ``)
+	html("url path", `<a href="/p/{{.}}/x">x</a>`, `a b#c`)
+	html("url fragment", `<a href="/p#{{.}}">x</a>`, `a%20b`)
+	html("url utf8", `<a href="/p/{{.}}">x</a>`, `é ü`)
 	// JavaScript inside <script>.
 	html("js", `<script>var x = "{{.}}";</script>`, `</script><script>alert(1)</script>`)
 	html("js quote", `<script>var x = '{{.}}';</script>`, `a'b\c`)

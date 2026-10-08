@@ -9,19 +9,29 @@ out href data <a href="#ZgotmplZ">x</a>
 out href safe <a href="https://example.com/?a=b&amp;c=d">x</a>
 out href relative <a href="/path?q=1&amp;r=2">x</a>
 out href mailto <a href="mailto:a@b.c">x</a>
-out src <img src="x&#34; onerror=&#34;alert(1)">
+out src <img src="x%22%20onerror=%22alert%281%29">
 out unquoted href <a href=#ZgotmplZ>x</a>
+out url query <a href="/s?q=http%3a%2f%2fok%2fa%20b%3fc%3dd%26e">x</a>
+out url query scheme <a href="/s?q=javascript%3aalert%281%29">x</a>
+out url query param <a href="/s?q=x%26admin%3d1">x</a>
+out url start quote <a href="%22%20onmouseover=%22x">x</a>
+out url start space <a href="http://ok/a%20b?c=d&amp;e">x</a>
+out url unquoted <img src=a%27b%5cc>
+out url unquoted empty <img src=ZgotmplZ>
+out url path <a href="/p/a%20b#c/x">x</a>
+out url fragment <a href="/p#a%2520b">x</a>
+out url utf8 <a href="/p/%c3%a9%20%c3%bc">x</a>
 out js <script>var x = "\u003c\/script\u003e\u003cscript\u003ealert(1)\u003c\/script\u003e";</script>
 out js quote <script>var x = 'a\u0027b\\c';</script>
 out js backslash <script>var x = "\\";</script>
 out unquoted space <a title=x&#32;onmouseover&#61;alert(1)>x</a>
 out unquoted eq <a title=a&#61;b&#96;c>x</a>
-out unquoted href space <a href=https://a.example/&#32;onmouseover&#61;alert(1)>x</a>
+out unquoted href space <a href=https://a.example/%20onmouseover&#61;alert%281%29>x</a>
 out unquoted then attr <a title=p&#32;q id=z>x</a>
 out quoted then onclick ok <a href="/x" title="v">x</a>
 out after script <script>var x = 1;</script>&lt;b&gt;
 out builtin html <p>&amp;lt;i&amp;gt;</p>
-out builtin urlquery <p>a+b%26c</p>
+out builtin urlquery <p>a&#43;b%26c</p>
 out builtin js <p>\u003C/script\u003E</p>
 refused <style>{{.}}</style> stencil: <style> is not supported
 refused <a onclick="{{.}}">x</a> stencil: the onclick attribute is not supported

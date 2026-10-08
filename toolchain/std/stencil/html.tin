@@ -22,6 +22,14 @@ const escUnq = 4 // an unquoted attribute value
 
 const escUnqURL = 5 // an unquoted URL attribute value
 
+const escURLPath = 6 // a URL attribute value after its start, before any "?" or "#": normalized, not filtered
+
+const escURLQuery = 7 // a URL attribute value in the query or the fragment: query-escaped
+
+const escUnqURLPath = 8 // escURLPath in an unquoted value
+
+const escUnqURLQuery = 9 // escURLQuery in an unquoted value
+
 // The scanner's states.
 const stText = 0
 
@@ -43,11 +51,12 @@ type htmlState struct {
 	jsQuote   u8   // the open string literal's quote inside <script>, 0 outside one
 	jsUnknown bool // the script has a construct the scanner cannot judge (a comment, regexp or division, ${)
 	jsEsc     bool // the previous byte in a JavaScript string was a backslash
+	urlPart   i64  // in a URL attribute value: 0 nothing yet, 1 after the start (the path), 2 in the query or the fragment
 }
 
 // newHTMLState is the state at the start of a template: element text.
 fn newHTMLState() htmlState {
-	return htmlState{state: stText, quote: 0, attr: "", closing: false, tagName: "", inAttr: false, valueSeen: false, jsQuote: 0, jsUnknown: false, jsEsc: false}
+	return htmlState{state: stText, quote: 0, attr: "", closing: false, tagName: "", inAttr: false, valueSeen: false, jsQuote: 0, jsUnknown: false, jsEsc: false, urlPart: 0}
 }
 
 // sameContext reports whether two states are in the same markup context, which a block's
@@ -55,7 +64,7 @@ fn newHTMLState() htmlState {
 fn sameContext(a htmlState, b htmlState) bool {
 	return a.state == b.state && a.quote == b.quote && a.inAttr == b.inAttr && a.valueSeen == b.valueSeen &&
 		a.attr == b.attr && a.tagName == b.tagName && a.jsQuote == b.jsQuote && a.jsUnknown == b.jsUnknown &&
-		a.jsEsc == b.jsEsc
+		a.jsEsc == b.jsEsc && a.urlPart == b.urlPart
 }
 
 // annotateHTML walks the parsed nodes and sets each action's escape mode from the surrounding
@@ -120,6 +129,18 @@ fn modeFor(s htmlState) i64 {
 	let unquoted = s.state == stTag
 	if s.state == stAttrValue || s.inAttr {
 		if isURLAttr(s.attr) {
+			if s.urlPart == 2 {
+				if unquoted {
+					return escUnqURLQuery
+				}
+				return escURLQuery
+			}
+			if s.urlPart == 1 {
+				if unquoted {
+					return escUnqURLPath
+				}
+				return escURLPath
+			}
 			if unquoted {
 				return escUnqURL
 			}
@@ -148,7 +169,7 @@ fn isRefusedAttr(name str) bool {
 // through its caller's state.
 fn copyState(st htmlState) htmlState {
 	return htmlState{state: st.state, quote: st.quote, attr: st.attr, closing: st.closing, tagName: st.tagName, inAttr: st.inAttr,
-		valueSeen: st.valueSeen, jsQuote: st.jsQuote, jsUnknown: st.jsUnknown, jsEsc: st.jsEsc}
+		valueSeen: st.valueSeen, jsQuote: st.jsQuote, jsUnknown: st.jsUnknown, jsEsc: st.jsEsc, urlPart: st.urlPart}
 }
 
 // scanHTML advances the scanner over one text segment.
@@ -216,12 +237,14 @@ fn scanHTML(t str, st htmlState) !htmlState {
 			if s.inAttr {
 				// Part of an unquoted value.
 				s.valueSeen = true
+				advanceURLPart(mut s, c)
 				i += 1
 				continue
 			}
 			if c == '=' {
 				s.inAttr = true
 				s.valueSeen = false
+				s.urlPart = 0
 				i += 1
 				continue
 			}
@@ -255,6 +278,7 @@ fn scanHTML(t str, st htmlState) !htmlState {
 				i += 1
 				continue
 			}
+			advanceURLPart(mut s, t[i])
 			i += 1
 			continue
 		}
@@ -273,6 +297,19 @@ fn scanHTML(t str, st htmlState) !htmlState {
 		i += 1
 	}
 	return s
+}
+
+// advanceURLPart moves a URL attribute value's position over one byte of its text, as Go's tURL does: a "?" or "#" starts
+// the query or fragment, any other byte but a space ends the start of the value.
+fn advanceURLPart(s mut htmlState, c u8) {
+	if !isURLAttr(s.attr) || s.urlPart == 2 {
+		return
+	}
+	if c == '?' || c == '#' {
+		s.urlPart = 2
+	} else if s.urlPart == 0 && !isSpaceByte(c) {
+		s.urlPart = 1
+	}
 }
 
 // scanJS advances the script scanner over one byte. It tracks string literals only; a comment,
@@ -341,23 +378,55 @@ fn escapeFor(mode i64, s str) str {
 		return s
 	}
 	if mode == escURL {
-		return escapeURLAttr(s)
+		return escapeCtx(urlFilterNormalize(s))
+	}
+	if mode == escURLPath {
+		return escapeCtx(urlEncode(s, true))
+	}
+	if mode == escURLQuery {
+		return escapeCtx(urlEncode(s, false))
 	}
 	if mode == escUnq {
-		return escapeUnquoted(escapeHTML(s))
+		return escapeUnquoted(escapeCtx(s))
 	}
 	if mode == escUnqURL {
-		return escapeUnquoted(escapeURLAttr(s))
+		return escapeUnquoted(escapeCtx(urlFilterNormalize(s)))
+	}
+	if mode == escUnqURLPath {
+		return escapeUnquoted(escapeCtx(urlEncode(s, true)))
+	}
+	if mode == escUnqURLQuery {
+		return escapeUnquoted(escapeCtx(urlEncode(s, false)))
 	}
 	if mode == escJS {
 		return escapeJSStr(s)
 	}
-	return escapeHTML(s)
+	return escapeCtx(s)
+}
+
+// escapeCtx is Go's contextual HTML escaper: escapeHTML, and "+" as &#43; too (the html builtin leaves it alone).
+fn escapeCtx(s str) str {
+	let e = escapeHTML(s)
+	if indexOfByte(e, '+') < 0 {
+		return e
+	}
+	mut out = ""
+	for i in 0..len(e) {
+		if e[i] == '+' {
+			out += "&#43;"
+		} else {
+			out += e[i:i+1]
+		}
+	}
+	return out
 }
 
 // escapeUnquoted escapes what ends or splits an unquoted attribute value (whitespace, "=" and the
 // backtick), on text that is already HTML-escaped, as Go's html/template does.
 fn escapeUnquoted(s str) str {
+	if len(s) == 0 {
+		return "ZgotmplZ"
+	}
 	mut out = ""
 	for i in 0..len(s) {
 		let c = s[i]
@@ -382,26 +451,60 @@ fn escapeUnquoted(s str) str {
 	return out
 }
 
-// escapeURLAttr escapes a URL attribute value, as Go does: a URL whose scheme is not safe becomes
-// the #ZgotmplZ sentinel.
-fn escapeURLAttr(s str) str {
-	let t = trimSpaceASCII(s)
-	if len(t) == 0 {
-		return s
-	}
-	if !isSafeURL(t) {
+// urlFilterNormalize is a value at the start of a URL attribute: an unsafe scheme becomes the #ZgotmplZ sentinel, the rest is
+// normalized (Go's urlfilter and urlnormalizer).
+fn urlFilterNormalize(s str) str {
+	if !isSafeURL(s) {
 		return "#ZgotmplZ"
 	}
-	return escapeHTML(s)
+	return urlEncode(s, true)
 }
 
-// isSafeURL accepts relative URLs and the http, https and mailto schemes.
+// urlEncode percent-encodes the bytes outside the URL grammar, in lower-case hex, as Go's processURLOnto does: with norm the
+// reserved characters and "%" stay (a value that is a URL already), without it only the unreserved ones do (a query value).
+fn urlEncode(s str, norm bool) str {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		let c = s[i]
+		mut plain = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~'
+		if norm && c == '%' && i + 2 < len(s) && isHexByte(s[i+1]) && isHexByte(s[i+2]) {
+			plain = true // a valid escape stays
+		}
+		if norm && (c == '!' || c == '#' || c == '$' || c == '&' || c == '*' || c == '+' || c == ',' || c == '/' || c == ':' ||
+			c == ';' || c == '=' || c == '?' || c == '@' || c == '[' || c == ']') {
+			plain = true
+		}
+		if plain {
+			out = append(out, c)
+		} else {
+			out = append(out, '%')
+			out = append(out, hexLower(c >> 4))
+			out = append(out, hexLower(c & 15))
+		}
+	}
+	return rt_str_from_raw(cast(i64, out)[2], len(out))
+}
+
+// isHexByte reports a hex digit.
+fn isHexByte(c u8) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+// hexLower is the lower-case hex digit of a nibble.
+fn hexLower(n u8) u8 {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'a' + (n - 10)
+}
+
+// isSafeURL accepts relative URLs and the http, https and mailto schemes, as Go's isSafeURL does: no space is trimmed first.
 fn isSafeURL(s str) bool {
 	let colon = indexOfByte(s, ':')
 	if colon < 0 {
 		return true // relative
 	}
-	// A colon before any slash is a scheme.
+	// A slash before the colon: a path, not a scheme.
 	let slash = indexOfByte(s, '/')
 	if slash >= 0 && slash < colon {
 		return true
@@ -418,17 +521,4 @@ fn indexOfByte(s str, c u8) i64 {
 		}
 	}
 	return -1
-}
-
-// trimSpaceASCII trims ASCII spaces.
-fn trimSpaceASCII(s str) str {
-	mut a = 0
-	mut b = len(s)
-	for a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r') {
-		a += 1
-	}
-	for b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\n' || s[b-1] == '\r') {
-		b -= 1
-	}
-	return s[a:b]
 }
