@@ -1,0 +1,387 @@
+// Package dump writes HTTP requests and responses out as text, byte for byte as Go's httputil.DumpRequest and
+// httputil.DumpResponse do (#739): for logs, for debugging a client or a handler, and for tests that compare what went over
+// the wire.
+//
+//	fn handle(q anvil.Req, w mut anvil.Out) {
+//		herald.Info("request", "dump", dump.Request(q, false))
+//	}
+//
+//	let r = try wire.Get("http://127.0.0.1:8080/")
+//	say.Text(dump.Response(r, true))
+//
+// Request takes the request a handler serves (Go's server-side Request); Response takes the response a wire call returned.
+// The header fields are written as Go writes them: names in canonical form ("content-type" becomes "Content-Type"), sorted
+// by name, the values of one name in the order they came. Bodies are written as they were framed: a chunked body as one
+// chunk and the last chunk, any other as it is. tools/ci/dump_check.tin compares both with Go's over a corpus.
+//
+// Not reproduced: an absolute-form request target ("GET http://host/x") is written as its path with a Host field (Go keeps
+// the URL and writes no Host); a status line without a reason phrase ("HTTP/1.1 200") is written "HTTP/1.1 200 " (Go writes
+// "HTTP/1.1 200 200"); the trailers of an HTTP/1.1 chunked response, which wire does not keep.
+package dump
+
+import "anvil"
+import "wire"
+
+// Request returns the request q as text, as Go's httputil.DumpRequest(req, body): the request line, the Host field, a
+// Transfer-Encoding: chunked field for a chunked request, the other fields (Cache-Control: no-cache added after a
+// Pragma: no-cache, as Go's server does), an empty line and, when body is true, the body (chunked again when it came
+// chunked). A request on a Router.Stream route has no body here: its body is read with BodyStream.
+fn Request(q anvil.Req, body bool) str {
+	let fields = q.Fields()
+	let b = q.Body()
+	mut out = make([]u8, 0, 256+len(b))
+	out = append(out, q.Method...)
+	out = append(out, ' ')
+	out = append(out, q.Path...)
+	if len(q.Query) > 0 {
+		out = append(out, '?')
+		out = append(out, q.Query...)
+	}
+	out = append(out, ' ')
+	out = append(out, q.Proto()...)
+	out = append(out, "\r\n"...)
+	let host = q.Header("host")
+	if len(host) > 0 {
+		out = append(out, "Host: "...)
+		out = append(out, host...)
+		out = append(out, "\r\n"...)
+	}
+	mut chunked = false
+	mut rest = make([]field, 0, len(fields))
+	mut pragma = false
+	for f in fields {
+		let x = split(f)
+		if x.name == "Host" || x.name == "Trailer" {
+			continue
+		}
+		if x.name == "Transfer-Encoding" {
+			chunked = true
+			continue
+		}
+		if x.name == "Pragma" && !pragma {
+			pragma = true
+			if x.value == "no-cache" && !has(fields, "Cache-Control") {
+				rest = append(rest, field{name: "Cache-Control", value: "no-cache"})
+			}
+		}
+		rest = append(rest, x)
+	}
+	if chunked {
+		out = append(out, "Transfer-Encoding: chunked\r\n"...)
+	}
+	writeSorted(mut out, mut rest)
+	out = append(out, "\r\n"...)
+	if body {
+		if chunked {
+			writeChunked(mut out, b)
+			out = append(out, "\r\n"...)
+		} else {
+			out = append(out, b...)
+		}
+	}
+	return str(out)
+}
+
+// Response returns the response r as text, as Go's httputil.DumpResponse(resp, body): the status line, a Connection: close
+// field when the connection ends after it (HTTP/1.0 without keep-alive, a body read to the end of the connection), the
+// framing (Content-Length, or Transfer-Encoding: chunked), the other fields, an empty line and, when body is true, the body.
+fn Response(r wire.Resp, body bool) str {
+	let fields = r.Fields()
+	let proto = r.Proto()
+	let http10 = proto == "HTTP/1.0"
+	let code = r.Status
+	let bodyAllowed = !(code >= 100 && code < 200) && code != 204 && code != 304
+	mut chunked = false
+	mut length = -1
+	mut connClose = false
+	mut connKeep = false
+	mut rest = make([]field, 0, len(fields))
+	for f in fields {
+		let x = split(f)
+		if x.name == "Transfer-Encoding" {
+			chunked = true
+			continue
+		}
+		if x.name == "Content-Length" {
+			if length < 0 {
+				length = decimal(x.value)
+			}
+			continue
+		}
+		if x.name == "Trailer" {
+			continue
+		}
+		if x.name == "Connection" {
+			if hasToken(x.value, "close") {
+				connClose = true
+			}
+			if hasToken(x.value, "keep-alive") {
+				connKeep = true
+			}
+		}
+		rest = append(rest, x)
+	}
+	if http10 {
+		chunked = false
+	}
+	// The body's length as Go's reader sees it: 0 without a body, -1 when chunked or read to the end of the connection.
+	mut cl = length
+	if !bodyAllowed {
+		cl = 0
+	} else if chunked {
+		cl = -1
+	}
+	mut closes = connClose
+	if http10 {
+		closes = connClose || !connKeep
+	}
+	if cl < 0 && !chunked {
+		closes = true
+	}
+	mut writesConnection = closes
+	if connClose && !http10 {
+		// Go's reader takes the Connection: close field out of an HTTP/1.1 response and writes it back first.
+		mut kept = make([]field, 0, len(rest))
+		for x in rest {
+			if x.name != "Connection" {
+				kept = append(kept, x)
+			}
+		}
+		rest = kept
+	} else if connClose {
+		writesConnection = false
+	}
+	let b = r.Body
+	mut out = make([]u8, 0, 256+len(b))
+	out = append(out, proto...)
+	out = append(out, ' ')
+	out = append(out, threeDigits(code)...)
+	out = append(out, ' ')
+	out = append(out, r.Reason()...)
+	out = append(out, "\r\n"...)
+	if writesConnection {
+		out = append(out, "Connection: close\r\n"...)
+	}
+	if cl > 0 {
+		out = append(out, "Content-Length: "...)
+		out = append(out, itoa(cl)...)
+		out = append(out, "\r\n"...)
+	} else if chunked && bodyAllowed {
+		out = append(out, "Transfer-Encoding: chunked\r\n"...)
+	}
+	writeSorted(mut out, mut rest)
+	if cl == 0 && bodyAllowed {
+		out = append(out, "Content-Length: 0\r\n"...)
+	}
+	out = append(out, "\r\n"...)
+	if body && bodyAllowed {
+		if chunked {
+			writeChunked(mut out, b)
+			out = append(out, "\r\n"...)
+		} else {
+			out = append(out, b...)
+		}
+	}
+	return str(out)
+}
+
+// field is one header field: its name in canonical form and its value.
+type field struct {
+	name  str
+	value str
+}
+
+// split takes a "Name: value" line apart, the name made canonical.
+fn split(f str) field {
+	mut c = 0
+	for c < len(f) && f[c] != ':' {
+		c += 1
+	}
+	mut v = c + 1
+	for v < len(f) && (f[v] == ' ' || f[v] == '\t') {
+		v += 1
+	}
+	if v > len(f) {
+		v = len(f)
+	}
+	return field{name: canonical(f[:c]), value: f[v:]}
+}
+
+// canonical is Go's CanonicalMIMEHeaderKey: the first letter and every letter after a '-' in upper case, the others in lower
+// case; a name with a byte that is not a token byte stays as it is.
+fn canonical(s str) str {
+	mut upper = true
+	mut ok = true
+	for i in 0..len(s) {
+		let c = s[i]
+		if !tokenByte(c) {
+			return s
+		}
+		if (upper && c >= 'a' && c <= 'z') || (!upper && c >= 'A' && c <= 'Z') {
+			ok = false
+		}
+		upper = c == '-'
+	}
+	if ok {
+		return s
+	}
+	let b = make([]u8, len(s))
+	upper = true
+	for i in 0..len(s) {
+		mut c = s[i]
+		if upper && c >= 'a' && c <= 'z' {
+			c -= 32
+		} else if !upper && c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		b[i] = c
+		upper = c == '-'
+	}
+	return str(b)
+}
+
+fn tokenByte(c u8) bool {
+	let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	return alnum || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~'
+}
+
+// has reports a field called name (any case) among the lines.
+fn has(fields []str, name str) bool {
+	for f in fields {
+		if split(f).name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// writeSorted appends the fields sorted by name, the values of one name in their order (Go's Header.Write), each value with
+// CR and LF made spaces and the blanks around it dropped.
+fn writeSorted(out mut []u8, fs mut []field) {
+	for a in 1..len(fs) {
+		let x = fs[a]
+		mut b = a
+		for b > 0 && less(x.name, fs[b-1].name) {
+			fs[b] = fs[b-1]
+			b -= 1
+		}
+		fs[b] = x
+	}
+	for x in fs {
+		out = append(out, x.name...)
+		out = append(out, ": "...)
+		out = append(out, x.value...)
+		out = append(out, "\r\n"...)
+	}
+}
+
+fn less(a str, b str) bool {
+	let n = min(len(a), len(b))
+	for i in 0..n {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
+// writeChunked appends b as one chunk (none when it is empty) and the last chunk, as Go's chunked writer does.
+fn writeChunked(out mut []u8, b str) {
+	if len(b) > 0 {
+		let digits = "0123456789abcdef"
+		mut n = len(b)
+		mut hex = make([]u8, 0, 16)
+		for n > 0 {
+			hex = append(hex, digits[n&15])
+			n = n >> 4
+		}
+		mut i = len(hex) - 1
+		for i >= 0 {
+			out = append(out, hex[i])
+			i -= 1
+		}
+		out = append(out, "\r\n"...)
+		out = append(out, b...)
+		out = append(out, "\r\n"...)
+	}
+	out = append(out, "0\r\n"...)
+}
+
+// hasToken reports token t in a comma-separated list v, in any case.
+fn hasToken(v str, t str) bool {
+	mut i = 0
+	for i <= len(v) {
+		mut j = i
+		for j < len(v) && v[j] != ',' {
+			j += 1
+		}
+		mut a = i
+		mut e = j
+		for a < e && (v[a] == ' ' || v[a] == '\t') {
+			a += 1
+		}
+		for e > a && (v[e-1] == ' ' || v[e-1] == '\t') {
+			e -= 1
+		}
+		if e-a == len(t) {
+			mut same = true
+			for k in 0..len(t) {
+				mut c = v[a+k]
+				if c >= 'A' && c <= 'Z' {
+					c += 32
+				}
+				if c != t[k] {
+					same = false
+					break
+				}
+			}
+			if same {
+				return true
+			}
+		}
+		i = j + 1
+	}
+	return false
+}
+
+fn decimal(s str) i64 {
+	mut n = 0
+	for i in 0..len(s) {
+		let c = s[i]
+		if c < '0' || c > '9' || n > 922337203685477579 {
+			return -1
+		}
+		n = n*10 + i64(c-'0')
+	}
+	return n
+}
+
+fn itoa(v i64) str {
+	if v == 0 {
+		return "0"
+	}
+	mut b = make([]u8, 0, 20)
+	mut n = v
+	for n > 0 {
+		b = append(b, u8('0'+n%10))
+		n /= 10
+	}
+	for i in 0..len(b)/2 {
+		let t = b[i]
+		b[i] = b[len(b)-1-i]
+		b[len(b)-1-i] = t
+	}
+	return str(b)
+}
+
+// threeDigits is the status code with at least three digits (Go's %03d).
+fn threeDigits(code i64) str {
+	let s = itoa(code)
+	if len(s) == 1 {
+		return "00" + s
+	}
+	if len(s) == 2 {
+		return "0" + s
+	}
+	return s
+}
