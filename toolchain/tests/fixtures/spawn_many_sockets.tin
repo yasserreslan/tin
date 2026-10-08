@@ -1,0 +1,108 @@
+// Reproducer: on macOS, spawn.Run while hundreds of sockets are open with a read parked on each
+// of them gets the child's output pipe wrong (nothing comes back, or the spawn itself fails).
+// The runtime bug the CI checks work around: tls_server_check holds the 400 stalled handshakes of
+// its one-core timing in a helper process of their own instead of in the check.
+//
+// It prints one line per run: the exit code and what the child printed. Alone the child answers
+// "ready" and code 0; with the parked reads the same child must answer the same.
+package main
+
+import "fault"
+import "mint"
+import "quarry"
+import "say"
+import "spawn"
+import "twine"
+import "wire"
+
+// child is the program spawned while the reads are parked: the exit code and what it printed, a
+// spawn failure as a negative code. The child writes its answer to a file of its own too: when the
+// pipe is the broken part, the file is there and the text is not.
+fn child() (i64, str) {
+	let mark = quarry.TempDir() + "/spawn_mark.txt"
+	let script = "echo ready > \"" + mark + "\"; echo ready"
+	let r = within 20s {
+		try spawn.Run(spawn.Cmd{Argv: []str{"sh", "-c", script}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Pipe, MaxOutput: 0})
+	} catch err {
+		return -1, "spawn failed: " + say.Str(err)
+	}
+	let marked = quarry.ReadFile(mark) catch _ {
+		""
+	}
+	return r.Code, r.Stdout + r.Stderr + " mark=" + marked
+}
+
+// wait is a read that waits up to ten seconds for data that never comes: a task parked on the
+// connection, the way a server sits on a handshake that stops halfway.
+fn wait(c wire.Conn) !i64 {
+	let got = within 10s {
+		mut buf = []u8{}
+		try c.Read(mut buf, 1)
+	} catch _ {
+		-1
+	}
+	return got
+}
+
+// parkedReads holds both ends of n connections with a read parked on each one, and spawns the
+// child while they all wait.
+fn parkedReads(l wire.Listener, cs []wire.Conn, others []wire.Conn) ! {
+	scope s {
+		for i in 0..len(cs) {
+			let c = cs[i]
+			s.spawn(fn() ! {
+				try wait(c)
+			})
+		}
+		for i in 0..len(others) {
+			let c = others[i]
+			s.spawn(fn() ! {
+				try wait(c)
+			})
+		}
+		let (code, out) = child()
+		say.Line("held:", code, twine.TrimSpace(out))
+	}
+}
+
+fn main() {
+	let (code0, out0) = child()
+	say.Line("alone:", code0, twine.TrimSpace(out0))
+	let l = wire.Listen("127.0.0.1:0") catch _ {
+		say.Line("cannot listen")
+		return
+	}
+	let port = l.Port()
+	mut cs = []wire.Conn{}
+	mut others = []wire.Conn{}
+	// The peer's accept queue holds 128 connections on macOS (somaxconn), so the two ends are
+	// made in rounds: dial, accept, dial more.
+	for round in 0..4 {
+		for i in 0..100 {
+			let c = wire.Dial("127.0.0.1:" + mint.Itoa(port)) catch err {
+				say.Line("dial", round, i, "failed:", say.Str(err))
+				return
+			}
+			cs = append(cs, c)
+		}
+		for i in 0..100 {
+			let c = l.AcceptTimeout(5000000000) catch err {
+				say.Line("accept", round, i, "failed:", say.Str(err))
+				return
+			}
+			others = append(others, c)
+		}
+	}
+	say.Line("holding", len(cs), "connections and", len(others), "ends of them")
+	guard {
+		try parkedReads(l, cs, others)
+	} catch err {
+		say.Line("parkedReads failed:", say.Str(err))
+	}
+	for i in 0..len(cs) {
+		cs[i].Close()
+	}
+	for i in 0..len(others) {
+		others[i].Close()
+	}
+}

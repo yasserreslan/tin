@@ -35,6 +35,14 @@ fn (ed mut Editor) Perform(cmd i64) {
 		ed.handleKey(Key{Code: keyLeft, Flags: flagCmd | flagAlt, Chars: ""})
 		return
 	}
+	if cmd == CmdToggleWrap {
+		if ed.ToggleWrapView() {
+			ed.Say("word wrap on")
+		} else {
+			ed.Say("word wrap off")
+		}
+		return
+	}
 	if cmd == CmdFold {
 		ed.FoldCaret()
 		return

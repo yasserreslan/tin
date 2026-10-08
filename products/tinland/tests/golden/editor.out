@@ -136,6 +136,14 @@ shown: 1 fn a() {|}|last! row 6
 shown: 0 fn a() {|    if x {|        y|    }|    z|}|last! row 6
 shown: 1 |fn a() {|    if x {|    }|    z|}|last! row 1
 shown: 1 |fn a() {|    if x {|    }|    z|}|last!|end row 8
+wrap: true
+caret row 3 col 4 top 0 0
+caret row 2 col 4 top 0 0
+caret row 1 col 4 top 0 0
+caret row 0 col 4 top 0 0
+caret row 0 col 0 top 0 0
+wrap: false
+caret row 0 col 0 top 0 0
 diags: 0
 --- nav.tin row 7 col 4 dirty false
 package main

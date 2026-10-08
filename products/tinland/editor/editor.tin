@@ -111,6 +111,8 @@ type Editor struct {
 	dragging bool
 	// Folds are the folded blocks (fold.tin); FoldLines is the line count they were made for.
 	Folds    []fold
+	// ScrollSeg is the row of line Scroll at the top of the view when lines are wrapped (wrap.tin).
+	ScrollSeg i64
 	FoldLines i64
 	// mapDrag is true while the mouse drags in the minimap.
 	mapDrag bool
@@ -166,6 +168,7 @@ fn (ed mut Editor) activate(i i64) {
 	ed.Scroll = ed.Tabs[i].Scroll
 	ed.HScroll = ed.Tabs[i].HScroll
 	ed.rawFor = -1
+	ed.ScrollSeg = 0
 	ed.Folds = []fold{}
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1
@@ -423,6 +426,30 @@ fn (ed Editor) gutterW() f64 {
 // ensureVisible scrolls so the cursor is on screen.
 fn (ed mut Editor) ensureVisible() {
 	let rows = ed.rows()
+	let dc = textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4)
+	if wrapOn {
+		ed.HScroll = 0
+		if ed.ScrollSeg >= ed.segCount(ed.Scroll) {
+			ed.ScrollSeg = 0
+		}
+		let (cr, cs) = ed.rowAtCaret(dc)
+		if cr < ed.Scroll || (cr == ed.Scroll && cs < ed.ScrollSeg) {
+			ed.Scroll = cr
+			ed.ScrollSeg = cs
+		}
+		let d = ed.visRow(cr, dc)
+		if d >= rows {
+			ed.scrollRows(d - rows + 1)
+		}
+		let most = len(ed.Buf.Lines) - 1
+		if ed.Scroll > most {
+			ed.Scroll = most
+		}
+		if ed.Scroll < 0 {
+			ed.Scroll = 0
+		}
+		return
+	}
 	if ed.Buf.Row < ed.Scroll {
 		ed.Scroll = ed.Buf.Row
 	}
@@ -438,7 +465,6 @@ fn (ed mut Editor) ensureVisible() {
 		ed.Scroll = 0
 	}
 	let cols = ed.cols()
-	let dc = textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4)
 	if dc < ed.HScroll {
 		ed.HScroll = dc
 	}

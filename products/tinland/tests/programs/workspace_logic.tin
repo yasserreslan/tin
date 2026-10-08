@@ -21,6 +21,10 @@ fn key(ws mut workspace.Workspace, code i64, chars str) {
 	ws.PickerKey(code, 0, chars)
 }
 
+fn PickRecentForTest() i64 {
+	return workspace.PickRecent
+}
+
 fn typeText(ws mut workspace.Workspace, text str) {
 	for i in 0..len(text) {
 		key(mut ws, -1, text[i:i + 1])
@@ -167,6 +171,20 @@ added
 	// the terminal: a shell on a pseudo terminal, its output in the screen
 	quarry.Setenv("SHELL", "/bin/sh") catch _ {
 	}
+	// recent files: newest first, once each, kept in a file and read back (a file that is gone is left out)
+	ws.RecentPath = root + "/recent.list"
+	ws.OpenFile(root + "/main.tin")
+	ws.OpenFile(root + "/notes.md")
+	ws.OpenFile(root + "/main.tin")
+	say.Line("recent", len(ws.Recent) > 0, ws.Recent[0] == root + "/main.tin", ws.Recent[1] == root + "/notes.md")
+	let recentCount = len(ws.Recent)
+	ws.Recent = []str{}
+	ws.LoadRecent(root + "/recent.list")
+	say.Line("recent read back", len(ws.Recent) == recentCount, ws.Recent[0] == root + "/main.tin")
+	ws.OpenPicker(PickRecentForTest())
+	typeText(mut ws, "notes")
+	say.Line("recent picker", ws.Picker.Kind, len(ws.Picker.Items), twine.HasSuffix(ws.Picker.Items[0], "/notes.md"))
+	ws.ClosePicker()
 	// auto-save: a file with changes is written, a tab without a name is not
 	ws.OpenFile(root + "/notes.md")
 	ws.Ed.Buf.MoveTo(0, 0, false)

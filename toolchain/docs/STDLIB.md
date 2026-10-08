@@ -51,6 +51,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lane](#lane) | a bounded queue between the tasks of one core (buffered channels) |
 | [replay](#replay) | recording and reading request capsules for tin replay |
 | [stencil](#stencil) | text templates loaded at run time (text/template) |
+| [column](#column) | aligned text columns (text/tabwriter) |
 | [scroll](#scroll) | XML tokenizer and writer (encoding/xml) |
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
@@ -1948,6 +1949,36 @@ Execute keeps the data and the variables in a cell bound to a runtime slot (the 
 - `(t mut Template) Func(name str, f fn([]Value) !Value)`: Func registers f for {{name ...}} calls in this template.
 - `(t Template) Execute(data Value) !str`: Execute renders the template with data and returns the output.
 - `(t Template) ExecuteTo(w mut twine.Builder, data Value) !`: ExecuteTo renders the template with data into w. The data and the variables live in a cell bound to a runtime slot for the call (the pattern policy.Bind uses).
+
+## column
+
+Package column aligns tabbed columns in text, like Go's text/tabwriter: the elastic tabstops algorithm.
+
+The writer treats its input as cells terminated by a horizontal ('\t') or vertical ('\v') tab and lines broken by a newline ('\n') or form feed ('\f'). Tab-terminated cells in contiguous lines form a column, and the writer pads the cells so that every cell of a column has the same width:
+
+```tin body
+let text = try column.Format("a\tbb\tc\nlonger\tb\tdd\n", 0, 8, 1, ' ', 0)
+// text is "a      bb c\nlonger b  dd\n"
+```
+
+NewWriter streams instead, into anything with Write (mut dyn io.Writer).
+
+A form feed acts like a newline and also ends every column block (a flush). Columns ended entirely by vertical tabs are dropped when DiscardEmptyColumns is set. With FilterHTML, HTML tags are zero width and entities one; with tab padding (padchar '\t') cells are left-aligned, as Go's tabwriter has it.
+
+- `const FilterHTML = 1`: The flags, as Go's tabwriter: FilterHTML ignores HTML tags and treats entities as one rune, StripEscape strips the Escape characters of escaped segments, AlignRight right-aligns cells, DiscardEmptyColumns drops columns that hold only empty cells ended by vertical tabs, TabIndent pads leading empty cells with tabs, and Debug writes a '|' between columns and a "---" line after a form feed.
+- `const StripEscape = 2`
+- `const AlignRight = 4`
+- `const DiscardEmptyColumns = 8`
+- `const TabIndent = 16`
+- `const Debug = 32`
+- `const Escape = 0xff`: Escape brackets an escaped segment: text between two of them is passed through and counts one rune per byte for the column width. 0xff cannot appear in valid UTF-8, which is why Go chose it.
+- `type Writer struct`: Writer inserts padding around tab-terminated columns in what is written to it, and sends the result to put.
+- `NewWriter(put dyn io.Writer, minwidth i64, tabwidth i64, padding i64, padchar u8, flags i64) !Writer`: NewWriter returns a writer that pads cells to at least minwidth (plus padding), counts a tab as tabwidth columns, uses padchar for the padding, and follows the flags. Negative minwidth, tabwidth or padding fail.
+- `type StrSink struct`: StrSink collects what is written to it, for Format and for tests.
+- `(s mut StrSink) Write(data []u8) !i64`: Write appends data to the sink.
+- `Format(s str, minwidth i64, tabwidth i64, padding i64, padchar u8, flags i64) !str`: Format aligns the columns of s with the same parameters as NewWriter and returns the result: the common one-shot use.
+- `(w mut Writer) Flush() !`: Flush writes the buffered text, padding the columns; an incomplete escape at the end counts as complete.
+- `(w mut Writer) Write(buf []u8) !i64`: Write buffers the cells and lines of buf: tabs and vertical tabs end a cell, newlines and form feeds end a line (and a form feed flushes), and a line with a single cell is flushed at once since it cannot affect the following lines.
 
 ## scroll
 

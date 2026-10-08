@@ -70,6 +70,7 @@ fn Sh(script str, dir str, seconds i64) Out {
 // Fail prints the message and ends the check with status 1.
 fn Fail(message str) {
 	say.Line("FAIL", message)
+	cleanupTracked()
 	quarry.Exit(1)
 }
 
@@ -139,12 +140,47 @@ fn Mkdirs(path str) {
 	}
 }
 
-// TempDir makes a new directory below dir (made if need be) whose name starts with prefix, and returns its path.
+// TempDir makes a new directory below dir (made if need be) whose name starts with prefix, and returns its path. A check that
+// fails removes it before it exits.
 fn TempDir(dir str, prefix str) str {
 	Mkdirs(dir)
 	let o = Exec([]str{"mktemp", "-d", Join(dir, prefix + "XXXXXX")}, "", 20)
 	Must(o, "mktemp")
-	return twine.TrimSpace(o.Stdout)
+	let path = twine.TrimSpace(o.Stdout)
+	TrackDir(path)
+	return path
+}
+
+// What a failing check cleans up before it exits: the throwaway directories it made and the programs it started, so a failure
+// leaves no directory and no process behind.
+mut failDirs = []str{}
+mut failPids = []i64{}
+
+// TrackDir names a throwaway directory a failing check removes.
+fn TrackDir(path str) {
+	failDirs = append(failDirs, keep(path))
+}
+
+// TrackPid names a process a failing check ends.
+fn TrackPid(pid i64) {
+	failPids = append(failPids, pid)
+}
+
+// cleanupTracked ends every tracked program, then removes every tracked directory: the programs hold files in them open.
+fn cleanupTracked() {
+	if len(failDirs) == 0 && len(failPids) == 0 {
+		return
+	}
+	if len(failPids) > 0 {
+		mut argv = []str{"kill", "-9"}
+		for i in 0..len(failPids) {
+			argv = append(argv, mint.Itoa(failPids[len(failPids) - 1 - i]))
+		}
+		Exec(argv, "", 10)
+	}
+	for i in 0..len(failDirs) {
+		Remove(failDirs[i])
+	}
 }
 
 // Remove deletes a file or a directory with everything in it.
@@ -263,6 +299,7 @@ fn Same(name str, got str, want str) {
 fn Finish() {
 	say.Line(tests, "tests,", failures, "failed")
 	if failures > 0 {
+		cleanupTracked()
 		quarry.Exit(1)
 	}
 }

@@ -26,6 +26,9 @@ binary true true
 marks [2 9]
 git [ M main.tin]
 restored true true notes.md 4
+recent true true true
+recent read back true true
+recent picker 5 1 true
 dirty before true
 auto-saved 1 false Arewritten elsewhere
 nothing left 0

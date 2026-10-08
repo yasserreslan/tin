@@ -1,0 +1,62 @@
+package main
+
+// column: the tabwriter port — cells and lines, the width, padding and padchar parameters, the flags
+// (FilterHTML, StripEscape, AlignRight, DiscardEmptyColumns, TabIndent, Debug), form feeds and
+// single-cell lines that flush, UTF-8 widths, the streaming Writer and the one-shot Format.
+
+import "column"
+import "say"
+
+fn main() {
+	format("a\tbb\tc\nlonger\tb\tdd\n", 0, 8, 1, ' ', 0)
+	format("aaaa\tbbb\td\naa\tb\tdd\na\t\naa\tcccc\tee\n", 0, 8, 1, ' ', 0)
+	format("a\tb\nlong\tc\n", 3, 8, 1, ' ', 0)
+	format("a\tb\nlong\tc\n", 0, 8, 3, '.', 0)
+	format("a\tb\nlong\tc\n", 0, 8, 2, ' ', column.TabIndent)
+	format("a\tb\nlong\tc\n", 0, 8, 1, '\t', 0)
+	format("a\tb\nlong\tc\n", 0, 8, 1, ' ', column.AlignRight)
+	format("a\v\vb\nlong\v\vc\n", 0, 8, 1, ' ', column.DiscardEmptyColumns)
+	format("a\v\vb\nlong\v\vc\n", 0, 8, 1, ' ', 0)
+	format("<b>x</b>\t1\n<i>yy</i>\t2\n", 0, 8, 1, ' ', column.FilterHTML)
+	format("&amp;\t1\nx\t2\n", 0, 8, 1, ' ', column.FilterHTML)
+	format("\xffa\tb\xff\tc\nlonger\td\n", 0, 8, 1, ' ', 0)
+	format("\xffa\tb\xff\tc\nlonger\td\n", 0, 8, 1, ' ', column.StripEscape)
+	format("a\tb\fc\td\n", 0, 8, 1, ' ', column.Debug)
+	format("one\nx\tyy\n", 0, 8, 1, ' ', 0)
+	format("é\tx\nlonger\ty\n", 0, 8, 1, ' ', 0)
+	format("", 0, 8, 1, ' ', 0)
+
+	// Streaming: several Writes, one Flush.
+	mut s = column.StrSink{B: []u8{}}
+	mut w = column.NewWriter(s, 0, 8, 1, ' ', 0) catch err {
+		say.Line("new failed", err)
+		return
+	}
+	w.Write([]u8("a\tb\n")) catch err {
+		say.Line("write failed", err)
+		return
+	}
+	w.Write([]u8("long\tc\n")) catch err {
+		say.Line("write failed", err)
+		return
+	}
+	w.Flush() catch err {
+		say.Line("flush failed", err)
+		return
+	}
+	say.Line("stream", say.Fmt("%q", str(s.B)))
+
+	// Negative parameters fail.
+	column.NewWriter(s, -1, 8, 1, ' ', 0) catch err {
+		say.Line("negative", err)
+	}
+}
+
+// format prints one Format result with its parameters.
+fn format(s str, minwidth i64, tabwidth i64, padding i64, padchar u8, flags i64) {
+	let out = column.Format(s, minwidth, tabwidth, padding, padchar, flags) catch err {
+		say.Line("format failed", err)
+		return
+	}
+	say.Line("format", minwidth, tabwidth, padding, say.Fmt("%q", padchar), flags, say.Fmt("%q", out))
+}
