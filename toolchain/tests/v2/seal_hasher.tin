@@ -1,0 +1,91 @@
+package main
+
+import "dice"
+import "seal"
+import "say"
+
+// The incremental SHA-256 and SHA-1 (#773) against the one-shot functions: every length from 0 to 300 cut at
+// every point, random pieces, Sum in the middle of a stream, Reset, and a 64 MiB stream whose digests the Go
+// twin (bench/ref/seal_hasher) prints too.
+
+fn check(name str, sha1 bool) {
+	mut r = dice.New(1)
+	let data = str(r.Bytes(300))
+	mut bad = 0
+	mut cases = 0
+	for n in 0..301 {
+		let s = data[0:n]
+		mut want = seal.Sha256(s)
+		if sha1 {
+			want = seal.Sha1(s)
+		}
+		for cut in 0..n + 1 {
+			mut x = seal.NewSha256()
+			if sha1 {
+				x = seal.NewSha1()
+			}
+			x.WriteStr(s[0:cut])
+			_ = x.Write([]u8(s[cut:])) catch _ {
+				0
+			}
+			cases += 1
+			if seal.Hex(x.Sum()) != seal.Hex(want) {
+				bad += 1
+			}
+		}
+	}
+	say.Line(name, "splits:", cases, "mismatches:", bad)
+	mut pieces = 0
+	mut bad2 = 0
+	for round in 0..200 {
+		let n = r.Intn(2000)
+		let s = str(r.Bytes(n))
+		mut x = seal.NewSha256()
+		if sha1 {
+			x = seal.NewSha1()
+		}
+		mut i = 0
+		for i < n {
+			let k = min(n - i, r.Intn(130))
+			x.WriteStr(s[i:i + k])
+			i += k
+			pieces += 1
+		}
+		mut want = seal.Sha256(s)
+		if sha1 {
+			want = seal.Sha1(s)
+		}
+		if seal.Hex(x.Sum()) != seal.Hex(want) || x.Len() != n {
+			bad2 += 1
+		}
+	}
+	say.Line(name, "random pieces mismatches:", bad2, pieces > 1000)
+}
+
+fn main() {
+	check("sha256", false)
+	check("sha1", true)
+	mut x = seal.NewSha256()
+	x.WriteStr("hello, ")
+	let mid = seal.Hex(x.Sum())
+	x.WriteStr("tin!\n")
+	say.Line("sum mid-stream:", mid == seal.Sha256Hex("hello, "), seal.Hex(x.Sum()) == seal.Sha256Hex("hello, tin!\n"))
+	x.Reset()
+	say.Line("reset:", seal.Hex(x.Sum()) == seal.Sha256Hex(""), x.Size(), seal.NewSha1().Size())
+	mut big = seal.NewSha256()
+	mut big1 = seal.NewSha1()
+	mut chunk = make([]u8, 65536)
+	for i in 0..1024 {
+		for j in 0..len(chunk) {
+			chunk[j] = u8((i * 7 + j * 13) & 255)
+		}
+		_ = big.Write(chunk) catch _ {
+			0
+		}
+		_ = big1.Write(chunk) catch _ {
+			0
+		}
+	}
+	say.Line("64 MiB sha256:", seal.Hex(big.Sum()))
+	say.Line("64 MiB sha1:", seal.Hex(big1.Sum()))
+}

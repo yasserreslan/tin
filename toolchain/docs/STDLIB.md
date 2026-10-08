@@ -1346,6 +1346,15 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `type Ed25519PrivateKey struct`: Ed25519PrivateKey is an Ed25519 key: the 32-byte seed and the public key it gives.
 - `Ed25519PublicKey(seed secret []u8) ![]u8`: Ed25519PublicKey is the 32-byte public key of a 32-byte Ed25519 seed.
 - `SignEd25519(seed secret []u8, msg []u8) ![]u8`: SignEd25519 is the 64-byte Ed25519 signature of msg by the key with the 32-byte seed (pure Ed25519: msg is not hashed first).
+- `type Hasher struct`: Hasher is an incremental SHA-256 or SHA-1; it satisfies io.Writer.
+- `NewSha256() Hasher`: NewSha256 is an incremental SHA-256.
+- `NewSha1() Hasher`: NewSha1 is an incremental SHA-1; use it only where a protocol requires SHA-1.
+- `(x mut Hasher) Reset()`: Reset forgets everything written, as if the hasher were new.
+- `(x Hasher) Size() i64`: Size is the length of the digest: 32 for SHA-256, 20 for SHA-1.
+- `(x Hasher) Len() i64`: Len is the number of bytes written since the hasher was made or reset.
+- `(x mut Hasher) Write(data []u8) !i64`: Write adds data to the hash; it never fails, and returns len(data).
+- `(x mut Hasher) WriteStr(s str)`: WriteStr adds the bytes of s to the hash.
+- `(x Hasher) Sum() []u8`: Sum is the digest of everything written so far; the hasher can go on taking data.
 - `type Hash enum { SHA256, SHA384, SHA512 }`: Hash names a SHA-2 function for Hmac and HKDF.
 - `Sum(h Hash, s secret str) []u8`: Sum is the digest of s under h; s may be secret.
 - `Size(h Hash) i64`: Size is the length in bytes of h's digest.
