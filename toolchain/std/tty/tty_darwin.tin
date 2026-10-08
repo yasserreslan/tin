@@ -1,0 +1,62 @@
+package tty
+
+// macOS: ioctl TIOCGWINSZ, tcgetattr and tcsetattr on struct termios (four unsigned long flags, c_cc[20], speeds),
+// and posix_openpt for a pseudo-terminal.
+
+const termiosSize = 72
+
+extern fn ioctl(fd i64, req i64, ...) i64
+extern fn tcgetattr(fd i64, t i64) i64
+extern fn tcsetattr(fd i64, when i64, t i64) i64
+extern fn posix_openpt(flags i64) i64
+extern fn grantpt(fd i64) i64
+extern fn unlockpt(fd i64) i64
+extern fn ptsname(fd i64) i64
+
+fn sysWinsize(fd i64, ws i64) i64 {
+	return ioctl(fd, 0x40087468, ws)
+}
+
+fn sysGetattr(fd i64, buf i64) i64 {
+	return tcgetattr(fd, buf)
+}
+
+fn sysSetattr(fd i64, buf i64) i64 {
+	return tcsetattr(fd, 0, buf)
+}
+
+// makeRaw clears ICANON ECHO ISIG IEXTEN, IXON ICRNL BRKINT INPCK ISTRIP and OPOST, sets CS8, VMIN 1 and VTIME 0.
+fn makeRaw(buf i64) {
+	buf[0] = buf[0] & ~(0x200 | 0x100 | 0x2 | 0x10 | 0x20)
+	buf[1] = buf[1] & ~0x1
+	buf[2] = buf[2] | 0x300
+	buf[3] = buf[3] & ~(0x100 | 0x8 | 0x80 | 0x400)
+	store8(buf + 32 + 16, 1)
+	store8(buf + 32 + 17, 0)
+}
+
+fn lflagRaw(buf i64) bool {
+	return buf[3] & (0x100 | 0x8) == 0
+}
+
+fn sysOpenPty() (i64, i64) {
+	let m = i64(i32(posix_openpt(2 | 0x20000)))
+	if m < 0 {
+		return -1, -1
+	}
+	if i64(i32(grantpt(m))) != 0 || i64(i32(unlockpt(m))) != 0 {
+		rt_sys_close(m)
+		return -1, -1
+	}
+	let name = ptsname(m)
+	if name == 0 {
+		rt_sys_close(m)
+		return -1, -1
+	}
+	let s = i64(i32(rt_sys_open(name, 2 | 0x20000, 0)))
+	if s < 0 {
+		rt_sys_close(m)
+		return -1, -1
+	}
+	return m, s
+}

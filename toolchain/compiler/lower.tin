@@ -2491,6 +2491,9 @@ fn chk_composite(e i64, want i64) i64 {
 	if kind_of(t) == K_OPT {
 		t = cast(Ty, t.elem)
 	}
+	if kind_of(t) == K_VARRAY && varray_literal_fits(tx, t) != 0 {
+		return chk_varray_literal(e, t)
+	}
 	if cast(Node, tx).kind == EX_TYPE && cast(TypeNode, tx).ty != 0 {
 		t = cast(Ty, resolve_type(cast(TypeNode, tx).ty))
 	} else if cast(Node, tx).kind == EX_INDEX {
@@ -2710,6 +2713,82 @@ fn chk_composite(e i64, want i64) i64 {
 	}
 	err_code_type(pos, "E216 COMPOSITE", "cannot build a composite literal of type ", cast(i64, t), "")
 	return ty_int
+}
+
+// varray_literal_fits reports whether a composite literal's type is the inline array type t where one is wanted
+// (a value struct field, an element of one array, an assignment to such a field): `[N]T{...}` with N and T as t's, or
+// no type at all ({...} for a row, #817).
+fn varray_literal_fits(tx i64, t Ty) i64 {
+	if cast(Node, tx).kind != EX_TYPE {
+		return 0
+	}
+	let ty = cast(TypeNode, tx).ty
+	if ty == 0 {
+		return 1
+	}
+	return varray_type_fits(ty, t)
+}
+
+// varray_type_fits reports whether the array type as written, [N]T or [N][M]T, is the inline array type t.
+fn varray_type_fits(ty i64, t Ty) i64 {
+	if cast(Node, ty).kind != TX_ARRAY {
+		return 0
+	}
+	let et = cast(Ty, t.elem)
+	let b = cast(TypeExpr, ty).b
+	if kind_of(et) == K_VARRAY {
+		if varray_type_fits(b, et) == 0 {
+			return 0
+		}
+	} else if resolve_type(b) != cast(i64, et) {
+		return 0
+	}
+	let n = array_len(ty)
+	array_inner = 0
+	return i64(n == t.key)
+}
+
+// chk_varray_literal builds an inline array value [N]T{...}: N elements, the listed ones and then zero values, in a
+// zeroed frame area like a value struct literal's, so that a store copies its bytes (#817).
+fn chk_varray_literal(e i64, t Ty) i64 {
+	let pos = cast(Node, e).pos
+	let elems = cast(Composite, e).elems
+	let n = len(elems)
+	if n > t.key {
+		let m = err_code(pos, "E202 ARRAY_TYPE")
+		buf_str(m, "too many values in an array literal: ")
+		buf_int(m, n)
+		buf_str(m, " for ")
+		buf_int(m, t.key)
+		buf_str(m, " elements")
+		err_end(cast([]u8, m))
+		return cast(i64, t)
+	}
+	mut stmts = []i64{}
+	// Elements that are references (a str, a slice) start as their zero value, "" and the empty slice.
+	mut init = mk_int(pos, 0, cast(i64, t))
+	if value_has_ref(t) != 0 {
+		init = value_zero(pos, t)
+	}
+	let obj = temp(pos, init, cast(i64, t))
+	stmts = append(stmts, cast(i64, obj))
+	let et = t.elem
+	let w = type_width(cast(Ty, et))
+	mut i = 0
+	for i < n {
+		let v = elems[i]
+		let vt = chk(cast(Node, v), et)
+		check_assignable(cast(Node, v), vt, cast(Ty, et))
+		if is_untyped(vt) != 0 {
+			reconvert(cast(Node, v), et)
+		}
+		if !(is_const_zero(v) != 0 && is_ref(et) == 0) {
+			stmts = append(stmts, assign_stmt(pos, mk_mem(pos, sym_ref_node(pos, cast(Sym, obj.sym)), 0, 0, i * w, et), v))
+		}
+		i = i + 1
+	}
+	replace_node(e, mk_seq(pos, cast(i64, stmts), sym_ref_node(pos, cast(Sym, obj.sym)), 0))
+	return cast(i64, t)
 }
 
 // init_zero_field stores the zero value of a field the literal left out. Memory is
@@ -4830,6 +4909,33 @@ fn chk_builtin(e i64, name str, want i64) i64 {
 		mut st = cast(Ty, chk(cast(Node, args[1]), 0))
 		if has_secret(cast(i64, st)) != 0 && has_secret(cast(i64, dt)) == 0 {
 			secret_sink_error(cast(Node, args[1]).pos, "copy would put ", " into a slice that is not secret", cdesc, cast(i64, st))
+		}
+		if kind_of(dt) == K_VARRAY {
+			// copy(v.arr, xs): the fewer of N and len(xs) elements, into the inline array's bytes (#817).
+			value_write_check(pos, arg0(cast(Call, e)), 0)
+			let et = cast(Ty, dt.elem)
+			if value_has_ref(cast(Ty, dt)) != 0 || value_ref_field(et) != 0 {
+				err_code_type(pos, "E217 BUILTIN_ARGS", "copy fills an inline array of numbers, bools and value structs without references, not ", cast(i64, dt), ": assign its elements one by one")
+				return ty_int
+			}
+			mut dsrc = 0
+			mut slen = 0
+			if kind_of(st) == K_STRING && is_integer_t(cast(i64, et)) != 0 && type_width(et) == 1 {
+				let sv = temp(pos, args[1], cast(i64, st))
+				dsrc = mk_bin(pos, "+", mk_conv(pos, sym_ref_node(pos, cast(Sym, sv.sym)), CV_SAME, ty_int), mk_int(pos, 8, ty_int), ty_int)
+				slen = mk_mem(pos, sym_ref_node(pos, cast(Sym, sv.sym)), 0, 0, 0, ty_int)
+				let cp = rt_call(pos, "rt_varray_copy", cast(i64, args5(mk_conv(pos, arg0(cast(Call, e)), CV_SAME, ty_int), mk_int(pos, dt.key, ty_int), dsrc, slen, mk_int(pos, type_width(et), ty_int))), ty_int)
+				replace_node(e, mk_seq(pos, args1(cast(i64, sv)), cp, ty_int))
+			} else if kind_of(st) == K_SLICE && st.elem == dt.elem {
+				let sv = temp(pos, args[1], cast(i64, st))
+				dsrc = mk_hdr(pos, sym_ref_node(pos, cast(Sym, sv.sym)), 2)
+				slen = mk_hdr(pos, sym_ref_node(pos, cast(Sym, sv.sym)), 0)
+				let cp = rt_call(pos, "rt_varray_copy", cast(i64, args5(mk_conv(pos, arg0(cast(Call, e)), CV_SAME, ty_int), mk_int(pos, dt.key, ty_int), dsrc, slen, mk_int(pos, type_width(et), ty_int))), ty_int)
+				replace_node(e, mk_seq(pos, args1(cast(i64, sv)), cp, ty_int))
+			} else {
+				err_code_type(pos, "E217 BUILTIN_ARGS", "copy into an inline array needs a slice of its elements (or a str for bytes), filling ", cast(i64, dt), "")
+			}
+			return ty_int
 		}
 		if kind_of(st) == K_STRING {
 			replace_node(e, rt_call(pos, "rt_copy_str", args2(arg0(cast(Call, e)), args[1]), ty_int))

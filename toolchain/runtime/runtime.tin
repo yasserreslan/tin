@@ -2082,6 +2082,17 @@ fn rt_slice_copy(dst i64, src i64, esz i64) i64 {
 	return n
 }
 
+// rt_varray_copy is copy into an inline array of a value struct: n elements of esz bytes at dst, filled from
+// the srclen elements at src, the fewer of the two; it returns how many were copied (#817).
+fn rt_varray_copy(dst i64, n i64, src i64, srclen i64, esz i64) i64 {
+	mut m = n
+	if srclen < m {
+		m = srclen
+	}
+	memmove(dst, src, m*esz)
+	return m
+}
+
 // rt_slice_copy_rc is copy for a counted element type (#176): into a long-lived array,
 // each value copied in gains its slot's count and each value it replaces loses one (the
 // incs come first, so a value copied over itself keeps its count).

@@ -1,0 +1,67 @@
+package tty
+
+// Linux: ioctl TIOCGWINSZ, TCGETS and TCSETS on the kernel's struct termios (four u32 flags, c_line, c_cc[19]),
+// and /dev/ptmx for a pseudo-terminal.
+
+const termiosSize = 64
+
+fn ioctl(fd i64, req i64, arg i64) i64 {
+	return linux_result(linux_raw(linux_nr_ioctl(), fd, req, arg, 0, 0, 0))
+}
+
+fn sysWinsize(fd i64, ws i64) i64 {
+	return ioctl(fd, 0x5413, ws)
+}
+
+fn sysGetattr(fd i64, buf i64) i64 {
+	return ioctl(fd, 0x5401, buf)
+}
+
+fn sysSetattr(fd i64, buf i64) i64 {
+	return ioctl(fd, 0x5402, buf)
+}
+
+fn u32at(buf i64, off i64) i64 {
+	return __ld(buf + off, 2) & 0xffffffff
+}
+
+fn setU32(buf i64, off i64, v i64) {
+	__st(buf + off, v, 2)
+}
+
+// makeRaw clears ICANON ECHO ISIG IEXTEN, IXON ICRNL BRKINT INPCK ISTRIP and OPOST, sets CS8, VMIN 1 and VTIME 0.
+fn makeRaw(buf i64) {
+	setU32(buf, 0, u32at(buf, 0) & ~(0x400 | 0x100 | 0x2 | 0x10 | 0x20))
+	setU32(buf, 4, u32at(buf, 4) & ~0x1)
+	setU32(buf, 8, u32at(buf, 8) | 0x30)
+	setU32(buf, 12, u32at(buf, 12) & ~(0x2 | 0x8 | 0x1 | 0x8000))
+	store8(buf + 17 + 6, 1)
+	store8(buf + 17 + 5, 0)
+}
+
+fn lflagRaw(buf i64) bool {
+	return u32at(buf, 12) & (0x2 | 0x8) == 0
+}
+
+// sysOpenPty opens /dev/ptmx, unlocks it (TIOCSPTLCK) and opens its terminal side /dev/pts/N (TIOCGPTN).
+fn sysOpenPty() (i64, i64) {
+	let m = i64(i32(rt_sys_open(rt_cstr("/dev/ptmx"), 2 | 0x100, 0)))
+	if m < 0 {
+		return -1, -1
+	}
+	let arg = calloc(1, 8)
+	ioctl(m, 0x40045431, arg)
+	if i64(i32(ioctl(m, 0x80045430, arg))) != 0 {
+		free(arg)
+		rt_sys_close(m)
+		return -1, -1
+	}
+	let n = u32at(arg, 0)
+	free(arg)
+	let s = i64(i32(rt_sys_open(rt_cstr("/dev/pts/{n}"), 2 | 0x100, 0)))
+	if s < 0 {
+		rt_sys_close(m)
+		return -1, -1
+	}
+	return m, s
+}

@@ -8,9 +8,9 @@ import "twine"
 
 // mouseTo moves the caret to the character cell at (x, y).
 fn (ed mut Editor) mouseTo(x f64, y f64, extend bool) {
-	mut row = ed.Scroll + i64(y / ed.LineH)
+	mut row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
 	if y < 0.0 {
-		row = ed.Scroll - 1
+		row = ed.prevVisible(ed.Scroll)
 	}
 	if row < 0 {
 		row = 0
@@ -41,6 +41,14 @@ fn (ed mut Editor) KeyDown(code i64, flags i64, chars str) {
 fn (ed mut Editor) MouseDown(x f64, y f64, clicks i64, flags i64) {
 	ed.Mode = modeEdit
 	ed.CompOpen = false
+	if x < ed.gutterW() && x >= ed.gutterW() - ed.CharW * 2.0 && y >= 0.0 {
+		// the fold arrow of the line under the mouse
+		let row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
+		if ed.foldable(row) {
+			ed.ToggleFold(row)
+			return
+		}
+	}
 	if ed.mapW() > 0.0 && x >= ed.AreaW - ed.mapW() {
 		ed.mapDrag = true
 		ed.mapScrollTo(y)
@@ -99,12 +107,10 @@ fn (ed mut Editor) Wheel(dx f64, dy f64) {
 	let lines = i64(ed.acc / ed.LineH)
 	if lines != 0 {
 		ed.acc -= f64(lines) * ed.LineH
-		ed.Scroll -= lines
-		if ed.Scroll < 0 {
-			ed.Scroll = 0
-		}
-		if ed.Scroll > len(ed.Buf.Lines) - 1 {
-			ed.Scroll = len(ed.Buf.Lines) - 1
+		if lines > 0 {
+			ed.Scroll = ed.shownBefore(ed.Scroll, lines)
+		} else {
+			ed.Scroll = ed.shownAfter(ed.Scroll, 0 - lines)
 		}
 		ed.Redraw = true
 	}

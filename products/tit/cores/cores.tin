@@ -1,0 +1,146 @@
+package cores
+
+import "../object"
+import "fault"
+import "flume"
+import "hearth"
+import "mint"
+import "quarry"
+import "relay"
+import "twine"
+
+// All the cores (#783). A command runs under Start: core 0 runs it while the other cores wait for jobs over relay
+// (cores share no memory, so a job and its answer travel as strings). Work that splits into independent pieces, such
+// as hashing the files status has to read, goes to the pool when it is running and runs on core 0 when it is not
+// (in tests, or with one core). The pool is started once: a second hearth.Run hangs (#858).
+
+mut running = false
+
+// Start runs main with n cores (hearth.Cores() when n is 0): core 0 runs main, the others serve jobs until it returns.
+fn Start(n0 i64, main fn()) {
+	mut n = n0
+	if n <= 0 {
+		n = hearth.Cores()
+	}
+	if n <= 1 {
+		main()
+		return
+	}
+	hearth.Run(n, fn(core i64) {
+		if core == 0 {
+			running = true
+			main()
+			running = false
+			for k in 1..relay.Cores() {
+				relay.Send(k, "")
+			}
+			return
+		}
+		serveJobs()
+	})
+}
+
+// serveJobs answers jobs on a worker core until core 0 sends the empty message.
+fn serveJobs() {
+	for {
+		let (_, msg) = relay.Recv()
+		if msg == "" {
+			return
+		}
+		let reply = arena {
+			serve(msg)
+		}
+		relay.Send(0, reply)
+	}
+}
+
+// Running reports whether the pool is serving jobs (on core 0, inside Start with more than one core).
+fn Running() bool {
+	return running && relay.Cores() > 1
+}
+
+// serve answers one job: "h <seq> <path>" hashes a file as a blob.
+fn serve(msg str) str {
+	let f = twine.SplitN(msg, " ", 3)
+	if len(f) == 3 && f[0] == "h" {
+		let (id, err) = HashPath(f[2])
+		if err != nil {
+			return f[1] + " !" + fault.Message(err)
+		}
+		return f[1] + " " + id.Hex()
+	}
+	return "? bad job"
+}
+
+// HashPath is the blob id of the file at path: its contents, or a symlink's target.
+fn HashPath(path str) !object.Id {
+	let info = try quarry.Lstat(path)
+	if info.Type == quarry.FileType.Symlink {
+		let target = try quarry.Readlink(path)
+		return object.Hash(object.Kind.Blob, target)
+	}
+	mut r = try flume.Open(path)
+	let (id, err) = object.HashBlob(mut r, info.Size)
+	r.Close()
+	if err != nil {
+		fail err
+	}
+	return id
+}
+
+// HashResult is one file's blob id, or why it could not be read. Id is not the last field (#847).
+type HashResult struct {
+	Id  object.Id
+	Err str
+}
+
+// HashPaths hashes the files, on every core when the pool is running and there are enough of them.
+fn HashPaths(paths []str) []HashResult {
+	mut out = make([]HashResult, 0, len(paths))
+	if !Running() || len(paths) < 32 {
+		for p in paths {
+			let (id, err) = HashPath(p)
+			if err != nil {
+				out = append(out, HashResult{Err: fault.Message(err), Id: object.NoId})
+			} else {
+				out = append(out, HashResult{Err: "", Id: id})
+			}
+		}
+		return out
+	}
+	for i in 0..len(paths) {
+		out = append(out, HashResult{Err: "not hashed", Id: object.NoId})
+	}
+	let workers = relay.Cores() - 1
+	mut sent = 0
+	mut done = 0
+	// keep each worker a few jobs ahead, so the inboxes stay small
+	for sent < len(paths) && sent < workers * 4 {
+		relay.Send(1 + sent % workers, "h {sent} " + paths[sent])
+		sent += 1
+	}
+	for done < len(paths) {
+		let (from, reply) = relay.Recv()
+		let sp = twine.IndexByte(reply, ' ')
+		let seq = mint.Atoi(reply[0:sp]) catch _ {
+			-1
+		}
+		if seq >= 0 && seq < len(paths) {
+			let rest = reply[sp + 1:]
+			if len(rest) > 0 && rest[0] == '!' {
+				out[seq] = HashResult{Err: rest[1:], Id: object.NoId}
+			} else {
+				let id = object.ParseId(rest) catch _ {
+					object.NoId
+				}
+				out[seq] = HashResult{Err: "", Id: id}
+			}
+		}
+		done += 1
+		if sent < len(paths) {
+			relay.Send(from, "h {sent} " + paths[sent])
+			sent += 1
+		}
+	}
+	return out
+}

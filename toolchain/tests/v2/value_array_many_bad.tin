@@ -1,0 +1,12 @@
+package main
+
+import "say"
+
+type V value struct {
+	arr [3]i64
+}
+
+fn main() {
+	let v = V{arr: [3]i64{1, 2, 3, 4}}
+	say.Line(v.arr[0])
+}

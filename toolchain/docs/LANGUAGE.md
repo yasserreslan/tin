@@ -333,7 +333,13 @@ argument, a result), so two names never share a value. (`value` is a contextual 
   `u.b[i]` is bounds-checked (a constant index at compile time), `len(u.b)` is N, `for i, x in
   u.b` ranges over a copy, and it compares, hashes, prints (`[a b c]`) and encodes to JSON as
   its elements do. It cannot be sliced or appended to. Outside a value struct `[N]T` keeps its
-  meaning, a slice that starts with N zero elements.
+  meaning, a slice that starts with N zero elements. Where an inline array is wanted (a field in a
+  literal, the right side of an assignment to the field, an element of `[M][N]T`), `[N]T{...}` builds
+  one: the listed elements, then zeros, and more than N is E202. `a.b = c.b` copies N elements, and
+  `copy(v.b, xs)` fills one from a slice of its element type (or, for bytes, a `str`) and gives the
+  fewer of N and `len(xs)` that it copied, so an object id is
+  `mut o = Oid{}` and `copy(o.b, seal.Sha1(data))`. A slice variable does not assign to an inline
+  array (E230): copy it in.
 - A value struct holds numbers, `bool`, `str`, slices, maps, structs, funcs, `dyn` values,
   optionals (`?str`, `?Node`, `?f64`, `?dyn S`), other value structs and inline arrays of any of
   these (#669, #692). A `str` field or element starts as `""`, a slice as an empty slice and an

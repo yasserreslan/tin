@@ -1,0 +1,1 @@
+toolchain/tests/v2/value_array_many_bad.tin:10:17: error E202 ARRAY_TYPE: too many values in an array literal: 4 for 3 elements
