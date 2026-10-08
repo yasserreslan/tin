@@ -51,7 +51,7 @@ fn Decode(s str) !str {
 			// A soft break may be followed by the line ending, or be the last line of the input
 			// when something precedes the "=" (Go's rule exactly).
 			if !(twine.HasPrefix(rest, "\n") || twine.HasPrefix(rest, "\r\n") ||
-				(len(rest) == 0 && len(line) > 1 && done)) {
+					(len(rest) == 0 && len(line) > 1 && done)) {
 				fail say.Fault("quotedprintable: invalid bytes after the soft break")
 			}
 			line = line[0:len(line)-1]
