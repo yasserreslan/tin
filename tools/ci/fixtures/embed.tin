@@ -1,0 +1,74 @@
+package main
+
+import "embed"
+import "fs"
+import "say"
+
+// The fixture tree is embed_tree/ next to this file; the patterns are the ones bench/ref/embed/main.go selects with (#928).
+// embed: embed_tree/*
+let all str
+
+// embed: embed_tree/*.txt
+let texts str
+
+// embed: embed_tree/sub
+let sub str
+
+// embed: embed_tree/a?b*
+let ab str
+
+// embed: embed_tree/README.md
+let readme str
+
+// embed: embed_tree/*/deep
+let deep str
+
+const digits = "0123456789abcdef"
+
+fn hexStr(s str) str {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, digits[s[i] >> 4])
+		out = append(out, digits[s[i] & 15])
+	}
+	return str(out)
+}
+
+fn dump(label str, blob str) ! {
+	say.Line("pattern", label)
+	let tree = try embed.Parse(blob)
+	try fs.WalkDir(tree, ".", fn(path str, d ?fs.DirEntry, err fault) ! {
+		if err != nil {
+			fail err
+		}
+		if let e = d {
+			if e.IsDir() {
+				say.Line("d", path)
+				return
+			}
+		}
+		let body = try fs.ReadFile(tree, path)
+		say.Line("f", path, len(body), hexStr(body))
+	})
+}
+
+fn main() {
+	dump("embed_tree/*", all) catch err {
+		say.Line("failed", err)
+	}
+	dump("embed_tree/*.txt", texts) catch err {
+		say.Line("failed", err)
+	}
+	dump("embed_tree/sub", sub) catch err {
+		say.Line("failed", err)
+	}
+	dump("embed_tree/a?b*", ab) catch err {
+		say.Line("failed", err)
+	}
+	dump("embed_tree/README.md", readme) catch err {
+		say.Line("failed", err)
+	}
+	dump("embed_tree/*/deep", deep) catch err {
+		say.Line("failed", err)
+	}
+}

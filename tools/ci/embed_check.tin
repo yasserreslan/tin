@@ -1,0 +1,47 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+
+// Compare the file trees that embed selects with Go's (#928).
+//
+// The compiler embeds the fixture tree (tools/ci/fixtures/embed_tree) under six directive patterns in tools/ci/fixtures/embed.tin,
+// which lists each pattern's files and directories through fs.WalkDir with their sizes and bytes. bench/ref/embed selects the same
+// files with Go's rules and lists them through testing/fstest.MapFS; the check compares their lines. A directory is walked with
+// its hidden names (. and _) left out, a glob matches each element, and the order is fs.WalkDir's (names sorted byte by byte).
+
+fn run(exe str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 300, "", []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/embed")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "embed-")
+	let tin = ci.Join(work, "embed-tin")
+	ci.BuildTin("tools/ci/fixtures/embed.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "embed-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/embed"}, ci.Root(), 300), "go build embed")
+
+	let want = run(goexe)
+	let got = run(tin)
+	ci.Check(len(got) == len(want), "embed: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "embed: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("embed: " + mint.Itoa(len(want)) + " lines over six patterns match Go's file trees")
+}

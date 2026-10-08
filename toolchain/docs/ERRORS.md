@@ -119,7 +119,7 @@ fn main() {
 ```
 
 ```text
-example.tin:4:1: error E004 EMBED: no file matches static/*.html
+example.tin:5:1: error E004 EMBED: no file matches static/*.html
 ```
 
 Fix: check the pattern against the files (the directory is the one of the source file), or move

@@ -9,6 +9,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [argo](#argo) | JSON (encoding/json) |
 | [io](#io) | streaming shapes (io) |
 | [fs](#fs) | file system interfaces and helpers (io/fs) |
+| [embed](#embed) | read-only file trees compiled into the image, from a // embed: directive (embed) |
 | [anvil](#anvil) | HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http) |
 | [hearth](#hearth) | cores and threads (runtime) |
 | [relay](#relay) | messages between cores (channels) |
@@ -224,6 +225,27 @@ Where Go asks an interface at run time (fs.ReadDir tries ReadDirFS, then a file'
 - `(f osFile) Stat() !FileInfo`: Stat describes the file as it was when it was opened.
 - `(f mut osFile) ReadDir(n i64) ![]DirEntry`: ReadDir gives the directory's next n entries (all that are left for n <= 0), sorted by name; an empty slice at the end.
 - `(f mut osFile) Close() !`: Close closes the file; a second Close fails with ErrClosed.
+
+## embed
+
+Package embed is the file tree the compiler puts into a program's image (#928), read-only, as Go's embed.FS is. A line "//embed: PATTERN" at column 1, directly above a top-level "let NAME str", makes NAME the blob of the files PATTERN names, relative to the directory of the source file (globs with * and ?; directories are walked, hidden names left out). Parse reads that blob as a file system: Open, ReadDir, Stat and ReadFile satisfy the fs package's shapes, so fs.ReadFile, fs.WalkDir and fs.Glob work on it. Nothing is read from disk at run time, and the bytes stay in the image.
+
+The blob has one record per file: its slash-separated name, a newline, its size in decimal, a newline and its bytes. The compiler writes each directory's records in name order, and Parse checks that order, so a blob that is not a tree from the compiler fails with ErrFormat rather than giving unsorted listings.
+
+- `type FS struct`: FS is an embedded file tree, read-only: a value from Parse (the zero value has no files and no maps).
+- `Parse(blob str) !FS`: Parse reads blob, the bytes of a tree the compiler embedded, as a file system; a blob that is not one fails with ErrFormat.
+- `(f FS) Open(name str) !dyn fs.File`: Open opens the named file or directory for reading.
+- `(f FS) ReadFile(name str) !str`: ReadFile reads the named file whole.
+- `(f FS) ReadDir(name str) ![]fs.DirEntry`: ReadDir lists the named directory, sorted by name, with each entry's type.
+- `(f FS) Stat(name str) !fs.FileInfo`: Stat describes the named file or directory: files are read-only (0444), directories 0555.
+- `(f mut embedFile) Read(buf mut []u8) !i64`: Read reads the next bytes of the file into buf: 0 at the end.
+- `(f embedFile) Stat() !fs.FileInfo`: Stat describes the file.
+- `(f mut embedFile) ReadDir(n i64) ![]fs.DirEntry`: ReadDir fails: a file has no entries.
+- `(f mut embedFile) Close() !`: Close closes the file; a second Close fails with fs.ErrClosed.
+- `(f mut embedDir) Read(buf mut []u8) !i64`: Read fails: a directory cannot be read as a file (Go names it with a trailing slash too).
+- `(f embedDir) Stat() !fs.FileInfo`: Stat describes the directory.
+- `(f mut embedDir) ReadDir(n i64) ![]fs.DirEntry`: ReadDir gives the next n entries (all that are left for n <= 0), sorted by name; an empty slice at the end.
+- `(f mut embedDir) Close() !`: Close closes the directory; a second Close fails with fs.ErrClosed.
 
 ## anvil
 

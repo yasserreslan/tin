@@ -7,6 +7,7 @@ fn fix_table() str {
 		"E001\tstart the file with `package main` (or the package's name), and keep only one.\n" +
 		"E002\tmove the import up, under the package declaration.\n" +
 		"E003\tcheck the path (it is relative to the current directory) and that the file is readable.\n" +
+		"E004\tcheck the pattern against the files (the directory is the one of the source file), or move the directive onto the `let` line above it.\n" +
 		"E010\tremove the character, or put the text in a string.\n" +
 		"E011\tcorrect the digits, or write the number in a base whose digits it uses.\n" +
 		"E012\tuse one of the units (`30s`), or put a space or an operator between the number and the name.\n" +
