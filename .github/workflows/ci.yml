@@ -100,6 +100,8 @@ jobs:
         run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)
         run: sh tools/ci/tin.sh squash_twin_check
+      - name: ZIP archives against Go's archive/zip (both directions)
+        run: sh tools/ci/tin.sh zip_check
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
       - name: Task memory after a 300-request heavy burst

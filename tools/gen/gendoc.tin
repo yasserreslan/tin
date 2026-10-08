@@ -54,6 +54,8 @@ fn packages() []str {
 		"cairn", "containers (container/heap, sets, LRU)",
 		"stamp", "hashes and checksums (hash/*)",
 		"squash", "compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2)",
+		"squash", "compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib)",
+		"zip", "ZIP archives (archive/zip)",
 		"ledger", "CSV reading and writing (encoding/csv)",
 		"abacus", "arbitrary-precision integers (math/big)",
 		"seal", "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)",
