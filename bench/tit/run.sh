@@ -50,6 +50,24 @@ echo '|---|---|---|---|'
 measure "status (clean)" "git status" "'$tit' status"
 measure "log (whole history)" "git log" "'$tit' log"
 measure "log -n 1" "git log -n 1" "'$tit' log -n 1"
+# packing on every core against one (#778): tit repack of the adopted history, from the same packs each time
+cores=$(nproc 2> /dev/null || getconf _NPROCESSORS_ONLN)
+cp -R .tit "$d/tit-packs"
+repack() {
+	rm -rf .tit
+	cp -R "$d/tit-packs" .tit
+	t0=$(date +%s%N)
+	TIN_CORES=$1 "$tit" repack > /dev/null
+	echo $((($(date +%s%N) - t0) / 1000))
+}
+: > "$d/r1"
+: > "$d/rn"
+for i in 1 2 3; do
+	repack 1 >> "$d/r1"
+	repack "$cores" >> "$d/rn"
+done
+r1=$(median < "$d/r1")
+rn=$(median < "$d/rn")
 # twenty files changed
 for f in $(git ls-files '*.tin' | head -20); do
 	printf '\n// changed\n' >> "$f"
@@ -57,3 +75,5 @@ done
 measure "status (20 files changed)" "git status" "'$tit' status"
 measure "diff (20 files changed)" "git diff" "'$tit' diff"
 git checkout -q -- .
+echo
+echo "tit repack of the whole history (3 runs each, medians): 1 core $(awk -v x="$r1" 'BEGIN { printf "%.1f", x / 1000000 }') s, $cores cores $(awk -v x="$rn" 'BEGIN { printf "%.1f", x / 1000000 }') s: $(awk -v a="$r1" -v b="$rn" 'BEGIN { printf "%.2f", a / b }')x faster on every core"

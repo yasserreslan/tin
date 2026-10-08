@@ -1,5 +1,6 @@
 package packfile
 
+import "../cores"
 import "../crash"
 import "../object"
 import "../store"
@@ -46,30 +47,42 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 		}
 		return len(b.body) - len(a.body)
 	})
+	// delta search on every core (tit/cores): each object against the window before it of its kind, then the bases
+	// taken in order, so a chain stays within MaxDeltaDepth. Objects over 16 MiB are not searched (a delta of such
+	// files is slow to find, and they are kept in chunks anyway).
+	mut bodies = make([]str, len(items))
+	mut kinds = make([]i64, len(items))
 	for i in 0..len(items) {
-		if len(items[i].body) < 64 {
+		bodies[i] = items[i].body
+		kinds[i] = typeOf(items[i].kind)
+	}
+	let (which, deltas) = cores.WindowDeltas(bodies, kinds, window)
+	for i in 0..len(items) {
+		let j = which[i]
+		if j < 0 || j >= i || items[j].depth >= MaxDeltaDepth {
 			continue
 		}
-		mut best = ""
-		mut bestBase = -1
-		for j in max(0, i - window)..i {
-			if items[j].kind != items[i].kind || items[j].depth >= MaxDeltaDepth {
-				continue
+		items[i].base = j
+		items[i].delta = deltas[i]
+		items[i].depth = items[j].depth + 1
+	}
+	// every entry compressed on every core: commits and trees stored (zlib's stored blocks: they shrink little, a tree
+	// being mostly ids, and a walk or a log inflates thousands of them, #807), blobs and deltas compressed
+	mut payloads = make([]str, len(items))
+	mut levels = make([]i64, len(items))
+	for i in 0..len(items) {
+		if items[i].base >= 0 {
+			payloads[i] = items[i].delta
+			levels[i] = squash.Default
+		} else {
+			payloads[i] = items[i].body
+			levels[i] = squash.Default
+			if items[i].kind != object.Kind.Blob {
+				levels[i] = 0
 			}
-			let d = arena {
-				MakeDelta(items[j].body, items[i].body)
-			}
-			if len(d) > 0 && len(d) < len(items[i].body) / 2 && (bestBase < 0 || len(d) < len(best)) {
-				best = d
-				bestBase = j
-			}
-		}
-		if bestBase >= 0 {
-			items[i].base = bestBase
-			items[i].delta = best
-			items[i].depth = items[bestBase].depth + 1
 		}
 	}
+	let zs = cores.Compress(payloads, levels)
 	try quarry.MkdirAll(dir)
 	let tmp = dir + "/tmp-" + seal.Hex(seal.RandomBytes(8))
 	mut out = []u8{}
@@ -82,27 +95,15 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 		let off = len(out)
 		offs[i] = off
 		mut e = []u8{}
-		mut payload = items[i].body
 		if items[i].base >= 0 {
 			e = append(e, u8(typeOfsDelta))
 			appendUv(mut e, len(items[i].body))
 			appendUv(mut e, off - offs[items[i].base])
-			payload = items[i].delta
 		} else {
 			e = append(e, u8(typeOf(items[i].kind)))
 			appendUv(mut e, len(items[i].body))
 		}
-		// each entry compresses in an arena: the deflater's tables and buffers go with it, only the stream is kept.
-		// Commits and trees are stored, not compressed (zlib's stored blocks): they shrink little (a tree is mostly
-		// ids), and a walk or a log inflates thousands of them, which then costs a copy each (#807)
-		mut level = squash.Default
-		if items[i].base < 0 && items[i].kind != object.Kind.Blob {
-			level = 0
-		}
-		let lv = level
-		let z = arena {
-			squash.Zlib(payload, lv)
-		}
+		let z = zs[i]
 		appendUv(mut e, len(z))
 		appendStr(mut e, z)
 		crcs[i] = stamp.Crc32(str(e))

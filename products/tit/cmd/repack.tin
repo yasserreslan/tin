@@ -1,0 +1,48 @@
+package cmd
+
+import "../change"
+import "../object"
+import "../packfile"
+import "quarry"
+import "twine"
+
+// tit repack (#778): every pack into one, its deltas searched again and its entries compressed on every core. adopt
+// leaves a pack for each batch it converts, and each pack is one more index to search for every object read. Loose
+// objects stay as they are (large files among them are kept in chunks). The new pack is in place before the old ones
+// go, so a crash leaves objects twice, never missing.
+
+fn doRepack(g Global, o mut Out) ! {
+	mut r = try open(g)
+	use lock = change.Lock(r.Ws.Store)
+	let dir = r.Ws.Store + "/packs"
+	mut old = []str{}
+	if quarry.IsDir(dir) {
+		let names = try quarry.ReadDir(dir)
+		for n in names {
+			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
+				old = append(old, n[0:len(n) - 5])
+			}
+		}
+	}
+	if len(old) < 2 {
+		o.Line("Nothing to repack: {len(old)} pack.")
+		return
+	}
+	mut ids = []object.Id{}
+	for p in r.ids.packs {
+		for i in 0..p.Count {
+			ids = append(ids, p.IdAt(i))
+		}
+	}
+	let p = try packfile.Write(mut r.Store, ids, dir)
+	let keepName = p.Path[len(dir) + 1:len(p.Path) - 5]
+	for n in old {
+		if n == keepName {
+			continue
+		}
+		try quarry.Remove(dir + "/" + n + ".idx")
+		try quarry.Remove(dir + "/" + n + ".pack")
+	}
+	let info = try quarry.Lstat(p.Path)
+	o.Line("Packed {p.Count} objects from {len(old)} packs into one ({info.Size / 1048576} MiB, {p.Deltas()} deltas).")
+}

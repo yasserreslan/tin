@@ -57,6 +57,7 @@ type Command enum {
 	Watch(WatchArgs)
 	Park(str)
 	Focus([]str, bool)
+	Repack
 	Unpark(str)
 	Log(LogArgs)
 	Show(str)
@@ -214,6 +215,7 @@ commands:
   history <[package.]Name or Type.Method> [-n N]
                              the commits that changed one Tin declaration, following renames and moves
   overlap                    other branches (and fetched remote ones) changing the declarations this one changes
+  repack                     every pack into one, its deltas found again on every core (adopt leaves many)
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   ship <version> [--remote name] [--no-push] [--dry-run]
@@ -900,6 +902,10 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Watch(wa)
 	}
+	if name == "repack" {
+		try noMore(rest, 0, "repack")
+		return g, Command.Repack
+	}
 	if name == "focus" {
 		mut dirs = []str{}
 		mut all = false
@@ -1162,6 +1168,7 @@ fn commandName(c Command) str {
 		Watch(_) => "watch"
 		Park(_) => "park"
 		Focus(_, _) => "focus"
+		Repack => "repack"
 		Unpark(_) => "unpark"
 		Log(_) => "log"
 		Show(_) => "show"
@@ -1308,6 +1315,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Focus(dirs, all) => {
 			try doFocus(g, dirs, all, mut o)
+		}
+		Repack => {
+			try doRepack(g, mut o)
 		}
 		Unpark(name) => {
 			try doUnpark(g, name, mut o)

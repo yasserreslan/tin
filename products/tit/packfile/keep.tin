@@ -15,111 +15,149 @@ import "stamp"
 
 const keepCache = 64 << 20
 
-// keeper decodes the entries of a pack's bytes by offset.
-type keeper struct {
-	data   str
-	end    i64
-	max    i64
-	byId   map[str]i64
-	kinds  map[i64]object.Kind
-	bodies map[i64]str
-	order  []i64
-	held   i64
+// The decoded bodies kept for the deltas after them, by offset, with their kinds, oldest first, and their bytes; the
+// offsets of the entries decoded so far by id. Globals (one set a core) so that each entry is decoded in an arena of
+// its own and only its id leaves it: what it inflated goes with the arena, and what is kept here is kept (keep), its
+// memory given back when it is dropped.
+mut kBodies = map[i64]str{}
+
+mut kKinds = map[i64]i64{}
+
+mut kOrder = []i64{}
+
+mut kHeld = 0
+
+mut kById = map[str]i64{}
+
+// keepReset empties the globals: every entry dropped, given back.
+fn keepReset() i64 {
+	for off in kOrder {
+		delete(kBodies, off)
+		delete(kKinds, off)
+	}
+	mut ids = []str{}
+	for id, _ in kById {
+		ids = append(ids, id)
+	}
+	for id in ids {
+		delete(kById, id)
+	}
+	kOrder = keep(kOrder[0:0])
+	kHeld = 0
+	return 0
 }
 
-fn (k keeper) uvarintAt(at i64) !(i64, i64) {
-	return try uvarintIn(k.data[0:k.end], at)
+// keptEntry is what one entry's arena gives back: its kind, where the next entry starts, its id and its CRC.
+type keptEntry struct {
+	kind i64
+	next i64
+	id   str
+	crc  u32
 }
 
-// decode is the kind and body of the entry at off, its delta chain resolved within the pack.
-fn (k mut keeper) decode(off i64, depth i64) !(object.Kind, str, i64) {
+fn uvarintTo(data str, end i64, at i64) !(i64, i64) {
+	// on the whole data (a slice of a str is a copy), then bounded by the entries' end
+	let (v, next) = try uvarintIn(data, at)
+	if next > end {
+		fail fault.Wrap(ErrBadPack, "a number runs past the entries at {at}")
+	}
+	return v, next
+}
+
+// decodeAt is the kind (an entry type) and body of the entry at off, its delta chain resolved within the pack, and
+// where the next entry starts.
+fn decodeAt(data str, end i64, max i64, off i64, depth i64) !(i64, str, i64) {
 	if depth > MaxDeltaDepth {
 		fail fault.Wrap(ErrBadPack, "a delta chain deeper than {MaxDeltaDepth} at {off}")
 	}
-	if off < 20 || off >= k.end {
+	if off < 20 || off >= end {
 		fail fault.Wrap(ErrBadPack, "an entry outside the pack at {off}")
 	}
-	let t = i64(k.data[off])
-	let (size, a) = try k.uvarintAt(off + 1)
-	if size > k.max {
+	let t = i64(data[off])
+	let (size, a) = try uvarintTo(data, end, off + 1)
+	if size > max {
 		fail fault.Wrap(fault.LimitExceeded, "an object of {size} bytes at {off}")
 	}
 	mut at = a
 	mut baseOff = -1
 	if t == typeOfsDelta {
-		let (dist, b) = try k.uvarintAt(at)
+		let (dist, b) = try uvarintTo(data, end, at)
 		at = b
 		baseOff = off - dist
 		if dist <= 0 || baseOff < 20 {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against no earlier entry")
 		}
 	} else if t == typeRefDelta {
-		if at + 32 > k.end {
+		if at + 32 > end {
 			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 		}
-		let (bo, known) = k.byId[k.data[at:at + 32]]
+		let (bo, known) = kById[data[at:at + 32]]
 		if !known {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against an object not before it in the pack")
 		}
 		baseOff = bo
 		at += 32
 	}
-	let (clen, c) = try k.uvarintAt(at)
-	if clen < 0 || c + clen > k.end {
+	let (clen, c) = try uvarintTo(data, end, at)
+	if clen < 0 || c + clen > end {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 	}
-	let z = k.data[c:c + clen]
+	let z = data[c:c + clen]
 	if baseOff < 0 {
-		let kind = try kindOf(t)
+		let _ = try kindOf(t)
 		let body = squash.Unzlib(z, size + 1) catch err {
 			fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
 		}
 		if len(body) != size {
 			fail fault.Wrap(ErrBadPack, "entry at {off}: {len(body)} bytes, not {size}")
 		}
-		return kind, body, c + clen
+		return t, body, c + clen
 	}
-	mut kind = object.Kind.Blob
+	mut kind = typeBlob
 	mut base = ""
-	let (cached, hit) = k.bodies[baseOff]
+	let (cached, hit) = kBodies[baseOff]
 	if hit {
-		kind = k.kinds[baseOff]
+		kind = kKinds[baseOff]
 		base = cached
 	} else {
-		let (bk, bb, _) = try k.decode(baseOff, depth + 1)
+		let (bk, bb, _) = try decodeAt(data, end, max, baseOff, depth + 1)
 		kind = bk
 		base = bb
 	}
-	let d = squash.Unzlib(z, 2 * k.max + 64) catch err {
+	let d = squash.Unzlib(z, 2 * max + 64) catch err {
 		fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
 	}
 	let body = try ApplyDelta(base, d, size)
 	return kind, body, c + clen
 }
 
-// remember keeps a body for the deltas after it, dropping the oldest past the budget.
-fn (k mut keeper) remember(off i64, kind object.Kind, body str) {
-	if len(body) > keepCache / 4 {
-		return
-	}
-	k.bodies[off] = keep(body)
-	k.kinds[off] = kind
-	k.order = append(k.order, off)
-	k.held += len(body)
-	mut drop = 0
-	for k.held > keepCache && drop < len(k.order) {
-		let old = k.order[drop]
-		let (b, ok) = k.bodies[old]
-		if ok {
-			k.held -= len(b)
-			delete(k.bodies, old)
-			delete(k.kinds, old)
+// keepEntry decodes the entry at off, keeps its body for the deltas after it, and gives what Keep records of it.
+fn keepEntry(data str, end i64, max i64, off i64) !keptEntry {
+	let (t, body, next) = try decodeAt(data, end, max, off, 0)
+	let kind = try kindOf(t)
+	let id = object.Hash(kind, body)
+	kById[keep(id.Bytes())] = off
+	if len(body) <= keepCache / 4 {
+		kBodies[off] = keep(body)
+		kKinds[off] = t
+		kOrder = append(kOrder, off)
+		kHeld += len(body)
+		mut drop = 0
+		for kHeld > keepCache && drop < len(kOrder) {
+			let old = kOrder[drop]
+			let (b, ok) = kBodies[old]
+			if ok {
+				kHeld -= len(b)
+				delete(kBodies, old)
+				delete(kKinds, old)
+			}
+			drop += 1
 		}
-		drop += 1
+		if drop > 0 {
+			kOrder = keep(kOrder[drop:])
+		}
 	}
-	if drop > 0 {
-		k.order = k.order[drop:]
-	}
+	return keptEntry{kind: t, next: next, id: id.Bytes(), crc: stamp.Crc32(data[off:next])}
 }
 
 // Keep writes the pack data (as a fetch receives it) into dir as it is, with an index built for it, after checking
@@ -137,7 +175,9 @@ fn Keep(data str, dir str, maxObject i64) !Pack {
 	if count < 0 || count > end {
 		fail fault.Wrap(ErrBadPack, "{count} entries in {len(data)} bytes")
 	}
-	mut k = keeper{data: data, end: end, max: maxObject, byId: map[str]i64{}, kinds: map[i64]object.Kind{}, bodies: map[i64]str{}, order: []i64{}, held: 0}
+	_ = arena {
+		keepReset()
+	}
 	mut ids = make([]object.Id, 0, count)
 	mut offs = make([]i64, 0, count)
 	mut crcs = make([]u32, 0, count)
@@ -146,17 +186,21 @@ fn Keep(data str, dir str, maxObject i64) !Pack {
 		if at >= end {
 			fail fault.Wrap(ErrBadPack, "{count} entries promised, {n} found")
 		}
-		let (kind, body, next) = try k.decode(at, 0)
-		let id = object.Hash(kind, body)
-		k.byId[keep(id.Bytes())] = at
-		k.remember(at, kind, body)
+		let off = at
+		let e = try arena {
+			try keepEntry(data, end, maxObject, off)
+		}
+		let id = try object.IdOf(e.id)
 		ids = append(ids, id)
-		offs = append(offs, at)
-		crcs = append(crcs, stamp.Crc32(data[at:next]))
-		at = next
+		offs = append(offs, off)
+		crcs = append(crcs, e.crc)
+		at = e.next
 	}
 	if at != end {
 		fail fault.Wrap(ErrBadPack, "{end - at} bytes after the last entry")
+	}
+	_ = arena {
+		keepReset()
 	}
 	try quarry.MkdirAll(dir)
 	let tmp = dir + "/tmp-" + seal.Hex(seal.RandomBytes(8))

@@ -68,6 +68,9 @@ type Pack struct {
 	fanout []i64
 	cache  map[i64]str
 	kinds  map[i64]object.Kind
+	// order is the cached offsets, oldest first; held their bytes (at most cacheMost)
+	order []i64
+	held  i64
 }
 
 fn le32(s str, at i64) i64 {
@@ -144,7 +147,7 @@ fn Open(path str) !Pack {
 			fail fault.Wrap(ErrBadPack, "{idxPath}: an offset outside the pack")
 		}
 	}
-	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", ids: ids, offs: offs, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}}
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", ids: ids, offs: offs, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
 }
 
 // Find is the position of the object in the index, or -1.
@@ -265,15 +268,49 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 			fail fault.Wrap(ErrBadPack, "entry at {off}: {len(body)} bytes, not {size}")
 		}
 		let kind = try kindOf(t)
+		if depth > 0 {
+			// the base of a delta: the next delta on it will want it again
+			p.remember(off, kind, body)
+		}
 		return kind, body
 	}
 	let (kind, base) = try p.entryAt(baseOff, depth + 1)
 	let out = try ApplyDelta(base, body, size)
-	if len(p.cache) < 256 {
-		p.cache[off] = out
-		p.kinds[off] = kind
-	}
+	p.remember(off, kind, out)
 	return kind, out
+}
+
+// cacheMost is how many bytes of decoded entries a pack keeps for the deltas read after them.
+const cacheMost = 32 << 20
+
+// remember keeps a decoded entry for the deltas that build on it, dropping the oldest past cacheMost: a delta chain
+// is then decoded once, not once for every object on it.
+fn (p mut Pack) remember(off i64, kind object.Kind, body str) {
+	if len(body) > cacheMost / 8 {
+		return
+	}
+	let (_, had) = p.cache[off]
+	if had {
+		return
+	}
+	p.cache[off] = keep(body)
+	p.kinds[off] = kind
+	p.order = append(p.order, off)
+	p.held += len(body)
+	mut drop = 0
+	for p.held > cacheMost && drop < len(p.order) {
+		let old = p.order[drop]
+		let (b, ok) = p.cache[old]
+		if ok {
+			p.held -= len(b)
+			delete(p.cache, old)
+			delete(p.kinds, old)
+		}
+		drop += 1
+	}
+	if drop > 0 {
+		p.order = p.order[drop:]
+	}
 }
 
 // GetRaw is the object's kind and body, checked against its id.

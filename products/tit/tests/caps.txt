@@ -7,6 +7,7 @@ change files
 cmd net files spawn
 cores files
 crash
+delta
 diff
 fault
 flume files
