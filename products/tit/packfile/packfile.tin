@@ -216,7 +216,9 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 	}
 	let zbytes = p.data[c:c + clen]
-	let budget = 2 * size + 4194304
+	// the inflater grows its output by doubling (the buffers it outgrows stay until the pool resets, less than 4 times
+	// the size together) and copies the result once: 6 times the size, and room for its tables
+	let budget = 6 * size + 4194304
 	// budget * 1: a bare name before { would read as a struct literal.
 	let body = limit memory budget * 1 {
 		try squash.Unzlib(zbytes, size + 1)
