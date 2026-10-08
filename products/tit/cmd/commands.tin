@@ -1,0 +1,407 @@
+package cmd
+
+import "../change"
+import "../diff"
+import "../identity"
+import "../ignore"
+import "../index"
+import "../object"
+import "../revwalk"
+import "argo"
+import "fault"
+import "quarry"
+import "seal"
+import "tide"
+import "trail"
+
+// The commands of the first wave: init, status, log, show, cat, config and key.
+
+fn doInit(g Global, dir str, o mut Out) ! {
+	let root = trail.Clean(dir)
+	let store = root + "/.tit"
+	if quarry.Exists(store) {
+		fail "{store} exists already"
+	}
+	for sub in []str{"objects", "packs", "refs/heads", "refs/tags", "changes", "oplog", "workspaces/default"} {
+		try quarry.MkdirAll(store + "/" + sub)
+	}
+	try change.WriteHead(store + "/workspaces/default", change.Head.Branch("refs/heads/main"))
+	try quarry.WriteFile(store + "/config", "[core]\n\tformat = 1\n")
+	if g.Json {
+		o.Line("{{\"store\":\"" + store + "\"}}")
+	} else {
+		o.Line("Started an empty tit repository in " + store)
+	}
+}
+
+type statusJson struct {
+	staged    []str
+	unstaged  []str
+	untracked []str
+}
+
+fn letter(f index.FileStatus) str {
+	return match f {
+		Added(_) => "A"
+		Modified(_) => "M"
+		Deleted(_) => "D"
+		Renamed(_, _) => "R"
+		TypeChanged(_) => "T"
+		Untracked(_) => "?"
+		Conflicted(_) => "U"
+	}
+}
+
+fn fpath(f index.FileStatus) str {
+	return match f {
+		Added(p) => p
+		Modified(p) => p
+		Deleted(p) => p
+		Renamed(_, p) => p
+		TypeChanged(p) => p
+		Untracked(p) => p
+		Conflicted(p) => p
+	}
+}
+
+fn doStatus(g Global, o mut Out) ! {
+	mut r = try open(g)
+	mut idx = try r.readIndex()
+	let head = try r.headCommit()
+	mut tree = object.NoId
+	if head != nil {
+		tree = try r.treeOf(head)
+	}
+	mut rules = try ignore.Load(r.Ws.Root)
+	let rep = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
+	// unchanged files' new stat goes back into the index, so the next status skips them
+	try idx.Write(r.Ws.IndexPath())
+	if g.Json {
+		mut j = statusJson{staged: []str{}, unstaged: []str{}, untracked: rep.Untracked}
+		for f in rep.Staged {
+			j.staged = append(j.staged, letter(f) + " " + fpath(f))
+		}
+		for f in rep.Unstaged {
+			j.unstaged = append(j.unstaged, letter(f) + " " + fpath(f))
+		}
+		mut b = make([]u8, 0, 256)
+		argo.Put(mut b, j)
+		o.Line(str(b))
+		return
+	}
+	if len(rep.Staged) + len(rep.Unstaged) + len(rep.Untracked) == 0 {
+		o.Line("Nothing to commit, the working directory matches the last commit.")
+		return
+	}
+	if len(rep.Staged) > 0 {
+		o.Line("Staged for the next commit:")
+		for f in rep.Staged {
+			o.Line("  " + paint(g, "32", letter(f) + " " + fpath(f)))
+		}
+	}
+	if len(rep.Unstaged) > 0 {
+		o.Line("Changed, not staged:")
+		for f in rep.Unstaged {
+			o.Line("  " + paint(g, "31", letter(f) + " " + fpath(f)))
+		}
+	}
+	if len(rep.Untracked) > 0 {
+		o.Line("Untracked:")
+		for p in rep.Untracked {
+			o.Line("  " + paint(g, "31", p))
+		}
+	}
+}
+
+fn dateText(p object.Person) str {
+	let zone = tide.FixedZone("", p.Zone * 60)
+	return tide.Format(p.When * 1000000000, zone, "Mon Jan 2 15:04:05 2006 -0700")
+}
+
+fn commitData(r mut Repo, id object.Id) !object.CommitData {
+	let o = try r.Store.Get(id)
+	return match o {
+		Commit(c) => c
+		Blob(_) => try notCommitData(id)
+		Tree(_) => try notCommitData(id)
+		Tag(_) => try notCommitData(id)
+	}
+}
+
+fn notCommitData(id object.Id) !object.CommitData {
+	fail fault.Wrap(revwalk.ErrBadRev, "{id.Hex()} is not a commit")
+}
+
+fn firstLine(s str) str {
+	for i in 0..len(s) {
+		if s[i] == '\n' {
+			return s[0:i]
+		}
+	}
+	return s
+}
+
+type logJson struct {
+	commit  str
+	change  str
+	parents []str
+	author  str
+	email   str
+	time    i64
+	message str
+}
+
+fn writeCommit(g Global, r mut Repo, id object.Id, c object.CommitData, o mut Out) {
+	o.Line(paint(g, "33", "commit " + id.Hex()))
+	if len(c.Parents) > 1 {
+		mut ps = []str{}
+		for p in c.Parents {
+			ps = append(ps, p.Hex()[0:12])
+		}
+		o.Line("Merge:  " + joinWords(ps))
+	}
+	o.Line("Change: " + c.Change.Letters()[0:12])
+	o.Line("Author: " + c.Author.Name + " <" + c.Author.Email + ">")
+	o.Line("Date:   " + dateText(c.Author))
+	o.Line("")
+	for line in splitLines(c.Message) {
+		o.Line("    " + line)
+	}
+}
+
+fn splitLines(s str) []str {
+	mut out = []str{}
+	mut start = 0
+	for i in 0..len(s) {
+		if s[i] == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+fn doLog(g Global, la LogArgs, o mut Out) ! {
+	mut r = try open(g)
+	let parsed = try revwalk.Parse(la.Rev)
+	if la.Rev == "HEAD" {
+		let head = try r.headCommit()
+		if head == nil {
+			fail "the current branch has no commits yet"
+		}
+	}
+	mut starts = []object.Id{}
+	mut hide = []object.Id{}
+	mut single = false
+	match parsed {
+		Range(a, b) => {
+			let ai = try r.resolveRev(a)
+			let bi = try r.resolveRev(b)
+			hide = append(hide, ai)
+			starts = append(starts, bi)
+		}
+		Symmetric(a, b) => {
+			// what either side has that the other lacks: both tips, less their merge base's history
+			let ai = try r.resolveRev(a)
+			let bi = try r.resolveRev(b)
+			starts = append(starts, ai, bi)
+			let base = try revwalk.MergeBase(mut r.Store, ai, bi)
+			if base != nil {
+				hide = append(hide, base)
+			}
+		}
+		Head => {
+			single = true
+		}
+		Name(_) => {
+			single = true
+		}
+		Short(_) => {
+			single = true
+		}
+		Change(_) => {
+			single = true
+		}
+		Git(_) => {
+			single = true
+		}
+		Ancestor(_, _) => {
+			single = true
+		}
+		Parent(_, _) => {
+			single = true
+		}
+	}
+	if single {
+		let id = try r.resolveRev(parsed)
+		starts = append(starts, id)
+	}
+	mut order = revwalk.Order.Date
+	if la.First {
+		order = revwalk.Order.FirstParent
+	} else if la.Topo {
+		order = revwalk.Order.Topo
+	}
+	let ids = try revwalk.Walk(mut r.Store, starts, hide, order, la.Most)
+	mut first = true
+	for id in ids {
+		let c = try commitData(mut r, id)
+		if g.Json {
+			mut ps = []str{}
+			for p in c.Parents {
+				ps = append(ps, p.Hex())
+			}
+			mut b = make([]u8, 0, 256)
+			argo.Put(mut b, logJson{commit: id.Hex(), change: c.Change.Letters(), parents: ps, author: c.Author.Name, email: c.Author.Email, time: c.Author.When, message: c.Message})
+			o.Line(str(b))
+		} else if la.OneLine {
+			o.Line(paint(g, "33", id.Hex()[0:12]) + " " + firstLine(c.Message))
+		} else {
+			if !first {
+				o.Line("")
+			}
+			writeCommit(g, mut r, id, c, mut o)
+		}
+		first = false
+	}
+}
+
+fn doShow(g Global, rev str, o mut Out) ! {
+	mut r = try open(g)
+	let id = try r.resolve(rev)
+	let c = try commitData(mut r, id)
+	writeCommit(g, mut r, id, c, mut o)
+	mut before = object.NoId
+	if len(c.Parents) > 0 {
+		before = try r.treeOf(c.Parents[0])
+	}
+	let changes = try diff.TreeDiff(mut r.Store, before, c.Tree, true)
+	if len(changes) == 0 {
+		return
+	}
+	o.Line("")
+	let stats = try diff.Stats(mut r.Store, changes)
+	o.Text(diff.FormatStat(stats))
+	for ch in changes {
+		mut a = ""
+		mut b = ""
+		if len(ch.OldHash) > 0 {
+			let aid = try object.IdOf(ch.OldHash)
+			let (_, ab) = try r.Store.GetRaw(aid)
+			a = ab
+		}
+		if len(ch.NewHash) > 0 {
+			let bid = try object.IdOf(ch.NewHash)
+			let (_, bb) = try r.Store.GetRaw(bid)
+			b = bb
+		}
+		mut oldName = "a/" + ch.OldPath
+		if len(ch.OldPath) == 0 {
+			oldName = "/dev/null"
+		}
+		mut newName = "b/" + ch.Path
+		if ch.Kind == diff.Kind.Deleted {
+			newName = "/dev/null"
+		}
+		o.Line("")
+		o.Text(diff.Unified(oldName, newName, a, b, 3))
+	}
+}
+
+fn doCat(g Global, rev str, o mut Out) ! {
+	mut r = try open(g)
+	mut id = object.NoId
+	let parsed = object.ParseId(rev) catch _ {
+		object.NoId
+	}
+	if parsed != object.NoId {
+		id = parsed
+	} else {
+		let found = try r.ids.Match(rev)
+		if len(found) == 1 {
+			id = found[0]
+		} else {
+			id = try r.resolve(rev)
+		}
+	}
+	let (kind, body) = try r.Store.GetRaw(id)
+	match kind {
+		Tree => {
+			let obj = try object.Decode(kind, body)
+			match obj {
+				Tree(es) => {
+					for e in es {
+						mut k = "blob"
+						if e.Mode == object.Mode.Dir {
+							k = "tree"
+						}
+						o.Line(object.ModeText(e.Mode) + " " + k + " " + e.Id.Hex() + "\t" + e.Name)
+					}
+				}
+				Blob(_) => {
+				}
+				Commit(_) => {
+				}
+				Tag(_) => {
+				}
+			}
+		}
+		Blob, Commit, Tag => {
+			o.Text(body)
+		}
+	}
+}
+
+fn doConfigGet(g Global, key str, o mut Out) ! {
+	let r = try open(g)
+	let c = try r.config()
+	let v = c.Get(key)
+	if v == nil {
+		fail "{key} is not set"
+	}
+	o.Line(v)
+}
+
+fn doConfigSet(g Global, key str, value str, user bool, o mut Out) ! {
+	if user {
+		try identity.Set(identity.UserConfigPath(), key, value)
+		return
+	}
+	let r = try open(g)
+	try identity.Set(r.Ws.Store + "/config", key, value)
+}
+
+fn doConfigList(g Global, o mut Out) ! {
+	let r = try open(g)
+	let c = try r.config()
+	for k in c.Keys() {
+		let v = c.Get(k)
+		if v != nil {
+			o.Line(k + "=" + v)
+		}
+	}
+}
+
+fn doKey(g Global, path str, o mut Out) ! {
+	mut cfg = identity.NewConfig()
+	let (r, oerr) = open(g)
+	if oerr == nil {
+		cfg = try r.config()
+	}
+	mut p = path
+	if len(p) == 0 {
+		p = identity.DefaultKeyPath(cfg)
+	}
+	if quarry.Exists(p) {
+		let s = try identity.LoadKey(p)
+		o.Line(seal.B64(s.Public))
+		return
+	}
+	let pub = try identity.NewKey(p)
+	o.Line(pub)
+	quarry.Eprintln("tit: made a new key at " + p + "; add this line to .tit-signers to be trusted:")
+	quarry.Eprintln("<your email> ed25519 " + pub)
+}

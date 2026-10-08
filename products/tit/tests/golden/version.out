@@ -1,4 +1,4 @@
-tit 0 (design/tit.md, #770)
+tit 0 (design/tit.md, #769)
   corrupt object
   object not found
   bad pack
@@ -11,4 +11,3 @@ tit 0 (design/tit.md, #770)
   uncommitted changes would be overwritten
   no identity
   bad signature
-  packages linked: true
