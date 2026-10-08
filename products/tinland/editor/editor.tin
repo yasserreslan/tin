@@ -445,6 +445,9 @@ fn (ed mut Editor) handleKey(k Key) {
 		if alt && !b.HasSel {
 			b.WordLeft(true)
 		}
+		if !b.HasSel && ed.insidePair() {
+			b.Delete()
+		}
 		b.Backspace()
 	} else if k.Code == keyForwardDelete {
 		b.Delete()
@@ -474,7 +477,9 @@ fn (ed mut Editor) handleKey(k Key) {
 	} else if ctrl {
 		ed.controlKey(k)
 	} else if typeable(k.Chars) {
-		b.Insert(k.Chars)
+		if !ed.autoPair(k.Chars) {
+			b.Insert(k.Chars)
+		}
 		if k.Chars == "." && len(ed.Syms) > 0 {
 			ed.openCompletion()
 		}
@@ -819,4 +824,71 @@ fn (ed Editor) StatusLine() str {
 		return "Go to line: " + ed.Prompt + "_"
 	}
 	return ed.Message
+}
+
+// closerOf is the character that closes an opening one ("" for a character that opens nothing).
+fn closerOf(ch str) str {
+	if ch == "(" {
+		return ")"
+	}
+	if ch == "[" {
+		return "]"
+	}
+	if ch == "{{" {
+		return "}}"
+	}
+	if ch == "\"" || ch == "'" || ch == "`" {
+		return ch
+	}
+	return ""
+}
+
+// charAt is the character at byte col of the line as a string ("" past the end or in the middle of a character).
+fn charAt(line str, col i64) str {
+	if col < 0 || col >= len(line) {
+		return ""
+	}
+	return line[col:col + 1]
+}
+
+// autoPair types a bracket or quote the way editors do: an opening one brings its closing one (with the caret between, and a
+// selection wrapped), and a closing one typed in front of the same one steps over it. It reports whether it handled the key.
+fn (ed mut Editor) autoPair(ch str) bool {
+	let b = ed.Buf
+	let line = b.Lines[b.Row]
+	let next = charAt(line, b.Col)
+	let prev = charAt(line, b.Col - 1)
+	if !b.HasSel && next == ch && (ch == ")" || ch == "]" || ch == "}}" || ch == "\"" || ch == "'" || ch == "`") {
+		b.Right(false)
+		return true
+	}
+	let close = closerOf(ch)
+	if len(close) == 0 {
+		return false
+	}
+	if b.HasSel {
+		let text = b.SelectedText()
+		b.Insert(ch + text + close)
+		return true
+	}
+	// a quote after a word character is an apostrophe or a closing quote, not a new pair
+	if (ch == "\"" || ch == "'" || ch == "`") && len(prev) > 0 && wordByte(prev[0]) {
+		return false
+	}
+	// only open a pair in front of nothing, a space or a closing character
+	if len(next) > 0 && next != " " && next != "\t" && next != ")" && next != "]" && next != "}}" {
+		return false
+	}
+	b.Insert(ch + close)
+	b.Left(false)
+	return true
+}
+
+// insidePair reports whether the caret sits between an opening character and its closing one ("()" with the caret in the middle).
+fn (ed Editor) insidePair() bool {
+	let b = ed.Buf
+	let line = b.Lines[b.Row]
+	let prev = charAt(line, b.Col - 1)
+	let next = charAt(line, b.Col)
+	return len(prev) > 0 && closerOf(prev) == next && len(next) > 0
 }
