@@ -1,0 +1,50 @@
+// Package html tokenizes and escapes HTML, as Go's html and golang.org/x/net/html do: EscapeString and UnescapeString for text
+// and attribute values, and a Tokenizer that splits a document into text, tags, attributes, comments and doctypes with the
+// WHATWG tokenization rules (raw text in script, style, textarea, title and the other raw elements; bogus comments; the
+// legacy references without a semicolon). The tokenizer reads a whole string, so its tokens are the same as Go's over a
+// reader. The Go twin (bench/ref/html and tools/ci/html_check.tin) compares the token streams over a corpus of pages and
+// generated documents.
+package html
+
+import "fault"
+
+// The token types, as Go's TokenType.
+
+// ErrorToken means that the input has ended (or failed): Err says why.
+const ErrorToken = 0
+
+// TextToken is a run of text.
+const TextToken = 1
+
+// StartTagToken is a start tag, like <a>.
+const StartTagToken = 2
+
+// EndTagToken is an end tag, like </a>.
+const EndTagToken = 3
+
+// SelfClosingTagToken is a tag written with a trailing slash, like <br/>.
+const SelfClosingTagToken = 4
+
+// CommentToken is a comment, a bogus comment, a processing instruction or an empty "</>".
+const CommentToken = 5
+
+// DoctypeToken is a <!DOCTYPE ...> declaration.
+const DoctypeToken = 6
+
+// ErrEOF is what Err returns once the input is used up, as io.EOF is in Go.
+let ErrEOF = fault("EOF")
+
+// Attribute is one attribute of a tag: Namespace is always empty (it is for the parser), Key is lower-cased and Val is unescaped.
+type Attribute struct {
+	Namespace str
+	Key str
+	Val str
+}
+
+// Token is one token: Data is the tag name (lower-cased), the text, the comment or the doctype, unescaped; Attr holds the
+// attributes of a tag.
+type Token struct {
+	Type i64
+	Data str
+	Attr []Attribute
+}

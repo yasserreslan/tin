@@ -1,0 +1,181 @@
+package html
+
+import "twine"
+
+// windows1252 are the runes that the numeric references 0x80 to 0x9F stand for: old documents were written in that encoding.
+shared let windows1252 = []i64{0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x8D, 0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178}
+
+// longestEntityWithoutSemicolon is the length of the longest named reference that has no semicolon.
+const longestEntityWithoutSemicolon = 6
+
+// EscapeString escapes the characters <, >, &, ' and " and a carriage return to references, as Go's html.EscapeString does.
+fn EscapeString(s str) str {
+	if !twine.ContainsAny(s, "&'<>\"\r") {
+		return s
+	}
+	mut b = twine.NewBuilder(len(s) + 16)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c == '&' {
+			b.Str("&amp;")
+		} else if c == '\'' {
+			b.Str("&#39;")
+		} else if c == '<' {
+			b.Str("&lt;")
+		} else if c == '>' {
+			b.Str("&gt;")
+		} else if c == '"' {
+			b.Str("&#34;")
+		} else if c == '\r' {
+			b.Str("&#13;")
+		} else {
+			b.Byte(c)
+		}
+	}
+	return b.String()
+}
+
+// UnescapeString replaces the character references in s with the characters they stand for, as Go's html.UnescapeString does.
+fn UnescapeString(s str) str {
+	if !twine.ContainsByte(s, '&') {
+		return s
+	}
+	return unescape(s, false)
+}
+
+// isAlnum reports whether c is an ASCII letter or digit.
+fn isAlnum(c u8) bool {
+	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9')
+}
+
+// unescapeEntity reads the character reference that starts with the '&' at s[src]. It returns the rune, a second rune (0 when
+// there is none) and the number of bytes the reference takes. A '&' that starts no reference is the rune '&' with length 1.
+// In an attribute value a reference without a semicolon that is followed by '=' is left alone.
+fn unescapeEntity(s str, src i64, attribute bool) (i64, i64, i64) {
+	let rest = s[src:]
+	mut i = 1
+	if len(rest) <= 1 {
+		return 38, 0, 1
+	}
+	if rest[i] == '#' {
+		if len(rest) <= 2 {
+			return 38, 0, 1
+		}
+		i += 1
+		mut hex = false
+		if rest[i] == 'x' || rest[i] == 'X' {
+			hex = true
+			i += 1
+		}
+		let i0 = i
+		mut x i64 = 0
+		for i < len(rest) {
+			let c = rest[i]
+			mut d i64 = 0
+			mut mult i64 = 10
+			if hex {
+				mult = 16
+				if '0' <= c && c <= '9' {
+					d = i64(c - '0')
+				} else if 'a' <= c && c <= 'f' {
+					d = i64(c-'a') + 10
+				} else if 'A' <= c && c <= 'F' {
+					d = i64(c-'A') + 10
+				} else {
+					break
+				}
+			} else if '0' <= c && c <= '9' {
+				d = i64(c - '0')
+			} else {
+				break
+			}
+			if x <= 0x10FFFF {
+				x = mult*x + d
+			}
+			i += 1
+		}
+		if i == i0 {
+			return 38, 0, 1
+		}
+		if i < len(rest) && rest[i] == ';' {
+			i += 1
+		}
+		if 0x80 <= x && x <= 0x9F {
+			x = windows1252[x-0x80]
+		} else if x == 0 || (0xD800 <= x && x <= 0xDFFF) || x > 0x10FFFF {
+			x = 0xFFFD
+		}
+		return x, 0, i
+	}
+	// The longest run of letters and digits (and one ';') that may be a name.
+	for i < len(rest) {
+		let c = rest[i]
+		i += 1
+		if isAlnum(c) {
+			continue
+		}
+		if c != ';' {
+			i -= 1
+		}
+		break
+	}
+	let name = rest[1:i]
+	let inAttrName = attribute && len(name) > 0 && name[len(name)-1] != ';' && len(rest) > i && rest[i] == '='
+	if len(name) > 0 && !inAttrName {
+		let (r, ok) = entities[name]
+		if ok {
+			return r, 0, i
+		}
+		let (pair, ok2) = entities2[name]
+		if ok2 {
+			return pair[0], pair[1], i
+		}
+		if !attribute {
+			// The longest prefix of the name that is a reference without a semicolon.
+			mut maxLen = len(name) - 1
+			if maxLen > longestEntityWithoutSemicolon {
+				maxLen = longestEntityWithoutSemicolon
+			}
+			mut j = maxLen
+			for j > 1 {
+				let (p, ok3) = entities[name[:j]]
+				if ok3 {
+					return p, 0, j + 1
+				}
+				j -= 1
+			}
+		}
+	}
+	return 38, 0, 1
+}
+
+// unescape replaces the references in s, as Go's unescape does: attribute says whether s is an attribute value.
+fn unescape(s str, attribute bool) str {
+	let first = twine.IndexByte(s, '&')
+	if first < 0 {
+		return s
+	}
+	mut b = twine.NewBuilder(len(s))
+	b.Str(s[:first])
+	mut src = first
+	for src < len(s) {
+		let amp = twine.IndexByte(s[src:], '&')
+		if amp < 0 {
+			b.Str(s[src:])
+			break
+		}
+		b.Str(s[src:src+amp])
+		src += amp
+		let (r1, r2, n) = unescapeEntity(s, src, attribute)
+		if n == 1 && r1 == 38 {
+			b.Byte('&')
+		} else {
+			b.Rune(i32(r1))
+			if r2 != 0 {
+				b.Rune(i32(r2))
+			}
+		}
+		src += n
+	}
+	return b.String()
+}
