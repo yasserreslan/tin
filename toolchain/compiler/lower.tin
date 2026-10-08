@@ -108,11 +108,11 @@ fn chk_kind(e i64, want i64) i64 {
 	}
 	if k == EX_TRY {
 		err_code_at(cast(Node, e).pos, "E403 TRY_PLACEMENT", "try is only allowed as a statement, an initializer, an assignment or a return")
-		return ty_int
+		return placeholder_type(want)
 	}
 	if k == EX_CATCH {
 		err_code_at(cast(Node, e).pos, "E401 CATCH_PLACEMENT", "catch is only allowed on a whole statement, initializer, assignment or return value")
-		return ty_int
+		return placeholder_type(want)
 	}
 	if k == EX_INTERP {
 		if is_query_t(cast(Ty, want)) != 0 {

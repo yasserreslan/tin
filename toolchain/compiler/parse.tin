@@ -132,6 +132,7 @@ const CALL_METHOD = 9 // argument 0 is a method receiver (no call-site mut)
 // Regions of reference values, for the ember/ingot rules.
 const R_OWNED = 3 // a fresh keep() copy, only storable into ingot memory
 
+shared mut compound_seq i64 // numbers the temps of compound assignments with a catch or match value
 shared mut p_toks []Token
 shared mut p_i i64
 shared mut p_nolit i64 // composite literals after a name are off in if/for/switch headers
@@ -1967,7 +1968,29 @@ fn parse_simple_stmt(xs []i64) i64 {
 		let t = cast(Token, p_next()).text
 		let a = cast(AssignStmt, node_new(ST_ASSIGN, pos))
 		a.target = x
-		a.value = op_binary_new(pos, t[:len(t) - 1], x, parse_expr(1))
+		let rhs = parse_catch(parse_expr(1))
+		let rk = cast(Node, rhs).kind
+		if rk == EX_CATCH || rk == EX_WRAP || rk == EX_TRY || rk == EX_MATCH {
+			// x op= e catch ... (also try and a match): the value is bound first, as `let v = e catch ...` does, and then
+			// x = x op v (#819); the temp is named so that no source name can clash with it.
+			compound_seq = compound_seq + 1
+			let nb = buf_new()
+			buf_str(nb, "$cmp")
+			buf_int(nb, compound_seq)
+			let tmp = str(nb)
+			let l = cast(LetStmt, node_new(ST_LET, pos))
+			l.name = tmp
+			l.init = rhs
+			let tid = cast(IdentExpr, node_new(EX_IDENT, pos))
+			tid.name = tmp
+			a.value = op_binary_new(pos, t[:len(t) - 1], x, cast(i64, tid))
+			let list = cast(ListStmt, node_new(ST_LIST, pos))
+			list.stmts = []i64{}
+			list.stmts = append(list.stmts, cast(i64, l))
+			list.stmts = append(list.stmts, cast(i64, a))
+			return cast(i64, list)
+		}
+		a.value = op_binary_new(pos, t[:len(t) - 1], x, rhs)
 		return cast(i64, a)
 	}
 	if p_is("++") != 0 || p_is("--") != 0 {
@@ -2994,6 +3017,9 @@ fn parse_primary() i64 {
 		p_nolit = saved
 		if p_word("catch") != 0 {
 			p_fail_code(p_peek().pos, "E401 CATCH_PLACEMENT", "catch goes on a whole statement, initializer, assignment or return value, not inside an expression")
+		}
+		if p_is(",") != 0 {
+			p_fail_code(p_peek().pos, "E020 UNEXPECTED", "a tuple is not a value: a catch block that stands for several results leaves instead (return, break, continue or fail), and a call's results are bound with let (a, b) = f()")
 		}
 		p_expect(")")
 		return x

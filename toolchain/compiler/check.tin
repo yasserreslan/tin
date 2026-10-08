@@ -9186,6 +9186,15 @@ fn check_match_tail(s Node, m i64) {
 	replace_node(cast(i64, s), flat_block(pos, cast(i64, stmts)))
 }
 
+// placeholder_type is the type an expression rejected for its placement stands for: the type wanted, so that the
+// rejection is not followed by a mismatch error (#819), else int.
+fn placeholder_type(want i64) i64 {
+	if want != 0 && is_untyped(want) == 0 && kind_of(cast(Ty, want)) != K_VOID {
+		return want
+	}
+	return ty_int
+}
+
 // chk_match lowers a match inside an expression to an EX_SEQ yielding its value.
 fn chk_match(e i64, want i64) i64 {
 	let pos = cast(Node, e).pos
@@ -9195,7 +9204,7 @@ fn chk_match(e i64, want i64) i64 {
 		let arm = cast([]i64, arms[i])
 		if cast(MatchArm, arm).block != 0 {
 			err_code_at(cast(Node, cast(MatchArm, arm).body).pos, "E293 MATCH_VALUE", "a match inside an expression has expression arms: give it a statement of its own (let v = match ...)")
-			return ty_int
+			return placeholder_type(want)
 		}
 		i = i + 1
 	}

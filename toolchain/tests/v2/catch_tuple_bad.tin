@@ -1,0 +1,14 @@
+package main
+
+import "say"
+
+fn pair() !(i64, i64) {
+	return 1, 2
+}
+
+fn main() {
+	let (a, b) = pair() catch _ {
+		(0, 0)
+	}
+	say.Line(a, b)
+}

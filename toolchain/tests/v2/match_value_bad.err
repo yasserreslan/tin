@@ -1,0 +1,1 @@
+toolchain/tests/v2/match_value_bad.tin:10:9: error E293 MATCH_VALUE: a match inside an expression has expression arms: give it a statement of its own (let v = match ...)
