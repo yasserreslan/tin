@@ -10,6 +10,7 @@ const PickCommand = 1
 const PickNewFile = 2
 const PickNewFolder = 3
 const PickRename = 4
+const PickRecent = 5
 
 // Picker is the state of the box.
 type Picker struct {
@@ -33,6 +34,7 @@ fn commands() []command {
 		command{name: "File: New", cmd: 1},
 		command{name: "File: Open File...", cmd: 2},
 		command{name: "File: Open Folder...", cmd: CmdOpenFolder},
+		command{name: "File: Open Recent...", cmd: CmdOpenRecent},
 		command{name: "File: Save", cmd: 3},
 		command{name: "File: Save As...", cmd: 4},
 		command{name: "File: Close Tab", cmd: 5},
@@ -92,12 +94,17 @@ fn (ws mut Workspace) ClosePicker() {
 fn (ws mut Workspace) refilter() {
 	mut items = []str{}
 	mut targets = []i64{}
-	if ws.Picker.Kind >= PickNewFile {
+	if ws.Picker.Kind >= PickNewFile && ws.Picker.Kind != PickRecent {
 		ws.Picker.Items = items
 		ws.Picker.Targets = targets
 		return
 	}
-	if ws.Picker.Kind == PickFile {
+	if ws.Picker.Kind == PickRecent {
+		items = project.Ranked(ws.Picker.Query, ws.Recent, 14)
+		for it in items {
+			targets = append(targets, 0)
+		}
+	} else if ws.Picker.Kind == PickFile {
 		if ws.HasProj {
 			let all = ws.Proj.Files(20000)
 			mut rel = []str{}
@@ -178,6 +185,8 @@ fn (ws mut Workspace) accept(i i64) {
 	ws.ClosePicker()
 	if kind == PickFile {
 		ws.OpenFile(ws.Proj.Root + "/" + item)
+	} else if kind == PickRecent {
+		ws.OpenFile(item)
 	} else {
 		ws.Perform(target)
 	}
@@ -217,6 +226,9 @@ fn (ws Workspace) pickerPrompt() str {
 	}
 	if ws.Picker.Kind == PickCommand {
 		return "Command"
+	}
+	if ws.Picker.Kind == PickRecent {
+		return "Open recent file"
 	}
 	if ws.Picker.Kind == PickNewFile {
 		return "New file name"

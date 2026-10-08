@@ -53,6 +53,7 @@ fn Start(exe str, args []str, set []str, log str, port i64) Server {
 		ci.Fail("cannot start " + exe + ": " + say.Str(err))
 		panic("unreachable")
 	}
+	ci.TrackPid(p.Pid())
 	return Server{Pid: p.Pid(), Port: port, Log: log}
 }
 
@@ -266,7 +267,9 @@ fn StartCoded(exe str, args []str, set []str, log str, port i64) Server {
 	for tide.Now() < end {
 		let text = twine.TrimSpace(ci.Read(pidfile))
 		if len(text) > 0 {
-			return Server{Pid: ci.Num(text), Port: port, Log: log}
+			let pid = ci.Num(text)
+			ci.TrackPid(pid)
+			return Server{Pid: pid, Port: port, Log: log}
 		}
 		tide.Sleep(10000000)
 	}
@@ -399,7 +402,9 @@ fn StartSplit(exe str, args []str, set []str, log str, port i64) Server {
 	for tide.Now() < end {
 		let text = twine.TrimSpace(ci.Read(pidfile))
 		if len(text) > 0 {
-			return Server{Pid: ci.Num(text), Port: port, Log: log}
+			let pid = ci.Num(text)
+			ci.TrackPid(pid)
+			return Server{Pid: pid, Port: port, Log: log}
 		}
 		tide.Sleep(10000000)
 	}
@@ -429,7 +434,9 @@ fn StartStdin(exe str, stdinFile str, set []str, log str, port i64) Server {
 	for tide.Now() < end {
 		let text = twine.TrimSpace(ci.Read(pidfile))
 		if len(text) > 0 {
-			return Server{Pid: ci.Num(text), Port: port, Log: log}
+			let pid = ci.Num(text)
+			ci.TrackPid(pid)
+			return Server{Pid: pid, Port: port, Log: log}
 		}
 		tide.Sleep(10000000)
 	}
