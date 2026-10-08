@@ -8,13 +8,30 @@ import "pack"
 
 const deltaBlock = 16
 
-// blockHash is the hash of the 16 bytes of s at i (FNV-1a over the block, computed modulo 2^64).
+const rollBase = u64(0x100000001b3)
+
+// blockHash is the hash of the 16 bytes of s at i: the polynomial sum of s[i+k] * B^(15-k) modulo 2^64, which
+// rollHash moves one byte along in constant time.
 @wrap fn blockHash(s str, i i64) u64 {
-	mut h = u64(0xcbf29ce484222325)
+	mut h = u64(0)
 	for k in 0..deltaBlock {
-		h = (h ^ u64(s[i + k])) * 0x100000001b3
+		h = h * rollBase + u64(s[i + k])
 	}
 	return h
+}
+
+// rollTop is B^15 modulo 2^64, the weight of a block's first byte.
+@wrap fn rollTop() u64 {
+	mut p = u64(1)
+	for k in 0..deltaBlock - 1 {
+		p = p * rollBase
+	}
+	return p
+}
+
+// rollHash is the hash of the block one byte on: out leaves at the front, in arrives at the back.
+@wrap fn rollHash(h u64, out u8, in u8, top u64) u64 {
+	return (h - u64(out) * top) * rollBase + u64(in)
 }
 
 // appendUvarint appends v as a uvarint (seven bits a byte, low first).
@@ -56,10 +73,13 @@ fn MakeDelta(base str, target str) str {
 	appendUvarint(mut out, u64(len(base)))
 	appendUvarint(mut out, u64(len(target)))
 	mut lit = make([]u8, 0, 64)
+	let top = rollTop()
 	mut t = 0
+	// h is the hash of target[t:t+16] whenever that block exists
+	mut h = blockHash(target, 0)
 	for t < len(target) {
 		if t + deltaBlock <= len(target) {
-			let (b0, hit) = index[blockHash(target, t)]
+			let (b0, hit) = index[h]
 			if hit && base[b0:b0 + deltaBlock] == target[t:t + deltaBlock] {
 				mut b = b0
 				mut start = t
@@ -81,10 +101,16 @@ fn MakeDelta(base str, target str) str {
 				appendUvarint(mut out, u64(b))
 				appendUvarint(mut out, u64(end - start))
 				t = end
+				if t + deltaBlock <= len(target) {
+					h = blockHash(target, t)
+				}
 				continue
 			}
 		}
 		lit = append(lit, target[t])
+		if t + deltaBlock < len(target) {
+			h = rollHash(h, target[t], target[t + deltaBlock], top)
+		}
 		t += 1
 	}
 	putInsert(mut out, lit)
