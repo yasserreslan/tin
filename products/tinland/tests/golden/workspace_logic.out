@@ -12,6 +12,8 @@ match opened main.tin 0 12 main
 invalid regular expression
 created true fresh.tin
 rename starts with fresh.tin
+marks [2 9]
+git [ M main.tin]
 shell running true 2 3
 terminal output seen true
 shell stopped false

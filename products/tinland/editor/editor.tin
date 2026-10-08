@@ -93,13 +93,19 @@ type Editor struct {
 	accX     f64
 	// Follow asks the next frame to scroll the caret into view (after typing or moving it, not after a wheel).
 	Follow   bool
+	// Marks are the lines git says differ from the last commit (line * 4 + 1 added, 2 changed, 3 lines removed above), for the file named
+	// MarksPath as it was when MarksSaves saves had happened; Saves counts the saves.
+	Marks    []i64
+	MarksPath str
+	MarksSaves i64
+	Saves    i64
 	dragging bool
 	clicks   i64
 	lastClick f64
 }
 
 fn New(buf textedit.Buffer) Editor {
-	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
+	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, Marks: []i64{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
 	ed.rawFor = -1
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1
@@ -285,6 +291,7 @@ fn (ed mut Editor) save(asNew bool) bool {
 	}
 	ed.Buf.Path = path
 	ed.Buf.Dirty = false
+	ed.Saves += 1
 	ed.Say("saved " + path)
 	return true
 }

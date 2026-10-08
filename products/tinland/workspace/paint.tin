@@ -28,6 +28,9 @@ fn (ws mut Workspace) Prepare() {
 		ws.Bottom = BottomOutput
 	}
 	ws.termFit()
+	if ws.HasProj && (ws.Ed.Buf.Path != ws.Ed.MarksPath || ws.Ed.Saves != ws.Ed.MarksSaves) {
+		ws.RefreshMarks()
+	}
 	ws.Ed.Prepare()
 }
 
