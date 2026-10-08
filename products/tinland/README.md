@@ -12,6 +12,9 @@ bin/tinc -o tinland products/tinland/main.tin
 ./tinland [folder or file...]
 ```
 
+For an application with its own Dock icon and name in the menu bar, `tools/dev/tinland_app.sh` builds `bin/Tinland.app`
+(`open -a bin/Tinland.app --args /path/to/folder`).
+
 ## Keys
 
 | | |
