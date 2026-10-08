@@ -1,0 +1,164 @@
+package main
+
+// The pack twin, Tin side: read the hex corpus of bench/ref/pack (Go's encoding/binary,
+// encoding/base32 and encoding/ascii85) on stdin and print the same lines, so
+// tools/ci/pack_check.py can compare them (#740).
+//
+// Lines:
+//
+//	P <hex64>   a u64 value: the packed forms
+//	U <hex>     bytes: the unpacked u64 reads and the varints
+//	B <hex>     bytes: base32 (standard and hex) and ascii85 encodings, a decode of the raw
+//	            bytes as a string, and the round trip of the encodings
+
+import "say"
+import "pack"
+import "seal"
+import "quarry"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(body)) {
+		if i < i64(len(body)) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		if len(line) == 0 {
+			continue
+		}
+		let sp = indexOfByte(line, ' ')
+		if sp < 0 {
+			say.Line("fault", "no space")
+			return
+		}
+		let kind = line[0:sp]
+		let raw = unhex(line[sp+1:len(line)]) catch err {
+			say.Line("fault", err)
+			return
+		}
+		if kind == "P" {
+			packValue(raw)
+		} else if kind == "U" {
+			unpackValue(raw)
+		} else if kind == "B" {
+			encodings(raw)
+		}
+	}
+}
+
+// packValue prints the packed forms of the u64 the eight bytes hold.
+fn packValue(raw str) {
+	let b = pad8(raw)
+	let v = pack.BE.U64(b)
+	mut tmp = make([]u8, 8)
+	pack.LE.PutU16(mut tmp, u16(v))
+	let le16 = seal.Hex(tmp[0:2])
+	pack.BE.PutU16(mut tmp, u16(v))
+	let be16 = seal.Hex(tmp[0:2])
+	pack.LE.PutU32(mut tmp, u32(v))
+	let le32 = seal.Hex(tmp[0:4])
+	pack.BE.PutU32(mut tmp, u32(v))
+	let be32 = seal.Hex(tmp[0:4])
+	pack.LE.PutU64(mut tmp, v)
+	let le64 = seal.Hex(tmp)
+	pack.BE.PutU64(mut tmp, v)
+	let be64 = seal.Hex(tmp)
+	mut uv = []u8{}
+	uv = pack.PutUvarint(mut uv, v)
+	mut sv = []u8{}
+	sv = pack.PutVarint(mut sv, i64(v))
+	say.Line("pack", v, le16, be16, le32, be32, le64, be64, seal.Hex(uv), seal.Hex(sv))
+}
+
+// unpackValue prints the u64 reads and the varints of the bytes.
+fn unpackValue(raw str) {
+	let b = pad8(raw)
+	say.Line("unpack", pack.LE.U64(b), pack.BE.U64(b), uvarintText(raw), varintText(raw))
+}
+
+// uvarintText is the uvarint's value, or "fault".
+fn uvarintText(raw str) str {
+	let (v, _) = pack.Uvarint([]u8(raw)) catch _ {
+		return "fault"
+	}
+	return say.Fmt("%d", v)
+}
+
+// varintText is the varint's value, or "fault".
+fn varintText(raw str) str {
+	let (v, _) = pack.Varint([]u8(raw)) catch _ {
+		return "fault"
+	}
+	return say.Fmt("%d", v)
+}
+
+// encodings prints the base32 and ascii85 encodings of the bytes, a decode of the bytes as a
+// string, and the round trip of the encodings.
+fn encodings(raw str) {
+	let b = []u8(raw)
+	let std = seal.Base32(b)
+	let hexA = seal.Base32Hex(b)
+	let a85 = seal.Ascii85(b)
+	say.Line("encoding", std, hexA, a85)
+	say.Line("decode", b32Text(raw), b32HexText(raw), a85Text(raw))
+	say.Line("roundtrip", b32Text(std), b32HexText(hexA), a85Text(a85))
+}
+
+// b32Text is the standard base32 decode of s, or "fault".
+fn b32Text(s str) str {
+	let b = seal.Base32Decode(s) catch _ {
+		return "fault"
+	}
+	return seal.Hex(b)
+}
+
+// b32HexText is the extended-hex base32 decode of s, or "fault".
+fn b32HexText(s str) str {
+	let b = seal.Base32HexDecode(s) catch _ {
+		return "fault"
+	}
+	return seal.Hex(b)
+}
+
+// a85Text is the ascii85 decode of s, or "fault".
+fn a85Text(s str) str {
+	let b = seal.Ascii85Decode(s) catch _ {
+		return "fault"
+	}
+	return seal.Hex(b)
+}
+
+// pad8 pads or cuts raw to eight bytes.
+fn pad8(raw str) []u8 {
+	let b = make([]u8, 8)
+	mut i = 0
+	for i < 8 && i < len(raw) {
+		b[i] = raw[i]
+		i += 1
+	}
+	return b
+}
+
+// indexOfByte returns the first index of c in s, or -1.
+fn indexOfByte(s str, c u8) i64 {
+	for i in 0..len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// unhex decodes a lowercase hex string.
+fn unhex(s str) !str {
+	let b = try seal.HexDecode(s)
+	return str(b)
+}

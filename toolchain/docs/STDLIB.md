@@ -36,7 +36,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib) |
 | [ledger](#ledger) | CSV reading and writing (encoding/csv) |
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
-| [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64) |
+| [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
 | [herald](#herald) | logging (log/slog) |
 | [crucible](#crucible) | testing helpers (testing) |
 | [constraints](#constraints) | named generic constraint shapes |
@@ -52,6 +52,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [stencil](#stencil) | text templates loaded at run time (text/template) |
 | [scroll](#scroll) | XML tokenizer and writer (encoding/xml) |
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
+| [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
 | [metal](#metal) | Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor |
 | [gpuwin](#gpuwin) | a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU |
@@ -809,7 +810,7 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 
 ## spawn
 
-Package spawn starts child processes, like Go's os/exec: Run a program and collect its output, or Start it, talk to it through pipes, signal it or kill it. A program is never run through a shell: write []str{"sh", "-c", script} for one. On Linux the child is a clone that execs, and waits block on a pidfd; on macOS it is posix_spawn with file actions (POSIX_SPAWN_CLOEXEC_DEFAULT keeps the runtime's descriptors out of it) and waits block on a kqueue EVFILT_PROC, both through the scheduler's deadlines (#576).
+Package spawn starts child processes, like Go's os/exec: Run a program and collect its output, or Start it, talk to it through pipes, signal it or kill it. A program is never run through a shell: write []str{"sh", "-c", script} for one. On Linux the child is a clone that execs and waits block on a pidfd; on macOS it is posix_spawn with file actions (POSIX_SPAWN_CLOEXEC_DEFAULT keeps the runtime's descriptors out of it) and the wait sleeps through the scheduler, which carries the task's deadline on both (#576).
 
 - `type Stdio enum`: Stdio says where a child's standard descriptor points.
 - `type Env enum`: Env says which environment a child gets. A Tin slice has no nil, so where Go's exec.Cmd says "nil inherits and an empty list is empty", this package says so with a variant.
@@ -1346,6 +1347,14 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `B64Decode(s str) ![]u8`: B64Decode decodes standard padded base64.
 - `B64URL(b []u8) str`: B64URL encodes b as unpadded URL-safe base64 (as in JWTs).
 - `B64URLDecode(s str) ![]u8`: B64URLDecode decodes unpadded URL-safe base64.
+- `Base32(b []u8) str`: Base32 encodes b as standard padded base32 (RFC 4648).
+- `Base32Hex(b []u8) str`: Base32Hex encodes b as padded base32 with the extended-hex alphabet (RFC 4648).
+- `Base32NoPad(b []u8) str`: Base32NoPad encodes b as standard base32 without the padding characters.
+- `Base32Decode(s str) ![]u8`: Base32Decode decodes standard base32; the padding is optional.
+- `Base32HexDecode(s str) ![]u8`: Base32HexDecode decodes extended-hex base32.
+- `Ascii85(b []u8) str`: Ascii85 encodes b with the ascii85 alphabet. The <~ and ~> delimiters are the caller's.
+- `Ascii85MaxLen(n i64) i64`: Ascii85MaxLen is the most Ascii85 writes for n bytes.
+- `Ascii85Decode(s str) ![]u8`: Ascii85Decode decodes ascii85, following Go's Decode function: any byte at or below a space is skipped, 'z' is a group of four zero bytes, a group that does not fit in 32 bits wraps (as Go's uint32 arithmetic does), and a final group of one byte is refused. The <~ and ~> markers are the caller's: Go's Decode does not know them (its streaming decoder does).
 - `type RSAPublicKey struct`: RSAPublicKey is an RSA public key: modulus N and exponent E, as big-endian bytes.
 - `ParseRSAPublicKeyPEM(pem str) !RSAPublicKey`: ParseRSAPublicKeyPEM reads a PEM "PUBLIC KEY" (SubjectPublicKeyInfo) or "RSA PUBLIC KEY" (PKCS #1) block.
 - `EncryptOAEPSha1(key RSAPublicKey, msg []u8) ![]u8`: EncryptOAEPSha1 encrypts msg for key with RSA-OAEP (SHA-1, MGF1-SHA-1, empty label), as MySQL's caching_sha2_password and sha256_password expect.
@@ -1862,6 +1871,26 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `(re Regexp) Split(s str, n i64) []str`: Split slices s around every match, like Go's Split: n < 0 returns every piece, n == 0 returns nothing, and n > 0 at most n pieces.
 - `QuoteMeta(s str) str`: QuoteMeta returns s with the metacharacters escaped, like Go's QuoteMeta.
 
+## pack
+
+- `type Order struct`: Order is a byte order: LittleEndian or BigEndian.
+- `const Size16 = 2`: Size is the number of bytes U16, U32 and U64 read, and PutU16, PutU32 and PutU64 write.
+- `const Size32 = 4`
+- `const Size64 = 8`
+- `(o Order) U16(b []u8) u16`: U16 reads a u16.
+- `(o Order) U32(b []u8) u32`: U32 reads a u32.
+- `(o Order) U64(b []u8) u64`: U64 reads a u64.
+- `(o Order) PutU16(b mut []u8, v u16)`: PutU16 writes v into the first two bytes of b, which must be long enough.
+- `(o Order) PutU32(b mut []u8, v u32)`: PutU32 writes v into the first four bytes of b, which must be long enough.
+- `(o Order) PutU64(b mut []u8, v u64)`: PutU64 writes v into the first eight bytes of b, which must be long enough.
+- `(o Order) AppendU16(b mut []u8, v u16) []u8`: AppendU16 appends v to b.
+- `(o Order) AppendU32(b mut []u8, v u32) []u8`: AppendU32 appends v to b.
+- `(o Order) AppendU64(b mut []u8, v u64) []u8`: AppendU64 appends v to b.
+- `PutUvarint(b mut []u8, v u64) []u8`: PutUvarint appends v in the variable-length form and returns the longer buffer: seven bits a byte, the high bit set while more follow, at most ten bytes.
+- `Uvarint(b []u8) !(u64, i64)`: Uvarint reads a variable-length unsigned integer and returns it with the number of bytes it took. A cut-off or over-long encoding fails with a fault.
+- `PutVarint(b mut []u8, v i64) []u8`: PutVarint appends v in the zigzag varint form (Go's Varint): small magnitudes take few bytes, negative numbers too.
+- `Varint(b []u8) !(i64, i64)`: Varint reads a zigzag varint and returns it with the number of bytes it took.
+
 ## textedit
 
 Package textedit is the editing model behind Tinland: a text buffer with a cursor, a selection, undo and redo, search, and the syntax highlighting of Tin source. It does no I/O and draws nothing, so it runs (and is tested) on every platform; the editor program supplies the keys, the pixels and the files.
@@ -1876,6 +1905,24 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `const KindFunc = 7`
 - `type Span struct`: Span is the text from Start to End (byte offsets in the line) of one class.
 - `Highlight(line str, raw bool) ([]Span, bool)`: Highlight classifies one line. raw says the line starts inside a raw string; the second result says it ends inside one. Text that is not in any span is plain.
+- `const LangTin = 0`: Highlighting for the languages besides Tin that a project holds: the same classes (keyword, string, number, comment, constant, type, function) from the usual lexical rules of each family: C like (Go, Rust, JavaScript and TypeScript, C and C++, Java, Swift), Python, shell, JSON, YAML and TOML, and Markdown. It is a lexer for one line at a time, with a state that carries what runs over lines (a block comment, a multi-line string, a code fence).
+- `const LangGo = 1`
+- `const LangRust = 2`
+- `const LangJS = 3`
+- `const LangPython = 4`
+- `const LangC = 5`
+- `const LangJava = 6`
+- `const LangSwift = 7`
+- `const LangShell = 8`
+- `const LangJSON = 9`
+- `const LangYAML = 10`
+- `const LangMarkdown = 11`
+- `const LangPlain = 12`
+- `const StateNone = 0`: What a line starts inside, for HighlightLang.
+- `const StateBlock = 1`
+- `const StateRaw = 2`
+- `LanguageOf(path str) i64`: LanguageOf is the language of a file by its name.
+- `HighlightLang(lang i64, line str, state i64) ([]Span, i64)`: HighlightLang classifies one line of a file of the language. state says what the line starts inside (StateNone, StateBlock for a /* */ comment or a Markdown code fence, StateRaw for a multi-line string); the second result is the state the next line starts in.
 - `type Pos struct`: Pos is a place in the text: a line and a byte offset in it (always on a rune boundary).
 - `type Buffer struct`: Buffer is the text being edited, split into lines (without their newlines), with the cursor and an optional selection from (SelRow, SelCol) to the cursor.
 - `New() Buffer`: New returns an empty buffer: one empty line, the cursor at its start.

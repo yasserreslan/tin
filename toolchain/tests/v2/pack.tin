@@ -1,0 +1,110 @@
+package main
+
+// pack and the small encodings: the little- and big-endian byte orders, the varints, and base32
+// and ascii85. The output is the same on every platform.
+
+import "say"
+import "fault"
+import "pack"
+import "seal"
+
+// texts joins the pieces, so a slice prints in a fixed order.
+fn texts(parts []str) str {
+	mut out = ""
+	for _, p in parts {
+		out += " " + p
+	}
+	return out
+}
+
+fn main() {
+	// The byte orders: the bytes a value takes and the value back.
+	mut buf = make([]u8, 8)
+	pack.LE.PutU32(mut buf, 0x01020304)
+	say.Line("le bytes", seal.Hex(buf[0:4]), pack.LE.U32(buf), pack.BE.U32(buf))
+	pack.BE.PutU64(mut buf, 0x0102030405060708)
+	say.Line("be bytes", seal.Hex(buf), pack.BE.U64(buf))
+	pack.LE.PutU16(mut buf, 0xABCD)
+	say.Line("u16", pack.LE.U16(buf), pack.BE.U16(buf), seal.Hex(buf[0:2]))
+
+	// Append grows the buffer.
+	mut b = []u8{}
+	b = pack.LE.AppendU16(mut b, 1)
+	b = pack.BE.AppendU32(mut b, 2)
+	b = pack.LE.AppendU64(mut b, 3)
+	say.Line("append", len(b), seal.Hex(b))
+
+	// Reading past a short buffer panics, as Go's binary does.
+	let short = make([]u8, 2)
+	let shortpanic = guard {
+		let v = pack.LE.U64(short)
+		v == 0
+	} catch err {
+		fault.Is(err, fault.Panic)
+	}
+	say.Line("short", shortpanic)
+
+	// Varints: the bytes for a set of values and the values back.
+	mut vs = []u8{}
+	for _, v in []i64{0, 1, 127, 128, 300, 16384, 1099511627776, 9223372036854775807, -1, -5, -9223372036854775807 - 1} {
+		vs = pack.PutVarint(mut vs, v)
+	}
+	say.Line("varint bytes", len(vs), seal.Hex(vs))
+	mut vals = []str{}
+	mut at = 0
+	for at < len(vs) {
+		let (v, n) = pack.Varint(vs[at:len(vs)]) catch _ {
+			vals = append(vals, "fault")
+			break
+		}
+		vals = append(vals, say.Fmt("%d", v))
+		at += n
+	}
+	say.Line("varint back", texts(vals))
+	say.Line("uvarint", uvarintText([]u8{0xAC, 0x02}), uvarintText([]u8{0x80}), uvarintText([]u8{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02}), uvarintText([]u8{}))
+
+	// base32: the standard and extended-hex alphabets, with and without padding.
+	let man = []u8{'M', 'a', 'n'}
+	say.Line("base32", seal.Base32(man), seal.Base32Hex(man), seal.Base32NoPad(man))
+	say.Line("base32 back", b32Text(seal.Base32(man)), b32HexText(seal.Base32Hex(man)))
+	say.Line("base32 bad", b32Text("mzxw6==="), b32Text("ABCDE"), b32Text("A="), b32Text("MZ=W6==="), b32Text("MZXW6"))
+	say.Line("base32 extra pad", b32Text("MZXW6===="))
+	say.Line("base32 pad", b32Text("MZXW6==="), b32Text("MZXW6"))
+
+	// ascii85: the alphabet, the zero group and the partial group.
+	say.Line("ascii85", seal.Ascii85(man), seal.Ascii85([]u8{}), seal.Ascii85([]u8{0, 0, 0, 0}), seal.Ascii85([]u8{0, 0, 0, 0, 1}))
+	say.Line("ascii85 back", a85Text("9jqo"), a85Text("z"), a85Text("z9jqo"), a85Text("9jq o"))
+	say.Line("ascii85 bad", a85Text("~"), a85Text("v"))
+}
+
+// uvarintText is the uvarint's value, or "fault".
+fn uvarintText(raw []u8) str {
+	let (v, _) = pack.Uvarint(raw) catch _ {
+		return "fault"
+	}
+	return say.Fmt("%d", v)
+}
+
+// b32Text is the standard base32 decode of s, or "fault".
+fn b32Text(s str) str {
+	let b = seal.Base32Decode(s) catch _ {
+		return "fault"
+	}
+	return seal.Hex(b)
+}
+
+// b32HexText is the extended-hex base32 decode of s, or "fault".
+fn b32HexText(s str) str {
+	let b = seal.Base32HexDecode(s) catch _ {
+		return "fault"
+	}
+	return seal.Hex(b)
+}
+
+// a85Text is the ascii85 decode of s, or "fault".
+fn a85Text(s str) str {
+	let b = seal.Ascii85Decode(s) catch _ {
+		return "fault"
+	}
+	return seal.Hex(b)
+}
