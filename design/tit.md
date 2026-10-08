@@ -165,14 +165,23 @@ Large files need no fifth kind: a blob over 8 MiB keeps its id and is stored in 
 ```text
 .tit/
   objects/ab/cdef…        loose objects (section 5)
-  packs/<hex>.pack        packs and their indexes (section 6), named by the pack's trailing hash
-  packs/<hex>.idx
+  objects/chunks/ab/cdef… the chunks of large blobs (section 5)
+  packs/<hex>.pack        packs and their indexes (section 6), named by the pack's trailing hash; adopt and
+  packs/<hex>.idx         repack write commits and tags, trees, and blobs in packs of their own
   refs/heads/<name>       branches; refs/tags/<name>; refs/remotes/<remote>/<name>
   packed-refs             refs packed into one file
   changes/kz/vqt…         the change index (section 8)
   git-ids                 git id ⇄ tit id for every adopted object (section 7)
   oplog/                  the operation log (section 9)
-  workspaces/<name>/      per-workspace state: HEAD, index (section 10)
+  workspaces/<name>/      per-workspace state: HEAD, index (section 10), and:
+    head-tree             "<commit> <tree>": the tree of HEAD's commit, a cache (status reads no object for it)
+    snapshots/<time>      files kept before a command changed them: the command, then "<blob>\t<f|x|l>\t<path>"
+                          lines (tit timeline; kept 14 days, never pushed)
+    parked/<name>         tit park: the branch, the commit, its tree and the tree of the parked files
+    focus                 tit focus: the directories checked out, one a line
+    EDIT                  tit edit: the branch, its tip and the change being edited
+  bench/<name>.jsonl      tit bench results
+  mirror.git/             a mirror over HTTP(S): the git objects written, then pushed from here (section 7)
   config                  repository config (section 11)
   lock                    the repository write lock (section 12)
 ```
