@@ -1,0 +1,125 @@
+package main
+
+// gob: the messages of a stream (type descriptions and values), the integers and floats of the wire, struct fields by
+// number with zero fields left out, and the decoder's faults. The streams are the ones Go's encoding/gob writes for the
+// same values (tools/ci/gob_check.tin compares both ways); the output is the same on every platform.
+
+import "fault"
+import "gob"
+import "say"
+import "seal"
+import "twine"
+
+// encodeText encodes one value of type t with a fresh encoder and returns its bytes in hex, or the fault.
+fn encodeText(s gob.Schema, t i64, v gob.Value) str {
+	mut e = gob.NewEncoder(s)
+	let msg = e.Encode(t, v) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return seal.Hex(msg)
+}
+
+// decodeHex decodes the first value of the stream in hex as type t and returns it as text, or the fault.
+fn decodeHex(s gob.Schema, t i64, hexText str) str {
+	let stream = seal.HexDecode(hexText) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	mut d = gob.NewDecoder(stream)
+	let v = d.Decode(s, t) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return valueText(s, t, v)
+}
+
+// valueText prints a value of the schema type t: numbers, a bool, strings and bytes as hex, and each struct field.
+fn valueText(s gob.Schema, t i64, v gob.Value) str {
+	let k = s.Kind(t)
+	if k == gob.KindInt {
+		return say.Fmt("%d", v.I)
+	}
+	if k == gob.KindUint {
+		return say.Fmt("%d", v.U)
+	}
+	if k == gob.KindFloat {
+		return say.Fmt("%v", v.F)
+	}
+	if k == gob.KindBool {
+		if v.B {
+			return "true"
+		}
+		return "false"
+	}
+	if k == gob.KindString || k == gob.KindBytes {
+		return seal.Hex([]u8(v.S))
+	}
+	if k == gob.KindStruct {
+		let fields = s.Fields(t)
+		mut parts = []str{}
+		for i in 0..len(fields) {
+			parts = append(parts, fields[i].Name + ":" + valueText(s, fields[i].Type, v.Items[i]))
+		}
+		return "{{" + twine.Join(parts, " ") + "}}"
+	}
+	return say.Fmt("%d items", len(v.Items))
+}
+
+fn main() {
+	mut s = gob.NewSchema()
+
+	// Singletons: a non-struct value is one message with a zero field delta, and zero values are sent.
+	say.Line("int 7", encodeText(s, gob.Int, gob.IntV(7)))
+	say.Line("int -3", encodeText(s, gob.Int, gob.IntV(-3)))
+	say.Line("int 300", encodeText(s, gob.Int, gob.IntV(300)))
+	say.Line("int min", encodeText(s, gob.Int, gob.IntV(-9223372036854775807 - 1)))
+	say.Line("int 0", encodeText(s, gob.Int, gob.IntV(0)))
+	say.Line("uint 0", encodeText(s, gob.Uint, gob.UintV(0)))
+	say.Line("uint 300", encodeText(s, gob.Uint, gob.UintV(300)))
+	say.Line("bool true", encodeText(s, gob.Bool, gob.BoolV(true)))
+	say.Line("bool false", encodeText(s, gob.Bool, gob.BoolV(false)))
+	say.Line("string hi", encodeText(s, gob.String, gob.StringV("hi")))
+	say.Line("string empty", encodeText(s, gob.String, gob.StringV("")))
+	say.Line("bytes", encodeText(s, gob.Bytes, gob.BytesV([]u8{1, 2})))
+	say.Line("float 1", encodeText(s, gob.Float, gob.FloatV(1.0)))
+	say.Line("float -2.5", encodeText(s, gob.Float, gob.FloatV(-2.5)))
+	say.Line("float 0", encodeText(s, gob.Float, gob.FloatV(0.0)))
+
+	// Decoding the singletons reads them back.
+	say.Line("read int", decodeHex(s, gob.Int, "0304000e"))
+	say.Line("read float", decodeHex(s, gob.Float, "050800fef03f"))
+	say.Line("read string", decodeHex(s, gob.String, "050c00026869"))
+	say.Line("read bool", decodeHex(s, gob.Bool, "03020001"))
+	say.Line("read uint", decodeHex(s, gob.Uint, "03060000"))
+	say.Line("read negative", decodeHex(s, gob.Int, "03040005"))
+
+	// Slices and maps: the description of the slice type, then the value.
+	let ints = s.Slice(gob.Int)
+	say.Line("ints", encodeText(s, ints, gob.SliceV([]gob.Value{gob.IntV(1), gob.IntV(2)})))
+	say.Line("ints empty", encodeText(s, ints, gob.SliceV([]gob.Value{})))
+	let mapSI = s.Map(gob.String, gob.Int)
+	say.Line("map", encodeText(s, mapSI, gob.MapV([]gob.Value{gob.StringV("a")}, []gob.Value{gob.IntV(1)})))
+
+	// Structs: each field sent is its number delta, its value, and the terminator 0; zero fields are left out.
+	mut s2 = gob.NewSchema()
+	let inner = s2.Struct("Inner")
+	s2.AddField(inner, "A", gob.Int) catch err {
+		say.Line("fault", err)
+		return
+	}
+	s2.AddField(inner, "B", gob.String) catch err {
+		say.Line("fault", err)
+		return
+	}
+	say.Line("inner", encodeText(s2, inner, gob.StructV([]gob.Value{gob.IntV(1), gob.StringV("x")})))
+	say.Line("inner zero", encodeText(s2, inner, gob.StructV([]gob.Value{gob.IntV(0), gob.StringV("")})))
+	say.Line("inner b only", encodeText(s2, inner, gob.StructV([]gob.Value{gob.IntV(0), gob.StringV("y")})))
+	say.Line("read inner", decodeHex(s2, inner, "1e7f03010105496e6e657201ff80000102010141010400010142010c00000008ff80010201017800"))
+	say.Line("read inner zero", decodeHex(s2, inner, "1e7f03010105496e6e657201ff80000102010141010400010142010c00000003ff8000"))
+
+	// Faults: a stream that ends early, an empty stream, and a type that does not match the stream.
+	say.Line("empty", decodeHex(s, gob.Int, ""))
+	say.Line("cut value", decodeHex(s, gob.String, "050c000268"))
+	say.Line("cut message", decodeHex(s, gob.String, "050c0002"))
+	say.Line("mismatch", decodeHex(s, gob.Int, "050c00026869"))
+	say.Line("singleton delta", decodeHex(s, gob.Int, "03040105"))
+	say.Line("unknown type", decodeHex(s, gob.Int, "03ff8400"))
+}

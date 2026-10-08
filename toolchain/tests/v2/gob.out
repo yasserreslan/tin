@@ -1,0 +1,35 @@
+int 7 0304000e
+int -3 03040005
+int 300 050400fe0258
+int min 0b0400f8ffffffffffffffff
+int 0 03040000
+uint 0 03060000
+uint 300 050600fe012c
+bool true 03020001
+bool false 03020000
+string hi 050c00026869
+string empty 030c0000
+bytes 050a00020102
+float 1 050800fef03f
+float -2.5 050800fe04c0
+float 0 03080000
+read int 7
+read float 1
+read string 6869
+read bool true
+read uint 0
+read negative -3
+ints 0b7f020102ff80000104000006ff8000020204
+ints empty 0b7f020102ff80000104000004ff800000
+map 0d7f040102ff8000010c0104000007ff800001016102
+inner 1e7f03010105496e6e657201ff80000102010141010400010142010c00000008ff80010201017800
+inner zero 1e7f03010105496e6e657201ff80000102010141010400010142010c00000003ff8000
+inner b only 1e7f03010105496e6e657201ff80000102010141010400010142010c00000006ff8002017900
+read inner {A:1 B:78}
+read inner zero {A:0 B:}
+empty fault: EOF
+cut value fault: unexpected EOF
+cut message fault: unexpected EOF
+mismatch fault: gob: decoding into local type int, received remote type string
+singleton delta fault: gob: decode: corrupted data: non-zero delta for singleton
+unknown type fault: gob: unknown type id or corrupted data
