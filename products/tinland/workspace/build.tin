@@ -17,6 +17,15 @@ fn (ws Workspace) Build(t mut ui.Tree) {
 	if ws.LeftOpen && ws.Panel == PanelProject {
 		ws.projectPanel(mut t)
 		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
+	} else if ws.LeftOpen && ws.Panel == PanelGit {
+		ws.gitPanel(mut t)
+		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
+	} else if ws.LeftOpen && ws.Panel == PanelOutline {
+		ws.outlinePanel(mut t)
+		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
+	} else if ws.LeftOpen && ws.Panel == PanelDiagnostics {
+		ws.diagnosticsPanel(mut t)
+		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
 	} else if ws.LeftOpen && ws.Panel == PanelSearch {
 		ws.searchPanel(mut t)
 		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)

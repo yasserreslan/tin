@@ -93,7 +93,7 @@ fn (ws mut Workspace) key(code i64, flags i64, chars str) {
 // scroll moves what is under the mouse: the project panel, the output panel or the text.
 fn (ws mut Workspace) scroll(dx f64, dy f64) {
 	let id = ws.Hits.ScrollAt(ws.MouseX, ws.MouseY)
-	if id == idLeftScroll || id == idOutputScroll {
+	if id == idLeftScroll || id == idOutputScroll || id == idSearchScroll || id == idPanelScroll {
 		ws.Scrolls.Scroll(id, 0.0 - dy)
 	} else {
 		ws.Ed.Wheel(dx, dy)
@@ -132,6 +132,12 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 	} else if id == idSearchRegex {
 		ws.Search.Regex = !ws.Search.Regex
 		ws.Search.Done = false
+	} else if id >= idGitRow {
+		ws.openGitFile(id - idGitRow)
+	} else if id >= idDiagRow {
+		ws.openDiag(id - idDiagRow)
+	} else if id >= idSymRow {
+		ws.openSym(id - idSymRow)
 	} else if id >= idSearchRow {
 		ws.OpenMatch(id - idSearchRow)
 	} else if id == idDivider {
@@ -200,6 +206,12 @@ fn (ws mut Workspace) togglePanel(k i64) {
 		if k == PanelSearch {
 			ws.Focus = FocusSearch
 		}
+		if k == PanelGit {
+			ws.RefreshGit()
+		}
+		if k == PanelDiagnostics {
+			ws.Ed.CheckNow()
+		}
 	}
 }
 
@@ -226,6 +238,7 @@ fn (ws mut Workspace) Perform(cmd i64) {
 	} else if cmd == CmdRefresh {
 		if ws.HasProj {
 			ws.Proj.Refresh()
+			ws.RefreshGit()
 		}
 	} else if cmd == CmdNewFile {
 		ws.OpenPicker(PickNewFile)

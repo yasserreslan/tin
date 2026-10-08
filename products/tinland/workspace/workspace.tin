@@ -28,10 +28,14 @@ const idSearchWord = 22
 const idSearchRegex = 23
 const idPickerInput = 24
 const idSearchScroll = 25
+const idPanelScroll = 26
 const idRow = 10000
 const idOutputLine = 30000
 const idPickerItem = 40000
 const idSearchRow = 50000
+const idSymRow = 60000
+const idDiagRow = 70000
+const idGitRow = 80000
 
 // The panels of the left dock and their buttons in the status bar.
 const PanelProject = 0
@@ -82,6 +86,8 @@ type Workspace struct {
 	Focus i64
 	Picker Picker
 	Search Search
+	// Git is the output of git status, one line per changed file.
+	Git []str
 }
 
 // Where typed text goes.
@@ -91,7 +97,7 @@ const FocusPicker = 2
 
 // New makes a workspace around an editor.
 fn New(th theme.Theme, ed editor.Editor) Workspace {
-	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}}
+	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}, Git: []str{}}
 	ws.LeftOpen = true
 	ws.LeftW = 260.0
 	ws.W = 1100.0
