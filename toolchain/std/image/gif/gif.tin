@@ -1,0 +1,288 @@
+// Package gif decodes and encodes GIF images, including animated frame delays, disposal and transparency.
+package gif
+
+import "image"
+import "image/color"
+import "squash"
+
+const maxPixels = 64 * 1024 * 1024
+
+// GIF is a sequence of paletted frames and their timing and disposal metadata.
+type GIF struct {
+	// Image contains the frames in display order.
+	Image []image.Paletted
+	// Delay contains each frame's duration in hundredths of a second.
+	Delay []i64
+	// Disposal contains each frame's disposal method.
+	Disposal []u8
+	// LoopCount is the repeat count, or -1 when the animation does not loop.
+	LoopCount i64
+}
+
+// Decode reads the first image in a GIF stream.
+fn Decode(data str) !dyn image.Image {
+	let all = try DecodeAll(data)
+	if len(all.Image) == 0 {
+		fail "gif: no image frames"
+	}
+	return all.Image[0]
+}
+
+// DecodeConfig reads a GIF's logical screen dimensions and color model.
+fn DecodeConfig(data str) !image.Config {
+	if len(data) < 13 || (data[0:6] != "GIF87a" && data[0:6] != "GIF89a") {
+		fail "gif: invalid header"
+	}
+	let w = le16(data, 6)
+	let h = le16(data, 8)
+	if w <= 0 || h <= 0 || w*h > maxPixels {
+		fail "gif: image dimensions exceed limit"
+	}
+	return image.Config{ColorModel: color.PaletteModel, Width: w, Height: h}
+}
+
+// DecodeAll reads every image, delay, disposal method and loop count in a GIF stream.
+fn DecodeAll(data str) !GIF {
+	let config = try DecodeConfig(data)
+	let screenW = config.Width
+	let screenH = config.Height
+	let packed = i64(data[10])
+	mut at = i64(13)
+	mut global = []color.NRGBA{}
+	if packed & 0x80 != 0 {
+		let n = 1 << ((packed & 7)+1)
+		if len(data)-at < 3*n { fail "gif: truncated global color table" }
+		global = try readPalette(data, at, n)
+		at += 3*n
+	}
+	mut out = GIF{Image: []image.Paletted{}, Delay: []i64{}, Disposal: []u8{}, LoopCount: -1}
+	mut delay = i64(0)
+	mut disposal = u8(0)
+	mut transparent = i64(-1)
+	mut trailer = false
+	for at < len(data) {
+		let tag = data[at]
+		at += 1
+		if tag == 0x3b {
+			trailer = true
+			break
+		}
+		if tag == 0x21 {
+			if at >= len(data) { fail "gif: truncated extension" }
+			let label = data[at]
+			at += 1
+			if label == 0xf9 {
+				if at+6 > len(data) || data[at] != 4 || data[at+5] != 0 { fail "gif: invalid graphic control extension" }
+				let flags = i64(data[at+1])
+				disposal = u8((flags >> 2) & 7)
+				delay = le16(data, at+2)
+				transparent = i64(data[at+4])
+				if flags & 1 == 0 { transparent = -1 }
+				at += 6
+			} else if label == 0xff {
+				if at >= len(data) { fail "gif: truncated application extension" }
+				let n = i64(data[at])
+				at += 1
+				if n > len(data)-at { fail "gif: truncated application identifier" }
+				let app = data[at:at+n]
+				at += n
+				let (blocks, end) = try readBlocks(data, at)
+				at = end
+				if app == "NETSCAPE2.0" && len(blocks) >= 3 && blocks[0] == 1 {
+					out.LoopCount = le16(str(blocks), 1)
+				}
+			} else {
+				let (_, end) = try readBlocks(data, at)
+				at = end
+			}
+			continue
+		}
+		if tag != 0x2c { fail "gif: invalid block type" }
+		if at+9 > len(data) { fail "gif: truncated image descriptor" }
+		let x = le16(data, at)
+		let y = le16(data, at+2)
+		let w = le16(data, at+4)
+		let h = le16(data, at+6)
+		let flags = i64(data[at+8])
+		at += 9
+		if w <= 0 || h <= 0 || w*h > maxPixels || x+w > screenW || y+h > screenH { fail "gif: invalid frame bounds" }
+		mut palette = normalizedPalette(global)
+		if flags & 0x80 != 0 {
+			let n = 1 << ((flags & 7)+1)
+			if len(data)-at < 3*n { fail "gif: truncated local color table" }
+			palette = try readPalette(data, at, n)
+			at += 3*n
+		}
+		if len(palette) == 0 { fail "gif: frame has no color table" }
+		if at >= len(data) { fail "gif: missing LZW code size" }
+		let width = i64(data[at])
+		at += 1
+		if width < 2 || width > 8 { fail "gif: invalid LZW code size" }
+		let (compressed, end) = try readBlocks(data, at)
+		at = end
+		let indices = try squash.UnlzwWidth(str(compressed), squash.LSB, w*h, width)
+		if len(indices) != w*h { fail "gif: incorrect frame data length" }
+		mut frame = image.NewPaletted(image.Rect(x, y, x+w, y+h), palette)
+		if flags & 0x40 == 0 {
+			for i in 0..len(indices) {
+				if i64(indices[i]) >= len(palette) { fail "gif: palette index out of range" }
+				frame.Pix[i] = indices[i]
+			}
+		} else {
+			let passes = []i64{0, 4, 2, 1}
+			let steps = []i64{8, 8, 4, 2}
+			mut src = i64(0)
+			for pass in 0..4 {
+				mut row = passes[pass]
+				for row < h {
+					for col in 0..w {
+						if i64(indices[src]) >= len(palette) { fail "gif: palette index out of range" }
+						frame.Pix[row*w+col] = indices[src]
+						src += 1
+					}
+					row += steps[pass]
+				}
+			}
+		}
+		if transparent >= len(palette) { fail "gif: transparent index out of range" }
+		if transparent >= 0 { frame.Palette[transparent].A = 0 }
+		out.Image = append(out.Image, frame)
+		out.Delay = append(out.Delay, delay)
+		out.Disposal = append(out.Disposal, disposal)
+		delay = 0
+		disposal = 0
+		transparent = -1
+	}
+	if !trailer { fail "gif: missing trailer" }
+	if len(out.Image) == 0 { fail "gif: no image frames" }
+	return out
+}
+
+// Encode writes one paletted image as a GIF.
+fn Encode(src dyn image.Image) str {
+	let pal = image.AsPaletted(src)
+	if pal == nil { panic("gif: image is not paletted") }
+	return EncodeAll(GIF{Image: []image.Paletted{pal}, Delay: []i64{0}, Disposal: []u8{0}, LoopCount: -1})
+}
+
+// EncodeAll writes paletted frames and their delays and disposal methods as a GIF.
+fn EncodeAll(g GIF) str {
+	if len(g.Image) == 0 || len(g.Image) > 65535 || len(g.Delay) != len(g.Image) || (len(g.Disposal) != 0 && len(g.Disposal) != len(g.Image)) || g.LoopCount < -1 || g.LoopCount > 65535 { panic("gif: invalid frame count or metadata") }
+	let first = g.Image[0]
+	let screen = first.Bounds()
+	let sw = screen.Max.X
+	let sh = screen.Max.Y
+	if screen.Min.X != 0 || screen.Min.Y != 0 || sw <= 0 || sh <= 0 || sw*sh > maxPixels { panic("gif: invalid logical screen") }
+	mut out = []u8{}
+	for _, b in "GIF89a" { out = append(out, u8(b)) }
+	put16(mut out, sw)
+	put16(mut out, sh)
+	let basePalette = normalizedPalette(first.Palette)
+	let baseBits = tableBits(len(basePalette))
+	out = append(out, u8(0x80 | ((baseBits-1)<<4) | (baseBits-1)), 0, 0)
+	writeTable(mut out, basePalette, 1<<baseBits)
+	if g.LoopCount >= 0 {
+		out = append(out, 0x21, 0xff, 11)
+		for _, b in "NETSCAPE2.0" { out = append(out, u8(b)) }
+		out = append(out, 3, 1)
+		put16(mut out, g.LoopCount)
+		out = append(out, 0)
+	}
+	for i, frame in g.Image {
+		let r = frame.Bounds()
+		if r.Min.X < 0 || r.Min.Y < 0 || r.Max.X > sw || r.Max.Y > sh || r.Empty() || r.Dx()*r.Dy() > maxPixels { panic("gif: invalid frame bounds") }
+		let palette = normalizedPalette(frame.Palette)
+		if len(palette) == 0 || len(palette) > 256 { panic("gif: invalid palette size") }
+		for c in palette { if c.A != 0 && c.A != 255 { panic("gif: palette alpha must be zero or opaque") } }
+		for _, index in frame.Pix { if i64(index) >= len(palette) { panic("gif: palette index out of range") } }
+		let bits = tableBits(len(palette))
+		mut d = i64(0)
+		mut disp = u8(0)
+		if i < len(g.Delay) { d = g.Delay[i] }
+		if i < len(g.Disposal) { disp = g.Disposal[i] }
+		if d < 0 || d > 65535 || disp > 7 { panic("gif: invalid frame metadata") }
+		mut trans = i64(-1)
+		for j, c in palette { if c.A == 0 && trans < 0 { trans = j } }
+		mut control = i64(disp)<<2
+		if trans >= 0 { control |= 1 }
+		out = append(out, 0x21, 0xf9, 4, u8(control))
+		put16(mut out, d)
+	if trans < 0 { out = append(out, 0) } else { out = append(out, u8(trans)) }
+		out = append(out, 0)
+		out = append(out, 0x2c)
+		put16(mut out, r.Min.X)
+		put16(mut out, r.Min.Y)
+		put16(mut out, r.Dx())
+		put16(mut out, r.Dy())
+		out = append(out, u8(0x80 | (bits-1)))
+		writeTable(mut out, palette, 1<<bits)
+		let codeSize = max(2, bits)
+		out = append(out, u8(codeSize))
+		let compressed = squash.LzwWidth(str(frame.Pix), squash.LSB, codeSize)
+		appendBlocks(mut out, compressed)
+	}
+	out = append(out, 0x3b)
+	return str(out)
+}
+
+fn readPalette(data str, at i64, n i64) ![]color.NRGBA {
+	mut p = []color.NRGBA{}
+	for i in 0..n {
+		let j = at+3*i
+		p = append(p, color.NRGBA{R: u8(data[j]), G: u8(data[j+1]), B: u8(data[j+2]), A: 255})
+	}
+	return p
+}
+
+fn readBlocks(data str, at i64) !([]u8, i64) {
+	mut out = []u8{}
+	mut p = at
+	for {
+		if p >= len(data) { fail "gif: truncated data sub-block" }
+		let n = i64(data[p])
+		p += 1
+		if n == 0 { return out, p }
+		if n > len(data)-p { fail "gif: truncated data sub-block" }
+		for i in 0..n { out = append(out, u8(data[p+i])) }
+		p += n
+	}
+}
+
+fn appendBlocks(out mut []u8, data str) {
+	mut at = i64(0)
+	for at < len(data) {
+		let n = min(255, len(data)-at)
+		out = append(out, u8(n))
+		for i in 0..n { out = append(out, u8(data[at+i])) }
+		at += n
+	}
+	out = append(out, 0)
+}
+
+fn normalizedPalette(p []color.NRGBA) []color.NRGBA {
+	mut out = []color.NRGBA{}
+	for c in p { out = append(out, c) }
+	return out
+}
+
+fn tableBits(n i64) i64 {
+	mut bits = i64(1)
+	for (1 << bits) < max(2, n) { bits += 1 }
+	return max(2, bits)
+}
+
+fn writeTable(out mut []u8, p []color.NRGBA, n i64) {
+	for i in 0..n {
+		mut c = color.NRGBA{}
+		if i < len(p) { c = p[i] }
+		out = append(out, c.R, c.G, c.B)
+	}
+}
+
+fn le16(s str, at i64) i64 {
+	return i64(s[at]) | i64(s[at+1])<<8
+}
+
+fn put16(out mut []u8, n i64) {
+	out = append(out, u8(n), u8(n>>8))
+}
