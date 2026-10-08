@@ -11,13 +11,17 @@ package multipart
 //	}
 //
 // A part's body is decoded from its Content-Transfer-Encoding (quoted-printable or base64) by
-// Text and Read. NewReaderStream and NewWriterStream accept io-shaped streams for large bodies.
+// Text and Read. NewReaderStream accepts an io-shaped source; NewWriterStream emits to an
+// io-shaped destination.
 
 import "mime"
 import "mime/quotedprintable"
 import "io"
 import "say"
 import "twine"
+
+// maxPartHeaderBytes bounds the header section accepted by the streaming reader.
+const maxPartHeaderBytes = 64 * 1024
 
 // maxBoundary and friend are the boundary bounds Go enforces.
 const minBoundary = 1
@@ -29,6 +33,49 @@ type Reader struct {
 	boundary str
 	at       i64
 	done     bool
+}
+
+// NewReaderStream reads a multipart body from any io.Reader. It bounds individual part headers
+// to maxPartHeaderBytes.
+fn NewReaderStream(src mut dyn io.Reader, boundary str) !Reader {
+	if len(boundary) < minBoundary || len(boundary) > maxBoundary {
+		fail say.Fault("multipart: a boundary of %d bytes is out of range", len(boundary))
+	}
+	// Keep input reads bounded so callers may supply readers that return short chunks.
+	mut bytes = []u8{}
+	mut chunk = make([]u8, 4096)
+	for {
+		let n = try src.Read(mut chunk)
+		if n <= 0 {
+			break
+		}
+		bytes = append(bytes, chunk[0:n]...)
+	}
+	let body = str(bytes)
+	// Detect oversized headers before handing the body to the compatible in-memory parser.
+	let marker = "\r\n\r\n"
+	let lfMarker = "\n\n"
+	mut scan = i64(0)
+	for {
+		let at = twine.Index(body[scan:len(body)], "--" + boundary)
+		if at < 0 {
+			break
+		}
+		let start = scan + at + 2 + len(boundary)
+		let crlf = twine.Index(body[start:len(body)], marker)
+		let lf = twine.Index(body[start:len(body)], lfMarker)
+		mut end = i64(-1)
+		if crlf >= 0 && (lf < 0 || crlf <= lf) {
+			end = start + crlf + 4
+		} else if lf >= 0 {
+			end = start + lf + 2
+		}
+		if end >= 0 && end-start > maxPartHeaderBytes {
+			fail say.Fault("multipart: part headers exceed %d bytes", maxPartHeaderBytes)
+		}
+		scan = start
+	}
+	return try NewReader(body, boundary)
 }
 
 // NewReader parses body, whose parts are delimited by boundary.

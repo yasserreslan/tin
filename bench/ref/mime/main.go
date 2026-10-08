@@ -55,29 +55,65 @@ func main() {
 			w.Close()
 			fmt.Fprintf(out, "Q %s %s\n", hex.EncodeToString(dec), hex.EncodeToString([]byte(enc.String())))
 		case "M":
-			boundary := decodeHex(fields[1])
-			body := decodeHex(fields[2])
-			r := multipart.NewReader(strings.NewReader(body), boundary)
-			parts := []string{}
-			for {
-				p, err := r.NextPart()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					parts = append(parts, "fault")
-					break
-				}
-				data, err := io.ReadAll(p)
-				if err != nil {
-					parts = append(parts, "fault")
-					break
-				}
-				parts = append(parts, fmt.Sprintf("%s|%s|%s|%s", p.FormName(), p.FileName(), p.Header.Get("Content-Type"), hex.EncodeToString(data)))
-			}
-			fmt.Fprintf(out, "M %s\n", strings.Join(parts, " "))
+			printMultipart(out, decodeHex(fields[1]), decodeHex(fields[2]), strings.NewReader(decodeHex(fields[2])))
+		case "MC":
+			chunk := atoi(fields[1])
+			body := decodeHex(fields[3])
+			printMultipart(out, decodeHex(fields[2]), body, &chunkReader{r: strings.NewReader(body), size: chunk})
 		}
 	}
+}
+
+type chunkReader struct {
+	r    io.Reader
+	size int
+}
+
+func (c *chunkReader) Read(p []byte) (int, error) {
+	if len(p) > c.size {
+		p = p[:c.size]
+	}
+	return c.r.Read(p)
+}
+
+func printMultipart(out *bufio.Writer, boundary, body string, src io.Reader) {
+	r := multipart.NewReader(src, boundary)
+	parts := []string{}
+	for {
+		p, err := r.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			parts = append(parts, "fault")
+			break
+		}
+		data, err := io.ReadAll(p)
+		if err != nil {
+			parts = append(parts, "fault")
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s", p.FormName(), p.FileName(), p.Header.Get("Content-Type"), hex.EncodeToString(data)))
+	}
+	prefix := "M"
+	if _, ok := src.(*chunkReader); ok {
+		prefix = "MC"
+	}
+	fmt.Fprintf(out, "%s %s\n", prefix, strings.Join(parts, " "))
+}
+
+func atoi(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 7
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < 1 {
+		return 7
+	}
+	return n
 }
 
 func decodeHex(s string) string {

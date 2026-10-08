@@ -19,4 +19,6 @@ multipart parts  [name||value] [f|a.txt|café]
 multipart lf  [a||x]
 multipart qp  [f|x|café]
 multipart bad  multipart: no boundary in the body  multipart: a part's body is not terminated by a boundary
-multipart stream writer true
+multipart stream writer true true
+multipart stream reader true true true
+multipart stream truncated multipart: a part's body is not terminated by a boundary
