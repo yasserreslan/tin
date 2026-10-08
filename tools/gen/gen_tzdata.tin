@@ -1,0 +1,207 @@
+package main
+
+import "../ci/ci"
+import "mint"
+import "quarry"
+import "say"
+import "sift"
+import "squash"
+import "twine"
+
+// Generate toolchain/std/tide/tzdata/tzdata.tin from the IANA time zone database (run from the repo root).
+//
+//     gen_tzdata [DIR-OR-ZIP]
+//
+// The default source is Go's lib/time/zoneinfo.zip ($(go env GOROOT)/lib/time/zoneinfo.zip), the IANA database (public domain,
+// https://www.iana.org/time-zones) as Go ships it; a directory (a system /usr/share/zoneinfo, say) is read instead when one is given.
+// The output is the nested package tide/tzdata: import it for its side effect, like Go's time/tzdata, and tide.LoadZone resolves names
+// the system directories do not have, as in an empty container image.
+//
+// The container is: u32 zone count; per zone, u32 name length, u32 data length, the name and the TZif bytes (RFC 8536). It is deflated
+// (RFC 1951, level 9) into string constants; tide/tzdata inflates it on every core when its globals are set up and keeps each zone's
+// bytes, and tide.LoadZone parses one lazily when the system directories miss.
+//
+// Budget: the packed stream stays under 128 KiB (about 80 KiB today) and the generated file under 1 MiB. The binary increase is measured
+// on the Linux targets in the pull request.
+
+const OUT = "toolchain/std/tide/tzdata/tzdata.tin"
+const CHUNK = 16000
+const BUDGET = 131072
+
+fn le(d str, at i64, n i64) i64 {
+	mut v = i64(0)
+	for i in 0..n {
+		v = v | (i64(d[at + i]) << (8 * i))
+	}
+	return v
+}
+
+// readZip returns the names and contents of the files of a zip archive (stored or deflated entries), read from its central directory.
+fn readZip(path str) ([]str, []str) {
+	let data = ci.Read(path)
+	mut names = []str{}
+	mut bodies = []str{}
+	// the end of central directory record is the last "PK\x05\x06"
+	let eocd = twine.LastIndex(data, "PK\x05\x06")
+	ci.Check(eocd >= 0, "gen_tzdata: " + path + " is not a zip archive")
+	let count = le(data, eocd + 10, 2)
+	mut at = le(data, eocd + 16, 4)
+	for i in 0..count {
+		ci.Check(data[at:at + 4] == "PK\x01\x02", "gen_tzdata: a bad central directory entry")
+		let method = le(data, at + 10, 2)
+		let compressed = le(data, at + 20, 4)
+		let nameLen = le(data, at + 28, 2)
+		let extraLen = le(data, at + 30, 2)
+		let commentLen = le(data, at + 32, 2)
+		let local = le(data, at + 42, 4)
+		let name = data[at + 46:at + 46 + nameLen]
+		at += 46 + nameLen + extraLen + commentLen
+		if twine.HasSuffix(name, "/") {
+			continue
+		}
+		let localNameLen = le(data, local + 26, 2)
+		let localExtraLen = le(data, local + 28, 2)
+		let start = local + 30 + localNameLen + localExtraLen
+		mut body = data[start:start + compressed]
+		if method == 8 {
+			body = squash.Inflate(body, 100000000) catch _ {
+				ci.Fail("gen_tzdata: cannot inflate " + name)
+				panic("unreachable")
+			}
+		}
+		names = append(names, name)
+		bodies = append(bodies, body)
+	}
+	return names, bodies
+}
+
+fn special(rel str) bool {
+	for s in []str{"posixrules", "leapseconds", "tzdata.zi", "iso3166.tab", "zone.tab", "zone1970.tab", "zonenow.tab", "leap-seconds.list", "+VERSION", "VERSION"} {
+		if rel == s {
+			return true
+		}
+	}
+	return false
+}
+
+// readDir returns the names (relative paths) and contents of the files below a directory, skipping the posix and right trees, the
+// non-zone files and broken links.
+fn readDir(path str, prefix str, names mut []str, bodies mut []str) {
+	let entries = quarry.ReadDir(path) catch _ {
+		return
+	}
+	mut sorted = []str{}
+	for e in entries {
+		sorted = append(sorted, e)
+	}
+	quarry.SortStrs(mut sorted)
+	for name in sorted {
+		let full = ci.Join(path, name)
+		mut rel = name
+		if len(prefix) > 0 {
+			rel = prefix + "/" + name
+		}
+		if quarry.IsDir(full) {
+			if name != "posix" && name != "right" {
+				readDir(full, rel, mut names, mut bodies)
+			}
+			continue
+		}
+		if special(rel) {
+			continue
+		}
+		let body = quarry.ReadFile(full) catch _ {
+			continue
+		}
+		names = append(names, rel)
+		bodies = append(bodies, body)
+	}
+}
+
+fn word(v i64) str {
+	return str([]u8{u8(v & 255), u8((v >> 8) & 255), u8((v >> 16) & 255), u8((v >> 24) & 255)})
+}
+
+fn escape(data str) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for i in 0..len(data) {
+		let b = data[i]
+		if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
+			out = append(out, b)
+		} else {
+			out = append(out, '\\')
+			out = append(out, 'x')
+			out = append(out, digits[b >> 4])
+			out = append(out, digits[b & 15])
+		}
+	}
+	return str(out)
+}
+
+fn main() {
+	let args = quarry.Args()
+	mut source = ""
+	if len(args) > 1 {
+		source = args[1]
+	} else {
+		let root = twine.TrimSpace(ci.Exec([]str{"go", "env", "GOROOT"}, "", 30).Stdout)
+		source = ci.Join(root, "lib/time/zoneinfo.zip")
+	}
+	mut names = []str{}
+	mut bodies = []str{}
+	if twine.HasSuffix(source, ".zip") {
+		let (n, b) = readZip(source)
+		names = n
+		bodies = b
+	} else {
+		readDir(source, "", mut names, mut bodies)
+	}
+	// only TZif files, sorted by name
+	mut zoneNames = []str{}
+	for i in 0..len(names) {
+		if len(bodies[i]) >= 4 && bodies[i][0:4] == "TZif" {
+			zoneNames = append(zoneNames, names[i])
+		}
+	}
+	ci.Check(len(zoneNames) > 0, "gen_tzdata: no TZif files in " + source)
+	sift.Sort(mut zoneNames)
+	mut container = word(len(zoneNames))
+	for name in zoneNames {
+		mut body = ""
+		for i in 0..len(names) {
+			if names[i] == name && len(bodies[i]) >= 4 && bodies[i][0:4] == "TZif" {
+				body = bodies[i]
+			}
+		}
+		container += word(len(name)) + word(len(body)) + name + body
+	}
+	let stream = squash.Deflate(container, squash.Best)
+	if len(stream) > BUDGET {
+		say.Line("gen_tzdata: the packed stream is " + mint.Itoa(len(stream)) + " bytes, over the " + mint.Itoa(BUDGET) + " budget")
+		quarry.Exit(1)
+	}
+	mut chunks = []str{}
+	mut from = 0
+	for from < len(stream) {
+		mut end = from + CHUNK
+		if end > len(stream) {
+			end = len(stream)
+		}
+		chunks = append(chunks, escape(stream[from:end]))
+		from = end
+	}
+	mut out = []str{"// Code generated by tools/gen/gen_tzdata.tin from " + source + "; DO NOT EDIT.", "", "// Package tzdata embeds the IANA time zone database (public domain,", "// https://www.iana.org/time-zones) so that tide.LoadZone works in an image with no", "// /usr/share/zoneinfo: import it for its side effect, like Go's time/tzdata.", "//", "//\timport \"tide/tzdata\"", "//", "// Without it, LoadZone in an empty root fails with tide.ErrUnknownZone. With it, every name", "// in the database resolves from memory: the package installs the data on every core when its", "// globals are set up, before main, and LoadZone reads it after $ZONEINFO and the system", "// directories miss. The trade-off is size: the whole database is one DEFLATE stream of", "// " + mint.Itoa(len(stream) / 1024) + " KiB (" + mint.Itoa(len(zoneNames)) + " zones), and a static binary grows by that much plus the name table; the", "// generator (tools/gen/gen_tzdata.tin) enforces a 128 KiB budget on the stream. A program", "// that never imports this package pays nothing.", "package tzdata", "", "import \"tide\"", "", "// packedChunks hold the DEFLATE stream (RFC 1951) of the zone container: u32 count; per", "// zone, u32 name length, u32 data length, the name and the TZif bytes (RFC 8536). They are", "// chunks of one stream, no source line over 16 KiB."}
+	mut refs = []str{}
+	for i in 0..len(chunks) {
+		out = append(out, "const packed" + mint.Itoa(i) + " = \"" + chunks[i] + "\"")
+		refs = append(refs, "packed" + mint.Itoa(i))
+	}
+	for l in []str{"", "// packed is the whole stream: the chunks concatenated.", "let packed = " + twine.Join(refs, " + "), "", "// registered installs the database on this core when the package's globals are set up.", "let registered = tide.RegisterEmbedded(packed)", ""} {
+		out = append(out, l)
+	}
+	let text = twine.Join(out, "\n")
+	ci.Mkdirs(ci.Join(ci.Root(), "toolchain/std/tide/tzdata"))
+	ci.Write(ci.Join(ci.Root(), OUT), text)
+	say.Line(OUT + ": " + mint.Itoa(len(zoneNames)) + " zones, " + mint.Itoa(len(stream)) + " bytes packed, " + mint.Itoa(len(text)) + " bytes of source")
+}
