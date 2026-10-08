@@ -394,6 +394,12 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 	let tree = try index.WriteTree(mut loose, idx)
 	let head = try change.ReadHead(r.Ws.State())
 	let parent = try r.headCommit()
+	// no private key or token goes into a commit (tit guard)
+	mut guardFrom = object.NoId
+	if parent != nil {
+		guardFrom = try r.treeOf(parent)
+	}
+	try guardCommit(mut r, guardFrom, tree)
 	// a merge that stopped at conflicts: this commit finishes it, with both parents
 	let merging = try mergeHead(r)
 	let cfg = try r.config()

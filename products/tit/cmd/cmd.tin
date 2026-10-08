@@ -40,6 +40,9 @@ type Command enum {
 	Pull(ShareArgs)
 	Serve(ServeArgs)
 	Mirror(str)
+	Guard([]str)
+	Verify(str)
+	Bisect(BisectArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -170,6 +173,10 @@ commands:
   pull [remote]              fetch, then merge the remote's copy of the current branch
   serve [--addr host:port] [--public] [--allow file]
                              serve this repository over the tit protocol (keys: .tit/allowed-keys)
+  guard [paths]              search the tracked files (or these) for private keys and tokens; commit runs it too
+  verify [rev or range]      check every commit's signature against .tit-signers as of its parent
+  bisect --run <cmd> --good <rev> [--bad <rev>]
+                             find the first change where cmd fails (status 125: cannot test, skip it)
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -548,6 +555,46 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Serve(va)
 	}
+	if name == "guard" {
+		mut ps = []str{}
+		for a in rest {
+			ps = append(ps, a)
+		}
+		return g, Command.Guard(ps)
+	}
+	if name == "verify" {
+		mut rev = "HEAD"
+		if len(rest) == 1 {
+			rev = rest[0]
+		} else if len(rest) > 1 {
+			fail fault.Wrap(ErrUsage, "verify takes a revision or a range")
+		}
+		return g, Command.Verify(rev)
+	}
+	if name == "bisect" {
+		mut ba = BisectArgs{Run: "", Good: "", Bad: ""}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "--run" && k + 1 < len(rest) {
+				k += 1
+				ba.Run = rest[k]
+			} else if a == "--good" && k + 1 < len(rest) {
+				k += 1
+				ba.Good = rest[k]
+			} else if a == "--bad" && k + 1 < len(rest) {
+				k += 1
+				ba.Bad = rest[k]
+			} else {
+				fail fault.Wrap(ErrUsage, "bisect: unexpected {a}")
+			}
+			k += 1
+		}
+		if len(ba.Run) == 0 || len(ba.Good) == 0 {
+			fail fault.Wrap(ErrUsage, "bisect takes --run <command> and --good <rev> (and --bad <rev>, HEAD by default)")
+		}
+		return g, Command.Bisect(ba)
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -672,6 +719,9 @@ fn commandName(c Command) str {
 		Pull(_) => "pull"
 		Serve(_) => "serve"
 		Mirror(_) => "mirror"
+		Guard(_) => "guard"
+		Verify(_) => "verify"
+		Bisect(_) => "bisect"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -764,6 +814,15 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Mirror(path) => {
 			try doMirror(g, path, mut o)
+		}
+		Guard(ps) => {
+			try doGuard(g, ps, mut o)
+		}
+		Verify(rev) => {
+			try doVerify(g, rev, mut o)
+		}
+		Bisect(ba) => {
+			try doBisect(g, ba, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
