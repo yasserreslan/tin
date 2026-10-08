@@ -333,6 +333,15 @@ fn (ws mut Workspace) Perform(cmd i64) {
 			ws.LeftOpen = true
 			ws.Panel = PanelProject
 		}
+	} else if cmd == editor.CmdPaste && ws.Picker.Open {
+		ws.Picker.Query = pasteLine(ws.Picker.Query, appkit.ClipboardText())
+		ws.Picker.Sel = 0
+		ws.refilter()
+	} else if cmd == editor.CmdPaste && ws.Focus == FocusSearch {
+		ws.Search.Query = pasteLine(ws.Search.Query, appkit.ClipboardText())
+		ws.Search.Done = false
+	} else if cmd == editor.CmdPaste && ws.Focus == FocusReplace {
+		ws.Search.Replace = pasteLine(ws.Search.Replace, appkit.ClipboardText())
 	} else if cmd == editor.CmdPaste && ws.Focus == FocusTerminal {
 		ws.Pty.Type(appkit.ClipboardText())
 	} else if cmd == editor.CmdOpen {
