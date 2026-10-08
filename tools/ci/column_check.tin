@@ -1,0 +1,148 @@
+package main
+
+import "./ci"
+import "column"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare the column writer with Go's text/tabwriter.
+//
+// A generated corpus (a fixed seed, so both sides see the same cases) of tables — tabs and vertical tabs between cells, newlines
+// and form feeds between lines, HTML tags and entities, escaped segments, UTF-8 text, empty cells and single-cell lines — is run
+// through both writers in every flag combination and a spread of width, padding and padchar settings, and the flushed output is
+// compared byte for byte; some cases are written in several chunks.
+
+const SEED = 753
+
+fn hex(b []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// bytesOf turns a string's bytes into a byte slice.
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+// params is one "<flags> <minwidth> <tabwidth> <padding> <padchar>" prefix.
+fn params(rng dice.Rand, flags i64) str {
+	let padchars = []u8{' ', '.', '\t', 'x'}
+	let pad = padchars[rng.Range(0, len(padchars))]
+	return say.Fmt("%d %d %d %d %s", flags, rng.Range(0, 6), rng.Range(0, 8), rng.Range(0, 3), hex([]u8{pad}))
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	let flagsAll = []i64{0, column.FilterHTML, column.StripEscape, column.AlignRight, column.DiscardEmptyColumns, column.TabIndent, column.Debug,
+		column.FilterHTML | column.AlignRight, column.TabIndent | column.AlignRight, column.Debug | column.FilterHTML,
+		column.DiscardEmptyColumns | column.TabIndent, column.FilterHTML | column.StripEscape | column.DiscardEmptyColumns}
+	let fixed = []str{"a\tbb\tc\nlonger\tb\tdd\n", "aaaa\tbbb\td\naa\tb\tdd\na\t\naa\tcccc\tee\n", "a\tb\tc\n\td\n",
+		"1\t2\t3\t4\n11\t22\t33\t44\n", "x\v\ty\v\tz\n", "one cell\nonly\n", "<b>bold</b>\t1\n<i>x</i>\t22\n", "&amp;\tentity\n",
+		"\xffnot\there\xff\nreal\tcell\n", "é\t😀\nlonger\tx\n", "", "\n", "\t\n", "\f", "a\fbb\tc\n", "a\v\tb\nc\td\n",
+		"empty\t\tcells\n\t\tx\n", "  lead\tpad  \n"}
+	for s in fixed {
+		for f in flagsAll {
+			lines = append(lines, "T " + params(rng, f) + " " + hex(bytesOf(s)))
+		}
+	}
+	let cells = []str{"a", "bb", "longer", "", "x y", "é", "😀", "<b>", "&amp;", "e.txt", "\xffesc\taped\xff", "1234", "  two  ", "end"}
+	let terms = []str{"\t", "\t", "\t", "\v"}
+	for i in 0..250 {
+		mut s = ""
+		for k in 0..rng.Range(1, 4) {
+			mut line = ""
+			for c in 0..rng.Range(0, 4) {
+				line = line + cells[rng.Range(0, len(cells))] + terms[rng.Range(0, len(terms))]
+			}
+			if rng.Range(0, 2) == 0 {
+				line = line + cells[rng.Range(0, len(cells))]
+			}
+			s = s + line
+			if rng.Range(0, 8) == 0 {
+				s = s + "\f"
+			} else {
+				s = s + "\n"
+			}
+		}
+		lines = append(lines, "T " + params(rng, flagsAll[rng.Range(0, len(flagsAll))]) + " " + hex(bytesOf(s)))
+	}
+	for i in 0..60 {
+		mut s = ""
+		for k in 0..rng.Range(1, 5) {
+			s = s + cells[rng.Range(0, len(cells))] + "\t" + cells[rng.Range(0, len(cells))] + "\n"
+		}
+		let b = bytesOf(s)
+		mut line = "W " + params(rng, flagsAll[rng.Range(0, len(flagsAll))])
+		mut at = i64(0)
+		for at < i64(len(b)) {
+			mut stop = at + 1 + rng.Range(0, 7)
+			if stop > i64(len(b)) {
+				stop = i64(len(b))
+			}
+			line = line + " " + hex(b[at:stop])
+			at = stop
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/column")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "column-")
+	let tin = ci.Join(work, "column-tin")
+	ci.BuildTin("tools/ci/fixtures/column.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "column-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/column"}, ci.Root(), 300), "go build column")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "column: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + " (corpus line " + corpusLine(lines, i) + "):")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 6 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "column: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("column: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's text/tabwriter")
+}
+
+// corpusLine is the corpus line an output line came from (every case prints one line).
+fn corpusLine(lines []str, outIndex i64) str {
+	if outIndex < len(lines) {
+		let line = lines[outIndex]
+		if len(line) > 90 {
+			return line[0:90] + "..."
+		}
+		return line
+	}
+	return "?"
+}

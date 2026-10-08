@@ -79,6 +79,8 @@ jobs:
         run: sh tools/ci/tin.sh pack_check
       - name: Stream helpers against Go's io (a generated chunk corpus)
         run: sh tools/ci/tin.sh io_check
+      - name: Aligned columns against Go's text/tabwriter (every flag and padding)
+        run: sh tools/ci/tin.sh column_check
       - name: CRC-64 and LZW against Go's hash/crc64 and compress/lzw (a generated corpus)
         run: sh tools/ci/tin.sh hash_check
       - name: UTF-16 against Go's unicode/utf16 (a generated rune corpus)

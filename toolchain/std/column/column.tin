@@ -1,0 +1,374 @@
+// Package column aligns tabbed columns in text, like Go's text/tabwriter: the elastic tabstops algorithm.
+//
+// The writer treats its input as cells terminated by a horizontal ('\t') or vertical ('\v') tab and lines broken by a
+// newline ('\n') or form feed ('\f'). Tab-terminated cells in contiguous lines form a column, and the writer pads the cells so
+// that every cell of a column has the same width:
+//
+//	let text = try column.Format("a\tbb\tc\nlonger\tb\tdd\n", 0, 8, 1, ' ', 0)
+//	// text is "a      bb c\nlonger b  dd\n"
+//
+// NewWriter streams instead, into anything with Write (mut dyn io.Writer).
+//
+// A form feed acts like a newline and also ends every column block (a flush). Columns ended entirely by vertical tabs are
+// dropped when DiscardEmptyColumns is set. With FilterHTML, HTML tags are zero width and entities one; with tab padding
+// (padchar '\t') cells are left-aligned, as Go's tabwriter has it.
+package column
+
+import "glyph"
+import "io"
+import "say"
+
+// The flags, as Go's tabwriter: FilterHTML ignores HTML tags and treats entities as one rune, StripEscape strips the
+// Escape characters of escaped segments, AlignRight right-aligns cells, DiscardEmptyColumns drops columns that hold only
+// empty cells ended by vertical tabs, TabIndent pads leading empty cells with tabs, and Debug writes a '|' between columns
+// and a "---" line after a form feed.
+const FilterHTML = 1
+const StripEscape = 2
+const AlignRight = 4
+const DiscardEmptyColumns = 8
+const TabIndent = 16
+const Debug = 32
+
+// Escape brackets an escaped segment: text between two of them is passed through and counts one rune per byte for the
+// column width. 0xff cannot appear in valid UTF-8, which is why Go chose it.
+const Escape = 0xff
+
+// cell is one segment of text: its size in bytes, its width in runes, and whether a horizontal tab ended it.
+type cell struct {
+	size  i64
+	width i64
+	htab  bool
+}
+
+// Writer inserts padding around tab-terminated columns in what is written to it, and sends the result to put.
+type Writer struct {
+	put      dyn io.Writer
+	minwidth i64
+	tabwidth i64
+	padding  i64
+	padchar  u8
+	flags    i64
+	pad      []u8
+	buf      []u8
+	pos      i64
+	cell     cell
+	endChar  u8
+	lines    [][]cell
+	widths   []i64
+	err      fault
+}
+
+// NewWriter returns a writer that pads cells to at least minwidth (plus padding), counts a tab as tabwidth columns, uses
+// padchar for the padding, and follows the flags. Negative minwidth, tabwidth or padding fail.
+fn NewWriter(put dyn io.Writer, minwidth i64, tabwidth i64, padding i64, padchar u8, flags i64) !Writer {
+	if minwidth < 0 || tabwidth < 0 || padding < 0 {
+		fail say.Fault("column: negative minwidth, tabwidth or padding")
+	}
+	if padchar == '\t' {
+		flags &= ^AlignRight // tab padding enforces left alignment
+	}
+	mut pad = []u8{}
+	for i in 0..8 {
+		pad = append(pad, padchar)
+	}
+	mut w = Writer{put: put, minwidth: minwidth, tabwidth: tabwidth, padding: padding, padchar: padchar, flags: flags, pad: pad, buf: []u8{}, pos: 0, cell: cell{size: 0, width: 0, htab: false}, endChar: 0, lines: [][]cell{}, widths: []i64{}, err: nil}
+	w.reset()
+	return w
+}
+
+// StrSink collects what is written to it, for Format and for tests.
+type StrSink struct {
+	B []u8
+}
+
+// Write appends data to the sink.
+fn (s mut StrSink) Write(data []u8) !i64 {
+	s.B = append(s.B, data...)
+	return i64(len(data))
+}
+
+// Format aligns the columns of s with the same parameters as NewWriter and returns the result: the common one-shot use.
+fn Format(s str, minwidth i64, tabwidth i64, padding i64, padchar u8, flags i64) !str {
+	mut sink = StrSink{B: []u8{}}
+	mut w = try NewWriter(sink, minwidth, tabwidth, padding, padchar, flags)
+	try w.Write([]u8(s))
+	try w.Flush()
+	return str(sink.B)
+}
+
+// reset drops the buffered text and starts one empty line.
+fn (w mut Writer) reset() {
+	w.buf = w.buf[0:0]
+	w.pos = 0
+	w.cell = cell{size: 0, width: 0, htab: false}
+	w.endChar = 0
+	w.lines = w.lines[0:0]
+	w.widths = w.widths[0:0]
+	w.addLine(true)
+}
+
+// addLine appends an empty line.
+fn (w mut Writer) addLine(flushed bool) {
+	w.lines = append(w.lines, []cell{})
+}
+
+// out writes bytes to the output, remembering the first fault for Flush or Write to report.
+fn (w mut Writer) out(b []u8) {
+	if w.err != nil {
+		return
+	}
+	let n = w.put.Write(b) catch err {
+		w.err = err
+		return
+	}
+	if n != i64(len(b)) {
+		w.err = say.Fault("column: short write")
+	}
+}
+
+// writeN writes src as often as needed to write n bytes.
+fn (w mut Writer) writeN(src []u8, n i64) {
+	mut left = n
+	for left > i64(len(src)) {
+		w.out(src)
+		left -= i64(len(src))
+	}
+	w.out(src[0:left])
+}
+
+// writePadding writes the padding that brings a cell of textw width to cellw, with tabs instead of padchar when useTabs
+// is set (the leading empty cells of TabIndent) or the padchar is a tab.
+fn (w mut Writer) writePadding(textw i64, cellw i64, useTabs bool) {
+	if w.padchar == '\t' || useTabs {
+		if w.tabwidth == 0 {
+			return
+		}
+		let rounded = (cellw + w.tabwidth - 1) / w.tabwidth * w.tabwidth
+		let n = rounded - textw
+		if n < 0 {
+			return
+		}
+		let tabs = []u8{'\t', '\t', '\t', '\t', '\t', '\t', '\t', '\t'}
+		w.writeN(tabs, (n+w.tabwidth-1)/w.tabwidth)
+		return
+	}
+	w.writeN(w.pad, cellw-textw)
+}
+
+// writeLines writes the lines from line0 to line1 (only line0 to the last one carry a newline), starting at the buffer
+// position pos0, and returns the position after them.
+fn (w mut Writer) writeLines(pos0 i64, line0 i64, line1 i64) i64 {
+	mut pos = pos0
+	let vbar = []u8{'|'}
+	let newline = []u8{'\n'}
+	mut i = line0
+	for i < line1 {
+		let line = w.lines[i]
+		mut useTabs = w.flags&TabIndent != 0
+		mut j = i64(0)
+		for j < i64(len(line)) {
+			let c = line[j]
+			if j > 0 && w.flags&Debug != 0 {
+				w.out(vbar)
+			}
+			if c.size == 0 {
+				if j < i64(len(w.widths)) {
+					w.writePadding(c.width, w.widths[j], useTabs)
+				}
+			} else {
+				useTabs = false
+				if w.flags&AlignRight == 0 {
+					w.out(w.buf[pos:pos+c.size])
+					pos += c.size
+					if j < i64(len(w.widths)) {
+						w.writePadding(c.width, w.widths[j], false)
+					}
+				} else {
+					if j < i64(len(w.widths)) {
+						w.writePadding(c.width, w.widths[j], false)
+					}
+					w.out(w.buf[pos:pos+c.size])
+					pos += c.size
+				}
+			}
+			j += 1
+		}
+		if i+1 == i64(len(w.lines)) {
+			w.out(w.buf[pos : pos+w.cell.size])
+			pos += w.cell.size
+		} else {
+			w.out(newline)
+		}
+		i += 1
+	}
+	return pos
+}
+
+// format pads and writes the lines from line0 to line1, knowing the widths of the columns to the left, and returns the
+// buffer position after them.
+fn (w mut Writer) format(pos0 i64, line0 i64, line1 i64) i64 {
+	mut pos = pos0
+	let column = i64(len(w.widths))
+	mut start = line0
+	mut this = line0
+	for this < line1 {
+		let line = w.lines[this]
+		if column >= i64(len(line))-1 {
+			this += 1
+			continue
+		}
+		// This line has a cell in the column, so a column block begins here.
+		pos = w.writeLines(pos, start, this)
+		start = this
+		mut width = w.minwidth
+		mut discardable = true
+		for this < line1 {
+			let l = w.lines[this]
+			if column >= i64(len(l))-1 {
+				break
+			}
+			let c = l[column]
+			if c.width+w.padding > width {
+				width = c.width + w.padding
+			}
+			if c.width > 0 || c.htab {
+				discardable = false
+			}
+			this += 1
+		}
+		if discardable && w.flags&DiscardEmptyColumns != 0 {
+			width = 0
+		}
+		w.widths = append(w.widths, width)
+		pos = w.format(pos, start, this)
+		w.widths = w.widths[0 : i64(len(w.widths))-1]
+		start = this
+	}
+	return w.writeLines(pos, start, line1)
+}
+
+// append adds text to the current cell.
+fn (w mut Writer) append(text []u8) {
+	w.buf = append(w.buf, text...)
+	w.cell.size += i64(len(text))
+}
+
+// updateWidth counts the runes of the current cell up to the end of the buffer.
+fn (w mut Writer) updateWidth() {
+	w.cell.width += glyph.RuneCount(str(w.buf[w.pos:i64(len(w.buf))]))
+	w.pos = i64(len(w.buf))
+}
+
+// startEscape begins an escaped segment: Escape, an HTML tag or an HTML entity.
+fn (w mut Writer) startEscape(ch u8) {
+	if ch == Escape {
+		w.endChar = Escape
+	} else if ch == '<' {
+		w.endChar = '>'
+	} else if ch == '&' {
+		w.endChar = ';'
+	}
+}
+
+// endEscape ends an escaped segment: an HTML tag counts no width, an entity one rune, and other text its runes without the
+// two Escape characters.
+fn (w mut Writer) endEscape() {
+	if w.endChar == Escape {
+		w.updateWidth()
+		if w.flags&StripEscape == 0 {
+			w.cell.width -= 2
+		}
+	} else if w.endChar == ';' {
+		w.cell.width += 1
+	}
+	w.pos = i64(len(w.buf))
+	w.endChar = 0
+}
+
+// terminateCell ends the current cell and returns the number of cells in the line.
+fn (w mut Writer) terminateCell(htab bool) i64 {
+	w.cell.htab = htab
+	let last = i64(len(w.lines)) - 1
+	w.lines[last] = append(w.lines[last], w.cell)
+	w.cell = cell{size: 0, width: 0, htab: false}
+	return i64(len(w.lines[last]))
+}
+
+// Flush writes the buffered text, padding the columns; an incomplete escape at the end counts as complete.
+fn (w mut Writer) Flush() ! {
+	w.flush()
+	if w.err != nil {
+		let e = w.err
+		w.err = nil
+		fail e
+	}
+}
+
+// flush formats and writes everything buffered.
+fn (w mut Writer) flush() {
+	if w.cell.size > 0 {
+		if w.endChar != 0 {
+			w.endEscape()
+		}
+		w.terminateCell(false)
+	}
+	w.format(0, 0, i64(len(w.lines)))
+	w.reset()
+}
+
+// Write buffers the cells and lines of buf: tabs and vertical tabs end a cell, newlines and form feeds end a line (and a
+// form feed flushes), and a line with a single cell is flushed at once since it cannot affect the following lines.
+fn (w mut Writer) Write(buf []u8) !i64 {
+	mut n = i64(0)
+	mut i = i64(0)
+	for i < i64(len(buf)) {
+		let ch = buf[i]
+		if w.endChar == 0 {
+			if ch == '\t' || ch == '\v' || ch == '\n' || ch == '\f' {
+				w.append(buf[n:i])
+				w.updateWidth()
+				n = i + 1
+				let ncells = w.terminateCell(ch == '\t')
+				if ch == '\n' || ch == '\f' {
+					w.addLine(ch == '\f')
+					if ch == '\f' || ncells == 1 {
+						w.flush()
+						if ch == '\f' && w.flags&Debug != 0 {
+							let hbar = []u8{'-', '-', '-', '\n'}
+							w.out(hbar)
+						}
+					}
+				}
+			} else if ch == Escape {
+				w.append(buf[n:i])
+				w.updateWidth()
+				n = i
+				if w.flags&StripEscape != 0 {
+					n += 1
+				}
+				w.startEscape(Escape)
+			} else if (ch == '<' || ch == '&') && w.flags&FilterHTML != 0 {
+				w.append(buf[n:i])
+				w.updateWidth()
+				n = i
+				w.startEscape(ch)
+			}
+		} else if ch == w.endChar {
+			mut j = i + 1
+			if ch == Escape && w.flags&StripEscape != 0 {
+				j = i
+			}
+			w.append(buf[n:j])
+			n = i + 1
+			w.endEscape()
+		}
+		i += 1
+	}
+	w.append(buf[n:])
+	if w.err != nil {
+		let e = w.err
+		w.err = nil
+		fail e
+	}
+	return i64(len(buf))
+}
