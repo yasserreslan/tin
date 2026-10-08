@@ -1,0 +1,1 @@
+toolchain/tests/v2/let_no_value_bad.tin:13:2: error E234 VALUE_COUNT: c is declared from a call that gives no value (only a fault): drop "let c ="

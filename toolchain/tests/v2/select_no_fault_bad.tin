@@ -1,0 +1,14 @@
+package main
+
+import "lane"
+import "say"
+
+fn main() {
+	mut l = lane.New[i64](1)
+	l.TrySend(1)
+	select {
+		let x = l.Recv() => {
+			say.Line(x)
+		}
+	}
+}

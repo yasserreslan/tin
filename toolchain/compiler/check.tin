@@ -5319,6 +5319,15 @@ fn sel_gated(pos i64, r str, i i64, stmt i64) i64 {
 
 fn lower_select(s i64) {
 	let pos = cast(Node, s).pos
+	let sfrs = cast(Fn, ck_fn).rtypes
+	if len(sfrs) == 0 || kind_of(cast(Ty, sfrs[len(sfrs) - 1])) != K_ERROR {
+		// The select itself ends with a fault when the boundary is cancelled or its deadline passes, and a lane
+		// receive or a task wait in an arm fails like any other: report that once, not the try the lowering
+		// writes (#821). The arms are not checked, so their names do not follow as undefined.
+		err_code_at(pos, "E411 NO_FAULT_RESULT", "select can fail (a deadline, a cancellation, a lane receive or a task wait in an arm): the enclosing function must return a fault, so write ! after its parameters (fn name(...) !)")
+		replace_node(s, empty_block(pos))
+		return
+	}
 	sel_seq = sel_seq + 1
 	let arms = cast(SelectStmt, s).arms
 	let n = len(arms)
@@ -7938,7 +7947,14 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 		}
 	} else if mode == 1 {
 		if nvals != 1 {
-			err_code_at(pos, "E234 VALUE_COUNT", "try here needs a call with exactly one result besides the fault")
+			if nvals == 0 && handler != 0 && cast(LetStmt, s).name != "_" {
+				// let c = bad() catch ... where bad() ! gives no value: say so, and keep c declared so that its
+				// uses are not reported again as undefined (#821).
+				err_code_at(pos, "E234 VALUE_COUNT", cast(LetStmt, s).name + " is declared from a call that gives no value (only a fault): drop \"let " + cast(LetStmt, s).name + " =\"")
+				declare_local(pos, cast(LetStmt, s).name, ty_int)
+			} else {
+				err_code_at(pos, "E234 VALUE_COUNT", "try here needs a call with exactly one result besides the fault")
+			}
 			return
 		}
 		let vs = temps[0]

@@ -182,6 +182,7 @@ fn rg_assign_sym(s Sym, bits i64, pos i64) {
 }
 
 fn rg_stmt(s i64) {
+	rg_cell_note = -1
 	let k = cast(Node, s).kind
 	if k == ST_BLOCK {
 		rg_stmts(cast(Block, s).stmts)
@@ -517,6 +518,8 @@ fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname str) {
 	if (c & (RG_INGOT | RG_UNK)) != 0 && rg_report != 0 {
 		if len(gname) != 0 {
 			err_code_quoted(pos, "E310 REQUEST_ESCAPE", "request memory stored into global ", gname, ", which outlives the request: wrap the value in keep()")
+		} else if cast(Fn, rg_fn).escapes != 0 && rg_cell_note >= 0 && cast(i64, cast(Fn, rg_fn).captures[rg_cell_note]) != 0 {
+			err_code_quoted(pos, "E310 REQUEST_ESCAPE", "request memory stored into ", cast(Fn, rg_fn).captures[rg_cell_note].name, ", a captured variable of a closure that may outlive the request (it is not passed only to functions that call it, and keep() copies its variables into long-lived memory): wrap the value in keep()")
 		} else {
 			err_code_at(pos, "E310 REQUEST_ESCAPE", "request memory stored into long-lived memory (it may be reachable from a global): wrap the value in keep()")
 		}
@@ -636,12 +639,15 @@ fn rg_cell_index(e i64) i64 {
 	return cast(MemExpr, e).off / 8 - 2
 }
 
+shared mut rg_cell_note i64 = -1 // the captured variable of a closure that may be kept read last (E310 names it)
+
 // rg_cell_bits is what captured variable i may hold. A closure that is only passed to functions
 // that call it (sift.Each and the like) lives no longer than its parent's frame: the variable
 // holds what the parent and such closures put there. Any other closure may be kept, which copies
 // its variables into long-lived memory, so their origin is unknown.
 fn rg_cell_bits(i i64) i64 {
 	if cast(Fn, rg_fn).escapes != 0 {
+		rg_cell_note = i
 		return RG_UNK | RG_EMB
 	}
 	let os = cast(Fn, rg_fn).captures[i]

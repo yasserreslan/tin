@@ -1,0 +1,1 @@
+toolchain/tests/v2/select_no_fault_bad.tin:9:2: error E411 NO_FAULT_RESULT: select can fail (a deadline, a cancellation, a lane receive or a task wait in an arm): the enclosing function must return a fault, so write ! after its parameters (fn name(...) !)

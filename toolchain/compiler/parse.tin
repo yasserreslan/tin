@@ -603,8 +603,17 @@ fn parse_type_decl() {
 	if p_is("[") != 0 && p_peek2().kind == TK_IDENT {
 		let save = p_i
 		p_next()
-		p_next()
+		let pname = cast(Token, p_next())
 		let generic = i64(p_is("]") == 0)
+		if generic == 0 {
+			// type Page[T] struct { ... }: a name where an array type has its length, then a type body. A type
+			// parameter needs its constraint (the array reading would only report T as undefined, and then
+			// everything that uses Page).
+			p_next()
+			if p_is("struct") != 0 || p_word("enum") != 0 || p_word("value") != 0 {
+				p_fail_code(pname.pos, "E047 TYPE_PARAM_CONSTRAINT", "type parameter " + pname.text + " needs a constraint: write [" + pname.text + " constraints.Any]")
+			}
+		}
 		p_i = save
 		if generic != 0 {
 			d.tparams = cast([]str, cast(i64, []i64{}))

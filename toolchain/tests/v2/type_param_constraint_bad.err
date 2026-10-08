@@ -1,0 +1,1 @@
+toolchain/tests/v2/type_param_constraint_bad.tin:5:11: error E047 TYPE_PARAM_CONSTRAINT: type parameter T needs a constraint: write [T constraints.Any]

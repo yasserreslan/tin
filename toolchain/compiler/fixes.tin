@@ -23,6 +23,7 @@ fn fix_table() str {
 		"E044\tgive the last field names their type (`Rect(x f64, w, h f64)`), or list only types (`Rect(f64, f64, f64)`).\n" +
 		"E045\tlist the variants (`type Shape enum {{ Circle(r f64), Empty }}`), or use a struct.\n" +
 		"E046\tname the parameters (`fn first[T constraints.Any](xs []T) T`), or leave the brackets out.\n" +
+		"E047\t`type Page[T constraints.Any] struct {{ ... }}` (and `import \"constraints\"`).\n" +
 		"E050\tput the label on the loop it names, or remove it.\n" +
 		"E051\tadd the arms to wait on, or remove the `select`.\n" +
 		"E052\tbind one name. To number the elements of a slice, range over the slice: `for i, x in xs`. To count down, count up and compute the value: `for i in 0..n {{ let j = n - 1 - i }}`.\n" +
