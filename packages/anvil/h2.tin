@@ -1102,13 +1102,11 @@ fn h2_field(np i64, nn i64, vp i64, vn i64, vok bool, kind i64) {
 	hfKind = k
 	hfVok = vok
 	if !vok {
-		// A value holds no NUL, CR or LF (RFC 9113 8.2.1): a line of its own could follow it.
-		for i in 0..vn {
-			let b = load8(vp + i)
-			if b <= 13 && (b == 0 || b == 10 || b == 13) {
-				hfBad = true
-				return
-			}
+		// A value holds no NUL, CR or LF (RFC 9113 8.2.1): a line of its own could follow it. Nor
+		// any other control byte but HTAB, or DEL, as on HTTP/1.1 (RFC 9110 5.5, #748).
+		if ctl_in(vp, vn) {
+			hfBad = true
+			return
 		}
 		hfVok = true
 	}
@@ -1131,6 +1129,10 @@ fn h2_field(np i64, nn i64, vp i64, vn i64, vok bool, kind i64) {
 			hfP = off
 			hfPn = vn
 		} else if k == kdAuthority {
+			if !host_ok(vp, vn) {
+				hfBad = true // uri-host [":" port], as a Host field (#748)
+				return
+			}
 			hfA = off
 			hfAn = vn
 		}
@@ -1163,6 +1165,10 @@ fn h2_field(np i64, nn i64, vp i64, vn i64, vok bool, kind i64) {
 				h2CkLen += vn
 				return
 			} else if k == kdHost {
+				if !host_ok(vp, vn) {
+					hfBad = true
+					return
+				}
 				hfHost = true
 			} else if k == kdExpect && name_is(vp, vn, "100-continue") {
 				hfExpect = true

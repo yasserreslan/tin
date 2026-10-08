@@ -1295,17 +1295,22 @@ fn serve_one(c i64, p i64, n i64) i64 {
 		}
 		// A CR inside a field line (only the one before LF is allowed) or a NUL is rejected: a
 		// proxy that ends lines at a bare CR would frame the request differently (RFC 9112 2.2).
+		// So is every other control byte but HTAB, and DEL (RFC 9110 5.5, #748), as Go does.
 		mut vl = l
 		if vl > 0 && load8(h+vl-1) == '\r' {
 			vl -= 1
 		}
-		if memchr(h, '\r', vl) != 0 || memchr(h, 0, vl) != 0 {
+		if ctl_in(h, vl) {
 			bad(c, 400)
 			return -1
 		}
 		let f = lower(load8(h))
 		if f == 'h' && kn == 4 && name_is(h, kn, "host") {
 			hosts += 1
+			if !host_ok(h+kn+1, vl-kn-1) {
+				bad(c, 400)
+				return -1
+			}
 		} else if f == 'e' && kn == 6 && name_is(h, kn, "expect") {
 			mut j = kn + 1
 			for j < vl && (load8(h+j) == ' ' || load8(h+j) == '\t') {
@@ -3199,16 +3204,17 @@ fn (w mut Out) Status(code i64) {
 	w.code = code
 }
 
-// Type sets the Content-Type header. CR, LF and NUL in t become spaces, so a value taken from
-// the request cannot add header lines.
+// Type sets the Content-Type header. Control bytes in t (CR, LF, NUL and the others but HTAB, and
+// DEL) become spaces, so a value taken from the request cannot add header lines.
 fn (w mut Out) Type(t str) {
 	w.ctype = field_value(t)
 }
 
 // Head adds a response header. A name that is not an HTTP token is ignored, and so are
-// Content-Length, Transfer-Encoding and Connection: anvil writes the framing itself. CR, LF and
-// NUL in the value become spaces, so a value taken from the request cannot add header lines or
-// a body (response splitting), as Go's net/http does.
+// Content-Length, Transfer-Encoding and Connection: anvil writes the framing itself. Control
+// bytes in the value (CR, LF, NUL and the others but HTAB, and DEL) become spaces, so a value
+// taken from the request cannot add header lines or a body (response splitting), as Go's net/http
+// does, nor hand a client a value RFC 9110 5.5 forbids (#748).
 fn (w mut Out) Head(k str, v str) {
 	if !is_token(k) || is_framing(k) {
 		return
@@ -3217,7 +3223,7 @@ fn (w mut Out) Head(k str, v str) {
 	w.extra = append(w.extra, ": "...)
 	for i in 0..len(v) {
 		mut c = v[i]
-		if c == '\r' || c == '\n' || c == 0 {
+		if is_ctl(c) {
 			c = ' '
 		}
 		w.extra = append(w.extra, c)
@@ -3229,7 +3235,7 @@ fn (w mut Out) Head(k str, v str) {
 // stream (gRPC's grpc-status and grpc-message), on HTTP/1.1 after the last chunk of a chunked
 // stream (w.Stream() without Length). A response with a Content-Length cannot carry trailers in
 // HTTP/1.1: they are dropped there. Like Head, a name that is not a token and the framing fields
-// are ignored, and CR, LF and NUL in the value become spaces.
+// are ignored, and control bytes in the value become spaces.
 fn (w mut Out) Trailer(k str, v str) {
 	if !is_token(k) || is_framing(k) {
 		return
@@ -3242,7 +3248,7 @@ fn (w mut Out) Trailer(k str, v str) {
 	t = append(t, ": "...)
 	for i in 0..len(v) {
 		mut c = v[i]
-		if c == '\r' || c == '\n' || c == 0 {
+		if is_ctl(c) {
 			c = ' '
 		}
 		t = append(t, c)
@@ -3250,27 +3256,75 @@ fn (w mut Out) Trailer(k str, v str) {
 	t = append(t, "\r\n"...)
 }
 
-// field_value is s with CR, LF and NUL replaced by spaces (s itself when it has none).
+// field_value is s with its control bytes (every byte below 0x20 but HTAB, and DEL) replaced by
+// spaces, s itself when it has none (#748).
 fn field_value(s str) str {
-	mut bad = false
-	for i in 0..len(s) {
-		if s[i] == '\r' || s[i] == '\n' || s[i] == 0 {
-			bad = true
-			break
-		}
-	}
-	if !bad {
+	if !ctl_in(cast(i64, s)+8, len(s)) {
 		return s
 	}
 	let b = make([]u8, len(s))
 	for i in 0..len(s) {
 		mut c = s[i]
-		if c == '\r' || c == '\n' || c == 0 {
+		if is_ctl(c) {
 			c = ' '
 		}
 		b[i] = c
 	}
 	return str(b)
+}
+
+// is_ctl reports a control byte a field value may not hold: below 0x20 but HTAB, or DEL
+// (RFC 9110 5.5).
+fn is_ctl(b u8) bool {
+	return (b < 0x20 && b != '\t') || b == 0x7f
+}
+
+// ctl_in reports whether the n bytes at p hold a control byte (is_ctl). Eight bytes are tested at
+// once: a word with no byte below 0x20 and none equal to 0x7f is skipped, any other is looked at
+// byte by byte (an HTAB is allowed).
+fn ctl_in(p i64, n i64) bool {
+	mut i = 0
+	for i+8 <= n {
+		let x = u64(__ld(p+i, 3))
+		let y = x ^ 0x7f7f7f7f7f7f7f7f
+		if ((x -% 0x2020202020202020) & ~x & 0x8080808080808080) != 0 || ((y -% 0x0101010101010101) & ~y & 0x8080808080808080) != 0 {
+			for k in 0..8 {
+				if is_ctl(u8(load8(p+i+k))) {
+					return true
+				}
+			}
+		}
+		i += 8
+	}
+	for i < n {
+		if is_ctl(u8(load8(p+i))) {
+			return true
+		}
+		i += 1
+	}
+	return false
+}
+
+// host_ok reports whether the n bytes at p, without the whitespace around them, are a Host value:
+// uri-host [":" port] (RFC 9110 7.2, RFC 3986 3.2.2), with the bytes Go's ValidHostHeader allows:
+// letters, digits and !$%&'()*+,-.:;=[]_~ (an empty value is allowed, #748).
+fn host_ok(p i64, n i64) bool {
+	mut a = 0
+	mut e = n
+	for a < e && (load8(p+a) == ' ' || load8(p+a) == '\t') {
+		a += 1
+	}
+	for e > a && (load8(p+e-1) == ' ' || load8(p+e-1) == '\t') {
+		e -= 1
+	}
+	for i in a..e {
+		let b = load8(p+i)
+		let alnum = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+		if !alnum && b != '!' && b != '$' && b != '%' && b != '&' && b != '\'' && b != '(' && b != ')' && b != '*' && b != '+' && b != ',' && b != '-' && b != '.' && b != ':' && b != ';' && b != '=' && b != '[' && b != ']' && b != '_' && b != '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // is_framing reports whether header k is one anvil computes for every response.

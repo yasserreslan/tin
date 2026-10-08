@@ -222,18 +222,28 @@ def check_huffman(port):
     alphabet = [b for b in range(1, 256) if b not in (10, 13)]
     c = w.Conn(port)
     sid = 1
+    malformed = 0
     for i in range(400):
         n = rnd.randrange(0, 200)
         v = bytes(rnd.choice(alphabet) for _ in range(n)).strip(b' \t')
+        # A value whose fields mostly avoid control bytes, so most of them are served (#748).
+        if i % 2 == 0:
+            v = bytes(b for b in v if b >= 0x20 or b == 9).replace(b'\x7f', b'').strip(b' \t')
         block = (w.encode([(':method', 'GET'), (':scheme', 'http'), (':path', '/echo'), (':authority', 'x')]) +
                  b'\x00' + w.enc_huff('x-test') + w.enc_huff(v))
         c.send(w.frame(w.HEADERS, w.END_HEADERS | w.END_STREAM, sid, block))
         r = c.responses([sid])[sid]
-        got = [l for l in r['body'].split(b'\n') if l.startswith(b'x-test=')][0][7:]
-        assert got == v, (i, v, got)
+        if any((b < 0x20 and b != 9) or b == 0x7f for b in v):
+            # Decoded, then refused: a control byte but HTAB, or DEL, makes it malformed (#748).
+            assert r['reset'] == 1 and r['headers'] is None, (i, v, r)
+            malformed += 1
+        else:
+            got = [l for l in r['body'].split(b'\n') if l.startswith(b'x-test=')][0][7:]
+            assert got == v, (i, v, got)
         sid += 2
     c.close()
-    print('PASS Huffman: 400 values of every byte but CR and LF decode exactly')
+    assert 100 < malformed < 300, malformed
+    print('PASS Huffman: 400 values of every byte but CR and LF decode exactly; the %d with a control byte are malformed' % malformed)
 
 
 def check_multiplexing(port):
@@ -390,6 +400,24 @@ def check_limits(port):
     assert w.status(c.responses([5])[5]) == '200'
     c.close()
     print('PASS limits: 413 past TIN_MAX_BODY, 431 past 64 KiB of headers (sent in CONTINUATION frames); the connection goes on')
+
+
+def check_control_bytes(port):
+    """#748: a field value with a control byte but HTAB, or DEL, and an :authority or host that is
+    not uri-host [":" port], make the request malformed (RST_STREAM PROTOCOL_ERROR), as on HTTP/1.1."""
+    c = w.Conn(port)
+    c.request(1, 'GET', '/', [('x-foo', 'a\x01b\x7f')])
+    c.request(3, 'GET', '/', [('x-foo', 'ab\x7f')])
+    c.request(5, 'GET', '/', [('host', 'a b')])
+    c.send(w.headers_frames(7, w.encode([(':method', 'GET'), (':scheme', 'http'), (':path', '/'),
+                                         (':authority', 'a/b')]), True))
+    c.request(9, 'GET', '/', [('x-foo', 'a\tb')])
+    r = c.responses([1, 3, 5, 7, 9])
+    for sid in (1, 3, 5, 7):
+        assert r[sid]['reset'] == 1 and r[sid]['headers'] is None, (sid, r[sid])
+    assert w.status(r[9]) == '200', r[9]
+    c.close()
+    print('PASS control bytes: x-foo with \\x01 or DEL, host "a b" and :authority "a/b" are reset as malformed; an HTAB is fine (#748)')
 
 
 def check_responses(port, files):
@@ -709,6 +737,7 @@ def main():
         check_cancels(srv)
         check_write_timeout(srv)
         check_limits(srv.port)
+        check_control_bytes(srv.port)
         check_responses(srv.port, files)
         check_header_table_size(srv.port)
         check_upgrade(srv.port)
