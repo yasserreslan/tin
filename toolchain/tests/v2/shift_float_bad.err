@@ -1,0 +1,1 @@
+toolchain/tests/v2/shift_float_bad.tin:7:17: error E236 OPERATOR: cannot shift f64

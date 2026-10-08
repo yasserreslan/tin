@@ -820,7 +820,7 @@ fn unify(l Node, r i64, want i64) i64 {
 		}
 		lt = chk(l, fw)
 		rt = chk(cast(Node, r), fw)
-	} else if is_untyped_lit(cast(i64, l)) == 0 || is_untyped_lit(r) != 0 {
+	} else if (is_untyped_lit(cast(i64, l)) == 0 && shifts_untyped(cast(i64, l)) == 0) || is_untyped_lit(r) != 0 {
 		lt = chk(l, want)
 		rt = chk(cast(Node, r), default_or(lt, want))
 	} else {
@@ -854,6 +854,16 @@ fn unify(l Node, r i64, want i64) i64 {
 		err_code_types(l.pos, "E230 TYPE_MISMATCH", "mismatched types ", lt, " and ", rt)
 	}
 	return lt
+}
+
+// shifts_untyped reports a non-constant shift of an untyped constant (1 << n): it takes its type from the other
+// operand of the binary operation it stands in, and from the context only when it stands alone, as in Go (#820).
+fn shifts_untyped(e i64) i64 {
+	if cast(Node, e).kind != EX_BINARY {
+		return 0
+	}
+	let op = cast(Binary, e).op
+	return i64((op == "<<" || op == ">>") && is_untyped_lit(cast(Binary, e).l) != 0)
 }
 
 fn default_or(t i64, want i64) i64 {

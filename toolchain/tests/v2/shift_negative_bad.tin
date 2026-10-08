@@ -1,0 +1,8 @@
+package main
+
+import "say"
+
+fn main() {
+	let s = 3
+	say.Line(u64(-29 >> u64(s)))
+}

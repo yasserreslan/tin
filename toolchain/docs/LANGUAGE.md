@@ -942,7 +942,10 @@ angle brackets, so a comparison never depends on what its operands are.
 - `>>` is arithmetic for signed types and logical for unsigned types. A shift count must
   be between 0 and the width of the shifted value less one: `u8(1) << 8` panics (a constant
   count out of range is E224), and so does a negative count. Bits shifted out are dropped:
-  a shift is a bit operation, so `u8(0x81) << 1` is 2.
+  a shift is a bit operation, so `u8(0x81) << 1` is 2. An untyped constant on the left of a shift whose count is
+  not constant takes the type of the other operand of the operation around it, as in Go: in `n | (1 << c)` the
+  `1` has the type of `n`; only a shift that stands alone takes its type from the conversion or declaration
+  around it (`f64(1 << c)` is an error, and so is `u64(-1 >> c)`).
 - The compiler removes a check that cannot fire: the counter of `for i in 0..n` steps up
   below its bound, and after inlining, ranges known from constants, lengths, narrow types,
   locals assigned once and loop counters prove that `i * 31` or `i + j + 1` on such values

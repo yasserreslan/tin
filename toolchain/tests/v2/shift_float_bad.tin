@@ -1,0 +1,8 @@
+package main
+
+import "say"
+
+fn main() {
+	let s = 3
+	say.Line(f64(1 << u64(s)))
+}

@@ -1,0 +1,1 @@
+toolchain/tests/v2/shift_negative_bad.tin:7:15: error E223 CONST_OVERFLOW: constant -29 overflows u64
