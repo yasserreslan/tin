@@ -27,6 +27,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [trail](#trail) | paths (path, path/filepath on Unix) |
 | [lever](#lever) | command-line flags (flag) |
+| [tty](#tty) | terminals: size, raw mode, colour (golang.org/x/term) |
 | [tide](#tide) | time (time) |
 | [dice](#dice) | random numbers (math/rand) |
 | [sift](#sift) | sorting, searching and the generic slice functions (sort, slices, cmp) |
@@ -925,6 +926,22 @@ Package lever parses command-line flags (like Go's flag): register handles, Pars
 - `Set(name str, value str) !`: Set assigns value to the flag named name as if it were given on the command line.
 - `Parse(args []str) !`: Parse reads flags from args (without the program name) until the first non-flag or "--"; the rest is kept for Rest().
 - `Usage() str`: Usage returns the flags sorted by name, each with its value type, help and non-zero default, formatted exactly like Go's PrintDefaults.
+
+## tty
+
+Package tty is the terminal for command line programs: whether a descriptor is a terminal, its size, raw mode with a State that restores it, a pseudo-terminal pair for tests, and colour that turns itself off when the output is not a terminal, when NO_COLOR is set or when TERM is dumb.
+
+- `type State struct`: State is a terminal's mode before Raw changed it; Close (or Restore) puts it back, so `use st = tty.Raw(0)` restores the terminal on every way out of the function.
+- `IsTerminal(fd i64) bool`: IsTerminal reports whether fd is a terminal.
+- `Size(fd i64) !(i64, i64)`: Size is the terminal's width and height in characters.
+- `Raw(fd i64) !State`: Raw puts the terminal into raw mode (no echo, no line editing, no signals from keys, bytes as typed) and returns the state to restore.
+- `Restore(st State) !`: Restore puts the terminal back as it was before Raw.
+- `(st State) Close() !`: Close restores the terminal (for `use`).
+- `IsRaw(fd i64) bool`: IsRaw reports whether the terminal at fd has echo and line editing off.
+- `OpenPty() !(i64, i64)`: OpenPty opens a pseudo-terminal pair: the controlling side and the terminal side, as descriptors.
+- `CloseFd(fd i64)`: CloseFd closes a descriptor OpenPty gave.
+- `Colors(fd i64) bool`: Colors reports whether colour should be written to fd: it is a terminal, NO_COLOR is unset and TERM is not dumb.
+- `Paint(on bool, code str, s str) str`: Paint wraps s in the SGR code (such as "1" bold, "31" red, "32" green, "2" dim) when on is true, else returns s.
 
 ## tide
 
