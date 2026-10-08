@@ -278,6 +278,7 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 		ed.markCell(th, textX, y, mr, mc, mut scene)
 	}
 	ed.scrollbar(th, x, y, w, h, mut scene)
+	ed.promptBox(th, x, y, w, mut scene)
 	ed.popups(th, x, y, w, h, mut scene)
 	render.Unclip(mut scene)
 }
@@ -518,4 +519,72 @@ fn (ed Editor) matchBracket() (i64, i64, bool) {
 		}
 	}
 	return 0, 0, false
+}
+
+// matchCount is how many times the find text occurs in the buffer (counting stops at 9999).
+fn (ed Editor) matchCount(needle str) i64 {
+	if len(needle) == 0 {
+		return 0
+	}
+	mut n = 0
+	for line in ed.Buf.Lines {
+		mut from = 0
+		for from < len(line) {
+			let at = twine.Index(line[from:], needle)
+			if at < 0 {
+				break
+			}
+			n += 1
+			from = from + at + len(needle)
+		}
+		if n >= 9999 {
+			return n
+		}
+	}
+	return n
+}
+
+// promptBox draws the find, replace or go-to-line box in the corner of the text area while one is open.
+fn (ed Editor) promptBox(th theme.Theme, x f64, y f64, w f64, scene mut metal.Scene) {
+	if ed.Mode == modeEdit {
+		return
+	}
+	mut label = "Find"
+	mut text = ed.Prompt
+	mut note = ""
+	if ed.Mode == modeGoto {
+		label = "Go to line"
+	} else if ed.Mode == modeReplace {
+		label = "Replace " + ed.Needle + " with"
+	}
+	let needle = ed.activeNeedle()
+	if len(needle) > 0 {
+		let n = ed.matchCount(needle)
+		if n == 0 {
+			note = "no results"
+		} else {
+			note = mint.Itoa(n) + " results"
+		}
+	}
+	let boxW = min(520.0, w - 20.0)
+	let bx = x + w - boxW - 14.0
+	let by = y + 8.0
+	render.FillRound(mut scene, bx, by, boxW, 34.0, 6.0, th.Panel)
+	render.Stroke(mut scene, bx, by, boxW, 34.0, 6.0, 1.0, th.Accent)
+	let lh = render.LineHeight(render.FontUI)
+	let ty = by + (34.0 - lh) / 2.0
+	render.Pen(mut scene, render.FontUI, bx + 12.0, ty, label, th.Faint)
+	let lx = bx + 12.0 + render.Width(render.FontUI, label) + 10.0
+	let end = render.Pen(mut scene, render.FontUI, lx, ty, text, th.Text)
+	if ed.Blink {
+		render.Fill(mut scene, end + 1.0, by + 8.0, 1.5, 18.0, th.Cursor)
+	}
+	if len(note) > 0 {
+		mut color = th.Muted
+		if note == "no results" {
+			color = th.Error
+		}
+		let nw = render.Width(render.FontSmall, note)
+		render.Pen(mut scene, render.FontSmall, bx + boxW - nw - 12.0, by + (34.0 - render.LineHeight(render.FontSmall)) / 2.0, note, color)
+	}
 }

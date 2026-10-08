@@ -814,14 +814,14 @@ fn (ed Editor) Cleanup() {
 // StatusLine is what the status bar says on the left: the find, replace or go-to-line prompt while one is open, otherwise the last
 // message (empty when there is none).
 fn (ed Editor) StatusLine() str {
-	if ed.Mode == modeFind {
-		return "Find: " + ed.Prompt + "_"
-	}
 	if ed.Mode == modeReplace {
-		return "Find: " + ed.Needle + "   Replace with: " + ed.Prompt + "_   (Return replaces, Cmd+Return all, Tab switches)"
+		return "Return replaces, Cmd+Return replaces all, Tab switches to the search text"
+	}
+	if ed.Mode == modeFind {
+		return "Return finds the next, Shift+Cmd+G the previous, Escape closes"
 	}
 	if ed.Mode == modeGoto {
-		return "Go to line: " + ed.Prompt + "_"
+		return "Type a line number and press Return"
 	}
 	return ed.Message
 }
