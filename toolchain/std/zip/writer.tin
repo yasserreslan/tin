@@ -1,0 +1,408 @@
+package zip
+
+import "io"
+import "squash"
+import "stamp"
+
+// Writing (#751), Go's writer.go: each entry's local header, its bytes and a data descriptor with the CRC-32 and
+// sizes, then at Close the central directory, with ZIP64 extra fields for any size or offset that reaches 4 GiB - 1
+// and the ZIP64 end records when one was needed or there are 65535 entries or more. Deflate uses squash at Go's
+// level 5; an entry is compressed in one piece up to 256 KiB and streamed past that, so memory stays bounded.
+
+const entryChunk = 262144
+const writeLevel = 5
+
+// entry is one central directory record to write at Close.
+type entry struct {
+	h      FileHeader
+	offset u64
+	raw    bool
+}
+
+// sink passes the archive's bytes to the writer below and counts them.
+type sink[W io.Writer] struct {
+	out   W
+	count i64
+}
+
+fn (s mut sink[W]) Write(data []u8) !i64 {
+	let n = try s.out.Write(data)
+	s.count += n
+	return n
+}
+
+// Writer writes a zip archive to out. Create or CreateHeader starts an entry, Write gives it its bytes, and Close
+// writes the central directory (it does not close out).
+type Writer[W io.Writer] struct {
+	out       sink[W]
+	dir       []entry
+	comment   str
+	closed    bool
+	open      bool
+	isDir     bool
+	raw       bool
+	method    u16
+	crc       u32
+	rawCount  u64
+	compStart i64
+	buf       []u8
+	big       []squash.DeflateWriter[sink[W]]
+}
+
+// NewWriter writes an archive to out.
+fn NewWriter[W io.Writer](out W) Writer[W] {
+	return Writer[W]{out: sink[W]{out: out, count: 0}, dir: []entry{}, comment: "", closed: false, open: false, isDir: false, raw: false, method: 0, crc: 0, rawCount: 0, compStart: 0, buf: []u8{}, big: []squash.DeflateWriter[sink[W]]{}}
+}
+
+// SetOffset says the archive starts n bytes into out (it follows other data, as in a self-extracting program); it
+// must be called before anything is written.
+fn (w mut Writer[W]) SetOffset(n i64) {
+	if w.out.count != 0 {
+		panic("zip: SetOffset called after data was written")
+	}
+	w.out.count = n
+}
+
+// SetComment sets the archive's comment, at most 65535 bytes.
+fn (w mut Writer[W]) SetComment(comment str) ! {
+	if len(comment) > uint16max {
+		fail "zip: Writer.Comment too long"
+	}
+	w.comment = comment
+}
+
+// Create starts an entry named name, compressed with Deflate (a name ending in a slash is a directory).
+fn (w mut Writer[W]) Create(name str) ! {
+	try w.CreateHeader(FileHeader{Name: name, Method: Deflate})
+}
+
+// CreateHeader starts an entry described by fh (the writer works on a copy). It sets the UTF-8 flag for a name or
+// comment that needs it, the versions, the data descriptor flag, the MS-DOS time and an extended timestamp from
+// Modified when that is set; a directory gets Store and no sizes.
+fn (w mut Writer[W]) CreateHeader(fh FileHeader) ! {
+	try w.prepare()
+	mut h = copyHeader(fh)
+	let (valid1, require1) = detectUTF8(h.Name)
+	let (valid2, require2) = detectUTF8(h.Comment)
+	if h.NonUTF8 {
+		h.Flags = h.Flags & ^u16(0x800)
+	} else if (require1 || require2) && valid1 && valid2 {
+		h.Flags = h.Flags | 0x800
+	}
+	h.CreatorVersion = (h.CreatorVersion & 0xff00) | zipVersion20
+	h.ReaderVersion = zipVersion20
+	if h.Modified != 0 {
+		let (d, t) = timeToMsDosTime(h.Modified, h.ModifiedOffset)
+		h.ModifiedDate = d
+		h.ModifiedTime = t
+		mut ext = make([]u8, 0, 9)
+		ext = put16(mut ext, extTimeExtraID)
+		ext = put16(mut ext, 5)
+		ext = append(ext, 1)
+		ext = put32(mut ext, u32(floorDiv(h.Modified, second)))
+		h.Extra = h.Extra + str(ext)
+	}
+	if h.IsDir() {
+		h.Method = Store
+		h.Flags = h.Flags & ^u16(0x8)
+		h.CompressedSize = 0
+		h.CompressedSize64 = 0
+		h.UncompressedSize = 0
+		h.UncompressedSize64 = 0
+	} else {
+		h.Flags = h.Flags | 0x8
+		if h.Method != Store && h.Method != Deflate {
+			fail ErrAlgorithm
+		}
+	}
+	try w.start(h, false)
+}
+
+// CreateRaw starts an entry whose bytes Write takes as they are (already compressed, as fh's Method and sizes and
+// CRC-32 say). Without the data descriptor flag in fh, the local header carries the sizes.
+fn (w mut Writer[W]) CreateRaw(fh FileHeader) ! {
+	try w.prepare()
+	mut h = copyHeader(fh)
+	h.CompressedSize = u32(min(h.CompressedSize64, uint32max))
+	h.UncompressedSize = u32(min(h.UncompressedSize64, uint32max))
+	try w.start(h, true)
+}
+
+// Copy copies the entry f of a Reader into the archive as it is stored, with no decompression or checks.
+fn (w mut Writer[W]) Copy(f File) ! {
+	mut r = try f.OpenRaw()
+	try w.CreateRaw(f.Header)
+	mut buf = make([]u8, 32768)
+	for {
+		let n = try r.Read(mut buf)
+		if n == 0 {
+			break
+		}
+		_ = try w.Write(buf[0:n])
+	}
+}
+
+// prepare ends the entry being written.
+fn (w mut Writer[W]) prepare() ! {
+	if w.closed {
+		fail "zip: write to a closed writer"
+	}
+	if w.open {
+		try w.finish()
+	}
+}
+
+// start records h, writes its local header and makes it the entry Write writes to.
+fn (w mut Writer[W]) start(h FileHeader, raw bool) ! {
+	if len(h.Name) > uint16max {
+		fail "zip: FileHeader.Name too long"
+	}
+	if len(h.Extra) > uint16max {
+		fail "zip: FileHeader.Extra too long"
+	}
+	if len(h.Comment) > uint16max {
+		fail "zip: FileHeader.Comment too long"
+	}
+	let e = entry{h: h, offset: u64(w.out.count), raw: raw}
+	w.dir = append(w.dir, e)
+	try w.writeHeader(e)
+	w.open = true
+	w.isDir = h.IsDir()
+	w.raw = raw
+	w.method = h.Method
+	w.crc = 0
+	w.rawCount = 0
+	w.compStart = w.out.count
+	w.buf = w.buf[0:0]
+}
+
+// writeHeader writes an entry's local header. With a data descriptor its CRC-32 and sizes are zero; a raw entry
+// without one carries them, through a ZIP64 extra field when a size passes 32 bits.
+fn (w mut Writer[W]) writeHeader(e entry) ! {
+	let h = e.h
+	mut readerVersion = h.ReaderVersion
+	let noDescriptor = e.raw && h.Flags & 0x8 == 0
+	let zip64 = noDescriptor && (h.CompressedSize64 > uint32max || h.UncompressedSize64 > uint32max)
+	mut b = make([]u8, 0, fileHeaderLen + len(h.Name) + len(h.Extra) + 20)
+	if zip64 {
+		readerVersion = max(readerVersion, zipVersion45)
+	}
+	b = put32(mut b, fileHeaderSignature)
+	b = put16(mut b, readerVersion)
+	b = put16(mut b, h.Flags)
+	b = put16(mut b, h.Method)
+	b = put16(mut b, h.ModifiedTime)
+	b = put16(mut b, h.ModifiedDate)
+	if noDescriptor {
+		b = put32(mut b, h.CRC32)
+		if zip64 {
+			b = put32(mut b, uint32max)
+			b = put32(mut b, uint32max)
+		} else {
+			b = put32(mut b, u32(h.CompressedSize64))
+			b = put32(mut b, u32(h.UncompressedSize64))
+		}
+	} else {
+		b = put32(mut b, 0)
+		b = put32(mut b, 0)
+		b = put32(mut b, 0)
+	}
+	b = put16(mut b, u16(len(h.Name)))
+	mut extraLen = len(h.Extra)
+	if zip64 {
+		extraLen += 20
+	}
+	b = put16(mut b, u16(extraLen))
+	b = append(b, h.Name...)
+	b = append(b, h.Extra...)
+	if zip64 {
+		b = put16(mut b, zip64ExtraID)
+		b = put16(mut b, 16)
+		b = put64(mut b, h.UncompressedSize64)
+		b = put64(mut b, h.CompressedSize64)
+	}
+	_ = try w.out.Write(b)
+}
+
+// Write gives the entry being written more bytes, compressing them as its method says (as they are for CreateRaw).
+// A directory takes no bytes.
+fn (w mut Writer[W]) Write(data []u8) !i64 {
+	if w.closed {
+		fail "zip: write to a closed writer"
+	}
+	if !w.open {
+		fail "zip: write with no entry: call Create first"
+	}
+	if w.isDir {
+		if len(data) == 0 {
+			return 0
+		}
+		fail "zip: write to directory"
+	}
+	if w.raw {
+		return try w.out.Write(data)
+	}
+	w.crc = stamp.Crc32UpdateBytes(w.crc, data)
+	w.rawCount += u64(len(data))
+	if w.method == Store {
+		return try w.out.Write(data)
+	}
+	if len(w.big) > 0 {
+		return try w.big[0].Write(data)
+	}
+	w.buf = append(w.buf, data...)
+	if len(w.buf) >= entryChunk {
+		// Past a chunk the entry is streamed: the compressor takes the bytes so far and keeps one chunk at a time.
+		w.big = append(w.big, squash.NewDeflateWriter(w.out, writeLevel))
+		_ = try w.big[0].Write(w.buf)
+		w.buf = []u8{}
+	}
+	return len(data)
+}
+
+// WriteString is Write of the bytes of s.
+fn (w mut Writer[W]) WriteString(s str) !i64 {
+	return try w.Write([]u8(s))
+}
+
+// finish ends the entry being written: the rest of its compressed bytes, then its CRC-32 and sizes into its
+// record and its data descriptor.
+fn (w mut Writer[W]) finish() ! {
+	w.open = false
+	if w.isDir {
+		return
+	}
+	let i = len(w.dir) - 1
+	if !w.raw {
+		if w.method == Deflate {
+			if len(w.big) > 0 {
+				try w.big[0].Close()
+				w.big = []squash.DeflateWriter[sink[W]]{}
+			} else {
+				let input = w.buf
+				let packed = arena {
+					squash.Deflate(str(input), writeLevel)
+				}
+				_ = try w.out.Write([]u8(packed))
+				w.buf = w.buf[0:0]
+			}
+		}
+		w.dir[i].h.CRC32 = w.crc
+		w.dir[i].h.CompressedSize64 = u64(w.out.count - w.compStart)
+		w.dir[i].h.UncompressedSize64 = w.rawCount
+		if w.dir[i].h.CompressedSize64 > uint32max || w.dir[i].h.UncompressedSize64 > uint32max {
+			w.dir[i].h.CompressedSize = uint32max
+			w.dir[i].h.UncompressedSize = uint32max
+			w.dir[i].h.ReaderVersion = zipVersion45
+		} else {
+			w.dir[i].h.CompressedSize = u32(w.dir[i].h.CompressedSize64)
+			w.dir[i].h.UncompressedSize = u32(w.dir[i].h.UncompressedSize64)
+		}
+	}
+	let h = w.dir[i].h
+	if h.Flags & 0x8 == 0 {
+		return
+	}
+	mut b = make([]u8, 0, dataDescriptor64Len)
+	b = put32(mut b, dataDescriptorSignature)
+	b = put32(mut b, h.CRC32)
+	if h.CompressedSize64 > uint32max || h.UncompressedSize64 > uint32max {
+		b = put64(mut b, h.CompressedSize64)
+		b = put64(mut b, h.UncompressedSize64)
+	} else {
+		b = put32(mut b, h.CompressedSize)
+		b = put32(mut b, h.UncompressedSize)
+	}
+	_ = try w.out.Write(b)
+}
+
+// Close ends the last entry and writes the central directory and the end records. It does not close out.
+fn (w mut Writer[W]) Close() ! {
+	if w.open {
+		try w.finish()
+	}
+	if w.closed {
+		fail "zip: writer closed twice"
+	}
+	w.closed = true
+	let start = w.out.count
+	mut usedZip64 = false
+	for i in 0..len(w.dir) {
+		let e = w.dir[i]
+		mut h = e.h
+		mut readerVersion = h.ReaderVersion
+		if h.CompressedSize64 >= uint32max || h.UncompressedSize64 >= uint32max || e.offset >= uint32max {
+			usedZip64 = true
+			readerVersion = max(readerVersion, zipVersion45)
+			mut x = make([]u8, 0, 28)
+			mut size = u16(0)
+			if h.UncompressedSize64 >= uint32max {
+				x = put64(mut x, h.UncompressedSize64)
+				size += 8
+			}
+			if h.CompressedSize64 >= uint32max {
+				x = put64(mut x, h.CompressedSize64)
+				size += 8
+			}
+			if e.offset >= uint32max {
+				x = put64(mut x, e.offset)
+				size += 8
+			}
+			mut head = make([]u8, 0, 4)
+			head = put16(mut head, zip64ExtraID)
+			head = put16(mut head, size)
+			h.Extra = h.Extra + str(head) + str(x)
+		}
+		mut b = make([]u8, 0, directoryHeaderLen + len(h.Name) + len(h.Extra) + len(h.Comment))
+		b = put32(mut b, directoryHeaderSignature)
+		b = put16(mut b, h.CreatorVersion)
+		b = put16(mut b, readerVersion)
+		b = put16(mut b, h.Flags)
+		b = put16(mut b, h.Method)
+		b = put16(mut b, h.ModifiedTime)
+		b = put16(mut b, h.ModifiedDate)
+		b = put32(mut b, h.CRC32)
+		b = put32(mut b, u32(min(h.CompressedSize64, uint32max)))
+		b = put32(mut b, u32(min(h.UncompressedSize64, uint32max)))
+		b = put16(mut b, u16(len(h.Name)))
+		b = put16(mut b, u16(len(h.Extra)))
+		b = put16(mut b, u16(len(h.Comment)))
+		b = put32(mut b, 0)
+		b = put32(mut b, h.ExternalAttrs)
+		b = put32(mut b, u32(min(e.offset, uint32max)))
+		b = append(b, h.Name...)
+		b = append(b, h.Extra...)
+		b = append(b, h.Comment...)
+		_ = try w.out.Write(b)
+	}
+	let end = w.out.count
+	let records = u64(len(w.dir))
+	let size = u64(end - start)
+	let offset = u64(start)
+	mut b = make([]u8, 0, directory64EndLen + directory64LocLen + directoryEndLen + len(w.comment))
+	if usedZip64 || records >= uint16max || size >= uint32max || offset >= uint32max {
+		b = put32(mut b, directory64EndSignature)
+		b = put64(mut b, directory64EndLen - 12)
+		b = put16(mut b, zipVersion45)
+		b = put16(mut b, zipVersion45)
+		b = put32(mut b, 0)
+		b = put32(mut b, 0)
+		b = put64(mut b, records)
+		b = put64(mut b, records)
+		b = put64(mut b, size)
+		b = put64(mut b, offset)
+		b = put32(mut b, directory64LocSignature)
+		b = put32(mut b, 0)
+		b = put64(mut b, u64(end))
+		b = put32(mut b, 1)
+	}
+	b = put32(mut b, directoryEndSignature)
+	b = put32(mut b, 0)
+	b = put16(mut b, u16(min(records, u64(uint16max))))
+	b = put16(mut b, u16(min(records, u64(uint16max))))
+	b = put32(mut b, u32(min(size, u64(uint32max))))
+	b = put32(mut b, u32(min(offset, u64(uint32max))))
+	b = put16(mut b, u16(len(w.comment)))
+	b = append(b, w.comment...)
+	_ = try w.out.Write(b)
+}
