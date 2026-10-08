@@ -4,7 +4,6 @@ import "../render"
 import "../ui"
 import "appkit"
 import "mint"
-import "mint"
 import "twine"
 
 // The smaller panels of the left dock: the outline of the file, the problems the compiler found, and the files git says changed.

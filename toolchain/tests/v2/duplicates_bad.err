@@ -1,0 +1,13 @@
+toolchain/tests/v2/duplicates_bad.tin:7:8: error E101 REDECLARED: package 'say' is imported twice in this file
+toolchain/tests/v2/duplicates_bad.tin:14:6: error E101 REDECLARED: type 'P' redeclared (previous declaration at toolchain/tests/v2/duplicates_bad.tin:9:6)
+toolchain/tests/v2/duplicates_bad.tin:11:4: error E101 REDECLARED: field 'x' is declared twice in this struct
+toolchain/tests/v2/duplicates_bad.tin:18:8: error E101 REDECLARED: variant 'A' is declared twice in this enum
+toolchain/tests/v2/duplicates_bad.tin:26:15: error E101 REDECLARED: fields x and y have one JSON name: "a"
+toolchain/tests/v2/duplicates_bad.tin:45:1: error E101 REDECLARED: type parameter 'T' is declared twice
+toolchain/tests/v2/duplicates_bad.tin:33:1: error E101 REDECLARED: method 'm' has the name of a field of its type: rename one
+toolchain/tests/v2/duplicates_bad.tin:41:1: error E101 REDECLARED: 'F' is declared as a type (at toolchain/tests/v2/duplicates_bad.tin:37:6) and again here
+toolchain/tests/v2/duplicates_bad.tin:54:18: error E216 COMPOSITE: duplicate field 'm' in struct literal
+toolchain/tests/v2/duplicates_bad.tin:55:38: error E216 COMPOSITE: duplicate key "a" in map literal
+toolchain/tests/v2/duplicates_bad.tin:56:30: error E216 COMPOSITE: duplicate key 1 in map literal
+toolchain/tests/v2/duplicates_bad.tin:57:2: error E101 REDECLARED: 'i' redeclared in this for (it names the index and the element)
+toolchain/tests/v2/duplicates_bad.tin:60:2: error E101 REDECLARED: 'a' is declared twice in this let

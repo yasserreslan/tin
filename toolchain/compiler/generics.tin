@@ -69,6 +69,7 @@ fn generics_init() {
 		let d = prog_types[i]
 		if cast(i64, d.tparams) != 0 {
 			set_file(d.file)
+			tparams_once(d.pos, cast([]str, d.tparams))
 			d.insts = cast([]i64, cast(i64, []i64{}))
 			d.methods = cast([]i64, cast(i64, []i64{}))
 			ty_generics = append(ty_generics, name_bind(qual(ck_pkg, d.name), cast(i64, d)))

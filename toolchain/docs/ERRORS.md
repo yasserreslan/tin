@@ -640,7 +640,11 @@ Fix: split the declaration: `let width = 640` and `let height = 480` on their ow
 ### E101 REDECLARED
 
 A name is declared once in its scope. Two package-level declarations of one name, such as
-two shapes, are an error at the second one.
+two shapes, are an error at the second one. So are (#712) a type declared twice, a type and a
+function, constant or variable of one name, a struct field or enum variant given twice, two
+fields with one JSON name (`@json`), a method named like a field of its type, a type parameter
+listed twice, one name twice in `let (a, a)` or `for i, i in`, and an import path imported
+twice in one file.
 
 ```tin edition=1
 package main
@@ -1261,9 +1265,9 @@ Fix: call a function; to convert, write the type (`i64(x)`).
 
 ### E216 COMPOSITE
 
-A composite literal names its type (`T{...}`), sets fields of a struct by name, gives keys
-in a map literal, and builds only structs, slices, arrays and maps; an enum value is built
-with a variant (`Shape.Circle(2)`).
+A composite literal names its type (`T{...}`), sets fields of a struct by name (each once),
+gives keys in a map literal (a constant key once, #712), and builds only structs, slices,
+arrays and maps; an enum value is built with a variant (`Shape.Circle(2)`).
 
 ```tin edition=1
 package main
