@@ -1,0 +1,30 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Linux clone threads: repeated returning cores, reaped stacks, inherited masks, child faults.
+
+const WANT = "cores returned: 208\nrecords live: 0\nthreads: 1\nmappings grew: false\n"
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/thread")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "thread-")
+	ci.CopyLib(ci.Root(), ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/threadprobe")
+	ci.Mkdirs(probe)
+	ci.Write(ci.Join(probe, "probe.tin"), ci.Read(ci.Join(ci.Root(), "tools/ci/fixtures/thread_probe.tin")))
+	let exe = ci.Join(work, "threads")
+	ci.BuildTin("tools/ci/fixtures/threads.tin", exe, work, []str{})
+	let result = ci.Exec([]str{exe}, "", 60)
+	ci.Write(ci.Join(out, "threads.log"), result.Stdout + result.Stderr)
+	ci.Check(result.Code == 0 && result.Stdout == WANT, "thread: exit " + mint.Itoa(result.Code) + "\n" + result.Stdout + result.Stderr)
+	let fault = ci.Exec([]str{exe, "overflow"}, "", 60)
+	ci.Write(ci.Join(out, "overflow.log"), fault.Stdout + fault.Stderr)
+	// Reported as what it is since #531 (it was "segmentation fault").
+	ci.Check(fault.Code == 2 && twine.Contains(fault.Stderr, "panic: stack overflow"), "thread overflow: exit " + mint.Itoa(fault.Code) + "\n" + fault.Stderr)
+	ci.Remove(work)
+	ci.Pass("208 returning clone cores: own signal stacks, inherited mask, own errors, stacks reaped after the kernel clears the tid; a core stack overflow is reported")
+}

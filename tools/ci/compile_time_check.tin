@@ -1,0 +1,61 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+
+// Long expression chains compile in time near-linear in their length (#713).
+//
+// A chain `x + x + ... + x` of n terms took time n^3 to compile: the checker's untyped-constant test and the range analysis's
+// is_const each walked the whole left spine at every level. Each shape below is generated with N terms and must compile within
+// LIMIT seconds (it takes well under one; the old compiler needed minutes) and print the right value.
+
+const N = 3000
+const LIMIT = 30
+
+fn program(decl str, expr str) str {
+	return "package main\n\nimport \"say\"\n\nfn main() {{\n\t" + decl + "\n\tlet t = " + expr + "\n\tsay.Line(t)\n}}\n"
+}
+
+fn repeat(term str, sep str) str {
+	mut parts = []str{}
+	for i in 0..N {
+		parts = append(parts, term)
+	}
+	return twine.Join(parts, sep)
+}
+
+fn run(name str, source str, want str, dir str) {
+	ci.Write(ci.Join(dir, "chain.tin"), source)
+	let exe = ci.Join(dir, "chain")
+	let start = tide.Now()
+	let built = ci.Exec([]str{ci.Tinc(), "-o", exe, ci.Join(dir, "chain.tin")}, ci.Root(), LIMIT)
+	let took = tide.Since(start)
+	ci.Must(built, "compile " + name)
+	let got = ci.Exec([]str{exe}, "", 10)
+	ci.Must(got, "run " + name)
+	ci.Check(twine.TrimSpace(got.Stdout) == want, name + ": printed " + twine.TrimSpace(got.Stdout) + ", want " + want)
+	let hundredths = took / 10000000 % 100
+	mut pad = ""
+	if hundredths < 10 {
+		pad = "0"
+	}
+	ci.Pass("compile time: " + name + " (" + mint.Itoa(N) + " terms) in " + mint.Itoa(took / 1000000000) + "." + pad + mint.Itoa(hundredths) + " s")
+}
+
+fn main() {
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin"), "ctime-")
+	let nested = twine.Repeat("(x + ", N - 1) + "x" + twine.Repeat(")", N - 1)
+	run("x + x + ...", program("mut x = 1", repeat("x", " + ")), mint.Itoa(N), dir)
+	run("x + 1 + 1 + ...", program("mut x = 1", "x + " + repeat("1", " + ")), mint.Itoa(N + 1), dir)
+	run("1 + 1 + ... + x", program("mut x = 1", repeat("1", " + ") + " + x"), mint.Itoa(N + 1), dir)
+	run("x + (x + (...))", program("mut x = 1", nested), mint.Itoa(N), dir)
+	run("x +% x +% ...", program("mut x = 1", repeat("x", " +% ")), mint.Itoa(N), dir)
+	run("x * 1 - 0 + ...", program("mut x = 1", repeat("x * 1 - 0", " + ")), mint.Itoa(N), dir)
+	run("f64 x + 0.5 + ...", program("mut x = 1.0", "x + " + repeat("0.5", " + ")), mint.Itoa(1 + N / 2), dir)
+	run("str s + \"a\" + ...", program("mut s = \"q\"", "len(s + " + repeat("\"a\"", " + ") + ")"), mint.Itoa(N + 1), dir)
+	ci.Remove(dir)
+	say.Line("compile time ok")
+}

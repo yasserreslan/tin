@@ -49,7 +49,7 @@ jobs:
       - name: Test the test harness
         run: |
           python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
-          for t in test_pyre test_harness test_next_version; do sh tools/ci/tin.sh $t; done
+          for t in test_pyre test_harness test_next_version test_replay_save; do sh tools/ci/tin.sh $t; done
       - name: Build from seed and verify self-hosting fixed point
         run: make bootstrap
       - name: Strict language and standard library suite
@@ -93,7 +93,7 @@ jobs:
         run: python3 tools/ci/syscall_check.py
       - name: Linux clone threads (returning cores, stack reaping, masks, child faults)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/thread_check.py
+        run: sh tools/ci/tin.sh thread_check
       - name: Static Linux executables (no interpreter, Tin _start, empty root)
         if: runner.os == 'Linux'
         run: python3 tools/ci/static_check.py
@@ -104,9 +104,9 @@ jobs:
       - name: Compiler path discovery and canonicalization
         run: python3 tools/ci/compiler_paths_check.py
       - name: Compile time of long expression chains (#713)
-        run: python3 tools/ci/compile_time_check.py
+        run: sh tools/ci/tin.sh compile_time_check
       - name: Packages (tin vendor, offline builds from vendor/, tin.lock hashes)
-        run: python3 tools/ci/packages_check.py
+        run: sh tools/ci/tin.sh packages_check
       - name: Linux DNS contract, transport and request deadlines
         if: runner.os == 'Linux'
         run: python3 tools/ci/dns_check.py

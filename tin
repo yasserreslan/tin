@@ -240,7 +240,8 @@ case $1 in
     set -e
     cat "$out"
     [ "$code" = 0 ] || { echo "tin: replay: not saved: the replay exited with status $code" >&2; exit "$code"; }
-    python3 "$root/tools/dev/replay_save.py" "$root" "$save" "$issue" "$capsule" "$build" "$out" ;;
+    saver=$cache/replay_save.$$; trap 'rm -f "$exe" "$out" "$saver"' EXIT
+    TIN_ROOT=$root "$tinc" -o "$saver" "$root/tools/dev/replay_save.tin" && "$saver" "$root" "$save" "$issue" "$capsule" "$build" "$out" ;;
   vendor)
     # tin vendor [DIR]: copy every package DIR/tin.mod requires, and the packages their tin.mod
     # files require, into DIR/vendor/<path>, then write DIR/tin.lock (toolchain/docs/PACKAGES.md).

@@ -1,0 +1,190 @@
+// Replay capsules as regression cases (#242): `tin replay --save-test` opens a capsule, seals it again under the public test key
+// and adds a case to toolchain/tests/regressions/cases.json.
+package capsule
+
+import "fault"
+import "quarry"
+import "seal"
+import "tinjson"
+import "twine"
+
+const MAGIC = "TINCAP\x01\x00"
+
+// TestKey seals saved tests: they are public, so the key is written in the case itself.
+fn TestKey() str {
+	return seal.Sha256Hex("tin replay saved tests: not a secret")
+}
+
+fn word(v i64) str {
+	let b = make([]u8, 8)
+	for i in 0..8 {
+		b[i] = u8(v >> (8 * i))
+	}
+	return str(b)
+}
+
+// stream is n bytes of the HMAC-SHA256 keystream of the nonce.
+fn stream(ke str, nonce str, n i64) []u8 {
+	mut out = []u8{}
+	mut i = 0
+	for i * 32 < n {
+		let block = seal.HmacSha256(ke, nonce + word(i))
+		for b in block {
+			out = append(out, b)
+		}
+		i += 1
+	}
+	return out
+}
+
+fn xor(data str, ks []u8) str {
+	let out = make([]u8, len(data))
+	for i in 0..len(data) {
+		out[i] = data[i] ^ ks[i]
+	}
+	return str(out)
+}
+
+// TestKeyBytes is the test key as the 32 bytes it stands for.
+fn TestKeyBytes() str {
+	let (b, err) = seal.HexDecode(TestKey())
+	if err != nil {
+		return ""
+	}
+	return str(b)
+}
+
+// Seal is the envelope of a capsule body (design/interface_replay.md, section 6) under a 32 byte key.
+fn Seal(body str, key str) str {
+	let ke = str(seal.HmacSha256(key, "tin replay enc"))
+	let km = str(seal.HmacSha256(key, "tin replay mac"))
+	let nonce = str(seal.RandomBytes(16))
+	let head = MAGIC + nonce + xor(body, stream(ke, nonce, len(body)))
+	return head + str(seal.HmacSha256(km, head))
+}
+
+// Unseal is the body of a capsule envelope; it fails when the data is no capsule, or the key is wrong or the data damaged.
+fn Unseal(data str, key str) !str {
+	let n = len(data)
+	if n < 8 || data[0:8] != MAGIC {
+		fail "not a capsule (no TINCAP header)"
+	}
+	let km = str(seal.HmacSha256(key, "tin replay mac"))
+	let tag = seal.HmacSha256(km, data[0:n - 32])
+	mut diff = u8(0)
+	if n < 56 {
+		fail "wrong key or damaged"
+	}
+	for i in 0..32 {
+		diff |= tag[i] ^ data[n - 32 + i]
+	}
+	if diff != 0 {
+		fail "wrong key or damaged"
+	}
+	let ke = str(seal.HmacSha256(key, "tin replay enc"))
+	let nonce = data[8:24]
+	let ct = data[24:n - 32]
+	return xor(ct, stream(ke, nonce, len(ct)))
+}
+
+// validName: lower-case letters, digits and dashes, not starting with a dash.
+fn validName(name str) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for i in 0..len(name) {
+		let c = name[i]
+		let ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c == '-' && i > 0)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+fn digits(s str) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i in 0..len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// caseText is a case as json.dumps(indent=2) writes it inside the manifest's list.
+fn caseText(name str, issue str, stdout str) str {
+	mut t = "  {{\n"
+	t += "    \"source\": " + tinjson.Quote(name + ".tin") + ",\n"
+	t += "    \"issue\": " + issue + ",\n"
+	t += "    \"replay\": {{\n"
+	t += "      \"capsule\": " + tinjson.Quote(name + ".tcap") + ",\n"
+	t += "      \"key\": " + tinjson.Quote(TestKey()) + "\n"
+	t += "    }},\n"
+	t += "    \"expected\": {{\n"
+	t += "      \"phase\": \"run\",\n"
+	t += "      \"exit\": 0,\n"
+	t += "      \"stdout\": " + tinjson.Quote(stdout) + "\n"
+	t += "    }}\n"
+	t += "  }}"
+	return t
+}
+
+// Save writes toolchain/tests/regressions/NAME.tin (a copy of build), NAME.tcap (the capsule opened with keyHex and sealed again
+// under the public test key) and the case in cases.json: the program run with the replay switches must exit 0 and print the text
+// in outFile. It returns the message to show, or fails with the reason.
+fn Save(root str, name str, issue str, capsuleFile str, build str, outFile str, keyHex str) !str {
+	if !validName(name) {
+		fail "tin replay: --save-test NAME must be lower-case letters, digits and dashes"
+	}
+	if !digits(issue) {
+		fail "tin replay: --issue N must be an issue number"
+	}
+	let (keyBytes, kerr) = seal.HexDecode(keyHex)
+	if kerr != nil {
+		fail "tin replay: TIN_REPLAY_KEY must be 64 hex digits"
+	}
+	let dest = root + "/toolchain/tests/regressions"
+	let manifest = quarry.ReadFile(dest + "/cases.json") catch _ {
+		fail "tin replay: cannot read cases.json"
+	}
+	let (cases, ok) = tinjson.Parse(manifest)
+	if !ok {
+		fail "tin replay: cases.json is not valid JSON"
+	}
+	mut taken = quarry.Exists(dest + "/" + name + ".tin")
+	for c in cases.Items() {
+		if c.Get("source").Text() == name + ".tin" {
+			taken = true
+		}
+	}
+	if taken {
+		fail "tin replay: toolchain/tests/regressions/" + name + ".tin exists already"
+	}
+	let data = quarry.ReadFile(capsuleFile) catch _ {
+		fail "tin replay: capsule: cannot read " + capsuleFile
+	}
+	let body = Unseal(data, str(keyBytes)) catch err {
+		fail "tin replay: capsule: " + fault.Message(err)
+	}
+	let source = quarry.ReadFile(build) catch _ {
+		fail "tin replay: cannot read " + build
+	}
+	let stdout = quarry.ReadFile(outFile) catch _ {
+		fail "tin replay: cannot read " + outFile
+	}
+	let testKey = TestKeyBytes()
+	try quarry.WriteFile(dest + "/" + name + ".tin", source)
+	try quarry.WriteFile(dest + "/" + name + ".tcap", Seal(body, testKey))
+	mut text = twine.TrimRight(manifest, "\n ")
+	if text == "[]" {
+		text = "[\n" + caseText(name, issue, stdout) + "\n]\n"
+	} else {
+		text = twine.TrimSuffix(text, "]")
+		text = twine.TrimRight(text, "\n ") + ",\n" + caseText(name, issue, stdout) + "\n]\n"
+	}
+	try quarry.WriteFile(dest + "/cases.json", text)
+	return "tin replay: saved toolchain/tests/regressions/" + name + ".tin and " + name + ".tcap (#" + issue + "); the capsule is public now: review its request and results before committing"
+}

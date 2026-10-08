@@ -1,0 +1,157 @@
+package main
+
+import "./ci"
+import "mint"
+import "seal"
+import "twine"
+
+// Packages (#146): tin vendor, offline builds from vendor/, tin.lock hashes and capabilities.
+
+fn put(path str, text str) {
+	ci.Mkdirs(parentOf(path))
+	ci.Write(path, text)
+}
+
+fn parentOf(path str) str {
+	let i = twine.LastIndex(path, "/")
+	return path[0:i]
+}
+
+// run executes argv in dir with the check's environment; offline wraps it in `unshare -rn` (a network namespace with no interfaces).
+fn run(argv []str, dir str, out str, offline bool) ci.Out {
+	mut full = []str{}
+	if offline {
+		full = append(full, "unshare")
+		full = append(full, "-rn")
+	}
+	for a in argv {
+		full = append(full, a)
+	}
+	// A dead proxy: a build that tried to fetch would fail even where namespaces are not allowed.
+	let set = []str{"TIN_ROOT=" + ci.Root(), "LC_ALL=C", "HTTP_PROXY=http://127.0.0.1:9", "HTTPS_PROXY=http://127.0.0.1:9", "TMPDIR=" + out}
+	return ci.ExecEnv(full, dir, 120, set, []str{})
+}
+
+// canUnshare reports whether this host lets an unprivileged process run without any network (Linux).
+fn canUnshare() bool {
+	let o = ci.Exec([]str{"unshare", "-rn", "true"}, "", 10)
+	return o.Code == 0
+}
+
+fn expect(cond bool, what str, o ci.Out) {
+	if !cond {
+		ci.Fail("packages: " + what + "\nexit " + mint.Itoa(o.Code) + "\nstdout:\n" + o.Stdout + "\nstderr:\n" + o.Stderr)
+	}
+}
+
+fn none() ci.Out {
+	return ci.Out{Code: 0, Stdout: "", Stderr: ""}
+}
+
+fn sha(path str) str {
+	return seal.Sha256Hex(ci.Read(path))
+}
+
+fn main() {
+	let tin = ci.Join(ci.Root(), "tin")
+	let out = ci.Join(ci.Root(), "bin/ci/packages")
+	ci.Mkdirs(out)
+	let offline = canUnshare()
+	let work = ci.TempDir(out, "pkg-")
+	// Two dependencies, given as local source directories; geo requires units itself.
+	put(ci.Join(work, "src/units/units.tin"), "package units\n\n// Cm converts metres to centimetres.\nfn Cm(m i64) i64 {{\n\treturn m * 100\n}}\n")
+	put(ci.Join(work, "src/units/tin.mod"), "module example.com/units\n")
+	put(ci.Join(work, "src/geo/geo.tin"), "package geo\n\nimport \"example.com/units\"\n\n// Area is in square centimetres.\nfn Area(w i64, h i64) i64 {{\n\treturn units.Cm(w) * units.Cm(h)\n}}\n")
+	put(ci.Join(work, "src/geo/geo_test.tin"), "package geo\n")
+	put(ci.Join(work, "src/geo/tin.mod"), "module example.com/geo\nrequire example.com/units ../units\n")
+	let app = ci.Join(work, "app")
+	put(ci.Join(app, "tin.mod"), "module example.com/app\nrequire example.com/geo ../src/geo\n")
+	put(ci.Join(app, "main.tin"), "package main\n\nimport \"example.com/geo\"\nimport \"say\"\n\nfn main() {{\n\tsay.Line(\"area\", geo.Area(2, 3))\n}}\n")
+
+	mut r = run([]str{"sh", tin, "vendor", app}, work, out, false)
+	expect(r.Code == 0, "tin vendor failed", r)
+	mut vendored = []str{}
+	for f in ci.Files(ci.Join(app, "vendor"), "") {
+		vendored = append(vendored, twine.TrimPrefix(f, app + "/"))
+	}
+	let listing = twine.Join(vendored, " ")
+	expect(listing == "vendor/example.com/geo/geo.tin vendor/example.com/geo/tin.mod vendor/example.com/units/tin.mod vendor/example.com/units/units.tin", "tin vendor copied " + listing + " (tests must stay out, requires are transitive)", none())
+	let lock = ci.Read(ci.Join(app, "tin.lock"))
+	mut want = ""
+	for f in vendored {
+		want += sha(ci.Join(app, f)) + " " + f + "\n"
+	}
+	want += "caps example.com/geo\ncaps example.com/units\n"
+	expect(lock == want, "tin.lock is\n" + lock + "instead of\n" + want, none())
+
+	let sourceTree = ci.Join(work, "src-copy")
+	ci.Copy(ci.Join(work, "src"), sourceTree)
+	// The sources are gone and there is no network: the build reads only vendor/.
+	ci.Remove(ci.Join(work, "src"))
+	let exe = ci.Join(work, "app-bin")
+	r = run([]str{ci.Tinc(), "-o", exe, "main.tin"}, app, out, offline)
+	expect(r.Code == 0, "the vendored program did not build offline", r)
+	mut ran = ci.Exec([]str{exe}, "", 30)
+	expect(ran.Stdout == "area 60000\n", "the vendored program printed " + ran.Stdout, ran)
+	r = run([]str{"sh", tin, "main.tin"}, app, out, offline)
+	expect(r.Code == 0 && r.Stdout == "area 60000\n", "tin main.tin offline", r)
+
+	// One changed byte in a vendored file fails the build, naming the file and both hashes.
+	let units = ci.Join(app, "vendor/example.com/units/units.tin")
+	let original = ci.Read(units)
+	let before = seal.Sha256Hex(original)
+	let changed = twine.Replace(original, "100", "900", 1)
+	ci.Write(units, changed)
+	let after = seal.Sha256Hex(changed)
+	r = run([]str{"sh", tin, "build", "main.tin", "-o", exe}, app, out, offline)
+	want = "error E111 LOCK_MISMATCH: tin.lock hash mismatch for vendor/example.com/units/units.tin: the lock records sha256 " + before + ", the file has " + after + "\n"
+	expect(r.Code == 1 && r.Stderr == want, "a changed vendored byte was not refused", r)
+
+	// A vendored file the lock does not list is refused too.
+	ci.Write(units, original)
+	put(ci.Join(app, "vendor/example.com/units/extra.tin"), "package units\n")
+	let extra = seal.Sha256Hex("package units\n")
+	r = run([]str{"sh", tin, "build", "main.tin", "-o", exe}, app, out, offline)
+	want = "error E111 LOCK_MISMATCH: tin.lock has no entry for vendor/example.com/units/extra.tin (sha256 " + extra + "); every vendored file must be locked\n"
+	expect(r.Code == 1 && r.Stderr == want, "an unlocked vendored file was accepted", r)
+	ci.Remove(units)
+	ci.Copy(sourceTree, ci.Join(work, "src"))
+
+	// A dependency that dials without net is refused at its call, naming the path to the entry point.
+	put(ci.Join(work, "src/peek/peek.tin"), "package peek\n\nimport \"wire\"\n\n// Up reports whether addr accepts a connection.\nfn Up(addr str) bool {{\n\tlet (c, err) = wire.Dial(addr)\n\tif err != nil {{\n\t\treturn false\n\t}}\n\tc.Close()\n\treturn true\n}}\n")
+	put(ci.Join(work, "src/peek/tin.mod"), "module example.com/peek\n")
+	put(ci.Join(app, "tin.mod"), "module example.com/app\nrequire example.com/geo ../src/geo\nrequire example.com/peek ../src/peek\n")
+	put(ci.Join(app, "main.tin"), "package main\n\nimport \"example.com/geo\"\nimport \"example.com/peek\"\nimport \"say\"\n\nfn main() {{\n\tsay.Line(\"area\", geo.Area(2, 3), peek.Up(\"127.0.0.1:1\"))\n}}\n")
+	r = run([]str{"sh", tin, "vendor"}, app, out, false)
+	expect(r.Code == 0, "tin vendor with peek", r)
+	expect(twine.Contains(ci.Read(ci.Join(app, "tin.lock")), "caps example.com/peek\n"), "the lock lists peek with no capabilities", none())
+	r = run([]str{"sh", tin, "build", "main.tin", "-o", exe}, app, out, offline)
+	want = "vendor/example.com/peek/peek.tin:7:21: error E804 CAPABILITY: wire.Dial needs capability net (wire.Dial -> wire.DialTimeout -> wire.resolve), which package example.com/peek does not declare in its tin.mod (caps: none)\n"
+	expect(r.Code == 1 && r.Stderr == want, "wire.Dial without net was not refused", r)
+
+	// Granting net upstream and vendoring again shows the new capability in the lock, and builds.
+	put(ci.Join(work, "src/peek/tin.mod"), "module example.com/peek\ncaps net\n")
+	let lockBefore = ci.Read(ci.Join(app, "tin.lock"))
+	r = run([]str{"sh", tin, "vendor"}, app, out, false)
+	expect(r.Code == 0, "tin vendor after granting net", r)
+	let lockAfter = ci.Read(ci.Join(app, "tin.lock"))
+	expect(twine.Contains(lockBefore, "caps example.com/peek\n") && twine.Contains(lockAfter, "caps example.com/peek net\n"), "the lock does not show the new capability:\n" + lockAfter, none())
+	r = run([]str{"sh", tin, "build", "main.tin", "-o", exe}, app, out, offline)
+	expect(r.Code == 0, "peek with net did not build", r)
+	ran = ci.Exec([]str{exe}, "", 30)
+	expect(ran.Stdout == "area 60000 false\n", "the program printed " + ran.Stdout, ran)
+	r = run([]str{"sh", tin, "caps", "main.tin"}, app, out, false)
+	expect(r.Code == 0 && twine.Contains(r.Stdout, "example.com/geo\nexample.com/peek net\nexample.com/units\n") && twine.Contains(r.Stdout, "main net\n") && twine.Contains(r.Stdout, "wire net files\n"), "tin caps", r)
+
+	// A lock whose caps line disagrees with the vendored manifest is refused.
+	ci.Write(ci.Join(app, "tin.lock"), twine.Replace(lockAfter, "caps example.com/peek net\n", "caps example.com/peek\n", 1))
+	r = run([]str{"sh", tin, "build", "main.tin", "-o", exe}, app, out, offline)
+	want = "error E115 LOCK_CAPS: tin.lock says \"caps example.com/peek\" for example.com/peek, its manifest declares \"caps example.com/peek net\" (run tin vendor)\n"
+	expect(r.Code == 1 && r.Stderr == want, "a stale caps line was accepted", r)
+	ci.Remove(work)
+	mut how = "with a dead proxy (no unprivileged network namespaces here)"
+	if offline {
+		how = "in a network namespace with no interfaces"
+	}
+	ci.Pass("packages: tin vendor, an offline build " + how + ", tin.lock refusals and capabilities")
+}
