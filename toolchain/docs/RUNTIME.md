@@ -194,7 +194,10 @@ limbo length.
 - `hearth.Cores()` counts usable CPUs: `sysconf` on macOS. On Linux it is the minimum of
   online CPUs, the affinity mask and the cgroup CPU quota (`cpu.max` /
   `cpu.cfs_quota_us`).
-- `TIN_CORES` overrides the count for anvil.
+- `TIN_CORES` overrides the count for anvil: a whole number from 1 to 1024. Any other value
+  (negative, zero, larger, not a number) is named in one line on stderr and the CPU count is
+  used (#746); `anvil.ServeN` with more than 1024 cores fails. A pipe or `fcntl` that fails while
+  the cores are set up (a full descriptor table) fails `Serve` instead of retrying.
 
 ## 5. Messages: relay
 

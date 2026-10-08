@@ -246,7 +246,8 @@ fn errno() i64 {
 }
 
 // Serve listens on addr (":8080", "127.0.0.1:8080") and serves h on every core. It
-// returns only if the server cannot start. TIN_CORES overrides the number of cores.
+// returns only if the server cannot start. TIN_CORES overrides the number of cores (1 to
+// 1024; another value is named on stderr and the CPU count is used).
 fn Serve(addr str, h fn(Req, mut Out)) ! {
 	return try ServeN(addr, serve_cores(), h)
 }
@@ -258,13 +259,23 @@ fn ServeN(addr str, n i64, h fn(Req, mut Out)) ! {
 	return try serve_on(addr, n)
 }
 
-// serve_cores is how many cores Serve uses: hearth.Cores(), or TIN_CORES when set.
+// maxCores is the most cores a server runs on: TIN_CORES and ServeN refuse more (#746).
+const maxCores = 1024
+
+// serve_cores is how many cores Serve uses: hearth.Cores(), or TIN_CORES when it is a whole
+// number from 1 to maxCores. Any other value (negative, zero, too large, not a number) is
+// named in one line on stderr and the CPU count is used instead (#746).
 fn serve_cores() i64 {
-	mut n = hearth.Cores()
-	let env = rt_getenv(cast(i64, "TIN_CORES") + 8)
-	if env != 0 && rt_decimal_integer(env)&0xffffffff > 0 {
-		n = rt_decimal_integer(env) & 0xffffffff
+	let n = hearth.Cores()
+	let (env, set) = quarry.LookupEnv("TIN_CORES")
+	if !set {
+		return n
 	}
+	let v = env_int("TIN_CORES", -1)
+	if v >= 1 && v <= maxCores {
+		return v
+	}
+	rt_fault_say("anvil: TIN_CORES=" + env + " is not a core count from 1 to " + say.Str(maxCores) + "; serving on " + say.Str(n) + " cores\n")
 	return n
 }
 
@@ -341,6 +352,11 @@ fn serve_on(addr str, n i64) ! {
 	if n < 1 {
 		n = 1
 	}
+	if n > maxCores {
+		rt_sys_close(fd)
+		rt_sig_unblock_term()
+		fail "anvil: " + say.Str(n) + " cores asked for; a server runs on at most " + say.Str(maxCores)
+	}
 	gCores = n
 	gPipes = calloc(2*n, 8)
 	gLoad = rt_aligned_alloc(n * 128)
@@ -351,10 +367,19 @@ fn serve_on(addr str, n i64) ! {
 	}
 	let fds = calloc(2, 4)
 	for i in 0..n {
-		rt_sys_pipe(fds)
+		// Every result is checked: a full descriptor table fails Serve instead of looping (#746).
+		if c32(rt_sys_pipe(fds)) < 0 || c32(rt_sys_fcntl(__ld(fds, 2), F_SETFL, O_NONBLOCK)) < 0 {
+			let e = errno()
+			for j in 0..i {
+				rt_sys_close(gPipes[2*j])
+				rt_sys_close(gPipes[2*j+1])
+			}
+			rt_sys_close(fd)
+			rt_sig_unblock_term()
+			fail "anvil: cannot make the pipes of core " + say.Str(i) + " (errno " + say.Str(e) + ")"
+		}
 		gPipes[2*i] = __ld(fds, 2)
 		gPipes[2*i+1] = __ld(fds+4, 2)
-		rt_sys_fcntl(gPipes[2*i], F_SETFL, O_NONBLOCK)
 	}
 	gGrace = 25
 	if !gDeadlineSet {
