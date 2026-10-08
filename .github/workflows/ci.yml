@@ -95,7 +95,7 @@ jobs:
       - name: Replay tapes (record, replay, divergence)
         run: python3 tools/ci/replay_check.py
       - name: Scheduling replay (select winners)
-        run: python3 tools/ci/sched_check.py
+        run: sh tools/ci/tin.sh sched_check
       - name: Raw Linux syscall ABI, signals, errors and directory iteration
         if: runner.os == 'Linux'
         run: sh tools/ci/tin.sh syscall_check

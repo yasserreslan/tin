@@ -6,7 +6,7 @@ import "quarry"
 import "say"
 import "tide"
 
-// A server for sched_check.py's end to end case (#243): each request races a lane that a child
+// A server for sched_check.tin's end to end case (#243): each request races a lane that a child
 // fills after send ms against a timer of timer ms, and answers with the branch it took.
 // RACE_MODE=lane or RACE_MODE=timer overrides every route's timing with one that makes that
 // side win live; the scheduling events stay the same (both sides still wait).

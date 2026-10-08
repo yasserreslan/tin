@@ -3,6 +3,7 @@
 package capsule
 
 import "fault"
+import "mint"
 import "quarry"
 import "seal"
 import "tinjson"
@@ -187,4 +188,130 @@ fn Save(root str, name str, issue str, capsuleFile str, build str, outFile str, 
 	}
 	try quarry.WriteFile(dest + "/cases.json", text)
 	return "tin replay: saved toolchain/tests/regressions/" + name + ".tin and " + name + ".tcap (#" + issue + "); the capsule is public now: review its request and results before committing"
+}
+
+// Effect is one effect record of a capsule (design/interface_replay.md, section 3.3).
+type Effect struct {
+	Seq i64
+	Kind str
+	Key str
+	Outcome i64
+	Ident i64
+	Data str
+}
+
+// Body is the decoded fields of a capsule body.
+type Body struct {
+	Schema i64
+	Tin str
+	Program str
+	Wall i64
+	Core i64
+	Status i64
+	Flags i64
+	Request str
+	Panic str
+	Peer str
+	Effects []Effect
+}
+
+// TestKeyPublic is the key the checks seal their capsules under: the bytes 0 to 31.
+fn CheckKey() str {
+	let b = make([]u8, 32)
+	for i in 0..32 {
+		b[i] = u8(i)
+	}
+	return str(b)
+}
+
+fn Word(v i64) str {
+	return word(v)
+}
+
+// Text is a length-prefixed string of a capsule body.
+fn Text(s str) str {
+	return word(len(s)) + s
+}
+
+// Build is a capsule body with these effect records; schema 2 adds the peer after the panic (#355).
+fn Build(effects []Effect, status i64, request str, schema i64, peer str) str {
+	mut out = word(schema) + Text("dev") + Text("replay_serve") + word(1700000000000000000) + word(0)
+	out += word(status) + word(0) + Text(request) + Text("")
+	if schema >= 2 {
+		out += Text(peer)
+	}
+	out += word(len(effects))
+	for i in 0..len(effects) {
+		let e = effects[i]
+		out += word(i) + Text(e.Kind) + Text(e.Key) + word(e.Outcome) + word(e.Ident) + Text(e.Data)
+	}
+	return out
+}
+
+type cursor struct {
+	Body str
+	Pos i64
+}
+
+fn (c mut cursor) word() !i64 {
+	if c.Pos + 8 > len(c.Body) {
+		fail "truncated"
+	}
+	mut v = 0
+	for i in 0..8 {
+		v |= i64(c.Body[c.Pos + i]) << (8 * i)
+	}
+	c.Pos += 8
+	return v
+}
+
+fn (c mut cursor) text() !str {
+	let n = try c.word()
+	if n < 0 || c.Pos + n > len(c.Body) {
+		fail "truncated"
+	}
+	let s = c.Body[c.Pos:c.Pos + n]
+	c.Pos += n
+	return s
+}
+
+// Decode reads the fields of a capsule body (sections 3.3 and 6).
+fn Decode(body str) !Body {
+	mut r = cursor{Body: body, Pos: 0}
+	mut c = Body{Schema: 0, Tin: "", Program: "", Wall: 0, Core: 0, Status: 0, Flags: 0, Request: "", Panic: "", Peer: "", Effects: []Effect{}}
+	c.Schema = try r.word()
+	c.Tin = try r.text()
+	c.Program = try r.text()
+	c.Wall = try r.word()
+	c.Core = try r.word()
+	c.Status = try r.word()
+	c.Flags = try r.word()
+	c.Request = try r.text()
+	c.Panic = try r.text()
+	if c.Schema >= 2 {
+		c.Peer = try r.text()
+	}
+	let count = try r.word()
+	for i in 0..count {
+		let seq = try r.word()
+		let kind = try r.text()
+		let key = try r.text()
+		let outcome = try r.word()
+		let ident = try r.word()
+		let data = try r.text()
+		c.Effects = append(c.Effects, Effect{Seq: seq, Kind: kind, Key: key, Outcome: outcome, Ident: ident, Data: data})
+	}
+	if r.Pos != len(body) {
+		fail mint.Itoa(len(body) - r.Pos) + " bytes after the last effect"
+	}
+	return c
+}
+
+// CheckKeyHex is CheckKey as the hex text TIN_REPLAY_KEY takes.
+fn CheckKeyHex() str {
+	let b = make([]u8, 32)
+	for i in 0..32 {
+		b[i] = u8(i)
+	}
+	return seal.Hex(b)
 }

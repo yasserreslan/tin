@@ -1,0 +1,145 @@
+package main
+
+import "./ci"
+import "./capsule"
+import "./nettest"
+import "mint"
+import "say"
+import "twine"
+
+// Scheduling replay (#243, design/interface_replay.md section 7): a recording select appends its winning arm as sched.select@1 keyed
+// by its site; a replaying select checks, watches and waits for the recorded arm only, so a select that raced a timer takes the
+// recorded branch under any live timing. A request's tasks resume in the recorded order (sched.resume@1), and a task whose effect is
+// not the next record waits for its turn; when no task can go on, the replay diverges instead of hanging. Cancels go on the tape
+// (sched.cancel@1); replaying, a deadline comes from the tape, not the clock. The fixture counts branches, it never times them.
+
+fn expected() str {
+	let lines = []str{
+		`no tape: lane`,
+		`lane recorded: lane [sched.resume@1  1 sched.resume@1  1 sched.resume@1  0 sched.select@1 sched.tin:17 0]`,
+		`lane live now: timer replayed: 20 of 20 took lane clean: 20`,
+		`timer recorded: timer [sched.resume@1  1 sched.resume@1  0 sched.select@1 sched.tin:17 1 sched.cancel@1 task 1 fault canceled sched.resume@1  1 sched.resume@1  0]`,
+		`timer live now: lane replayed: 20 of 20 took timer clean: 20`,
+		`race: 30 of 30 recordings replayed their branch under both timings`,
+		`deadline recorded: fault deadline exceeded [sched.resume@1  1 sched.cancel@1 within 0 fault deadline exceeded sched.resume@1  0 sched.select@1 sched.tin:17 2 sched.resume@1  1 sched.resume@1  0]`,
+		`deadline replayed: fault deadline exceeded diverged: false`,
+		`recorded deadline under 10 s: fault deadline exceeded diverged: false left: 0`,
+		`no deadline recorded: lane live under 1 ms: fault deadline exceeded replayed under 1 ms: 10 of 10`,
+		`order recorded: ab ba live swapped: ba`,
+		`order replayed: 20 of 20 gave ab and 20 of 20 gave ba`,
+		`effects recorded: v:b v:a  [sched.resume@1  1 sched.resume@1  2 test@1 b test@1 a sched.resume@1  0]`,
+		`effects replayed: 20 of 20 gave v:b v:a `,
+		`effects diverged: fault replay: divergence at effect 2: got test@1 "a", recorded test@1 "b" | replay: divergence at effect 2: got test@1 "a", recorded test@1 "b"`,
+		`old tape: v:a lane diverged: false left: 0`,
+		`other site: other replay: divergence at effect 0: select at sched.tin:30 has no record`,
+		""
+	}
+	return twine.Join(lines, "\n")
+}
+
+fn serve(exe str, log str, set []str) nettest.Server {
+	let port = nettest.Port()
+	mut env = []str{"TIN_CORES=1"}
+	for e in set {
+		env = append(env, e)
+	}
+	let server = nettest.Start(exe, []str{}, env, log, port)
+	server.Ready(10)
+	return server
+}
+
+fn endToEnd(work str, out str) {
+	let exe = ci.Join(work, "sched_serve")
+	ci.BuildTin("tools/ci/fixtures/sched_serve.tin", exe, "", []str{"-edition", "1"})
+	// Live, RACE_MODE decides the race: the timing really flips the branch.
+	mut server = serve(exe, ci.Join(out, "live1.log"), []str{"RACE_MODE=timer"})
+	let flipLane = nettest.Get(server.Port, "/lane")
+	let flipTimer = nettest.Get(server.Port, "/timer")
+	server.Stop()
+	server = serve(exe, ci.Join(out, "live2.log"), []str{"RACE_MODE=lane"})
+	let flipOther = nettest.Get(server.Port, "/timer")
+	server.Stop()
+	ci.Check(flipLane == "timer" && flipTimer == "timer" && flipOther == "lane", "the timing did not flip the branch: " + flipLane + " " + flipTimer + " " + flipOther)
+	let spool = ci.Join(work, "spool")
+	ci.Mkdirs(spool)
+	mut paths = []str{"/lane", "/timer"}
+	for i in 0..30 {
+		paths = append(paths, "/race/" + twine.Repeat("x", 1 + i % 3))
+	}
+	let key = capsule.CheckKey()
+	server = serve(exe, ci.Join(out, "record.log"), []str{"TIN_REPLAY_DIR=" + spool, "TIN_REPLAY_KEY=" + capsule.CheckKeyHex(), "TIN_REPLAY_SAMPLE=1"})
+	mut answers = []str{}
+	for p in paths {
+		answers = append(answers, nettest.Get(server.Port, p))
+	}
+	server.Stop()
+	ci.Check(answers[0] == "lane" && answers[1] == "timer", "the recorded answers were " + answers[0] + " " + answers[1])
+	let caps = ci.Files(spool, ".tcap")
+	ci.Check(len(caps) == len(paths), "capsules " + mint.Itoa(len(caps)) + ", requests " + mint.Itoa(len(paths)))
+	mut failures = []str{}
+	mut selects = 0
+	mut replays = 0
+	mut lanes = 0
+	for a in answers {
+		if a == "lane" {
+			lanes += 1
+		}
+	}
+	// the spool names sort by time: the capsules are in request order
+	for i in 0..len(paths) {
+		let data = ci.Read(caps[i])
+		let body = capsule.Unseal(data, key) catch _ {
+			failures = append(failures, caps[i] + ": cannot open")
+			continue
+		}
+		let c = capsule.Decode(body) catch _ {
+			failures = append(failures, caps[i] + ": cannot decode")
+			continue
+		}
+		if !twine.HasPrefix(c.Request, "GET " + paths[i] + " ") {
+			failures = append(failures, caps[i] + ": holds " + c.Request[0:40] + ", not " + paths[i])
+			continue
+		}
+		mut sawSelect = false
+		for e in c.Effects {
+			if e.Kind == "sched.select@1" {
+				sawSelect = true
+			}
+		}
+		if sawSelect {
+			selects += 1
+		}
+		for mode in []str{"", "lane", "timer"} {
+			let r = ci.ExecEnv([]str{ci.Join(ci.Root(), "tin"), "replay", caps[i], "--against", exe}, ci.Root(), 60, []str{"TIN_REPLAY_KEY=" + capsule.CheckKeyHex(), "RACE_MODE=" + mode}, []str{"TIN_REPLAY_DIR", "TIN_REPLAY_SAMPLE"})
+			replays += 1
+			if r.Code != 0 || r.Stdout != "replay: status 200 (recorded 200)\n" + answers[i] {
+				failures = append(failures, paths[i] + " recorded " + answers[i] + ", RACE_MODE=" + mode + ": exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+			}
+		}
+	}
+	ci.Write(ci.Join(out, "end_to_end.log"), twine.Join(failures, "\n"))
+	if len(failures) > 0 {
+		ci.Fail("scheduling replay end to end:\n" + twine.Join(failures[0:min(len(failures), 10)], "\n"))
+	}
+	ci.Check(selects == len(paths), "selects recorded: " + mint.Itoa(selects))
+	say.Line("scheduling replay end to end: " + mint.Itoa(len(paths)) + " requests whose select raced a timer, recorded by anvil (" + mint.Itoa(lanes) + " took the lane), " + mint.Itoa(replays) + " tin replay runs under both deciding timings all took the recorded branch and served the whole capsule")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/sched")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "sched-")
+	ci.CopyLib(ci.Root(), ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/schedprobe")
+	ci.Mkdirs(probe)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/sched_probe.tin"), ci.Join(probe, "probe.tin"))
+	let exe = ci.Join(work, "sched")
+	ci.BuildTin("tools/ci/fixtures/sched.tin", exe, work, []str{"-edition", "1"})
+	let r = ci.Exec([]str{exe}, ci.Root(), 60)
+	ci.Write(ci.Join(out, "sched.log"), r.Stdout + r.Stderr)
+	ci.Check(r.Code == 0, "sched fixture exited " + mint.Itoa(r.Code) + ": " + r.Stderr)
+	ci.Check(r.Stdout == expected(), "scheduling replay: output differs\n--- want\n" + expected() + "--- got\n" + r.Stdout)
+	endToEnd(work, out)
+	ci.Remove(work)
+	ci.Pass("scheduling replay: select winners and resume order replayed under the opposite timing, effects in their recorded order, deadlines from the tape, divergence")
+}
