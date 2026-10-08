@@ -299,6 +299,7 @@ fn main() {
 	ci.BuildTin("tools/ci/fixtures/lifecycle.tin", exe, "", []str{"-edition", "1"})
 	startupFails(exe, out, []str{"START_FAIL=1"}, "startup failed: on app.start: migration refused")
 	startupFails(exe, out, []str{"STORE_FAIL=1"}, "startup failed: use store: store unreachable")
+	startupFails(exe, out, []str{"GLOBAL_FAIL=1"}, "startup failed: initializing greeting: greeting file missing")
 	run(exe, out, "SIGTERM")
 	run(exe, out, "anvil.Drain")
 	admission(out)

@@ -1,0 +1,55 @@
+package main
+
+import "mint"
+import "say"
+
+type Config struct {
+	name str
+	port i64
+}
+
+fn load(name str, port str) !Config {
+	let n = try mint.Atoi(port)
+	return Config{name: name, port: n}
+}
+
+fn half(x i64) !i64 {
+	if x%2 != 0 {
+		fail "odd"
+	}
+	return x / 2
+}
+
+fn ratio() !f64 {
+	return 2.5
+}
+
+fn label() !str {
+	return "tin"
+}
+
+fn five() !i64 {
+	return 5
+}
+
+let port = try mint.Atoi("8080")
+let conf = try load("api", "9000")
+let typed i64 = try half(84)
+let scale = try ratio()
+let title = try label()
+let fallback = half(7) catch err {
+	say.Line("startup caught:", err)
+	-1
+}
+let skipped = half(8) catch err {
+	say.Line("never printed")
+	0
+}
+let after = port + typed
+mut counter = try half(10)
+shared let table = try five()
+
+fn main() {
+	counter += 1
+	say.Line(port, conf.name, conf.port, typed, scale, title, fallback, skipped, after, counter, table)
+}

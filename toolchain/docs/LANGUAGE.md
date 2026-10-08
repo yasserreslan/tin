@@ -738,8 +738,25 @@ fn main() {
 Globals are per core (section 11): each core thread has its own copy, and initializers
 run once on every core. Values stored into globals live in the long-lived heap
 (section 12). A `mut` global of a type with a zero value may leave out its initializer
-(`mut hits i64`). A global's initializer may fail only through `try`, which aborts
-startup.
+(`mut hits i64`). A global's initializer that can fail uses `try`, which aborts startup,
+or `catch`, which handles the fault in place:
+
+```tin
+import "mint"
+import "say"
+
+let port = try mint.Atoi("8080")                  // a fault ends startup (status 1)
+let workers = mint.Atoi("many") catch err { 4 }   // a fallback
+
+fn main() {
+	say.Line(port, workers)
+}
+```
+
+A fault from `try` is printed as `startup failed: initializing port: ...` on stderr and the
+process exits with status 1 before it serves anything, as a failing `use` does. The global is
+initialized where globals are (every core, or core 0 before the cores start for `shared let`),
+so a parsed template, a compiled pattern or a loaded certificate can be a global.
 
 Globals are per core, and `main` runs on core 0 only: a global that `main` (or a function it
 calls) assigns holds the new value on core 0 alone, while the handlers of the other cores read

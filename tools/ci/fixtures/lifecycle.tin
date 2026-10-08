@@ -24,6 +24,16 @@ fn openStore() !Store {
 
 use store = openStore()
 
+// A package-level try: a fault ends startup before the server listens (#815).
+fn loadGreeting() !str {
+	if quarry.Getenv("GLOBAL_FAIL") != "" {
+		fail "greeting file missing"
+	}
+	return "hello"
+}
+
+let greeting = try loadGreeting()
+
 on app.start {
 	if quarry.Getenv("START_FAIL") != "" {
 		fail "migration refused"
