@@ -13,6 +13,11 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 for name in display objc number bitmap callbacks metal; do
 	"$compiler" -o "$tmp/$name" "toolchain/tests/darwin/$name.tin"
 	"$tmp/$name" > "$tmp/$name.out"
+	# a machine without a GPU (a virtual machine) says so on its first line
+	if head -1 "$tmp/$name.out" | grep -q '^no gpu'; then
+		echo "SKIP darwin $name: $(head -1 "$tmp/$name.out")"
+		continue
+	fi
 	cmp "$tmp/$name.out" "toolchain/tests/darwin/$name.out" || { echo "FAIL darwin $name"; exit 1; }
 	echo "PASS darwin $name"
 done

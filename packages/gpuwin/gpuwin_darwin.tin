@@ -4,6 +4,7 @@
 package gpuwin
 
 import "appkit"
+import "constraints"
 import "metal"
 
 const tagClose = -1
@@ -182,4 +183,18 @@ fn Run(win Window) {
 // Quit ends Run.
 fn Quit(win Window) {
 	appkit.Send1(win.Win.App, "terminate:", 0)
+}
+
+mut stashed i64
+
+// Stash remembers the object the callbacks work on: AppKit calls plain functions, which have no variables of their own, so the
+// program hands them its state this way and takes it back with State. The object must stay alive while Run is running (it does
+// when main holds it).
+fn Stash[T constraints.Any](v T) {
+	stashed = cast(i64, v)
+}
+
+// State is the object Stash was given; T must be the same type.
+fn State[T constraints.Any]() T {
+	return cast(T, stashed)
 }

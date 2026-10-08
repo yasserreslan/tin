@@ -48,6 +48,8 @@ type Atlas struct {
 	Pixels i64
 	Fonts []Font
 	Glyphs map[i64]Glyph
+	// Icons are the SF Symbol names AddIcon was given; an icon's number is its place in the list.
+	Icons []str
 	NextX i64
 	NextY i64
 	RowH i64
@@ -95,6 +97,12 @@ fn (a mut Atlas) AddFont(name str, pixels f64) i64 {
 	return len(a.Fonts) - 1
 }
 
+// AddIcon registers an SF Symbol ("folder", "chevron.right", "magnifyingglass") and returns its number.
+fn (a mut Atlas) AddIcon(name str) i64 {
+	a.Icons = append(a.Icons, keep(name))
+	return len(a.Icons) - 1
+}
+
 // measure is the advance of the text in the font.
 fn (a mut Atlas) measure(f Font, text str) f64 {
 	return appkit.TextAdvance(f.Handle, text)
@@ -113,12 +121,47 @@ fn (a mut Atlas) Lookup(font i64, r i32) Glyph {
 	let w = i64(adv) + 3 + 2 * edge
 	let h = i64(f.Ascent + f.Descent) + 3 + 2 * edge
 	let g = Glyph{W: w, H: h, Advance: adv}
-	if a.NextX + w > a.Size {
+	a.place(mut g)
+	// draw it in white into a scratch bitmap and keep its alpha
+	let bmp = appkit.NewBitmap(w, h)
+	appkit.SetFont(bmp, f.Name, f.Pixels)
+	appkit.SetColor(bmp, 1.0, 1.0, 1.0, 1.0)
+	appkit.DrawUnicode(bmp, f64(edge), f64(h) - f64(edge) - f64(i64(f.Ascent) + 1), text)
+	a.copyAlpha(g, bmp)
+	appkit.FreeBitmap(bmp)
+	a.Glyphs[key] = keep(g)
+	a.Dirty = true
+	return g
+}
+
+// Icon returns the atlas rectangle of the icon (a number AddIcon gave) drawn size pixels square, drawing it first when the atlas does
+// not have it.
+fn (a mut Atlas) Icon(icon i64, size i64) Glyph {
+	let key = -(icon * 4096 + size) - 1
+	let (have, found) = a.Glyphs[key]
+	if found {
+		return have
+	}
+	let w = size + 2 * edge
+	let g = Glyph{W: w, H: w, Advance: f64(size)}
+	a.place(mut g)
+	let bmp = appkit.NewBitmap(w, w)
+	appkit.DrawSymbol(bmp, a.Icons[icon], f64(edge), f64(edge), f64(size))
+	a.copyAlpha(g, bmp)
+	appkit.FreeBitmap(bmp)
+	a.Glyphs[key] = keep(g)
+	a.Dirty = true
+	return g
+}
+
+// place finds room for the glyph's rectangle (starting a new row, or a new atlas when this one is full) and sets its position.
+fn (a mut Atlas) place(g mut Glyph) {
+	if a.NextX + g.W > a.Size {
 		a.NextX = 0
 		a.NextY += a.RowH
 		a.RowH = 0
 	}
-	if a.NextY + h > a.Size {
+	if a.NextY + g.H > a.Size {
 		a.Full += 1
 		a.Reset()
 		a.NextX = 0
@@ -127,24 +170,19 @@ fn (a mut Atlas) Lookup(font i64, r i32) Glyph {
 	}
 	g.X = a.NextX
 	g.Y = a.NextY
-	a.NextX += w
-	if h > a.RowH {
-		a.RowH = h
+	a.NextX += g.W
+	if g.H > a.RowH {
+		a.RowH = g.H
 	}
-	// draw it in white into a scratch bitmap and keep its alpha
-	let bmp = appkit.NewBitmap(w, h)
-	appkit.SetFont(bmp, f.Name, f.Pixels)
-	appkit.SetColor(bmp, 1.0, 1.0, 1.0, 1.0)
-	appkit.DrawUnicode(bmp, f64(edge), f64(h) - f64(edge) - f64(i64(f.Ascent) + 1), text)
-	for y in 0..h {
-		for x in 0..w {
-			store8(a.Pixels + (g.Y + y) * a.Size + g.X + x, appkit.Pixel(bmp, (y * w + x) * 4 + 3))
+}
+
+// copyAlpha keeps the alpha of the bitmap as the glyph's coverage.
+fn (a mut Atlas) copyAlpha(g Glyph, bmp appkit.Bitmap) {
+	for y in 0..g.H {
+		for x in 0..g.W {
+			store8(a.Pixels + (g.Y + y) * a.Size + g.X + x, appkit.Pixel(bmp, (y * g.W + x) * 4 + 3))
 		}
 	}
-	appkit.FreeBitmap(bmp)
-	a.Glyphs[key] = keep(g)
-	a.Dirty = true
-	return g
 }
 
 // Upload sends the glyphs drawn since the last upload to the GPU; call it before drawing a frame.

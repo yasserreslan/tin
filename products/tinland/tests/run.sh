@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../../.." || exit 1
 compiler=${1:-bin/tinc}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-for name in ui_layout; do
+for name in ui_layout project; do
 	"$compiler" -o "$tmp/$name" "products/tinland/tests/programs/$name.tin"
 	"$tmp/$name" > "$tmp/$name.out"
 	cmp "$tmp/$name.out" "products/tinland/tests/golden/$name.out" || { echo "FAIL tinland $name"; exit 1; }
