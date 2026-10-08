@@ -1,0 +1,116 @@
+192.0.2.1 => 192.0.2.1 192.0.2.1 32 true false false zone:
+2001:db8::68 => 2001:db8::68 2001:0db8:0000:0000:0000:0000:0000:0068 128 false true false zone:
+::ffff:1.2.3.4 => ::ffff:1.2.3.4 0000:0000:0000:0000:0000:ffff:0102:0304 128 false true true zone:
+fe80::1cc0:3e8c:119f:c2e1%ens18 => fe80::1cc0:3e8c:119f:c2e1%ens18 fe80:0000:0000:0000:1cc0:3e8c:119f:c2e1%ens18 128 false true false zone:ens18
+:: => :: 0000:0000:0000:0000:0000:0000:0000:0000 128 false true false zone:
+0.0.0.0 => 0.0.0.0 0.0.0.0 32 true false false zone:
+2001:0DB8:0000:0000:0000:0000:0000:0001 => 2001:db8::1 2001:0db8:0000:0000:0000:0000:0000:0001 128 false true false zone:
+1:2:3:4:5:6:1.2.3.4 => 1:2:3:4:5:6:102:304 0001:0002:0003:0004:0005:0006:0102:0304 128 false true false zone:
+::1.2.3.4 => ::102:304 0000:0000:0000:0000:0000:0000:0102:0304 128 false true false zone:
+1:0:0:2:0:0:0:3 => 1:0:0:2::3 0001:0000:0000:0002:0000:0000:0000:0003 128 false true false zone:
+1:0:0:2:0:0:3:0 => 1::2:0:0:3:0 0001:0000:0000:0002:0000:0000:0003:0000 128 false true false zone:
+fault ParseAddr(""): unable to parse IP
+fault ParseAddr("1.2.3"): IPv4 address too short
+fault ParseAddr("01.2.3.4"): IPv4 field has octet with leading zero
+fault ParseAddr("1.2.3.256"): IPv4 field has value >255
+fault ParseAddr("1.2.3.4.5"): IPv4 address too long
+fault ParseAddr("1..2.3"): IPv4 field must have at least one digit (at ".2.3")
+fault ParseAddr("1.2.3.4%eth0"): unexpected character (at "%eth0")
+fault ParseAddr("%eth0"): missing IPv6 address
+fault ParseAddr("fe80::1%"): zone must be a non-empty string
+fault ParseAddr("1::2::3"): multiple :: in address (at ":3")
+fault ParseAddr("12345::"): each group must have 4 or less digits (at "12345::")
+fault ParseAddr("1:2:3:4:5:6:7"): address string too short
+fault ParseAddr("1:2:3:4::5:6:7:8"): the :: must expand to at least one field of zeros
+fault ParseAddr("1:2:3:4:5:6:7:1.2.3.4"): embedded IPv4 address must replace the final 2 fields of the address (at "1.2.3.4")
+fault ParseAddr("::ffff:1.2.03.4"): IPv4 field has octet with leading zero
+fault ParseAddr("fe80:"): colon must be followed by more characters (at ":")
+fault ParseAddr("g::"): each colon-separated field must have at least one digit (at "g::")
+fault ParseAddr("é"): unable to parse IP
+127.0.0.1 loopback true private false unspecified false multicast false linklocal false false iface false global false
+::1 loopback true private false unspecified false multicast false linklocal false false iface false global false
+::ffff:127.0.0.1 loopback true private false unspecified false multicast false linklocal false false iface false global false
+10.1.2.3 loopback false private true unspecified false multicast false linklocal false false iface false global true
+172.16.0.1 loopback false private true unspecified false multicast false linklocal false false iface false global true
+172.32.0.1 loopback false private false unspecified false multicast false linklocal false false iface false global true
+192.168.1.1 loopback false private true unspecified false multicast false linklocal false false iface false global true
+fd00::1 loopback false private true unspecified false multicast false linklocal false false iface false global true
+0.0.0.0 loopback false private false unspecified true multicast false linklocal false false iface false global false
+:: loopback false private false unspecified true multicast false linklocal false false iface false global false
+::%eth0 loopback false private false unspecified false multicast false linklocal false false iface false global true
+224.0.0.1 loopback false private false unspecified false multicast true linklocal false true iface false global false
+239.1.1.1 loopback false private false unspecified false multicast true linklocal false false iface false global false
+ff02::1 loopback false private false unspecified false multicast true linklocal false true iface false global false
+ff01::1 loopback false private false unspecified false multicast true linklocal false false iface true global false
+ff05::1 loopback false private false unspecified false multicast true linklocal false false iface false global false
+169.254.1.1 loopback false private false unspecified false multicast false linklocal true false iface false global false
+fe80::1 loopback false private false unspecified false multicast false linklocal true false iface false global false
+255.255.255.255 loopback false private false unspecified false multicast false linklocal false false iface false global false
+8.8.8.8 loopback false private false unspecified false multicast false linklocal false false iface false global true
+2001:db8::1 loopback false private false unspecified false multicast false linklocal false false iface false global true
+10.0.0.1 true true false
+fe80::1%eth0 fe80::1 1.2.3.4
+1.2.3.255 next 1.2.4.0 prev 1.2.3.254 true true
+255.255.255.255 next invalid IP prev 255.255.255.254 false true
+0.0.0.0 next 0.0.0.1 prev invalid IP true false
+::ffff next ::1:0 prev ::fffe true true
+ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff next invalid IP prev ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe false true
+:: next ::1 prev invalid IP true false
+fe80::%lo next fe80::1%lo prev fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff%lo true true
+invalid IP false 0 ::1 ff02::1 ff02::2 0.0.0.0 ::
+10.0.0.1 true invalid IP false 2001:db8::1 192.168.0.1 [10 0 0 1] [10 0 0 1] 16
+192.168.1.77/24 => 192.168.1.77/24 24 192.168.1.0/24 192.168.1.77 false
+10.0.0.0/8 => 10.0.0.0/8 8 10.0.0.0/8 10.0.0.0 false
+2001:db8::1/32 => 2001:db8::1/32 32 2001:db8::/32 2001:db8::1 false
+::ffff:1.2.3.4/120 => ::ffff:1.2.3.4/120 120 ::ffff:1.2.3.0/120 ::ffff:1.2.3.4 false
+0.0.0.0/0 => 0.0.0.0/0 0 0.0.0.0/0 0.0.0.0 false
+1.2.3.4/32 => 1.2.3.4/32 32 1.2.3.4/32 1.2.3.4 true
+::/0 => ::/0 0 ::/0 :: false
+fault netip.ParsePrefix("1.2.3.4"): no '/'
+fault netip.ParsePrefix("1.2.3.4/33"): prefix length out of range
+fault netip.ParsePrefix("::1/129"): prefix length out of range
+fault netip.ParsePrefix("1.2.3.4/01"): bad bits after slash: "01"
+fault netip.ParsePrefix("1.2.3.4/+8"): bad bits after slash: "+8"
+fault netip.ParsePrefix("1.2.3.4/"): bad bits after slash: ""
+fault netip.ParsePrefix("fe80::1%eth0/64"): IPv6 zones cannot be present in a prefix
+fault netip.ParsePrefix("1.2.3/8"): ParseAddr("1.2.3"): IPv4 address too short
+192.168.0.0/16 contains 192.168.3.4 true
+192.168.0.0/16 contains 192.169.0.1 false
+192.168.0.0/16 contains ::ffff:192.168.3.4 false
+192.168.0.0/16 contains 10.0.0.1 false
+true false false
+10.0.0.0/8 overlaps 10.1.0.0/16 true true -1
+10.0.0.0/16 overlaps 10.1.0.0/16 false false -1
+0.0.0.0/0 overlaps 1.2.3.4/32 true true -1
+::/0 overlaps 1.2.3.4/32 false false 1
+2001:db8::/32 overlaps 2001:db8:1::/48 true true -1
+::ffff:0.0.0.0/96 overlaps ::/0 true true 1
+10.0.0.0/12 true prefix length 40 too large for IPv4 invalid Prefix invalid Prefix false
+1.2.3.4:80 => 1.2.3.4:80 80 1.2.3.4 true
+[::1]:443 => [::1]:443 443 ::1 true
+[fe80::1%eth0]:8080 => [fe80::1%eth0]:8080 8080 fe80::1%eth0 true
+[::ffff:1.2.3.4]:65535 => [::ffff:1.2.3.4]:65535 65535 ::ffff:1.2.3.4 true
+fault not an ip:port
+fault no port
+fault no IP
+fault missing ]
+fault invalid ip:port "[1.2.3.4]:80", square brackets can only be used with IPv6 addresses
+fault invalid ip:port "::1:80", IPv6 addresses must be surrounded by square brackets
+fault invalid port "65536" parsing "1.2.3.4:65536"
+fault invalid port "http" parsing "1.2.3.4:http"
+[2001:db8::1]:53 invalid AddrPort
+[invalid IP 1.2.3.4 10.0.0.2 10.0.0.10 :: ::1 ::ffff:10.0.0.1 fe80::1 fe80::1%a fe80::1%b]
+true false false
+4 2 3 1
+lan lan 0
+db [2001:db8::5]:5432 5432 true
+true true fe80::1%eth0 true [::1]:80
+fault not an ip:port
+fault unexpected slice size
+MustParseAddr -> panic: ParseAddr("1.2.3.04"): IPv4 field has octet with leading zero
+MustParsePrefix -> panic: netip.ParsePrefix("1.2.3.4"): no '/'
+MustParseAddrPort -> panic: invalid ip:port "::1:80", IPv6 addresses must be surrounded by square brackets
+As4 -> panic: As4 called on IPv6 address
+As4 zero -> panic: As4 called on IP zero value
+no allocation: 0 true true true 2001:db8::1 192.168.7.7
+String allocates: true 2001:db8::1
