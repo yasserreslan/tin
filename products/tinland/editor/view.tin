@@ -48,6 +48,7 @@ fn (ed mut Editor) UseFont() {
 // Prepare does what a frame needs that stores new memory: the multi-line string state of each line. Call it outside the
 // frame's arena, after the text changed.
 fn (ed mut Editor) Prepare() {
+	ed.syncFolds()
 	ed.updateRaw()
 }
 
@@ -172,8 +173,8 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 	let lh = ed.LineH
 	let pad = (lh - render.LineHeight(render.FontCode)) / 2.0
 	mut n = 0
-	for n <= rows && ed.Scroll + n < len(b.Lines) {
-		let row = ed.Scroll + n
+	mut row = ed.Scroll
+	for n <= rows && row < len(b.Lines) {
 		let line = b.Lines[row]
 		let top = y + ed.rowTop(n)
 		mut state = 0
@@ -297,12 +298,27 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 			numColor = th.GutterActive
 		}
 		render.Pen(mut scene, render.FontCode, lx, top + pad, label, numColor)
+		// the fold arrow: open (down) on a line that starts a block, closed (right) on a folded one, and an ellipsis after its text
+		if ed.foldable(row) {
+			let folded = ed.foldAt(row) >= 0
+			mut arrow = "\u25be"
+			if folded {
+				arrow = "\u25b8"
+			}
+			render.Pen(mut scene, render.FontCode, x + gutter - ed.CharW * 1.4, top + pad, arrow, th.Gutter)
+			if folded {
+				let ex = textX + f64(foldCols(line) - ed.HScroll + 1) * ed.CharW
+				render.FillRound(mut scene, ex, top + lh * 0.2, ed.CharW * 3.0, lh * 0.6, 3.0, th.Selection)
+				render.Pen(mut scene, render.FontCode, ex + ed.CharW * 0.5, top + pad, "\u2026", th.Gutter)
+			}
+		}
+		row = ed.nextVisible(row)
 		n += 1
 	}
 	// the caret: a bar between two characters, blinking
 	if ed.Blink && ed.Mode == modeEdit {
 		let cx = textX + f64(textedit.DisplayCol(b.Lines[b.Row], b.Col, 4) - ed.HScroll) * ed.CharW
-		let cn = b.Row - ed.Scroll
+		let cn = ed.dispRow(b.Row)
 		if cn >= 0 && cn <= rows {
 			render.Fill(mut scene, cx, y + ed.rowTop(cn), 1.5, lh, th.Cursor)
 		}
@@ -315,7 +331,7 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 	}
 	// the other carets
 	for p in ed.Extra {
-		let en = p.Row - ed.Scroll
+		let en = ed.dispRow(p.Row)
 		if en >= 0 && en <= rows && p.Row < len(b.Lines) {
 			let ex = textX + f64(textedit.DisplayCol(b.Lines[p.Row], p.Col, 4) - ed.HScroll) * ed.CharW
 			render.Fill(mut scene, ex, y + ed.rowTop(en), 1.5, lh, th.Cursor)
@@ -426,7 +442,7 @@ fn (ed Editor) popups(th theme.Theme, x f64, y f64, w f64, h f64, scene mut meta
 	}
 	widest = min(widest, 100)
 	let b = ed.Buf
-	let cn = b.Row - ed.Scroll
+	let cn = ed.dispRow(b.Row)
 	let cx = x + ed.gutterW() + f64(textedit.DisplayCol(b.Lines[b.Row], b.Col, 4) - ed.HScroll) * ed.CharW
 	let boxW = f64(widest + 2) * ed.CharW
 	let boxH = f64(len(lines)) * ed.LineH + 8.0
@@ -459,12 +475,14 @@ fn (ed Editor) popups(th theme.Theme, x f64, y f64, w f64, h f64, scene mut meta
 // cpuFrame does the work of a frame that needs no GPU: the highlighting state and the display cells of the visible lines (the
 // scripts time it to catch a regression in how a frame is prepared).
 fn (ed mut Editor) cpuFrame() {
+	ed.syncFolds()
 	ed.updateRaw()
 	ed.ensureVisible()
 	mut n = 0
-	for n <= ed.rows() && ed.Scroll + n < len(ed.Buf.Lines) {
-		let row = ed.Scroll + n
+	mut row = ed.Scroll
+	for n <= ed.rows() && row < len(ed.Buf.Lines) {
 		cellsOf(ed.Buf.Lines[row], ed.rawRows[row], ed.rawLang)
+		row = ed.nextVisible(row)
 		n += 1
 	}
 }
@@ -511,7 +529,7 @@ fn (ed Editor) markAt(row i64) i64 {
 
 // markCell outlines the character at byte col of line row.
 fn (ed Editor) markCell(th theme.Theme, textX f64, y f64, row i64, col i64, scene mut metal.Scene) {
-	let n = row - ed.Scroll
+	let n = ed.dispRow(row)
 	if n < 0 || n > ed.rows() {
 		return
 	}

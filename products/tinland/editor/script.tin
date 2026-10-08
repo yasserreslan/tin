@@ -82,6 +82,8 @@ fn (ed Editor) dump() {
 //   output           prints the output panel
 //   prompt           prints the find or go-to-line prompt
 //   open:PATH        loads a file
+//   fold, unfold, unfoldall  fold the block at the caret, open the fold there, open all
+//   shown            prints the folds' count and the lines on screen
 //   whitespace       toggles the whitespace marks (prints the new state)
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
@@ -184,6 +186,22 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("prompt:", ed.Mode, ed.Prompt, ed.Message)
 		} else if twine.HasPrefix(step, "open:") {
 			ed.Load(step[5:])
+		} else if step == "fold" {
+			ed.FoldCaret()
+		} else if step == "unfold" {
+			ed.UnfoldCaret()
+		} else if step == "unfoldall" {
+			ed.UnfoldAll()
+		} else if step == "shown" {
+			// the lines on screen, in order, with the folds
+			ed.syncFolds()
+			mut shown = []str{}
+			mut r = ed.Scroll
+			for r < len(ed.Buf.Lines) && len(shown) < 40 {
+				shown = append(shown, ed.Buf.Lines[r])
+				r = ed.nextVisible(r)
+			}
+			say.Line("shown:", len(ed.Folds), twine.Join(shown, "|"), "row", ed.Buf.Row)
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
 		} else if twine.HasPrefix(step, "snap:") {
