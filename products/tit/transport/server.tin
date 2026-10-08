@@ -164,18 +164,21 @@ fn (s mut Server) authenticate(method str, path str, signature str, body str, no
 	}
 	if twine.HasSuffix(path, "/tit/v1/push") {
 		// forget nonces too old to pass CheckNonce, then refuse one seen already
-		mut recent = map[str]i64{}
+		mut stale = []str{}
 		for n, at in s.seen {
-			if now - at < NonceLife {
-				recent[n] = at
+			if now - at >= NonceLife {
+				stale = append(stale, n)
 			}
 		}
-		s.seen = recent
+		for n in stale {
+			delete(s.seen, n)
+		}
 		let (_, used) = s.seen[nonce]
 		if used {
 			try refusal(Code.NonceExpired, "this nonce was used already")
 		}
-		s.seen[nonce] = now
+		// a server keeps this past the request: keep() copies it into long-lived memory
+		s.seen[keep(nonce)] = now
 	}
 	return email
 }

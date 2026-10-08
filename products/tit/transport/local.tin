@@ -24,30 +24,13 @@ fn NewLocal(server Server, email str, seed secret []u8) Local {
 
 fn (l mut Local) call(method str, path str, body str) !str {
 	mut r = try l.send(method, path, body)
-	if r.Status == 401 && len(l.email) > 0 {
-		// a challenge: sign with the nonce it carries, once
-		let (k, header, _, ferr) = ReadFrame(r.Body)
-		if ferr == nil && k == Kind.Error {
-			mut e = ErrorAnswer{Code: "", Message: "", Ref: "", Nonce: ""}
-			let derr = argo.Get(header, mut e)
-			if derr == nil && len(e.Nonce) > 0 {
-				l.nonce = e.Nonce
-				r = try l.send(method, path, body)
-			}
-		}
+	// a challenge: sign with the nonce it carries, once
+	let n = challengeNonce(r.Status, r.Body)
+	if len(n) > 0 && len(l.email) > 0 {
+		l.nonce = n
+		r = try l.send(method, path, body)
 	}
-	if r.Status != 200 {
-		let (k, header, _, ferr) = ReadFrame(r.Body)
-		if ferr != nil || k != Kind.Error {
-			fail fault.Wrap(ErrRefused, "Internal: status {r.Status}")
-		}
-		mut e = ErrorAnswer{Code: "", Message: "", Ref: "", Nonce: ""}
-		argo.Get(header, mut e) catch _ {
-			fail fault.Wrap(ErrRefused, "Internal: status {r.Status}")
-		}
-		try Refused(e)
-	}
-	return r.Body
+	return try answer(r.Status, r.Body)
 }
 
 fn (l mut Local) send(method str, path str, body str) !Reply {

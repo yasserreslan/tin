@@ -1,0 +1,130 @@
+package transport
+
+import "anvil"
+import "wire"
+import "argo"
+import "fault"
+import "seal"
+import "twine"
+import "tide"
+
+// The protocol over HTTP (#795, #796): Http is the client Transport, on wire; Serve puts a Server behind anvil.
+
+// challengeNonce is the fresh nonce a 401 answer carries, or "".
+fn challengeNonce(status i64, body str) str {
+	if status != 401 {
+		return ""
+	}
+	let (k, header, _, ferr) = ReadFrame(body)
+	if ferr != nil || k != Kind.Error {
+		return ""
+	}
+	mut e = ErrorAnswer{Code: "", Message: "", Ref: "", Nonce: ""}
+	let derr = argo.Get(header, mut e)
+	if derr != nil {
+		return ""
+	}
+	return e.Nonce
+}
+
+// answer is the body of a 200 answer, or the refusal any other answer carries.
+fn answer(status i64, body str) !str {
+	if status == 200 {
+		return body
+	}
+	let (k, header, _, ferr) = ReadFrame(body)
+	if ferr != nil || k != Kind.Error {
+		fail fault.Wrap(ErrRefused, "Internal: status {status}")
+	}
+	mut e = ErrorAnswer{Code: "", Message: "", Ref: "", Nonce: ""}
+	argo.Get(header, mut e) catch _ {
+		fail fault.Wrap(ErrRefused, "Internal: status {status}")
+	}
+	try Refused(e)
+	return ""
+}
+
+// Http reaches a repository at url (http:// or https://), signing as email with the key seed ("" email: unsigned).
+type Http struct {
+	url   str
+	path  str
+	email str
+	seed  secret []u8
+	nonce str
+}
+
+// NewHttp is a client of the repository at url.
+fn NewHttp(url str, email str, seed secret []u8) Http {
+	mut base = url
+	for twine.HasSuffix(base, "/") {
+		base = base[0:len(base) - 1]
+	}
+	// the path the server sees, which the signature covers
+	mut path = ""
+	let scheme = twine.Index(base, "://")
+	if scheme >= 0 {
+		let slash = twine.IndexByte(base[scheme + 3:], '/')
+		if slash >= 0 {
+			path = base[scheme + 3 + slash:]
+		}
+	}
+	return Http{url: base, path: path, email: email, seed: seed, nonce: ""}
+}
+
+fn (h mut Http) send(method str, req str, body str) !wire.Resp {
+	mut headers = []str{"Content-Type", "application/x-tit"}
+	if len(h.email) > 0 && len(h.nonce) > 0 {
+		let s = try seal.SignEd25519(h.seed, []u8(SigningPayload(method, h.path + req, h.nonce, body)))
+		headers = append(headers, "Tit-Signature", SignatureHeader(h.email, h.nonce, s))
+	}
+	return try wire.DoWith(method, h.url + req, headers, body, wire.Options{Timeout: 600 * 1000000000, MaxBody: 4 * 1024 * 1024 * 1024, MaxIdle: 0})
+}
+
+fn (h mut Http) call(method str, req str, body str) !str {
+	mut r = try h.send(method, req, body)
+	let n = challengeNonce(r.Status, r.Body)
+	if len(n) > 0 && len(h.email) > 0 {
+		h.nonce = n
+		r = try h.send(method, req, body)
+	}
+	return try answer(r.Status, r.Body)
+}
+
+// Heads asks for the server's refs, and keeps the nonce for the next requests.
+fn (h mut Http) Heads() !Heads {
+	let body = try h.call("GET", "/tit/v1/heads", "")
+	let (_, header, _) = try ReadFrame(body)
+	mut out = Heads{Refs: []RefHead{}, Changes: []ChangeHead{}, Nonce: "", Server: "", Limits: Limits{Pack: 0, Refs: 0}}
+	try argo.Get(header, mut out)
+	h.nonce = out.Nonce
+	return out
+}
+
+// Fetch asks for what req wants: the answer's header and the pack.
+fn (h mut Http) Fetch(req FetchRequest) !(FetchAnswer, str) {
+	let body = try h.call("POST", "/tit/v1/fetch", Frame(Kind.FetchRequest, Encode(req), ""))
+	let (_, header, data) = try ReadFrame(body)
+	mut a = FetchAnswer{Objects: 0}
+	try argo.Get(header, mut a)
+	return a, data
+}
+
+// Push sends req and its pack, signed with the nonce of the last heads or challenge.
+fn (h mut Http) Push(req PushRequest, pack str) !PushAnswer {
+	let body = try h.call("POST", "/tit/v1/push", Frame(Kind.PushRequest, Encode(req), pack))
+	let (_, header, _) = try ReadFrame(body)
+	mut a = PushAnswer{Refs: []str{}}
+	try argo.Get(header, mut a)
+	return a
+}
+
+// Serve answers the protocol for server on addr, on every core, until the process ends.
+fn Serve(addr str, server Server) ! {
+	mut srv = server
+	try anvil.Serve(addr, fn(q anvil.Req, w mut anvil.Out) {
+		let r = srv.Handle(q.Method, q.Path, q.Header("tit-signature"), q.Body(), tide.Wall() / 1000000000)
+		w.Status(r.Status)
+		w.Type("application/x-tit")
+		w.Body = []u8(r.Body)
+	})
+}
