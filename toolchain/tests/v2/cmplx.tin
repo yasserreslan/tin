@@ -1,0 +1,104 @@
+package main
+
+import "cmplx"
+import "gauge"
+import "say"
+
+// Each line is a call and its result (real part, then imaginary part) for the corner cases of Go's math/cmplx: signed zeros,
+// poles, infinities, NaN, the branch cuts and the Complex64 rounding. The values are exact or Go's special-case results, so
+// every platform prints the same bits (cmplx_check compares the general values with Go's math/cmplx).
+
+fn main() {
+	let inf = gauge.Inf(1)
+	let ninf = gauge.Inf(-1)
+	let nan = gauge.NaN()
+	let nz = gauge.Copysign(0, -1)
+
+	// Construction, the predicates and the parts.
+	let z = cmplx.New(3, 4)
+	say.Line("New", z.Re, z.Im)
+	say.Line("Abs(3+4i)", cmplx.Abs(z))
+	say.Line("Abs(0)", cmplx.Abs(cmplx.New(nz, nz)))
+	say.Line("Phase(1+0i)", cmplx.Phase(cmplx.New(1, 0)))
+	say.Line("Phase(-1+0i)", cmplx.Phase(cmplx.New(-1, 0)))
+	say.Line("Phase(-1-0i)", cmplx.Phase(cmplx.New(-1, nz)))
+	say.Line("Phase(0-1i)", cmplx.Phase(cmplx.New(0, -1)))
+	say.Line("Phase(-0+0i)", cmplx.Phase(cmplx.New(nz, 0)))
+	say.Line("Phase(0-0i)", cmplx.Phase(cmplx.New(0, nz)))
+	let (r, t) = cmplx.Polar(cmplx.New(0, 2))
+	say.Line("Polar(2i)", r, t)
+	let p = cmplx.Rect(2, 0)
+	say.Line("Rect(2,0)", p.Re, p.Im)
+	say.Line("Conj(1+2i)", cmplx.Conj(cmplx.New(1, 2)).Re, cmplx.Conj(cmplx.New(1, 2)).Im)
+	say.Line("Conj(1+0i)", cmplx.Conj(cmplx.New(1, 0)).Im)
+	say.Line("Inf", cmplx.Inf().Re, cmplx.Inf().Im)
+	say.Line("NaN", cmplx.NaN().Re, cmplx.NaN().Im)
+	say.Line("IsNaN(NaN+1i)", cmplx.IsNaN(cmplx.New(nan, 1)), cmplx.IsNaN(cmplx.New(inf, nan)))
+	say.Line("IsNaN(1+1i)", cmplx.IsNaN(cmplx.New(1, 1)))
+	say.Line("IsInf(Inf+NaN i)", cmplx.IsInf(cmplx.New(inf, nan)), cmplx.IsInf(cmplx.New(nan, ninf)))
+	say.Line("IsInf(NaN+1i)", cmplx.IsInf(cmplx.New(nan, 1)))
+
+	// Sqrt: the imaginary axis and the negative real axis (branch cut) keep the sign of a signed zero.
+	show("Sqrt(-4+0i)", cmplx.Sqrt(cmplx.New(-4, 0)))
+	show("Sqrt(-4-0i)", cmplx.Sqrt(cmplx.New(-4, nz)))
+	show("Sqrt(0-0i)", cmplx.Sqrt(cmplx.New(0, nz)))
+	show("Sqrt(-0+0i)", cmplx.Sqrt(cmplx.New(nz, 0)))
+	show("Sqrt(3+4i)", cmplx.Sqrt(cmplx.New(3, 4)))
+	show("Sqrt(-3+4i)", cmplx.Sqrt(cmplx.New(-3, 4)))
+	show("Sqrt(-3-4i)", cmplx.Sqrt(cmplx.New(-3, -4)))
+	show("Sqrt(-inf+1i)", cmplx.Sqrt(cmplx.New(ninf, 1)))
+	show("Sqrt(1-inf i)", cmplx.Sqrt(cmplx.New(1, ninf)))
+	show("Sqrt(NaN+inf i)", cmplx.Sqrt(cmplx.New(nan, inf)))
+
+	// Exp, Sin, Cos and the hyperbolic functions at zero and infinity.
+	show("Exp(0)", cmplx.Exp(cmplx.New(0, 0)))
+	show("Exp(+inf+0i)", cmplx.Exp(cmplx.New(inf, 0)))
+	show("Exp(-inf+inf i)", cmplx.Exp(cmplx.New(ninf, inf)))
+	show("Exp(+inf+inf i)", cmplx.Exp(cmplx.New(inf, inf)))
+	show("Exp(NaN+0i)", cmplx.Exp(cmplx.New(nan, 0)))
+	show("Sin(0)", cmplx.Sin(cmplx.New(0, 0)))
+	show("Sin(-0+inf i)", cmplx.Sin(cmplx.New(nz, inf)))
+	show("Cos(0)", cmplx.Cos(cmplx.New(0, 0)))
+	show("Sinh(0-0i)", cmplx.Sinh(cmplx.New(0, nz)))
+	show("Cosh(0)", cmplx.Cosh(cmplx.New(0, 0)))
+	show("Tanh(inf+0i)", cmplx.Tanh(cmplx.New(inf, 0)))
+	show("Tan(0+inf i)", cmplx.Tan(cmplx.New(0, inf)))
+	show("Cot(0)", cmplx.Cot(cmplx.New(0, 0)))
+
+	// Pow: a zero base gives 0, 1, Inf or NaN by the exponent; otherwise r**y with the exact modulus.
+	show("Pow(0, 0)", cmplx.Pow(cmplx.New(0, 0), cmplx.New(0, 0)))
+	show("Pow(0, 2)", cmplx.Pow(cmplx.New(0, 0), cmplx.New(2, 0)))
+	show("Pow(-0, -1)", cmplx.Pow(cmplx.New(nz, 0), cmplx.New(-1, 0)))
+	show("Pow(0, -1i)", cmplx.Pow(cmplx.New(0, 0), cmplx.New(0, -1)))
+	show("Pow(0, NaN)", cmplx.Pow(cmplx.New(0, 0), cmplx.New(nan, 0)))
+	show("Pow(2, 3)", cmplx.Pow(cmplx.New(2, 0), cmplx.New(3, 0)))
+
+	// Log: the principal branch, with the phase of a signed zero on the negative axis.
+	show("Log(1)", cmplx.Log(cmplx.New(1, 0)))
+	show("Log(-1+0i)", cmplx.Log(cmplx.New(-1, 0)))
+	show("Log(-1-0i)", cmplx.Log(cmplx.New(-1, nz)))
+	show("Log(0)", cmplx.Log(cmplx.New(0, 0)))
+
+	// Inverse functions: the special cases of Go's asin, atan and acosh tables.
+	show("Asin(0)", cmplx.Asin(cmplx.New(0, 0)))
+	show("Asin(inf+inf i)", cmplx.Asin(cmplx.New(inf, inf)))
+	show("Asin(NaN+inf i)", cmplx.Asin(cmplx.New(nan, inf)))
+	show("Acosh(0)", cmplx.Acosh(cmplx.New(0, 0)))
+	show("Atan(0)", cmplx.Atan(cmplx.New(0, 0)))
+	show("Atan(inf+inf i)", cmplx.Atan(cmplx.New(inf, inf)))
+	show("Atan(NaN+inf i)", cmplx.Atan(cmplx.New(nan, inf)))
+	show("Atanh(0)", cmplx.Atanh(cmplx.New(0, 0)))
+
+	// Complex64: each part rounds to float32 (0.1 is 0.100000001490116... as float32), and the square root is taken in float64.
+	let c64 = cmplx.From64(cmplx.New(0.1, -2.5))
+	say.Line("From64(0.1-2.5i)", c64.Re, c64.Im)
+	let wide = c64.To128()
+	say.Line("To128", wide.Re, wide.Im)
+	say.Line("From64(1e39)", cmplx.From64(cmplx.New(1e39, 0)).Re)
+	say.Line("From64(NaN)", cmplx.From64(cmplx.New(nan, 0)).Re)
+}
+
+// show prints a call's name and the two parts of its result.
+fn show(name str, z cmplx.Complex) {
+	say.Line(name, z.Re, z.Im)
+}

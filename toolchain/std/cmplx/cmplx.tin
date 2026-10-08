@@ -1,0 +1,629 @@
+// Package cmplx is complex arithmetic: the functions of Go's math/cmplx on Complex (a value struct of two f64 parts) and
+// Complex64 (two f32 parts). The real functions come from package gauge; the branches, poles, signed zeros and infinities
+// are Go's, and the expressions keep Go's shape so that arm64 fuses the same products (see the note on mul).
+package cmplx
+
+import "bits"
+import "gauge"
+
+// Complex is a complex number: Re is the real part and Im the imaginary part (Go's complex128).
+type Complex value struct {
+	Re f64
+	Im f64
+}
+
+// Complex64 is a complex number with float32 parts (Go's complex64); From64 rounds each part to float32.
+type Complex64 value struct {
+	Re f32
+	Im f32
+}
+
+const pi2 = 1.5707963267948966 // Pi/2
+const pi4 = 0.7853981633974483 // Pi/4
+
+// New returns the complex number re + im*i (Go's complex(re, im)).
+fn New(re f64, im f64) Complex {
+	return Complex{Re: re, Im: im}
+}
+
+// From64 rounds each part of z to float32, as Go's complex64(z) does.
+fn From64(z Complex) Complex64 {
+	return Complex64{Re: f32(z.Re), Im: f32(z.Im)}
+}
+
+// To128 widens each part of c to float64 (exact).
+fn (c Complex64) To128() Complex {
+	return New(f64(c.Re), f64(c.Im))
+}
+
+// Inf returns the complex infinity (+Inf, +Inf).
+fn Inf() Complex {
+	let inf = gauge.Inf(1)
+	return New(inf, inf)
+}
+
+// NaN returns the complex NaN (NaN, NaN).
+fn NaN() Complex {
+	let nan = gauge.NaN()
+	return New(nan, nan)
+}
+
+// IsInf reports whether either part of z is an infinity.
+fn IsInf(z Complex) bool {
+	return gauge.IsInf(z.Re, 0) || gauge.IsInf(z.Im, 0)
+}
+
+// IsNaN reports whether z is NaN: a part is NaN and neither part is an infinity.
+fn IsNaN(z Complex) bool {
+	if gauge.IsInf(z.Re, 0) || gauge.IsInf(z.Im, 0) {
+		return false
+	}
+	return gauge.IsNaN(z.Re) || gauge.IsNaN(z.Im)
+}
+
+// Abs returns the absolute value (modulus) of z, computed with Hypot so it does not overflow.
+fn Abs(z Complex) f64 {
+	return gauge.Hypot(z.Re, z.Im)
+}
+
+// Phase returns the phase (argument) of z, in [-Pi, Pi].
+fn Phase(z Complex) f64 {
+	return gauge.Atan2(z.Im, z.Re)
+}
+
+// Polar returns the absolute value and the phase of z (Abs and Phase).
+fn Polar(z Complex) (f64, f64) {
+	return Abs(z), Phase(z)
+}
+
+// Rect returns the complex number with modulus r and phase theta.
+fn Rect(r f64, theta f64) Complex {
+	let (s, c) = gauge.Sincos(theta)
+	return New(r*c, r*s)
+}
+
+// Conj returns the complex conjugate of z.
+fn Conj(z Complex) Complex {
+	return New(z.Re, -z.Im)
+}
+
+// mul is Go's complex multiplication (a+bi)(c+di) = (ac-bd) + (ad+bc)i. The products are written as Go's SSA fuses
+// them on arm64: each sum or difference takes its right product fused, so a product with two uses is rounded once per use.
+fn mul(a Complex, b Complex) Complex {
+	return New(a.Re*b.Re-a.Im*b.Im, a.Re*b.Im+a.Im*b.Re)
+}
+
+// Sqrt returns the principal square root of z, with the sign of the imaginary part chosen as Go does.
+fn Sqrt(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if im == 0 {
+		if re == 0 {
+			return New(0, im)
+		}
+		if re < 0 {
+			return New(0, gauge.Copysign(gauge.Sqrt(-re), im))
+		}
+		return New(gauge.Sqrt(re), im)
+	} else if gauge.IsInf(im, 0) {
+		return New(gauge.Inf(1), im)
+	}
+	if re == 0 {
+		if im < 0 {
+			let r = gauge.Sqrt(-0.5 * im)
+			return New(r, -r)
+		}
+		let r = gauge.Sqrt(0.5 * im)
+		return New(r, r)
+	}
+	mut a = re
+	mut b = im
+	mut scale = 0.0
+	// Rescale to avoid internal overflow or underflow.
+	if gauge.Abs(a) > 4 || gauge.Abs(b) > 4 {
+		a *= 0.25
+		b *= 0.25
+		scale = 2
+	} else {
+		a *= 1.8014398509481984e16 // 2**54
+		b *= 1.8014398509481984e16
+		scale = 7.450580596923828125e-9 // 2**-27
+	}
+	mut r = gauge.Hypot(a, b)
+	mut t = 0.0
+	if a > 0 {
+		t = gauge.Sqrt(0.5*r + 0.5*a)
+		r = scale * gauge.Abs((0.5*b)/t)
+		t *= scale
+	} else {
+		r = gauge.Sqrt(0.5*r - 0.5*a)
+		t = scale * gauge.Abs((0.5*b)/r)
+		r *= scale
+	}
+	if b < 0 {
+		return New(t, -r)
+	}
+	return New(t, r)
+}
+
+// Exp returns e**z, the complex exponential of z.
+fn Exp(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if gauge.IsInf(re, 0) {
+		if re > 0 && im == 0 {
+			return z
+		}
+		if gauge.IsInf(im, 0) || gauge.IsNaN(im) {
+			if re < 0 {
+				return New(0, gauge.Copysign(0, im))
+			}
+			return New(gauge.Inf(1), gauge.NaN())
+		}
+	} else if gauge.IsNaN(re) {
+		if im == 0 {
+			return New(gauge.NaN(), im)
+		}
+	}
+	let r = gauge.Exp(re)
+	let (s, c) = gauge.Sincos(im)
+	return New(r*c, r*s)
+}
+
+// Log returns the natural logarithm of z: ln|z| + i*Phase(z), the principal branch (cut along the negative real axis).
+fn Log(z Complex) Complex {
+	return New(gauge.Log(Abs(z)), Phase(z))
+}
+
+// Log10 returns the base-10 logarithm of z.
+fn Log10(z Complex) Complex {
+	let w = Log(z)
+	return New(gauge.Log10E*w.Re, gauge.Log10E*w.Im)
+}
+
+// Pow returns x**y for complex x and y, as exp(y*log(x)) with Go's special cases (x == 0 gives 0, 1, Inf or NaN by y).
+// Go's version panics ("not reached") for x == 0 with a NaN real part and an infinite imaginary part of y; this returns NaN.
+fn Pow(x Complex, y Complex) Complex {
+	if x.Re == 0 && x.Im == 0 {
+		if IsNaN(y) {
+			return NaN()
+		}
+		let r = y.Re
+		let i = y.Im
+		if r == 0 {
+			return New(1, 0)
+		}
+		if r < 0 {
+			if i == 0 {
+				return New(gauge.Inf(1), 0)
+			}
+			return Inf()
+		}
+		if r > 0 {
+			return New(0, 0)
+		}
+		return NaN()
+	}
+	let modulus = Abs(x)
+	if modulus == 0 {
+		return New(0, 0)
+	}
+	mut r = gauge.Pow(modulus, y.Re)
+	let arg = Phase(x)
+	mut theta = y.Re * arg
+	if y.Im != 0 {
+		r *= gauge.Exp(-y.Im * arg)
+		theta = theta + y.Im*gauge.Log(modulus)
+	}
+	let (s, c) = gauge.Sincos(theta)
+	return New(r*c, r*s)
+}
+
+// sinhcosh returns sinh(x) and cosh(x), using exp for large |x| as Go does.
+fn sinhcosh(x f64) (f64, f64) {
+	if gauge.Abs(x) <= 0.5 {
+		return gauge.Sinh(x), gauge.Cosh(x)
+	}
+	mut e = gauge.Exp(x)
+	let ei = 0.5 / e
+	e *= 0.5
+	return e - ei, e + ei
+}
+
+// Sin returns the sine of z.
+fn Sin(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if im == 0 && (gauge.IsInf(re, 0) || gauge.IsNaN(re)) {
+		return New(gauge.NaN(), im)
+	} else if gauge.IsInf(im, 0) {
+		if re == 0 {
+			return z
+		}
+		if gauge.IsInf(re, 0) || gauge.IsNaN(re) {
+			return New(gauge.NaN(), im)
+		}
+	} else if re == 0 && gauge.IsNaN(im) {
+		return z
+	}
+	let (s, c) = gauge.Sincos(re)
+	let (sh, ch) = sinhcosh(im)
+	return New(s*ch, c*sh)
+}
+
+// Sinh returns the hyperbolic sine of z.
+fn Sinh(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if re == 0 && (gauge.IsInf(im, 0) || gauge.IsNaN(im)) {
+		return New(re, gauge.NaN())
+	} else if gauge.IsInf(re, 0) {
+		if im == 0 {
+			return New(re, im)
+		}
+		if gauge.IsInf(im, 0) || gauge.IsNaN(im) {
+			return New(re, gauge.NaN())
+		}
+	} else if im == 0 && gauge.IsNaN(re) {
+		return New(gauge.NaN(), im)
+	}
+	let (s, c) = gauge.Sincos(im)
+	let (sh, ch) = sinhcosh(re)
+	return New(c*sh, s*ch)
+}
+
+// Cos returns the cosine of z.
+fn Cos(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if im == 0 && (gauge.IsInf(re, 0) || gauge.IsNaN(re)) {
+		return New(gauge.NaN(), -im*gauge.Copysign(0, re))
+	} else if gauge.IsInf(im, 0) {
+		if re == 0 {
+			return New(gauge.Inf(1), -re*gauge.Copysign(0, im))
+		}
+		if gauge.IsInf(re, 0) || gauge.IsNaN(re) {
+			return New(gauge.Inf(1), gauge.NaN())
+		}
+	} else if re == 0 && gauge.IsNaN(im) {
+		return New(gauge.NaN(), 0)
+	}
+	let (s, c) = gauge.Sincos(re)
+	let (sh, ch) = sinhcosh(im)
+	return New(c*ch, -s*sh)
+}
+
+// Cosh returns the hyperbolic cosine of z.
+fn Cosh(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if re == 0 && (gauge.IsInf(im, 0) || gauge.IsNaN(im)) {
+		return New(gauge.NaN(), re*gauge.Copysign(0, im))
+	} else if gauge.IsInf(re, 0) {
+		if im == 0 {
+			return New(gauge.Inf(1), im*gauge.Copysign(0, re))
+		}
+		if gauge.IsInf(im, 0) || gauge.IsNaN(im) {
+			return New(gauge.Inf(1), gauge.NaN())
+		}
+	} else if im == 0 && gauge.IsNaN(re) {
+		return New(gauge.NaN(), im)
+	}
+	let (s, c) = gauge.Sincos(im)
+	let (sh, ch) = sinhcosh(re)
+	return New(c*ch, s*sh)
+}
+
+// Tan returns the tangent of z.
+fn Tan(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if gauge.IsInf(im, 0) {
+		if gauge.IsInf(re, 0) || gauge.IsNaN(re) {
+			return New(gauge.Copysign(0, re), gauge.Copysign(1, im))
+		}
+		return New(gauge.Copysign(0, gauge.Sin(2*re)), gauge.Copysign(1, im))
+	} else if re == 0 && gauge.IsNaN(im) {
+		return z
+	}
+	mut d = gauge.Cos(2*re) + gauge.Cosh(2*im)
+	if gauge.Abs(d) < 0.25 {
+		d = tanSeries(z)
+	}
+	if d == 0 {
+		return Inf()
+	}
+	return New(gauge.Sin(2*re)/d, gauge.Sinh(2*im)/d)
+}
+
+// Tanh returns the hyperbolic tangent of z.
+fn Tanh(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if gauge.IsInf(re, 0) {
+		if gauge.IsInf(im, 0) || gauge.IsNaN(im) {
+			return New(gauge.Copysign(1, re), gauge.Copysign(0, im))
+		}
+		return New(gauge.Copysign(1, re), gauge.Copysign(0, gauge.Sin(2*im)))
+	} else if im == 0 && gauge.IsNaN(re) {
+		return z
+	}
+	let d = gauge.Cosh(2*re) + gauge.Cos(2*im)
+	if d == 0 {
+		return Inf()
+	}
+	return New(gauge.Sinh(2*re)/d, gauge.Sin(2*im)/d)
+}
+
+// Cot returns the cotangent of z.
+fn Cot(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	mut d = gauge.Cosh(2*im) - gauge.Cos(2*re)
+	if gauge.Abs(d) < 0.25 {
+		d = tanSeries(z)
+	}
+	if d == 0 {
+		return Inf()
+	}
+	return New(gauge.Sin(2*re)/d, -gauge.Sinh(2*im)/d)
+}
+
+// reducePi returns x mod Pi, for the argument of Atan, as Go's reducePi: a three-part Pi below 2**30 and a Payne-Hanek style
+// reduction with 1191 bits of Pi above it.
+fn reducePi(x f64) f64 {
+	let reduceThreshold = 1073741824.0 // 1 << 30
+	if gauge.Abs(x) < reduceThreshold {
+		let pi1 = 3.141592502593994      // 0x400921fb40000000
+		let pi2 = 1.5099578831723193e-07 // 0x3e84442d00000000
+		let pi3 = 1.0780605716316238e-14 // 0x3d08469898cc5170
+		mut t = x / gauge.Pi
+		t += 0.5
+		t = f64(i64(t)) // the multiple
+		return ((x - t*pi1) - t*pi2) - t*pi3
+	}
+	let mask = u64(0x7FF)
+	let shift = u64(64 - 11 - 1)
+	let bias = i64(1023)
+	let fracMask = (u64(1) << shift) - 1
+	mut ix = gauge.F64bits(x)
+	let exp = i64((ix>>shift)&mask) - bias - i64(shift)
+	ix &= fracMask
+	ix |= u64(1) << shift
+	let digit = u64(exp+64) / 64
+	let bitshift = u64(exp+64) % 64
+	let z0 = shl(piTable[digit], bitshift) | shr(piTable[digit+1], 64-bitshift)
+	let z1 = shl(piTable[digit+1], bitshift) | shr(piTable[digit+2], 64-bitshift)
+	let z2 = shl(piTable[digit+2], bitshift) | shr(piTable[digit+3], 64-bitshift)
+	let (z2hi, _) = bits.Mul64(z2, ix)
+	let (z1hi, z1lo) = bits.Mul64(z1, ix)
+	let z0lo = z0 *% ix
+	let (lo, c) = bits.Add64(z1lo, z2hi, 0)
+	let (hi, _) = bits.Add64(z0lo, z1hi, c)
+	let lz = u64(bits.LeadingZeros64(hi))
+	let e = u64(bias) - (lz + 1)
+	mut h = shl(hi, lz+1) | shr(lo, 64-(lz+1))
+	h >>= 64 - shift
+	h |= e << shift
+	mut y = gauge.F64frombits(h)
+	if y > 0.5 {
+		y = y - 1
+	}
+	return gauge.Pi * y
+}
+
+// shl is x << n, zero when n is 64 or more (Go's shift rule; Tin panics on a count past the width).
+fn shl(x u64, n u64) u64 {
+	if n >= 64 {
+		return 0
+	}
+	return x << n
+}
+
+// shr is x >> n, zero when n is 64 or more.
+fn shr(x u64, n u64) u64 {
+	if n >= 64 {
+		return 0
+	}
+	return x >> n
+}
+
+// piTable holds the bits of 2/Pi in 64-bit words, for reducePi.
+let piTable = []u64{
+	0x0000000000000000,
+	0x517cc1b727220a94,
+	0xfe13abe8fa9a6ee0,
+	0x6db14acc9e21c820,
+	0xff28b1d5ef5de2b0,
+	0xdb92371d2126e970,
+	0x0324977504e8c90e,
+	0x7f0ef58e5894d39f,
+	0x74411afa975da242,
+	0x74ce38135a2fbf20,
+	0x9cc8eb1cc1a99cfa,
+	0x4e422fc5defc941d,
+	0x8ffc4bffef02cc07,
+	0xf79788c5ad05368f,
+	0xb69b3f6793e584db,
+	0xa7a31fb34f2ff516,
+	0xba93dd63f5f2f8bd,
+	0x9e839cfbc5294975,
+	0x35fdafd88fc6ae84,
+	0x2b0198237e3db5d5,
+}
+
+// tanSeries sums the series for tan(z) that Go uses when cos(2x) + cosh(2y) is small.
+fn tanSeries(z Complex) f64 {
+	let machep = 1.0 / 9007199254740992.0 // 1 / 2**53
+	mut x = gauge.Abs(2 * z.Re)
+	mut y = gauge.Abs(2 * z.Im)
+	x = reducePi(x)
+	x = x * x
+	y = y * y
+	mut x2 = 1.0
+	mut y2 = 1.0
+	mut f = 1.0
+	mut rn = 0.0
+	mut d = 0.0
+	for {
+		rn += 1
+		f *= rn
+		rn += 1
+		f *= rn
+		x2 *= x
+		y2 *= y
+		mut t = y2 + x2
+		t /= f
+		d += t
+		rn += 1
+		f *= rn
+		rn += 1
+		f *= rn
+		x2 *= x
+		y2 *= y
+		t = y2 - x2
+		t /= f
+		d += t
+		if !(gauge.Abs(t/d) > machep) {
+			break
+		}
+	}
+	return d
+}
+
+// Asin returns the arcsine of z, on the principal branch (cuts on the real axis beyond ±1).
+fn Asin(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if im == 0 && gauge.Abs(re) <= 1 {
+		return New(gauge.Asin(re), im)
+	}
+	if re == 0 && gauge.Abs(im) <= 1 {
+		return New(re, gauge.Asinh(im))
+	}
+	if gauge.IsNaN(im) {
+		if re == 0 {
+			return New(re, gauge.NaN())
+		}
+		if gauge.IsInf(re, 0) {
+			return New(gauge.NaN(), re)
+		}
+		return NaN()
+	}
+	if gauge.IsInf(im, 0) {
+		if gauge.IsNaN(re) {
+			return z
+		}
+		if gauge.IsInf(re, 0) {
+			return New(gauge.Copysign(pi4, re), im)
+		}
+		return New(gauge.Copysign(0, re), im)
+	}
+	if gauge.IsInf(re, 0) {
+		return New(gauge.Copysign(pi2, re), gauge.Copysign(re, im))
+	}
+	let ct = New(-im, re) // i * z
+	let xx = mul(z, z)
+	let x1 = New(1-xx.Re, -xx.Im) // 1 - z*z
+	let x2 = Sqrt(x1)             // sqrt(1 - z*z)
+	let w = Log(New(ct.Re+x2.Re, ct.Im+x2.Im))
+	return New(w.Im, -w.Re) // -i * w
+}
+
+// Acos returns the arccosine of z.
+fn Acos(z Complex) Complex {
+	let w = Asin(z)
+	return New(pi2-w.Re, -w.Im)
+}
+
+// Asinh returns the inverse hyperbolic sine of z.
+fn Asinh(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if im == 0 && gauge.Abs(re) <= 1 {
+		return New(gauge.Asinh(re), im)
+	}
+	if re == 0 && gauge.Abs(im) <= 1 {
+		return New(re, gauge.Asin(im))
+	}
+	if gauge.IsInf(re, 0) {
+		if gauge.IsInf(im, 0) {
+			return New(re, gauge.Copysign(pi4, im))
+		}
+		if gauge.IsNaN(im) {
+			return z
+		}
+		return New(re, gauge.Copysign(0.0, im))
+	}
+	if gauge.IsNaN(re) {
+		if im == 0 {
+			return z
+		}
+		if gauge.IsInf(im, 0) {
+			return New(im, re)
+		}
+		return NaN()
+	}
+	if gauge.IsInf(im, 0) {
+		return New(gauge.Copysign(im, re), gauge.Copysign(pi2, im))
+	}
+	let xx = mul(z, z)
+	let x1 = New(1+xx.Re, xx.Im) // 1 + z*z
+	let s = Sqrt(x1)
+	return Log(New(z.Re+s.Re, z.Im+s.Im))
+}
+
+// Acosh returns the inverse hyperbolic cosine of z, with a real part that is never negative.
+fn Acosh(z Complex) Complex {
+	if z.Re == 0 && z.Im == 0 {
+		return New(0, gauge.Copysign(pi2, z.Im))
+	}
+	let w = Acos(z)
+	if w.Im <= 0 {
+		return New(-w.Im, w.Re) // i * w
+	}
+	return New(w.Im, -w.Re) // -i * w
+}
+
+// Atan returns the arctangent of z, on the principal branch (cuts on the imaginary axis beyond ±i).
+fn Atan(z Complex) Complex {
+	let re = z.Re
+	let im = z.Im
+	if im == 0 {
+		return New(gauge.Atan(re), im)
+	}
+	if re == 0 && gauge.Abs(im) <= 1 {
+		return New(re, gauge.Atanh(im))
+	}
+	if gauge.IsInf(im, 0) || gauge.IsInf(re, 0) {
+		if gauge.IsNaN(re) {
+			return New(gauge.NaN(), gauge.Copysign(0, im))
+		}
+		return New(gauge.Copysign(pi2, re), gauge.Copysign(0, im))
+	}
+	if gauge.IsNaN(re) || gauge.IsNaN(im) {
+		return NaN()
+	}
+	let x2 = re * re
+	let a = 1 - re*re - im*im
+	if a == 0 {
+		return NaN()
+	}
+	let t0 = 0.5 * gauge.Atan2(2*re, a)
+	let w = reducePi(t0)
+	mut t = im - 1
+	// Go does not fuse these two sums on arm64, so the products are rounded (f64) before the add.
+	let b = x2 + f64(t*t)
+	if b == 0 {
+		return NaN()
+	}
+	t = im + 1
+	let c = (x2 + f64(t*t)) / b
+	return New(w, 0.25*gauge.Log(c))
+}
+
+// Atanh returns the inverse hyperbolic tangent of z.
+fn Atanh(z Complex) Complex {
+	let w = Atan(New(-z.Im, z.Re)) // i * z
+	return New(w.Im, -w.Re)        // -i * w
+}
