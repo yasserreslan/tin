@@ -1,0 +1,67 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Run the #576 spawn tests: natively on macOS, in a Linux container on Linux.
+//
+// The tests start real processes, so they cannot run in the empty-root image; debian:bookworm-slim provides the programs. On Linux the
+// fixture is built for the host's architecture and run in that architecture's container, so the check works on a Linux runner and on a
+// Mac's Docker VM alike; on macOS it is built for the host and run directly, exercising posix_spawn and the scheduler's wait. It covers
+// start and wait, exit codes, a missing program, PATH lookup, a working directory, signals, a deadline that kills and reaps, a 1 MiB
+// stdin pipe round trip, streaming reads, Run's separate stdout and stderr, and the maxOutput cap.
+
+fn expected() []str {
+	return []str{"cat true 0 1048576 true", "deadline result -1", "deadline true", "dir 0 true", "echo 0", "hello", "killed -1", "limit true", "lookpath true", "loop fds equal true", "missing spawn: /no/such/tin-program: no such file or directory", "run 4 true true", "run deadline result false", "run deadline true", "sh exit 3", "stream true 0"}
+}
+
+fn sortLines(xs []str) []str {
+	mut out = []str{}
+	for x in xs {
+		out = append(out, x)
+	}
+	for i in 1..len(out) {
+		let x = out[i]
+		mut j = i - 1
+		for j >= 0 && out[j] > x {
+			out[j + 1] = out[j]
+			j -= 1
+		}
+		out[j + 1] = x
+	}
+	return out
+}
+
+fn main() {
+	let root = ci.Root()
+	let directory = ci.Join(root, "bin/ci/spawn")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "spawn-")
+	let exe = ci.Join(work, "spawn")
+	mut result = ci.Out{Code: 0, Stdout: "", Stderr: ""}
+	mut where = ""
+	if ci.OS() == "darwin" {
+		// macOS: the fixture runs directly, with posix_spawn and the kqueue wait.
+		ci.BuildTin("tools/ci/fixtures/spawn.tin", exe, "", []str{})
+		result = ci.Exec([]str{exe}, root, 300)
+		where = "macOS native (posix_spawn and the scheduler wait)"
+	} else {
+		mut target = "linux-amd64"
+		mut platform = "linux/amd64"
+		if ci.Arch() == "arm64" {
+			target = "linux-arm64"
+			platform = "linux/arm64"
+		}
+		ci.BuildTin("tools/ci/fixtures/spawn.tin", exe, "", []str{"-target", target})
+		result = ci.Exec([]str{"docker", "run", "--rm", "--platform", platform, "-v", exe + ":/spawn", "debian:bookworm-slim", "/spawn"}, root, 300)
+		where = target + " in debian:bookworm-slim"
+	}
+	ci.Write(ci.Join(directory, "spawn.stderr.log"), result.Stderr)
+	ci.Check(result.Code == 0, "spawn: exit " + mint.Itoa(result.Code) + ": " + result.Stderr)
+	let got = twine.Join(sortLines(ci.Lines(result.Stdout)), "\n")
+	let want = twine.Join(expected(), "\n")
+	ci.Check(got == want, "spawn: got\n" + got + "\nwant\n" + want)
+	ci.Remove(work)
+	ci.Pass("spawn: " + mint.Itoa(len(expected())) + " lines from " + where)
+}

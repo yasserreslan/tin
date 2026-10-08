@@ -21,7 +21,7 @@ import time
 import urllib.request
 
 from suite import ROOT
-from lifetime_check import eventually, server_ready
+from pycompat import eventually, server_ready
 from tls_check import make_certs, openssl3, free_port, wait_port
 
 

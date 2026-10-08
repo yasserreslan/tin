@@ -1,5 +1,5 @@
 // #341: a handler that never waits holds its core (built with -nopolls). /spin loops for ever, /ok answers, /stuck gives
-// anvil.StuckCores and anvil.StuckFor; wedge_check.py runs it.
+// anvil.StuckCores and anvil.StuckFor; wedge_check.tin runs it.
 package main
 
 import "anvil"

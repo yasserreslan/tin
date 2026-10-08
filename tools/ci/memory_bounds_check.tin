@@ -1,0 +1,193 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "quarry"
+import "say"
+import "tide"
+import "twine"
+
+// Memory bounds by default (#356): the request budget, the soft limit and anvil.Load's memory.
+//
+// The fixture (tools/ci/fixtures/memory_bounds.tin, edition 1) keeps memory in a global (/keep/{mb}), holds request pool while it
+// waits (/hold/{mb}), allocates without bound (/hog), allocates as much but drops it as it goes (/churn, #633) and answers what its
+// admission policy last saw in anvil.Load (/load).
+//
+// Native phase (every platform): with TIN_MEMORY_SOFT set, Load.Ingot grows by what /keep keeps and Load.Pool by what /hold holds;
+// while the pool and ingot bytes are past the soft limit new requests get 503 with Retry-After before their handler runs and on
+// server.overload runs; once the holds end, requests are served again and on server.recovered runs. With TIN_REQUEST_MEMORY at
+// 96 MiB, /churn makes and drops 800 MB and answers: the budget counts live memory.
+//
+// Container phase (Linux; macOS with TIN_DOCKER=1): the fixture runs in a 256 MiB cgroup (a Docker container built FROM scratch, so
+// nothing is pulled) with neither variable set. /hog ends at the default request budget (a quarter of the limit per core) with 500 and
+// the server goes on, and /churn, which drops each block, is served; /keep then fills the long-lived heap until the default soft limit
+// (90% of the limit) refuses new requests with 503, well before the cgroup's OOM killer would end the process.
+
+const MiB = 1048576
+
+// build compiles the fixture from a copy outside tools/: the tree's tools read trusted, and the compiler leaves trusted code's loops
+// alone (#633), so /churn would not be a user program's handler.
+fn build(out str, target str) str {
+	mut name = "memory_bounds"
+	mut extra = []str{"-edition", "1"}
+	if len(target) > 0 {
+		name = "memory_bounds-" + target
+		extra = append(extra, "-target")
+		extra = append(extra, target)
+	}
+	let exe = ci.Join(out, name)
+	let source = ci.Join(out, "memory_bounds.tin")
+	ci.Write(source, ci.Read(ci.Join(ci.Root(), "tools/ci/fixtures/memory_bounds.tin")))
+	ci.BuildTin(source, exe, "", extra)
+	return exe
+}
+
+fn get(port i64, path str) nettest.Reply {
+	return nettest.Do(port, "GET", path, []str{}, "")
+}
+
+// load is the pool and ingot bytes of the last admission.
+fn load(port i64) (i64, i64) {
+	let r = get(port, "/load")
+	let words = twine.Fields(r.Body)
+	ci.Check(r.Status == 200 && len(words) == 4 && words[0] == "pool" && words[2] == "ingot", "memory bounds: /load answered " + r.Body)
+	return ci.Num(words[1]), ci.Num(words[3])
+}
+
+fn expect(r nettest.Reply, status i64, body str, what str) {
+	ci.Check(r.Status == status && r.Body == body, "memory bounds: " + what + " answered " + mint.Itoa(r.Status) + " " + r.Body + ", want " + mint.Itoa(status) + " " + body)
+}
+
+fn native(out str) {
+	let exe = build(out, "")
+	let port = nettest.Port()
+	let log = ci.Join(out, "memory_bounds.out")
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_MEMORY_SOFT=" + mint.Itoa(64 * MiB), "TIN_REQUEST_MEMORY=" + mint.Itoa(96 * MiB)}, log, port)
+	server.Ready(10)
+	// 800 MB made and dropped 8 MB at a time stays inside a 96 MiB request budget (#633).
+	expect(get(port, "/churn"), 200, "churned 100004950", "/churn")
+	let (pool0, ingot0) = load(port)
+	expect(get(port, "/keep/16"), 200, "kept 1", "/keep/16")
+	let (_, ingot1) = load(port)
+	ci.Check(ingot1 - ingot0 >= 16 * MiB, "memory bounds: the ingot grew from " + mint.Itoa(ingot0) + " to " + mint.Itoa(ingot1))
+	// A request holding 24 MiB of pool while it waits shows in the next request's Load.
+	mut a = nettest.Send(port, nettest.GetRequest("/hold/24"))
+	tide.Sleep(400000000)
+	let (pool1, _) = load(port)
+	ci.Check(pool1 - pool0 >= 24 * MiB, "memory bounds: the pool grew from " + mint.Itoa(pool0) + " to " + mint.Itoa(pool1))
+	// Another 48 MiB passes the 64 MiB soft limit: new requests are refused, held ones go on.
+	mut b = nettest.Send(port, nettest.GetRequest("/hold/48"))
+	tide.Sleep(400000000)
+	let refused = get(port, "/plain")
+	expect(refused, 503, "Service Unavailable", "/plain past the soft limit")
+	ci.Check(refused.Header("retry-after") == "1", "memory bounds: Retry-After is " + refused.Header("retry-after"))
+	expect(nettest.Finish(mut a, 20), 200, "held " + mint.Itoa(24 * MiB), "/hold/24")
+	expect(nettest.Finish(mut b, 20), 200, "held " + mint.Itoa(48 * MiB), "/hold/48")
+	// The holds' pools are freed with their requests: below the limit, requests are served.
+	expect(get(port, "/plain"), 200, "ok", "/plain below the soft limit")
+	let (pool2, _) = load(port)
+	ci.Check(pool2 < 24 * MiB, "memory bounds: the pool is still " + mint.Itoa(pool2) + " after the holds ended (was " + mint.Itoa(pool1) + ")")
+	// A second after the last refusal, an admitted request ends the overload.
+	tide.Sleep(1100000000)
+	expect(get(port, "/plain"), 200, "ok", "/plain after the overload")
+	ci.Check(server.Running(), "memory bounds: the server exited")
+	server.Stop()
+	let text = ci.Read(log)
+	ci.Check(!twine.Contains(text, "panic"), "memory bounds: the server panicked:\n" + text)
+	mut events = []str{}
+	for line in twine.Split(text, "\n") {
+		if line == "overload" || line == "recovered" {
+			events = append(events, line)
+		}
+	}
+	ci.Check(twine.Join(events, ",") == "overload,recovered", "memory bounds: events " + twine.Join(events, ",") + "\n" + text)
+	ci.Pass("soft limit: Load.Pool and Load.Ingot count held and kept memory; past TIN_MEMORY_SOFT new requests get 503 with Retry-After; below it they are served; overload, recovered; /churn drops 800 MB inside a 96 MiB request budget")
+}
+
+fn dockerOk() bool {
+	return ci.Exec([]str{"docker", "info"}, "", 60).Code == 0
+}
+
+fn docker(args []str) ci.Out {
+	mut argv = []str{"docker"}
+	for a in args {
+		argv = append(argv, a)
+	}
+	return ci.Exec(argv, "", 300)
+}
+
+fn serving(port i64) bool {
+	// The published port accepts before the server listens: wait for an answer.
+	return get(port, "/plain").Status == 200
+}
+
+fn container(out str) {
+	mut target = ""
+	if !ci.Linux() {
+		target = "linux-" + ci.Arch()
+	}
+	let exe = build(out, target)
+	let tag = "tin-memory-bounds-" + mint.Itoa(quarry.Pid())
+	let dir = ci.TempDir(out, "image-")
+	ci.Copy(exe, ci.Join(dir, "prog"))
+	ci.Write(ci.Join(dir, "Dockerfile"), "FROM scratch\nCOPY prog /prog\nENTRYPOINT [\"/prog\"]\n")
+	ci.Must(docker([]str{"build", "-q", "-t", tag, dir}), "docker build")
+	let port = nettest.Port()
+	ci.Must(docker([]str{"run", "-d", "--name", tag, "--memory", "256m", "--memory-swap", "256m", "-e", "TIN_CORES=1", "-e", "PORT=8080", "-p", "127.0.0.1:" + mint.Itoa(port) + ":8080", tag}), "docker run")
+	nettest.Eventually(20.0, fn() bool {
+		return serving(port)
+	})
+	// The default budget is a quarter of 256 MiB: /hog ends with 500, the next request is served.
+	ci.Check(get(port, "/hog").Status == 500, "memory bounds: /hog did not end with 500")
+	expect(get(port, "/plain"), 200, "ok", "/plain after /hog")
+	ci.Check(get(port, "/hog").Status == 500, "memory bounds: the second /hog did not end with 500")
+	expect(get(port, "/plain"), 200, "ok", "/plain after the second /hog")
+	// The same allocations, dropped as they go, are charged one block at a time (#633).
+	expect(get(port, "/churn"), 200, "churned 100004950", "/churn in the container")
+	// Keep 4 MiB at a time: the default soft limit (90% of 256 MiB) refuses before the cgroup kills.
+	mut kept = 0
+	mut last = get(port, "/keep/4")
+	for i in 0..80 {
+		last = get(port, "/keep/4")
+		if last.Status != 200 {
+			break
+		}
+		kept += 4
+	}
+	ci.Check(last.Status == 503 && last.Header("retry-after") == "1", "memory bounds: status " + mint.Itoa(last.Status) + " after keeping " + mint.Itoa(kept) + " MiB")
+	ci.Check(kept >= 192 && kept <= 232, "refused after keeping " + mint.Itoa(kept) + " MiB of a 256 MiB container")
+	ci.Check(get(port, "/plain").Status == 503, "memory bounds: /plain was not refused")
+	let state = twine.Fields(docker([]str{"inspect", "-f", `{{.State.Running}} {{.State.OOMKilled}}`, tag}).Stdout)
+	ci.Check(len(state) == 2 && state[0] == "true" && state[1] == "false", "memory bounds: container state " + twine.Join(state, " "))
+	// SIGTERM drains and exits 0, which also flushes the fixture's stdout.
+	docker([]str{"stop", "-t", "10", tag})
+	let code = twine.TrimSpace(docker([]str{"inspect", "-f", `{{.State.ExitCode}}`, tag}).Stdout)
+	ci.Check(code == "0", "memory bounds: exit " + code)
+	let logs = docker([]str{"logs", tag})
+	docker([]str{"rm", "-f", tag})
+	docker([]str{"rmi", "-f", tag})
+	ci.Check(twine.Count(logs.Stderr, "limit exceeded: the request's memory budget") == 2, "memory bounds: the budget was not reported twice:\n" + logs.Stderr)
+	mut overload = false
+	for line in ci.Lines(logs.Stdout) {
+		if line == "overload" {
+			overload = true
+		}
+	}
+	ci.Check(overload, "memory bounds: no overload in " + logs.Stdout)
+	ci.Pass("256 MiB cgroup: /hog ends at the default request budget with 500 and the server goes on; /churn is served; after " + mint.Itoa(kept) + " MiB kept the default soft limit answers 503 and the process lives")
+}
+
+fn main() {
+	let out = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "memory-bounds-")
+	native(out)
+	let want = ci.Linux() || ci.Env("TIN_DOCKER") == "1"
+	if want && dockerOk() {
+		container(out)
+	} else if ci.Linux() && len(ci.Env("CI")) > 0 {
+		ci.Fail("the 256 MiB cgroup phase needs Docker on Linux CI runners")
+	} else {
+		say.Line("256 MiB cgroup: skipped (Linux with Docker, or TIN_DOCKER=1)")
+	}
+	ci.Remove(out)
+}

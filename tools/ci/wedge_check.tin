@@ -1,0 +1,68 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+
+// A core held by a handler that never waits (#341): the monitor thread publishes how long its event loop has not turned
+// (anvil.StuckCores, anvil.StuckFor), and SIGTERM still ends the process within the grace period when core 0 is the stuck one (Linux,
+// where the signal is a descriptor).
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/wedge")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "spin")
+	// -nopolls: the monitor is the backstop for code that does not poll (@nopoll, the standard library); with polls, which a server
+	// program gets by default (#341), the spin would end at its deadline instead of holding the core.
+	ci.BuildTin("tools/ci/fixtures/spin.tin", exe, "", []str{"-nopolls"})
+	if !ci.Linux() {
+		say.Line("SKIP held cores: on macOS core 0 accepts every connection, so a held core 0 serves nothing (Linux only)")
+		return
+	}
+	// Two cores, one of them held: the other answers, and reports the held one.
+	let port = nettest.Port()
+	let server = nettest.StartCoded(exe, []str{}, []str{"TIN_CORES=2", "TIN_GRACE=2"}, ci.Join(out, "two.log"), port)
+	server.Ready(10)
+	ci.Check(nettest.Get(port, "/stuck") == "0 0", "wedge: a core is stuck at first")
+	// the spin request never answers: send it and do not read
+	let spin = nettest.Send(port, nettest.GetRequest("/spin"))
+	let end = tide.Now() + 25000000000
+	mut seen = ""
+	for tide.Now() < end && len(seen) == 0 {
+		tide.Sleep(300000000)
+		// half the connections land on the held core and time out
+		let r = nettest.Parse(nettest.Raw(port, nettest.GetRequest("/stuck"), 1))
+		if r.Status == 200 {
+			let words = twine.Fields(r.Body)
+			if len(words) == 2 && ci.Num(words[0]) == 1 && ci.Num(words[1]) >= 1500 {
+				seen = r.Body
+			}
+		}
+	}
+	ci.Check(len(seen) > 0, "wedge: the held core was not reported")
+	let words = twine.Fields(seen)
+	say.Line("a core held by a spinning handler: StuckCores " + words[0] + ", StuckFor " + words[1] + " ms")
+	server.Signal("KILL")
+	spin.Close()
+	// One core, held: SIGTERM is read by no one, the monitor ends the process after the grace period.
+	let port2 = nettest.Port()
+	let one = nettest.StartCoded(exe, []str{}, []str{"TIN_CORES=1", "TIN_GRACE=2", "TIN_DEADLINE_MS=1000"}, ci.Join(out, "one.log"), port2)
+	one.Ready(10)
+	ci.Check(nettest.Get(port2, "/ok") == "ok", "wedge: /ok")
+	let spin2 = nettest.Send(port2, nettest.GetRequest("/spin"))
+	tide.Sleep(500000000)
+	let t0 = tide.Now()
+	one.Signal("TERM")
+	let (code, ended) = one.ExitCode(12.0)
+	let took = tide.Now() - t0
+	if !ended {
+		one.Signal("KILL")
+	}
+	spin2.Close()
+	say.Line("SIGTERM with core 0 held: exit " + mint.Itoa(code) + " after " + mint.Itoa(took / 100000000) + " tenths of a second (grace 2 s)")
+	ci.Check(ended && code == 0 && took < 6000000000, "wedge: exit " + mint.Itoa(code) + " after " + mint.Itoa(took / 1000000) + " ms")
+	ci.Pass("wedge: a held core is reported and SIGTERM still ends the process")
+}

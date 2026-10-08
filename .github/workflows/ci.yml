@@ -55,7 +55,7 @@ jobs:
       - name: Strict language and standard library suite
         run: tools/dev/v2test.sh bin/tinc
       - name: Docs and examples are edition 1, and every docs code block compiles
-        run: python3 tools/ci/docs_check.py bin/tinc
+        run: sh tools/ci/tin.sh docs_check bin/tinc
       - name: Exact number conversion (Go reference and hard parsing corpus)
         run: sh tools/ci/tin.sh number_check
       - name: Arbitrary-precision integers against Go's math/big (100,000 pairs)
@@ -67,9 +67,9 @@ jobs:
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: sh tools/ci/tin.sh pack_check
       - name: Stream helpers against Go's io (a generated chunk corpus)
-        run: python3 tools/ci/io_check.py
+        run: sh tools/ci/tin.sh io_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
-        run: python3 tools/ci/spawn_check.py
+        run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)
         run: sh tools/ci/tin.sh squash_twin_check
       - name: Memory primitives and deterministic allocation failure
@@ -85,7 +85,7 @@ jobs:
       - name: Reclamation with long-lived tasks (a parked WebSocket does not pin dropped blocks)
         run: sh tools/ci/tin.sh limbo_check
       - name: Arena blocks and CSV streaming (flat peak RSS; a 1 GiB file in a 64 KiB window)
-        run: python3 tools/ci/arena_check.py
+        run: sh tools/ci/tin.sh arena_check
       - name: Replay tapes (record, replay, divergence)
         run: python3 tools/ci/replay_check.py
       - name: Scheduling replay (select winners)
@@ -116,7 +116,7 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 tools/ci/dns_cache_check.py
       - name: JSON decoding against encoding/json (strict mode, atomic faults, UTF-8)
-        run: python3 tools/ci/argo_twin_check.py
+        run: sh tools/ci/tin.sh argo_twin_check
       - name: Cryptographic primitives (Wycheproof and hashlib vectors)
         run: python3 tools/ci/crypto_check.py
       - name: TLS 1.3 client (RFC 8448 trace, openssl and Python interop, https and wss)
@@ -127,19 +127,19 @@ jobs:
       - name: Memory safety and issue-linked regressions
         run: sh tools/ci/tin.sh regressions
       - name: Request tasks (waits overlap, deadlines, pipelined order)
-        run: python3 tools/ci/task_check.py
+        run: sh tools/ci/tin.sh task_check
       - name: Router (parameters, middleware, 404/405 and waits under concurrent requests)
         run: python3 tools/ci/router_check.py
       - name: Runtime lifetimes (formatting, helper deadlines, WebSocket memory)
-        run: python3 tools/ci/lifetime_check.py
+        run: sh tools/ci/tin.sh lifetime_check
       - name: Guards (defers and cleanup callbacks before the panic's fault)
         run: sh tools/ci/tin.sh guard_check
       - name: Boundary cancellation (every client wakes; cancels flow down only)
-        run: python3 tools/ci/cancel_check.py
+        run: sh tools/ci/tin.sh cancel_check
       - name: Structured concurrency in requests (scope, spawn, first-fault cancellation)
-        run: python3 tools/ci/scope_check.py
+        run: sh tools/ci/tin.sh scope_check
       - name: Memory bounds (request budget, soft limit; 256 MiB cgroup on Linux)
-        run: python3 tools/ci/memory_bounds_check.py
+        run: sh tools/ci/tin.sh memory_bounds_check
       - name: Format memory (say.Line and interpolation in a plain program run in constant memory)
         if: runner.os == 'Linux'
         run: sh tools/ci/tin.sh format_memory_check
@@ -148,13 +148,13 @@ jobs:
         run: sh tools/ci/tin.sh dyn_memory_check
       - name: Loop memory (binary-trees within 3x of Go's peak; a plain loop of temporaries under 16 MiB)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/loop_memory_check.py
+        run: sh tools/ci/tin.sh loop_memory_check
       - name: File I/O through io_uring (Linux) and helper threads (concurrent reads, contents, FIFO deadlines, helper thread count)
         env:
           TIN_REQUIRE_IO_URING: ${{ runner.os == 'Linux' && '1' || '' }}
         run: python3 tools/ci/file_io_check.py
       - name: Server lifecycle (use, on, startup faults, drain then stop events)
-        run: python3 tools/ci/lifecycle_check.py
+        run: sh tools/ci/tin.sh lifecycle_check
       - name: Streaming responses (chunks, Content-Length, SendFile, server-sent events, flat memory)
         run: python3 tools/ci/stream_check.py
       # h2spec is pinned to a commit of its default branch: its v2 tags cannot be installed with go install.
@@ -170,17 +170,17 @@ jobs:
         run: python3 tools/ci/wire_h2_check.py
       - name: Held cores (stuck-core counters; SIGTERM while core 0 is held, Linux)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/wedge_check.py
+        run: sh tools/ci/tin.sh wedge_check
       - name: CPU safepoints (deadline, defers, server recovery and Linux drain)
-        run: python3 tools/ci/poll_check.py
+        run: sh tools/ci/tin.sh poll_check
       - name: Certificates and signatures (test PKI, Wycheproof, mutated certificates, against Go)
-        run: python3 tools/ci/x509_check.py
+        run: sh tools/ci/tin.sh x509_check
       - name: Redis client (batching, deadlines, reconnects, AUTH)
         run: python3 tools/ci/redis_check.py
       - name: WebSocket server and client (RFC 6455 rules, many idle connections)
-        run: python3 tools/ci/websocket_check.py
+        run: sh tools/ci/tin.sh websocket_check
       - name: Kafka connections in an event loop (Close during a held fetch, group lanes, handshake deadlines)
-        run: python3 tools/ci/kafka_check.py
+        run: sh tools/ci/tin.sh kafka_check
       - name: MySQL client (pool, deadlines, auth plugins, reconnects)
         run: python3 tools/ci/mysql_check.py
       - name: MySQL client against the runner's MySQL 8 (Linux x86-64)
@@ -201,7 +201,7 @@ jobs:
           POSTGRES_ADDR=127.0.0.1:5432 POSTGRES_USER=tin POSTGRES_PASSWORD=tinpass POSTGRES_DATABASE=tin python3 tools/ci/postgres_check.py
       - name: HTTP correctness, RSS stability and shutdown (Linux)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/http_check.py
+        run: sh tools/ci/tin.sh http_check
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -399,3 +399,38 @@ fn Lines(text str) []str {
 fn Exists(path str) bool {
 	return quarry.Exists(path)
 }
+
+// PeakRun runs the program (with extra environment entries) under /usr/bin/time and returns its exit status, standard output and its
+// peak resident memory in bytes (the child's own, as the kernel counts it). The standard error of the program is returned too.
+fn PeakRun(exe str, args []str, set []str, seconds i64) (i64, str, i64, str) {
+	mut argv = []str{"/usr/bin/time"}
+	let linux = OS() == "linux"
+	if linux {
+		argv = append(argv, "-f")
+		argv = append(argv, "PEAK %M")
+	} else {
+		argv = append(argv, "-l")
+	}
+	argv = append(argv, "env")
+	for e in set {
+		argv = append(argv, e)
+	}
+	argv = append(argv, exe)
+	for a in args {
+		argv = append(argv, a)
+	}
+	let o = Exec(argv, Root(), seconds)
+	mut peak = -1
+	mut errText = ""
+	for line in Lines(o.Stderr) {
+		let words = twine.Fields(line)
+		if linux && len(words) == 2 && words[0] == "PEAK" {
+			peak = Num(words[1]) * 1024
+		} else if !linux && len(words) >= 4 && words[1] == "maximum" && words[2] == "resident" {
+			peak = Num(words[0])
+		} else {
+			errText += line + "\n"
+		}
+	}
+	return o.Code, o.Stdout, peak, errText
+}

@@ -1,0 +1,132 @@
+package main
+
+import "../dev/distpack"
+import "./ci"
+import "quarry"
+import "say"
+import "twine"
+
+// Archive reproducibility and installer integrity, upgrades, and paths with spaces.
+
+const FAKE_COMPILER = "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in -o) out=$2; shift 2 ;; *) shift ;; esac\ndone\nprintf '#!/bin/sh\\necho \"Tin installation verified\"\\n' > \"$out\"\nchmod +x \"$out\"\n"
+
+fn target() str {
+	return ci.OS() + "-" + ci.Arch()
+}
+
+// Setup is a fresh source tree beside a fake compiler.
+type Setup struct {
+	Base str
+	Root str
+	Compiler str
+	Releases str
+	Install str
+}
+
+fn setup() Setup {
+	let base = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "tin distribution ")
+	let root = ci.Join(base, "source")
+	ci.Mkdirs(ci.Join(root, "toolchain"))
+	for name in []str{"tin", "Makefile", "README.md", "go.mod", "install.sh"} {
+		ci.Copy(ci.Join(ci.Root(), name), ci.Join(root, name))
+	}
+	ci.Write(ci.Join(root, "toolchain/runtime.tin"), "// library\n")
+	let compiler = ci.Join(base, "compiler")
+	ci.Write(compiler, FAKE_COMPILER)
+	ci.Must(ci.Exec([]str{"chmod", "755", compiler}, "", 5), "chmod")
+	return Setup{Base: base, Root: root, Compiler: compiler, Releases: ci.Join(base, "releases"), Install: ci.Join(base, "installed tin")}
+}
+
+fn release(s Setup, version str) str {
+	let output = ci.Join(s.Releases, "v" + version)
+	let archive = distpack.Package(version, target(), s.Compiler, output, s.Root) catch err {
+		ci.Fail("package: " + say.Str(err))
+		panic("unreachable")
+	}
+	ci.Write(ci.Join(output, "SHA256SUMS"), ci.Read(archive[0:len(archive) - 3] + ".gz.sha256"))
+	return archive
+}
+
+fn install(s Setup, version str) ci.Out {
+	return ci.ExecEnv([]str{"sh", ci.Join(ci.Root(), "install.sh"), version}, "", 120, []str{"TIN_INSTALL_DIR=" + s.Install, "TIN_RELEASE_BASE_URL=file://" + twine.Replace(s.Releases, " ", "%20", -1)}, []str{})
+}
+
+fn resolved(path str) str {
+	return twine.TrimSpace(ci.Sh("cd \"$(dirname \"" + path + "\")\" && readlink \"" + path + "\" || echo \"" + path + "\"", "", 10).Stdout)
+}
+
+// member is the text of a file in the archive.
+fn member(archive str, name str) str {
+	return ci.Exec([]str{"tar", "-xzOf", archive, name}, "", 60).Stdout
+}
+
+fn main() {
+	// the archive is reproducible and self-contained
+	let s = setup()
+	let first = release(s, "0.4.0")
+	let secondDir = ci.Join(s.Base, "second")
+	let second = distpack.Package("v0.4.0", target(), s.Compiler, secondDir, s.Root) catch err {
+		ci.Fail(say.Str(err))
+		panic("unreachable")
+	}
+	ci.Test("the same inputs make the same archive", ci.Read(first) == ci.Read(second))
+	let root = "tin-0.4.0-" + target() + "/"
+	ci.Same("VERSION", member(first, root + "VERSION"), "0.4.0\n")
+	ci.Same("TARGET", twine.TrimSpace(member(first, root + "TARGET")), target())
+	let listing = ci.Exec([]str{"tar", "-tvzf", first}, "", 60).Stdout
+	mut tincMode = ""
+	for line in ci.Lines(listing) {
+		if twine.HasSuffix(line, " " + root + "bin/tinc") {
+			tincMode = twine.Fields(line)[0]
+		}
+	}
+	ci.Same("bin/tinc is executable", tincMode, "-rwxr-xr-x")
+	ci.Test("the seed is the compiler", member(first, root + "toolchain/seed/tinc-" + target()) == ci.Read(s.Compiler))
+	ci.Test("the library is in", twine.Contains(ci.Exec([]str{"tar", "-tzf", first}, "", 60).Stdout, root + "toolchain/runtime.tin"))
+	// a name too long for the ustar name field still comes out whole
+	let longName = ci.Join(s.Root, "examples/" + twine.Repeat("long-directory-name/", 6) + "file.tin")
+	ci.Mkdirs(longName[0:twine.LastIndex(longName, "/")])
+	ci.Write(longName, "long\n")
+	let longArchive = distpack.Package("0.4.0", target(), s.Compiler, ci.Join(s.Base, "long"), s.Root) catch err {
+		ci.Fail(say.Str(err))
+		panic("unreachable")
+	}
+	ci.Same("a long path", member(longArchive, root + "examples/" + twine.Repeat("long-directory-name/", 6) + "file.tin"), "long\n")
+	ci.Remove(s.Base)
+
+	// install, upgrade, and the old version stays
+	let u = setup()
+	release(u, "0.4.0")
+	let one = install(u, "v0.4.0")
+	ci.Test("first install", one.Code == 0)
+	let firstTarget = resolved(ci.Join(u.Install, "bin/tin"))
+	release(u, "0.4.1")
+	let two = install(u, "0.4.1")
+	ci.Test("upgrade", two.Code == 0)
+	ci.Test("the old version stays", ci.Exists(firstTarget))
+	ci.Test("the link moved", resolved(ci.Join(u.Install, "bin/tin")) != firstTarget)
+	ci.Test("tinc is a link", ci.Sh("[ -L \"" + ci.Join(u.Install, "bin/tinc") + "\" ]", "", 5).Code == 0)
+	ci.Remove(u.Base)
+
+	// a bad checksum does not change an existing install
+	let b = setup()
+	release(b, "0.4.0")
+	ci.Test("install before tampering", install(b, "0.4.0").Code == 0)
+	let current = resolved(ci.Join(b.Install, "bin/tin"))
+	let archive = release(b, "0.4.1")
+	ci.Write(archive, ci.Read(archive) + "tampered")
+	let bad = install(b, "0.4.1")
+	ci.Test("a tampered archive is refused", bad.Code != 0)
+	ci.Test("the checksum mismatch is said", twine.Contains(bad.Stderr, "checksum mismatch"))
+	ci.Test("the install is unchanged", resolved(ci.Join(b.Install, "bin/tin")) == current)
+	ci.Remove(b.Base)
+
+	// an invalid version cannot escape the install directory
+	let v = setup()
+	for value in []str{"../../bad", "0.4.0/other", "0.4.0;touch bad"} {
+		ci.Test("refused version: " + value, install(v, value).Code != 0)
+	}
+	ci.Test("nothing was installed", !quarry.Exists(v.Install))
+	ci.Remove(v.Base)
+	ci.Finish()
+}

@@ -1,0 +1,688 @@
+// The docs checker (#227): docs are edition 1. No edition-0 syntax in the docs or examples, and every docs code block compiles.
+//
+// Without a compiler it checks the text only. Every fenced block in README.md and toolchain/docs/*.md names its language, Tin code is
+// fenced ```tin (never ```go), and no Tin code (a ```tin block, an inline `code` span, or a file under examples/) uses a form edition 1
+// removed: func, var, :=, switch/case/default, the three-clause for, range, ++/--, go, chan, extern. Given a compiler, it also compiles
+// every ```tin block of README.md and toolchain/docs/ with -edition 1. toolchain/docs/ERRORS.md is checked for syntax only:
+// diagnostics_check compiles its examples.
+//
+// A ```tin block is a program, or a package that a generated program imports. Missing parts are added: `package main` when there is no
+// package clause, an import for each standard package it uses, and an empty `fn main()`. Attributes after the language word change that:
+//   body          the block is statements: it becomes the body of `fn example() !`;
+//   error         the block must not compile (error=E123 also names the code it must print);
+//   old-syntax    the block shows edition-0 syntax on purpose (a rejected form): no syntax check;
+//   file=NAME     the block is another file, NAME, of the program before it (a local package).
+// An HTML comment `<!-- tin-prelude` ... `-->` right before a fence holds declarations the reader does not need (a type, a stub
+// function); they are added to that block only. Text between `<!-- docs-check: old-syntax begin -->` and `<!-- docs-check: old-syntax
+// end -->` may name removed forms (a table of what edition 1 changed).
+package docscheck
+
+import "../ci"
+import "../pyre"
+import "mint"
+import "quarry"
+import "say"
+import "sift"
+import "twine"
+
+const PRELUDE_START = "<!-- tin-prelude"
+const REGION_BEGIN = "<!-- docs-check: old-syntax begin -->"
+const REGION_END = "<!-- docs-check: old-syntax end -->"
+
+// Languages are the fenced languages a doc may use; Tin code is ```tin, a grammar ```ebnf, program output ```text.
+fn Languages() []str {
+	return []str{"dockerfile", "ebnf", "go-reference", "json", "sh", "text", "tin", "yaml"}
+}
+
+fn oldPatterns() []str {
+	return []str{`\bfunc\b`, `\bvar\b`, `:=`, `\bswitch\b`, `^\s*(case\b.*|default\s*):\s*($|//)`, `\bfor\b[^{]*;[^{]*;`, `(\bfor\b.*|:=\s*)\brange\b`, `(\w|\]|\))(\+\+|--)(?![\w-])`, `^\s*go\s+[\w.]+\(`, `\bchan\b`, `\bextern\s+(func|fn)\b`}
+}
+
+// oldReasons are the replacements the messages name, in the order of oldPatterns.
+fn oldReasons() []str {
+	return []str{"'func' (edition 1: fn)", "'var' (edition 1: let or mut)", "':=' (edition 1: let or mut)", "'switch' (edition 1: match)", "a case clause (edition 1: match arms)", "a three-clause for (edition 1: for i in 0..n)", "'range' (edition 1: for x in xs)", "'++' or '--' (edition 1: += 1)", "'go' (edition 1: scope or detach)", "'chan' (edition 1 has no channels)", "'extern' (edition 1 has no extern declarations)"}
+}
+
+// Block is a fenced block.
+type Block struct {
+	Line i64
+	Indent str
+	Lang str
+	// Attrs are the words after the language: NAME=value, or NAME alone (value "").
+	AttrNames []str
+	AttrValues []str
+	Body []str
+	Exempt bool
+	Prelude []str
+	HasPrelude bool
+	// Files are the other files of the program this block starts: name, then text.
+	FileNames []str
+	FileBodies []str
+}
+
+// Prose is a line outside blocks.
+type Prose struct {
+	Number i64
+	Text str
+	Exempt bool
+}
+
+// Attr is the value of an attribute and whether the block has it.
+fn (b Block) Attr(name str) (str, bool) {
+	for i in 0..len(b.AttrNames) {
+		if b.AttrNames[i] == name {
+			return b.AttrValues[i], true
+		}
+	}
+	return "", false
+}
+
+// CodePart is the line without its string literals and // comment, so prose in them never matches.
+fn CodePart(line str) str {
+	let stripped = stripStrings(line)
+	let at = twine.Index(stripped, "//")
+	if at < 0 {
+		return stripped
+	}
+	return stripped[0:at]
+}
+
+// stripStrings replaces each "..." (with escapes), `...` and '...' literal by "".
+fn stripStrings(line str) str {
+	mut out = ""
+	mut i = 0
+	for i < len(line) {
+		let c = line[i]
+		if c == '"' || c == '\'' {
+			mut j = i + 1
+			mut closed = false
+			for j < len(line) {
+				if line[j] == '\\' {
+					j += 2
+					continue
+				}
+				if line[j] == c {
+					closed = true
+					break
+				}
+				j += 1
+			}
+			if closed {
+				out += "\"\""
+				i = j + 1
+				continue
+			}
+		} else if c == '`' {
+			let close = twine.IndexByte(line[i + 1:], '`')
+			if close >= 0 {
+				out += "\"\""
+				i = i + 1 + close + 1
+				continue
+			}
+		}
+		out += line[i:i + 1]
+		i += 1
+	}
+	return out
+}
+
+mut compiled []pyre.Regex
+mut compiledReady bool
+
+fn patterns() []pyre.Regex {
+	if !compiledReady {
+		mut all = []pyre.Regex{}
+		for p in oldPatterns() {
+			let r = pyre.Compile(p) catch _ {
+				ci.Fail("docs: pattern " + p + " does not compile")
+				panic("unreachable")
+			}
+			all = append(all, r)
+		}
+		compiled = keep(all)
+		compiledReady = true
+	}
+	return compiled
+}
+
+// OldForms are the removed forms one line of Tin uses.
+fn OldForms(line str) []str {
+	let code = CodePart(line)
+	let reasons = oldReasons()
+	mut found = []str{}
+	let ps = patterns()
+	for i in 0..len(ps) {
+		let (_, _, ok) = ps[i].Search(code, 0)
+		if ok {
+			found = append(found, reasons[i])
+		}
+	}
+	return found
+}
+
+fn isSpace(c u8) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'
+}
+
+// fence reads a line like "  ```tin body error=E020": indent, language and the rest; ok is false when the line is no fence start.
+fn fence(line str) (str, str, str, bool) {
+	mut i = 0
+	for i < len(line) && isSpace(line[i]) {
+		i += 1
+	}
+	if i + 3 > len(line) || line[i:i + 3] != "```" {
+		return "", "", "", false
+	}
+	let indent = line[0:i]
+	i += 3
+	if i < len(line) && line[i] == '`' {
+		return "", "", "", false
+	}
+	mut j = i
+	for j < len(line) && !isSpace(line[j]) && line[j] != '`' {
+		j += 1
+	}
+	let lang = line[i:j]
+	let rest = line[j:]
+	if twine.IndexByte(rest, '`') >= 0 {
+		return "", "", "", false
+	}
+	return indent, lang, rest, true
+}
+
+// Page is the blocks and prose lines of a markdown page.
+type Page struct {
+	Blocks []Block
+	Prose []Prose
+}
+
+// ParseMarkdown reads a page; it fails with the reason when a fence or a prelude is not closed.
+fn ParseMarkdown(text str) !Page {
+	mut blocks = []Block{}
+	mut prose = []Prose{}
+	mut open = false
+	mut current = Block{}
+	mut exempt = false
+	mut prelude = []str{}
+	mut havePrelude = false
+	mut inPrelude = false
+	mut preludeEnd = -1
+	let lines = twine.Split(text, "\n")
+	mut count = len(lines)
+	if count > 0 && len(lines[count - 1]) == 0 {
+		count -= 1
+	}
+	for n in 0..count {
+		let number = n + 1
+		let line = lines[n]
+		if open {
+			let trimmed = twine.TrimSpace(line)
+			if twine.HasPrefix(trimmed, "```") && len(twine.Trim(trimmed, "`")) == 0 {
+				blocks = append(blocks, current)
+				open = false
+			} else if twine.HasPrefix(line, current.Indent) {
+				current.Body = append(current.Body, line[len(current.Indent):])
+			} else {
+				current.Body = append(current.Body, twine.TrimLeft(line, " \t\r\n\v\f"))
+			}
+			continue
+		}
+		if inPrelude {
+			if twine.TrimSpace(line) == "-->" {
+				inPrelude = false
+				preludeEnd = number
+			} else {
+				prelude = append(prelude, line)
+			}
+			continue
+		}
+		if twine.TrimSpace(line) == PRELUDE_START {
+			prelude = []str{}
+			havePrelude = true
+			inPrelude = true
+			continue
+		}
+		let (indent, lang, rest, ok) = fence(line)
+		if ok {
+			mut names = []str{}
+			mut values = []str{}
+			for word in twine.Fields(rest) {
+				let eq = twine.IndexByte(word, '=')
+				if eq < 0 {
+					names = append(names, word)
+					values = append(values, "")
+				} else {
+					names = append(names, word[0:eq])
+					values = append(values, word[eq + 1:])
+				}
+			}
+			let b = Block{Line: number, Indent: indent, Lang: lang, AttrNames: names, AttrValues: values, Body: []str{}, Exempt: false, Prelude: []str{}, HasPrelude: false, FileNames: []str{}, FileBodies: []str{}}
+			let old = hasName(names, "old-syntax")
+			current = b
+			current.Exempt = exempt || old
+			if havePrelude && preludeEnd == number - 1 {
+				current.Prelude = prelude
+				current.HasPrelude = true
+			}
+			prelude = []str{}
+			havePrelude = false
+			open = true
+			continue
+		}
+		let trimmed = twine.TrimSpace(line)
+		if trimmed == REGION_BEGIN {
+			exempt = true
+		} else if trimmed == REGION_END {
+			exempt = false
+		}
+		prose = append(prose, Prose{Number: number, Text: line, Exempt: exempt})
+	}
+	if open {
+		fail say.Fault("%s", "unterminated code block at line " + mint.Itoa(current.Line))
+	}
+	if inPrelude {
+		fail say.Fault("%s", "unterminated tin-prelude comment")
+	}
+	return Page{Blocks: blocks, Prose: prose}
+}
+
+fn hasName(names []str, name str) bool {
+	for n in names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DocPages are README.md and toolchain/docs/*.md, in order.
+fn DocPages(root str) []str {
+	mut pages = []str{ci.Join(root, "README.md")}
+	for name in ci.Names(ci.Join(root, "toolchain/docs"), ".md") {
+		pages = append(pages, ci.Join(root, "toolchain/docs/" + name))
+	}
+	return pages
+}
+
+// inlineSpans are the `code` spans of a line (a run of backticks closes with a run of the same length).
+fn inlineSpans(line str) []str {
+	mut spans = []str{}
+	mut i = 0
+	for i < len(line) {
+		if line[i] != '`' {
+			i += 1
+			continue
+		}
+		mut run = 0
+		for i + run < len(line) && line[i + run] == '`' {
+			run += 1
+		}
+		let mark = line[i:i + run]
+		// the span is at least one character, closed by the same run of backticks
+		mut close = -1
+		if i + run + 1 <= len(line) {
+			close = twine.Index(line[i + run + 1:], mark)
+		}
+		if i + run < len(line) && close >= 0 {
+			spans = append(spans, line[i + run:i + run + 1 + close])
+			i = i + run + 1 + close + run
+		} else {
+			i += run
+		}
+	}
+	return spans
+}
+
+fn isWordSpan(span str) bool {
+	if len(span) == 0 {
+		return false
+	}
+	for i in 0..len(span) {
+		let c = span[i]
+		let ok = c == '_' || c == '.' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+fn Relative(path str, root str) str {
+	return twine.TrimPrefix(path, root + "/")
+}
+
+// CheckPage returns the syntax problems of one page (appended to problems) and its compilable ```tin blocks.
+fn CheckPage(path str, root str, problems mut []str) []Block {
+	let where = Relative(path, root)
+	let page = ParseMarkdown(ci.Read(path)) catch err {
+		problems = append(problems, where + ": " + say.Str(err))
+		return []Block{}
+	}
+	for p in page.Prose {
+		if p.Exempt {
+			continue
+		}
+		for span in inlineSpans(p.Text) {
+			// A bare word (`switch`) names a construct; code has more than one word.
+			if isWordSpan(twine.TrimSpace(span)) {
+				continue
+			}
+			for why in OldForms(span) {
+				problems = append(problems, where + ":" + mint.Itoa(p.Number) + ": `" + span + "` uses " + why)
+			}
+		}
+	}
+	mut programs = []Block{}
+	let known = Languages()
+	for b in page.Blocks {
+		if b.Lang == "go" {
+			problems = append(problems, where + ":" + mint.Itoa(b.Line) + ": Tin code is fenced ```tin, not ```go (real Go is ```go-reference)")
+		} else if !hasName(known, b.Lang) {
+			mut shown = b.Lang
+			if len(shown) == 0 {
+				shown = "nothing"
+			}
+			problems = append(problems, where + ":" + mint.Itoa(b.Line) + ": a code block names its language (" + twine.Join(known, ", ") + "), not '" + shown + "'")
+		}
+		if (b.Lang == "tin" || b.Lang == "go") && !b.Exempt {
+			for k in 0..len(b.Body) {
+				for why in OldForms(b.Body[k]) {
+					problems = append(problems, where + ":" + mint.Itoa(b.Line + k + 1) + ": uses " + why)
+				}
+			}
+		}
+		if b.Lang == "tin" {
+			programs = append(programs, b)
+		}
+	}
+	return programs
+}
+
+// CheckExamples checks every .tin file under examples/; it returns how many there are.
+fn CheckExamples(root str, problems mut []str) i64 {
+	mut count = 0
+	for path in ci.Files(ci.Join(root, "examples"), ".tin") {
+		count += 1
+		let lines = ci.Lines(ci.Read(path))
+		for k in 0..len(lines) {
+			for why in OldForms(lines[k]) {
+				problems = append(problems, Relative(path, root) + ":" + mint.Itoa(k + 1) + ": uses " + why)
+			}
+		}
+	}
+	return count
+}
+
+// Checked is the result of the text check: problems, the pages whose blocks get compiled (with those blocks) and the example count.
+type Checked struct {
+	Problems []str
+	Pages []str
+	Blocks [][]Block
+	Examples i64
+}
+
+fn CheckStatic(root str) Checked {
+	mut problems = []str{}
+	mut pages = []str{}
+	mut blocks = [][]Block{}
+	for path in DocPages(root) {
+		if !quarry.Exists(path) {
+			continue
+		}
+		let found = CheckPage(path, root, mut problems)
+		if twine.HasSuffix(path, "/ERRORS.md") {
+			continue
+		}
+		pages = append(pages, path)
+		blocks = append(blocks, found)
+	}
+	let examples = CheckExamples(root, mut problems)
+	return Checked{Problems: problems, Pages: pages, Blocks: blocks, Examples: examples}
+}
+
+fn packageName(line str) str {
+	return twine.TrimSpace(line[7:])
+}
+
+// importPath is the quoted path of an `import "x"` line, or "" when the line is no import.
+fn importPath(line str) (str, bool) {
+	if !twine.HasPrefix(line, "import") || len(line) < 8 || !isSpace(line[6]) {
+		return "", false
+	}
+	let rest = twine.TrimLeft(line[6:], " \t")
+	if len(rest) == 0 || rest[0] != '"' {
+		return "", false
+	}
+	let close = twine.IndexByte(rest[1:], '"')
+	if close < 0 {
+		return "", false
+	}
+	return rest[1:1 + close], true
+}
+
+fn isPackageClause(line str) bool {
+	if !twine.HasPrefix(line, "package") || len(line) < 8 || !isSpace(line[7]) {
+		return false
+	}
+	let rest = twine.TrimLeft(line[7:], " \t")
+	return len(rest) > 0 && isWordByte(rest[0])
+}
+
+fn isWordByte(c u8) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+fn hasMain(text str) bool {
+	for line in twine.Split(text, "\n") {
+		if twine.HasPrefix(line, "fn") && len(line) > 3 && isSpace(line[2]) {
+			let rest = twine.TrimLeft(line[2:], " \t\r\n\v\f")
+			if twine.HasPrefix(rest, "main") && twine.HasPrefix(twine.TrimLeft(rest[4:], " \t\r\n\v\f"), "(") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usedPackages are the names a text uses as `name.Member` (a lower-case word not preceded by a word character or a dot).
+fn usedPackages(text str) []str {
+	mut names = []str{}
+	mut i = 0
+	for i < len(text) {
+		let c = text[i]
+		let startOk = i == 0 || !(isWordByte(text[i - 1]) || text[i - 1] == '.')
+		if startOk && c >= 'a' && c <= 'z' {
+			mut j = i
+			for j < len(text) && isWordByte(text[j]) {
+				j += 1
+			}
+			if j + 1 < len(text) && text[j] == '.' && (text[j + 1] == '_' || (text[j + 1] >= 'a' && text[j + 1] <= 'z') || (text[j + 1] >= 'A' && text[j + 1] <= 'Z')) {
+				let name = text[i:j]
+				if !hasName(names, name) {
+					names = append(names, name)
+				}
+			}
+			i = j
+			continue
+		}
+		i += 1
+	}
+	return names
+}
+
+// LibraryPackages are the names of the standard-library and package directories.
+fn LibraryPackages(root str) []str {
+	mut names = []str{}
+	for part in []str{"toolchain/std", "packages"} {
+		let entries = quarry.ReadDir(ci.Join(root, part)) catch _ {
+			[]str{}
+		}
+		for name in entries {
+			if quarry.IsDir(ci.Join(ci.Join(root, part), name)) {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// declared reports whether a local or parameter named name is declared in the text (so `name.x` is not a package use).
+fn declared(text str, name str) bool {
+	let a = pyre.Compile(`\b(let|mut)\s+` + name + `\b(?!\.)|[(,]\s*` + name + `\s+(mut\s+)?[\w\[?]`) catch _ {
+		return false
+	}
+	let (_, _, ok) = a.Search(text, 0)
+	return ok
+}
+
+fn joinLines(lines []str) str {
+	mut out = ""
+	for l in lines {
+		out += l + "\n"
+	}
+	return out
+}
+
+// Program is the source a ```tin block compiles as.
+fn Program(block Block, packages []str) str {
+	let body = joinLines(block.Body)
+	mut prelude = ""
+	if block.HasPrelude {
+		prelude = joinLines(block.Prelude)
+	}
+	// The prelude's and the block's imports go first, after the package clause.
+	mut headLines = []str{}
+	mut rest = []str{}
+	for line in twine.Split(prelude + body, "\n") {
+		let (_, isImport) = importPath(line)
+		if isPackageClause(line) || isImport {
+			headLines = append(headLines, line)
+		} else {
+			rest = append(rest, line)
+		}
+	}
+	mut text = twine.Join(rest, "\n") + "\n"
+	let (_, isBody) = block.Attr("body")
+	if isBody {
+		mut bodyLines = []str{}
+		for l in twine.Split(body, "\n") {
+			let (_, imp) = importPath(l)
+			if !imp {
+				bodyLines = append(bodyLines, l)
+			}
+		}
+		// the split of a text ending in a newline has an empty last element: Python's splitlines does not
+		if len(bodyLines) > 0 && len(bodyLines[len(bodyLines) - 1]) == 0 {
+			bodyLines = bodyLines[0:len(bodyLines) - 1]
+		}
+		mut preludeLines = []str{}
+		for l in twine.Split(prelude, "\n") {
+			let (_, imp) = importPath(l)
+			if !imp {
+				preludeLines = append(preludeLines, l)
+			}
+		}
+		if len(preludeLines) > 0 && len(preludeLines[len(preludeLines) - 1]) == 0 {
+			preludeLines = preludeLines[0:len(preludeLines) - 1]
+		}
+		mut indented = ""
+		for l in bodyLines {
+			if len(twine.TrimSpace(l)) > 0 {
+				indented += "\t" + l + "\n"
+			} else {
+				indented += "\n"
+			}
+		}
+		text = twine.Join(preludeLines, "\n") + "\nfn example() ! {{\n" + indented + "}}\n"
+	}
+	mut packageLine = "package main"
+	mut havePackage = false
+	mut imports = []str{}
+	mut imported = []str{}
+	for l in headLines {
+		let (path, isImport) = importPath(l)
+		if isImport {
+			imports = append(imports, l)
+			imported = append(imported, path[twine.LastIndex(path, "/") + 1:])
+		} else if isPackageClause(l) && !havePackage {
+			packageLine = l
+			havePackage = true
+		}
+	}
+	// A package the block uses and does not import, unless a local or parameter has its name.
+	mut wanted = []str{}
+	for name in usedPackages(text) {
+		if hasName(packages, name) && !hasName(imported, name) && !declared(text, name) {
+			wanted = append(wanted, name)
+		}
+	}
+	sift.Sort(mut wanted)
+	for name in wanted {
+		imports = append(imports, "import \"" + name + "\"")
+	}
+	text = packageLine + "\n\n" + joinLines(imports) + "\n" + text
+	if !hasMain(text) && PackageOf(text) == "main" {
+		text += "\nfn main() {{}}\n"
+	}
+	return text
+}
+
+// PackageOf is the name in the first package clause of the text.
+fn PackageOf(text str) str {
+	for line in twine.Split(text, "\n") {
+		if isPackageClause(line) {
+			return packageName(line)
+		}
+	}
+	return ""
+}
+
+// AttachFiles: a block marked file=NAME is another file of the program before it; it returns the blocks to compile.
+fn AttachFiles(blocks []Block) []Block {
+	mut out = []Block{}
+	mut current = Block{Line: 0, Indent: "", Lang: "", AttrNames: []str{}, AttrValues: []str{}, Body: []str{}, Exempt: false, Prelude: []str{}, HasPrelude: false, FileNames: []str{}, FileBodies: []str{}}
+	mut have = false
+	for b in blocks {
+		let (name, has) = b.Attr("file")
+		if has && len(name) > 0 && have {
+			current = withFile(current, name, joinLines(b.Body))
+			continue
+		}
+		if have {
+			out = append(out, current)
+		}
+		current = copyBlock(b)
+		have = true
+	}
+	if have {
+		out = append(out, current)
+	}
+	return out
+}
+
+// withFile is the block with one more file.
+fn withFile(b Block, name str, text str) Block {
+	mut names = []str{}
+	for n in b.FileNames {
+		names = append(names, n)
+	}
+	names = append(names, name)
+	mut bodies = []str{}
+	for n in b.FileBodies {
+		bodies = append(bodies, n)
+	}
+	bodies = append(bodies, text)
+	return Block{Line: b.Line, Indent: b.Indent, Lang: b.Lang, AttrNames: b.AttrNames, AttrValues: b.AttrValues, Body: b.Body, Exempt: b.Exempt, Prelude: b.Prelude, HasPrelude: b.HasPrelude, FileNames: names, FileBodies: bodies}
+}
+
+fn copyBlock(b Block) Block {
+	mut names = []str{}
+	for n in b.FileNames {
+		names = append(names, n)
+	}
+	mut bodies = []str{}
+	for n in b.FileBodies {
+		bodies = append(bodies, n)
+	}
+	return Block{Line: b.Line, Indent: b.Indent, Lang: b.Lang, AttrNames: b.AttrNames, AttrValues: b.AttrValues, Body: b.Body, Exempt: b.Exempt, Prelude: b.Prelude, HasPrelude: b.HasPrelude, FileNames: names, FileBodies: bodies}
+}

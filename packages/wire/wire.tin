@@ -344,6 +344,18 @@ fn (l Listener) Port() i64 {
 	return l.port
 }
 
+// LocalPort is the port this end of the connection uses (what the peer sees as the source port).
+fn (c Conn) LocalPort() i64 {
+	let sa = calloc(1, 32)
+	let ln = calloc(1, 8)
+	ln[0] = 32
+	rt_sys_getsockname(c.fd, sa, ln)
+	let port = i64(load8(sa + 2)) << 8 | i64(load8(sa + 3))
+	free(ln)
+	free(sa)
+	return port
+}
+
 // Accept waits for the next connection.
 fn (l Listener) Accept() !Conn {
 	return try l.AcceptTimeout(0)

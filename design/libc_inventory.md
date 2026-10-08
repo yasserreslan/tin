@@ -28,15 +28,15 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `calloc` | `toolchain/runtime/runtime.tin`, `lib/std.tin` | 2 | removed | Tin mmap allocator or byte/word operations | Memory/OOM injection; overlap/alignment/microbenchmarks; bootstrap (phase 2) |
 | `ceil` | `toolchain/std/gauge/gauge.tin` | 0 | intrinsic | Hardware float intrinsic | toolchain/tests/v2/gauge.tin and gauge_math.tin; both backend instruction checks |
 | `chdir` | `toolchain/std/quarry/quarry.tin` | 3 | removed | chdir raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
-| `clock_gettime` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | clock_gettime raw syscall (per-architecture ABI) | Monotonic/wall-clock Go twin; tools/ci/task_check.py deadlines (phases 3/5) |
+| `clock_gettime` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | clock_gettime raw syscall (per-architecture ABI) | Monotonic/wall-clock Go twin; tools/ci/task_check.tin deadlines (phases 3/5) |
 | `close` | `packages/anvil/anvil.tin`, `toolchain/std/flume/flume.tin`, `packages/mysql/mysql.tin`, `packages/postgres/postgres.tin`, `toolchain/std/quarry/quarry.tin`, `packages/redis/redis.tin`, `toolchain/runtime/runtime_linux.tin`, `lib/std.tin`, `packages/websocket/websocket.tin`, `packages/wire/wire.tin` | 3 | removed | close raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `closedir` | `toolchain/std/quarry/quarry.tin`, `toolchain/compiler/main.tin` | 3 | removed | Tin directory cleanup and close syscall | toolchain/tests/v2/quarry.tin; directory refill/unknown-type/symlink cases; bootstrap (phase 3) |
 | `connect` | `packages/wire/wire.tin` | 3 | removed | connect raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `creat` | `lib/std.tin` | 3 | removed | openat with create/truncate flags | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `dladdr` | `toolchain/runtime/runtime.tin` | 4 | removed | Linker-emitted Tin function symbol table | Exact panic backtrace and function-boundary tests (phase 4) |
-| `epoll_create1` | `packages/anvil/anvil_linux.tin` | 3 | removed | epoll_create1 raw syscall (per-architecture ABI) | tools/ci/http_check.py and task_check.py (phase 3) |
-| `epoll_ctl` | `packages/anvil/anvil_linux.tin` | 3 | removed | epoll_ctl raw syscall (per-architecture ABI) | tools/ci/http_check.py and task_check.py (phase 3) |
-| `epoll_wait` | `packages/anvil/anvil_linux.tin` | 3 | removed | epoll_wait raw syscall (per-architecture ABI) | tools/ci/http_check.py and task_check.py (phase 3) |
+| `epoll_create1` | `packages/anvil/anvil_linux.tin` | 3 | removed | epoll_create1 raw syscall (per-architecture ABI) | tools/ci/http_check.tin and task_check.tin (phase 3) |
+| `epoll_ctl` | `packages/anvil/anvil_linux.tin` | 3 | removed | epoll_ctl raw syscall (per-architecture ABI) | tools/ci/http_check.tin and task_check.tin (phase 3) |
+| `epoll_wait` | `packages/anvil/anvil_linux.tin` | 3 | removed | epoll_wait raw syscall (per-architecture ABI) | tools/ci/http_check.tin and task_check.tin (phase 3) |
 | `exit` | `toolchain/std/crucible/crucible.tin`, `toolchain/runtime/runtime.tin`, `lib/std.tin` | 3 | removed | exit_group for process termination; exit for thread termination | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `fcntl` | `packages/anvil/anvil.tin`, `toolchain/std/relay/relay.tin`, `toolchain/runtime/runtime.tin`, `packages/wire/wire.tin` | 3 | removed | fcntl raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `floor` | `toolchain/std/gauge/gauge.tin` | 0 | intrinsic | Hardware float intrinsic | toolchain/tests/v2/gauge.tin and gauge_math.tin; both backend instruction checks |
@@ -73,8 +73,8 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `posix_memalign` | `toolchain/runtime/runtime.tin` | 2 | removed | Tin mmap allocator or byte/word operations | Memory/OOM injection; overlap/alignment/microbenchmarks; bootstrap (phase 2) |
 | `pthread_attr_init` | `toolchain/runtime/runtime.tin` | 5 | removed | Tin thread stack configuration (`rt_thread_start` in runtime_linux.tin) | tools/ci/thread_check.py stacks, guard and reaping (phase 5) |
 | `pthread_attr_setstacksize` | `toolchain/runtime/runtime.tin` | 5 | removed | Tin mmap stack and guard page | tools/ci/thread_check.py stacks, guard and reaping (phase 5) |
-| `pthread_create` | `toolchain/runtime/runtime.tin` | 5 | removed | Raw clone (`rt_sys_clone` leaf) with parent-owned stacks and child trampoline | tools/ci/thread_check.py returning cores, masks, alternate stacks and child faults; task_check.py helper threads (phase 5) |
-| `pthread_sigmask` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | rt_sigprocmask with kernel sigset_t | tools/ci/http_check.py shutdown; per-thread signal-mask tests (phase 3) |
+| `pthread_create` | `toolchain/runtime/runtime.tin` | 5 | removed | Raw clone (`rt_sys_clone` leaf) with parent-owned stacks and child trampoline | tools/ci/thread_check.py returning cores, masks, alternate stacks and child faults; task_check.tin helper threads (phase 5) |
+| `pthread_sigmask` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | rt_sigprocmask with kernel sigset_t | tools/ci/http_check.tin shutdown; per-thread signal-mask tests (phase 3) |
 | `read` | `toolchain/runtime/runtime.tin`, `lib/std.tin` | 3 | removed | read raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `readdir` | `toolchain/std/quarry/quarry.tin`, `toolchain/compiler/main.tin` | 3 | removed | Tin linux_dirent64 parsing and buffer refills | toolchain/tests/v2/quarry.tin; directory refill/unknown-type/symlink cases; bootstrap (phase 3) |
 | `readlink` | `toolchain/compiler/host_linux.tin` | 3 | removed | readlink raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
@@ -90,7 +90,7 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `setenv` | `toolchain/std/quarry/quarry.tin` | 5 | removed | Tin owned environment update (`rt_setenv`) | toolchain/tests/v2/quarry.tin overwrite and ownership (phase 5) |
 | `setsockopt` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | setsockopt raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `signal` | `packages/anvil/anvil.tin`, `toolchain/runtime/runtime_linux.tin` | 3 | removed | rt_sigaction and per-architecture signal return | Broken-pipe behavior; signal return; issue #175 handler (phases 3/5) |
-| `signalfd` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | signalfd4 | tools/ci/http_check.py shutdown (phase 3) |
+| `signalfd` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | signalfd4 | tools/ci/http_check.tin shutdown (phase 3) |
 | `snprintf` | `toolchain/runtime/runtime.tin` | 1 | removed | Tin precision float formatting and diagnostic text | tools/ci/number_check.tin; existing bounds/core diagnostics |
 | `socket` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | socket raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `sqrt` | `toolchain/std/dice/dice.tin`, `toolchain/std/gauge/gauge.tin` | 0 | intrinsic | Hardware float intrinsic | toolchain/tests/v2/gauge.tin and gauge_math.tin; both backend instruction checks |

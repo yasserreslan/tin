@@ -1,0 +1,53 @@
+package main
+
+import "../ci/ci"
+import "./distpack"
+import "quarry"
+import "say"
+import "twine"
+
+// Package a native Tin compiler and its source/library tree as a reproducible archive.
+//
+// Usage: dist --target TARGET [--version V] [--compiler PATH] [--outdir DIR]
+
+fn usage(message str) {
+	say.Line("dist: " + message)
+	say.Line("usage: dist --target darwin-arm64|linux-arm64|linux-amd64 [--version V] [--compiler PATH] [--outdir DIR]")
+	quarry.Exit(2)
+}
+
+fn main() {
+	let root = ci.Root()
+	mut version = twine.TrimSpace(ci.Read(ci.Join(root, "VERSION")))
+	mut target = ""
+	mut compiler = ci.Join(root, "bin/tinc")
+	mut outdir = ci.Join(root, "bin/dist")
+	let args = quarry.Args()
+	mut i = 1
+	for i < len(args) {
+		if i + 1 >= len(args) {
+			usage("missing value after " + args[i])
+		}
+		if args[i] == "--version" {
+			version = args[i + 1]
+		} else if args[i] == "--target" {
+			target = args[i + 1]
+		} else if args[i] == "--compiler" {
+			compiler = args[i + 1]
+		} else if args[i] == "--outdir" {
+			outdir = args[i + 1]
+		} else {
+			usage("unknown option " + args[i])
+		}
+		i += 2
+	}
+	if len(target) == 0 {
+		usage("--target is required")
+	}
+	let archive = distpack.Package(version, target, compiler, outdir, root) catch err {
+		say.Line("dist: " + say.Str(err))
+		quarry.Exit(1)
+		return
+	}
+	say.Line(archive)
+}

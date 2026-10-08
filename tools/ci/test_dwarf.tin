@@ -1,0 +1,320 @@
+package main
+
+import "./ci"
+import "./dwarf"
+import "mint"
+import "say"
+import "twine"
+
+// tinc -g: a DWARF line table and the functions' names in the executable (#409 macOS, #370 Linux), read back here without a debugger:
+// the sections are found in the ELF or Mach-O file, the line program is run, and the compilation unit's subprograms are listed.
+// Without -g the executable has none of it, and with it the program prints the same.
+
+fn fixture() str {
+	return ci.Join(ci.Root(), "tools/ci/fixtures/debug_lines.tin")
+}
+
+fn compiler() str {
+	let under = ci.Env("TINC_UNDER_TEST")
+	if len(under) > 0 {
+		return under
+	}
+	return ci.Tinc()
+}
+
+fn build(out str, flags []str) {
+	mut argv = []str{compiler()}
+	for f in flags {
+		argv = append(argv, f)
+	}
+	argv = append(argv, "-o")
+	argv = append(argv, out)
+	argv = append(argv, fixture())
+	ci.Must(ci.ExecEnv(argv, ci.Root(), 120, []str{"TIN_ROOT=" + ci.Root()}, []str{}), "tinc " + twine.Join(flags, " "))
+}
+
+fn sectionsOf(path str) dwarf.Sections {
+	let s = dwarf.SectionsOf(ci.Read(path)) catch err {
+		ci.Fail(path + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	return s
+}
+
+fn subprograms(dies []dwarf.Die) ([]str, []i64, []i64) {
+	mut names = []str{}
+	mut lows = []i64{}
+	mut highs = []i64{}
+	for d in dies {
+		if d.Tag == 0x2e {
+			let (name, _) = d.Str(0x03)
+			let (low, _) = d.Num(0x11)
+			let (size, _) = d.Num(0x12)
+			names = append(names, name)
+			lows = append(lows, low)
+			highs = append(highs, low + size)
+		}
+	}
+	return names, lows, highs
+}
+
+fn index(names []str, name str) i64 {
+	for i in 0..len(names) {
+		if names[i] == name {
+			return i
+		}
+	}
+	return -1
+}
+
+fn typeText(dies []dwarf.Die, at i64) str {
+	let t = dwarf.TypeText(dies, at) catch err {
+		ci.Fail("type text: " + say.Str(err))
+		panic("unreachable")
+	}
+	return t
+}
+
+// variables are "kind name type" of a function's parameters (param) and locals (local), in order, and their location lengths.
+fn variables(dies []dwarf.Die, fnName str) ([]str, []i64) {
+	mut fnAt = i64(-1)
+	for d in dies {
+		let (name, _) = d.Str(0x03)
+		if d.Tag == 0x2e && name == fnName {
+			fnAt = d.At
+			break
+		}
+	}
+	mut out = []str{}
+	mut locs = []i64{}
+	for d in dies {
+		if d.Parent == fnAt && (d.Tag == 0x05 || d.Tag == 0x34) {
+			mut kind = "local"
+			if d.Tag == 0x05 {
+				kind = "param"
+			}
+			let (name, _) = d.Str(0x03)
+			let (typeAt, _) = d.Num(0x49)
+			let (loc, _) = d.Str(0x02)
+			out = append(out, kind + " " + name + " " + typeText(dies, typeAt))
+			locs = append(locs, len(loc))
+		}
+	}
+	return out, locs
+}
+
+fn withKind(vars []str, kind str) str {
+	mut out = []str{}
+	for v in vars {
+		if twine.HasPrefix(v, kind + " ") {
+			out = append(out, v)
+		}
+	}
+	return twine.Join(out, "|")
+}
+
+fn members(dies []dwarf.Die, structName str) []dwarf.Die {
+	mut at = i64(-1)
+	for d in dies {
+		let (name, _) = d.Str(0x03)
+		if d.Tag == 0x13 && name == structName {
+			at = d.At
+		}
+	}
+	mut out = []dwarf.Die{}
+	for d in dies {
+		if d.Parent == at && d.Tag == 0x0d {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+fn memberText(ms []dwarf.Die) str {
+	mut out = []str{}
+	for m in ms {
+		let (name, _) = m.Str(0x03)
+		let (off, _) = m.Num(0x38)
+		out = append(out, name + "@" + mint.Itoa(off))
+	}
+	return twine.Join(out, ",")
+}
+
+fn checkTarget(target str, dir str) {
+	let exe = ci.Join(dir, "prog-" + target)
+	build(exe, []str{"-g", "-target", target})
+	let secs = sectionsOf(exe)
+	mut sorted = []str{}
+	for n in secs.Names {
+		sorted = append(sorted, n)
+	}
+	for i in 1..len(sorted) {
+		let x = sorted[i]
+		mut j = i - 1
+		for j >= 0 && sorted[j] > x {
+			sorted[j + 1] = sorted[j]
+			j -= 1
+		}
+		sorted[j + 1] = x
+	}
+	ci.Same(target + ": the sections", twine.Join(sorted, ","), ".debug_abbrev,.debug_info,.debug_line")
+	let (line, _) = secs.Get(".debug_line")
+	let (info, _) = secs.Get(".debug_info")
+	let (abbrev, _) = secs.Get(".debug_abbrev")
+	let table = dwarf.LineRows(line) catch err {
+		ci.Fail(target + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	ci.Same(target + ": the first file", table.Files[0], fixture())
+	ci.Test(target + ": the sequence ends", table.Rows[len(table.Rows) - 1].End)
+	// addresses never go back, and the statements of the fixture are there, in order within a function
+	mut ordered = true
+	for i in 1..len(table.Rows) {
+		if table.Rows[i].Addr < table.Rows[i - 1].Addr {
+			ordered = false
+		}
+	}
+	ci.Test(target + ": addresses never go back", ordered)
+	mut mine = []i64{}
+	for r in table.Rows {
+		if r.File == 1 && !r.End {
+			mine = append(mine, r.Line)
+		}
+	}
+	for want in []i64{9, 10, 14, 15, 17} {
+		mut found = false
+		for l in mine {
+			if l == want {
+				found = true
+			}
+		}
+		ci.Test(target + ": line " + mint.Itoa(want), found)
+	}
+	let dies = dwarf.Dies(info, abbrev) catch err {
+		ci.Fail(target + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	let (names, lows, highs) = subprograms(dies)
+	for name in []str{"add", "pick", "main.main"} {
+		ci.Test(target + ": subprogram " + name, index(names, name) >= 0)
+	}
+	let k = index(names, "add")
+	mut body = []i64{}
+	mut inside = true
+	for r in table.Rows {
+		if r.Addr >= lows[k] && r.Addr < highs[k] && r.File == 1 {
+			body = append(body, r.Line)
+		}
+	}
+	ci.Test(target + ": the lines of add", len(body) >= 2 && body[0] == 9 && body[1] == 10)
+	for r in table.Rows {
+		if r.File == 1 && r.Addr >= lows[k] && r.Addr < highs[k] && !(lows[k] <= r.Addr && r.Addr < highs[k]) {
+			inside = false
+		}
+	}
+	ci.Test(target + ": add's rows lie in its range", inside)
+	// parameters and locals with types and places
+	let (vars, locs) = variables(dies, "describe")
+	ci.Same(target + ": describe's parameters", withKind(vars, "param"), "param p *Point|param xs *[]i64|param scale f64|param ok bool")
+	ci.Same(target + ": describe's locals", withKind(vars, "local"), "local total i64|local label *str")
+	mut located = true
+	for l in locs {
+		if l < 1 {
+			located = false
+		}
+	}
+	ci.Test(target + ": every variable has a location", located)
+	// a struct's members, with their offsets, and the str and slice layouts
+	ci.Same(target + ": Point's members", memberText(members(dies, "Point")), "X@0,Y@8,name@16")
+	ci.Same(target + ": str's members", memberText(members(dies, "str")), "len@0,data@8")
+	let sliceMembers = memberText(members(dies, "[]i64"))
+	ci.Test(target + ": a slice's members", twine.HasPrefix(sliceMembers, "len@0,cap@") && twine.Contains(sliceMembers, ",data@") && twine.Contains(sliceMembers, ",region@"))
+	// globals: a per-core one is addressed from the context register, a shared one has its address
+	mut globalNames = []str{}
+	mut hitsType = ""
+	mut hitsLoc = ""
+	mut totalLoc = ""
+	for d in dies {
+		let (external, isExternal) = d.Num(0x3f)
+		if d.Tag == 0x34 && isExternal && external == 1 {
+			let (name, _) = d.Str(0x03)
+			let (typeAt, _) = d.Num(0x49)
+			let (loc, _) = d.Str(0x02)
+			globalNames = append(globalNames, name)
+			if name == "hits" {
+				hitsType = typeText(dies, typeAt)
+				hitsLoc = loc
+			}
+			if name == "total" {
+				totalLoc = loc
+			}
+		}
+	}
+	for i in 1..len(globalNames) {
+		let x = globalNames[i]
+		mut j = i - 1
+		for j >= 0 && globalNames[j] > x {
+			globalNames[j + 1] = globalNames[j]
+			j -= 1
+		}
+		globalNames[j + 1] = x
+	}
+	ci.Same(target + ": the globals", twine.Join(globalNames, ","), "hits,total")
+	ci.Same(target + ": hits' type", hitsType, "i64")
+	mut ctx = i64(0x8c)
+	if twine.Contains(target, "amd64") {
+		ctx = 0x7f
+	}
+	ci.Test(target + ": hits is a word of the context block", len(hitsLoc) > 0 && i64(hitsLoc[0]) == ctx)
+	ci.Test(target + ": total has an address", len(totalLoc) == 9 && i64(totalLoc[0]) == 3)
+	// the function ranges do not overlap
+	mut spans = []i64{}
+	for i in 0..len(lows) {
+		spans = append(spans, lows[i])
+	}
+	for i in 1..len(spans) {
+		let x = spans[i]
+		mut j = i - 1
+		for j >= 0 && spans[j] > x {
+			spans[j + 1] = spans[j]
+			j -= 1
+		}
+		spans[j + 1] = x
+	}
+	mut disjoint = true
+	for i in 0..len(lows) {
+		for j in 0..len(lows) {
+			if i != j && lows[i] < highs[j] && lows[j] < highs[i] {
+				disjoint = false
+			}
+		}
+	}
+	ci.Test(target + ": the function ranges do not overlap", disjoint)
+}
+
+fn main() {
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "dwarf-")
+	let targets = []str{"darwin-arm64", "linux-arm64", "linux-amd64"}
+	for t in targets {
+		checkTarget(t, dir)
+	}
+	// nothing without -g
+	for t in targets {
+		let exe = ci.Join(dir, "plain-" + t)
+		build(exe, []str{"-target", t})
+		let secs = sectionsOf(exe)
+		ci.Test(t + ": no DWARF without -g", len(secs.Names) == 0)
+	}
+	// the native build prints the same with and without -g
+	let plain = ci.Join(dir, "plain")
+	let debug = ci.Join(dir, "debug")
+	build(plain, []str{})
+	build(debug, []str{"-g"})
+	let a = ci.Exec([]str{plain}, "", 60)
+	let b = ci.Exec([]str{debug}, "", 60)
+	let want = "lines 10 22\npt 1.5 true 3\nz 3\n"
+	ci.Test("the plain build prints the expected text", a.Code == 0 && a.Stdout == want)
+	ci.Test("the -g build prints the same", b.Code == 0 && b.Stdout == want)
+	ci.Remove(dir)
+	ci.Finish()
+}

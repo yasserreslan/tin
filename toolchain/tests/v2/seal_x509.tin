@@ -6,7 +6,7 @@ import "quarry"
 import "twine"
 
 // Verifies every case of a test PKI made by bench/ref/x509_pki (default: the copy in
-// toolchain/tests/data/x509; tools/ci/x509_check.py passes a fresh one). Prints "NAME OK n" or
+// toolchain/tests/data/x509; tools/ci/x509_check.tin passes a fresh one). Prints "NAME OK n" or
 // "NAME FAIL class: fault"; bench/ref/seal_x509 is the Go twin (it prints the class only).
 
 mut dir = "toolchain/tests/data/x509"

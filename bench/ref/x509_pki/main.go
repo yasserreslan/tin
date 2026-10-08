@@ -1,5 +1,5 @@
 // Generates the X.509 test PKI: certificates under DIR/certs and DIR/cases.txt listing every
-// verification case and its expected outcome. Used by tools/ci/x509_check.py (a fresh PKI per
+// verification case and its expected outcome. Used by tools/ci/x509_check.tin (a fresh PKI per
 // run) and to make the checked-in copy under toolchain/tests/data/x509.
 //
 //	go run ./bench/ref/x509_pki DIR

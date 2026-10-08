@@ -571,7 +571,7 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   with `rt_wait_fault()`: the reason itself when it is `fault.DeadlineExceeded` or
   `fault.LimitExceeded` (by identity), otherwise a `fault.Canceled` fault reading
   `canceled: <reason>` whose cause is the reason (design/interface_faults.md).
-  `tools/ci/cancel_check.py` checks every client.
+  `tools/ci/cancel_check.tin` checks every client.
 - Deadlines (#233, edition 1): `within d { }` enters a `bkWithin` boundary whose deadline is
   the earlier of `now + d` and the enclosing one (the request's `TIN_DEADLINE_MS`, an outer
   `within`); waits past it fail with `fault.DeadlineExceeded`, which the block gives as its
@@ -1298,7 +1298,7 @@ use SHA-256/384/512 (SHA-1 is refused) with RSA keys of 2048 to 8192 bits, ECDSA
 has an unhandled critical extension, and the chain holds at most `MaxChain` (8) certificates.
 Host names follow RFC 6125: DNS SANs only (the common name is ignored), one leftmost `*`
 label over at least two more labels, IP literals against IP SANs. The parser is strict DER and
-rejects every certificate Go's `crypto/x509` rejects (`tools/ci/x509_check.py` checks this on
+rejects every certificate Go's `crypto/x509` rejects (`tools/ci/x509_check.tin` checks this on
 byte-flipped certificates).
 the instructions (for tests). Vectors: `tools/ci/crypto_check.py` runs the Wycheproof files in `toolchain/tests/wycheproof/`
 (including the invalid inputs) and random inputs checked against Python's `hashlib`.

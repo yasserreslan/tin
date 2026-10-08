@@ -7,7 +7,7 @@ import "mint"
 
 // x509_mutate FILE BLOCK: XORs each byte of the BLOCK-th certificate in FILE (from 0) with 0x01,
 // 0x80 and 0xff and prints "BLOCK BYTE XOR rejected" for each mutant that fails to parse.
-// tools/ci/x509_check.py runs it once per certificate (memory is only reclaimed at exit);
+// tools/ci/x509_check.tin runs it once per certificate (memory is only reclaimed at exit);
 // bench/ref/x509_mutate is the Go twin.
 fn main() {
 	let args = quarry.Args()

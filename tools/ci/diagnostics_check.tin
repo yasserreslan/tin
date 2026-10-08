@@ -1,0 +1,164 @@
+package main
+
+import "./ci"
+import "./diagcheck"
+import "mint"
+import "quarry"
+import "say"
+import "tinjson"
+import "twine"
+
+// Diagnostic codes (#244): the compiler, toolchain/docs/ERRORS.md and the expected diagnostics agree. Without a compiler it checks the
+// codes only; `diagnostics_check bin/tinc` also compiles every documented example and requires exactly the output the page shows. The
+// rules are in tools/ci/diagcheck.
+
+// Job is one documented example to compile: the entry, the folder with its files and what it must print.
+type Job struct {
+	Entry diagcheck.Entry
+	Dir str
+	Edition str
+	Output str
+	Custom bool
+}
+
+fn shellQuote(s str) str {
+	return "'" + twine.Replace(s, "'", "'\\''", -1) + "'"
+}
+
+fn rangeProblem(entry diagcheck.Entry, d tinjson.J) str {
+	let line = d.Get("line").Int()
+	let endLine = d.Get("endLine").Int()
+	let col = d.Get("col").Int()
+	let endCol = d.Get("endCol").Int()
+	if (line > 0 && endLine < line) || (line > 0 && endLine == line && endCol <= col) {
+		return entry.Code + " " + entry.Name + ": -json range " + mint.Itoa(line) + ":" + mint.Itoa(col) + "-" + mint.Itoa(endLine) + ":" + mint.Itoa(endCol) + " is empty"
+	}
+	return ""
+}
+
+// checkJson: the -check -json form of an example agrees with the text form: the same diagnostics at the same positions, with a range
+// that ends after it starts (toolchain/docs/TOOLING.md, section 3).
+fn checkJson(j Job, entries []diagcheck.Entry) str {
+	let code = ci.Num(twine.TrimSpace(ci.Read(ci.Join(j.Dir, "jcode.txt"))))
+	mut want = []str{}
+	for line in ci.Lines(j.Output) {
+		let t = diagcheck.ParseTextError(line)
+		if t.Ok {
+			mut col = t.Col
+			if len(col) == 0 {
+				col = "0"
+				if len(t.Line) > 0 {
+					col = "1"
+				}
+			}
+			mut lineNo = t.Line
+			if len(lineNo) == 0 {
+				lineNo = "0"
+			}
+			want = append(want, t.File + "|" + lineNo + "|" + col + "|" + t.Code + "|" + t.Name + "|" + t.Message)
+		}
+	}
+	mut got = []str{}
+	for line in ci.Lines(ci.Read(ci.Join(j.Dir, "json.txt"))) {
+		let (d, ok) = tinjson.Parse(line)
+		if !ok {
+			return j.Entry.Code + " " + j.Entry.Name + ": -check -json printed " + line
+		}
+		let problem = rangeProblem(j.Entry, d)
+		if len(problem) > 0 {
+			return problem
+		}
+		got = append(got, d.Get("file").Text() + "|" + mint.Itoa(d.Get("line").Int()) + "|" + mint.Itoa(d.Get("col").Int()) + "|" + d.Get("code").Text() + "|" + d.Get("name").Text() + "|" + d.Get("message").Text())
+		// the fix is the page's Fix: paragraph of the code ("" when the entry has none)
+		if d.Get("fix").Text() != diagcheck.Fix(entries, d.Get("code").Text()) {
+			return j.Entry.Code + " " + j.Entry.Name + ": -json fix of " + d.Get("code").Text() + " is " + d.Get("fix").Text() + ", the page says " + diagcheck.Fix(entries, d.Get("code").Text())
+		}
+	}
+	if code != 1 || twine.Join(got, "\n") != twine.Join(want, "\n") {
+		return diagcheck.DOC + ":" + mint.Itoa(j.Entry.Line) + ": " + j.Entry.Code + " " + j.Entry.Name + ": -check -json printed " + twine.Join(got, " ; ") + " (exit " + mint.Itoa(code) + ") instead of " + twine.Join(want, " ; ")
+	}
+	return ""
+}
+
+fn main() {
+	let root = ci.Root()
+	let args = quarry.Args()
+	let checked = diagcheck.CheckStatic(root)
+	mut problems = checked.Problems
+	if len(args) > 1 {
+		mut compiler = args[1]
+		if !twine.HasPrefix(compiler, "/") {
+			compiler = ci.Join(root, compiler)
+		}
+		let work = ci.TempDir(ci.Join(root, "bin/ci"), "diag-")
+		mut jobs = []Job{}
+		for e in checked.Entries {
+			if e.Retired || e.Unexampled {
+				continue
+			}
+			let ex = diagcheck.ExampleOf(e)
+			if len(ex.Why) > 0 {
+				continue
+			}
+			let dir = ci.Join(work, "job" + mint.Itoa(len(jobs)))
+			ci.Mkdirs(dir)
+			if ex.HasProgram {
+				ci.Write(ci.Join(dir, "example.tin"), ex.Program)
+			}
+			for b in e.Blocks {
+				if b.HasName {
+					let path = ci.Join(dir, b.Name)
+					ci.Mkdirs(path[0:twine.LastIndex(path, "/")])
+					ci.Write(path, b.Body)
+				}
+			}
+			let c = diagcheck.CommandOf(e, compiler, ex.Edition)
+			mut script = "cd \"$(dirname \"$0\")\" || exit 1\nenv TIN_ROOT=" + shellQuote(root) + " LC_ALL=C"
+			for v in c.Env {
+				script += " " + shellQuote(v)
+			}
+			for a in c.Argv {
+				script += " " + shellQuote(a)
+			}
+			script += " > /dev/null 2> out.txt\necho $? > code.txt\n"
+			mut custom = false
+			for b in e.Blocks {
+				if b.Kind == "sh" && !b.HasName {
+					custom = true
+				}
+			}
+			if !custom {
+				script += "env TIN_ROOT=" + shellQuote(root) + " LC_ALL=C " + shellQuote(compiler) + " -edition " + ex.Edition + " -check -json example.tin > json.txt 2> /dev/null\necho $? > jcode.txt\n"
+			}
+			ci.Write(ci.Join(dir, "run.sh"), script)
+			jobs = append(jobs, Job{Entry: e, Dir: dir, Edition: ex.Edition, Output: ex.Output, Custom: custom})
+		}
+		ci.Must(ci.Sh("ls -d \"" + work + "\"/job* | xargs -P \"$(getconf _NPROCESSORS_ONLN)\" -I{{}} sh {{}}/run.sh", "", 1800), "compile the examples")
+		for j in jobs {
+			let got = ci.Read(ci.Join(j.Dir, "out.txt"))
+			let code = ci.Num(twine.TrimSpace(ci.Read(ci.Join(j.Dir, "code.txt"))))
+			if code != 1 || got != j.Output {
+				problems = append(problems, diagcheck.DOC + ":" + mint.Itoa(j.Entry.Line) + ": " + j.Entry.Code + " " + j.Entry.Name + ": the example printed (exit " + mint.Itoa(code) + "):\n" + got + "instead of:\n" + j.Output)
+				continue
+			}
+			if !j.Custom {
+				let p = checkJson(j, checked.Entries)
+				if len(p) > 0 {
+					problems = append(problems, p)
+				}
+			}
+		}
+		ci.Remove(work)
+	}
+	for p in problems {
+		say.Line("FAIL diagnostics: " + p)
+	}
+	if len(problems) > 0 {
+		quarry.Exit(1)
+	}
+	mut examples = ""
+	if len(args) > 1 {
+		examples = "and their examples "
+	}
+	ci.Pass("diagnostics: " + mint.Itoa(len(checked.Entries)) + " codes " + examples + "agree; all " + mint.Itoa(checked.Coded) + " expected diagnostics carry a code")
+}

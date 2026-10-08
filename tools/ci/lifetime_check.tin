@@ -1,0 +1,212 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Task-local formatting, detached helper deadlines, and WebSocket memory lifetimes.
+//
+// Private probes are appended to temporary library copies, never to the production API. Each protocol phase checks actual outputs and
+// server liveness, with bounded waits.
+
+// Stats are the counters /stats reports: closed connections, bad buffers, running helpers, the saved text and the scoped count.
+type Stats struct {
+	Closed i64
+	Bad i64
+	Helpers i64
+	Saved str
+	Scoped i64
+}
+
+fn stats(port i64) Stats {
+	let parts = twine.Split(nettest.Get(port, "/stats"), "|")
+	return Stats{Closed: ci.Num(parts[0]), Bad: ci.Num(parts[1]), Helpers: ci.Num(parts[2]), Saved: parts[3], Scoped: ci.Num(parts[4])}
+}
+
+fn expectReply(port i64, path str, status i64, body str) {
+	let r = nettest.Do(port, "GET", path, []str{}, "")
+	ci.Check(r.Status == status && r.Body == body, "lifetime: " + path + " answered " + mint.Itoa(r.Status) + " " + r.Body + ", want " + mint.Itoa(status) + " " + body)
+}
+
+fn health(port i64, times i64) {
+	for i in 0..times {
+		arena {
+			expectReply(port, "/health", 200, "healthy")
+		}
+	}
+}
+
+fn mkfifo(path str) {
+	ci.Must(ci.Exec([]str{"mkfifo", path}, "", 10), "mkfifo " + path)
+}
+
+fn echoWs(c mut nettest.Socket, op i64, data str) {
+	c.Send(op, data, true, true)
+	let f = c.Recv()
+	ci.Check(f.Op == op && f.Data == data, "lifetime: websocket echo of " + mint.Itoa(len(data)) + " bytes answered " + mint.Itoa(f.Op) + " " + mint.Itoa(len(f.Data)))
+}
+
+fn checks(port i64, directory str) {
+	// All helpers block on heap-owned dynamic paths. Their callers must return before the FIFO is opened; meanwhile completed task
+	// records and pools are reused.
+	mut files = []str{}
+	for i in 0..4 {
+		files = append(files, ci.Join(directory, "fifo" + mint.Itoa(i)))
+		mkfifo(files[i])
+	}
+	let started = tide.Now()
+	mut pending = []wire.Conn{}
+	for f in files {
+		pending = append(pending, nettest.Send(port, nettest.GetRequest("/file?name=" + f[twine.LastIndex(f, "/") + 1:])))
+	}
+	for i in 0..4 {
+		mut c = pending[i]
+		let r = nettest.Finish(mut c, 10)
+		ci.Check(r.Status == 504 && r.Body == "deadline exceeded", "lifetime: a blocked read answered " + mint.Itoa(r.Status) + " " + r.Body)
+	}
+	ci.Check(tide.Now() - started < 1500000000, "lifetime: the blocked reads took too long")
+	ci.Check(stats(port).Helpers == 4, "lifetime: four helpers should be blocked")
+	health(port, 50)
+	// A queued job also expires without a free helper and is disposed on late completion.
+	ci.Write(ci.Join(directory, "queued"), "late result")
+	expectReply(port, "/file?name=queued", 504, "deadline exceeded")
+	ci.Check(stats(port).Helpers == 5, "lifetime: the queued job should count as a helper")
+	for f in files {
+		// opening a FIFO for writing completes once a reader is there; the blocked helpers are the readers
+		ci.Must(ci.Exec([]str{"sh", "-c", ": > \"$0\"", f}, "", 10), "release " + f)
+	}
+	nettest.Eventually(3.0, fn() bool {
+		return stats(port).Helpers == 0
+	})
+	expectReply(port, "/file?name=queued", 200, "late result")
+
+	// An expired write still owns both its path and data until its helper finishes.
+	let fifo = ci.Join(directory, "writefifo")
+	mkfifo(fifo)
+	expectReply(port, "/write?name=writefifo&data=original", 504, "deadline exceeded")
+	health(port, 50)
+	let got = ci.Exec([]str{"cat", fifo}, "", 5)
+	ci.Check(got.Stdout == "owned:original", "lifetime: the write put " + got.Stdout + " in the FIFO")
+	nettest.Eventually(3.0, fn() bool {
+		return stats(port).Helpers == 0
+	})
+	say.Line("helper deadlines: running/queued reads and writes; late results disposed safely")
+
+	mut c = nettest.Connect(port, "/ws")
+	echoWs(mut c, 1, "keep")
+	echoWs(mut c, 1, "wait")
+	let data = twine.Repeat("x", 4096)
+	for i in 0..4000 {
+		arena {
+			echoWs(mut c, 2, data)
+		}
+	}
+	// Control traffic and tiny fragments cannot build up temporary pool allocations while one Read is still running, before Each can
+	// reset the message pool.
+	let ping = twine.Repeat("p", 125)
+	for i in 0..1000 {
+		arena {
+			c.Send(9, ping, true, true)
+			let f = c.Recv()
+			ci.Check(f.Op == 10 && f.Data == ping, "lifetime: pong")
+		}
+	}
+	c.Send(2, "abcd", false, true)
+	for i in 0..999 {
+		c.Send(0, "abcd", false, true)
+	}
+	c.Send(0, "", true, true)
+	let frag = c.Recv()
+	ci.Check(frag.Op == 2 && frag.Data == twine.Repeat("abcd", 1000), "lifetime: fragments came back as " + mint.Itoa(len(frag.Data)) + " bytes")
+	c.Send(1, "fault", true, true)
+	let fault = c.Recv()
+	ci.Check(fault.Op == 1 && fault.Data == "outer:/ws|callback stopped", "lifetime: the fault answered " + fault.Data)
+	c.Close()
+	nettest.Eventually(3.0, fn() bool {
+		return stats(port).Closed >= 1
+	})
+	let after = stats(port)
+	ci.Check(after.Saved == "keep", "lifetime: saved " + after.Saved)
+	ci.Check(after.Scoped == 4004, "lifetime: scoped " + mint.Itoa(after.Scoped))
+	ci.Check(after.Bad == 0, "lifetime: bad buffers " + mint.Itoa(after.Bad))
+	say.Line("WebSocket scope: 4000 messages, pings/fragments, keep, waits, fault and outer objects")
+
+	// Read retains its earlier result across subsequent reads: no hidden pool reset.
+	mut raw = nettest.Connect(port, "/raw")
+	raw.Send(1, "first", true, true)
+	raw.Send(1, "second", true, true)
+	let both = raw.Recv()
+	ci.Check(both.Op == 1 && both.Data == "first|second", "lifetime: /raw answered " + both.Data)
+	raw.Close()
+	nettest.Eventually(3.0, fn() bool {
+		return stats(port).Closed >= 2
+	})
+	let baseline = stats(port).Closed
+	let big = twine.Repeat("z", 70000)
+	for i in 0..300 {
+		arena {
+			mut w = nettest.Connect(port, "/ws")
+			echoWs(mut w, 2, big)
+			w.End()
+		}
+	}
+	mut closer = nettest.Connect(port, "/close")
+	let closing = closer.Recv()
+	ci.Check(closing.Op == 8 && closing.Data == "\x03\xe8", "lifetime: /close answered " + mint.Itoa(closing.Op))
+	closer.Close()
+	nettest.Eventually(3.0, fn() bool {
+		return stats(port).Closed == baseline + 301
+	})
+	ci.Check(stats(port).Bad == 0, "connection buffer was not released at task exit")
+	say.Line("WebSocket cleanup: 300 closed connections, automatic release and repeated Close")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/lifetime")
+	ci.Mkdirs(out)
+	let directory = ci.TempDir(out, "lifetime-")
+	ci.CopyLib(ci.Root(), ci.Join(directory, "lib"))
+	let fixtures = ci.Join(ci.Root(), "tools/ci/fixtures")
+	let libs = []str{"runtime", "websocket"}
+	let probes = []str{"helper_probe", "websocket_probe"}
+	for i in 0..2 {
+		let path = ci.Join(directory, "lib/" + libs[i] + "/" + libs[i] + ".tin")
+		ci.Write(path, ci.Read(path) + "\n" + ci.Read(ci.Join(fixtures, probes[i] + ".tin")))
+	}
+	let exe = ci.Join(directory, "server")
+	ci.BuildTin(ci.Join(fixtures, "lifetime.tin"), exe, directory, []str{})
+	let port = nettest.Port()
+	// Formatting's 300 ms wait needs a longer initial deadline; separate helper requests below run on a second server with a 100 ms
+	// request deadline. Their files stay on the helper threads (TIN_IO_URING=0): a regular file's read through io_uring never queues
+	// behind blocked helpers. file_io_check.tin covers io_uring's deadlines.
+	let deadlines = []str{"1000", "100"}
+	let runs = []str{"format", "all"}
+	for i in 0..2 {
+		let set = []str{"TIN_CORES=1", "TIN_GRACE=1", "TIN_DEADLINE_MS=" + deadlines[i], "REVIEW_DIR=" + directory, "TIN_IO_URING=0"}
+		let server = nettest.Start(exe, []str{}, set, ci.Join(out, runs[i] + ".log"), port)
+		server.Ready(10)
+		if runs[i] == "format" {
+			let a = nettest.Send(port, nettest.GetRequest("/a"))
+			tide.Sleep(25000000)
+			let b = nettest.Send(port, nettest.GetRequest("/b"))
+			mut ma = a
+			mut mb = b
+			let ra = nettest.Finish(mut ma, 10)
+			let rb = nettest.Finish(mut mb, 10)
+			ci.Check(ra.Status == 200 && ra.Body == "A:/a", "lifetime: /a answered " + ra.Body)
+			ci.Check(rb.Status == 200 && rb.Body == "B:/b", "lifetime: /b answered " + rb.Body)
+			ci.Check(server.Running(), "lifetime: the server died")
+			say.Line("overlapping formatting: correct outputs, server alive")
+		} else {
+			checks(port, directory)
+			ci.Check(server.Running(), "lifetime: the server died")
+		}
+		server.Stop()
+	}
+	ci.Remove(directory)
+	ci.Pass("lifetime: helper deadlines, WebSocket scope and cleanup")
+}

@@ -1,4 +1,4 @@
-// Appended to a temporary copy of toolchain/runtime/runtime.tin by lifetime_check.py.
+// Appended to a temporary copy of toolchain/runtime/runtime.tin by lifetime_check.tin.
 fn rt_test_helpers() i64 {
 	rt_lock(&helperLock)
 	let n = helperCount

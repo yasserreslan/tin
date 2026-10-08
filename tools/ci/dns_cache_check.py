@@ -10,8 +10,8 @@ import time
 from urllib.parse import quote
 
 from suite import ROOT
-from task_check import free_port
-from lifetime_check import request, response
+from pycompat import free_port
+from pycompat import request, response
 from dns_check import DNS
 from treeutil import copy_tree
 

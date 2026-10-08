@@ -1,0 +1,94 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// The tree stays formatted: `tin fmt -l` lists no tracked .tin file except those named in EXCLUDED.
+//
+// The excluded files are not formatted on purpose: the hot files (AGENTS.md rule 6: no reformatting of existing code in them, so work
+// in flight is not disturbed), and files whose position in the source is part of what a test checks (expected error positions,
+// recorded effect sites, vendored files with a hash in a tin.lock, edition 0 syntax, the VS Code fixtures). To fix a file this test
+// names, run `tin fmt -w` on it.
+
+// excluded are glob patterns on paths from the repository root ('*' also matches '/').
+fn excluded() []str {
+	return []str{"toolchain/compiler/check.tin", "toolchain/compiler/lower.tin", "toolchain/compiler/region.tin", "toolchain/compiler/parse.tin", "toolchain/compiler/inline.tin", "toolchain/compiler/gen*.tin", "toolchain/runtime/runtime*.tin", "packages/anvil/anvil*.tin", "*_bad.tin", "toolchain/tests/edition1/*", "tools/ci/fixtures/*", "toolchain/tests/fixtures/*", "*/vendor/*", "products/tinland/vscode/*"}
+}
+
+// glob matches the path against a pattern whose only special character is '*' (any run, slashes included).
+fn glob(pattern str, path str) bool {
+	let parts = twine.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == path
+	}
+	if !twine.HasPrefix(path, parts[0]) {
+		return false
+	}
+	mut at = len(parts[0])
+	for k in 1..len(parts) - 1 {
+		let found = twine.Index(path[at:], parts[k])
+		if found < 0 {
+			return false
+		}
+		at += found + len(parts[k])
+	}
+	let last = parts[len(parts) - 1]
+	return len(path) - at >= len(last) && twine.HasSuffix(path, last)
+}
+
+fn isExcluded(path str) bool {
+	for p in excluded() {
+		if glob(p, path) {
+			return true
+		}
+	}
+	return false
+}
+
+fn tracked() []str {
+	let o = ci.Exec([]str{"git", "ls-files", "*.tin"}, ci.Root(), 60)
+	ci.Must(o, "git ls-files")
+	mut files = []str{}
+	for f in ci.Lines(o.Stdout) {
+		if !twine.Contains(f, " ") {
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
+fn main() {
+	let all = tracked()
+	mut files = []str{}
+	for f in all {
+		if !isExcluded(f) {
+			files = append(files, ci.Join(ci.Root(), f))
+		}
+	}
+	ci.Test("there are files to check", len(files) > 500)
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "fmt-gate-")
+	let exe = ci.Join(dir, "tinfmt")
+	ci.BuildTin("tools/fmt/main.tin", exe, "", []str{})
+	mut argv = []str{exe, "-l"}
+	for f in files {
+		argv = append(argv, f)
+	}
+	let r = ci.Exec(argv, ci.Root(), 600)
+	ci.Test("nothing to format", r.Code == 0 && len(r.Stdout) == 0)
+	if r.Code != 0 || len(r.Stdout) > 0 {
+		say.Line("tin fmt -w these files:\n" + r.Stdout)
+	}
+	// a pattern that matches nothing is a leftover
+	for p in excluded() {
+		mut any = false
+		for f in all {
+			if glob(p, f) {
+				any = true
+			}
+		}
+		ci.Test(p + " matches a file", any)
+	}
+	ci.Remove(dir)
+	ci.Finish()
+}

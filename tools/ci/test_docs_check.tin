@@ -1,0 +1,141 @@
+package main
+
+import "./ci"
+import "./docscheck"
+import "say"
+import "twine"
+
+// The docs checker (#227) finds edition-0 syntax and unlabeled blocks, and builds blocks as programs.
+
+fn packages() []str {
+	return []str{"say", "tide", "argo"}
+}
+
+// page is the problems of a tree with one docs page (and example files: name, text pairs).
+fn page(text str, example str, exampleText str) docscheck.Checked {
+	let root = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "docs-test-")
+	ci.Mkdirs(ci.Join(root, "toolchain/docs"))
+	ci.Mkdirs(ci.Join(root, "examples"))
+	ci.Write(ci.Join(root, "README.md"), "# Tin\n")
+	ci.Write(ci.Join(root, "toolchain/docs/PAGE.md"), text)
+	if len(example) > 0 {
+		ci.Write(ci.Join(root, "examples/" + example), exampleText)
+	}
+	let checked = docscheck.CheckStatic(root)
+	ci.Remove(root)
+	return checked
+}
+
+fn block(body str, attrNames []str, attrValues []str, prelude str) docscheck.Block {
+	mut lines = []str{}
+	for l in twine.Split(body, "\n") {
+		lines = append(lines, l)
+	}
+	mut pre = []str{}
+	mut hasPrelude = false
+	if len(prelude) > 0 {
+		pre = twine.Split(prelude, "\n")
+		hasPrelude = true
+	}
+	return docscheck.Block{Line: 1, Indent: "", Lang: "tin", AttrNames: attrNames, AttrValues: attrValues, Body: lines, Exempt: false, Prelude: pre, HasPrelude: hasPrelude, FileNames: []str{}, FileBodies: []str{}}
+}
+
+fn plain(body str) docscheck.Block {
+	return block(body, []str{}, []str{}, "")
+}
+
+fn anyContains(problems []str, parts []str) bool {
+	for p in problems {
+		mut all = true
+		for part in parts {
+			if !twine.Contains(p, part) {
+				all = false
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+fn main() {
+	// each removed form
+	for line in []str{"func f() {{}}", "x := 1", "var n i64", "switch x {{", "\tcase 1, 2:", "\tdefault:", "for i := 0; i < n; i++ {{", "for _, x := range xs {{", "n++", "xs[i]--", "go serve()", "let c chan i64", "extern func write(fd i64) i64"} {
+		ci.Test("removed form: " + line, len(docscheck.OldForms(line)) > 0)
+	}
+	// edition 1 is clean
+	for line in []str{"fn f() {{}}", "let x = 1", "mut n i64 = 0", "match x {{", "\t1, 2 => \"a\"", "for i in 0..n {{", "for i, x in xs {{", "n += 1", "let s = \"a--b\"", "say.Line(\"x := 1\") // var y", "let r = `raw ++ {{}}`", "shell --flag"} {
+		ci.Test("edition 1 line: " + line, len(docscheck.OldForms(line)) == 0)
+	}
+	// blocks and inline code
+	let a = page("Use `x := 1` here, but `switch` is a word.\n\n```tin\nfn main() {{\n\tx := 1\n}}\n```\n", "", "")
+	ci.Test("inline code is checked", anyContains(a.Problems, []str{"PAGE.md:1:", ":="}))
+	ci.Test("block lines are checked", anyContains(a.Problems, []str{"PAGE.md:5:"}))
+	ci.Test("two problems", len(a.Problems) == 2)
+	// go and unlabeled fences
+	let b = page("```go\nfn main() {{}}\n```\n\n```\nplain\n```\n\n```go-reference\nfunc main() {{}}\n```\n", "", "")
+	ci.Test("go fence", anyContains(b.Problems, []str{"not ```go"}))
+	ci.Test("unlabeled fence", anyContains(b.Problems, []str{"not 'nothing'"}))
+	ci.Test("two fence problems", len(b.Problems) == 2)
+	// old syntax on purpose
+	let c = page("<!-- docs-check: old-syntax begin -->\n| `x := 1` | `let x = 1` |\n<!-- docs-check: old-syntax end -->\n\n```tin old-syntax error\nx := 1\n```\n", "", "")
+	ci.Test("old syntax on purpose", len(c.Problems) == 0)
+	// examples
+	let d = page("# p\n", "a.tin", "package main\n\nfunc main() {{}}\n")
+	ci.Test("examples are checked", anyContains(d.Problems, []str{"examples/a.tin:3"}))
+	// the errors page is not compiled here
+	let errorsRoot = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "docs-test-")
+	ci.Mkdirs(ci.Join(errorsRoot, "toolchain/docs"))
+	ci.Mkdirs(ci.Join(errorsRoot, "examples"))
+	ci.Write(ci.Join(errorsRoot, "toolchain/docs/ERRORS.md"), "```tin\nfn main() {{}}\n```\n")
+	let e = docscheck.CheckStatic(errorsRoot)
+	ci.Remove(errorsRoot)
+	ci.Test("ERRORS.md has no problems", len(e.Problems) == 0)
+	ci.Test("ERRORS.md is not compiled here", len(e.Pages) == 0)
+
+	// programs
+	let p1 = docscheck.Program(plain("fn f() {{\n\tsay.Line(tide.Now())\n}}"), packages())
+	ci.Test("adds the package clause and imports", twine.HasPrefix(p1, "package main\n\nimport \"say\"\nimport \"tide\"\n"))
+	ci.Test("adds main", twine.Contains(p1, "fn main() {{}}"))
+	let p2 = docscheck.Program(plain("package main\n\nimport \"say\"\n\nfn main() {{\n\tsay.Line(1)\n}}"), packages())
+	ci.Test("keeps its own import", twine.Count(p2, "import \"say\"") == 1)
+	ci.Test("keeps its own main", twine.Count(p2, "fn main") == 1)
+	let p3 = docscheck.Program(plain("fn f(argo str) {{\n\t_ = argo.x\n}}"), packages())
+	ci.Test("a local with a package name is not an import", !twine.Contains(p3, "import \"argo\""))
+	let p4 = docscheck.Program(block("let n = work()\nsay.Line(n)", []str{"body"}, []str{""}, "import \"tide\"\n\nfn work() i64 {{\n\treturn 1\n}}"), packages())
+	ci.Test("body: imports first", twine.HasPrefix(p4, "package main\n\nimport \"tide\"\nimport \"say\"\n"))
+	ci.Test("body: prelude", twine.Contains(p4, "fn work() i64"))
+	ci.Test("body: example function", twine.Contains(p4, "fn example() ! {{\n\tlet n = work()\n\tsay.Line(n)\n}}"))
+	let p5 = docscheck.Program(plain("package geo\n\nfn Area() i64 {{\n\treturn 1\n}}"), packages())
+	ci.Test("a library package has no main", !twine.Contains(p5, "fn main"))
+
+	// prelude and attributes
+	let parsed = docscheck.ParseMarkdown("<!-- tin-prelude\nfn f() {{}}\n-->\n```tin body error=E020\nf()\n```\n\n```tin\nfn g() {{}}\n```\n") catch err {
+		ci.Fail(say.Str(err))
+		panic("unreachable")
+	}
+	ci.Test("prelude", parsed.Blocks[0].HasPrelude && len(parsed.Blocks[0].Prelude) == 1 && parsed.Blocks[0].Prelude[0] == "fn f() {{}}")
+	let (errorValue, hasError) = parsed.Blocks[0].Attr("error")
+	let (_, hasBody) = parsed.Blocks[0].Attr("body")
+	ci.Test("attributes", hasError && errorValue == "E020" && hasBody)
+	ci.Test("no prelude on the next block", !parsed.Blocks[1].HasPrelude)
+
+	// file blocks join the program before
+	let files = docscheck.ParseMarkdown("```tin\nfn main() {{}}\n```\n\n```tin file=geo.tin\npackage geo\n```\n") catch err {
+		ci.Fail(say.Str(err))
+		panic("unreachable")
+	}
+	let programs = docscheck.AttachFiles(files.Blocks)
+	ci.Test("one program", len(programs) == 1)
+	ci.Test("with its file", len(programs[0].FileNames) == 1 && programs[0].FileNames[0] == "geo.tin" && programs[0].FileBodies[0] == "package geo\n")
+
+	// every real page parses
+	for path in docscheck.DocPages(ci.Root()) {
+		docscheck.ParseMarkdown(ci.Read(path)) catch err {
+			ci.Test("parses " + path, false)
+			say.Line(say.Str(err))
+		}
+	}
+	ci.Finish()
+}

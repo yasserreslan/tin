@@ -1,0 +1,127 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "quarry"
+import "say"
+import "tide"
+import "twine"
+
+// Test an extracted release from another directory, then its Linux builder/runtime image.
+//
+// Usage: distribution_check ARCHIVE [--docker] [--image IMAGE] [--skip-native]
+
+fn run(argv []str, dir str, seconds i64, what str) ci.Out {
+	let o = ci.Exec(argv, dir, seconds)
+	ci.Must(o, what)
+	return o
+}
+
+fn runEnv(argv []str, dir str, seconds i64, set []str, what str) ci.Out {
+	let o = ci.ExecEnv(argv, dir, seconds, set, []str{"TIN_ROOT"})
+	ci.Must(o, what)
+	return o
+}
+
+fn main() {
+	let args = quarry.Args()
+	mut archive = ""
+	mut docker = false
+	mut image = ""
+	mut skipNative = false
+	mut i = 1
+	for i < len(args) {
+		if args[i] == "--docker" {
+			docker = true
+		} else if args[i] == "--skip-native" {
+			skipNative = true
+		} else if args[i] == "--image" && i + 1 < len(args) {
+			image = args[i + 1]
+			i += 1
+		} else {
+			archive = args[i]
+		}
+		i += 1
+	}
+	if len(archive) == 0 || (skipNative && !docker) {
+		say.Line("usage: distribution_check ARCHIVE [--docker] [--image IMAGE] [--skip-native] (--skip-native needs --docker)")
+		quarry.Exit(2)
+	}
+	if !twine.HasPrefix(archive, "/") {
+		archive = ci.Join(ci.Root(), archive)
+	}
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci"), "tin-release-")
+	// the archive holds regular files with relative names only
+	let names = run([]str{"tar", "-tzf", archive}, "", 180, "list the archive").Stdout
+	for name in ci.Lines(names) {
+		ci.Check(!twine.HasPrefix(name, "/") && !twine.Contains(name, "../"), "the archive holds " + name)
+	}
+	run([]str{"tar", "-xzf", archive, "-C", work}, "", 180, "extract the archive")
+	let top = twine.TrimSpace(ci.Sh("cd \"" + work + "\" && ls -d */ | head -1", "", 10).Stdout)
+	let tree = ci.Join(work, twine.TrimSuffix(top, "/"))
+	let version = twine.TrimSpace(ci.Read(ci.Join(tree, "VERSION")))
+	let source = ci.Join(work, "hello.tin")
+	ci.Write(source, "package main\nimport \"say\"\nfn main() {{ say.Line(\"release works\") }}\n")
+	if !skipNative {
+		let hello = runEnv([]str{ci.Join(tree, "tin"), source}, work, 180, []str{}, "tin hello.tin")
+		ci.Check(hello.Stdout == "release works\n", "release: printed " + hello.Stdout)
+		// The standalone tinc symlink must also find lib/ without TIN_ROOT.
+		let link = ci.Join(work, "tinc")
+		ci.Link(ci.Join(tree, "bin/tinc"), link)
+		runEnv([]str{link, "-o", ci.Join(work, "hello"), source}, work, 180, []str{}, "tinc through its link")
+		ci.Check(run([]str{ci.Join(work, "hello")}, "", 60, "hello").Stdout == "release works\n", "release: the compiled program printed something else")
+		runEnv([]str{"make", "bootstrap"}, tree, 600, []str{}, "make bootstrap")
+		let mirror = ci.Join(work, "releases/v" + version)
+		ci.Mkdirs(mirror)
+		let base = archive[twine.LastIndex(archive, "/") + 1:]
+		ci.Copy(archive, ci.Join(mirror, base))
+		ci.Copy(archive[0:len(archive) - 3] + ".gz.sha256", ci.Join(mirror, "SHA256SUMS"))
+		let installed = ci.Join(work, "installed tin")
+		let url = "file://" + twine.Replace(ci.Join(work, "releases"), " ", "%20", -1)
+		runEnv([]str{"sh", ci.Join(root, "install.sh"), version}, work, 180, []str{"TIN_RELEASE_BASE_URL=" + url, "TIN_INSTALL_DIR=" + installed}, "install.sh")
+		let got = run([]str{ci.Join(installed, "bin/tin"), source}, work, 180, "the installed tin")
+		ci.Check(got.Stdout == "release works\n", "release: the installed tin printed " + got.Stdout)
+		say.Line("PASS relocated archive, standalone compiler, self-hosting, verified installer")
+	}
+	if !docker {
+		ci.Remove(work)
+		return
+	}
+	let context = ci.Join(work, "context")
+	ci.Mkdirs(context)
+	run([]str{"mv", tree, ci.Join(context, "tin")}, "", 60, "move the tree")
+	ci.Copy(ci.Join(root, "docker/builder.Dockerfile"), ci.Join(context, "Dockerfile"))
+	mut builder = image
+	if len(builder) == 0 {
+		builder = "tin-builder:distribution-check"
+	}
+	let runtime = "tin-api:distribution-check"
+	run([]str{"docker", "build", "--build-arg", "TIN_VERSION=" + version, "-t", builder, context}, "", 180, "docker build builder")
+	run([]str{"docker", "run", "--rm", "-v", work + ":/src", builder, "hello.tin"}, "", 180, "docker run builder")
+	run([]str{"docker", "build", "--build-arg", "TIN_BUILDER=" + builder, "-f", "examples/k8s/Dockerfile", "-t", runtime, "."}, root, 180, "docker build runtime")
+	// Docker chooses a free host port; the user's port 8080 remains untouched.
+	let cid = twine.TrimSpace(run([]str{"docker", "run", "-d", "--rm", "--cpus=2", "--memory=256m", "-p", "127.0.0.1::8080", "-e", "TIN_GRACE=1", runtime}, "", 180, "docker run runtime").Stdout)
+	let portText = twine.TrimSpace(run([]str{"docker", "port", cid, "8080/tcp"}, "", 60, "docker port").Stdout)
+	let port = ci.Num(portText[twine.LastIndex(portText, ":") + 1:])
+	mut healthy = false
+	for k in 0..100 {
+		let r = nettest.Do(port, "GET", "/healthz", []str{}, "")
+		if r.Status == 200 && r.Body == "ok" {
+			healthy = true
+			break
+		}
+		tide.Sleep(50000000)
+	}
+	if !healthy {
+		ci.Exec([]str{"docker", "stop", "-t", "5", cid}, "", 60)
+		ci.Fail("Container never became healthy")
+	}
+	let json = nettest.Do(port, "GET", "/json", []str{}, "")
+	ci.Check(twine.Contains(json.Body, "Hello, World!"), "the container's /json answered " + json.Body)
+	let user = ci.Exec([]str{"docker", "exec", cid, "sh", "-c", "test ! -e /opt/tin && test \"$(id -u)\" = 10001"}, "", 60)
+	ci.Exec([]str{"docker", "stop", "-t", "5", cid}, "", 60)
+	ci.Must(user, "the container's user and files")
+	say.Line("PASS builder, source-to-runtime image, HTTP, non-root user, shutdown")
+	ci.Remove(work)
+}

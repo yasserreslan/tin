@@ -1,0 +1,320 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Server lifecycle (#238): use and on around startup, the drain and the stop.
+//
+// The fixture (tools/ci/fixtures/lifecycle.tin, edition 1) opens a package-level use on each core and prints its on handlers. A fault
+// in on app.start (or in a use) ends startup with status 1 before anything is accepted. SIGTERM drains: a waiting request is cancelled
+// with "draining" at the end of the grace period, every core runs on core.stop and closes its use, then on app.stop runs (its own waits
+// still work) and the process exits 0. anvil.Drain(d) does the same from a handler.
+
+fn refused(port i64) bool {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 1000000000) catch _ {
+		return true
+	}
+	c.Close()
+	return false
+}
+
+fn startupFails(exe str, out str, set []str, want str) {
+	let port = nettest.Port()
+	let log = ci.Join(out, "fail.log")
+	let server = nettest.StartCoded(exe, []str{}, withCores(set), log, port)
+	let (code, ended) = server.ExitCode(5.0)
+	let text = ci.Read(log)
+	ci.Check(ended && code == 1, "lifecycle: exit " + mint.Itoa(code) + ", want 1: " + text)
+	ci.Check(twine.Contains(text, want), "lifecycle: " + text)
+	ci.Check(!twine.Contains(twine.Replace(text, "on app.start", "", -1), "app.start"), "lifecycle: app.start ran: " + text)
+	ci.Check(refused(port), "the server accepted a connection after a failed start")
+	say.Line("startup: " + want + " ends the process with status 1 before accepting")
+}
+
+// stopped checks the order of the log. app.start once, then each core's start; at the end each core stops and closes its store, then
+// app.stop runs last, then the process exits 0 (stdout is flushed at exit).
+fn stopped(text str, how str) {
+	ci.Check(twine.Count(text, "app.start") == 1, "lifecycle: app.start count in " + text)
+	ci.Check(twine.Count(text, "core.start 0") == 1 && twine.Count(text, "core.start 1") == 1, "lifecycle: core.start counts in " + text)
+	ci.Check(twine.Index(text, "app.start") < twine.Index(text, "core.start"), "lifecycle: app.start was not first: " + text)
+	for core in []str{"0", "1"} {
+		ci.Check(twine.Count(text, "core.stop " + core) == 1, "lifecycle: core.stop " + core + " count in " + text)
+		ci.Check(twine.Count(text, "close store " + core) == 1, "lifecycle: close store " + core + " count in " + text)
+		ci.Check(twine.Index(text, "core.stop " + core) < twine.Index(text, "close store " + core), "lifecycle: close before stop on core " + core)
+	}
+	ci.Check(twine.Count(text, "app.stop") == 1 && !twine.Contains(text, "app.stop wait failed"), "lifecycle: app.stop in " + text)
+	mut last = ""
+	for line in ci.Lines(text) {
+		if len(twine.TrimSpace(line)) > 0 {
+			last = line
+		}
+	}
+	ci.Check(last == "app.stop", "app.stop must run last, after every core stopped: " + text)
+	say.Line(how + ": core.stop and the use closes ran on both cores, then app.stop; exit 0")
+}
+
+fn run(exe str, out str, how str) {
+	let port = nettest.Port()
+	let log = ci.Join(out, how + ".log")
+	let server = nettest.StartCoded(exe, []str{}, []str{"TIN_CORES=2", "TIN_GRACE=1"}, log, port)
+	server.Ready(10)
+	ci.Check(nettest.Do(port, "GET", "/hello", []str{}, "").Status == 200, "lifecycle: /hello")
+	mut parked = nettest.Client{C: nettest.Open(port).C, Buf: ""}
+	parked.Get("/park", "")
+	ci.Check(!parked.Ready(0.3), "lifecycle: the parked request answered at once")
+	let begin = tide.Now()
+	mut grace = 1.0
+	if how == "SIGTERM" {
+		server.Signal("TERM")
+	} else {
+		let r = nettest.Do(port, "GET", "/drain", []str{}, "")
+		ci.Check(r.Status == 200 && r.Body == "draining", "lifecycle: /drain answered " + r.Body)
+		grace = 0.3
+	}
+	let answer = parked.Answer(3.0)
+	ci.Check(answer.Status == 200 && answer.Body == "fault: canceled: draining", "lifecycle: the parked request ended with " + answer.Body)
+	let took = tide.Now() - begin
+	let tookSeconds = f64(took) / 1000000000.0
+	ci.Check(tookSeconds >= grace - 0.1 && tookSeconds < grace + 1.0, "cancelled after " + mint.Itoa(took / 1000000) + " ms, want about " + mint.FormatFloat(grace, 'f', 1) + " s")
+	let (code, ended) = server.ExitCode(3.0)
+	ci.Check(ended && code == 0, "lifecycle: exit " + mint.Itoa(code))
+	say.Line(how + ": the waiting request ended with \"canceled: draining\" after " + mint.Itoa(took / 10000000) + " hundredths of a second")
+	stopped(ci.Read(log), how)
+}
+
+// admission: a custom admission policy (#238): past two waiting requests on the core, new requests get 503 with Retry-After before
+// their handler runs, the connection stays open, and requests are admitted again once the load drops.
+fn admission(out str) {
+	let exe = ci.Join(out, "admit")
+	ci.BuildTin("tools/ci/fixtures/admit.tin", exe, "", []str{"-edition", "1"})
+	let port = nettest.Port()
+	let log = ci.Join(out, "admit.out")
+	let server = nettest.StartSplit(exe, []str{}, []str{"TIN_CORES=1"}, log, port)
+	server.Ready(10)
+	mut conns = []nettest.Client{}
+	for i in 0..4 {
+		conns = append(conns, nettest.Open(port))
+	}
+	// Each request has started waiting (3 s) before the next arrives, even on a slow runner.
+	for i in 0..4 {
+		mut c = conns[i]
+		c.Get("/slow", "")
+		tide.Sleep(200000000)
+	}
+	mut got = []nettest.Reply{}
+	for i in 0..4 {
+		mut c = conns[i]
+		got = append(got, c.Answer(10.0))
+	}
+	ci.Check(got[0].Status == 200 && got[1].Status == 200 && got[2].Status == 503 && got[3].Status == 503, "lifecycle: admission statuses " + mint.Itoa(got[0].Status) + " " + mint.Itoa(got[1].Status) + " " + mint.Itoa(got[2].Status) + " " + mint.Itoa(got[3].Status))
+	ci.Check(got[0].Body == "slow ok" && got[1].Body == "slow ok" && got[2].Body == "Service Unavailable" && got[3].Body == "Service Unavailable", "lifecycle: admission bodies")
+	ci.Check(got[2].Header("retry-after") == "1" && got[3].Header("retry-after") == "1", "lifecycle: Retry-After missing")
+	ci.Check(len(got[0].Header("retry-after")) == 0, "lifecycle: an admitted request carries Retry-After")
+	// The refused connection stays open; with the load gone it is admitted again.
+	mut refusedConn = conns[2]
+	refusedConn.Get("/fast", "")
+	let again = refusedConn.Answer(10.0)
+	ci.Check(again.Status == 200 && again.Body == "fast ok", "lifecycle: the refused connection answered " + again.Body)
+	for i in 0..4 {
+		mut c = conns[i]
+		c.Close()
+	}
+	// A second after the last refusal, an admitted request ends the overload.
+	tide.Sleep(1100000000)
+	mut fresh = nettest.Open(port)
+	fresh.Get("/fast", "")
+	let last = fresh.Answer(10.0)
+	fresh.Close()
+	ci.Check(last.Status == 200 && last.Body == "fast ok", "lifecycle: a fresh request answered " + last.Body)
+	ci.Check(server.Running(), "lifecycle: the server exited")
+	server.Stop()
+	let err = ci.Read(log + ".err")
+	ci.Check(!twine.Contains(err, "panic"), "lifecycle: the server panicked: " + err)
+	mut events = []str{}
+	for line in ci.Lines(ci.Read(log)) {
+		if line == "overload" || line == "recovered" {
+			events = append(events, line)
+		}
+	}
+	ci.Check(twine.Join(events, ",") == "overload,recovered", "lifecycle: events " + twine.Join(events, ",") + " in " + ci.Read(log))
+	say.Line("admission: past the policy, requests get 503 with Retry-After and no handler; the connection stays open; on server.overload and server.recovered run once each")
+}
+
+// serveInSay (#347): say.Line(anvil.Serve(...)) with a handler that keeps request data in a global used to segfault at SIGTERM
+// (exit 2): say.Line's formatting frame was open while requests ran.
+fn serveInSay(out str) {
+	let exe = ci.Join(out, "serve_in_say")
+	ci.BuildTin("tools/ci/fixtures/serve_in_say.tin", exe, "", []str{})
+	let port = nettest.Port()
+	let log = ci.Join(out, "serve_in_say.out")
+	let server = nettest.StartSplit(exe, []str{}, []str{"TIN_CORES=1", "TIN_GRACE=1"}, log, port)
+	server.Ready(10)
+	for n in 1..4 {
+		mut c = nettest.Open(port)
+		c.Write("POST /add HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
+		let r = c.Answer(10.0)
+		c.Close()
+		ci.Check(r.Status == 200 && r.Body == "len=" + mint.Itoa(n), "lifecycle: /add answered " + r.Body)
+	}
+	server.Signal("TERM")
+	let (code, ended) = server.ExitCode(30.0)
+	ci.Check(ended && code == 0 && ci.Read(log) == "<nil>\n", "lifecycle: exit " + mint.Itoa(code) + " stdout " + ci.Read(log) + " stderr " + ci.Read(log + ".err"))
+	say.Line("serve in say.Line: three kept requests, then SIGTERM: <nil> and exit 0 (#347)")
+}
+
+fn xff(v str) str {
+	return "X-Forwarded-For: " + v + "\r\n"
+}
+
+fn fwd(v str) str {
+	return "Forwarded: " + v + "\r\n"
+}
+
+// serveAddr runs the client_addr fixture with the trusted proxies and asks once for each header; it returns the client addresses.
+fn serveAddr(exe str, out str, trust str, asks []str) []str {
+	let port = nettest.Port()
+	let log = ci.Join(out, "client_addr.out")
+	let server = nettest.StartSplit(exe, []str{}, []str{"TIN_CORES=1", "TRUST=" + trust}, log, port)
+	server.Ready(10)
+	mut got = []str{}
+	for header in asks {
+		mut c = nettest.Open(port)
+		let local = c.C.LocalPort()
+		c.Write("GET /addr HTTP/1.1\r\nHost: x\r\n" + header + "\r\n")
+		let r = c.Answer(10.0)
+		c.Close()
+		let parts = twine.Split(r.Body, " ")
+		ci.Check(r.Status == 200 && len(parts) == 2 && parts[0] == "127.0.0.1:" + mint.Itoa(local), "lifecycle: /addr answered " + mint.Itoa(r.Status) + " " + r.Body + " from local port " + mint.Itoa(local))
+		got = append(got, parts[1])
+	}
+	server.Stop()
+	// The access log of the anvil docs: a herald line per request, in order, with the client.
+	mut logged = []str{}
+	let marker = " INFO core=0 request method=GET route=/addr status=200 client="
+	for line in ci.Lines(ci.Read(log + ".err")) {
+		let at = twine.Index(line, marker)
+		if at >= 0 {
+			logged = append(logged, line[at + len(marker):])
+		}
+	}
+	ci.Check(twine.Join(logged, ",") == twine.Join(got, ","), "the access log carries the client: " + twine.Join(logged, ",") + " against " + twine.Join(got, ","))
+	return got
+}
+
+// clientAddr (#355): RemoteAddr is the connection's peer; ClientIP believes X-Forwarded-For and Forwarded only from TrustedProxies,
+// taking the rightmost untrusted address, and formats IPv6 per RFC 5952 (an IPv4-mapped address as IPv4).
+fn clientAddr(out str) {
+	let exe = ci.Join(out, "client_addr")
+	ci.BuildTin("tools/ci/fixtures/client_addr.tin", exe, "", []str{})
+	let untrusted = serveAddr(exe, out, "", []str{"", xff("203.0.113.7"), fwd("for=192.0.2.60")})
+	ci.Check(twine.Join(untrusted, ",") == "127.0.0.1,127.0.0.1,127.0.0.1", "an untrusted peer: the headers are ignored: " + twine.Join(untrusted, ","))
+	let headers = []str{"", xff("203.0.113.7"), xff("198.51.100.1, 203.0.113.7, 10.1.2.3"), xff("10.0.0.1"), xff("2001:DB8:0:0:0:0:0:1"), xff("2001:db8:0:0:1:0:0:1"), xff("::ffff:192.0.2.5"), xff("fe80::1:2"), xff("garbage, 203.0.113.7"), xff("203.0.113.7, 01.2.3.4"), fwd("for=\"[2001:db8:cafe::17]:4711\""), fwd("for=192.0.2.60;proto=http;by=203.0.113.43, for=10.9.9.9"), fwd("For=\"192.0.2.61:8080\"")}
+	let wants = []str{"127.0.0.1", "203.0.113.7", "203.0.113.7", "10.0.0.1", "2001:db8::1", "2001:db8::1:0:0:1", "192.0.2.5", "fe80::1:2", "203.0.113.7", "127.0.0.1", "2001:db8:cafe::17", "192.0.2.60", "192.0.2.61"}
+	let got = serveAddr(exe, out, "127.0.0.0/8,10.0.0.0/8,fd00::/8", headers)
+	ci.Check(twine.Join(got, ",") == twine.Join(wants, ","), "client addresses: got " + twine.Join(got, ",") + ", want " + twine.Join(wants, ","))
+	let bad = ci.ExecEnv([]str{exe}, ci.Root(), 30, []str{"PORT=" + mint.Itoa(nettest.Port()), "TRUST=10.0.0.0/8,10.0.0.0/33"}, []str{})
+	ci.Check(twine.Contains(bad.Stdout, "is not an IP address or network"), "a bad network was accepted: " + bad.Stdout + bad.Stderr)
+	say.Line("client address: RemoteAddr, ClientIP behind trusted proxies only (X-Forwarded-For, Forwarded), RFC 5952 IPv6, mapped IPv4, malformed entries and a bad network refused (#355)")
+}
+
+// perCoreData (#343): a global every core needs is built where every core runs. examples/percore.tin reads a file in on core.start;
+// with 2 and 4 cores every core answers with the same table, and the requests on fresh connections reach every core.
+fn perCoreData(out str) {
+	let exe = ci.Join(out, "percore")
+	ci.BuildTin("examples/percore.tin", exe, "", []str{})
+	let rows = ci.Join(out, "rows.txt")
+	mut names = []str{}
+	for i in 0..1000 {
+		names = append(names, "name" + mint.Itoa(i))
+	}
+	ci.Write(rows, twine.Join(names, "\n"))
+	for cores in []i64{2, 4} {
+		let port = nettest.Port()
+		let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=" + mint.Itoa(cores), "ROWS_FILE=" + rows}, ci.Join(out, "percore.log"), port)
+		server.Ready(10)
+		mut tables = []str{}
+		mut seen = []i64{}
+		for i in 0..8 * cores {
+			let r = nettest.Do(port, "GET", "/count", []str{}, "")
+			ci.Check(r.Status == 200, "lifecycle: /count answered " + mint.Itoa(r.Status))
+			let at = twine.Index(r.Body, " core ")
+			let table = r.Body[0:at]
+			let core = ci.Num(r.Body[at + 6:])
+			mut known = false
+			for t in tables {
+				if t == table {
+					known = true
+				}
+			}
+			if !known {
+				tables = append(tables, table)
+			}
+			mut core_known = false
+			for s in seen {
+				if s == core {
+					core_known = true
+				}
+			}
+			if !core_known {
+				seen = append(seen, core)
+			}
+		}
+		server.Stop()
+		ci.Check(len(tables) == 1 && tables[0] == "1000 1000", "every core holds the table: " + twine.Join(tables, ","))
+		ci.Check(len(seen) == cores, "the requests reach every core: " + mint.Itoa(len(seen)) + " of " + mint.Itoa(cores))
+	}
+	say.Line("per-core data: examples/percore.tin builds its table in on core.start; 2 and 4 cores all answer 1000 1000 (#343)")
+}
+
+// badCores (#746): TIN_CORES=-1 used to ask for 4294967295 cores, loop on pipe() at 100% CPU, never listen and ignore SIGTERM. A value that is
+// not a core count from 1 to 1024 is named on stderr and the CPU count is used; the server answers and stops on SIGTERM.
+fn badCores(exe str, out str) {
+	for value in []str{"-1", "99999999999", "0", "abc"} {
+		let port = nettest.Port()
+		let log = ci.Join(out, "cores.log")
+		let server = nettest.StartCoded(exe, []str{}, []str{"TIN_CORES=" + value, "TIN_GRACE=1"}, log, port)
+		server.Ready(1)
+		ci.Check(nettest.Do(port, "GET", "/hello", []str{}, "").Status == 200, "lifecycle: /hello with TIN_CORES=" + value)
+		server.Signal("TERM")
+		let (code, ended) = server.ExitCode(3.0)
+		if !ended {
+			server.Signal("KILL")
+		}
+		ci.Check(ended && code == 0, "lifecycle: exit " + mint.Itoa(code) + " with TIN_CORES=" + value)
+		let text = ci.Read(log)
+		ci.Check(twine.Contains(text, "anvil: TIN_CORES=" + value + " is not a core count from 1 to 1024; serving on "), "lifecycle: TIN_CORES=" + value + " was not named: " + text)
+	}
+	say.Line("TIN_CORES=-1, 99999999999, 0, abc: named on stderr, served on the CPU count, exit 0 on SIGTERM (#746)")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/lifecycle")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "server")
+	ci.BuildTin("tools/ci/fixtures/lifecycle.tin", exe, "", []str{"-edition", "1"})
+	startupFails(exe, out, []str{"START_FAIL=1"}, "startup failed: on app.start: migration refused")
+	startupFails(exe, out, []str{"STORE_FAIL=1"}, "startup failed: use store: store unreachable")
+	run(exe, out, "SIGTERM")
+	run(exe, out, "anvil.Drain")
+	admission(out)
+	serveInSay(out)
+	clientAddr(out)
+	perCoreData(out)
+	badCores(exe, out)
+	ci.Pass("lifecycle: startup failures, drain, admission, serve in say, client addresses, per-core data")
+}
+
+fn withCores(set []str) []str {
+	mut all = []str{}
+	for s in set {
+		all = append(all, s)
+	}
+	all = append(all, "TIN_CORES=2")
+	all = append(all, "TIN_GRACE=1")
+	return all
+}

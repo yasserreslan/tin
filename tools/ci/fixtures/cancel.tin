@@ -13,7 +13,7 @@ import "tide"
 import "websocket"
 import "wire"
 
-// Every client points at a server that accepts and never answers (cancel_check.py).
+// Every client points at a server that accepts and never answers (cancel_check.tin).
 let hole = quarry.Getenv("HOLE_ADDR")
 let rc = redis.Open(redis.Options{Addr: quarry.Getenv("HOLE_ADDR")})
 let mc = mysql.Open(mysql.Options{Addr: quarry.Getenv("HOLE_ADDR"), User: "tin", Pool: 1})

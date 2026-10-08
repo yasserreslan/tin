@@ -1,0 +1,107 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// tin fmt: the whitespace formatter is idempotent, keeps every token, and its modes work.
+
+const UNFORMATTED = "package main\n\nimport \"say\"\n\n\nfn main() {{\n    let x=1\n  if x==1 {{\n\t\tsay.Line(\"a\",x)\n    }}\n\n}}\n"
+const FORMATTED = "package main\n\nimport \"say\"\n\nfn main() {{\n\tlet x = 1\n\tif x == 1 {{\n\t\tsay.Line(\"a\", x)\n\t}}\n}}\n"
+
+fn tinFmt(args []str, stdin str) ci.Out {
+	mut argv = []str{"sh", ci.Join(ci.Root(), "tin"), "fmt"}
+	for a in args {
+		argv = append(argv, a)
+	}
+	return ci.ExecIn(argv, ci.Root(), 120, stdin, []str{})
+}
+
+// tokens are the lines of the token listing without their place: the place differs when the layout does, the rest must not.
+fn tokens(path str) str {
+	let o = ci.Exec([]str{ci.Tinc(), "-tokens", path}, ci.Root(), 60)
+	mut lines = []str{}
+	for line in twine.Split(o.Stdout, "\n") {
+		let space = twine.IndexByte(line, ' ')
+		if space >= 0 {
+			lines = append(lines, line[space + 1:])
+		} else {
+			lines = append(lines, line)
+		}
+	}
+	return twine.Join(lines, "\n")
+}
+
+fn main() {
+	// stdin
+	let s = tinFmt([]str{"-stdin"}, UNFORMATTED)
+	ci.Test("stdin", s.Code == 0 && s.Stdout == FORMATTED)
+
+	// list, diff and write
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "tinfmt-")
+	let a = ci.Join(dir, "a.tin")
+	let b = ci.Join(dir, "b.tin")
+	ci.Write(a, UNFORMATTED)
+	ci.Write(b, FORMATTED)
+	let l = tinFmt([]str{"-l", dir}, "")
+	ci.Test("list names the unformatted file", l.Code == 1 && twine.TrimSpace(l.Stdout) == a)
+	let d = tinFmt([]str{"-d", a}, "")
+	ci.Test("diff exits 1", d.Code == 1)
+	ci.Test("diff shows the old line", twine.Contains(d.Stdout, "-    let x=1"))
+	ci.Test("diff shows the new line", twine.Contains(d.Stdout, "+\tlet x = 1"))
+	let patched = ci.Join(dir, "patched.tin")
+	ci.Write(patched, UNFORMATTED)
+	let p = ci.ExecIn([]str{"patch", "-s", patched}, "", 30, d.Stdout, []str{})
+	ci.Test("the diff applies with patch", p.Code == 0 && ci.Read(patched) == FORMATTED)
+	ci.Test("the diff mode leaves the file alone", ci.Read(a) == UNFORMATTED)
+	let w = tinFmt([]str{a}, "")
+	ci.Test("write mode", w.Code == 0 && len(w.Stdout) == 0 && ci.Read(a) == FORMATTED)
+	let again = tinFmt([]str{"-l", dir}, "")
+	ci.Test("nothing left to list", again.Code == 0 && len(again.Stdout) == 0)
+
+	// usage errors
+	ci.Test("no arguments", tinFmt([]str{}, "").Code == 2)
+	ci.Test("an unknown option", tinFmt([]str{"-x", "a.tin"}, "").Code == 2)
+	ci.Test("a missing file", tinFmt([]str{"/nonexistent/a.tin"}, "").Code == 2)
+
+	// the strict tests and the examples: formatting twice changes nothing, and formatting never changes a token
+	let exe = ci.Join(dir, "tinfmt")
+	ci.BuildTin("tools/fmt/main.tin", exe, "", []str{})
+	mut files = []str{}
+	for name in ci.Names(ci.Join(ci.Root(), "toolchain/tests/v2"), ".tin") {
+		if !twine.HasSuffix(name, "_bad.tin") {
+			files = append(files, ci.Join(ci.Root(), "toolchain/tests/v2/" + name))
+		}
+	}
+	for name in ci.Names(ci.Join(ci.Root(), "examples"), ".tin") {
+		if !twine.HasSuffix(name, "_bad.tin") {
+			files = append(files, ci.Join(ci.Root(), "examples/" + name))
+		}
+	}
+	ci.Test("there are files", len(files) > 100)
+	mut failures = 0
+	for path in files {
+		let text = ci.Read(path)
+		let once = ci.ExecIn([]str{exe, "-stdin"}, "", 60, text, []str{})
+		if once.Code != 0 {
+			say.Line(path + ": " + once.Stderr)
+			failures += 1
+			continue
+		}
+		let twice = ci.ExecIn([]str{exe, "-stdin"}, "", 60, once.Stdout, []str{})
+		if once.Stdout != twice.Stdout {
+			say.Line(path + ": formatting twice changed it")
+			failures += 1
+			continue
+		}
+		let copy = ci.Join(dir, path[twine.LastIndex(path, "/") + 1:])
+		ci.Write(copy, once.Stdout)
+		if tokens(copy) != tokens(path) {
+			say.Line(path + ": formatting changed the tokens")
+			failures += 1
+		}
+	}
+	ci.Test("every test and example is idempotent and keeps its tokens", failures == 0)
+	ci.Remove(dir)
+	ci.Finish()
+}

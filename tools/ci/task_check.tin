@@ -1,0 +1,118 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Request tasks: on one core, waiting requests overlap and do not delay fast ones; deadlines cut waits short; pipelined responses stay
+// in order behind a waiting request.
+
+// timed is a GET with the whole raw answer and the milliseconds it took.
+fn timed(port i64, path str) (str, i64) {
+	let t0 = tide.Now()
+	let raw = nettest.Raw(port, nettest.GetRequest(path), 10)
+	return raw, (tide.Now() - t0) / 1000000
+}
+
+// overlapped starts many slow requests, runs fast ones meanwhile and collects the slow answers. It returns their bodies, the longest
+// fast request in milliseconds and the whole time in milliseconds.
+fn overlapped(port i64, path str, count i64, fastCount i64, extra bool) ([]str, i64, i64) {
+	mut conns = []wire.Conn{}
+	let t0 = tide.Now()
+	for i in 0..count {
+		conns = append(conns, nettest.Send(port, nettest.GetRequest(path)))
+	}
+	tide.Sleep(50000000)
+	mut longest = i64(0)
+	for i in 0..fastCount {
+		let (_, ms) = timed(port, "/fast")
+		if ms > longest {
+			longest = ms
+		}
+	}
+	if extra {
+		for i in 0..5 {
+			let (raw, ms) = timed(port, "/file?n=" + mint.Itoa(i))
+			let r = nettest.Parse(raw)
+			ci.Check(twine.HasSuffix(r.Body, "file: hello from a helper thread"), "file body: " + r.Body)
+			if ms > longest {
+				longest = ms
+			}
+		}
+	}
+	mut bodies = []str{}
+	for i in 0..count {
+		mut c = conns[i]
+		bodies = append(bodies, nettest.Finish(mut c, 10).Body)
+	}
+	return bodies, longest, (tide.Now() - t0) / 1000000
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/tasks")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "tasks")
+	ci.BuildTin("examples/tasks.tin", exe, "", []str{})
+	let port = nettest.Port()
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_DEADLINE_MS=1500"}, ci.Join(out, "server.log"), port)
+	server.Ready(10)
+	mut failures = []str{}
+	let (slow, fastMax, total) = overlapped(port, "/slow?ms=400", 8, 30, false)
+	say.Line("8 x 400 ms waits in " + mint.Itoa(total) + " ms; fast requests meanwhile: max " + mint.Itoa(fastMax) + " ms")
+	if total > 1200 {
+		failures = append(failures, "waiting requests did not overlap (" + mint.Itoa(total) + " ms)")
+	}
+	if fastMax > 100 {
+		failures = append(failures, "a fast request waited " + mint.Itoa(fastMax) + " ms")
+	}
+	for b in slow {
+		if !twine.HasPrefix(b, "slept") {
+			failures = append(failures, "slow body: " + b)
+		}
+	}
+	let (prox, proxFast, proxTotal) = overlapped(port, "/proxy?ms=400", 6, 20, true)
+	say.Line("6 proxied 400 ms calls in " + mint.Itoa(proxTotal) + " ms; fast meanwhile: max " + mint.Itoa(proxFast) + " ms")
+	if proxTotal > 1200 {
+		failures = append(failures, "proxied calls did not overlap (" + mint.Itoa(proxTotal) + " ms)")
+	}
+	if proxFast > 100 {
+		failures = append(failures, "a fast request waited " + mint.Itoa(proxFast) + " ms behind proxies")
+	}
+	for b in prox {
+		if !twine.HasPrefix(b, "via proxy: slept") {
+			failures = append(failures, "proxy body: " + b)
+		}
+	}
+	let (refused, refusedMs) = timed(port, "/proxy?ms=1&port=1")
+	say.Line("refused upstream: " + mint.Itoa(refusedMs) + " ms, " + twine.Split(refused, "\r\n")[0])
+	if !twine.HasPrefix(refused, "HTTP/1.1 502") || refusedMs > 1000 {
+		failures = append(failures, "refused upstream: " + mint.Itoa(refusedMs) + " ms " + refused)
+	}
+	let (late, lateMs) = timed(port, "/slow?ms=5000")
+	say.Line("deadline: " + mint.Itoa(lateMs) + " ms, " + twine.Split(late, "\r\n")[0])
+	if !twine.HasPrefix(late, "HTTP/1.1 504") || lateMs > 2500 {
+		failures = append(failures, "deadline: " + mint.Itoa(lateMs) + " ms " + late)
+	}
+	let pipelined = nettest.Raw(port, "GET /slow?ms=100 HTTP/1.1\r\nHost: x\r\n\r\nGET /fast HTTP/1.1\r\nHost: x\r\n\r\nGET /slow?ms=30 HTTP/1.1\r\nHost: x\r\n\r\nGET /fast HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 10)
+	mut order = []str{}
+	let pieces = twine.Split(pipelined, "HTTP/1.1 ")
+	for i in 1..len(pieces) {
+		let body = pieces[i][twine.Index(pieces[i], "\r\n\r\n") + 4:]
+		mut head = body
+		if len(head) > 5 {
+			head = head[0:5]
+		}
+		order = append(order, head)
+	}
+	say.Line("pipelined order: " + twine.Join(order, " "))
+	if twine.Join(order, ",") != "slept,fast,slept,fast" {
+		failures = append(failures, "pipelined responses out of order: " + twine.Join(order, ","))
+	}
+	server.Stop()
+	ci.Check(len(failures) == 0, twine.Join(failures, "\n"))
+	ci.Pass("tasks: waiting requests overlap, deadlines cut waits short, pipelined responses stay in order")
+}

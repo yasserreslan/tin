@@ -8,7 +8,7 @@ import "ore"
 
 // The #576 Linux tests: start and wait, exit codes, a missing program, stdin from a file, a
 // separate stderr, a working directory, signals, and a task deadline killing the child. They run
-// in the Linux containers (tools/ci/spawn_check.py); /bin/sh and cat need debian:bookworm-slim.
+// in the Linux containers (tools/ci/spawn_check.tin); /bin/sh and cat need debian:bookworm-slim.
 
 // runSh runs sh and returns (code, stdout is "out", stderr is "err").
 fn runSh() !(i64, bool, bool) {

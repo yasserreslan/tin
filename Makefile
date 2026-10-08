@@ -20,7 +20,7 @@ all: bin/tinc
 # Native release archive. Build on each supported host; releases.yml collects all three.
 DIST_TARGET ?= $(HOST_OS)-$(shell uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 dist: bin/tinc
-	python3 tools/dev/dist.py --target $(DIST_TARGET)
+	sh tools/ci/tin.sh tools/dev/dist.tin --target $(DIST_TARGET)
 
 # The compiler, built by the checked-in seed compiler: no Go, no cc.
 bin/tinc: $(SEED) $(SELF)

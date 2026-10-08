@@ -80,16 +80,16 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
-        run: make bootstrap && python3 tools/dev/dist.py --target "$TARGET" --version "$VERSION"
+        run: make bootstrap && sh tools/ci/tin.sh tools/dev/dist.tin --target "$TARGET" --version "$VERSION"
       - name: Test archives and build native images
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            python3 tools/ci/distribution_check.py "bin/dist/tin-$VERSION-$TARGET.tar.gz" --docker --image "ghcr.io/$GITHUB_REPOSITORY:$VERSION-$TARGET"
+            sh tools/ci/tin.sh distribution_check "bin/dist/tin-$VERSION-$TARGET.tar.gz" --docker --image "ghcr.io/$GITHUB_REPOSITORY:$VERSION-$TARGET"
           else
-            python3 tools/ci/distribution_check.py "bin/dist/tin-$VERSION-$TARGET.tar.gz"
+            sh tools/ci/tin.sh distribution_check "bin/dist/tin-$VERSION-$TARGET.tar.gz"
           fi
       - name: Build Tinland.app (macOS)
         if: runner.os == 'macOS'

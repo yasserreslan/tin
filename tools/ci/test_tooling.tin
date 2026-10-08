@@ -1,0 +1,253 @@
+package main
+
+import "./ci"
+import "quarry"
+import "seal"
+import "twine"
+
+// Tests for the build tooling: the Makefile and the tin command.
+
+// A stand-in for bin/tinc: logs its arguments one per line and writes an executable that prints its own.
+const FAKE_TINC = `#!/bin/sh
+: > "$FAKE_TINC_LOG"
+for a do printf '%s\n' "$a" >> "$FAKE_TINC_LOG"; done
+out=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) out=$2; shift 2 ;;
+    -target) shift 2 ;;
+    -audit-secrets) exit 0 ;;
+    *) [ -f "$1" ] || { echo "cannot open $1" >&2; exit 1; }; shift ;;
+  esac
+done
+printf '#!/bin/sh\nfor a do printf "%%s\\n" "$a"; done\n' > "$out"
+chmod +x "$out"
+`
+
+fn makeVar(name str, overrides []str, set []str, unset []str) []str {
+	mut argv = []str{"make", "-s", "-C", ci.Root(), "print-" + name}
+	for o in overrides {
+		argv = append(argv, o)
+	}
+	let o = ci.ExecEnv(argv, "", 60, set, unset)
+	ci.Must(o, "make print-" + name)
+	return twine.Fields(o.Stdout)
+}
+
+// installInto copies the Makefile and tin script into tree and runs install without building bin/tinc.
+fn installInto(tree str, overrides []str, set []str) ci.Out {
+	ci.Mkdirs(tree)
+	for name in []str{"Makefile", "tin"} {
+		ci.Copy(ci.Join(ci.Root(), name), ci.Join(tree, name))
+	}
+	mut argv = []str{"make", "-s", "-C", tree, "-o", "bin/tinc", "install"}
+	for o in overrides {
+		argv = append(argv, o)
+	}
+	return ci.ExecEnv(argv, "", 60, set, []str{"PREFIX"})
+}
+
+fn count(xs []str, x str) i64 {
+	mut n = 0
+	for y in xs {
+		if y == x {
+			n += 1
+		}
+	}
+	return n
+}
+
+fn unique(xs []str) bool {
+	for x in xs {
+		if count(xs, x) > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+fn isLink(path str) bool {
+	return ci.Sh("[ -L \"" + path + "\" ]", "", 5).Code == 0
+}
+
+fn makefileTests(base str) {
+	// Issue #11: a native Linux host listed host_linux.tin twice.
+	for host in []str{"linux", "darwin"} {
+		let sources = makeVar("SELF_LINUX", []str{"HOST_OS=" + host}, []str{}, []str{"PREFIX"})
+		ci.Test("one linux host on " + host, count(sources, "toolchain/compiler/host_linux.tin") == 1 && count(sources, "toolchain/compiler/host_darwin.tin") == 0 && unique(sources))
+	}
+	// Issue #10: PREFIX defaulted to the Homebrew prefix on Linux too.
+	ci.Same("linux prefix", twine.Join(makeVar("PREFIX", []str{"HOST_OS=linux"}, []str{}, []str{"PREFIX"}), " "), "/usr/local")
+	let mac = twine.Join(makeVar("PREFIX", []str{"HOST_OS=darwin"}, []str{}, []str{"PREFIX"}), " ")
+	ci.Test("darwin prefix", mac == "/opt/homebrew" || mac == "/usr/local")
+	ci.Same("prefix from the environment", twine.Join(makeVar("PREFIX", []str{"HOST_OS=linux"}, []str{"PREFIX=/opt/x"}, []str{}), " "), "/opt/x")
+	// Issue #10: a PREFIX without a bin directory made ln fail.
+	let tree = ci.Join(base, "tin tree")
+	let prefix = ci.Join(base, "fresh prefix")
+	let made = installInto(tree, []str{"PREFIX=" + prefix}, []str{})
+	ci.Test("install creates the bin directory", made.Code == 0)
+	let link = ci.Join(prefix, "bin/tin")
+	ci.Test("install links tin", isLink(link))
+	ci.Same("the link points at the tree", twine.TrimSpace(ci.Sh("cd \"$(dirname \"" + link + "\")\" && cd \"$(dirname \"$(readlink \"" + link + "\")\")\" && pwd -P", "", 10).Stdout), twine.TrimSpace(ci.Sh("cd \"" + tree + "\" && pwd -P", "", 10).Stdout))
+	let home = ci.Join(base, "home")
+	let tilde = installInto(ci.Join(base, "tree2"), []str{"PREFIX=~/.local"}, []str{"HOME=" + home})
+	ci.Test("install expands a tilde prefix", tilde.Code == 0 && isLink(ci.Join(home, ".local/bin/tin")))
+}
+
+// TinSetup is a root with the real tin script and the fake compiler beside a work directory.
+type TinSetup struct {
+	Base str
+	Root str
+	Work str
+	Log str
+}
+
+fn tinSetup() TinSetup {
+	let base = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "tooling-")
+	let root = ci.Join(base, "root")
+	ci.Mkdirs(ci.Join(root, "bin"))
+	ci.Copy(ci.Join(ci.Root(), "tin"), ci.Join(root, "tin"))
+	ci.Write(ci.Join(root, "bin/tinc"), FAKE_TINC)
+	ci.Must(ci.Exec([]str{"chmod", "755", ci.Join(root, "bin/tinc")}, "", 5), "chmod")
+	let work = ci.Join(base, "work")
+	ci.Mkdirs(work)
+	for name in []str{"hello world.tin", "b*.tin", "bx.tin", "c.tin"} {
+		ci.Write(ci.Join(work, name), "package main\n")
+	}
+	return TinSetup{Base: base, Root: root, Work: work, Log: ci.Join(base, "argv.log")}
+}
+
+fn (t TinSetup) tin(args []str) []str {
+	mut argv = []str{"sh", ci.Join(t.Root, "tin")}
+	for a in args {
+		argv = append(argv, a)
+	}
+	let o = ci.ExecEnv(argv, t.Work, 60, []str{"FAKE_TINC_LOG=" + t.Log, "TMPDIR=" + t.Base}, []str{"PREFIX"})
+	ci.Check(o.Code == 0, "tin " + twine.Join(args, " ") + ": " + o.Stderr)
+	return lines(o.Stdout)
+}
+
+// lines splits text at newlines, keeping empty lines (Python's splitlines).
+fn lines(text str) []str {
+	if len(text) == 0 {
+		return []str{}
+	}
+	return twine.Split(twine.TrimSuffix(text, "\n"), "\n")
+}
+
+fn (t TinSetup) tincArgs() []str {
+	return lines(ci.Read(t.Log))
+}
+
+fn eq(a []str, b []str) bool {
+	return twine.Join(a, "\x01") == twine.Join(b, "\x01") && len(a) == len(b)
+}
+
+fn tinCommandTests() {
+	// Issue #9: run and build split file names on spaces and expanded wildcards.
+	let a = tinSetup()
+	let out = a.tin([]str{"run", "hello world.tin", "b*.tin", "--", "a", "b c", "*", "--", ""})
+	ci.Test("run keeps program arguments", eq(out, []str{"a", "b c", "*", "--", ""}))
+	let argv = a.tincArgs()
+	ci.Test("run keeps files", argv[0] == "-o" && eq(argv[2:], []str{"hello world.tin", "b*.tin"}))
+	ci.Remove(a.Base)
+
+	let b = tinSetup()
+	ci.Test("run without program arguments", len(b.tin([]str{"run", "hello world.tin", "c.tin"})) == 0 && eq(b.tincArgs()[2:], []str{"hello world.tin", "c.tin"}))
+	ci.Remove(b.Base)
+
+	let c = tinSetup()
+	ci.Mkdirs(ci.Join(c.Work, "out dir"))
+	c.tin([]str{"build", "hello world.tin", "-o", "out dir/prog", "b*.tin", "--target", "linux-arm64"})
+	ci.Test("build keeps files, options and output", eq(c.tincArgs(), []str{"-target", "linux-arm64", "-o", "out dir/prog", "hello world.tin", "b*.tin"}))
+	ci.Remove(c.Base)
+
+	let d = tinSetup()
+	ci.Mkdirs(ci.Join(d.Work, "sub dir"))
+	ci.Write(ci.Join(d.Work, "sub dir/my prog.tin"), "package main\n")
+	d.tin([]str{"build", "sub dir/my prog.tin", "c.tin"})
+	ci.Test("build's default output is the first file", eq(d.tincArgs(), []str{"-o", "my prog", "sub dir/my prog.tin", "c.tin"}) && ci.Exists(ci.Join(d.Work, "my prog")))
+	ci.Remove(d.Base)
+
+	let e = tinSetup()
+	ci.Test("single file form", eq(e.tin([]str{"hello world.tin", "x y", "*"}), []str{"x y", "*"}) && eq(e.tincArgs()[2:], []str{"hello world.tin"}))
+	ci.Remove(e.Base)
+
+	// tin audit secrets (#239) hands its options and files to tinc -audit-secrets unchanged.
+	let f = tinSetup()
+	ci.Test("audit secrets", len(f.tin([]str{"audit", "secrets", "-edition", "1", "hello world.tin", "b*.tin"})) == 0 && eq(f.tincArgs(), []str{"-audit-secrets", "-edition", "1", "hello world.tin", "b*.tin"}))
+	ci.Remove(f.Base)
+}
+
+fn compile(main str, output str) ci.Out {
+	return ci.ExecEnv([]str{ci.Join(ci.Root(), "bin/tinc"), "-o", output, main}, "", 60, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+}
+
+fn packageResolutionTests() {
+	// vendor precedes the library and lock hashes are required
+	let project = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "resolution-")
+	ci.Mkdirs(ci.Join(project, "vendor/dep"))
+	let main = ci.Join(project, "main.tin")
+	let dep = ci.Join(project, "vendor/dep/dep.tin")
+	ci.Write(main, "package main\nimport \"dep\"\nimport \"say\"\nfn main() {{ say.Line(dep.Value()) }}\n")
+	ci.Write(dep, "package dep\nfn Value() i64 {{ return 7 }}\n")
+	let output = ci.Join(project, "program")
+	let built = compile(main, output)
+	ci.Test("a vendored package builds", built.Code == 0)
+	ci.Test("it is the vendored one", ci.Exec([]str{output}, "", 10).Stdout == "7\n")
+	mut entries = ""
+	for source in []str{main, dep} {
+		entries += seal.Sha256Hex(ci.Read(source)) + " " + source[len(project) + 1:] + "\n"
+	}
+	ci.Write(ci.Join(project, "tin.lock"), entries)
+	ci.Test("a matching lock builds", compile(main, output).Code == 0)
+	ci.Write(dep, "package dep\nfn Value() i64 {{ return 8 }}\n")
+	let mismatch = compile(main, output)
+	ci.Test("a changed file is refused", mismatch.Code != 0 && twine.Contains(mismatch.Stderr, "tin.lock hash mismatch"))
+	ci.Remove(project)
+
+	// tin vendor (#146): a require needs a domain path and one source; the build never fetches.
+	let work = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "vendor-")
+	ci.Mkdirs(ci.Join(work, "a"))
+	ci.Mkdirs(ci.Join(work, "b"))
+	ci.Write(ci.Join(work, "a/a.tin"), "package a\n")
+	ci.Write(ci.Join(work, "b/a.tin"), "package a\n")
+	ci.Write(ci.Join(work, "b/tin.mod"), "require example.com/a ../a\n")
+	let app = ci.Join(work, "app")
+	ci.Mkdirs(app)
+	for step in 0..4 {
+		mut manifest = ""
+		if step == 0 {
+			manifest = "require a ../a\n"
+		} else if step == 1 {
+			manifest = "require example.com/a ../missing\n"
+		} else if step == 2 {
+			manifest = "require example.com/a ../b\nrequire example.com/b ../b\n"
+		} else {
+			manifest = "// one dependency\nrequire example.com/a ../a\n"
+		}
+		ci.Write(ci.Join(app, "tin.mod"), manifest)
+		let r = ci.ExecEnv([]str{"sh", ci.Join(ci.Root(), "tin"), "vendor", app}, "", 60, []str{"TIN_ROOT=" + ci.Root(), "TMPDIR=" + work}, []str{})
+		if step == 0 {
+			ci.Test("a require needs a domain", r.Code == 1 && twine.Contains(r.Stderr, "an import path starts with a domain"))
+		} else if step == 1 {
+			ci.Test("a require needs a directory", r.Code == 1 && twine.Contains(r.Stderr, "is not a directory"))
+		} else if step == 2 {
+			ci.Test("a package has one source", r.Code == 1 && twine.Contains(r.Stderr, "example.com/a is required from two sources"))
+			ci.Test("a refused vendor leaves no folder", !quarry.Exists(ci.Join(app, "vendor")))
+		} else {
+			ci.Test("a good manifest vendors", r.Code == 0)
+			ci.Test("the package is copied", ci.Read(ci.Join(app, "vendor/example.com/a/a.tin")) == "package a\n")
+		}
+	}
+	ci.Remove(work)
+}
+
+fn main() {
+	let base = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "tooling-make-")
+	makefileTests(base)
+	ci.Remove(base)
+	tinCommandTests()
+	packageResolutionTests()
+	ci.Finish()
+}

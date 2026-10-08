@@ -9,7 +9,7 @@ import "twine"
 //
 //	bin/tinc -o /tmp/genfixes tools/gen/genfixes.tin && /tmp/genfixes
 //
-// tools/ci/diagnostics_check.py compiles every example of the page and requires that the fix in the JSON form is the
+// tools/ci/diagnostics_check.tin compiles every example of the page and requires that the fix in the JSON form is the
 // page's, so a stale fixes.tin fails CI.
 
 // literal is s as the body of a Tin string.
