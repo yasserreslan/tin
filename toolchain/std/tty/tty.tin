@@ -1,0 +1,114 @@
+// Package tty is the terminal for command line programs: whether a descriptor is a terminal, its size, raw mode with a
+// State that restores it, a pseudo-terminal pair for tests, and colour that turns itself off when the output is not a
+// terminal, when NO_COLOR is set or when TERM is dumb.
+package tty
+
+import "quarry"
+import "say"
+
+// State is a terminal's mode before Raw changed it; Close (or Restore) puts it back, so `use st = tty.Raw(0)`
+// restores the terminal on every way out of the function.
+type State struct {
+	fd    i64
+	saved []u8
+}
+
+// IsTerminal reports whether fd is a terminal.
+fn IsTerminal(fd i64) bool {
+	return rt_isatty(fd)
+}
+
+// Size is the terminal's width and height in characters.
+fn Size(fd i64) !(i64, i64) {
+	let ws = calloc(1, 8)
+	let r = sysWinsize(fd, ws)
+	let cols = i64(load8(ws + 2)) | i64(load8(ws + 3)) << 8
+	let rows = i64(load8(ws)) | i64(load8(ws + 1)) << 8
+	free(ws)
+	if i64(i32(r)) != 0 {
+		fail say.Fault("tty: size of descriptor %d: %s", fd, errText())
+	}
+	return cols, rows
+}
+
+// Raw puts the terminal into raw mode (no echo, no line editing, no signals from keys, bytes as typed) and returns the
+// state to restore.
+fn Raw(fd i64) !State {
+	let buf = calloc(1, termiosSize)
+	if i64(i32(sysGetattr(fd, buf))) != 0 {
+		free(buf)
+		fail say.Fault("tty: descriptor %d is not a terminal: %s", fd, errText())
+	}
+	mut saved = make([]u8, termiosSize)
+	for i in 0..termiosSize {
+		saved[i] = load8(buf + i)
+	}
+	makeRaw(buf)
+	let r = sysSetattr(fd, buf)
+	free(buf)
+	if i64(i32(r)) != 0 {
+		fail say.Fault("tty: raw mode on descriptor %d: %s", fd, errText())
+	}
+	return State{fd: fd, saved: saved}
+}
+
+// Restore puts the terminal back as it was before Raw.
+fn Restore(st State) ! {
+	if len(st.saved) == 0 {
+		return
+	}
+	let buf = calloc(1, termiosSize)
+	for i in 0..termiosSize {
+		store8(buf + i, i64(st.saved[i]))
+	}
+	let r = sysSetattr(st.fd, buf)
+	free(buf)
+	if i64(i32(r)) != 0 {
+		fail say.Fault("tty: restore descriptor %d: %s", st.fd, errText())
+	}
+}
+
+// Close restores the terminal (for `use`).
+fn (st State) Close() ! {
+	try Restore(st)
+}
+
+// IsRaw reports whether the terminal at fd has echo and line editing off.
+fn IsRaw(fd i64) bool {
+	let buf = calloc(1, termiosSize)
+	let ok = i64(i32(sysGetattr(fd, buf))) == 0 && lflagRaw(buf)
+	free(buf)
+	return ok
+}
+
+// OpenPty opens a pseudo-terminal pair: the controlling side and the terminal side, as descriptors.
+fn OpenPty() !(i64, i64) {
+	let (m, s) = sysOpenPty()
+	if m < 0 || s < 0 {
+		fail say.Fault("tty: open a pseudo-terminal: %s", errText())
+	}
+	return m, s
+}
+
+// CloseFd closes a descriptor OpenPty gave.
+fn CloseFd(fd i64) {
+	rt_sys_close(fd)
+}
+
+// Colors reports whether colour should be written to fd: it is a terminal, NO_COLOR is unset and TERM is not dumb.
+fn Colors(fd i64) bool {
+	return IsTerminal(fd) && len(quarry.Getenv("NO_COLOR")) == 0 && quarry.Getenv("TERM") != "dumb"
+}
+
+// Paint wraps s in the SGR code (such as "1" bold, "31" red, "32" green, "2" dim) when on is true, else returns s.
+fn Paint(on bool, code str, s str) str {
+	if !on {
+		return s
+	}
+	return "\x1b[" + code + "m" + s + "\x1b[0m"
+}
+
+fn errText() str {
+	let p = rt_sys_strerror(rt_errno())
+	return rt_str_from_raw(p, strlen(p))
+}

@@ -1,0 +1,41 @@
+package main
+
+import "say"
+import "tty"
+
+// The tty package (#775) on a pseudo-terminal: raw mode on inside a function and restored by `use` after a fault,
+// the size of a new terminal, and colour that is off where the output is not a terminal.
+
+fn work(fd i64, failIt bool) ! {
+	use st = tty.Raw(fd)
+	say.Line("raw inside:", tty.IsRaw(fd))
+	if failIt {
+		fail "something went wrong"
+	}
+}
+
+fn main() {
+	let (m, s) = tty.OpenPty() catch err {
+		say.Line(err)
+		return
+	}
+	say.Line("the terminal side is a terminal:", tty.IsTerminal(s), "raw before:", tty.IsRaw(s))
+	work(s, true) catch err {
+		say.Line("fault:", err)
+	}
+	say.Line("raw after the fault:", tty.IsRaw(s))
+	work(s, false) catch err {
+		say.Line(err)
+	}
+	say.Line("raw after a clean return:", tty.IsRaw(s))
+	let (cols, rows, serr) = tty.Size(s)
+	say.Line("a new terminal's size:", cols, rows, serr == nil)
+	let (_, e1) = tty.Raw(1000)
+	say.Line("raw on a closed descriptor fails:", e1 != nil)
+	let (_, _, e2) = tty.Size(1000)
+	say.Line("size of a closed descriptor fails:", e2 != nil)
+	say.Line("colour on a pipe:", tty.Colors(1))
+	say.Line(tty.Paint(false, "1", "plain"), tty.Paint(true, "31", "red") == "\x1b[31mred\x1b[0m")
+	tty.CloseFd(s)
+	tty.CloseFd(m)
+}

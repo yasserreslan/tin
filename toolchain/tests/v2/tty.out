@@ -1,0 +1,11 @@
+the terminal side is a terminal: true raw before: false
+raw inside: true
+fault: something went wrong
+raw after the fault: false
+raw inside: true
+raw after a clean return: false
+a new terminal's size: 0 0 true
+raw on a closed descriptor fails: true
+size of a closed descriptor fails: true
+colour on a pipe: false
+plain true
