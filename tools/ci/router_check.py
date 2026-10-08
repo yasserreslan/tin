@@ -202,6 +202,11 @@ def response_headers(port, failures):
         failures.append('framing headers from the handler were sent: %r' % got)
     if b'X-Echo: a  Set-Cookie: x=1    INJECTED' not in lines or b'Content-Type: text/x  X-Evil: 1' not in lines:
         failures.append('CR/LF in values were not replaced by spaces: %r' % got)
+    # #748: every other control byte but HTAB, and DEL, becomes a space too.
+    got = raw(port, b'GET /echo-head?v=a%01b%7fc%09d&t=text/%1bx HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+    lines = got.partition(b'\r\n\r\n')[0].split(b'\r\n')
+    if b'X-Echo: a b c\td' not in lines or b'Content-Type: text/ x' not in lines:
+        failures.append('control bytes in values were not replaced by spaces: %r' % got)
     for code in (204, 304):
         got = raw(port, b'GET /status/%d HTTP/1.1\r\nHost: x\r\n\r\nGET /fast HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' % code)
         first, _, rest = got.partition(b'\r\n\r\n')
@@ -237,6 +242,15 @@ def conformance(port, failures):
         (b'GET /fast HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n', b'HTTP/1.1 400 '),
         (b'GET /fast HTTP/1.x\r\nHost: x\r\n\r\n', b'HTTP/1.1 400 '),
         (b'GET /fast HTTP/1.0\r\n\r\n', b'HTTP/1.1 200 '),
+        # #748: a control byte but HTAB, or DEL, in a field value, and a Host that is not
+        # uri-host [":" port], are 400 as in Go; an HTAB and an IPv6 literal with a port are fine.
+        (b'GET /fast HTTP/1.1\r\nHost: x\r\nX-Foo: a\x01b\x7f\r\nConnection: close\r\n\r\n', b'HTTP/1.1 400 '),
+        (b'GET /fast HTTP/1.1\r\nHost: x\r\nX-Foo: a\x1bb\r\nConnection: close\r\n\r\n', b'HTTP/1.1 400 '),
+        (b'GET /fast HTTP/1.1\r\nHost: x\r\nX-Foo: ab\x7f\r\nConnection: close\r\n\r\n', b'HTTP/1.1 400 '),
+        (b'GET /fast HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n', b'HTTP/1.1 400 '),
+        (b'GET /fast HTTP/1.1\r\nHost: x/y\r\nConnection: close\r\n\r\n', b'HTTP/1.1 400 '),
+        (b'GET /fast HTTP/1.1\r\nHost: x\r\nX-Foo: a\tb\r\nConnection: close\r\n\r\n', b'HTTP/1.1 200 '),
+        (b'GET /fast HTTP/1.1\r\nHost: [::1]:8080\r\nConnection: close\r\n\r\n', b'HTTP/1.1 200 '),
         (b'GET http://other.example/files/a/b?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n', b'HTTP/1.1 200 '),
     ]
     for data, want in cases:
