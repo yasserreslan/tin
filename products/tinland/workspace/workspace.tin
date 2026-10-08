@@ -14,8 +14,9 @@ import "appkit"
 // Ids of the elements the mouse can reach.
 const idTitle = 1
 const idLeftScroll = 2
-const idEditor = 3
-const idEditor2 = 27
+// The editor area of pane p has the id idPaneBase + p (up to maxPanes of them).
+const idPaneBase = 3100
+const maxPanes = 4
 const idDivider = 4
 const idOutputScroll = 5
 const idOutputClose = 6
@@ -25,7 +26,7 @@ const idRefresh = 9
 const idPanelBase = 10
 const idTabBase = 1000
 const idTabClose = 2000
-const tabsPerPane = 500
+const tabsPerPane = 100
 const idSearchInput = 20
 const idSearchCase = 21
 const idSearchWord = 22
@@ -57,6 +58,7 @@ const dragNone = 0
 const dragDivider = 1
 const dragText = 2
 const DragTitle = 3
+const dragTerm = 4
 
 // Sizes in points.
 const titleH = 36.0
@@ -109,6 +111,12 @@ type Workspace struct {
 	Pty appkit.Pty
 	TermUp bool
 	TermScroll i64
+	// The selection in the terminal, from (SelCol0, SelLine0) to (SelCol1, SelLine1), lines counted from the oldest history line.
+	TermSel bool
+	SelCol0 i64
+	SelLine0 i64
+	SelCol1 i64
+	SelLine1 i64
 }
 
 const MenuNone = 0
@@ -180,9 +188,10 @@ fn (ws mut Workspace) SetActive(i i64) {
 	}
 }
 
-// Split opens a second pane to the right showing the active file.
+// Split opens another pane after the active one, showing the active file (up to maxPanes).
 fn (ws mut Workspace) Split() {
-	if len(ws.Panes) > 1 {
+	if len(ws.Panes) >= maxPanes {
+		ws.Ed.Say("at most four panes")
 		return
 	}
 	let pane = editor.New(textedit.New())
@@ -190,24 +199,40 @@ fn (ws mut Workspace) Split() {
 	if len(ws.Ed.Buf.Path) > 0 {
 		pane.Load(ws.Ed.Buf.Path)
 	}
-	ws.Panes = append(ws.Panes, pane)
-	ws.SetActive(1)
+	mut panes = []editor.Editor{}
+	for i in 0..len(ws.Panes) {
+		panes = append(panes, ws.Panes[i])
+		if i == ws.Active {
+			panes = append(panes, pane)
+		}
+	}
+	ws.Panes = panes
+	ws.Active = ws.Active + 1
+	ws.Ed = ws.Panes[ws.Active]
 	ws.Dirty = true
 }
 
-// CloseSplit closes the right pane (asking about unsaved changes in it).
+// CloseSplit closes the active pane (asking about unsaved changes in it) when there is more than one.
 fn (ws mut Workspace) CloseSplit() {
 	if len(ws.Panes) < 2 {
 		return
 	}
-	let pane = ws.Panes[1]
+	let pane = ws.Panes[ws.Active]
 	pane.Perform(editor.CmdQuit)
 	if !pane.Quit {
 		return
 	}
-	ws.Panes = ws.Panes[0:1]
-	ws.Active = 0
-	ws.Ed = ws.Panes[0]
+	mut panes = []editor.Editor{}
+	for i in 0..len(ws.Panes) {
+		if i != ws.Active {
+			panes = append(panes, ws.Panes[i])
+		}
+	}
+	ws.Panes = panes
+	if ws.Active >= len(ws.Panes) {
+		ws.Active = len(ws.Panes) - 1
+	}
+	ws.Ed = ws.Panes[ws.Active]
 	ws.Dirty = true
 }
 

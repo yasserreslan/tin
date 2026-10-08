@@ -80,6 +80,8 @@ fn (ws mut Workspace) PollTerminal() bool {
 	}
 	if got {
 		ws.TermScroll = 0
+		// the lines moved: a selection would be on other text now
+		ws.TermSel = false
 		ws.Dirty = true
 	}
 	return got
@@ -105,6 +107,7 @@ fn (ws mut Workspace) termKey(code i64, flags i64, chars str) {
 	let alt = (flags & appkit.ModAlt) != 0
 	let shift = (flags & appkit.ModShift) != 0
 	let ctrl = (flags & appkit.ModCtrl) != 0
+	ws.TermSel = false
 	mut out = ""
 	if code == keyReturn {
 		out = "\r"
@@ -235,6 +238,9 @@ fn (ws Workspace) paintTerminal(x f64, y f64, w f64, h f64, scene mut metal.Scen
 			if bg != 0 {
 				render.Fill(mut scene, ox + f64(col) * cell, top, cell, lh, bg)
 			}
+			if ws.selected(col, v) {
+				render.Fill(mut scene, ox + f64(col) * cell, top, cell, lh, th.Selection)
+			}
 			if c.Ch == 0 {
 				if len(run) > 0 {
 					render.Pen(mut scene, render.FontCode, ox + f64(runX) * cell, top + pad, run, runFg)
@@ -272,4 +278,106 @@ fn (ws Workspace) paintTerminal(x f64, y f64, w f64, h f64, scene mut metal.Scen
 
 fn runeText(ch i64) str {
 	return glyph.RuneStr(i32(ch))
+}
+
+// termCell is the column and the line (counted from the oldest history line) under the point (x, y) in the terminal panel.
+fn (ws Workspace) termCell(x f64, y f64) (i64, i64) {
+	let (tx, ty, tw, th) = ws.Hits.Rect(idTerminal)
+	let col = i64((x - tx - 12.0) / render.CodeCell())
+	let row = i64((y - ty - 4.0) / ws.Ed.LineH)
+	return max(0, min(col, ws.Term.Cols - 1)), ws.Term.HistoryLines() - ws.TermScroll + max(0, min(row, ws.Term.Rows - 1))
+}
+
+// termPress starts a selection at the point.
+fn (ws mut Workspace) termPress(x f64, y f64) {
+	let (c, l) = ws.termCell(x, y)
+	ws.SelCol0 = c
+	ws.SelLine0 = l
+	ws.SelCol1 = c
+	ws.SelLine1 = l
+	ws.TermSel = false
+	ws.Drag = dragTerm
+}
+
+// termDrag extends the selection to the point.
+fn (ws mut Workspace) termDrag(x f64, y f64) {
+	let (c, l) = ws.termCell(x, y)
+	ws.SelCol1 = c
+	ws.SelLine1 = l
+	ws.TermSel = ws.SelCol0 != c || ws.SelLine0 != l
+}
+
+// selected reports whether cell (col, line) is inside the selection.
+fn (ws Workspace) selected(col i64, line i64) bool {
+	if !ws.TermSel {
+		return false
+	}
+	mut a = ws.SelLine0 * ws.Term.Cols + ws.SelCol0
+	mut b = ws.SelLine1 * ws.Term.Cols + ws.SelCol1
+	if a > b {
+		let t = a
+		a = b
+		b = t
+	}
+	let at = line * ws.Term.Cols + col
+	return at >= a && at <= b
+}
+
+// cellAt is the cell of the line (counted from the oldest history line) and column.
+fn (ws Workspace) cellAt(col i64, line i64) terminal.Cell {
+	let hist = ws.Term.HistoryLines()
+	if line < hist {
+		return ws.Term.HistoryAt(col, line)
+	}
+	return ws.Term.At(col, line - hist)
+}
+
+// TermSelectedText is the selected characters, the lines without their trailing blanks.
+fn (ws Workspace) TermSelectedText() str {
+	if !ws.TermSel {
+		return ""
+	}
+	mut l0 = ws.SelLine0
+	mut c0 = ws.SelCol0
+	mut l1 = ws.SelLine1
+	mut c1 = ws.SelCol1
+	if l0 > l1 || (l0 == l1 && c0 > c1) {
+		let tl = l0
+		let tc = c0
+		l0 = l1
+		c0 = c1
+		l1 = tl
+		c1 = tc
+	}
+	mut out = ""
+	for line in l0..l1 + 1 {
+		mut row = ""
+		mut last = -1
+		mut from = 0
+		mut to = ws.Term.Cols - 1
+		if line == l0 {
+			from = c0
+		}
+		if line == l1 {
+			to = c1
+		}
+		for col in from..to + 1 {
+			if ws.cellAt(col, line).Ch != 0 {
+				last = col
+			}
+		}
+		for col in from..last + 1 {
+			let ch = ws.cellAt(col, line).Ch
+			if ch == 0 {
+				row = row + " "
+			} else {
+				row = row + runeText(ch)
+			}
+		}
+		out = out + row
+		if line < l1 {
+			out = out + "\n"
+		}
+	}
+	return out
 }

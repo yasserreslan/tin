@@ -132,10 +132,8 @@ fn (ws mut Workspace) scroll(dx f64, dy f64) {
 		ws.TermScroll = max(0, min(ws.TermScroll + i64(dy / ws.Ed.LineH), ws.Term.HistoryLines()))
 	} else {
 		let over = ws.Hits.At(ws.MouseX, ws.MouseY)
-		if over == idEditor2 && len(ws.Panes) > 1 {
-			ws.Panes[1].Wheel(dx, dy)
-		} else if over == idEditor {
-			ws.Panes[0].Wheel(dx, dy)
+		if isPane(over) && paneOf(over) < len(ws.Panes) {
+			ws.Panes[paneOf(over)].Wheel(dx, dy)
 		} else {
 			ws.Ed.Wheel(dx, dy)
 		}
@@ -147,7 +145,7 @@ fn (ws mut Workspace) scroll(dx f64, dy f64) {
 fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 	let id = ws.Hits.At(x, y)
 	ws.Dirty = true
-	if id == idEditor || id == idEditor2 {
+	if isPane(id) {
 		ws.SetActive(paneOf(id))
 		let (ex, ey, ew, eh) = ws.Hits.Rect(id)
 		ws.Ed.MouseDown(x - ex, y - ey, clicks, flags)
@@ -193,10 +191,10 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.Drag = DragTitle
 	} else if id >= idRow && id < idOutputLine {
 		ws.clickRow(id - idRow)
-	} else if id >= idTabClose && id < idTabClose + 2 * tabsPerPane {
+	} else if id >= idTabClose && id < idTabClose + maxPanes * tabsPerPane {
 		ws.SetActive((id - idTabClose) / tabsPerPane)
 		ws.Ed.CloseTab((id - idTabClose) % tabsPerPane)
-	} else if id >= idTabBase && id < idTabBase + 2 * tabsPerPane {
+	} else if id >= idTabBase && id < idTabBase + maxPanes * tabsPerPane {
 		ws.SetActive((id - idTabBase) / tabsPerPane)
 		ws.Ed.Activate((id - idTabBase) % tabsPerPane)
 	} else if id >= idPanelBase && id < idTabBase {
@@ -213,6 +211,7 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.ToggleTerminal()
 	} else if id == idTerminal {
 		ws.Focus = FocusTerminal
+		ws.termPress(x, y)
 	} else if id == idNewFile {
 		ws.Perform(CmdNewFile)
 	} else if id == idRefresh {
@@ -231,6 +230,9 @@ fn (ws mut Workspace) drag(x f64, y f64) {
 			w = 600.0
 		}
 		ws.LeftW = w
+		ws.Dirty = true
+	} else if ws.Drag == dragTerm {
+		ws.termDrag(x, y)
 		ws.Dirty = true
 	} else if ws.Drag == dragText {
 		let (ex, ey, ew, eh) = ws.Hits.Rect(paneId(ws.Active))
@@ -336,6 +338,11 @@ fn (ws mut Workspace) Perform(cmd i64) {
 			ws.LeftOpen = true
 			ws.Panel = PanelProject
 		}
+	} else if cmd == editor.CmdCopy && ws.Focus == FocusTerminal {
+		let text = ws.TermSelectedText()
+		if len(text) > 0 {
+			appkit.SetClipboard(text)
+		}
 	} else if cmd == editor.CmdPaste && ws.Picker.Open {
 		ws.Picker.Query = pasteLine(ws.Picker.Query, appkit.ClipboardText())
 		ws.Picker.Sel = 0
@@ -405,19 +412,17 @@ fn (ws mut Workspace) zoom(points f64) {
 	ws.Dirty = true
 }
 
-// paneOf is the pane an editor area id belongs to, and paneId the id of a pane's editor area.
+// paneOf is the pane an editor area id belongs to, paneId the id of a pane's editor area, isPane whether an id is one.
 fn paneOf(id i64) i64 {
-	if id == idEditor2 {
-		return 1
-	}
-	return 0
+	return id - idPaneBase
 }
 
 fn paneId(pane i64) i64 {
-	if pane == 1 {
-		return idEditor2
-	}
-	return idEditor
+	return idPaneBase + pane
+}
+
+fn isPane(id i64) bool {
+	return id >= idPaneBase && id < idPaneBase + maxPanes
 }
 
 // projectKey handles a key while the project panel has the keyboard: Up and Down move the selection, Right opens a folder, Left
