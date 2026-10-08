@@ -355,7 +355,12 @@ close-after-write flag, writing flag, bytes needed. Idle connections hold no buf
   with `rt_task_wait` for a full socket, for at most the write timeout, so nothing is held in
   the request pool. After every write the request deadline restarts, so it bounds the time between
   writes, not the whole stream. `SendFile` moves a file with `sendfile(2)` in pieces of 1 MiB on
-  a helper thread (the same call on macOS), framed as chunks inside a chunked stream. When the
+  a helper thread (the same call on macOS), framed as chunks inside a chunked stream. Its open
+  and `fstat` never run on the core thread (#744): they go through `quarry.OpenRegular`, as
+  `ReadFile`'s do, through the core's io_uring on Linux or on a helper thread (always a helper
+  under a slow mount), within the request deadline. An open that waits (a FIFO with no writer, a
+  hung NFS, FUSE or CIFS mount) fails with `deadline exceeded` while the core serves others, and a
+  directory or another file that is not regular fails before the head is sent. When the
   handler returns, the last chunk goes into the output buffer, the descriptor is registered again
   and the connection goes on as after any response: the next pipelined request is served. A write
   that fails, a cancel or a drain, `w.Abort()`, a body shorter than its `Content-Length`, a

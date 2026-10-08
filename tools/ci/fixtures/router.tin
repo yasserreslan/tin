@@ -66,6 +66,14 @@ fn file(q anvil.Req, w mut anvil.Out) {
 	w.Text("file {p}")
 }
 
+// send serves the file named by ?path= (#744): a FIFO with no writer, a directory, a file.
+fn send(q anvil.Req, w mut anvil.Out) {
+	w.SendFile(q.Param("path"), 0, -1) catch err {
+		w.Status(500)
+		w.Text("sendfile: {err}")
+	}
+}
+
 fn item(q anvil.Req, w mut anvil.Out) {
 	pause(q) catch err {
 		w.Status(504)
@@ -179,6 +187,7 @@ fn main() {
 	r.Post("/users", create)
 	r.Get(`/files/{path...}`, file)
 	r.Get("/fast", fast)
+	r.Get("/send", send)
 	r.Get("/boom", boom)
 	r.Get("/unwinds", unwinds)
 	r.Get("/double", double)
