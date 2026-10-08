@@ -34,3 +34,10 @@ for s in products/tit/tests/sessions/*.sh; do
 	cmp "$tmp/session_$name.out" "products/tit/tests/golden/session_$name.out" || { diff "products/tit/tests/golden/session_$name.out" "$tmp/session_$name.out"; echo "FAIL tit session $name"; exit 1; }
 	echo "PASS tit session $name"
 done
+# scripts that check tit against git themselves (they need git) and exit non-zero on a difference
+for s in products/tit/tests/scripts/*.sh; do
+	name=$(basename "$s" .sh)
+	mkdir "$tmp/script_$name"
+	sh "$s" "$tmp/tit" "$tmp/script_$name" > "$tmp/script_$name.out" 2>&1 || { cat "$tmp/script_$name.out"; echo "FAIL tit script $name"; exit 1; }
+	echo "PASS tit script $name"
+done

@@ -201,8 +201,41 @@ fn GitIds(dir str, prefix str) ![]object.Id {
 	return out
 }
 
-// Resolve is the commit a revision names (a range does not name one commit: use Walk).
+// Resolve is the commit a revision names (a range does not name one commit: use Walk). An annotated tag is peeled to
+// the object it tags.
 fn Resolve[S store.ObjectStore, M store.Matcher](r mut Repo[S], m M, rev Rev) !object.Id {
+	let id = try resolveRaw(mut r, m, rev)
+	return try peel(mut r.Store, id)
+}
+
+// peel follows tags to the object they tag (a tag may tag a tag).
+fn peel[S store.ObjectStore](s mut S, id object.Id) !object.Id {
+	mut cur = id
+	for k in 0..16 {
+		let (kind, _) = try s.GetRaw(cur)
+		if kind != object.Kind.Tag {
+			return cur
+		}
+		let o = try s.Get(cur)
+		match o {
+			Tag(t) => {
+				cur = t.Object
+			}
+			Commit(_) => {
+				return cur
+			}
+			Tree(_) => {
+				return cur
+			}
+			Blob(_) => {
+				return cur
+			}
+		}
+	}
+	fail fault.Wrap(ErrBadRev, "{id.Hex()}: tags nested more than 16 deep")
+}
+
+fn resolveRaw[S store.ObjectStore, M store.Matcher](r mut Repo[S], m M, rev Rev) !object.Id {
 	match rev {
 		Head => {
 			let h = try change.ReadHead(r.WsDir)

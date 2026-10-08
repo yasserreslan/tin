@@ -25,6 +25,7 @@ type Command enum {
 	Mv(str, str)
 	Commit(CommitArgs)
 	Diff(DiffArgs)
+	Adopt(str)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -41,6 +42,7 @@ type LogArgs struct {
 	OneLine bool
 	First   bool
 	Topo    bool
+	Format  str
 }
 
 // Global holds the options every command takes.
@@ -129,12 +131,13 @@ commands:
                              $EDITOR asks for the message; --amend makes a new version of the last change)
   diff [--staged] [--stat] [A B] [paths]
                              changes not staged yet, the staged ones, or between two revisions
-  log [rev] [-n N] [--oneline] [--first-parent] [--topo]
+  log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id|change|git-id]
                              the history from rev (HEAD by default)
   show [rev]                 one commit and its changes
   cat <rev or id>            an object's content
   config get <key>           a setting; config set [--user] <key> <value>; config list
   key [path]                 make your signing key if there is none, and print its public half
+  adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
   help [command]             this text
 
@@ -275,7 +278,7 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Diff(da)
 	}
 	if name == "log" {
-		mut la = LogArgs{Rev: "HEAD", Most: 0, OneLine: false, First: false, Topo: false}
+		mut la = LogArgs{Rev: "HEAD", Most: 0, OneLine: false, First: false, Topo: false, Format: ""}
 		mut k = 0
 		for k < len(rest) {
 			let a = rest[k]
@@ -293,6 +296,11 @@ fn Parse(args []str) !(Global, Command) {
 				la.First = true
 			} else if a == "--topo" {
 				la.Topo = true
+			} else if twine.HasPrefix(a, "--format=") {
+				la.Format = a[9:]
+				if la.Format != "git-id" && la.Format != "id" && la.Format != "change" {
+					fail fault.Wrap(ErrUsage, "log: --format takes id, change or git-id")
+				}
 			} else if len(a) > 0 && a[0] == '-' {
 				fail fault.Wrap(ErrUsage, "log: unknown option {a}")
 			} else {
@@ -329,6 +337,13 @@ fn Parse(args []str) !(Global, Command) {
 			return g, Command.ConfigSet(rest[2], rest[3], true)
 		}
 		fail fault.Wrap(ErrUsage, "config get <key> | config set [--user] <key> <value> | config list")
+	}
+	if name == "adopt" {
+		mut path = ""
+		if len(rest) > 0 {
+			path = rest[0]
+		}
+		return g, Command.Adopt(path)
 	}
 	if name == "key" {
 		mut path = ""
@@ -423,6 +438,7 @@ fn commandName(c Command) str {
 		Mv(_, _) => "mv"
 		Commit(_) => "commit"
 		Diff(_) => "diff"
+		Adopt(_) => "adopt"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -470,6 +486,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Diff(da) => {
 			try doDiff(g, da, mut o)
+		}
+		Adopt(path) => {
+			try doAdopt(g, path, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

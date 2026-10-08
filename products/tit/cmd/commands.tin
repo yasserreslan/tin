@@ -2,6 +2,7 @@ package cmd
 
 import "../change"
 import "../diff"
+import "../git"
 import "../identity"
 import "../ignore"
 import "../index"
@@ -385,9 +386,35 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 		order = revwalk.Order.Topo
 	}
 	let ids = try revwalk.Walk(mut r.Store, starts, hide, order, la.Most)
+	// --format=git-id: the git id each adopted commit came from, "-" for one made in tit
+	mut gitOf = map[str]str{}
+	if la.Format == "git-id" {
+		let table = try git.ReadIds(r.Ws.Store + "/git-ids")
+		let (gs, ts) = table.Pairs()
+		for k in 0..len(gs) {
+			gitOf[ts[k]] = gs[k]
+		}
+	}
 	mut first = true
 	for id in ids {
+		if la.Format == "id" {
+			o.Line(id.Hex())
+			continue
+		}
+		if la.Format == "git-id" {
+			let (gid, adopted) = gitOf[id.Bytes()]
+			if adopted {
+				o.Line(git.Hex(gid))
+			} else {
+				o.Line("-")
+			}
+			continue
+		}
 		let c = try commitData(mut r, id)
+		if la.Format == "change" {
+			o.Line(c.Change.Letters())
+			continue
+		}
 		if g.Json {
 			mut ps = []str{}
 			for p in c.Parents {
