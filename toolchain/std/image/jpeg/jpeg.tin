@@ -1,4 +1,4 @@
-// Package jpeg decodes 8-bit JPEG images and writes quality-parameterized baseline JPEG images. EXIF orientation is left to the caller.
+// Package jpeg decodes 8-bit baseline and progressive JPEG images and writes quality-parameterized baseline JPEG images. EXIF orientation is left to the caller.
 package jpeg
 
 import "image"
@@ -20,28 +20,41 @@ type Component struct {
 	dc i64
 	ac i64
 	prev i64
-	blocks [][64]i64
+	scanned bool
+	coef []i64
 }
 
-// Decode decodes an 8-bit baseline sequential JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
+type frame struct {
+	seen bool
+	progressive bool
+	width i64
+	height i64
+	maxH i64
+	maxV i64
+	mcuCols i64
+	mcuRows i64
+	comps []Component
+}
+
+type scanState struct {
+	eobrun i64
+	rst i64
+}
+
+// Decode decodes an 8-bit baseline or progressive JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
 fn Decode(data str) !dyn image.Image {
 	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
 		fail "jpeg: invalid signature"
 	}
-	mut quant = [256]i64{}
-	mut haveQuant = [4]bool{}
+	mut quant = make([]i64, 256)
+	mut haveQuant = make([]bool, 4)
 	mut huff = []Huffman{}
 	for _i in 0..8 { huff = append(huff, Huffman{values: []u8{}}) }
-	mut components = []Component{}
-	mut width = i64(0)
-	mut height = i64(0)
-	mut maxH = i64(0)
-	mut maxV = i64(0)
+	let order = zigOrder()
+	mut f = frame{}
+	mut restart = i64(0)
+	mut scans = i64(0)
 	mut pos = i64(2)
-	mut scanStart = i64(-1)
-	mut scanEnd = i64(-1)
-	mut restartInterval = i64(0)
-	mut progressive = false
 	for pos < len(data) {
 		if data[pos] != 0xff { fail "jpeg: expected marker" }
 		for pos < len(data) && data[pos] == 0xff { pos += 1 }
@@ -55,142 +68,49 @@ fn Decode(data str) !dyn image.Image {
 		if n < 2 || n > len(data)-pos { fail "jpeg: invalid segment length" }
 		let body = pos+2
 		let end = pos+n
-		if marker == 0xc0 || marker == 0xc2 {
-			if marker == 0xc2 { progressive = true }
-			if marker == 0xc0 {
-				if n < 8 { fail "jpeg: invalid frame header" }
-				if data[body] != 8 { fail "jpeg: unsupported precision" }
-				height = be16(data, body+1)
-				width = be16(data, body+3)
-				let count = i64(u8(data[body+5]))
-				if count != 1 && count != 3 { fail "jpeg: unsupported component count" }
-				if width <= 0 || height <= 0 || width*height > maxPixels { fail "jpeg: image dimensions exceed limit" }
-				if n != 8+3*count { fail "jpeg: invalid frame length" }
-				for i in 0..count {
-					let at = body+6+3*i
-					let hv = i64(u8(data[at+1]))
-					let ch = hv >> 4
-					let cv = hv & 15
-					if ch < 1 || ch > 4 || cv < 1 || cv > 4 { fail "jpeg: invalid sampling factor" }
-					maxH = max(maxH, ch)
-					maxV = max(maxV, cv)
-					components = append(components, Component{id: u8(data[at]), h: ch, v: cv, qt: i64(u8(data[at+2]))})
-				}
-			} else { fail "jpeg: progressive JPEG is not supported" }
+		if marker == 0xc0 || marker == 0xc1 || marker == 0xc2 {
+			if f.seen { fail "jpeg: multiple frames" }
+			try readFrame(mut f, data, body, n, marker == 0xc2)
+		} else if marker >= 0xc3 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc {
+			fail "jpeg: unsupported coding process"
 		} else if marker == 0xdb {
-			mut at = body
-			for at < end {
-				let info = i64(u8(data[at]))
-				at += 1
-				let table = info & 15
-				if table > 3 || info >> 4 != 0 || at+64 > end { fail "jpeg: invalid quantization table" }
-				for i in 0..64 { quant[table*64+zig(i)] = i64(u8(data[at+i])) }
-				haveQuant[table] = true
-				at += 64
-			}
+			try readQuant(mut quant, mut haveQuant, data, body, end, order)
 		} else if marker == 0xc4 {
-			mut at = body
-			for at < end {
-				if at+17 > end { fail "jpeg: invalid Huffman table" }
-				let info = i64(u8(data[at]))
-				let kind = info >> 4
-				let table = info & 15
-				if kind > 1 || table > 3 { fail "jpeg: invalid Huffman table id" }
-				mut total = i64(0)
-				let hi = kind*4+table
-				for i in 0..16 {
-					huff[hi].counts[i] = i64(u8(data[at+1+i]))
-					total += huff[hi].counts[i]
-				}
-				at += 17
-				if total == 0 || total > 256 || at+total > end { fail "jpeg: invalid Huffman values" }
-				huff[hi].values = []u8{}
-				for i in 0..total { huff[hi].values = append(huff[hi].values, u8(data[at+i])) }
-				at += total
-			}
+			try readHuffman(mut huff, data, body, end)
 		} else if marker == 0xdd {
 			if n != 4 { fail "jpeg: invalid restart interval" }
-			restartInterval = be16(data, body)
+			restart = be16(data, body)
 		} else if marker == 0xda {
-			if len(components) == 0 || n < 6 { fail "jpeg: scan without frame" }
-			let count = i64(u8(data[body]))
-			if count != len(components) || n != 6+2*count { fail "jpeg: non-interleaved scans are unsupported" }
-			for i in 0..count {
-				let at = body+1+2*i
-				let id = u8(data[at])
-				let selector = i64(u8(data[at+1]))
-				mut found = false
-				for j in 0..len(components) {
-					if components[j].id == id {
-						components[j].dc = selector >> 4
-						components[j].ac = selector & 15
-						found = true
-					}
-				}
-				if !found || components[i].dc > 3 || components[i].ac > 3 { fail "jpeg: invalid scan component" }
-			}
-			if data[end-3:end] != "\x00\x3f\x00" { fail "jpeg: unsupported scan parameters" }
-			scanStart = end
-			mut p = end
-			for p+1 < len(data) {
-				if data[p] == 0xff && data[p+1] >= 0xd0 && data[p+1] <= 0xd7 {
-					p += 2
-					continue
-				}
-				if data[p] == 0xff && data[p+1] != 0x00 {
-					scanEnd = p
-					break
-				}
-				if data[p] == 0xff { p += 2 } else { p += 1 }
-			}
-			break
+			if !f.seen { fail "jpeg: scan without frame" }
+			pos = try decodeScan(mut f, huff, data, body, end, restart)
+			scans += 1
+			continue
 		}
 		pos = end
 	}
-	if progressive { fail "jpeg: progressive JPEG is not supported" }
-	if scanStart < 0 || scanEnd < scanStart || width == 0 { fail "jpeg: missing image scan" }
-	for i in 0..len(components) {
-		if !haveQuant[components[i].qt] { fail "jpeg: missing quantization table" }
-		if components[i].h > maxH || components[i].v > maxV { fail "jpeg: invalid sampling factors" }
-	}
-	let mcuW = maxH*8
-	let mcuH = maxV*8
-	let mcuCols = (width+mcuW-1)/mcuW
-	let mcuRows = (height+mcuH-1)/mcuH
-	for i in 0..len(components) {
-		components[i].blocks = make([][64]i64, mcuCols*mcuRows*components[i].h*components[i].v)
+	if !f.seen || scans == 0 { fail "jpeg: missing image scan" }
+	for i in 0..len(f.comps) {
+		if !f.comps[i].scanned { fail "jpeg: component without scan" }
+		if !haveQuant[f.comps[i].qt] { fail "jpeg: missing quantization table" }
 	}
 	let basis = idctBasis()
-	mut bits = Bits{data: data, pos: scanStart, end: scanEnd}
-	for my in 0..mcuRows {
-		for mx in 0..mcuCols {
-			for ci in 0..len(components) {
-				for by in 0..components[ci].v {
-					for bx in 0..components[ci].h {
-						let (block, previous) = try readBlock(mut bits, huff[components[ci].dc], huff[4+components[ci].ac], components[ci].prev)
-						components[ci].prev = previous
-						let idx = (my*mcuCols+mx)*components[ci].h*components[ci].v + by*components[ci].h+bx
-						components[ci].blocks[idx] = block
-					}
-				}
-			}
-			if restartInterval > 0 && ((my*mcuCols+mx+1) % restartInterval) == 0 && my*mcuCols+mx+1 < mcuCols*mcuRows {
-				bits.align()
-				for i in 0..len(components) { components[i].prev = 0 }
-				bits.skipRestart() catch err { fail "jpeg: invalid restart marker {err}" }
-			}
-		}
+	let q0 = quant[f.comps[0].qt*64:f.comps[0].qt*64+64]
+	mut q1 = q0
+	mut q2 = q0
+	if len(f.comps) == 3 {
+		q1 = quant[f.comps[1].qt*64:f.comps[1].qt*64+64]
+		q2 = quant[f.comps[2].qt*64:f.comps[2].qt*64+64]
 	}
-	mut out = image.NewNRGBA64(image.Rect(0, 0, width, height))
-	for y in 0..height {
-		for x in 0..width {
-			let yy = sample(mut components[0], quant[components[0].qt*64:components[0].qt*64+64], basis, x, y, maxH, maxV, mcuCols)
+	mut out = image.NewNRGBA64(image.Rect(0, 0, f.width, f.height))
+	for y in 0..f.height {
+		for x in 0..f.width {
+			let yy = sample(f.comps[0], q0, basis, x, y, f.maxH, f.maxV, f.mcuCols)
 			mut r = yy
 			mut g = yy
 			mut b = yy
-			if len(components) == 3 {
-				let cb = sample(mut components[1], quant[components[1].qt*64:components[1].qt*64+64], basis, x, y, maxH, maxV, mcuCols)-128.0
-				let cr = sample(mut components[2], quant[components[2].qt*64:components[2].qt*64+64], basis, x, y, maxH, maxV, mcuCols)-128.0
+			if len(f.comps) == 3 {
+				let cb = sample(f.comps[1], q1, basis, x, y, f.maxH, f.maxV, f.mcuCols)-128.0
+				let cr = sample(f.comps[2], q2, basis, x, y, f.maxH, f.maxV, f.mcuCols)-128.0
 				r = yy + 1.402*cr
 				g = yy - 0.344136*cb - 0.714136*cr
 				b = yy + 1.772*cb
@@ -199,6 +119,328 @@ fn Decode(data str) !dyn image.Image {
 		}
 	}
 	return out
+}
+
+fn readFrame(f mut frame, data str, body i64, n i64, progressive bool) ! {
+	if n < 8 { fail "jpeg: invalid frame header" }
+	if data[body] != 8 { fail "jpeg: unsupported precision" }
+	let height = be16(data, body+1)
+	let width = be16(data, body+3)
+	let count = i64(u8(data[body+5]))
+	if count != 1 && count != 3 { fail "jpeg: unsupported component count" }
+	if width <= 0 || height <= 0 || width*height > maxPixels { fail "jpeg: image dimensions exceed limit" }
+	if n != 8+3*count { fail "jpeg: invalid frame length" }
+	mut maxH = i64(0)
+	mut maxV = i64(0)
+	mut comps = []Component{}
+	for i in 0..count {
+		let at = body+6+3*i
+		let hv = i64(u8(data[at+1]))
+		let ch = hv >> 4
+		let cv = hv & 15
+		let qt = i64(u8(data[at+2]))
+		if ch < 1 || ch > 4 || cv < 1 || cv > 4 { fail "jpeg: invalid sampling factor" }
+		if qt > 3 { fail "jpeg: invalid quantization table id" }
+		maxH = max(maxH, ch)
+		maxV = max(maxV, cv)
+		comps = append(comps, Component{id: u8(data[at]), h: ch, v: cv, qt: qt})
+	}
+	if count == 1 {
+		// A lone component is not interleaved: its MCU is one block whatever its sampling factors say.
+		comps[0].h = 1
+		comps[0].v = 1
+		maxH = 1
+		maxV = 1
+	}
+	f.seen = true
+	f.progressive = progressive
+	f.width = width
+	f.height = height
+	f.maxH = maxH
+	f.maxV = maxV
+	f.mcuCols = ceilDiv(width, 8*maxH)
+	f.mcuRows = ceilDiv(height, 8*maxV)
+	f.comps = comps
+}
+
+fn readQuant(quant mut []i64, haveQuant mut []bool, data str, body i64, end i64, order []i64) ! {
+	mut at = body
+	for at < end {
+		let info = i64(u8(data[at]))
+		at += 1
+		let table = info & 15
+		if table > 3 || info >> 4 != 0 || at+64 > end { fail "jpeg: invalid quantization table" }
+		for i in 0..64 { quant[table*64+order[i]] = i64(u8(data[at+i])) }
+		haveQuant[table] = true
+		at += 64
+	}
+}
+
+fn readHuffman(huff mut []Huffman, data str, body i64, end i64) ! {
+	mut at = body
+	for at < end {
+		if at+17 > end { fail "jpeg: invalid Huffman table" }
+		let info = i64(u8(data[at]))
+		let kind = info >> 4
+		let table = info & 15
+		if kind > 1 || table > 3 { fail "jpeg: invalid Huffman table id" }
+		mut total = i64(0)
+		let hi = kind*4+table
+		for i in 0..16 {
+			huff[hi].counts[i] = i64(u8(data[at+1+i]))
+			total += huff[hi].counts[i]
+		}
+		at += 17
+		if total == 0 || total > 256 || at+total > end { fail "jpeg: invalid Huffman values" }
+		huff[hi].values = []u8{}
+		for i in 0..total { huff[hi].values = append(huff[hi].values, u8(data[at+i])) }
+		at += total
+	}
+}
+
+// decodeScan decodes one scan into the frame's coefficients and returns the position of the marker that ends it.
+fn decodeScan(f mut frame, huff []Huffman, data str, body i64, end i64, restart i64) !i64 {
+	let count = i64(u8(data[body]))
+	if count < 1 || count > 4 || end-body != 4+2*count { fail "jpeg: invalid scan header" }
+	mut members = []i64{}
+	for i in 0..count {
+		let id = u8(data[body+1+2*i])
+		let selector = i64(u8(data[body+2+2*i]))
+		mut found = i64(-1)
+		for j in 0..len(f.comps) {
+			if f.comps[j].id == id { found = i64(j) }
+		}
+		if found < 0 { fail "jpeg: invalid scan component" }
+		for m in members {
+			if m == found { fail "jpeg: duplicate scan component" }
+		}
+		if selector>>4 > 3 || selector&15 > 3 { fail "jpeg: invalid scan component" }
+		f.comps[found].dc = selector >> 4
+		f.comps[found].ac = selector & 15
+		members = append(members, found)
+	}
+	let ss = i64(u8(data[end-3]))
+	let se = i64(u8(data[end-2]))
+	let ah = i64(u8(data[end-1])) >> 4
+	let al = i64(u8(data[end-1])) & 15
+	if !f.progressive {
+		if ss != 0 || se != 63 || ah != 0 || al != 0 { fail "jpeg: unsupported scan parameters" }
+	} else {
+		if se > 63 || ss > se { fail "jpeg: invalid spectral selection" }
+		if ss == 0 && se != 0 { fail "jpeg: invalid spectral selection" }
+		if ss > 0 && count != 1 { fail "jpeg: AC scan with several components" }
+		if al > 13 || (ah != 0 && al != ah-1) { fail "jpeg: invalid successive approximation" }
+	}
+	mut scanEnd = i64(-1)
+	mut p = end
+	for p+1 < len(data) {
+		if data[p] == 0xff && data[p+1] >= 0xd0 && data[p+1] <= 0xd7 {
+			p += 2
+			continue
+		}
+		if data[p] == 0xff && data[p+1] != 0x00 {
+			scanEnd = p
+			break
+		}
+		if data[p] == 0xff { p += 2 } else { p += 1 }
+	}
+	if scanEnd < 0 { fail "jpeg: truncated scan" }
+	for m in members {
+		if len(f.comps[m].coef) == 0 {
+			f.comps[m].coef = make([]i64, f.mcuCols*f.mcuRows*f.comps[m].h*f.comps[m].v*64)
+		}
+		f.comps[m].scanned = true
+	}
+	let order = zigOrder()
+	mut bits = Bits{data: data, pos: end, end: scanEnd}
+	mut st = scanState{}
+	mut unit = i64(0)
+	if len(members) == 1 {
+		// A lone component's scan visits the blocks that cover its own width and height, in raster order.
+		let c = members[0]
+		let bw = ceilDiv(ceilDiv(f.width*f.comps[c].h, f.maxH), 8)
+		let bh = ceilDiv(ceilDiv(f.height*f.comps[c].v, f.maxV), 8)
+		for by in 0..bh {
+			for bx in 0..bw {
+				let idx = ((by/f.comps[c].v)*f.mcuCols+bx/f.comps[c].h)*f.comps[c].h*f.comps[c].v + (by%f.comps[c].v)*f.comps[c].h + bx%f.comps[c].h
+				try decodeBlockAt(mut bits, mut st, mut f, c, idx, huff, ss, se, ah, al, order)
+				unit += 1
+				try endUnit(mut bits, mut st, mut f, members, restart, unit, bw*bh)
+			}
+		}
+	} else {
+		for my in 0..f.mcuRows {
+			for mx in 0..f.mcuCols {
+				for c in members {
+					for by in 0..f.comps[c].v {
+						for bx in 0..f.comps[c].h {
+							let idx = (my*f.mcuCols+mx)*f.comps[c].h*f.comps[c].v + by*f.comps[c].h + bx
+							try decodeBlockAt(mut bits, mut st, mut f, c, idx, huff, ss, se, ah, al, order)
+						}
+					}
+				}
+				unit += 1
+				try endUnit(mut bits, mut st, mut f, members, restart, unit, f.mcuCols*f.mcuRows)
+			}
+		}
+	}
+	return scanEnd
+}
+
+// endUnit consumes the restart marker that follows every restart interval but the last one of a scan.
+fn endUnit(bits mut Bits, st mut scanState, f mut frame, members []i64, restart i64, unit i64, total i64) ! {
+	if restart == 0 || unit%restart != 0 || unit >= total { return }
+	bits.align()
+	try bits.skipRestart(st.rst)
+	st.rst = (st.rst+1)%8
+	st.eobrun = 0
+	for m in members { f.comps[m].prev = 0 }
+}
+
+fn decodeBlockAt(bits mut Bits, st mut scanState, f mut frame, c i64, idx i64, huff []Huffman, ss i64, se i64, ah i64, al i64, order []i64) ! {
+	let base = idx*64
+	let dc = huff[f.comps[c].dc]
+	let ac = huff[4+f.comps[c].ac]
+	mut coef = f.comps[c].coef
+	if !f.progressive {
+		f.comps[c].prev = try decodeBaseline(mut bits, dc, ac, mut coef, base, f.comps[c].prev, order)
+	} else if ss == 0 && ah == 0 {
+		f.comps[c].prev = try decodeDCFirst(mut bits, dc, mut coef, base, f.comps[c].prev, al)
+	} else if ss == 0 {
+		try decodeDCRefine(mut bits, mut coef, base, al)
+	} else if ah == 0 {
+		try decodeACFirst(mut bits, mut st, ac, mut coef, base, ss, se, al, order)
+	} else {
+		try decodeACRefine(mut bits, mut st, ac, mut coef, base, ss, se, al, order)
+	}
+}
+
+fn decodeBaseline(bits mut Bits, dc Huffman, ac Huffman, coef mut []i64, base i64, previous i64, order []i64) !i64 {
+	let category = try bits.symbol(dc)
+	if category > 11 { fail "jpeg: invalid DC category" }
+	let delta = try receiveExtend(mut bits, category)
+	let value = previous+delta
+	coef[base] = value
+	mut k = i64(1)
+	for k < 64 {
+		let rs = try bits.symbol(ac)
+		let run = rs >> 4
+		let size = rs & 15
+		if size == 0 {
+			if run != 15 { break }
+			k += 16
+			continue
+		}
+		k += run
+		if k >= 64 || size > 10 { fail "jpeg: invalid AC coefficient" }
+		let v = try receiveExtend(mut bits, size)
+		coef[base+order[k]] = v
+		k += 1
+	}
+	return value
+}
+
+fn decodeDCFirst(bits mut Bits, dc Huffman, coef mut []i64, base i64, previous i64, al i64) !i64 {
+	let category = try bits.symbol(dc)
+	if category > 11 { fail "jpeg: invalid DC category" }
+	let delta = try receiveExtend(mut bits, category)
+	let value = previous+delta
+	coef[base] = value << al
+	return value
+}
+
+fn decodeDCRefine(bits mut Bits, coef mut []i64, base i64, al i64) ! {
+	let bit = try bits.bit()
+	if bit == 1 { coef[base] = coef[base] | (i64(1) << al) }
+}
+
+// decodeACFirst reads one band of a first AC scan; an EOB run covers this block and the blocks after it.
+fn decodeACFirst(bits mut Bits, st mut scanState, ac Huffman, coef mut []i64, base i64, ss i64, se i64, al i64, order []i64) ! {
+	if st.eobrun > 0 {
+		st.eobrun -= 1
+		return
+	}
+	mut k = ss
+	for k <= se {
+		let rs = try bits.symbol(ac)
+		let run = rs >> 4
+		let size = rs & 15
+		if size == 0 {
+			if run < 15 {
+				st.eobrun = i64(1) << run
+				if run > 0 {
+					let extra = try bits.take(run)
+					st.eobrun += extra
+				}
+				st.eobrun -= 1
+				return
+			}
+			k += 16
+			continue
+		}
+		k += run
+		if k > se || size > 10 { fail "jpeg: invalid AC coefficient" }
+		let v = try receiveExtend(mut bits, size)
+		coef[base+order[k]] = v << al
+		k += 1
+	}
+}
+
+// decodeACRefine adds one bit of precision to a band: history coefficients take a correction bit, new ones are +-1 << al.
+fn decodeACRefine(bits mut Bits, st mut scanState, ac Huffman, coef mut []i64, base i64, ss i64, se i64, al i64, order []i64) ! {
+	let p1 = i64(1) << al
+	let m1 = -p1
+	mut k = ss
+	if st.eobrun == 0 {
+		for k <= se {
+			let rs = try bits.symbol(ac)
+			mut run = rs >> 4
+			mut size = rs & 15
+			if size != 0 {
+				if size != 1 { fail "jpeg: invalid AC refinement" }
+				let sign = try bits.bit()
+				if sign == 1 { size = p1 } else { size = m1 }
+			} else if run != 15 {
+				st.eobrun = i64(1) << run
+				if run > 0 {
+					let extra = try bits.take(run)
+					st.eobrun += extra
+				}
+				break
+			}
+			for k <= se {
+				let at = base+order[k]
+				if coef[at] != 0 {
+					let bit = try bits.bit()
+					if bit == 1 && (coef[at] & p1) == 0 {
+						if coef[at] >= 0 { coef[at] += p1 } else { coef[at] += m1 }
+					}
+				} else {
+					if run == 0 { break }
+					run -= 1
+				}
+				k += 1
+			}
+			if size != 0 {
+				if k > se { fail "jpeg: invalid AC refinement" }
+				coef[base+order[k]] = size
+			}
+			k += 1
+		}
+	}
+	if st.eobrun > 0 {
+		for k <= se {
+			let at = base+order[k]
+			if coef[at] != 0 {
+				let bit = try bits.bit()
+				if bit == 1 && (coef[at] & p1) == 0 {
+					if coef[at] >= 0 { coef[at] += p1 } else { coef[at] += m1 }
+				}
+			}
+			k += 1
+		}
+		st.eobrun -= 1
+	}
 }
 
 type Bits struct {
@@ -211,6 +453,10 @@ type Bits struct {
 
 fn be16(s str, at i64) i64 {
 	return i64(u8(s[at]))<<8 | i64(u8(s[at+1]))
+}
+
+fn ceilDiv(a i64, b i64) i64 {
+	return (a+b-1)/b
 }
 
 fn (b mut Bits) bit() !i64 {
@@ -242,12 +488,19 @@ fn (b mut Bits) take(n i64) !i64 {
 	return value
 }
 
+fn receiveExtend(bits mut Bits, size i64) !i64 {
+	if size == 0 { return 0 }
+	let v = try bits.take(size)
+	if v < (1 << (size-1)) { return v-((1 << size)-1) }
+	return v
+}
+
 fn (b mut Bits) align() {
 	b.count = 0
 }
 
-fn (b mut Bits) skipRestart() ! {
-	if b.pos+2 > b.end || b.data[b.pos] != 0xff || b.data[b.pos+1] < 0xd0 || b.data[b.pos+1] > 0xd7 { fail "marker missing" }
+fn (b mut Bits) skipRestart(index i64) ! {
+	if b.pos+2 > b.end || b.data[b.pos] != 0xff || i64(u8(b.data[b.pos+1])) != 0xd0+index { fail "jpeg: missing restart marker" }
 	b.pos += 2
 }
 
@@ -255,43 +508,14 @@ fn (b mut Bits) symbol(h Huffman) !i64 {
 	mut code = i64(0)
 	mut index = i64(0)
 	for length in 0..16 {
-			let next = try b.bit()
-			code = (code<<1) | next
+		let next = try b.bit()
+		code = (code<<1) | next
 		let count = h.counts[length]
 		if code < count { return i64(h.values[index+code]) }
 		index += count
 		code -= count
 	}
 	fail "jpeg: invalid Huffman code"
-}
-
-fn readBlock(bits mut Bits, dc Huffman, ac Huffman, previous i64) !([64]i64, i64) {
-	mut coefficients = [64]i64{}
-	let category = try bits.symbol(dc)
-	if category > 11 { fail "jpeg: invalid DC category" }
-	mut delta = try bits.take(category)
-	if category > 0 && delta < (1<<(category-1)) { delta -= (1<<category)-1 }
-	let nextPrevious = previous+delta
-	coefficients[0] = nextPrevious
-	mut at = i64(1)
-	for at < 64 {
-		let runSize = try bits.symbol(ac)
-		if runSize == 0 { break }
-		let run = runSize >> 4
-		let size = runSize & 15
-		if size == 0 {
-			if run != 15 { break }
-			at += 16
-			continue
-		}
-		at += run
-		if at >= 64 || size > 10 { fail "jpeg: invalid AC coefficient" }
-		mut value = try bits.take(size)
-		if value < (1<<(size-1)) { value -= (1<<size)-1 }
-		coefficients[zig(at)] = value
-		at += 1
-	}
-	return coefficients, nextPrevious
 }
 
 fn idctBasis() []f64 {
@@ -305,29 +529,53 @@ fn idctBasis() []f64 {
 	return basis
 }
 
-fn sample(component mut Component, quant []i64, basis []f64, x i64, y i64, maxH i64, maxV i64, mcuCols i64) f64 {
-	let sx = x*component.h/maxH
-	let sy = y*component.v/maxV
+fn sample(c Component, quant []i64, basis []f64, x i64, y i64, maxH i64, maxV i64, mcuCols i64) f64 {
+	let sx = x*c.h/maxH
+	let sy = y*c.v/maxV
 	let blockX = sx/8
 	let blockY = sy/8
 	let withinX = sx%8
 	let withinY = sy%8
-	let blocksWide = mcuCols*component.h
-	let idx = ((blockY/component.v)*mcuCols+(blockX/component.h))*component.h*component.v + (blockY%component.v)*component.h + blockX%component.h
-	let block = component.blocks[idx]
+	let idx = ((blockY/c.v)*mcuCols+(blockX/c.h))*c.h*c.v + (blockY%c.v)*c.h + blockX%c.h
+	let base = idx*64
 	mut sum = f64(0.0)
 	for v in 0..8 {
 		for u in 0..8 {
-			sum += f64(block[v*8+u]*quant[v*8+u])*basis[u*8+withinX]*basis[v*8+withinY]
+			sum += f64(c.coef[base+v*8+u]*quant[v*8+u])*basis[u*8+withinX]*basis[v*8+withinY]
 		}
 	}
-	return sum*0.25+128.0
+	// The spec clamps each reconstructed sample to 8 bits before the colour conversion.
+	let v = sum*0.25+128.0
+	if v < 0.0 { return 0.0 }
+	if v > 255.0 { return 255.0 }
+	return v
 }
 
 fn unit16(v f64) u16 {
 	if v <= 0.0 { return 0 }
 	if v >= 255.0 { return 0xffff }
 	return u16(u32(v+0.5)*0x101)
+}
+
+// zigOrder maps each zigzag position to its natural (row-major) index.
+fn zigOrder() []i64 {
+	mut order = make([]i64, 64)
+	mut ordinal = i64(0)
+	for diagonal in 0..15 {
+		let low = max(0, diagonal-7)
+		let high = min(7, diagonal)
+		for offset in 0..high-low+1 {
+			mut v = high-offset
+			mut u = diagonal-v
+			if diagonal%2 != 0 {
+				u = high-offset
+				v = diagonal-u
+			}
+			order[ordinal] = v*8+u
+			ordinal += 1
+		}
+	}
+	return order
 }
 
 fn zig(index i64) i64 {

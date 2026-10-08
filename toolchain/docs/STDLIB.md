@@ -2306,7 +2306,7 @@ m.Set(10, 20, m.At(0, 0))
 let c = m.At(10, 20)
 ```
 
-Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel through the shape allocates nothing; each image also has its own typed accessors (RGBAAt, GrayAt, ColorIndexAt...). Layout tells which concrete image a dyn Image is and gives its pixel buffer: it is how image/draw and image/png take their fast paths, and how a caller gets the concrete image back (AsRGBA, AsNRGBA...). The image/jpeg package decodes 8-bit baseline sequential JPEG data and encodes baseline JPEG images.
+Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel through the shape allocates nothing; each image also has its own typed accessors (RGBAAt, GrayAt, ColorIndexAt...). Layout tells which concrete image a dyn Image is and gives its pixel buffer: it is how image/draw and image/png take their fast paths, and how a caller gets the concrete image back (AsRGBA, AsNRGBA...). The image/jpeg package decodes 8-bit baseline and progressive JPEG data and encodes baseline JPEG images.
 
 - `type Point value struct`: Point is an (X, Y) pair; X grows to the right and Y downwards.
 - `Pt(x i64, y i64) Point`: Pt is Point{X: x, Y: y}.
@@ -2481,7 +2481,7 @@ Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel thr
 - `(p NRGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
 - `type Huffman struct`
 - `type Component struct`
-- `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline sequential JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
+- `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline or progressive JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
 - `type Bits struct`
 
 ## textedit

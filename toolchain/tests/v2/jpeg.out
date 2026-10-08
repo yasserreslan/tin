@@ -1,4 +1,8 @@
 jpeg baseline decode 1x1
 jpeg encode gray 1x1
 jpeg encode color 1x1
+jpeg progressive color with restarts matches its baseline twin
+jpeg progressive gray matches its baseline twin
+truncated progressive JPEG rejected
+jpeg round trip 9x7 within 2 at quality 100 and 12 at quality 90
 jpeg baseline fault jpeg: invalid signature
