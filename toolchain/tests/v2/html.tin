@@ -1,0 +1,75 @@
+package main
+
+import "fault"
+import "html"
+import "say"
+
+// dump prints the tokens of text through the tokenizer's own methods: Next, Raw, Text, TagName and TagAttr.
+fn dump(text str) {
+	mut z = html.NewTokenizer(text)
+	for {
+		let tt = z.Next()
+		if tt == html.ErrorToken {
+			z.Err() catch err {
+				say.Line("error", fault.Is(err, html.ErrEOF), say.Fmt("%q", err))
+			}
+			return
+		}
+		say.Line("token", tt, say.Fmt("%q", z.Raw()))
+		if tt == html.TextToken || tt == html.CommentToken || tt == html.DoctypeToken {
+			say.Line("  text", say.Fmt("%q", z.Text()))
+			continue
+		}
+		let (name, more) = z.TagName()
+		say.Line("  tag", name, more)
+		mut m = more
+		for m {
+			let (k, v, next) = z.TagAttr()
+			say.Line("  attr", k, say.Fmt("%q", v))
+			m = next
+		}
+	}
+}
+
+fn main() {
+	say.Line("escape", say.Fmt("%q", html.EscapeString("<a href=\"x\">'&'\r")))
+	say.Line("escape plain", say.Fmt("%q", html.EscapeString("plain text")))
+	say.Line("unescape", say.Fmt("%q", html.UnescapeString("&lt;b&gt; &amp;amp; &eacute;&#233;&#xe9;&#XE9;")))
+	say.Line("unescape numeric", say.Fmt("%q", html.UnescapeString("&#x80; &#0; &#xD800; &#x110000; &#65 &#;")))
+	say.Line("unescape legacy", say.Fmt("%q", html.UnescapeString("&amp &notit; &notin; &ampx &zz; a & b")))
+	say.Line("unescape two runes", say.Fmt("%q", html.UnescapeString("&nLt; &nLt")))
+	say.Line("unescape none", say.Fmt("%q", html.UnescapeString("no references here")))
+
+	dump("<!DOCTYPE html><p class=a id='b' hidden>x &amp; y</p><br/><!-- c --><?pi x?>")
+	dump("<script>if (a<b) x &amp;</scRIPT ><b>z</b></script>")
+	dump("<a =x b=c/d e=\"1\" F=2 f=3 G='g'>")
+	dump("<Div CLASS=\"x\"><p>a\r\nb\rc</p></DIV>")
+	dump("</>|<!>|<!-->|<!--a--!>|<!x y>|<![CDATA[a<b]]>|<!doctype html>tail")
+	dump("<textarea>&lt;b&gt;</textarea><title>&amp;<b></title>")
+	dump("<a href=\"unfinished")
+	dump("text &amp; then <b")
+
+	mut cd = html.NewTokenizer("<![CDATA[a<b]]>")
+	cd.AllowCDATA(true)
+	let cdType = cd.Next()
+	say.Line("cdata allowed", cdType, say.Fmt("%q", cd.Text()))
+
+	mut frag = html.NewTokenizerFragment("a &amp; <b>x</b>", "textarea")
+	let fragType = frag.Next()
+	say.Line("fragment textarea", fragType, say.Fmt("%q", frag.Text()))
+	let fragTag = frag.Next()
+	say.Line("fragment textarea then", fragTag, say.Fmt("%q", frag.Raw()))
+
+	mut raw = html.NewTokenizerFragment("a &amp; <b>x</b>", "script")
+	let rawType = raw.Next()
+	say.Line("fragment script", rawType, say.Fmt("%q", raw.Text()))
+
+	mut next = html.NewTokenizer("<script>x<b>y</script>")
+	let startType = next.Next()
+	say.Line("script start", startType)
+	next.NextIsNotRawText()
+	let xType = next.Next()
+	say.Line("not raw", xType, say.Fmt("%q", next.Text()))
+	let bType = next.Next()
+	say.Line("not raw tag", bType, say.Fmt("%q", next.Raw()))
+}

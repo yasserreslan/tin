@@ -1,0 +1,97 @@
+package main
+
+import "html"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// The html twin, Tin side: read documents from stdin and print their token streams, one token per line, in the same format as
+// bench/ref/html (Go's golang.org/x/net/html). Each document is framed as its decimal length, a newline and its bytes; it is
+// tokenized twice, without and with AllowCDATA.
+
+// enc writes s with printable ASCII (and no backslash) as is and every other byte as \xHH.
+fn enc(s str) str {
+	let hex = "0123456789abcdef"
+	mut out = twine.NewBuilder(len(s) + 8)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 0x20 && c <= 0x7e && c != '\\' {
+			out.Byte(c)
+		} else {
+			out.Str("\\x")
+			out.Byte(hex[c>>4])
+			out.Byte(hex[c&15])
+		}
+	}
+	return out.String()
+}
+
+// typeName is the name Go's TokenType.String gives a token type.
+fn typeName(tt i64) str {
+	if tt == html.TextToken {
+		return "Text"
+	} else if tt == html.StartTagToken {
+		return "StartTag"
+	} else if tt == html.EndTagToken {
+		return "EndTag"
+	} else if tt == html.SelfClosingTagToken {
+		return "SelfClosingTag"
+	} else if tt == html.CommentToken {
+		return "Comment"
+	}
+	return "Doctype"
+}
+
+// document prints the tokens of text, with AllowCDATA set when cdata is.
+fn document(text str, cdata bool) {
+	mut z = html.NewTokenizer(text)
+	z.AllowCDATA(cdata)
+	for {
+		let tt = z.Next()
+		if tt == html.ErrorToken {
+			z.Err() catch err {
+				say.Line("end", err)
+				return
+			}
+			return
+		}
+		let raw = enc(z.Raw())
+		let t = z.Token()
+		mut line = typeName(tt) + " raw=" + raw + " data=" + enc(t.Data)
+		for a in t.Attr {
+			line += " attr=" + enc(a.Key) + ":" + enc(a.Val)
+		}
+		say.Line(line)
+	}
+}
+
+fn main() {
+	let input = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut pos = 0
+	mut doc = 0
+	for pos < len(input) {
+		let nl = twine.IndexByte(input[pos:], '\n')
+		let n = mint.Atoi(input[pos:pos+nl]) catch _ {
+			say.Line("frame: bad length")
+			return
+		}
+		pos += nl + 1
+		let text = input[pos:pos+n]
+		pos += n
+		say.Line("escape", enc(html.EscapeString(text)))
+		say.Line("unescape", enc(html.UnescapeString(text)))
+		for cdata in []bool{false, true} {
+			if cdata {
+				say.Line("doc", doc, "cdata")
+			} else {
+				say.Line("doc", doc, "plain")
+			}
+			document(text, cdata)
+		}
+		doc += 1
+	}
+}

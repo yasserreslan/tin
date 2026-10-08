@@ -1,0 +1,158 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Compare html's tokenizer with golang.org/x/net/html over a corpus of pages and generated documents.
+//
+// Both sides read the same framed documents on stdin and print one token per line (bench/ref/html and
+// tools/ci/fixtures/html_twin.tin), each document with and without AllowCDATA: the pages hold well-formed and malformed markup,
+// comments and bogus comments, doctypes, every raw-text element, attributes in every quoting form, references, NUL bytes and
+// carriage returns, foreign content; the generated documents splice those pieces with random bytes from a fixed seed.
+
+// gen is a 64-bit linear congruential generator with a fixed seed, so both sides see the same documents.
+type gen struct {
+	state u64
+}
+
+// next returns the next 64-bit value.
+fn (g mut gen) next() u64 {
+	g.state = g.state *% 6364136223846793005 +% 1442695040888963407
+	return g.state >> 33
+}
+
+// intn returns a value in [0, n).
+fn (g mut gen) intn(n i64) i64 {
+	return i64(g.next() % u64(n))
+}
+
+// pages are hand-written documents for the cases the WHATWG tokenizer treats by name.
+fn pages() []str {
+	return []str{
+		`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>A <b>bold</b> title &amp; more</title>
+<link rel=stylesheet href="site.css"><style>p > a { color: red } /* <b> */</style></head>
+<body class=main id='top' hidden data-x="a&quot;b">
+<p>Text with &lt;tags&gt; &copy; 2024 &#169; &#x2014; &euro &notit; &amp</p>
+<script type="text/javascript">if (a<b && c>d) { document.write("<p>x</p>") }</script>
+<textarea name=t>a <b>not a tag</b> &amp; &lt;</textarea>
+<!-- a comment -- with dashes -->
+<noscript><img src="x.png" alt=""></noscript>
+</body></html>`,
+		`<a href="x>y</a> <b c='d>e</b> <i f=g/h>j</i> <u k=l/>m</u>`,
+		`<p =x a==b c=d=e f= g="" h=''>text</p><br / ><img src=a.png/><input disabled/>`,
+		`</ p > </div class="x"> </> <1> < p> <!> <!--> <!---> <!-- a -- b --> <!--a--!> <!-- x --!> <?xml version="1.0"?>`,
+		`<!DOCTYPE`,
+		`<!doctype html public "-//W3C//DTD HTML 4.01//EN">after<!DOCTYPE x>`,
+		`<![CDATA[x<y]]><p>after</p><!x y><!-- unfinished`,
+		`<!-- abc --!`,
+		`<!--`,
+		`<a href="unfinished`,
+		`<a href=unquoted/still>x</a>`,
+		`a & b &amp c &#; &#x; &#65 &#X41; &#x41; &#128; &#xD800; &#x110000; &#0;`,
+		`&ampx &notin; &NotNestedGreaterGreater; &not; &AMP &amp;amp; &lt&gt`,
+		`<a title="&lt;&eacute&eacute;=&amp;" b=&amp=c d='&notit;' e="&#x41;&#65">`,
+		"CR\r\nLF\nlone\rCR\r\rend\r\n<p>\r\n</p>",
+		"nul\x00byte <a\x00b=\x00c>\x00</a\x00>",
+		`<DIV CLASS="X" Class="dup" id=Q ID=R><P>Upper</P></DIV>`,
+		`<a x=1 X=2 x=3 y="2" y='3'>`,
+		"<a\ttab=1\nnewline=2\fff=3\r>x</a>",
+		`<svg viewBox="0 0 1 1"><![CDATA[x<y]]><title>t</title><path d="M0"/></svg><math><mi>x</mi><mo>&lt;</mo></math>`,
+		`<script></SCRIPT ><style>p{}</style ><title>t</TITLE/></title>`,
+		`<script>a</scriptx>b</script><script>x</script/>`,
+		`<script><!--<script>x</script>--></script>after<script><!--<script>x</script>`,
+		`<script><!--<script >y</script >z--></script><script>a<!-- b</script>`,
+		`<script>document.write("<\/script>")</script><xmp><b>x</b></xmp><iframe><p></iframe>`,
+		`<textarea><p>x</textarea><title><b>y</title><noembed><i></noembed><noframes><u></noframes>`,
+		`<plaintext><b>not a tag &amp; </plaintext> after`,
+		`<script>`,
+		`<style>unfinished`,
+		`<a href="x" `,
+		`text only, no markup &amp; "quotes" 'apostrophes'`,
+		``,
+		`<!DOCTYPE html><!--c1--><!--c2--><p>x</p><![CDATA[x]]>`,
+	}
+}
+
+// fragments are the pieces the generated documents are built from.
+fn fragments() []str {
+	return []str{"<", ">", "</", "/>", "<!--", "-->", "--!>", "<!", "<!DOCTYPE ", "<![CDATA[", "]]>", "<?", "?>", "=", "\"", "'", " ", "\n", "\r", "\t", "\f", "\x00", "&", "&amp;", "&amp", "&lt;", "&#", "&#x", ";", "a", "b", "Z", "p", "div", "script", "SCRIPT", "style", "title", "textarea", "xmp", "iframe", "plaintext", "noscript", "</script", "</title", "<!--<script>", "</scr", "-", "!", "x=", "href", "svg", "<svg>", "<math>", "é", "\xff", "&notin;", "&#128;", "&#xD800;", "<a ", "</a>"}
+}
+
+// generated returns n documents of up to 40 pieces, a piece being a fragment or a random byte.
+fn generated(n i64) []str {
+	mut g = gen{state: 20240914}
+	let frags = fragments()
+	mut out = []str{}
+	for k in 0..n {
+		let pieces = g.intn(40)
+		mut b = twine.NewBuilder(256)
+		for j in 0..pieces {
+			if g.intn(10) < 7 {
+				b.Str(frags[g.intn(len(frags))])
+			} else {
+				b.Byte(u8(g.intn(256)))
+			}
+		}
+		out = append(out, b.String())
+	}
+	return out
+}
+
+// references returns, for every named reference in the table (toolchain/tests/data/html/entity_names.txt, written by
+// tools/gen/gen_html_entities.tin), a text document, an attribute value and an attribute value followed by "=".
+fn references() []str {
+	let names = twine.Split(ci.Read(ci.Join(ci.Root(), "toolchain/tests/data/html/entity_names.txt")), "\n")
+	mut out = []str{}
+	for name in names {
+		if len(name) == 0 {
+			continue
+		}
+		out = append(out, "x &" + name + " y")
+		out = append(out, "<a t=\"&" + name + "\" u='&" + name + "=1'>&" + name)
+		out = append(out, "<a t=&" + name + " u=\"&" + name + "=\">")
+	}
+	return out
+}
+
+// frame encodes the documents: each is its decimal length, a newline and its bytes.
+fn frame(docs []str) str {
+	mut b = twine.NewBuilder(1024)
+	for d in docs {
+		b.Str(mint.Itoa(i64(len(d))))
+		b.Byte('\n')
+		b.Str(d)
+	}
+	return b.String()
+}
+
+// run feeds input to exe and returns its output lines.
+fn run(exe str, input str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 300, input, []str{"TIN_ROOT=" + ci.Root()})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let dir = ci.Join(ci.Root(), "bin/ci/html")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "html-")
+	let tin = ci.Join(work, "html-tin")
+	ci.BuildTin("tools/ci/fixtures/html_twin.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "html-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "."}, ci.Join(ci.Root(), "bench/ref/html"), 300), "go build bench/ref/html")
+	let pageCount = len(pages())
+	let input = frame(append(append(pages(), generated(800)...), references()...))
+	let want = run(goexe, input)
+	let got = run(tin, input)
+	mut i = 0
+	for i < len(want) && i < len(got) {
+		ci.Check(want[i] == got[i], "html line " + mint.Itoa(i+1) + ": Go " + want[i] + ", Tin " + got[i])
+		i += 1
+	}
+	ci.Check(len(got) == len(want), "html: " + mint.Itoa(len(got)) + " lines against " + mint.Itoa(len(want)))
+	ci.Remove(work)
+	ci.Pass("html: " + mint.Itoa(len(want)) + " token lines over " + mint.Itoa(pageCount) + " pages, 800 generated documents and the references of the table match golang.org/x/net/html")
+}
