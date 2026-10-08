@@ -956,6 +956,10 @@ angle brackets, so a comparison never depends on what its operands are.
   is itself, and shift counts are taken modulo 64; it is for kernels whose arithmetic is
   modular everywhere (cipher rounds, constant-time field arithmetic). Its closures, generic
   instances and methods are `@wrap` too.
+- Float arithmetic rounds each operation, except that arm64 fuses `x*y + z`, `z + x*y` and `z - x*y` (also with
+  `f32`) into one multiply-add that rounds once, as Go does on arm64; amd64 never fuses. An explicit conversion
+  rounds the product and prevents fusion (`f64(x*y) + z`), and so does a local (`let p = x*y`, then `p + z`):
+  write one of them where the same bits are wanted on both targets (money, scores, hashes).
 - `>>` is arithmetic for signed types and logical for unsigned types. A shift count must
   be between 0 and the width of the shifted value less one: `u8(1) << 8` panics (a constant
   count out of range is E224), and so does a negative count. Bits shifted out are dropped:
@@ -2436,6 +2440,7 @@ OLD_SYNTAX, E091 ONE_PER_DECLARATION in [ERRORS.md](ERRORS.md)).
 | `goto`, `fallthrough` | not available |
 | integer arithmetic wraps; shift counts of any size; `int64(1e300)` is implementation-defined | `+ - *` panic on overflow, `+% -% *%` and `@wrap` wrap; shift counts below the width; float to integer panics out of range |
 | `http.Client` follows up to 10 redirects and accepts bare-LF responses | `wire.Do` returns a 3xx as the response and fails on bare-LF line ends |
+| arm64 fuses `x*y + z` into a multiply-add, amd64 does not; an explicit conversion prevents fusion | the same (section 6, Arithmetic): arm64 fuses, amd64 does not, and `f64(x*y) + z` or a local does not fuse |
 | untyped float constants are exact (`0.1 + 0.2` is 0.3) | float constant arithmetic rounds each operation to `f64`, as at run time (`0.1 + 0.2` is 0.30000000000000004) |
 
 <!-- docs-check: old-syntax end -->

@@ -1,0 +1,32 @@
+package main
+
+import "say"
+
+// An explicit conversion or a local rounds a product, so the sum is not fused into a multiply-add: the same bits
+// on arm64 and amd64 (#814). x*y + z written plainly may be fused on arm64, so it is not printed.
+
+fn g(x f64, y f64, z f64) f64 {
+	return f64(x * y) + z
+}
+
+fn h(x f64, y f64, z f64) f64 {
+	let p = x * y
+	return p + z
+}
+
+fn k(x f64, y f64, z f64) f64 {
+	return z - f64(x * y)
+}
+
+fn k2(x f64, y f64, z f64) f64 {
+	return z + f64(x * y)
+}
+
+fn m(x f32, y f32, z f32) f32 {
+	return f32(x * y) + z
+}
+
+fn main() {
+	say.Line(g(0.1, 10.0, -1.0), h(0.1, 10.0, -1.0), k(0.1, 10.0, 1.0), k2(0.1, 10.0, -1.0))
+	say.Line(m(f32(0.1), f32(10.0), f32(-1.0)))
+}
