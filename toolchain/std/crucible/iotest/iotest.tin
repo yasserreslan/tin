@@ -3,6 +3,8 @@
 // DataErrReader turns the end of its source into a fault, and TruncateWriter drops what a writer
 // takes past a limit while it still reports every byte as written.
 //
+//	import "crucible/iotest"
+//
 //	let r = iotest.HalfReader(src)             // reads at most (len(buf)+1)/2 bytes at a time
 //	let w = iotest.TruncateWriter(sink, 7)     // the sink gets the first 7 bytes; Write says all
 //

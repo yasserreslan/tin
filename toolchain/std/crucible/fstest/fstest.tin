@@ -3,6 +3,8 @@
 // names' parents, plus any entry whose Mode has ModeDir. TestFS walks a file system with fs.WalkDir
 // and checks what the walk shows against Open, Stat and ReadDir.
 //
+//	import "crucible/fstest"
+//
 //	let fsys = fstest.MapFS{"a/b.txt": fstest.MapFile{Data: "hi"}}
 //	try fstest.TestFS(fsys, []str{"a/b.txt"})
 //

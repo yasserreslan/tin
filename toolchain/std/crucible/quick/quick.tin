@@ -3,6 +3,9 @@
 // each check takes a generator per parameter: Int64, Uint64, Float64, Bool, Str and Bytes are the
 // ones in this package, and a test may pass its own.
 //
+//	import "crucible/quick"
+//	import "twine"
+//
 //	quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
 //
 // Values come from dice seeded by Config.Seed, so a run is the same every time. A failure reports

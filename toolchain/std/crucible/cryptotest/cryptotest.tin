@@ -3,6 +3,9 @@
 // testing/cryptotest seeds crypto/rand for a test; Tin has no process-wide random source to seed, so
 // each buffer carries its own seed and the same seed gives the same bytes on every run.
 //
+//	import "crucible/cryptotest"
+//	import "crucible"
+//
 //	let a = cryptotest.Seeded(7, 32)
 //	let b = cryptotest.Flip(a, 31, 0x80)        // the last byte differs in its top bit
 //	crucible.False("tag", cryptotest.Equal(a, b))

@@ -2,6 +2,10 @@
 // handlers. Its handler is herald: Check runs each record through herald.Line under a fixed clock
 // and reports every line that does not have herald's layout.
 //
+//	import "crucible/slogtest"
+//	import "crucible"
+//	import "herald"
+//
 //	let problems = slogtest.Check([]slogtest.Record{{Level: herald.LInfo, Msg: "listening", KV: []str{"addr", ":8080"}}})
 //	crucible.True("lines", len(problems) == 0)
 //
