@@ -35,7 +35,8 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+X, C, V, A | cut, copy, paste, select all (a cut or copy without a selection takes the line) |
 | Cmd+F, Cmd+G (Shift: backwards) | find as you type; Tab switches to the replacement, Return replaces, Cmd+Return replaces all |
 | Cmd+L | go to line |
-| Cmd+/ | comment or uncomment lines |
+| Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
+| Cmd+/ | comment or uncomment lines; Edit > Sort Lines and Trim Trailing Whitespace sort the touched lines and remove their trailing spaces and tabs (the command palette has both) |
 | Cmd+Alt+Down, Cmd+Alt+Up | add a caret on the line below or above (typing, Backspace, Delete and the arrows then act on every caret; Escape puts them away) |
 | Cmd+D, Cmd+Shift+K, Alt+Up/Down | duplicate, delete, move lines |
 | Cmd+[ and Cmd+] , Tab, Shift+Tab | unindent, indent |
@@ -64,6 +65,6 @@ Double click selects a word, triple click a line; the wheel scrolls what is unde
 ## Settings and keys
 
 `Tinland > Settings...` (Cmd+,) opens `~/.config/tinland/settings`, creating it with a commented template. One `name = value` per line:
-`theme = dark` or `light`, `autosave = on` (write the files with changes when the window has been quiet for a moment; off by default), `font_size`, `code_font` and `ui_font` (PostScript names), and key bindings by menu title: `key.toggle-terminal =
+`theme = dark` or `light`, `autosave = on` (write the files with changes when the window has been quiet for a moment; off by default), `trim_trailing_whitespace = on` (remove the trailing spaces and tabs of every line when a file is written; off by default), `insert_final_newline = on` (end a written file with a newline when it does not have one; off by default), `font_size`, `code_font` and `ui_font` (PostScript names), and key bindings by menu title: `key.toggle-terminal =
 ctrl+\`` (the title in lower case with dashes; `cmd`, `shift`, `alt` and `ctrl` then the key; `none` removes the key). Restart Tinland to
 apply them.

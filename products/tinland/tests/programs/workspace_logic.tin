@@ -196,6 +196,37 @@ added
 	}
 	say.Line("auto-saved", written, ws.Ed.Buf.Dirty, twine.TrimSpace(onDisk))
 	say.Line("nothing left", ws.Ed.SaveDirty())
+	// the line commands and the write hygiene of the settings: sorting, trimming, a final newline
+	put(root + "/sortme.txt", "charlie\nalpha\nbravo two\nbravo")
+	ws.OpenFile(root + "/sortme.txt")
+	say.Line("sortme dirty", ws.Ed.Buf.Dirty)
+	ws.Ed.Perform(editor.CmdSortLines)
+	say.Line("sorted the caret's line only", ws.Ed.Buf.Text())
+	ws.Ed.Perform(editor.CmdSelectAll)
+	ws.Ed.Perform(editor.CmdSortLines)
+	say.Line("sorted every line", ws.Ed.Buf.Text(), ws.Ed.Buf.Dirty)
+	put(root + "/messy.txt", "keep   \n\ttrailing\t\nthe end   ")
+	ws.OpenFile(root + "/messy.txt")
+	ws.Ed.Buf.MoveTo(0, 0, false)
+	ws.Ed.Perform(editor.CmdTrimTrailing)
+	say.Line("trimmed the caret's line", ws.Ed.Buf.Lines[0], ws.Ed.Buf.Dirty, ws.Ed.Buf.Lines[2])
+	ws.Ed.Perform(editor.CmdSelectAll)
+	ws.Ed.Perform(editor.CmdTrimTrailing)
+	say.Line("trimmed every line", ws.Ed.Buf.Lines[0], ws.Ed.Buf.Lines[1], ws.Ed.Buf.Lines[2])
+	ws.Ed.SaveDirty()
+	let noHygiene = quarry.ReadFile(root + "/messy.txt") catch _ {
+		"?"
+	}
+	say.Line("written without hygiene", noHygiene, len(noHygiene), twine.HasSuffix(noHygiene, "\n"))
+	ws.Ed.Buf.Dirty = true
+	ws.SaveHygiene(true, true)
+	say.Line("hygiene passed down", ws.Ed.SaveTrim, ws.Ed.SaveFinalNl, ws.Panes[0].SaveTrim)
+	ws.Ed.SaveDirty()
+	let withHygiene = quarry.ReadFile(root + "/messy.txt") catch _ {
+		"?"
+	}
+	say.Line("written with hygiene", withHygiene, len(withHygiene), twine.HasSuffix(withHygiene, "\n"))
+	ws.SaveHygiene(false, false)
 	ws.ToggleTerminal()
 	say.Line("shell running", ws.TermUp, ws.Bottom, ws.Focus)
 	appkit.RunCapture("sleep 0.5")
