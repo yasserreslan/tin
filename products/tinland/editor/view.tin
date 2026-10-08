@@ -321,10 +321,64 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 			render.Fill(mut scene, ex, y + ed.rowTop(en), 1.5, lh, th.Cursor)
 		}
 	}
-	ed.scrollbar(th, x, y, w, h, mut scene)
+	if ed.mapW() > 0.0 {
+		ed.minimap(th, x, y, w, h, mut scene)
+	} else {
+		ed.scrollbar(th, x, y, w, h, mut scene)
+	}
 	ed.promptBox(th, x, y, w, mut scene)
 	ed.popups(th, x, y, w, h, mut scene)
 	render.Unclip(mut scene)
+}
+
+// minimap draws the whole file as small bars, one per run of text, with the part in the window shaded; a click or a drag in it
+// scrolls.
+fn (ed Editor) minimap(th theme.Theme, x f64, y f64, w f64, h f64, scene mut metal.Scene) {
+	let mw = ed.mapW()
+	let mx = x + w - mw
+	render.Fill(mut scene, mx, y, mw, h, th.Editor)
+	render.Fill(mut scene, mx, y, 1.0, h, th.LineHighlight)
+	let start = ed.mapStart()
+	let cap = i64(h / minimapRow)
+	let rows = ed.rows()
+	// the window
+	let vy = y + f64(ed.Scroll - start) * minimapRow
+	render.Fill(mut scene, mx, vy, mw, f64(rows) * minimapRow, th.Selection)
+	let b = ed.Buf
+	mut n = 0
+	for n < cap && start + n < len(b.Lines) {
+		let line = b.Lines[start + n]
+		let top = y + f64(n) * minimapRow
+		// one bar for each run of characters that are not spaces, a column per character (a tab is four)
+		mut col = 0
+		mut from = -1
+		for k in 0..len(line) {
+			let ch = line[k]
+			if ch == ' ' || ch == '\t' {
+				if from >= 0 {
+					render.Fill(mut scene, mx + 4.0 + f64(from), top, f64(col - from), 1.2, th.Gutter)
+					from = -1
+				}
+				if ch == '\t' {
+					col += 4
+				} else {
+					col += 1
+				}
+			} else if ch < 128 || ch >= 192 {
+				if from < 0 {
+					from = col
+				}
+				col += 1
+			}
+			if col >= i64(mw) - 6 {
+				break
+			}
+		}
+		if from >= 0 {
+			render.Fill(mut scene, mx + 4.0 + f64(from), top, f64(col - from), 1.2, th.Gutter)
+		}
+		n += 1
+	}
 }
 
 // scrollbar draws a thin thumb at the right edge showing which part of the text is in view.

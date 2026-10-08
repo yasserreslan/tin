@@ -41,6 +41,11 @@ fn (ed mut Editor) KeyDown(code i64, flags i64, chars str) {
 fn (ed mut Editor) MouseDown(x f64, y f64, clicks i64, flags i64) {
 	ed.Mode = modeEdit
 	ed.CompOpen = false
+	if ed.mapW() > 0.0 && x >= ed.AreaW - ed.mapW() {
+		ed.mapDrag = true
+		ed.mapScrollTo(y)
+		return
+	}
 	ed.Follow = true
 	ed.mouseTo(x, y, (flags & flagShift) != 0)
 	if (flags & flagCmd) != 0 {
@@ -58,6 +63,10 @@ fn (ed mut Editor) MouseDown(x f64, y f64, clicks i64, flags i64) {
 
 // MouseDrag extends the selection to (x, y) while the button is held.
 fn (ed mut Editor) MouseDrag(x f64, y f64) {
+	if ed.mapDrag {
+		ed.mapScrollTo(y)
+		return
+	}
 	if ed.dragging {
 		ed.mouseTo(x, y, true)
 	}
@@ -66,6 +75,22 @@ fn (ed mut Editor) MouseDrag(x f64, y f64) {
 // MouseUp ends a drag.
 fn (ed mut Editor) MouseUp() {
 	ed.dragging = false
+	ed.mapDrag = false
+}
+
+// mapScrollTo scrolls so the line under y in the minimap is in the middle of the window.
+fn (ed mut Editor) mapScrollTo(y f64) {
+	let row = ed.mapStart() + i64(y / minimapRow)
+	mut top = row - ed.rows() / 2
+	let most = len(ed.Buf.Lines) - ed.rows()
+	if top > most {
+		top = most
+	}
+	if top < 0 {
+		top = 0
+	}
+	ed.Scroll = top
+	ed.Redraw = true
 }
 
 // Wheel scrolls the text by dy points (positive scrolls the text down, as a trackpad moves it).
