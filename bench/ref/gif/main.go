@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/gif"
 	"io"
+	"compress/lzw"
 	"os"
 	"strings"
 )
@@ -38,7 +39,30 @@ func main() {
 		if err != nil { panic(err) }
 		fmt.Printf("%s %s\n", hex.EncodeToString(b.Bytes()), digest(got))
 	}
+	interlaced := makeInterlaced(frame(image.Rect(0, 0, 7, 9), color.Palette{color.NRGBA{R: 240, G: 10, B: 20, A: 255}, color.NRGBA{G: 230, A: 255}, color.NRGBA{B: 220, A: 0}, color.NRGBA{R: 1, G: 2, B: 3, A: 255}}, 2))
+	decoded, err := gif.DecodeAll(bytes.NewReader(interlaced)); if err != nil { panic(err) }
+	fmt.Printf("%s %s\n", hex.EncodeToString(interlaced), digest(decoded))
 }
+
+func makeInterlaced(m *image.Paletted) []byte {
+	w, h := m.Rect.Dx(), m.Rect.Dy()
+	b := []byte("GIF89a")
+	put16(&b, w); put16(&b, h); b = append(b, 0x81, 0, 0)
+	for _, c := range m.Palette { n := color.NRGBAModel.Convert(c).(color.NRGBA); b = append(b, n.R, n.G, n.B) }
+	b = append(b, 0x2c); put16(&b, 0); put16(&b, 0); put16(&b, w); put16(&b, h); b = append(b, 0x40, 2)
+	var packed bytes.Buffer
+	z := lzw.NewWriter(&packed, lzw.LSB, 2)
+	starts, steps := []int{0, 4, 2, 1}, []int{8, 8, 4, 2}
+	var pass []byte
+	for p := range starts { for y := starts[p]; y < h; y += steps[p] { pass = append(pass, m.Pix[y*w:(y+1)*w]...) } }
+	if _, err := z.Write(pass); err != nil { panic(err) }; if err := z.Close(); err != nil { panic(err) }
+	data := packed.Bytes()
+	for len(data) > 0 { n := len(data); if n > 255 { n = 255 }; b = append(b, byte(n)); b = append(b, data[:n]...); data = data[n:] }
+	b = append(b, 0, 0x3b)
+	return b
+}
+
+func put16(b *[]byte, n int) { *b = append(*b, byte(n), byte(n>>8)) }
 
 func verifyBad() {
 	s := bufio.NewScanner(os.Stdin)
