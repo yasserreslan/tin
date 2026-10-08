@@ -74,4 +74,12 @@ fn main() {
 	say.Line(textedit.DisplayCol(line, 0, 4), textedit.DisplayCol(line, 3, 4), textedit.DisplayCol(line, 6, 4), textedit.DisplayCol(line, 8, 4))
 	say.Line(textedit.DisplayCol(line, len(line), 4), textedit.RuneWidth(0x65e5), textedit.RuneWidth(0x301), textedit.RuneWidth(65))
 	say.Line(textedit.ColForDisplay(line, 1, 4), textedit.ColForDisplay(line, 2, 4), textedit.ColForDisplay(line, 4, 4), textedit.ColForDisplay(line, 99, 4) == len(line))
+
+	// line endings: CRLF text is read as lines and written back with \r\n; a lone \r in a line of LF text stays
+	let crlf = textedit.FromText("a\r\nb\r\n")
+	say.Line(crlf.CRLF, len(crlf.Lines), crlf.Text() == "a\nb\n", crlf.FileText() == "a\r\nb\r\n")
+	let lf = textedit.FromText("a\nb")
+	say.Line(lf.CRLF, lf.FileText() == "a\nb")
+	let mixed = textedit.FromText("a\r\nb\nc")
+	say.Line(mixed.CRLF, mixed.FileText() == "a\r\nb\r\nc")
 }
