@@ -96,7 +96,9 @@ fn (ws Workspace) projectPanel(t mut ui.Tree) {
 	t.Close()
 	t.Open(ui.VBox().Flex(1.0).Scrolls(), idLeftScroll)
 	if !ws.HasProj {
-		t.Text("Open a folder with File > Open Folder", render.FontUI, th.Faint, ui.Box().Pad(12.0))
+		t.Open(ui.VBox().Pad(12.0), 0)
+		t.Text("Open a folder with File > Open Folder", render.FontUI, th.Faint, ui.Box())
+		t.Close()
 	} else {
 		let rows = len(ws.Proj.Rows)
 		let viewH = ws.H - titleH - statusH - 34.0

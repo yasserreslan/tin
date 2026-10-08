@@ -910,3 +910,8 @@ fn (ed Editor) insidePair() bool {
 	let next = charAt(line, b.Col)
 	return len(prev) > 0 && closerOf(prev) == next && len(next) > 0
 }
+
+// Empty reports whether the active tab is the untouched empty one a new editor starts with.
+fn (ed Editor) Empty() bool {
+	return len(ed.Tabs) == 1 && len(ed.Buf.Path) == 0 && !ed.Buf.Dirty && len(ed.Buf.Lines) == 1 && len(ed.Buf.Lines[0]) == 0
+}
