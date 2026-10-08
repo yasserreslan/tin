@@ -1,0 +1,14 @@
+sql: Register called twice for driver fake
+[id name]
+true
+[Int(4) Text(Ada)]
+false
+3
+17
+[Int(4) Text(Ada)]
+[id name]
+tx committed
+sql: transaction has already been committed or rolled back
+sql: database is closed
+sql: database is closed
+sql: statement is closed

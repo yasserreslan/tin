@@ -538,6 +538,9 @@ func (s *session) execute(described bool) {
 	case sql == "SELECT 1":
 		s.rows([]col{{"?column?", 23}}, [][]any{{int64(1)}}, "SELECT 1", described)
 		return
+	case sql == "SELECT 123 AS id, 'generic' AS name":
+		s.rows([]col{{"id", 23}, {"name", 25}}, [][]any{{int64(123), "generic"}}, "SELECT 1", described)
+		return
 	}
 	must(false, "unhandled SQL: "+sql)
 }

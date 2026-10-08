@@ -207,6 +207,7 @@ fn sharedChecks(exe str, out str, env []str, fake Fake, useFake bool) {
 	mut srv = startService(exe, out, env, 1)
 	let port = srv.Port
 	body(port, "/setup", "ok")
+	body(port, "/dbsql", "Int(123) Text(generic) [id name]")
 	let hostile = "o'brien \"x\"; DROP TABLE users"
 	let uid = ok(port, "/add?name=" + nettest.Quote(hostile)).Body
 	let (user, good) = tinjson.Parse(ok(port, "/user?id=" + uid).Body)

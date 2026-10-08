@@ -139,6 +139,7 @@ sh tools/ci/tin.sh loop_memory_check     # Linux: binary-trees within 3x of Go's
 sh tools/ci/tin.sh redis_check           # REDIS_ADDR=host:port for a real Redis
 sh tools/ci/tin.sh mysql_check           # MYSQL_ADDR, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE for a real MySQL
 sh tools/ci/tin.sh postgres_check        # POSTGRES_ADDR, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE for a real PostgreSQL
+sh tools/ci/tin.sh dbsql_check           # generic database/sql client and Go database/sql driver comparison
 sh tools/ci/tin.sh websocket_check
 sh tools/ci/tin.sh signal_check            # process signals and task delivery
 H2SPEC=path/to/h2spec sh tools/ci/tin.sh h2_check   # HTTP/2; without H2SPEC (and outside CI) h2spec is skipped
