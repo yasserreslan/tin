@@ -1,0 +1,336 @@
+package main
+
+// The list and ring twin, Tin side: read the operation scripts of bench/ref/list_ring (Go's container/list and
+// container/ring) on stdin, run them on cairn's List and Ring, and print the same lines, so
+// tools/ci/list_ring_check.tin can compare them (#919). The operations and the output format are in
+// bench/ref/list_ring/main.go.
+
+import "cairn"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// state is one case: two lists, and the element and ring node handles it has seen, in order.
+type state struct {
+	a     cairn.List[i64]
+	b     cairn.List[i64]
+	elems []cairn.Element[i64]
+	nodes []cairn.Ring[i64]
+}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut n = i64(0)
+	for line in twine.Split(body, "\n") {
+		let text = twine.TrimSpace(line)
+		if len(text) == 0 {
+			continue
+		}
+		n += 1
+		say.Line("case " + mint.Itoa(n))
+		runCase(text)
+	}
+}
+
+// runCase runs the operations of one case line and prints the results.
+fn runCase(line str) {
+	mut s = state{a: cairn.NewList[i64](), b: cairn.NewList[i64](), elems: []cairn.Element[i64]{}, nodes: []cairn.Ring[i64]{}}
+	for op in twine.Split(line, " ; ") {
+		let f = twine.Fields(op)
+		if len(f) == 0 {
+			continue
+		}
+		say.Line(twine.Join(f, " ") + " => " + s.exec(f))
+		s.dump()
+	}
+}
+
+// num parses an integer operand (the scripts only hold integers).
+fn num(tok str) i64 {
+	let (v, err) = mint.Atoi(tok)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// handle is the number of the handle tok (its prefix letter and digits) when it names one of the n handles seen.
+fn handle(tok str, prefix str, n i64) (i64, bool) {
+	if len(tok) < 2 || tok[0:1] != prefix {
+		return 0, false
+	}
+	let (k, err) = mint.Atoi(tok[1:])
+	if err != nil || k < 0 || k >= n {
+		return 0, false
+	}
+	return k, true
+}
+
+// list resolves a list name: a or b.
+fn (s state) list(name str) cairn.List[i64] {
+	if name == "a" {
+		return s.a
+	}
+	return s.b
+}
+
+// elemID numbers e when it is new and returns its handle number.
+fn (s mut state) elemID(e cairn.Element[i64]) i64 {
+	for i, x in s.elems {
+		if same(x, e) {
+			return i
+		}
+	}
+	s.elems = append(s.elems, e)
+	return i64(len(s.elems)) - 1
+}
+
+// nodeID numbers r when it is new and returns its handle number.
+fn (s mut state) nodeID(r cairn.Ring[i64]) i64 {
+	for i, x in s.nodes {
+		if same(x, r) {
+			return i
+		}
+	}
+	s.nodes = append(s.nodes, r)
+	return i64(len(s.nodes)) - 1
+}
+
+// elemRef prints an element as its handle, or nil.
+fn (s mut state) elemRef(e ?cairn.Element[i64]) str {
+	if let x = e {
+		return "e" + mint.Itoa(s.elemID(x))
+	}
+	return "nil"
+}
+
+// nodeRef prints a ring node as its handle, or nil.
+fn (s mut state) nodeRef(r ?cairn.Ring[i64]) str {
+	if let x = r {
+		return "r" + mint.Itoa(s.nodeID(x))
+	}
+	return "nil"
+}
+
+// elem resolves an element handle token; nil when it names no handle the case has seen.
+fn (s state) elem(tok str) ?cairn.Element[i64] {
+	let (k, ok) = handle(tok, "e", i64(len(s.elems)))
+	if !ok {
+		return nil
+	}
+	return s.elems[k]
+}
+
+// node resolves a ring node handle token; nil when it names no handle the case has seen.
+fn (s state) node(tok str) ?cairn.Ring[i64] {
+	let (k, ok) = handle(tok, "r", i64(len(s.nodes)))
+	if !ok {
+		return nil
+	}
+	return s.nodes[k]
+}
+
+// exec runs one operation and returns its result text, or "?" for an unknown handle.
+fn (s mut state) exec(f []str) str {
+	let op = f[0]
+	if op == "pf" {
+		return s.elemRef(s.list(f[1]).PushFront(num(f[2])))
+	}
+	if op == "pb" {
+		return s.elemRef(s.list(f[1]).PushBack(num(f[2])))
+	}
+	if op == "ib" || op == "ia" {
+		if let mark = s.elem(f[2]) {
+			mut m = mark
+			mut l = s.list(f[1])
+			if op == "ib" {
+				return s.elemRef(l.InsertBefore(num(f[3]), mut m))
+			}
+			return s.elemRef(l.InsertAfter(num(f[3]), mut m))
+		}
+		return "?"
+	}
+	if op == "pfl" {
+		mut l = s.list(f[1])
+		l.PushFrontList(s.list(f[2]))
+		return "-"
+	}
+	if op == "pbl" {
+		mut l = s.list(f[1])
+		l.PushBackList(s.list(f[2]))
+		return "-"
+	}
+	if op == "rm" {
+		if let e = s.elem(f[2]) {
+			mut x = e
+			mut l = s.list(f[1])
+			return mint.Itoa(l.Remove(mut x))
+		}
+		return "?"
+	}
+	if op == "mtf" || op == "mtb" {
+		if let e = s.elem(f[2]) {
+			mut x = e
+			mut l = s.list(f[1])
+			if op == "mtf" {
+				l.MoveToFront(mut x)
+			} else {
+				l.MoveToBack(mut x)
+			}
+			return "-"
+		}
+		return "?"
+	}
+	if op == "fr" {
+		return s.elemRef(s.list(f[1]).Front())
+	}
+	if op == "bk" {
+		return s.elemRef(s.list(f[1]).Back())
+	}
+	if op == "nx" || op == "pv" {
+		if let e = s.elem(f[1]) {
+			if op == "nx" {
+				return s.elemRef(e.Next())
+			}
+			return s.elemRef(e.Prev())
+		}
+		if let r = s.node(f[1]) {
+			if op == "nx" {
+				return s.nodeRef(r.Next())
+			}
+			return s.nodeRef(r.Prev())
+		}
+		return "?"
+	}
+	if op == "new" {
+		mut vals = []i64{}
+		for tok in f[1:] {
+			vals = append(vals, num(tok))
+		}
+		if let r = cairn.NewRing(vals) {
+			let first = len(s.nodes)
+			mut p = r
+			for i in 0..len(vals) {
+				s.nodes = append(s.nodes, p)
+				p = p.Next()
+			}
+			return "r" + mint.Itoa(i64(first))
+		}
+		return "nil"
+	}
+	if op == "link" {
+		if let r = s.node(f[1]) {
+			if let t = s.node(f[2]) {
+				mut rr = r
+				mut tt = t
+				return s.nodeRef(rr.Link(mut tt))
+			}
+		}
+		return "?"
+	}
+	if op == "unlink" {
+		if let r = s.node(f[1]) {
+			mut rr = r
+			return s.nodeRef(rr.Unlink(num(f[2])))
+		}
+		return "?"
+	}
+	if op == "move" {
+		if let r = s.node(f[1]) {
+			return s.nodeRef(r.Move(num(f[2])))
+		}
+		return "?"
+	}
+	if op == "do" {
+		if let r = s.node(f[1]) {
+			mut vals = []str{}
+			r.Do(fn(v i64) {
+				vals = append(vals, mint.Itoa(v))
+			})
+			return "[" + twine.Join(vals, " ") + "]"
+		}
+		return "?"
+	}
+	if op == "len" {
+		if let r = s.node(f[1]) {
+			return mint.Itoa(r.Len())
+		}
+		return "?"
+	}
+	return "?"
+}
+
+// walk returns the elements of l from its front, in order.
+fn walk(l cairn.List[i64]) []cairn.Element[i64] {
+	mut out = []cairn.Element[i64]{}
+	mut e = l.Front()
+	for {
+		if let x = e {
+			out = append(out, x)
+			e = x.Next()
+		} else {
+			break
+		}
+	}
+	return out
+}
+
+// values returns the values of l from its front (forward) or back (backward).
+fn values(xs []cairn.Element[i64]) str {
+	mut parts = []str{}
+	for x in xs {
+		parts = append(parts, mint.Itoa(x.Value))
+	}
+	return twine.Join(parts, " ")
+}
+
+// contains reports whether e is one of xs.
+fn contains(xs []cairn.Element[i64], e cairn.Element[i64]) bool {
+	for x in xs {
+		if same(x, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// dump prints both lists and every handle. Every live element is numbered first, in list order (a, then b).
+fn (s mut state) dump() {
+	let fa = walk(s.a)
+	let fb = walk(s.b)
+	for x in fa {
+		s.elemID(x)
+	}
+	for x in fb {
+		s.elemID(x)
+	}
+	say.Line("list a len=" + mint.Itoa(s.a.Len()) + " front=" + s.elemRef(s.a.Front()) + " back=" + s.elemRef(s.a.Back()) + " fwd=[" + values(fa) + "] rev=[" + values(reversed(fa)) + "]")
+	say.Line("list b len=" + mint.Itoa(s.b.Len()) + " front=" + s.elemRef(s.b.Front()) + " back=" + s.elemRef(s.b.Back()) + " fwd=[" + values(fb) + "] rev=[" + values(reversed(fb)) + "]")
+	for id in 0..len(s.elems) {
+		let e = s.elems[id]
+		mut own = "-"
+		if contains(fa, e) {
+			own = "a"
+		} else if contains(fb, e) {
+			own = "b"
+		}
+		say.Line("e" + mint.Itoa(i64(id)) + " val=" + mint.Itoa(e.Value) + " own=" + own + " next=" + s.elemRef(e.Next()) + " prev=" + s.elemRef(e.Prev()))
+	}
+	for id in 0..len(s.nodes) {
+		let r = s.nodes[id]
+		say.Line("r" + mint.Itoa(i64(id)) + " val=" + mint.Itoa(r.Value) + " next=" + s.nodeRef(r.Next()) + " prev=" + s.nodeRef(r.Prev()))
+	}
+}
+
+// reversed returns xs in reverse order.
+fn reversed(xs []cairn.Element[i64]) []cairn.Element[i64] {
+	mut out = []cairn.Element[i64]{}
+	for i in 0..len(xs) {
+		out = append(out, xs[len(xs)-1-i])
+	}
+	return out
+}

@@ -1,0 +1,134 @@
+package main
+
+import "cairn"
+import "mint"
+import "say"
+import "twine"
+
+// container/list and container/ring in cairn, on hand-checked cases (the Go twin with generated cases is
+// tools/ci/list_ring_check.tin). Every line below was worked out by hand from Go's rules before this file was run.
+
+// vals returns the values of l as "[1 2 3]", forward, or backward when back is true.
+fn vals(l cairn.List[i64], back bool) str {
+	mut xs = []str{}
+	if back {
+		mut e = l.Back()
+		for {
+			if let x = e {
+				xs = append(xs, mint.Itoa(x.Value))
+				e = x.Prev()
+			} else {
+				break
+			}
+		}
+	} else {
+		mut e = l.Front()
+		for {
+			if let x = e {
+				xs = append(xs, mint.Itoa(x.Value))
+				e = x.Next()
+			} else {
+				break
+			}
+		}
+	}
+	return "[" + twine.Join(xs, " ") + "]"
+}
+
+// ringVals returns the values of r's ring as "[1 2 3]", starting at r and going forward.
+fn ringVals(r cairn.Ring[i64]) str {
+	mut xs = []str{}
+	r.Do(fn(v i64) {
+		xs = append(xs, mint.Itoa(v))
+	})
+	return "[" + twine.Join(xs, " ") + "]"
+}
+
+fn main() {
+	// Lists: pushes, moves and removes.
+	mut l = cairn.NewList[i64]()
+	let one = l.PushBack(1)
+	mut two = l.PushBack(2)
+	mut three = l.PushBack(3)
+	say.Line("A1", vals(l, false), vals(l, true), l.Len())
+	mut zero = l.PushFront(0)
+	say.Line("A2", vals(l, false), vals(l, true), l.Len())
+	l.MoveToFront(mut three)
+	say.Line("A3", vals(l, false), vals(l, true))
+	l.MoveToBack(mut zero)
+	say.Line("A4", vals(l, false), vals(l, true))
+	l.MoveToBack(mut zero)
+	l.MoveToFront(mut three)
+	say.Line("A5", vals(l, false))
+	say.Line("A6", l.Remove(mut two), vals(l, false), vals(l, true), l.Len())
+	say.Line("A7", l.Remove(mut two), vals(l, false), l.Len())
+	l.MoveToFront(mut two)
+	let stale = l.InsertBefore(9, mut two)
+	say.Line("A8", vals(l, false), stale == nil)
+	if let f = l.Front() {
+		say.Line("A9", f.Value, f.Prev() == nil)
+	}
+	if let b = l.Back() {
+		say.Line("A9", b.Value, b.Next() == nil)
+	}
+	let seven = l.InsertBefore(7, mut one)
+	let eight = l.InsertAfter(8, mut zero)
+	say.Line("A10", vals(l, false), vals(l, true), l.Len(), seven != nil, eight != nil)
+
+	// PushFrontList and PushBackList copy the other list's values; other is unchanged, and may be the list itself.
+	mut other = cairn.NewList[i64]()
+	other.PushBack(7)
+	other.PushBack(8)
+	mut l2 = cairn.NewList[i64]()
+	l2.PushBack(5)
+	l2.PushBack(6)
+	l2.PushFrontList(other)
+	say.Line("B1", vals(l2, false), vals(other, false), l2.Len())
+	l2.PushBackList(other)
+	say.Line("B2", vals(l2, false), vals(l2, true), l2.Len())
+	mut l3 = cairn.NewList[i64]()
+	l3.PushBack(1)
+	l3.PushBack(2)
+	l3.PushFrontList(l3)
+	say.Line("B3", vals(l3, false))
+	l3.PushBackList(l3)
+	say.Line("B4", vals(l3, false), l3.Len())
+
+	// A removed element is not in its list any more; an element of another list is left alone.
+	mut l4 = cairn.NewList[i64]()
+	mut foreign = l4.PushBack(42)
+	mut l5 = cairn.NewList[i64]()
+	l5.PushBack(9)
+	say.Line("C1", l5.Remove(mut foreign), vals(l5, false), vals(l4, false))
+	l5.MoveToFront(mut foreign)
+	l5.MoveToBack(mut foreign)
+	say.Line("C2", vals(l5, false), vals(l4, false))
+	say.Line("C3", l4.Remove(mut foreign), vals(l4, false), l4.Len())
+
+	// Rings: NewRing, Do, Next, Prev, Move, Len.
+	let ring = cairn.NewRing([]i64{1, 2, 3})
+	if let r = ring {
+		say.Line("E1", ringVals(r), r.Len(), r.Next().Value, r.Prev().Value, r.Move(2).Value, r.Move(-1).Value, r.Move(4).Value)
+
+		// Link joins a ring after r and returns r's old next; Unlink removes the nodes after r.
+		if let s = cairn.NewRing([]i64{10, 11}) {
+			mut s2 = s
+			let old = r.Link(mut s2)
+			say.Line("E2", old.Value, ringVals(r), r.Len())
+			mut rr = r
+			let gone = rr.Unlink(2)
+			if let g = gone {
+				say.Line("E3", ringVals(g), ringVals(r), r.Len())
+			}
+			let none = rr.Unlink(0)
+			say.Line("E4", none == nil, rr.Unlink(-3) == nil, ringVals(r))
+		}
+	}
+	if let q = cairn.NewRing([]i64{5}) {
+		mut q2 = q
+		let same1 = q2.Link(mut q2)
+		say.Line("E5", same1.Value, ringVals(q), q.Len())
+	}
+	let empty = cairn.NewRing(([]i64{}))
+	say.Line("E6", empty == nil)
+}
