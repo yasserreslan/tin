@@ -131,6 +131,22 @@ shape File {
 	mut Close() !
 }
 
+// FileReader is an open File as an io.Reader, what Reader returns: a dyn File satisfies only its
+// own shape (dyn-to-dyn widening, E514, is not built), so io.Copy and io.ReadAll take this.
+type FileReader struct {
+	f dyn File
+}
+
+// Reader is f as an io.Reader: its Read is f's.
+fn Reader(f dyn File) FileReader {
+	return FileReader{f: f}
+}
+
+// Read reads from the file.
+fn (r mut FileReader) Read(buf mut []u8) !i64 {
+	return try r.f.Read(mut buf)
+}
+
 // FS is a file system: Open opens a file by a name ValidPath accepts.
 shape FS {
 	Open(name str) !dyn File
@@ -517,7 +533,7 @@ fn (d DirFS) Lstat(name str) !FileInfo {
 // ReadDir lists the named directory, sorted by name, with each entry's type (not following links).
 fn (d DirFS) ReadDir(name str) ![]DirEntry {
 	let full = try d.join("readdir", name)
-	return try listDir(full, name)
+	return try listDir(full, name, "open")
 }
 
 // ReadFile reads the whole named file with quarry.ReadFile (its 64 MiB bound and its waits in a task).
@@ -536,9 +552,9 @@ fn (d DirFS) Sub(dir str) !DirFS {
 }
 
 // listDir lists the directory at full; faults name name.
-fn listDir(full str, name str) ![]DirEntry {
+fn listDir(full str, name str, op str) ![]DirEntry {
 	let es = quarry.ReadDirEntries(full) catch err {
-		fail osFault(err, full, name)
+		fail osFaultOp(err, full, name, op)
 	}
 	mut out = make([]DirEntry, 0, len(es))
 	for e in es {
@@ -587,6 +603,11 @@ fn hasNUL(s str) bool {
 // osFault is quarry's fault err about the path full rewritten as Go's PathError about name: the
 // same operation and system text, matching ErrNotExist, ErrPermission or ErrExist as Go's errno does.
 fn osFault(err fault, full str, name str) ! {
+	fail osFaultOp(err, full, name, "")
+}
+
+// osFaultOp rewrites quarry's path to the Go operation and fs name.
+fn osFaultOp(err fault, full str, name str, requestedOp str) ! {
 	let msg = fault.Message(err)
 	let mark = " " + full + ": "
 	let at = indexOf(msg, mark)
@@ -594,7 +615,9 @@ fn osFault(err fault, full str, name str) ! {
 		fail err
 	}
 	mut op = msg[0:at]
-	if op == "fdopendir" {
+	if requestedOp != "" {
+		op = requestedOp
+	} else if op == "fdopendir" {
 		op = readDirOp
 	}
 	let text = msg[at+len(mark) : len(msg)]
@@ -662,7 +685,7 @@ fn openRead(full str, name str) !i64 {
 	return fd
 }
 
-// osFile is a file or directory DirFS opened.
+// osFile is a file or directory DirFS opened. As Go's os.File, its faults name the joined path.
 type osFile struct {
 	name   str
 	full   str
@@ -678,10 +701,10 @@ type osFile struct {
 // Read reads the next bytes of the file into buf: 0 at the end. A directory cannot be read.
 fn (f mut osFile) Read(buf mut []u8) !i64 {
 	if f.closed {
-		fail PathError("read", f.name, ErrClosed)
+		fail PathError("read", f.full, ErrClosed)
 	}
 	if f.dir {
-		fail PathError("read", f.name, errnoFault(eISDIR))
+		fail PathError("read", f.full, errnoFault(eISDIR))
 	}
 	if len(buf) == 0 {
 		return 0
@@ -693,7 +716,7 @@ fn (f mut osFile) Read(buf mut []u8) !i64 {
 		}
 		let e = rt_errno()
 		if e != EINTR {
-			fail PathError("read", f.name, errnoFault(e))
+			fail PathError("read", f.full, errnoFault(e))
 		}
 	}
 	return 0
@@ -702,7 +725,7 @@ fn (f mut osFile) Read(buf mut []u8) !i64 {
 // Stat describes the file as it was when it was opened.
 fn (f osFile) Stat() !FileInfo {
 	if f.closed {
-		fail PathError("stat", f.name, ErrClosed)
+		fail PathError("stat", f.full, ErrClosed)
 	}
 	return f.info
 }
@@ -711,13 +734,13 @@ fn (f osFile) Stat() !FileInfo {
 // an empty slice at the end.
 fn (f mut osFile) ReadDir(n i64) ![]DirEntry {
 	if f.closed {
-		fail PathError("readdir", f.name, ErrClosed)
+		fail PathError("readdir", f.full, ErrClosed)
 	}
 	if !f.dir {
-		fail PathError(readDirOp, f.name, errnoFault(eNOTDIR))
+		fail PathError(readDirOp, f.full, errnoFault(eNOTDIR))
 	}
 	if !f.listed {
-		f.list = try listDir(f.full, f.name)
+		f.list = try listDir(f.full, f.full, "readdirent")
 		f.listed = true
 	}
 	let left = i64(len(f.list)) - f.at
@@ -733,7 +756,7 @@ fn (f mut osFile) ReadDir(n i64) ![]DirEntry {
 // Close closes the file; a second Close fails with ErrClosed.
 fn (f mut osFile) Close() ! {
 	if f.closed {
-		fail PathError("close", f.name, ErrClosed)
+		fail PathError("close", f.full, ErrClosed)
 	}
 	f.closed = true
 	if f.fd >= 0 {

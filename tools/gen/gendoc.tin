@@ -25,6 +25,7 @@ fn packages() []str {
 		"fault", "fault chains and standard sentinels (errors)",
 		"argo", "JSON (encoding/json)",
 		"io", "streaming shapes (io)",
+		"fs", "file system interfaces and helpers (io/fs)",
 		"anvil", "HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http)",
 		"hearth", "cores and threads (runtime)",
 		"relay", "messages between cores (channels)",
