@@ -214,7 +214,7 @@ fn EncodeAll(g GIF) str {
 		if trans >= 0 { control |= 1 }
 		out = append(out, 0x21, 0xf9, 4, u8(control))
 		put16(mut out, d)
-	if trans < 0 { out = append(out, 0) } else { out = append(out, u8(trans)) }
+		if trans < 0 { out = append(out, 0) } else { out = append(out, u8(trans)) }
 		out = append(out, 0)
 		out = append(out, 0x2c)
 		put16(mut out, r.Min.X)
