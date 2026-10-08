@@ -1,0 +1,354 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare netip with Go's net/netip.
+//
+// A corpus (Go's own netip_test.go strings in toolchain/tests/data/netip/go_test_strings.txt, a hand-written edge table, and
+// generated cases from a fixed seed, so both sides see the same lines) is fed to bench/ref/netip and tools/ci/fixtures/netip.tin;
+// the check compares their lines: ParseAddr, ParsePrefix and ParseAddrPort of valid and invalid strings with their exact faults,
+// String, StringExpanded, every classification, Unmap, Next, Prev, the byte and text round trips, Addr.Prefix at the edge
+// lengths, Compare and Less, Prefix.Contains, Overlaps, Masked and Compare, AddrPort.Compare, WithZone, AddrFromSlice,
+// UnmarshalBinary and PrefixFrom.
+
+const SEED = 738
+
+fn hexOf(s str) str {
+	let digits = "0123456789abcdef"
+	mut out = make([]u8, 0, 2 * len(s))
+	for i in 0..len(s) {
+		out = append(out, digits[s[i] >> 4])
+		out = append(out, digits[s[i] & 15])
+	}
+	return str(out)
+}
+
+fn line1(op str, a str) str {
+	return op + " x" + hexOf(a)
+}
+
+fn line2(op str, a str, b str) str {
+	return op + " x" + hexOf(a) + " x" + hexOf(b)
+}
+
+// edges is the hand-written table: the quirks of net/netip's parser and the boundaries of each classification.
+fn edges() []str {
+	return []str{"", "1", "1.", ".", ":", "::", ":::", "%", "%eth0", "::%", "::%eth0", "1.2.3.4%eth0", "1.2.3.4/", "/",
+		"0.0.0.0", "255.255.255.255", "255.255.255.256", "256.0.0.0", "1.2.3.04", "1.2.3.00", "1.2.3.0", "00.0.0.0", "0.0.0.00",
+		"1.2.3.4.", "1.2.3.4.5", ".1.2.3.4", "1..2.3", "1.2.3", "1.2", "1.2.3.-4", "1.2.3.+4", "1.2.3.4 ", " 1.2.3.4", "1.2.3.4\n",
+		"１.２.３.４", "1.2.3.é", "é", "fe80::é", "fe80::1%é", "fe80::1%eth0%x", "fe80::1%eth 0", "fe80::%25eth0",
+		"::ffff:1.2.3.4", "::FFFF:1.2.3.4", "::ffff:0.0.0.0", "::ffff:255.255.255.255", "::ffff:1.2.3.4%eth0", "::ffff:1.2.3.04",
+		"::ffff:1.2.3", "::ffff:1.2.3.4.5", "::fffe:1.2.3.4", "::1.2.3.4", "1::1.2.3.4", "1:2:3:4:5:6:1.2.3.4", "1:2:3:4:5:6:7:1.2.3.4",
+		"1:2:3:4:5:1.2.3.4", "1:2:3:4:5:6:7:8:1.2.3.4", "::1:2:3:4:5:6:1.2.3.4", "1.2.3.4::", "::1.2.3.4:5", "1.2.3.4:5::",
+		"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF", "0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
+		"::0", "0::", "::1", "1::", "1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7::", "::2:3:4:5:6:7:8",
+		"1:2:3:4:5:6:7:8::", "::1:2:3:4:5:6:7:8", "1:2:3:4::5:6:7:8", "1::2::3", "1:::2", "1:2:", ":1:2", "12345::", "fffff::", "0fffff::",
+		"00000::", "1:0000:2::", "1:00000:2::", "g::", "::g", "1:2:3:4:5:6:7:g", "fe80::1%", "fe80::1%%", "ff02::1", "ff01::1",
+		"ff11::1", "ff12::1", "ff1e::1", "ff05::1", "ff32::1", "fe80::", "febf:ffff::", "fec0::", "fe7f:ffff::", "fc00::", "fd00::1",
+		"fe00::", "fb00::", "2001:db8::", "2000::", "1fff::", "::ffff:169.254.1.1", "::ffff:224.0.0.1", "::ffff:224.0.1.1",
+		"::ffff:127.0.0.1", "::ffff:10.1.1.1", "::ffff:172.31.1.1", "::ffff:172.32.1.1", "::ffff:192.168.1.1", "169.254.0.0",
+		"169.253.255.255", "169.255.0.0", "224.0.0.0", "224.0.0.255", "224.0.1.0", "239.255.255.255", "240.0.0.0", "223.255.255.255",
+		"127.0.0.0", "127.255.255.255", "128.0.0.0", "126.255.255.255", "10.0.0.0", "10.255.255.255", "11.0.0.0", "9.255.255.255",
+		"172.15.255.255", "172.16.0.0", "172.31.255.255", "172.32.0.0", "192.167.255.255", "192.168.0.0", "192.168.255.255",
+		"192.169.0.0", "::ffff:0:0", "::ffff:ffff:ffff", "0:0:0:0:0:ffff:7f00:1", "::ffff:7f00:1%lo", "::%lo", "::1%lo",
+		"0.0.0.0%x", "fe80::1%1", "fe80::1%[x]", "fe80::1%/64", "[::1]", "[1.2.3.4]", "1.2.3.4:80", "[::1]:80"}
+}
+
+// v4Text is a dotted IPv4 address, its fields biased to the classification boundaries.
+fn v4Text(rng mut dice.Rand) str {
+	let firsts = []i64{0, 1, 9, 10, 11, 100, 126, 127, 128, 169, 171, 172, 173, 191, 192, 193, 223, 224, 225, 239, 240, 254, 255}
+	let rest = []i64{0, 1, 15, 16, 31, 32, 167, 168, 169, 253, 254, 255}
+	mut f = []i64{}
+	for k in 0..4 {
+		let pick = rng.Range(0, 4)
+		if k == 0 && pick < 2 {
+			f = append(f, firsts[rng.Range(0, len(firsts))])
+		} else if pick == 0 {
+			f = append(f, rest[rng.Range(0, len(rest))])
+		} else {
+			f = append(f, rng.Range(0, 256))
+		}
+	}
+	return mint.Itoa(f[0]) + "." + mint.Itoa(f[1]) + "." + mint.Itoa(f[2]) + "." + mint.Itoa(f[3])
+}
+
+// group is one IPv6 group's text, in random case and sometimes with leading zeros.
+fn group(rng mut dice.Rand, v i64) str {
+	mut s = say.Fmt("%x", v)
+	let r = rng.Range(0, 6)
+	if r == 0 {
+		s = say.Fmt("%04x", v)
+	} else if r == 1 {
+		s = twine.ToUpper(s)
+	}
+	return s
+}
+
+// v6Text is an IPv6 address: groups biased to the special ranges, a random run written as ::, sometimes an embedded IPv4
+// address, an IPv4-mapped form or a zone.
+fn v6Text(rng mut dice.Rand) str {
+	let heads = []i64{0, 0x2001, 0x2000, 0x1fff, 0xfe80, 0xfebf, 0xfec0, 0xfe7f, 0xfc00, 0xfd12, 0xfb00, 0xff01, 0xff02, 0xff05,
+		0xff11, 0xff12, 0xff31, 0xffff, 0x100, 0x64}
+	let pool = []i64{0, 0, 0, 0, 1, 2, 0xffff, 0xfffe, 0x8000, 0xabcd, 0xdb8, 0x7f00}
+	mut g = []i64{}
+	for k in 0..8 {
+		if k == 0 && rng.Range(0, 3) > 0 {
+			g = append(g, heads[rng.Range(0, len(heads))])
+		} else if rng.Range(0, 3) == 0 {
+			g = append(g, rng.Range(0, 0x10000))
+		} else {
+			g = append(g, pool[rng.Range(0, len(pool))])
+		}
+	}
+	let form = rng.Range(0, 10)
+	if form == 0 {
+		// IPv4-mapped.
+		for k in 0..5 {
+			g[k] = 0
+		}
+		g[5] = 0xffff
+	}
+	if form == 1 {
+		for k in 0..8 {
+			g[k] = 0
+		}
+		g[7] = rng.Range(0, 3)
+	}
+	let embed = form == 0 || rng.Range(0, 8) == 0
+	mut n = 8
+	if embed {
+		n = 6
+	}
+	// A run of zero groups to write as ::, or none.
+	mut runStart = -1
+	mut runEnd = -1
+	if rng.Range(0, 4) > 0 {
+		runStart = rng.Range(0, n)
+		runEnd = runStart + rng.Range(1, n - runStart + 1)
+		for k in runStart..runEnd {
+			g[k] = 0
+		}
+	}
+	mut s = ""
+	mut k = 0
+	for k < n {
+		if k == runStart {
+			s = s + "::"
+			k = runEnd
+			continue
+		}
+		if k > 0 && !twine.HasSuffix(s, ":") {
+			s = s + ":"
+		}
+		s = s + group(mut rng, g[k])
+		k += 1
+	}
+	if embed {
+		if len(s) > 0 && !twine.HasSuffix(s, ":") {
+			s = s + ":"
+		}
+		s = s + v4Text(mut rng)
+	}
+	if rng.Range(0, 6) == 0 {
+		let zones = []str{"eth0", "1", "lo", "en0", "a%b", "Ethernet 2", "é", "z"}
+		s = s + "%" + zones[rng.Range(0, len(zones))]
+	}
+	return s
+}
+
+// addrText is an IPv4 or IPv6 address text.
+fn addrText(rng mut dice.Rand) str {
+	if rng.Range(0, 2) == 0 {
+		return v4Text(mut rng)
+	}
+	return v6Text(mut rng)
+}
+
+// mutate changes one to three bytes of s: a deletion, an insertion or a replacement from the parser's alphabet.
+fn mutate(rng mut dice.Rand, s str) str {
+	let alphabet = ":.%/[]0129afAFgx -+é"
+	mut b = []u8(s)
+	for t in 0..rng.Range(1, 4) {
+		let op = rng.Range(0, 3)
+		let c = alphabet[rng.Range(0, len(alphabet))]
+		if op == 0 && len(b) > 0 {
+			let at = rng.Range(0, len(b))
+			mut nb = make([]u8, 0, len(b))
+			for i in 0..len(b) {
+				if i != at {
+					nb = append(nb, b[i])
+				}
+			}
+			b = nb
+		} else if op == 1 {
+			let at = rng.Range(0, len(b) + 1)
+			mut nb = make([]u8, 0, len(b) + 1)
+			for i in 0..at {
+				nb = append(nb, b[i])
+			}
+			nb = append(nb, c)
+			for i in at..len(b) {
+				nb = append(nb, b[i])
+			}
+			b = nb
+		} else if len(b) > 0 {
+			b[rng.Range(0, len(b))] = c
+		}
+	}
+	return str(b)
+}
+
+// bitsText is a prefix length text: in range, at the edges, out of range or malformed.
+fn bitsText(rng mut dice.Rand) str {
+	let odd = []str{"", "0", "00", "01", "+1", "-1", "-0", "1a", " 8", "33", "128", "129", "255", "256", "999",
+		"9223372036854775807", "9223372036854775808", "99999999999999999999", "4294967296"}
+	if rng.Range(0, 5) == 0 {
+		return odd[rng.Range(0, len(odd))]
+	}
+	return mint.Itoa(rng.Range(0, 130))
+}
+
+// portText is a port text: in range, at the edges or malformed.
+fn portText(rng mut dice.Rand) str {
+	let odd = []str{"", "0", "00", "080", "65535", "65536", "99999", "+80", "-1", "8a", " 80", "1_000", "000000000000080"}
+	if rng.Range(0, 5) == 0 {
+		return odd[rng.Range(0, len(odd))]
+	}
+	return mint.Itoa(rng.Range(0, 65536))
+}
+
+// addrPortText is an address and a port, bracketed as it should be or not.
+fn addrPortText(rng mut dice.Rand) str {
+	let a = addrText(mut rng)
+	let p = portText(mut rng)
+	let r = rng.Range(0, 6)
+	if r == 0 {
+		return "[" + a + "]:" + p
+	}
+	if r == 1 {
+		return a + ":" + p
+	}
+	if twine.Contains(a, ":") {
+		return "[" + a + "]:" + p
+	}
+	return a + ":" + p
+}
+
+// near is a, or a with its last byte replaced by a digit: an equal or close address for Compare, Contains and Overlaps.
+fn near(rng mut dice.Rand, a str) str {
+	if len(a) == 0 || rng.Range(0, 3) == 0 {
+		return a
+	}
+	let digits = "0123456789"
+	mut b = []u8(a)
+	b[len(b) - 1] = digits[rng.Range(0, 10)]
+	return str(b)
+}
+
+fn corpus() []str {
+	mut rng = dice.New(SEED)
+	mut lines = []str{}
+	mut table = edges()
+	for s in ci.Lines(ci.Read(ci.Join(ci.Root(), "toolchain/tests/data/netip/go_test_strings.txt"))) {
+		table = append(table, s)
+	}
+	for s in table {
+		lines = append(lines, line1("A", s))
+		lines = append(lines, line1("P", s))
+		lines = append(lines, line1("T", s))
+		lines = append(lines, line1("P", s + "/" + bitsText(mut rng)))
+		lines = append(lines, line1("T", "[" + s + "]:80"))
+		lines = append(lines, line1("T", s + ":" + portText(mut rng)))
+		lines = append(lines, line2("W", s, "eth0"))
+		lines = append(lines, line2("W", s, ""))
+		lines = append(lines, line2("R", s, mint.Itoa(rng.Range(-2, 131))))
+	}
+	// Generated addresses, their mutations, prefixes and address/port pairs.
+	for i in 0..3000 {
+		let a = addrText(mut rng)
+		lines = append(lines, line1("A", a))
+		lines = append(lines, line1("A", mutate(mut rng, a)))
+		lines = append(lines, line1("P", a + "/" + bitsText(mut rng)))
+		lines = append(lines, line1("P", mutate(mut rng, a + "/" + bitsText(mut rng))))
+		lines = append(lines, line1("T", addrPortText(mut rng)))
+		lines = append(lines, line1("T", mutate(mut rng, addrPortText(mut rng))))
+	}
+	// Pairs: Compare and Less, Contains, Overlaps, AddrPort.Compare.
+	for i in 0..3000 {
+		let a = addrText(mut rng)
+		mut b = near(mut rng, a)
+		if rng.Range(0, 3) == 0 {
+			b = addrText(mut rng)
+		}
+		lines = append(lines, line2("C", a, b))
+		let p = a + "/" + mint.Itoa(rng.Range(0, 129))
+		lines = append(lines, line2("K", p, b))
+		lines = append(lines, line2("K", p, addrText(mut rng)))
+		mut q = b + "/" + mint.Itoa(rng.Range(0, 129))
+		if rng.Range(0, 2) == 0 {
+			q = addrText(mut rng) + "/" + bitsText(mut rng)
+		}
+		lines = append(lines, line2("O", p, q))
+		lines = append(lines, line2("Q", addrPortText(mut rng), addrPortText(mut rng)))
+	}
+	for i in 0..300 {
+		let zones = []str{"", "eth0", "1", "é", "a b", "%", "lo0"}
+		lines = append(lines, line2("W", addrText(mut rng), zones[rng.Range(0, len(zones))]))
+		mut raw = make([]u8, 0, 24)
+		let sizes = []i64{0, 1, 3, 4, 5, 15, 16, 17, 20}
+		let n = sizes[rng.Range(0, len(sizes))]
+		for k in 0..n {
+			raw = append(raw, u8(rng.I64n(256)))
+		}
+		if n >= 16 && rng.Range(0, 2) == 0 {
+			for k in 0..10 {
+				raw[k] = 0
+			}
+			raw[10] = 0xff
+			raw[11] = 0xff
+		}
+		lines = append(lines, line1("F", str(raw)))
+		lines = append(lines, line2("R", addrText(mut rng), mint.Itoa(rng.Range(-2, 131))))
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/netip")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "netip-")
+	let tin = ci.Join(work, "netip-tin")
+	ci.BuildTin("tools/ci/fixtures/netip.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "netip-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/netip"}, ci.Root(), 300), "go build netip")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "netip: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ": " + lines[i])
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "netip: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("netip: " + mint.Itoa(len(want)) + " lines match Go's net/netip")
+}

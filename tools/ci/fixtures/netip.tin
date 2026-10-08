@@ -1,0 +1,237 @@
+package main
+
+// The netip twin, Tin side: read the hex corpus of bench/ref/netip (Go's net/netip) on stdin and print the same lines, so
+// tools/ci/netip_check.tin can compare them (#738). Every argument is the hex of its bytes; a string that does not parse
+// stands for the zero value.
+//
+//	A <s>        ParseAddr: the text forms, the kind, the zone, every classification, Unmap, Next, Prev,
+//	             the byte forms, the text and binary round trips and Prefix(bits) for the edge lengths
+//	P <s>        ParsePrefix: String, Bits, IsValid, IsSingleIP, Addr, Masked and the text round trip
+//	T <s>        ParseAddrPort: String, Port, Addr and the text round trip
+//	C <a> <b>    Addr Compare, Less and ==
+//	K <p> <a>    Prefix.Contains
+//	O <p> <q>    Prefix Overlaps, Compare and ==
+//	Q <x> <y>    AddrPort Compare and ==
+//	W <a> <z>    Addr.WithZone
+//	F <b>        AddrFromSlice and UnmarshalBinary of the bytes
+//	R <a> <n>    PrefixFrom(a, n) with n decimal text
+
+import "fault"
+import "mint"
+import "netip"
+import "quarry"
+import "say"
+import "twine"
+
+let prefixBits = []i64{-1, 0, 1, 7, 8, 9, 15, 16, 24, 31, 32, 33, 63, 64, 65, 96, 100, 127, 128, 129}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		if len(line) > 0 {
+			run(line)
+		}
+	}
+}
+
+// run handles one corpus line.
+fn run(line str) {
+	let parts = twine.Fields(line)
+	if len(parts) == 0 {
+		return
+	}
+	let op = parts[0]
+	let x = arg(parts, 1)
+	let y = arg(parts, 2)
+	if op == "A" {
+		say.Line(addrLine(x))
+	} else if op == "P" {
+		say.Line(prefixLine(x))
+	} else if op == "T" {
+		say.Line(addrPortLine(x))
+	} else if op == "C" {
+		let a = addrOr(x)
+		let b = addrOr(y)
+		say.Line("C", a.Compare(b), tf(a.Less(b)), tf(b.Less(a)), tf(a == b))
+	} else if op == "K" {
+		say.Line("K", tf(prefixOr(x).Contains(addrOr(y))))
+	} else if op == "O" {
+		let p = prefixOr(x)
+		let q = prefixOr(y)
+		say.Line("O", tf(p.Overlaps(q)), tf(q.Overlaps(p)), p.Compare(q), tf(p == q))
+	} else if op == "Q" {
+		let a = addrPortOr(x)
+		let b = addrPortOr(y)
+		say.Line("Q", a.Compare(b), tf(a == b))
+	} else if op == "W" {
+		let a = addrOr(x).WithZone(y)
+		say.Line("W", q(a.String()), q(a.Zone()), tf(a.IsUnspecified()), q(a.StringExpanded()))
+	} else if op == "F" {
+		let (a, ok) = netip.AddrFromSlice([]u8(x))
+		mut u = netip.Addr{}
+		let err = u.UnmarshalBinary([]u8(x))
+		say.Line("F", q(a.String()), tf(ok), q(u.String()), faultText(err))
+	} else if op == "R" {
+		let (n, err) = mint.Atoi(y)
+		if err != nil {
+			panic("bad bits " + y)
+		}
+		let p = netip.PrefixFrom(addrOr(x), n)
+		say.Line("R", q(p.String()), p.Bits(), tf(p.IsValid()), q(p.Addr().String()), q(p.Masked().String()))
+	} else {
+		panic("unknown op " + op)
+	}
+}
+
+// arg is the decoded hex argument i, or "".
+fn arg(parts []str, i i64) str {
+	if i >= len(parts) {
+		return ""
+	}
+	let h = twine.TrimPrefix(parts[i], "x")
+	mut out = make([]u8, 0, len(h) / 2)
+	mut k = 0
+	for k + 1 < len(h) {
+		out = append(out, u8(nibble(h[k]) << 4 | nibble(h[k + 1])))
+		k += 2
+	}
+	return str(out)
+}
+
+fn nibble(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c - 'a') + 10
+	}
+	panic("bad hex")
+}
+
+fn hex(b []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = make([]u8, 0, 2 * len(b))
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+fn q(s str) str {
+	return mint.Quote(s)
+}
+
+fn tf(b bool) str {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+fn bit(b bool) str {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+fn faultText(err fault) str {
+	if err == nil {
+		return "ok"
+	}
+	return q(fault.Message(err))
+}
+
+fn addrOr(s str) netip.Addr {
+	let (a, err) = netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return a
+}
+
+fn prefixOr(s str) netip.Prefix {
+	let (p, err) = netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}
+	}
+	return p
+}
+
+fn addrPortOr(s str) netip.AddrPort {
+	let (p, err) = netip.ParseAddrPort(s)
+	if err != nil {
+		return netip.AddrPort{}
+	}
+	return p
+}
+
+// as4 is the hex of a.As4(), or the quoted panic message.
+fn as4(a netip.Addr) str {
+	// A local copy: a value-struct parameter read inside guard gives garbage (#891).
+	let c = a
+	let v = guard {
+		hex(c.As4())
+	} catch err {
+		q(twine.TrimPrefix(fault.Message(err), "panic: "))
+	}
+	return v
+}
+
+fn addrLine(s str) str {
+	let (a, err) = netip.ParseAddr(s)
+	if err != nil {
+		return "A err " + q(fault.Message(err))
+	}
+	let flags = bit(a.IsValid()) + bit(a.Is4()) + bit(a.Is6()) + bit(a.Is4In6()) + bit(a.IsLoopback()) + bit(a.IsPrivate()) +
+		bit(a.IsUnspecified()) + bit(a.IsMulticast()) + bit(a.IsLinkLocalUnicast()) + bit(a.IsLinkLocalMulticast()) +
+		bit(a.IsInterfaceLocalMulticast()) + bit(a.IsGlobalUnicast())
+	let text = a.MarshalText()
+	let bin = a.MarshalBinary()
+	mut t = netip.Addr{}
+	let terr = t.UnmarshalText(text)
+	mut b = netip.Addr{}
+	let berr = b.UnmarshalBinary(bin)
+	mut out = "A " + q(a.String()) + " " + q(a.StringExpanded()) + " " + mint.Itoa(a.BitLen()) + " " + flags + " " + q(a.Zone())
+	out = out + " unmap=" + q(a.Unmap().String()) + " next=" + q(a.Next().String()) + " prev=" + q(a.Prev().String())
+	out = out + " slice=" + hex(a.AsSlice()) + " as16=" + hex(a.As16()) + " as4=" + as4(a) + " bin=" + hex(bin) + " text=" + q(str(text))
+	out = out + " rt=" + tf(terr == nil) + "," + tf(t == a) + "," + tf(berr == nil) + "," + tf(b == a)
+	out = out + " np=" + tf(a.Next().Prev() == a) + " pn=" + tf(a.Prev().Next() == a)
+	for n in prefixBits {
+		let (p, perr) = a.Prefix(n)
+		if perr != nil {
+			out = out + " /" + mint.Itoa(n) + ":" + q(fault.Message(perr))
+		} else {
+			out = out + " /" + mint.Itoa(n) + ":" + q(p.String())
+		}
+	}
+	return out
+}
+
+fn prefixLine(s str) str {
+	let (p, err) = netip.ParsePrefix(s)
+	if err != nil {
+		return "P err " + q(fault.Message(err))
+	}
+	let text = p.MarshalText()
+	mut t = netip.Prefix{}
+	let terr = t.UnmarshalText(text)
+	return "P " + q(p.String()) + " " + mint.Itoa(p.Bits()) + " " + tf(p.IsValid()) + " " + tf(p.IsSingleIP()) + " " + q(p.Addr().String()) +
+		" " + q(p.Masked().String()) + " text=" + q(str(text)) + " rt=" + tf(terr == nil) + "," + tf(t == p)
+}
+
+fn addrPortLine(s str) str {
+	let (p, err) = netip.ParseAddrPort(s)
+	if err != nil {
+		return "T err " + q(fault.Message(err))
+	}
+	let text = p.MarshalText()
+	mut t = netip.AddrPort{}
+	let terr = t.UnmarshalText(text)
+	return "T " + q(p.String()) + " " + mint.Itoa(i64(p.Port())) + " " + q(p.Addr().String()) + " " + tf(p.IsValid()) + " text=" + q(str(text)) +
+		" rt=" + tf(terr == nil) + "," + tf(t == p)
+}
