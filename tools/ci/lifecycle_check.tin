@@ -271,6 +271,27 @@ fn perCoreData(out str) {
 	say.Line("per-core data: examples/percore.tin builds its table in on core.start; 2 and 4 cores all answer 1000 1000 (#343)")
 }
 
+// badCores (#746): TIN_CORES=-1 used to ask for 4294967295 cores, loop on pipe() at 100% CPU, never listen and ignore SIGTERM. A value that is
+// not a core count from 1 to 1024 is named on stderr and the CPU count is used; the server answers and stops on SIGTERM.
+fn badCores(exe str, out str) {
+	for value in []str{"-1", "99999999999", "0", "abc"} {
+		let port = nettest.Port()
+		let log = ci.Join(out, "cores.log")
+		let server = nettest.StartCoded(exe, []str{}, []str{"TIN_CORES=" + value, "TIN_GRACE=1"}, log, port)
+		server.Ready(1)
+		ci.Check(nettest.Do(port, "GET", "/hello", []str{}, "").Status == 200, "lifecycle: /hello with TIN_CORES=" + value)
+		server.Signal("TERM")
+		let (code, ended) = server.ExitCode(3.0)
+		if !ended {
+			server.Signal("KILL")
+		}
+		ci.Check(ended && code == 0, "lifecycle: exit " + mint.Itoa(code) + " with TIN_CORES=" + value)
+		let text = ci.Read(log)
+		ci.Check(twine.Contains(text, "anvil: TIN_CORES=" + value + " is not a core count from 1 to 1024; serving on "), "lifecycle: TIN_CORES=" + value + " was not named: " + text)
+	}
+	say.Line("TIN_CORES=-1, 99999999999, 0, abc: named on stderr, served on the CPU count, exit 0 on SIGTERM (#746)")
+}
+
 fn main() {
 	let out = ci.Join(ci.Root(), "bin/ci/lifecycle")
 	ci.Mkdirs(out)
@@ -284,6 +305,7 @@ fn main() {
 	serveInSay(out)
 	clientAddr(out)
 	perCoreData(out)
+	badCores(exe, out)
 	ci.Pass("lifecycle: startup failures, drain, admission, serve in say, client addresses, per-core data")
 }
 

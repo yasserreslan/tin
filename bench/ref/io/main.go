@@ -1,6 +1,6 @@
 // Command io reads a corpus of chunk patterns on stdin and prints, for each case, what Go's io
 // helpers do with a reader that returns the chunks. tools/ci/fixtures/io.tin prints the same
-// lines and tools/ci/io_check.py compares them (#736).
+// lines and tools/ci/io_check.tin compares them (#736).
 //
 // The reader yields the bytes of a deterministic sequence (byte i is (i*7+3) % 251) in the chunk
 // sizes of the corpus line, which are comma-separated. Cases:

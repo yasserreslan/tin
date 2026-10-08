@@ -1,7 +1,7 @@
 package main
 
 // The io twin, Tin side: read the corpus of bench/ref/io on stdin and print the same lines, so
-// tools/ci/io_check.py can compare the helpers' behaviour with Go's io (#736).
+// tools/ci/io_check.tin can compare the helpers' behaviour with Go's io (#736).
 //
 // The reader yields the bytes of the same deterministic sequence (byte i is (i*7+3) % 251) in
 // the chunk sizes of the corpus line.
