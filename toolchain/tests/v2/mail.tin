@@ -16,7 +16,7 @@ fn main() {
 	let raw = "Subject: one\r\n\tcontinued\r\nFrom: jane@example.com\r\n\r\nhello\r\n"
 	mut source = stringReader{data: raw}
 	let (msg, me) = mail.ReadMessage(mut source)
-	say.Line("message", me, msg.Header.Get("subject"), msg.Header.Get("from"), msg.Body)
+	say.Line("message", me, msg.Header.Get("subject"), msg.Header.Get("from"), say.Fmt("%q", msg.Body))
 	mut r = textproto.NewReader("one\r\n two\r\n..dot\r\n.\r\n")
 	let (line, e1) = r.ReadContinuedLine()
 	let (dot, e2) = r.ReadDotBytes()
@@ -24,7 +24,22 @@ fn main() {
 	say.Line("canonical", textproto.CanonicalMIMEHeaderKey("content-MD5"), textproto.CanonicalMIMEHeaderKey("bad key"))
 	mut w = textproto.NewWriter()
 	w.WriteDotBytes("line\r\n.dot\r\n")
-	say.Line("dot write", w.String())
+	say.Line("dot write", say.Fmt("%q", w.String()))
+	mut dw = w.DotWriter()
+	dw.Write([]u8("tail\n.dot")) catch _ {}
+	dw.Close() catch _ {}
+	say.Line("dot writer", say.Fmt("%q", w.String()))
+	mut drSource = textproto.NewReader(".one\r\n..two\r\n.\r\n")
+	mut dr = drSource.ReadDotReader() catch err {
+		say.Line("dot reader", err)
+		return
+	}
+	mut bytes = make([]u8, 32)
+	let read = dr.Read(mut bytes) catch err {
+		say.Line("dot read", err)
+		return
+	}
+	say.Line("dot reader", read, say.Fmt("%q", str(bytes[0:read])))
 }
 
 type stringReader struct {

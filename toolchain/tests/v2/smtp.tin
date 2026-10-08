@@ -1,0 +1,102 @@
+package main
+
+// smtp: send a dot-stuffed message to a local SMTP server and report refused recipients.
+
+import "hearth"
+import "mint"
+import "relay"
+import "say"
+import "smtp"
+import "wire"
+
+fn server(listener wire.Listener) ! {
+	mut c = try listener.Accept()
+	c.SetTimeout(2000000000)
+	try c.Write("220 local ESMTP\r\n")
+	mut input = []u8{}
+	mut data = false
+	mut message = ""
+	for {
+		let (_, err) = c.Read(mut input, 4096)
+		if err != nil {
+			break
+		}
+		for {
+			let at = lineEnd(str(input))
+			if at < 0 { break }
+			let line = str(input[0:at])
+			input = input[at+2:len(input)]
+			if data {
+				if line == "." {
+					data = false
+					try c.Write("250 queued\r\n")
+				} else if len(line) > 0 && line[0] == '.' {
+					message += line[1:len(line)] + "\n"
+				} else {
+					message += line + "\n"
+				}
+			} else if line == "DATA" {
+				data = true
+				try c.Write("354 send it\r\n")
+			} else if line == "AUTH CRAM-MD5" {
+				try c.Write("334 dGVzdA==\r\n")
+			} else if line == "dXNlciAzMTYxY2NmZDdmMjNlMzJiYmMzZTQ4NjdmYzk0YjE4Nw==" {
+				try c.Write("235 authenticated\r\n")
+			} else if line == "QUIT" {
+				try c.Write("221 bye\r\n")
+				relay.Send(0, message)
+				c.Close()
+				return
+			} else if line == "RCPT TO:<refuse@example.com>" {
+				try c.Write("550 refused\r\n")
+			} else {
+				try c.Write("250 ok\r\n")
+			}
+		}
+	}
+}
+
+fn lineEnd(s str) i64 {
+	for i in 0..len(s)-1 {
+		if s[i] == '\r' && s[i+1] == '\n' { return i }
+	}
+	return -1
+}
+
+fn worker(id i64) {
+	if id == 1 {
+		let listener = wire.Listen("127.0.0.1:0") catch err {
+			say.Line("listen", err)
+			return
+		}
+		relay.Send(0, mint.Itoa(listener.Port()))
+		server(listener) catch err { say.Line("server", err) }
+		server(listener) catch err { say.Line("server", err) }
+		server(listener) catch err { say.Line("server", err) }
+		listener.Close()
+		return
+	}
+	let (_, port) = relay.Recv()
+	mut c = smtp.Dial("127.0.0.1:" + port) catch err {
+		say.Line("dial", err)
+		return
+	}
+	let he = c.Hello("client.example")
+	let me = c.Mail("sender@example.com")
+	let re = c.Rcpt("receiver@example.com")
+	let bad = c.Rcpt("refuse@example.com")
+	let de = c.Data("Subject: test\r\n\r\nfirst\r\n.dot\r\n")
+	let auth = c.AuthCramMD5("user", "password")
+	let qe = c.Quit()
+	say.Line("send", he == nil, me == nil, re == nil, bad != nil, de == nil, auth == nil, qe == nil)
+	let (_, got) = relay.Recv()
+	say.Line("received", got)
+	let refused = smtp.SendMail("127.0.0.1:" + port, "sender@example.com", []str{"refuse@example.com"}, "body")
+	say.Line("refused relay", refused != nil)
+	let invalid = smtp.SendMail("127.0.0.1:" + port, "bad", []str{"receiver@example.com"}, "body")
+	say.Line("bad address", invalid != nil)
+}
+
+fn main() {
+	hearth.Run(2, worker)
+}

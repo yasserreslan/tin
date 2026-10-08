@@ -1,0 +1,8 @@
+send true true true true true true true
+received Subject: test
+
+first
+.dot
+
+refused relay true
+bad address true

@@ -15,6 +15,19 @@ type Writer struct {
 	data []u8
 }
 
+// DotReader reads a dot-decoded body from memory.
+type DotReader struct {
+	data str
+	pos  i64
+}
+
+// DotWriter writes dot-stuffed bytes into a Writer.
+type DotWriter struct {
+	writer    Writer
+	lineStart bool
+	closed    bool
+}
+
 // NewReader creates a reader over data.
 fn NewReader(data str) Reader {
 	return Reader{data: data}
@@ -69,7 +82,7 @@ fn (r mut Reader) ReadDotBytes() !str {
 			content = line[1:len(line)]
 		}
 		out = append(out, content...)
-		out = append(out, u8('\r'), u8('\n'))
+		out = append(out, u8('\n'))
 	}
 	if !ended {
 		fail say.Fault("textproto: unexpected EOF")
@@ -77,10 +90,49 @@ fn (r mut Reader) ReadDotBytes() !str {
 	return str(out)
 }
 
+// ReadDotReader consumes a dot-framed body and returns a reader over its decoded bytes.
+fn (r mut Reader) ReadDotReader() !DotReader {
+	let body = try r.ReadDotBytes()
+	return DotReader{data: body}
+}
+
+// Read returns the next decoded bytes, or 0 at the end of the dot body.
+fn (r mut DotReader) Read(buf mut []u8) !i64 {
+	if r.pos >= len(r.data) { return 0 }
+	let n = min(len(buf), len(r.data)-r.pos)
+	for i in 0..n { buf[i] = r.data[r.pos+i] }
+	r.pos += n
+	return n
+}
+
 // WriteLine appends one line and its CRLF terminator.
 fn (w mut Writer) WriteLine(line str) {
 	w.data = append(w.data, line...)
 	w.data = append(w.data, u8('\r'), u8('\n'))
+}
+
+// DotWriter starts a dot-stuffed body writer.
+fn (w Writer) DotWriter() DotWriter {
+	return DotWriter{writer: w, lineStart: true}
+}
+
+// Write dot-stuffs a chunk and appends it to the associated Writer.
+fn (d mut DotWriter) Write(data []u8) !i64 {
+	if d.closed { fail say.Fault("textproto: write to closed dot writer") }
+	for c in data {
+		if d.lineStart && c == '.' { d.writer.data = append(d.writer.data, u8('.')) }
+		d.writer.data = append(d.writer.data, c)
+		d.lineStart = c == '\n'
+	}
+	return len(data)
+}
+
+// Close writes the terminating dot line.
+fn (d mut DotWriter) Close() ! {
+	if d.closed { return }
+	if !d.lineStart { d.writer.data = append(d.writer.data, u8('\r'), u8('\n')) }
+	d.writer.data = append(d.writer.data, u8('.'), u8('\r'), u8('\n'))
+	d.closed = true
 }
 
 // WriteDotBytes writes a body with dot-stuffing and the terminating dot line.

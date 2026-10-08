@@ -1,8 +1,8 @@
 // Package mail reads RFC 5322 messages, addresses and dates.
 package mail
 
-import "io"
 import "mime"
+import "io"
 import "say"
 import "textproto"
 import "tide"
@@ -25,7 +25,15 @@ type Message struct {
 
 // ReadMessage reads a message and separates its headers from its body.
 fn ReadMessage(src mut dyn io.Reader) !Message {
-	let raw = try io.ReadAll(src)
+	mut rawBytes = []u8{}
+	mut buf = make([]u8, 4096)
+	for {
+		let n = try src.Read(mut buf)
+		if n <= 0 { break }
+		if len(rawBytes) + n > 67108864 { fail say.Fault("mail: message too large") }
+		rawBytes = append(rawBytes, buf[0:n]...)
+	}
+	let raw = str(rawBytes)
 	let split = twine.Index(raw, "\r\n\r\n")
 	mut width = 2
 	mut at = twine.Index(raw, "\n\n")
@@ -34,7 +42,8 @@ fn ReadMessage(src mut dyn io.Reader) !Message {
 		at = split
 	}
 	if at < 0 {
-		fail say.Fault("mail: missing required header separator")
+		at = len(raw)
+		width = 0
 	}
 	let headerText = raw[0:at]
 	let body = raw[at+width:len(raw)]
@@ -93,7 +102,7 @@ fn (h Header) Date() !i64 {
 // ParseDate parses a date in one of the standard RFC 5322 and obsolete formats.
 fn ParseDate(value str) !i64 {
 	let s = twine.TrimSpace(stripComments(value))
-	for layout in []str{tide.RFC1123Z, tide.RFC1123, tide.RFC822Z, tide.RFC822, tide.RFC850} {
+	for layout in []str{tide.RFC1123Z, "Mon, 2 Jan 2006 15:04:05 -0700", tide.RFC1123, tide.RFC822Z, tide.RFC822, tide.RFC850} {
 		let (ns, err) = tide.Parse(layout, s, tide.UTCZone())
 		if err == nil { return ns }
 	}
@@ -107,14 +116,21 @@ fn ParseAddress(value str) !Address {
 	if open >= 0 {
 		let close = twine.IndexByte(s, '>')
 		if close <= open || twine.TrimSpace(s[close+1:len(s)]) != "" { fail say.Fault("mail: invalid string") }
-		let name = twine.TrimSpace(stripComments(s[0:open]))
+		let rawName = twine.TrimSpace(stripComments(s[0:open]))
+		let name = try mime.WordDecoder{}.DecodeHeader(rawName)
 		let addr = twine.TrimSpace(s[open+1:close])
 		if !validAddrSpec(addr) { fail say.Fault("mail: invalid string") }
 		return Address{Name: unquote(name), Address: addr}
 	}
+	let commentStart = twine.LastIndexByte(s, '(')
+	let commentEnd = twine.LastIndexByte(s, ')')
 	let addr = twine.TrimSpace(stripComments(s))
 	if !validAddrSpec(addr) { fail say.Fault("mail: invalid string") }
-	return Address{Address: addr}
+	mut name = ""
+	if commentStart >= 0 && commentEnd == len(s)-1 && commentEnd > commentStart {
+		name = twine.TrimSpace(s[commentStart+1:commentEnd])
+	}
+	return Address{Name: name, Address: addr}
 }
 
 // ParseAddressList parses comma-separated addresses and RFC 5322 groups.
@@ -153,12 +169,12 @@ fn ParseAddressList(value str) ![]Address {
 			group = false
 		}
 	}
+	if group { fail say.Fault("mail: invalid address") }
 	let tail = twine.TrimSpace(s[start:len(s)])
 	if len(tail) > 0 {
 		let address = try ParseAddress(tail)
 		out = append(out, address)
 	}
-	if len(out) == 0 && len(twine.TrimSpace(value)) > 0 { fail say.Fault("mail: empty group") }
 	return out
 }
 
