@@ -146,3 +146,20 @@ fn TestDirtyBlocks(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+fn TestFileBecomesDirectory(t mut crucible.T) {
+	let d = fresh("filedir")
+	let w = Workspace{Name: "default", Root: d, Store: d + "/.tit"}
+	mut s = store.NewMem()
+	let t1 = treeOf(mut s, []file{file{path: "p", mode: object.Mode.File, body: "a file\n"}})
+	let t2 = treeOf(mut s, []file{file{path: "p/q.txt", mode: object.Mode.File, body: "inside\n"}})
+	mut idx = index.New()
+	t.NoFault("checkout", Checkout(mut s, w, mut idx, object.NoId, t1, false))
+	t.NoFault("file to directory", Checkout(mut s, w, mut idx, t1, t2, false))
+	crucible.Equal(mut t, "p is a directory", read(d, "p/q.txt"), "inside\n")
+	t.NoFault("directory to file", Checkout(mut s, w, mut idx, t2, t1, false))
+	crucible.Equal(mut t, "p is a file again", read(d, "p"), "a file\n")
+	crucible.Equal(mut t, "index", len(idx.Entries), 1)
+	quarry.RemoveAll(d) catch _ {
+	}
+}
