@@ -1848,7 +1848,9 @@ Package replay records a request's effects into a sealed capsule and reads capsu
 
 Package stencil renders templates loaded at run time, like Go's text/template over a dynamic value tree: {{.user.name}}, {{if}}, {{range}}, {{with}}, pipelines with the builtins (len, index, eq, ne, lt, le, gt, ge, and, or, not, printf, print, println, html, urlquery, js), {{define}}, {{template}} and {{block}}, and user functions registered with Func. Parse errors carry line and column; execution is bounded by a template recursion limit and a maximum output size. ParseHTML renders in HTML mode instead: an action's escaping follows its context in the surrounding markup (element text, attribute values, URL attributes and JavaScript inside <script>), and a context the mode cannot judge is a parse error rather than a guess.
 
-Value is a struct with constructor functions rather than the issue's enum: a compiler-generated enum constructor has no region summary, so an enum value passed to a function that stores it (as Execute does) is E312 ARG_ESCAPE even when it is request memory. The constructors below are ordinary functions, and Execute keeps the data and the variables in a cell bound to a runtime slot (the pattern policy.Bind uses), so the store happens inside the runtime.
+URL attributes (href, src, action, formaction, poster, background) are escaped by position, as Go's html/template does: at the start the scheme is filtered (only http, https, mailto and relative URLs pass, else #ZgotmplZ) and the value is percent-encoded where it leaves the URL grammar; after the start it is percent-encoded the same way; after a "?" or "#" every byte outside the unreserved set is percent-encoded, so a value cannot add query parameters. Hex digits are lower case, then the value is HTML-escaped.
+
+Execute keeps the data and the variables in a cell bound to a runtime slot (the pattern policy.Bind uses), so the stores happen inside the runtime.
 
 - `type State struct`: State is one execution of a template.
 - `type Node enum`: Node is one piece of a parsed template.

@@ -1,0 +1,41 @@
+package main
+
+// The stencil URL twin, Tin side: read template/value pairs (hex-encoded, tab separated, one pair per line) on stdin and print what
+// stencil.ParseHTML makes of each, in the format of bench/ref/stencil (Go's html/template): the hex-encoded output, or PARSE or EXEC.
+// tools/ci/stencil_url_check.tin feeds both sides the same corpus and compares the lines (#813).
+
+import "say"
+import "seal"
+import "stencil"
+import "quarry"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		let f = twine.Split(line, "\t")
+		let srcBytes = seal.HexDecode(f[0]) catch _ {
+			[]u8{}
+		}
+		let valBytes = seal.HexDecode(f[1]) catch _ {
+			[]u8{}
+		}
+		let src = str(srcBytes)
+		let val = str(valBytes)
+		let t = stencil.ParseHTML("t", src) catch _ {
+			say.Line("PARSE")
+			continue
+		}
+		let out = t.Execute(stencil.Map(map[str]stencil.Value{"v": stencil.Str(val)})) catch _ {
+			say.Line("EXEC")
+			continue
+		}
+		say.Line(seal.Hex([]u8(out)))
+	}
+}

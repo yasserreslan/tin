@@ -1,0 +1,115 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "seal"
+import "say"
+import "twine"
+
+// Compare stencil.ParseHTML's escaping of URL attributes with Go's html/template over a generated corpus (#813).
+//
+// Each template puts one or two actions at a different place of a URL attribute (the start, the path, the query, the fragment, an
+// unquoted value, after spaces); each value is a fixed edge case or a random string of URL-significant bytes, schemes, quotes and
+// non-ASCII text. Both sides print one line per pair (bench/ref/stencil and tools/ci/fixtures/stencil_url.tin), the hex-encoded
+// output, and the check compares the lines.
+
+const SEED = 813
+const RANDOM_VALUES = 150
+
+fn templates() []str {
+	return []str{
+		`<a href="{{.v}}">`,
+		`<a href="/s?q={{.v}}">`,
+		`<a href="/p/{{.v}}/x">`,
+		`<a href="/p#{{.v}}">`,
+		`<a href="{{.v}}/more">`,
+		`<a href="x?a={{.v}}&b={{.v}}">`,
+		`<a href='{{.v}}'>`,
+		`<a href=" {{.v}}">`,
+		`<a href="{{.v}}{{.v}}">`,
+		`<a href="/{{.v}}">`,
+		`<a href="/r/{{.v}}?ref={{.v}}#{{.v}}">`,
+		`<img src={{.v}}>`,
+		`<img src=/x?{{.v}}>`,
+		`<img src=/x/{{.v}}>`,
+		`<form action="{{.v}}">`,
+		`<p title="{{.v}}">`,
+		`<p>{{.v}}</p>`,
+	}
+}
+
+fn fixed() []str {
+	return []str{
+		"", "a", "http://ok/a b?c=d&e", "javascript:alert(1)", `" onmouseover="x`, `a'b\c`, "x&admin=1", "é ü", "a%20b", "a b#c",
+		" http://x", "mailto:a@b", "/rel/p ath", "#frag", "a:b", "HTTPS://X/Y", "x+y", "a<b>c", "100%", "%zz", "a\tb", "中文/路径",
+		"data:text/html,x", "../../etc/passwd", "a/b:c", "?x=1", "&", "=",
+	}
+}
+
+fn pieces() []str {
+	return []str{
+		"a", "b", "Z", "0", " ", "&", "?", "#", "/", ":", "%", "=", "+", "\"", "'", "<", ">", "\\", "é", "中", "javascript", "http",
+		"mailto", "@", "[", "]", "(", ")", "~", "-", "_", ".", "!", "*", ",", ";", "$", "\t",
+	}
+}
+
+fn hex(s str) str {
+	return seal.Hex([]u8(s))
+}
+
+fn unhex(s str) str {
+	let b = seal.HexDecode(s) catch _ {
+		[]u8{}
+	}
+	return str(b)
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/stencil_url")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "stencil-")
+	let tin = ci.Join(work, "stencil-tin")
+	ci.BuildTin("tools/ci/fixtures/stencil_url.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "stencil-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/stencil"}, ci.Root(), 300), "go build stencil")
+
+	let rng = dice.New(SEED)
+	mut values = fixed()
+	for i in 0..RANDOM_VALUES {
+		let n = rng.Range(0, 12)
+		mut v = ""
+		for j in 0..n {
+			v += pieces()[rng.I64n(len(pieces()))]
+		}
+		values = append(values, v)
+	}
+	mut tpls = []str{}
+	mut vals = []str{}
+	mut lines = []str{}
+	for t in templates() {
+		for v in values {
+			tpls = append(tpls, t)
+			vals = append(vals, v)
+			lines = append(lines, hex(t) + "\t" + hex(v))
+		}
+	}
+	let input = twine.Join(lines, "\n") + "\n"
+	let want = ci.Lines(ci.ExecIn([]str{goexe}, ci.Root(), 600, input, []str{}).Stdout)
+	let got = ci.Lines(ci.ExecIn([]str{tin}, ci.Root(), 600, input, []str{}).Stdout)
+	ci.Check(len(got) == len(want) && len(want) == len(lines), "stencil_url: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			bad += 1
+			if bad <= 20 {
+				say.Line("template " + tpls[i] + " value " + say.Fmt("%q", vals[i]))
+				say.Line("  Go:  " + unhex(want[i]))
+				say.Line("  Tin: " + unhex(got[i]))
+			}
+		}
+	}
+	ci.Check(bad == 0, "stencil_url: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " outputs differ from Go's html/template")
+	ci.Remove(work)
+	ci.Pass("stencil_url: " + mint.Itoa(len(want)) + " template/value pairs match Go's html/template")
+}
