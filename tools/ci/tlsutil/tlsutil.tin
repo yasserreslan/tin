@@ -29,10 +29,13 @@ fn argsOf(kind str) []str {
 	if kind == "ecdsa" {
 		return []str{"-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"}
 	}
+	if kind == "ecdsa384" {
+		return []str{"-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-384"}
+	}
 	return []str{"-newkey", "ed25519"}
 }
 
-// MakeCerts makes self-signed certificates of the kinds ("rsa", "ecdsa", "ed25519") in work; a kind openssl cannot make is left out.
+// MakeCerts makes self-signed certificates of the kinds ("rsa", "ecdsa", "ecdsa384", "ed25519") in work; a kind openssl cannot make is left out.
 // other-root.pem, next to them, is a root that signed none of them, under its own name: the trusted roots of the unknown-authority
 // case.
 fn MakeCerts(openssl str, work str, kinds []str) []Cert {

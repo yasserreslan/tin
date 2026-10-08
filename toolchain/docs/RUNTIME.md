@@ -973,7 +973,7 @@ HTTP/1.1 over TLS 1.3 on the same per-core event loops (`packages/anvil/serve_tl
   `on_write` is unchanged. A stream's writes are sealed into a buffer freed after each write;
   `SendFile` reads its file in 256 KiB pieces on a helper thread (`pread`) and seals them (no
   `sendfile` over TLS). `seal.AEAD.SealTo` on the CPU's AES-GCM instructions allocates nothing, so
-  256 MiB streamed over TLS leaves the server's RSS flat (`tls_server_check.py`).
+  256 MiB streamed over TLS leaves the server's RSS flat (`tls_server_check.tin`).
 - **`Out.Closed`** decrypts what has arrived (`ClosedRaw`, without waiting) instead of peeking
   at the socket, which would see only a record: it reports the client's close_notify or alert,
   or end of input. Application data it reads ahead stays in TLS, and the loop keeps reading

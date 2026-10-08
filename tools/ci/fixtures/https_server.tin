@@ -1,4 +1,4 @@
-// The server of tools/ci/tls_server_check.py: anvil.ServeTLS (#124 phase 5) with the
+// The server of tools/ci/tls_server_check.tin: anvil.ServeTLS (#124 phase 5) with the
 // certificate and key in TLS_CERT and TLS_KEY (paths). Routes:
 //   GET  /             "hello over tls"
 //   GET  /info         "alpn=P suite=S group=G" of the request's TLS connection

@@ -2,6 +2,8 @@
 # Runs a CI check or tool written in Tin: `tools/ci/tin.sh NAME [ARGS...]` compiles tools/ci/NAME.tin (or, with a slash, the path
 # given) with bin/tinc, which is built from the seed first when it is missing, and runs it from the repository root.
 set -e
+# checks that hold hundreds of connections need more descriptors than a Mac's default 256; the servers they start inherit the limit
+ulimit -n 4096 2>/dev/null || true
 cd "$(dirname "$0")/../.."
 [ -x bin/tinc ] || make -s bin/tinc
 name=$1
