@@ -320,9 +320,13 @@ say how it is undone: `match` on `Op` has no `_` arm anywhere in tit.
 6. Release the lock.
 
 **Recovery**, when a command opens the repository and finds `pending.op`: the operation did not reach its
-commit point, so every ref in it is set back to `Before` (whether or not step 4 got to it), the workspace files
-are restored from the snapshot, and `pending.op` is removed. The repository is then exactly as before the
-operation.
+commit point, so every ref it moved (every ref holding its `After`) is set back to `Before`, the workspace files
+are restored from the snapshot, and `pending.op` is removed. A ref still at `Before` was not reached; a ref holding
+neither was never the operation's (its compare-and-swap failed) and is left alone. The repository is then exactly
+as before the operation.
+
+A ref change named `workspaces/<name>/HEAD` is that workspace's HEAD, written as its file holds it (`ref: <branch>`
+or a commit): a switch records it, so undo, redo, restore and recovery move HEAD the way they move refs.
 
 **Undo** of operation *n* is a new operation whose ref changes are *n*'s reversed. It applies only if every
 ref is still at *n*'s `After`; otherwise it fails with `oplog.ErrMoved`, naming the ref and the workspace whose
