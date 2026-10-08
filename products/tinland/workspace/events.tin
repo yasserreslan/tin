@@ -27,6 +27,7 @@ const CmdToggleTerminal = 117
 const CmdSplit = 118
 const CmdCloseSplit = 119
 const CmdOpenSettings = 120
+const CmdToggleWhitespace = 121
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
@@ -340,6 +341,12 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		ws.zoom(ws.CodeSize - 1.0)
 	} else if cmd == CmdZoomReset {
 		ws.zoom(13.0)
+	} else if cmd == CmdToggleWhitespace {
+		if editor.ToggleWhitespace() {
+			ws.Ed.Say("whitespace shown")
+		} else {
+			ws.Ed.Say("whitespace hidden")
+		}
 	} else if cmd == CmdCollapseAll {
 		ws.collapseAll()
 	} else if cmd == CmdRevealInProject {

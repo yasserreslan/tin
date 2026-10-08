@@ -126,6 +126,8 @@ fn main() {
 }
 
   let z=2,3
+whitespace: true
+whitespace: false
 diags: 0
 --- nav.tin row 7 col 4 dirty false
 package main

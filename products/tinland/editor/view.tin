@@ -140,6 +140,20 @@ fn (ed Editor) rowTop(n i64) f64 {
 }
 
 // Paint draws the text area into the rectangle (x, y, w, h) (points). The text must have been Prepared.
+// showWhitespace marks spaces with a dot and tabs with an arrow (View > Toggle Whitespace).
+mut showWhitespace = false
+
+// ToggleWhitespace turns the whitespace marks on or off and reports the new state.
+fn ToggleWhitespace() bool {
+	showWhitespace = !showWhitespace
+	return showWhitespace
+}
+
+// WhitespaceShown is whether the whitespace marks are on.
+fn WhitespaceShown() bool {
+	return showWhitespace
+}
+
 fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut metal.Scene) {
 	ed.AreaW = w
 	ed.AreaH = h
@@ -227,6 +241,27 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 				k = m
 			}
 			i = j
+		}
+		// the whitespace marks: a dot for a space, an arrow at the start of a tab
+		if showWhitespace {
+			mut col = 0
+			for k in 0..len(line) {
+				let ch = line[k]
+				if ch == '\t' {
+					let stop = 4 - col % 4
+					if col >= ed.HScroll && col < last {
+						render.Pen(mut scene, render.FontCode, textX + f64(col - ed.HScroll) * ed.CharW, top + pad, "\u2192", th.Gutter)
+					}
+					col += stop
+				} else if ch == ' ' {
+					if col >= ed.HScroll && col < last {
+						render.Pen(mut scene, render.FontCode, textX + f64(col - ed.HScroll) * ed.CharW, top + pad, "\u00b7", th.Gutter)
+					}
+					col += 1
+				} else if ch < 128 || ch >= 192 {
+					col += textedit.DisplayCol(line[k:k + 1], 1, 4)
+				}
+			}
 		}
 		// errors on this line: a bar in the gutter and a line under the offending text
 		if ed.diagAt(row) >= 0 {
