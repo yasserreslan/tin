@@ -1,0 +1,16 @@
+le bytes 04030201 16909060 67305985
+be bytes 0102030405060708 72623859790382856
+u16 43981 52651 cdab
+append 14 0100000000020300000000000000
+short true
+varint bytes 39 0002fe018002d804808002808080808040feffffffffffffffff010109ffffffffffffffffff01
+varint back  0 1 127 128 300 16384 1099511627776 9223372036854775807 -1 -5 -9223372036854775808
+uvarint 300 fault fault fault
+base32 JVQW4=== 9LGMS=== JVQW4
+base32 back 4d616e 4d616e
+base32 bad fault fault fault fault fault
+base32 extra pad 666f6f
+base32 pad 666f6f fault
+ascii85 9jqo  z z!<
+ascii85 back 4d616e 00000000 000000004d616e 4d616e
+ascii85 bad fault fault

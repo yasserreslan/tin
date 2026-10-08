@@ -6,7 +6,7 @@ SKIP = {"runtime", "std", "fmt", "say"}
 ORDER = ["say", "fault", "argo", "io", "anvil", "hearth", "relay", "task", "wire", "tls", "hpack", "twine", "glyph", "mint", "gauge", "bits",
          "link", "ore", "flume", "quarry", "spawn", "trail", "lever", "tide", "dice", "sift", "atlas", "cairn", "stamp", "squash", "ledger", "abacus",
          "seal", "herald", "crucible", "constraints", "policy", "redis", "mysql", "postgres", "kafka", "websocket", "atomic",
-         "lane", "replay", "stencil", "scroll", "lasso", "appkit", "metal", "gpuwin", "textedit", "tinjson", "tinsym", "tinfmt"]
+         "lane", "replay", "stencil", "scroll", "lasso", "pack", "appkit", "metal", "gpuwin", "textedit", "tinjson", "tinsym", "tinfmt"]
 ROLE = {"say": "formatting and printing (fmt)", "fault": "fault chains and standard sentinels (errors)", "argo": "JSON (encoding/json)", "anvil": "HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http)",
         "hearth": "cores and threads (runtime)", "relay": "messages between cores (channels)", "task": "deadline and cancellation of the running code (context)", "wire": "TCP and HTTP/1.1 and HTTP/2 client (net, net/http)", "tls": "TLS 1.3 client and server (crypto/tls)",
         "hpack": "HTTP/2 header compression (golang.org/x/net/http2/hpack)",
@@ -16,7 +16,8 @@ ROLE = {"say": "formatting and printing (fmt)", "fault": "fault chains and stand
         "tide": "time (time)", "dice": "random numbers (math/rand)", "sift": "sorting, searching and the generic slice functions (sort, slices, cmp)", "atlas": "functions on maps (maps)",
         "cairn": "containers (container/heap, sets, LRU)", "stamp": "hashes and checksums (hash/*)", "squash": "compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib)",
         "ledger": "CSV reading and writing (encoding/csv)",
-        "seal": "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64)", "herald": "logging (log/slog)",
+        "seal": "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)", "herald": "logging (log/slog)",
+        "pack": "numbers as bytes: byte order and varints (encoding/binary)",
         "crucible": "testing helpers (testing)", "constraints": "named generic constraint shapes",
         "policy": "with policies and slots (context values, retry/cache/trace middleware)",
         "redis": "Redis client (go-redis)",

@@ -555,6 +555,269 @@ fn B64URLDecode(s str) ![]u8 {
 	return try b64dec(s, true, false)
 }
 
+// ---- base32 (RFC 4648) ----
+
+const b32std = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+const b32hex = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+
+// Base32 encodes b as standard padded base32 (RFC 4648).
+fn Base32(b []u8) str {
+	return b32enc(b, b32std, true)
+}
+
+// Base32Hex encodes b as padded base32 with the extended-hex alphabet (RFC 4648).
+fn Base32Hex(b []u8) str {
+	return b32enc(b, b32hex, true)
+}
+
+// Base32NoPad encodes b as standard base32 without the padding characters.
+fn Base32NoPad(b []u8) str {
+	return b32enc(b, b32std, false)
+}
+
+// Base32Decode decodes standard base32; the padding is optional.
+fn Base32Decode(s str) ![]u8 {
+	return try b32dec(s, false)
+}
+
+// Base32HexDecode decodes extended-hex base32.
+fn Base32HexDecode(s str) ![]u8 {
+	return try b32dec(s, true)
+}
+
+// b32enc encodes 5-byte groups as 8 five-bit characters, padding the last group.
+fn b32enc(b []u8, alphabet str, padded bool) str {
+	mut out = make([]u8, 0, (len(b)+4)/5*8)
+	mut i = 0
+	for i+5 <= len(b) {
+		let v = i64(b[i])<<32 | i64(b[i+1])<<24 | i64(b[i+2])<<16 | i64(b[i+3])<<8 | i64(b[i+4])
+		mut k = 7
+		for k >= 0 {
+			out = append(out, alphabet[(v>>(k*5))&31])
+			k -= 1
+		}
+		i += 5
+	}
+	let rest = len(b) - i
+	if rest > 0 {
+		mut v = i64(0)
+		mut j = 0
+		for j < rest {
+			v = v | i64(b[i+j])<<(32-8*j)
+			j += 1
+		}
+		mut chars = 7
+		if rest == 1 {
+			chars = 2
+		} else if rest == 2 {
+			chars = 4
+		} else if rest == 3 {
+			chars = 5
+		}
+		mut k = 0
+		for k < chars {
+			out = append(out, alphabet[(v>>((7-k)*5))&31])
+			k += 1
+		}
+		if padded {
+			for len(out)%8 != 0 {
+				out = append(out, '=')
+			}
+		}
+	}
+	return str(out)
+}
+
+// b32val is a base32 character's value, or -1. The alphabets are case-sensitive, as Go's are:
+// the standard one is A-Z followed by 2-7, the extended-hex one is 0-9 followed by A-V.
+fn b32val(c u8, hexAlphabet bool) i64 {
+	if hexAlphabet {
+		if c >= '0' && c <= '9' {
+			return i64(c - '0')
+		}
+		if c >= 'A' && c <= 'V' {
+			return i64(c-'A') + 10
+		}
+		return -1
+	}
+	if c >= 'A' && c <= 'Z' {
+		return i64(c - 'A')
+	}
+	if c >= '2' && c <= '7' {
+		return i64(c-'2') + 26
+	}
+	return -1
+}
+
+// b32dec decodes base32, following Go's decoder: characters are five bits, a group is eight
+// characters, the last group's padding must make the group whole, the lengths a group cannot use
+// (one, three or six characters) are refused, the discarded bits are not checked, and \r and \n
+// are ignored.
+fn b32dec(s str, hexAlphabet bool) ![]u8 {
+	mut clean = []u8{}
+	for i in 0..len(s) {
+		if s[i] != '\r' && s[i] != '\n' {
+			clean = append(clean, s[i])
+		}
+	}
+	mut out = []u8{}
+	mut at = 0
+	for at < len(clean) {
+		mut dbuf = [8]u8{}
+		mut dlen = 8
+		mut j = 0
+		for j < 8 {
+			if at >= len(clean) {
+				fail say.Fault("seal: base32: missing padding")
+			}
+			let c = clean[at]
+			at += 1
+			if c == '=' && j >= 2 && len(clean)-at < 8 {
+				if len(clean)-at+j < 7 {
+					fail say.Fault("seal: base32: not enough padding")
+				}
+				mut k = 0
+				for k < 7-j {
+					if at+k < len(clean) && clean[at+k] != '=' {
+						fail say.Fault("seal: base32: incorrect padding")
+					}
+					k += 1
+				}
+				dlen = j
+				at = len(clean)
+				if dlen == 1 || dlen == 3 || dlen == 6 {
+					fail say.Fault("seal: base32: invalid length")
+				}
+				break
+			}
+			let v = b32val(c, hexAlphabet)
+			if v < 0 {
+				fail say.Fault("seal: base32: illegal byte %d", at-1)
+			}
+			dbuf[j] = u8(v)
+			j += 1
+		}
+		// The bytes come in order: dst[0] first, as Go's fallthrough switch writes them.
+		if dlen >= 2 {
+			out = append(out, u8(i64(dbuf[0])<<3|i64(dbuf[1])>>2))
+		}
+		if dlen >= 4 {
+			out = append(out, u8(i64(dbuf[1])<<6|i64(dbuf[2])<<1|i64(dbuf[3])>>4))
+		}
+		if dlen >= 5 {
+			out = append(out, u8(i64(dbuf[3])<<4|i64(dbuf[4])>>1))
+		}
+		if dlen >= 7 {
+			out = append(out, u8(i64(dbuf[4])<<7|i64(dbuf[5])<<2|i64(dbuf[6])>>3))
+		}
+		if dlen >= 8 {
+			out = append(out, u8(i64(dbuf[6])<<5|i64(dbuf[7])))
+		}
+	}
+	return out
+}
+
+// ---- ascii85 (RFC 1924) ----
+
+// Ascii85 encodes b with the ascii85 alphabet. The <~ and ~> delimiters are the caller's.
+fn Ascii85(b []u8) str {
+	mut out = make([]u8, 0, Ascii85MaxLen(len(b)))
+	mut i = 0
+	for i+4 <= len(b) {
+		let v = u32(b[i])<<24 | u32(b[i+1])<<16 | u32(b[i+2])<<8 | u32(b[i+3])
+		if v == 0 {
+			out = append(out, 'z')
+		} else {
+			mut group = [5]u8{}
+			mut x = u64(v)
+			mut k = 4
+			for k >= 0 {
+				group[k] = u8(x%85) + 33
+				x = x / 85
+				k -= 1
+			}
+			for k in 0..5 {
+				out = append(out, group[k])
+			}
+		}
+		i += 4
+	}
+	let rest = len(b) - i
+	if rest > 0 {
+		mut v = u32(0)
+		mut j = 0
+		for j < rest {
+			v = v | u32(b[i+j])<<u32(24-8*j)
+			j += 1
+		}
+		mut group = [5]u8{}
+		mut x = u64(v)
+		mut k = 4
+		for k >= 0 {
+			group[k] = u8(x%85) + 33
+			x = x / 85
+			k -= 1
+		}
+		mut n = rest + 1
+		for k in 0..n {
+			out = append(out, group[k])
+		}
+	}
+	return str(out)
+}
+
+// Ascii85MaxLen is the most Ascii85 writes for n bytes.
+fn Ascii85MaxLen(n i64) i64 {
+	return n/4*5 + n%4 + 1
+}
+
+// Ascii85Decode decodes ascii85, following Go's Decode function: any byte at or below a space is
+// skipped, 'z' is a group of four zero bytes, a group that does not fit in 32 bits wraps (as
+// Go's uint32 arithmetic does), and a final group of one byte is refused. The <~ and ~> markers
+// are the caller's: Go's Decode does not know them (its streaming decoder does).
+fn Ascii85Decode(s str) ![]u8 {
+	mut out = []u8{}
+	mut v = u64(0)
+	mut nb = i64(0)
+	for i in 0..len(s) {
+		let b = s[i]
+		if b <= ' ' {
+			continue
+		}
+		if b == 'z' && nb == 0 {
+			nb = 5
+			v = 0
+		} else if b >= '!' && b <= 'u' {
+			v = (v*%85 +% u64(b) -% 33) & 0xFFFFFFFF
+			nb += 1
+		} else {
+			fail say.Fault("seal: ascii85: illegal byte %d", i)
+		}
+		if nb == 5 {
+			out = append(out, u8(v>>24), u8(v>>16), u8(v>>8), u8(v))
+			nb = 0
+			v = 0
+		}
+	}
+	if nb == 1 {
+		fail say.Fault("seal: ascii85: a group of one byte")
+	}
+	if nb > 1 {
+		mut k = nb
+		for k < 5 {
+			v = (v*%85 +% 84) & 0xFFFFFFFF
+			k += 1
+		}
+		mut left = nb - 1
+		for left > 0 {
+			out = append(out, u8(v>>24))
+			v = (v << 8) & 0xFFFFFFFF
+			left -= 1
+		}
+	}
+	return out
+}
+
 // ---- RSA public-key encryption (RSA-OAEP), for protocols that need it ----
 
 // RSAPublicKey is an RSA public key: modulus N and exponent E, as big-endian bytes.
