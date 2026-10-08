@@ -139,11 +139,14 @@ fn forward(q anvil.Req, w mut anvil.Out, target str, modify fn(mut Response) !bo
 		if re != nil {
 			if wire.IsEOF(re) { return nil }
 			w.Abort()
-			fail re
+			return nil
 		}
 		if n == 0 { return nil }
 		let we = w.Write(chunk[:n])
-		if we != nil { fail we }
+		if we != nil {
+			w.Abort()
+			return nil
+		}
 	}
 }
 
