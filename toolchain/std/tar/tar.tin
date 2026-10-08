@@ -1,0 +1,243 @@
+package tar
+
+// Package tar reads and writes bounded ustar archives, including regular files and directories.
+// Reader owns a copy of its input, bounded by the limit passed to NewReader; Writer buffers its output.
+
+import "say"
+
+const BlockSize = 512
+const MaxArchiveSize = 67108864
+
+// TypeFlag identifies the kind of an archive entry.
+type TypeFlag enum {
+	Regular
+	Directory
+	Symlink
+	HardLink
+	PAX
+	GNULongName
+	GNULongLink
+}
+
+// Header describes one tar archive entry.
+type Header struct {
+	Name str
+	Mode i64
+	Uid i64
+	Gid i64
+	Size i64
+	Mtime i64
+	Type TypeFlag
+	Linkname str
+}
+
+// Reader reads entries from a bounded archive in order.
+type Reader struct {
+	data []u8
+	at i64
+	left i64
+	limit i64
+	ended bool
+}
+
+// NewReader creates a reader over an archive, rejecting inputs above limit bytes.
+fn NewReader(data []u8, limit i64) !Reader {
+	if limit < 0 {
+		fail "tar: negative archive limit"
+	}
+	if i64(len(data)) > limit {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
+	return Reader{data: data, at: 0, left: 0, limit: limit, ended: false}
+}
+
+// Next advances to the next header, returning nil at the end of the archive.
+fn (r mut Reader) Next() !?Header {
+	if r.ended {
+		return nil
+	}
+	if r.left > 0 {
+		let padded = (r.left + BlockSize - 1) / BlockSize * BlockSize
+		if padded > i64(len(r.data)) - r.at {
+			fail "tar: unexpected EOF in file data"
+		}
+		r.at += padded
+		r.left = 0
+	}
+	if r.at + BlockSize > i64(len(r.data)) {
+		fail "tar: unexpected EOF in header"
+	}
+	let b = r.data[r.at:r.at+BlockSize]
+	if zeroBlock(b) {
+		r.ended = true
+		return nil
+	}
+	let expected = octal(b, 148, 8)
+	mut sum = i64(0)
+	for i in 0..BlockSize {
+		if i >= 148 && i < 156 {
+			sum += 32
+		} else {
+			sum += i64(b[i])
+		}
+	}
+	if expected < 0 || sum != expected {
+		fail "tar: invalid header checksum"
+	}
+	let size = octal(b, 124, 12)
+	if size < 0 || size > r.limit {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: file size exceeds limit"))
+	}
+	let name = cstring(b, 0, 100)
+	let prefix = cstring(b, 345, 155)
+	let fullName = if prefix != "" { prefix + "/" + name } else { name }
+	let f = b[156]
+	let ty = match f {
+		0, u8('0') => TypeFlag.Regular
+		u8('5') => TypeFlag.Directory
+		u8('2') => TypeFlag.Symlink
+		u8('1') => TypeFlag.HardLink
+		u8('x') => TypeFlag.PAX
+		u8('L') => TypeFlag.GNULongName
+		u8('K') => TypeFlag.GNULongLink
+		_ => TypeFlag.Regular
+	}
+	let h = Header{Name: fullName, Mode: octal(b, 100, 8), Uid: octal(b, 108, 8), Gid: octal(b, 116, 8), Size: size, Mtime: octal(b, 136, 12), Type: ty, Linkname: cstring(b, 157, 100)}
+	r.at += BlockSize
+	r.left = size
+	return h
+}
+
+// Read returns the current entry's next bytes, or zero at its end.
+fn (r mut Reader) Read(buf mut []u8) !i64 {
+	if r.left == 0 || len(buf) == 0 {
+		return 0
+	}
+	let n = min(i64(len(buf)), r.left)
+	if r.at + n > i64(len(r.data)) {
+		fail "tar: unexpected EOF in file data"
+	}
+	for i in 0..n {
+		buf[i] = r.data[r.at+i]
+	}
+	r.at += n
+	r.left -= n
+	return n
+}
+
+// Writer constructs a ustar archive in bounded memory.
+type Writer struct {
+	data []u8
+	closed bool
+}
+
+// NewWriter creates an empty archive writer.
+fn NewWriter() Writer {
+	return Writer{data: []u8{}, closed: false}
+}
+
+// WriteHeader appends a ustar header; the following Write calls must provide Size bytes.
+fn (w mut Writer) WriteHeader(h Header) ! {
+	if w.closed || len(w.data) % BlockSize != 0 {
+		fail "tar: invalid writer state"
+	}
+	if len(h.Name) == 0 || len(h.Name) > 100 || h.Size < 0 || h.Size > 0o77777777777 || h.Mode < 0 || h.Uid < 0 || h.Gid < 0 || h.Mtime < 0 {
+		fail "tar: header field is outside ustar limits"
+	}
+	if h.Type == TypeFlag.Symlink || h.Type == TypeFlag.HardLink {
+		if h.Size != 0 || len(h.Linkname) > 100 {
+			fail "tar: invalid link header"
+		}
+	}
+	mut b = make([]u8, BlockSize)
+	putString(mut b, 0, 100, h.Name)
+	putOctal(mut b, 100, 8, h.Mode)
+	putOctal(mut b, 108, 8, h.Uid)
+	putOctal(mut b, 116, 8, h.Gid)
+	putOctal(mut b, 124, 12, h.Size)
+	putOctal(mut b, 136, 12, h.Mtime)
+	for i in 148..156 { b[i] = u8(' ') }
+	b[156] = match h.Type {
+		TypeFlag.Regular => u8('0')
+		TypeFlag.Directory => u8('5')
+		TypeFlag.Symlink => u8('2')
+		TypeFlag.HardLink => u8('1')
+		_ => u8('0')
+	}
+	putString(mut b, 157, 100, h.Linkname)
+	putString(mut b, 257, 6, "ustar")
+	b[262] = 0
+	putString(mut b, 263, 2, "00")
+	mut sum = i64(0)
+	for x in b { sum += i64(x) }
+	putOctal(mut b, 148, 7, sum)
+	b[155] = 0
+	w.data = append(w.data, b...)
+	return
+}
+
+// Write appends file content and returns its byte count.
+fn (w mut Writer) Write(data []u8) !i64 {
+	if w.closed || i64(len(w.data)) + i64(len(data)) > MaxArchiveSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
+	w.data = append(w.data, data...)
+	return i64(len(data))
+}
+
+// Close pads the final entry and writes the two zero blocks ending the archive.
+fn (w mut Writer) Close() ! {
+	if w.closed { return }
+	let rem = len(w.data) % BlockSize
+	if rem > 0 {
+		for i in rem..BlockSize { w.data = append(w.data, 0) }
+	}
+	for i in 0..(BlockSize * 2) { w.data = append(w.data, 0) }
+	w.closed = true
+	return
+}
+
+// Bytes returns the archive bytes after Close.
+fn (w Writer) Bytes() ![]u8 {
+	if !w.closed { fail "tar: writer is not closed" }
+	return w.data
+}
+
+fn zeroBlock(b []u8) bool {
+	for x in b { if x != 0 { return false } }
+	return true
+}
+
+fn cstring(b []u8, at i64, n i64) str {
+	mut end = at
+	for end < at+n && b[end] != 0 { end += 1 }
+	return str(b[at:end])
+}
+
+fn octal(b []u8, at i64, n i64) i64 {
+	mut i = at
+	for i < at+n && (b[i] == 0 || b[i] == u8(' ')) { i += 1 }
+	mut v = i64(0)
+	mut any = false
+	for i < at+n && b[i] >= u8('0') && b[i] <= u8('7') {
+		any = true
+		v = v * 8 + i64(b[i] - u8('0'))
+		i += 1
+	}
+	if !any { return -1 }
+	return v
+}
+
+fn putString(b mut []u8, at i64, n i64, s str) {
+	for i in 0..min(n, i64(len(s))) { b[at+i] = s[i] }
+}
+
+fn putOctal(b mut []u8, at i64, n i64, value i64) {
+	mut v = value
+	mut i = at+n-1
+	for i > at {
+		b[i] = u8('0' + v % 8)
+		v /= 8
+		i -= 1
+	}
+}
