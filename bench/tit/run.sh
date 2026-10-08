@@ -1,0 +1,59 @@
+#!/bin/sh
+# tit against git on the Tin repository (#807): warm status, log and diff, the same working directory for both
+# (tit adopts the clone in place), 7 alternating runs each, medians and the ratio tit/git (lower is faster).
+# Linux only (date +%s%N). Usage: bench/tit/run.sh <tit> <git clone with full history> <scratch dir>
+set -eu
+tit=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+src=$2
+d=$3
+runs=7
+export HOME="$d/home" XDG_CONFIG_HOME="$d/home" TIT_NO_PAGER=1 GIT_PAGER=cat
+mkdir -p "$HOME"
+git clone -q --no-local "$src" "$d/repo"
+cd "$d/repo"
+git checkout -q -B main origin/main
+start=$(date +%s%N)
+"$tit" adopt . > /dev/null
+adopt_ms=$((($(date +%s%N) - start) / 1000000))
+commits=$(git rev-list --count main)
+files=$(git ls-files | wc -l)
+ms() {
+	t0=$(date +%s%N)
+	"$@" > /dev/null 2>&1
+	echo $((($(date +%s%N) - t0) / 1000))
+}
+median() {
+	sort -n | awk '{ a[NR] = $1 } END { print a[int((NR + 1) / 2)] }'
+}
+measure() {
+	name=$1
+	gitcmd=$2
+	titcmd=$3
+	sh -c "$gitcmd" > /dev/null 2>&1
+	sh -c "$titcmd" > /dev/null 2>&1
+	: > "$d/g" ; : > "$d/t"
+	i=0
+	while [ $i -lt $runs ]; do
+		ms sh -c "$gitcmd" >> "$d/g"
+		ms sh -c "$titcmd" >> "$d/t"
+		i=$((i + 1))
+	done
+	g=$(median < "$d/g")
+	t=$(median < "$d/t")
+	ratio=$(awk -v t="$t" -v g="$g" 'BEGIN { if (g > 0) printf "%.2f", t / g; else print "-" }')
+	printf '| %s | %s | %s | %s |\n' "$name" "$(awk -v x="$g" 'BEGIN { printf "%.1f", x / 1000 }')" "$(awk -v x="$t" 'BEGIN { printf "%.1f", x / 1000 }')" "$ratio"
+}
+echo "Tin repository: $commits commits on main, $files files. tit adopt: $adopt_ms ms. $runs alternating runs, medians in ms (each includes starting the process)."
+echo
+echo '| operation | git | tit | tit/git |'
+echo '|---|---|---|---|'
+measure "status (clean)" "git status" "'$tit' status"
+measure "log (whole history)" "git log" "'$tit' log"
+measure "log -n 1" "git log -n 1" "'$tit' log -n 1"
+# twenty files changed
+for f in $(git ls-files '*.tin' | head -20); do
+	printf '\n// changed\n' >> "$f"
+done
+measure "status (20 files changed)" "git status" "'$tit' status"
+measure "diff (20 files changed)" "git diff" "'$tit' diff"
+git checkout -q -- .

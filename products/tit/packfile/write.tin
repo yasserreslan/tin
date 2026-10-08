@@ -92,9 +92,16 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 			e = append(e, u8(typeOf(items[i].kind)))
 			appendUv(mut e, len(items[i].body))
 		}
-		// each entry compresses in an arena: the deflater's tables and buffers go with it, only the stream is kept
+		// each entry compresses in an arena: the deflater's tables and buffers go with it, only the stream is kept.
+		// Commits and trees are stored, not compressed (zlib's stored blocks): they shrink little (a tree is mostly
+		// ids), and a walk or a log inflates thousands of them, which then costs a copy each (#807)
+		mut level = squash.Default
+		if items[i].base < 0 && items[i].kind != object.Kind.Blob {
+			level = 0
+		}
+		let lv = level
 		let z = arena {
-			squash.Zlib(payload, squash.Default)
+			squash.Zlib(payload, lv)
 		}
 		appendUv(mut e, len(z))
 		appendStr(mut e, z)
