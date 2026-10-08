@@ -339,6 +339,7 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `Listen(addr str) !Listener`: Listen opens a TCP listener on "host:port" (":0" picks a free port: see Port).
 - `(l Listener) Port() i64`: Port is the port the listener is bound to.
 - `(c Conn) LocalPort() i64`: LocalPort is the port this end of the connection uses (what the peer sees as the source port).
+- `(c Conn) CloseWrite()`: CloseWrite half-closes the connection: the peer reads the end of the stream after what was written, and this end still reads what the peer sends.
 - `(l Listener) Accept() !Conn`: Accept waits for the next connection.
 - `(l Listener) AcceptTimeout(timeout i64) !Conn`: AcceptTimeout waits at most timeout ns for the next connection (0: no limit), failing with a fault that says "timed out" when none came. A negative timeout is refused.
 - `(l mut Listener) Close()`: Close stops listening.

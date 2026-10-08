@@ -1,0 +1,46 @@
+package main
+
+// wire_closewrite: Conn.CloseWrite half-closes a connection: the peer reads what was written and then the end of the stream, and the
+// closing end still reads what the peer sends afterwards.
+
+import "say"
+import "wire"
+
+fn main() {
+	let l = wire.Listen("127.0.0.1:0") catch err {
+		say.Line("listen failed", err)
+		return
+	}
+	let c = wire.DialTimeout("127.0.0.1:" + say.Str(l.Port()), 2000000000) catch err {
+		say.Line("dial failed", err)
+		return
+	}
+	let s = l.Accept() catch err {
+		say.Line("accept failed", err)
+		return
+	}
+	c.Write("ping") catch err {
+		say.Line("write failed", err)
+		return
+	}
+	c.CloseWrite()
+	let got = s.ReadFull(4) catch err {
+		say.Line("read failed", err)
+		return
+	}
+	say.Line("server read", got)
+	mut buf = []u8{}
+	let more = s.Read(mut buf, 100) catch _ {
+		-1
+	}
+	say.Line("server then read", more)
+	s.Write("pong") catch err {
+		say.Line("reply failed", err)
+		return
+	}
+	let back = c.ReadFull(4) catch err {
+		say.Line("client read failed", err)
+		return
+	}
+	say.Line("client read", back)
+}
