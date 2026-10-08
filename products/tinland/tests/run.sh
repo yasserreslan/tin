@@ -40,3 +40,12 @@ else
 	[ "$(head -c 4 "$tmp/workspace.png" | od -An -c | tr -d ' ')" = '211PNG' ] || { echo "FAIL tinland window snapshot png"; exit 1; }
 	echo "PASS tinland window snapshot"
 fi
+# a real language server (gopls), when one is installed: the client completes and gets diagnostics
+"$compiler" -o "$tmp/lsp" products/tinland/tests/programs/lsp.tin
+"$tmp/lsp" > "$tmp/lsp.out"
+if head -1 "$tmp/lsp.out" | grep -q '^no gopls'; then
+	echo "SKIP tinland lsp: $(head -1 "$tmp/lsp.out")"
+else
+	cmp "$tmp/lsp.out" products/tinland/tests/golden/lsp.out || { echo "FAIL tinland lsp"; exit 1; }
+	echo "PASS tinland lsp"
+fi

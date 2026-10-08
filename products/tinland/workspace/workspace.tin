@@ -4,6 +4,7 @@
 package workspace
 
 import "../editor"
+import "../lsp"
 import "../terminal"
 import "../project"
 import "textedit"
@@ -105,6 +106,10 @@ type Workspace struct {
 	CodeSize f64
 	// WantSettings asks the application to open its settings file (the file is the application's).
 	WantSettings bool
+	// The language servers: their clients, the language of each, and the one a completion request waits on (-1 for none).
+	Lsps []lsp.Client
+	LspLangs []str
+	LspWaiting i64
 	// The bottom dock: which panel shows, and the terminal: its screen, its shell, whether the shell runs, how far it is scrolled back.
 	Bottom i64
 	Term terminal.Screen
@@ -132,13 +137,14 @@ const FocusReplace = 5
 
 // New makes a workspace around an editor.
 fn New(th theme.Theme, ed editor.Editor) Workspace {
-	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}, Git: []str{}, Term: terminal.New(80, 10), Pty: appkit.Pty{}}
+	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}, Git: []str{}, Lsps: []lsp.Client{}, LspLangs: []str{}, Term: terminal.New(80, 10), Pty: appkit.Pty{}}
 	ws.LeftOpen = true
 	ws.LeftW = 260.0
 	ws.W = 1100.0
 	ws.H = 720.0
 	ws.Dirty = true
 	ws.CodeSize = 13.0
+	ws.LspWaiting = -1
 	ws.Panes = []editor.Editor{ed}
 	return ws
 }
@@ -264,6 +270,14 @@ fn (ws mut Workspace) CheckDisk() {
 	}
 	if ws.HasProj && ws.Bottom != BottomTerminal && ws.Panel == PanelGit && ws.LeftOpen {
 		ws.RefreshGit()
+		ws.Dirty = true
+	}
+}
+
+// CheckSources has the compiler look at the active file when it is Tin source that changed since it was last checked.
+fn (ws mut Workspace) CheckSources() {
+	if ws.Ed.DiagFor != ws.Ed.Buf.Version {
+		ws.Ed.CheckNow()
 		ws.Dirty = true
 	}
 }

@@ -119,7 +119,15 @@ fn (ws mut Workspace) key(code i64, flags i64, chars str) {
 		ws.Perform(CmdToggleProject)
 		return
 	}
+	// a language server answers Ctrl+Space, and a dot asks it what follows
+	if code == 49 && (flags & appkit.ModCtrl) != 0 && ws.LspComplete() {
+		ws.Dirty = true
+		return
+	}
 	ws.Ed.KeyDown(code, flags, chars)
+	if chars == "." && (flags & appkit.ModCmd) == 0 {
+		ws.LspComplete()
+	}
 	ws.Dirty = true
 }
 
@@ -303,6 +311,8 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		}
 	} else if cmd == editor.CmdQuit {
 		ws.RequestQuit()
+	} else if cmd == editor.CmdComplete && ws.LspComplete() {
+		ws.Dirty = true
 	} else if cmd == CmdOpenSettings {
 		ws.WantSettings = true
 	} else if cmd == CmdSplit {

@@ -42,7 +42,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+Shift+I | format the file with the rules of `tin fmt` |
 | Cmd+Shift+B or Cmd+click, Cmd+Alt+Left | go to the declaration of the name (in another file too), and back |
 | Ctrl+Q | quick info: the signature and documentation of the name |
-| Ctrl+Space, or typing a `.` | completion: names after `pkg.`, methods and fields after another dot, the package's names (Up and Down choose, Tab or Return accepts, Escape closes); in files of other languages, the words of the open files |
+| Ctrl+Space, or typing a `.` | completion: names after `pkg.`, methods and fields after another dot, the package's names (Up and Down choose, Tab or Return accepts, Escape closes); in Go, Rust, TypeScript, JavaScript and Python files a language server (`gopls`, `rust-analyzer`, `typescript-language-server`, `pyright-langserver` or `pylsp`, when installed: looked for in PATH, ~/go/bin, ~/.cargo/bin, /opt/homebrew/bin) completes and underlines its problems; in other files, the words of the open files |
 | Cmd+R | compile and run the file with `tinc` (output in a panel; click a compiler message to jump to it) |
 
 Every key command is also in the menu bar. Errors are underlined while you type: after a pause the compiler checks the text (`tinc -check -json` with the

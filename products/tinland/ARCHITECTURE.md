@@ -68,6 +68,7 @@ The window is built the way Zed's is, with one difference that comes from Tin's 
   rules, file operations, fuzzy matching and the search itself; it is portable.
 - **`terminal`**: the screen model of a VT100 style terminal (the grid, colors, scroll back); with `appkit.StartShell` (a
   shell on a pseudo terminal) it is the terminal panel. The screen model is portable and tested.
+- **`lsp`**: a Language Server Protocol client (JSON-RPC over pipes, never waiting: the loop polls it): completion and diagnostics from gopls and other servers; Tin files use the compiler (`language`, `tinsym`) instead.
 - **`editor`**: the text area (the buffer is `textedit`), its keys, completion, diagnostics, navigation and running a file.
 
 Where Zed keeps its state in `Rc` cells that live as long as they are referenced, Tin's request pool and ingot heap make a
@@ -77,4 +78,4 @@ and draws each frame in an `arena`, so a frame leaves nothing behind (memory sta
 resident size by nothing). The loop waits for the next AppKit event with `gpuwin.Pump`; AppKit calls the callbacks while it
 handles the event.
 
-Still to build: more than two panes, a settings file and keymaps, completion popups from a language server.
+Still to build: hover and go to definition through language servers, a debugger, extensions.

@@ -101,6 +101,10 @@ type Editor struct {
 	Marks    []i64
 	// Extra are the carets besides the buffer's own (multi.tin).
 	Extra    []textedit.Pos
+	// External are completion items someone else (a language server) supplied for the list that is open; ExternalDiags says the
+	// diagnostics come from elsewhere too, so CheckNow leaves them alone for files that are not Tin.
+	External []tinsym.Item
+	ExternalDiags bool
 	MarksPath str
 	MarksSaves i64
 	Saves    i64
@@ -110,7 +114,7 @@ type Editor struct {
 }
 
 fn New(buf textedit.Buffer) Editor {
-	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, Marks: []i64{}, Extra: []textedit.Pos{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
+	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, Marks: []i64{}, Extra: []textedit.Pos{}, External: []tinsym.Item{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
 	ed.rawFor = -1
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1

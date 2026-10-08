@@ -14,7 +14,9 @@ import "twine"
 fn (ed mut Editor) CheckNow() {
 	ed.DiagFor = ed.Buf.Version
 	if !twine.HasSuffix(ed.Buf.Path, ".tin") {
-		ed.Diags = []tinsym.Diag{}
+		if !ed.ExternalDiags {
+			ed.Diags = []tinsym.Diag{}
+		}
 		ed.Syms = []tinsym.Sym{}
 		return
 	}

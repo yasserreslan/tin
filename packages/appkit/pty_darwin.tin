@@ -130,3 +130,97 @@ fn (p mut Pty) Stop() {
 		p.Alive = false
 	}
 }
+
+extern fn pipe(fds i64) i64
+
+extern fn fork() i64
+
+extern fn dup2(from i64, to i64) i64
+
+// Pipe is a program started with its standard input and output on two pipes (a language server speaks over them): In is where the
+// program writes to it, Out where it reads what it printed.
+type Pipe struct {
+	In i64
+	Out i64
+	Pid i64
+	Alive bool
+	buf i64
+}
+
+// StartPipe runs the program (argv[0] is its full path) in the folder with its input and output on pipes.
+fn StartPipe(cwd str, argv []str) Pipe {
+	let args = calloc(len(argv) + 1, 8)
+	for i in 0..len(argv) {
+		args[i] = rt_cstr(argv[i])
+	}
+	args[len(argv)] = 0
+	let path = rt_cstr(argv[0])
+	let dir = rt_cstr(cwd)
+	let toChild = calloc(1, 8)
+	let fromChild = calloc(1, 8)
+	pipe(toChild)
+	pipe(fromChild)
+	let childIn = toChild[0] & 0xffffffff
+	let parentIn = (toChild[0] >> 32) & 0xffffffff
+	let parentOut = fromChild[0] & 0xffffffff
+	let childOut = (fromChild[0] >> 32) & 0xffffffff
+	let pid = fork()
+	if pid == 0 {
+		dup2(childIn, 0)
+		dup2(childOut, 1)
+		close(childIn)
+		close(parentIn)
+		close(parentOut)
+		close(childOut)
+		chdir(dir)
+		execv(path, args)
+		_exit(127)
+	}
+	close(childIn)
+	close(childOut)
+	let p = Pipe{In: parentIn, Out: parentOut, Pid: pid, Alive: pid > 0}
+	p.buf = calloc(65536, 1)
+	return p
+}
+
+// Read returns what the program printed since the last call ("" when nothing); it does not wait.
+fn (p mut Pipe) Read() str {
+	if !p.Alive {
+		return ""
+	}
+	let fds = calloc(1, 8)
+	store8(fds, p.Out & 255)
+	store8(fds + 1, (p.Out >> 8) & 255)
+	store8(fds + 2, (p.Out >> 16) & 255)
+	store8(fds + 3, (p.Out >> 24) & 255)
+	store8(fds + 4, 1)
+	let ready = poll(fds, 1, 0)
+	free(fds)
+	if ready <= 0 {
+		return ""
+	}
+	let n = read(p.Out, p.buf, 65536)
+	if n <= 0 {
+		p.Alive = false
+		return ""
+	}
+	return rt_str_from_raw(p.buf, n)
+}
+
+// Send writes the text to the program's input.
+fn (p Pipe) Send(text str) {
+	if p.Alive && len(text) > 0 {
+		write(p.In, rt_cstr(text), len(text))
+	}
+}
+
+// Stop ends the program.
+fn (p mut Pipe) Stop() {
+	if p.Pid > 0 {
+		kill(p.Pid, 15)
+		close(p.In)
+		close(p.Out)
+		waitpid(p.Pid, 0, 1)
+		p.Alive = false
+	}
+}
