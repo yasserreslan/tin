@@ -58,15 +58,31 @@ fn main() {
 		return
 	}
 	ci.Check(large.Status == 200 && len(large.Body) == size && large.Body[0] == 'x' && large.Body[size-1] == 'x', "proxy streamed a 4 MiB response")
+	// With the upstream refused, both proxies answer 502 with no body, as Go's default error handler does (#739). anvil adds its
+	// text/plain Content-Type to every response, which Go's 502 lacks; the strict test pins that header.
+	let deadPort = nettest.Port()
+	let goDeadPort = nettest.Port()
+	let dead = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "UPSTREAM=http://127.0.0.1:1"}, ci.Join(out, "dead.log"), deadPort)
+	dead.Ready(10)
+	let goDead = nettest.Start(goExe, []str{}, []str{"UPSTREAM=http://127.0.0.1:1"}, ci.Join(out, "go-dead.log"), goDeadPort)
+	goDead.Ready(10)
+	let (deadStatus, deadHeaders, deadBody) = metaRequest(deadPort)
+	let (goDeadStatus, goDeadHeaders, goDeadBody) = metaRequest(goDeadPort)
+	ci.Check(deadStatus == 502 && deadStatus == goDeadStatus, "Tin and Go ReverseProxy differed on the 502 status for an unreachable upstream")
+	ci.Check(deadBody == "" && deadBody == goDeadBody, "Tin and Go ReverseProxy differed on the 502 body for an unreachable upstream")
+	ci.Check(deadHeaders["content-length"] == goDeadHeaders["content-length"] && deadHeaders["content-length"] == "0", "Tin and Go ReverseProxy differed on the 502 content length")
+	ci.Check(deadHeaders["x-content-type-options"] == "" && goDeadHeaders["x-content-type-options"] == "", "the 502 for an unreachable upstream sent X-Content-Type-Options, which Go's does not")
+	dead.Stop()
+	goDead.Stop()
 	front.Stop()
 	goProxy.Stop()
 	backend.Stop()
 	let got = ci.Exec([]str{strict}, root, 30)
 	ci.Must(got, "run strict proxy error test")
 	let expected = ci.Read(ci.Join(root, "toolchain/tests/v2/proxy.out"))
-	let actual = twine.TrimSpace(got.Stdout)
-	ci.Check(actual == twine.TrimSpace(expected), "strict proxy output differs: " + actual)
-	ci.Pass("proxy: Go header comparison, chunked request, 4 MiB streaming, and strict 502 check passed")
+	let actual = got.Stdout
+	ci.Check(actual == expected, "strict proxy output differs: " + actual)
+	ci.Pass("proxy: Go header comparison, chunked request, 4 MiB streaming, Go's 502 for an unreachable upstream, and the exact strict 502 output passed")
 }
 
 fn metaRequest(port i64) (i64, map[str]str, str) {

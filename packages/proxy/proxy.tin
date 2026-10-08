@@ -42,12 +42,9 @@ fn New(target str) Proxy {
 fn noDirector(q anvil.Req) str { return "" }
 fn noModify(r mut Response) !bool { return true }
 
-// DefaultErrorHandler writes Go ReverseProxy's default 502 body.
+// DefaultErrorHandler writes Go ReverseProxy's default 502: the status with no body (anvil adds its text/plain content type).
 fn DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault) {
 	w.Status(502)
-	w.Type("text/plain; charset=utf-8")
-	w.Head("X-Content-Type-Options", "nosniff")
-	w.Text("Bad Gateway\n")
 }
 
 // ServeHTTP handles a request and can be registered with anvil.Router.Stream.

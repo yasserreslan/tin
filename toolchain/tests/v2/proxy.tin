@@ -10,5 +10,5 @@ fn main() {
 	let r = anvil.NewRouter()
 	r.Get("/", p.ServeHTTP)
 	let got = r.RunWith("GET", "/", []str{}, "")
-	say.Line(got.Code(), got.Header("Content-Type"), got.Header("X-Content-Type-Options"), str(got.Body))
+	say.Line(got.Code(), say.Fmt("%q", got.Header("Content-Type")), say.Fmt("%q", got.Header("X-Content-Type-Options")), say.Fmt("%q", str(got.Body)))
 }

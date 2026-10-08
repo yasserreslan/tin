@@ -544,7 +544,7 @@ Set Director to rewrite a request to a complete upstream URL. ModifyResponse can
 - `type Response struct`: Response is the upstream status and headers before they are copied to the client.
 - `type Proxy struct`: Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set, returns the complete upstream URL for each request, or an empty string to use Target. Use New to get default hooks.
 - `New(target str) Proxy`: New returns a proxy with default hook functions. Set hooks before registering ServeHTTP.
-- `DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault)`: DefaultErrorHandler writes Go ReverseProxy's default 502 body.
+- `DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault)`: DefaultErrorHandler writes Go ReverseProxy's default 502: the status with no body (anvil adds its text/plain content type).
 - `(p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out)`: ServeHTTP handles a request and can be registered with anvil.Router.Stream. Requests and responses reuse one 32 KiB buffer in each direction; neither body is accumulated.
 
 ## assay
