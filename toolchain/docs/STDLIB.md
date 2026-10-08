@@ -34,7 +34,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [atlas](#atlas) | functions on maps (maps) |
 | [cairn](#cairn) | containers (container/heap, sets, LRU) |
 | [stamp](#stamp) | hashes and checksums (hash/*) |
-| [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib) |
+| [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2) |
 | [ledger](#ledger) | CSV reading and writing (encoding/csv) |
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
@@ -1293,13 +1293,14 @@ Package stamp computes non-cryptographic hashes and checksums: FNV-1a, CRC-32 (I
 
 ## squash
 
-Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4 and Zstandard (RFC 8878). Every decoder takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input cannot make a huge output.
+Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4, Zstandard (RFC 8878), LZW (compress/lzw) and bzip2 decompression (compress/bzip2). Every decoder takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input cannot make a huge output.
 
 ```tin body
 let z = squash.Gzip("hello, hello, hello", squash.Default)
 let back = try squash.Gunzip(z, 64mb)
 ```
 
+- `Bunzip2(data str, max i64) !str`: Bunzip2 decompresses bzip2 data (one stream or several back to back, as Go's compress/bzip2 reads them), checking every block CRC and stream CRC and failing past max bytes of output.
 - `Deflate(data str, level i64) str`: Deflate compresses data as raw DEFLATE at level (Store to Best).
 - `const Store = 0`: Levels for Deflate, Gzip, Zlib and Zstd: Store writes the data uncompressed (in valid frames), Fastest and Best trade speed against size, Default is between.
 - `const Fastest = 1`

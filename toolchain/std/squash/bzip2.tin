@@ -1,0 +1,570 @@
+package squash
+
+// bzip2 decompression (read only, as Go's compress/bzip2, #754): a stream header, blocks of 100 to
+// 900 kB, each undone by its Huffman codes, the move-to-front and zero-run steps, the inverse
+// Burrows-Wheeler transform and the final run-length step, and a trailer with the stream's CRC.
+//
+//	let text = try squash.Bunzip2(compressed, 64*1024*1024)
+//
+// It is one-shot over the whole input like the other decoders here: a block has to be decoded whole
+// before its first byte is known, so a streaming reader would only save the output's memory; that
+// reader is a follow-up. Every block's CRC and every stream's combined CRC are checked. Streams
+// written back to back are read as one, as Go reads them: after a stream's trailer only the end of
+// the input or another "BZh" header may follow. Faults name what Go's errors name: "bzip2 data
+// invalid: ..." for a damaged stream and "bzip2: unexpected EOF" for one that ends early. Memory is
+// the output, four bytes per byte of the largest block size seen and a few kB of tables.
+
+import "fault"
+
+const bzBlockMagic = 0x314159265359
+const bzFinalMagic = 0x177245385090
+
+// bzFastBits is the width of the Huffman lookup table; longer codes walk the tree from there.
+const bzFastBits = 10
+
+// bzMaxSyms is the largest alphabet: 256 byte values, RUNA, RUNB and the end of block, less one.
+const bzMaxSyms = 258
+
+// bzCrcTab is the MSB-first CRC-32 table (polynomial 0x04C11DB7) bzip2 checks its blocks with.
+let bzCrcTab = bzCrcTable()
+
+fn bzCrcTable() []u32 {
+	mut t = make([]u32, 256)
+	for i in 0..256 {
+		mut c = u32(i) << 24
+		for j in 0..8 {
+			if c & 0x80000000 != 0 {
+				c = (c << 1) ^ 0x04C11DB7
+			} else {
+				c = c << 1
+			}
+		}
+		t[i] = c
+	}
+	return t
+}
+
+// bzCrc is the bzip2 CRC of b[from:].
+fn bzCrc(b []u8, from i64) u32 {
+	mut c = u32(0xffffffff)
+	for i in from..len(b) {
+		c = bzCrcTab[i64((c >> 24) ^ u32(b[i]))] ^ (c << 8)
+	}
+	return ^c
+}
+
+// bzBits reads bzip2's most-significant-first bit stream. Like Go's bitReader, a read past the end
+// gives zero bits and sets eof, and the decoder then reports the stream as ending early.
+type bzBits struct {
+	s   str
+	pos i64
+	acc u64 // the low n bits are the next ones, most significant first
+	n   i64
+	eof bool
+}
+
+// fill loads whole bytes while acc has room for another.
+fn (r mut bzBits) fill() {
+	for r.n <= 56 && r.pos < len(r.s) {
+		r.acc = (r.acc << 8) | u64(r.s[r.pos])
+		r.pos += 1
+		r.n += 8
+	}
+}
+
+// bits reads k bits, k at most 48; past the end it gives 0 and sets eof.
+fn (r mut bzBits) bits(k i64) i64 {
+	if r.n < k {
+		r.fill()
+		if r.n < k {
+			r.eof = true
+			r.n = 0
+			return 0
+		}
+	}
+	r.n -= k
+	return i64((r.acc >> u64(r.n)) & ((u64(1) << u64(k)) - 1))
+}
+
+// peek is the next k bits without reading them, zero past the end.
+fn (r mut bzBits) peek(k i64) i64 {
+	if r.n < k {
+		r.fill()
+		if r.n < k {
+			return i64((r.acc << u64(k-r.n)) & ((u64(1) << u64(k)) - 1))
+		}
+	}
+	return i64((r.acc >> u64(r.n-k)) & ((u64(1) << u64(k)) - 1))
+}
+
+// skip drops k peeked bits; dropping more than the input has sets eof.
+fn (r mut bzBits) skip(k i64) {
+	if k > r.n {
+		r.eof = true
+		r.n = 0
+		return
+	}
+	r.n -= k
+}
+
+// bzHuff holds up to six Huffman trees, each built exactly as Go builds it so that damaged code
+// lengths decode, or fail, as they do there: tree t's nodes are at t*bzMaxSyms, with a child of
+// -1 marking a leaf, and its lookup table at t<<bzFastBits.
+type bzHuff struct {
+	left  []i64
+	right []i64
+	lval  []i64
+	rval  []i64
+	fast  []i64 // (code length << 16) | symbol for a leaf within bzFastBits bits, else the node reached
+	code  []u32 // scratch: codes in ascending order
+	sym   []i64 // scratch: their symbols
+	plen  []i64 // scratch: lengths sorted ascending
+	psym  []i64 // scratch: their symbols
+	base  i64
+	next  i64
+}
+
+fn newBzHuff() bzHuff {
+	return bzHuff{left: make([]i64, 6*bzMaxSyms), right: make([]i64, 6*bzMaxSyms), lval: make([]i64, 6*bzMaxSyms), rval: make([]i64, 6*bzMaxSyms), fast: make([]i64, 6 << bzFastBits), code: make([]u32, bzMaxSyms), sym: make([]i64, bzMaxSyms), plen: make([]i64, bzMaxSyms), psym: make([]i64, bzMaxSyms), base: 0, next: 0}
+}
+
+// build makes tree t from the code lengths (each 1 to 20) of n symbols, as Go's newHuffmanTree.
+fn (h mut bzHuff) build(t i64, lens []i64, n i64) ! {
+	// Sort by length, then symbol.
+	mut k = 0
+	for l in 1..21 {
+		for s in 0..n {
+			if lens[s] == l {
+				h.plen[k] = l
+				h.psym[k] = s
+				k += 1
+			}
+		}
+	}
+	// Codes go to the longest first, counting up in 32 bits (an over-full set wraps, as in Go).
+	mut c = u32(0)
+	mut length = 32
+	for j in 0..n {
+		let i = n - 1 - j
+		if length > h.plen[i] {
+			length = h.plen[i]
+		}
+		h.code[j] = c
+		h.sym[j] = h.psym[i]
+		c +%= u32(1) << u64(32-length)
+	}
+	// Ascending by code: already so unless the count wrapped.
+	for j in 1..n {
+		let cj = h.code[j]
+		let sj = h.sym[j]
+		mut m = j
+		for m > 0 && h.code[m-1] > cj {
+			h.code[m] = h.code[m-1]
+			h.sym[m] = h.sym[m-1]
+			m -= 1
+		}
+		h.code[m] = cj
+		h.sym[m] = sj
+	}
+	h.base = t * bzMaxSyms
+	h.next = 0
+	_ = try h.node(0, n, 0)
+	// The lookup table: walk each bzFastBits-bit prefix down the tree (a 1 bit goes left, as in Go).
+	let fb = t << bzFastBits
+	let base = h.base
+	for p in 0..(1 << bzFastBits) {
+		mut at = 0
+		mut e = -1
+		for i in 0..bzFastBits {
+			if (p >> (bzFastBits - 1 - i)) & 1 == 1 {
+				let ch = h.left[base+at]
+				if ch < 0 {
+					e = ((i + 1) << 16) | h.lval[base+at]
+					break
+				}
+				at = ch
+			} else {
+				let ch = h.right[base+at]
+				if ch < 0 {
+					e = ((i + 1) << 16) | h.rval[base+at]
+					break
+				}
+				at = ch
+			}
+		}
+		if e < 0 {
+			e = at
+		}
+		h.fast[fb+p] = e
+	}
+}
+
+// node builds the subtree of the sorted codes lo..hi, which agree on their first level bits, and
+// is its node's index (Go's buildHuffmanNode).
+fn (h mut bzHuff) node(lo i64, hi i64, level i64) !i64 {
+	let test = u32(1) << u64(31-level)
+	mut split = hi
+	for i in lo..hi {
+		if h.code[i] & test != 0 {
+			split = i
+			break
+		}
+	}
+	if split == lo || split == hi {
+		// A level every code shares takes no bit, as in Go.
+		if hi-lo < 2 {
+			fail "squash: bzip2 data invalid: empty Huffman tree"
+		}
+		if level == 31 {
+			fail "squash: bzip2 data invalid: equal symbols in Huffman tree"
+		}
+		return try h.node(lo, hi, level+1)
+	}
+	let index = h.next
+	let at = h.base + index
+	h.next += 1
+	if split-lo == 1 {
+		h.left[at] = -1
+		h.lval[at] = h.sym[lo]
+	} else {
+		h.left[at] = try h.node(lo, split, level+1)
+	}
+	if hi-split == 1 {
+		h.right[at] = -1
+		h.rval[at] = h.sym[split]
+	} else {
+		h.right[at] = try h.node(split, hi, level+1)
+	}
+	return index
+}
+
+// bzDec is one decompression's state, allocated once and reused by every block and stream.
+type bzDec struct {
+	r         bzBits
+	h         bzHuff
+	tt        []u32 // the block: bytes, then with the inverse BWT's next index in the upper 24 bits
+	c         []i64 // byte counts, then the inverse BWT's starts
+	mtf       []u8  // the move-to-front list of the block's byte values
+	tmtf      []i64 // the move-to-front list of tree numbers
+	sel       []u8  // the tree of each group of 50 symbols
+	lens      []i64 // one tree's code lengths
+	blockSize i64
+	want      u32 // the block CRC the block header gives
+	fileCRC   u32 // the stream CRC so far, combined from the block headers' CRCs as Go does
+}
+
+// Bunzip2 decompresses bzip2 data (one stream or several back to back, as Go's compress/bzip2
+// reads them), checking every block CRC and stream CRC and failing past max bytes of output.
+fn Bunzip2(data str, max i64) !str {
+	mut d = bzDec{r: bzBits{s: data, pos: 0, acc: 0, n: 0, eof: false}, h: newBzHuff(), tt: make([]u32, 0), c: make([]i64, 256), mtf: make([]u8, 256), tmtf: make([]i64, 6), sel: make([]u8, 32768), lens: make([]i64, bzMaxSyms), blockSize: 0, want: 0, fileCRC: 0}
+	mut out = make([]u8, 0, min(max, len(data)*4+64))
+	d.run(mut out, max) catch err {
+		// A read past the end leaves zero bits behind it; whatever they decoded to, Go reports the end.
+		if d.r.eof && !fault.Is(err, fault.LimitExceeded) {
+			fail "squash: bzip2: unexpected EOF"
+		}
+		fail err
+	}
+	return str(out)
+}
+
+// run decodes the streams into out.
+fn (d mut bzDec) run(out mut []u8, max i64) ! {
+	try d.setup(true)
+	for {
+		let magic = d.r.bits(48)
+		if magic == bzBlockMagic {
+			let start = len(out)
+			try d.block(mut out, max)
+			if bzCrc(out, start) != d.want {
+				fail "squash: bzip2 data invalid: block checksum mismatch"
+			}
+		} else if magic == bzFinalMagic {
+			let crc = u32(d.r.bits(32))
+			if d.r.eof {
+				fail "squash: bzip2: unexpected EOF"
+			}
+			if crc != d.fileCRC {
+				fail "squash: bzip2 data invalid: file checksum mismatch"
+			}
+			// To the byte boundary: the bits of the last byte are padding, whole buffered bytes go back.
+			d.r.pos -= d.r.n / 8
+			d.r.n = 0
+			let s = d.r.s
+			if d.r.pos >= len(s) {
+				return
+			}
+			if d.r.pos+1 >= len(s) {
+				d.r.eof = true
+				fail "squash: bzip2: unexpected EOF"
+			}
+			if s[d.r.pos] != 'B' || s[d.r.pos+1] != 'Z' {
+				fail "squash: bzip2 data invalid: bad magic value in continuation file"
+			}
+			d.r.pos += 2
+			try d.setup(false)
+		} else {
+			fail "squash: bzip2 data invalid: bad magic value found"
+		}
+	}
+}
+
+// setup reads a stream header: "BZ" (unless already read), "h" and the block size digit.
+fn (d mut bzDec) setup(needMagic bool) ! {
+	if needMagic && d.r.bits(16) != 0x425a {
+		fail "squash: bzip2 data invalid: bad magic value"
+	}
+	if d.r.bits(8) != 'h' {
+		fail "squash: bzip2 data invalid: non-Huffman entropy encoding"
+	}
+	let level = d.r.bits(8)
+	if level < '1' || level > '9' {
+		fail "squash: bzip2 data invalid: invalid compression level"
+	}
+	if d.r.eof {
+		fail "squash: bzip2: unexpected EOF"
+	}
+	d.fileCRC = 0
+	d.blockSize = 100000 * (level - '0')
+	if d.blockSize > len(d.tt) {
+		d.tt = make([]u32, d.blockSize)
+	}
+}
+
+// sym decodes one symbol with tree t.
+fn (d mut bzDec) sym(t i64) i64 {
+	let e = d.h.fast[(t<<bzFastBits)+d.r.peek(bzFastBits)]
+	if e >= 65536 {
+		d.r.skip(e >> 16)
+		return e & 0xffff
+	}
+	d.r.skip(bzFastBits)
+	let base = t * bzMaxSyms
+	mut at = e
+	for {
+		if d.r.bits(1) == 1 {
+			let ch = d.h.left[base+at]
+			if ch < 0 {
+				return d.h.lval[base+at]
+			}
+			at = ch
+		} else {
+			let ch = d.h.right[base+at]
+			if ch < 0 {
+				return d.h.rval[base+at]
+			}
+			at = ch
+		}
+	}
+	return 0
+}
+
+// block reads one block (its magic already read) and appends its bytes to out.
+fn (d mut bzDec) block(out mut []u8, max i64) ! {
+	d.want = u32(d.r.bits(32))
+	d.fileCRC = ((d.fileCRC << 1) | (d.fileCRC >> 31)) ^ d.want
+	if d.r.bits(1) != 0 {
+		fail "squash: bzip2 data invalid: deprecated randomized files"
+	}
+	let origPtr = d.r.bits(24)
+
+	// The byte values in use: a 16-bit map of 16-value ranges, then a 16-bit map per range used.
+	let ranges = d.r.bits(16)
+	mut nsym = 0
+	for g in 0..16 {
+		if ranges & (1 << (15 - g)) != 0 {
+			let used = d.r.bits(16)
+			for s in 0..16 {
+				if used & (1 << (15 - s)) != 0 {
+					d.mtf[nsym] = u8(16*g + s)
+					nsym += 1
+				}
+			}
+		}
+	}
+	if nsym == 0 {
+		fail "squash: bzip2 data invalid: no symbols in input"
+	}
+	let trees = d.r.bits(3)
+	if trees < 2 || trees > 6 {
+		fail "squash: bzip2 data invalid: invalid number of Huffman trees"
+	}
+
+	// The tree of each 50 symbols: unary numbers, move-to-front over the tree numbers.
+	let nsel = d.r.bits(15)
+	for i in 0..trees {
+		d.tmtf[i] = i
+	}
+	for i in 0..nsel {
+		mut c = 0
+		for d.r.bits(1) != 0 {
+			c += 1
+		}
+		if c >= trees {
+			fail "squash: bzip2 data invalid: tree index too large"
+		}
+		let v = d.tmtf[c]
+		mut m = c
+		for m > 0 {
+			d.tmtf[m] = d.tmtf[m-1]
+			m -= 1
+		}
+		d.tmtf[0] = v
+		d.sel[i] = u8(v)
+	}
+
+	// Each tree's code lengths, delta coded from a 5-bit start; the alphabet adds RUNA, RUNB and the end.
+	let alpha = nsym + 2
+	for t in 0..trees {
+		mut length = d.r.bits(5)
+		for j in 0..alpha {
+			for {
+				if length < 1 || length > 20 {
+					fail "squash: bzip2 data invalid: Huffman length out of range"
+				}
+				if d.r.bits(1) == 0 {
+					break
+				}
+				if d.r.bits(1) == 1 {
+					length -= 1
+				} else {
+					length += 1
+				}
+			}
+			d.lens[j] = length
+		}
+		try d.h.build(t, d.lens, alpha)
+	}
+	if nsel == 0 {
+		fail "squash: bzip2 data invalid: no tree selectors given"
+	}
+	if i64(d.sel[0]) >= trees {
+		fail "squash: bzip2 data invalid: tree selector out of range"
+	}
+
+	// The symbols: runs of the front byte in bijective base 2 (RUNA, RUNB), else move-to-front indexes.
+	let tt = d.tt
+	let counts = d.c
+	for i in 0..256 {
+		counts[i] = 0
+	}
+	let bs = d.blockSize
+	let eob = alpha - 1
+	mut cur = i64(d.sel[0])
+	mut next = 1
+	mut decoded = 0
+	mut fill = 0
+	mut repeat = 0
+	mut power = 0
+	for {
+		if decoded == 50 {
+			if next >= nsel {
+				fail "squash: bzip2 data invalid: insufficient selector indices for number of symbols"
+			}
+			if i64(d.sel[next]) >= trees {
+				fail "squash: bzip2 data invalid: tree selector out of range"
+			}
+			cur = i64(d.sel[next])
+			next += 1
+			decoded = 0
+		}
+		let v = d.sym(cur)
+		decoded += 1
+		if d.r.eof {
+			fail "squash: bzip2: unexpected EOF"
+		}
+		if v < 2 {
+			if repeat == 0 {
+				power = 1
+			}
+			repeat += power << v
+			power = power << 1
+			if repeat > 2*1024*1024 {
+				fail "squash: bzip2 data invalid: repeat count too large"
+			}
+			continue
+		}
+		if repeat > 0 {
+			if repeat > bs-fill {
+				fail "squash: bzip2 data invalid: repeats past end of block"
+			}
+			let b = d.mtf[0]
+			for k in fill..fill+repeat {
+				tt[k] = u32(b)
+			}
+			counts[i64(b)] += repeat
+			fill += repeat
+			repeat = 0
+		}
+		if v == eob {
+			break
+		}
+		// Index 0 is always a run, so v-1 is the move-to-front index.
+		let at = v - 1
+		let b = d.mtf[at]
+		mut m = at
+		for m > 0 {
+			d.mtf[m] = d.mtf[m-1]
+			m -= 1
+		}
+		d.mtf[0] = b
+		if fill >= bs {
+			fail "squash: bzip2 data invalid: data exceeds block size"
+		}
+		tt[fill] = u32(b)
+		counts[i64(b)] += 1
+		fill += 1
+	}
+	if origPtr >= fill {
+		fail "squash: bzip2 data invalid: origPtr out of bounds"
+	}
+	if d.r.eof {
+		fail "squash: bzip2: unexpected EOF"
+	}
+
+	// The inverse BWT, in one array: each entry's upper 24 bits become the index of the next byte.
+	mut sum = 0
+	for i in 0..256 {
+		let n = counts[i]
+		counts[i] = sum
+		sum += n
+	}
+	for i in 0..fill {
+		let b = i64(tt[i] & 0xff)
+		tt[counts[b]] |= u32(i) << 8
+		counts[b] += 1
+	}
+
+	// Out, undoing the first run-length step: four equal bytes and a count of more.
+	mut pos = i64(tt[origPtr] >> 8)
+	mut last = -1
+	mut same = 0
+	for k in 0..fill {
+		let e = tt[pos]
+		let b = i64(e & 0xff)
+		pos = i64(e >> 8)
+		if same == 3 {
+			for j in 0..b {
+				out = append(out, u8(last))
+			}
+			if b > 0 {
+				last = -1
+			}
+			same = 0
+			if len(out) > max {
+				fail fault.Wrap(fault.LimitExceeded, "squash: bzip2 over {max} bytes")
+			}
+			continue
+		}
+		if last == b {
+			same += 1
+		} else {
+			same = 0
+		}
+		last = b
+		out = append(out, u8(b))
+	}
+	if len(out) > max {
+		fail fault.Wrap(fault.LimitExceeded, "squash: bzip2 over {max} bytes")
+	}
+}
