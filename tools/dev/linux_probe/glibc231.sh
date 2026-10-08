@@ -18,7 +18,7 @@ GL=$(ldd --version | head -1 | awk '{print $NF}'); OUT=/p/out/$PLAT-glibc$GL; T=
   echo "pthread_create / dladdr live in:"; for l in libpthread.so.0 libdl.so.2; do f=$(ls /lib/*-linux-gnu*/$l | head -1); echo "  $l: $(readelf -W --dyn-syms $f | awk '{print $8}' | grep -E '^(pthread_create|pthread_attr_setstacksize|dladdr|dlsym)@' | tr '\n' ' ')"; done
   echo; echo "=== unversioned binding on glibc $GL (realpath(path,NULL) + dlvsym):"
   sed -n "/^#define _GNU_SOURCE/,/^}/p" bindings.sh > $T/multi.c
-  gcc -O0 -fno-plt -Wl,-z,now -o $T/multi $T/multi.c -lm -ldl -lpthread && cp $T/multi $T/multi_unv && python3 elfpatch.py $T/multi_unv droptag 0x6ffffff0 droptag 0x6ffffffe droptag 0x6fffffff > /dev/null
+  gcc -O0 -fno-plt -Wl,-z,now -o $T/multi $T/multi.c -lm -ldl -lpthread && cp $T/multi $T/multi_unv && ./elfpatch $T/multi_unv droptag 0x6ffffff0 droptag 0x6ffffffe droptag 0x6fffffff > /dev/null
   echo "--- versioned:"; $T/multi | grep -E "realpath|bound|sched"; echo "--- unversioned:"; $T/multi_unv | grep -E "realpath|bound|sched"; echo "exit=$?"
 } > "$OUT/glibc231.txt" 2>&1
 echo done $OUT

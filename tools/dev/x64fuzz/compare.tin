@@ -1,0 +1,125 @@
+package main
+
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// Compare the x64fuzz listing with objdump's disassembly of the same bytes.
+//
+// Usage: compare OURS.txt OBJDUMP.txt [MAX_REPORTED]
+//
+// Both listings are normalized to one instruction per line with single spaces and lower-case text (objdump's addresses, byte columns,
+// continuation lines and `# target` comments are dropped), then compared instruction by instruction.
+
+fn norm(text str) str {
+	mut t = text
+	let hash = twine.IndexByte(t, '#')
+	if hash >= 0 {
+		t = t[0:hash]
+	}
+	return twine.Join(twine.Fields(twine.ToLower(t)), " ")
+}
+
+fn isHex(c u8) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+}
+
+// Line is an instruction objdump disassembled: its address, bytes and normalized text.
+type Line struct {
+	Addr i64
+	Bytes str
+	Text str
+}
+
+// parseObjdump reads "   1a:\t48 89 e5\tmov rbp,rsp"; ok is false for headers and the byte-only continuation lines.
+fn parseObjdump(line str) (Line, bool) {
+	mut i = 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i += 1
+	}
+	let start = i
+	for i < len(line) && isHex(line[i]) {
+		i += 1
+	}
+	if i == start || i >= len(line) || line[i] != ':' || i + 1 >= len(line) || line[i + 1] != '\t' {
+		return Line{Addr: 0, Bytes: "", Text: ""}, false
+	}
+	let addr = mint.ParseInt(line[start:i], 16) catch _ {
+		return Line{Addr: 0, Bytes: "", Text: ""}, false
+	}
+	let rest = line[i + 2:]
+	let tab = twine.IndexByte(rest, '\t')
+	if tab <= 0 {
+		return Line{Addr: 0, Bytes: "", Text: ""}, false
+	}
+	let bytes = rest[0:tab]
+	for k in 0..len(bytes) {
+		if !isHex(bytes[k]) && bytes[k] != ' ' {
+			return Line{Addr: 0, Bytes: "", Text: ""}, false
+		}
+	}
+	return Line{Addr: addr, Bytes: twine.TrimSpace(bytes), Text: norm(rest[tab + 1:])}, true
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) < 3 {
+		say.Line("usage: compare OURS.txt OBJDUMP.txt [MAX_REPORTED]")
+		quarry.Exit(2)
+	}
+	let oursText = quarry.ReadFile(args[1]) catch _ {
+		say.Line("compare: cannot read " + args[1])
+		quarry.Exit(2)
+		return
+	}
+	let theirsText = quarry.ReadFile(args[2]) catch _ {
+		say.Line("compare: cannot read " + args[2])
+		quarry.Exit(2)
+		return
+	}
+	mut ours = []str{}
+	for line in twine.Split(oursText, "\n") {
+		if len(twine.TrimSpace(line)) > 0 {
+			ours = append(ours, norm(line))
+		}
+	}
+	mut theirs = []Line{}
+	for line in twine.Split(theirsText, "\n") {
+		let (l, ok) = parseObjdump(twine.TrimRight(line, "\r"))
+		if ok {
+			theirs = append(theirs, l)
+		}
+	}
+	mut most = 40
+	if len(args) > 3 {
+		most = mint.Atoi(args[3]) catch _ {
+			40
+		}
+	}
+	mut mismatches = 0
+	mut n = len(ours)
+	if len(theirs) > n {
+		n = len(theirs)
+	}
+	for i in 0..n {
+		mut a = "<missing>"
+		if i < len(ours) {
+			a = ours[i]
+		}
+		mut b = Line{Addr: 0, Bytes: "", Text: "<missing>"}
+		if i < len(theirs) {
+			b = theirs[i]
+		}
+		if a != b.Text {
+			mismatches += 1
+			if mismatches <= most {
+				say.Line("#" + mint.Itoa(i) + " @0x" + mint.FormatInt(b.Addr, 16) + " [" + b.Bytes + "]\n  ours:    " + a + "\n  objdump: " + b.Text)
+			}
+		}
+	}
+	say.Line("x64fuzz: " + mint.Itoa(len(ours)) + " instructions printed, " + mint.Itoa(len(theirs)) + " disassembled, " + mint.Itoa(mismatches) + " mismatches")
+	if mismatches > 0 {
+		quarry.Exit(1)
+	}
+}

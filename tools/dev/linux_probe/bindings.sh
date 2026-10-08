@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
 }
 CEOF
 gcc -O0 -fno-plt -Wl,-z,now -o $T/multi $T/multi.c -lm -ldl -lpthread
-cp $T/multi $T/multi_unv; python3 /p/elfpatch.py $T/multi_unv droptag 0x6ffffff0 droptag 0x6ffffffe droptag 0x6fffffff > /dev/null
+cp $T/multi $T/multi_unv; /p/elfpatch $T/multi_unv droptag 0x6ffffff0 droptag 0x6ffffffe droptag 0x6fffffff > /dev/null
 PAT="symbol .(memcpy|__libc_start_main|exp|log|pow|fmod|hypot|log2|pthread_create|dladdr|realpath)'"
 {
   echo "glibc $GL $ARCH"
@@ -58,8 +58,8 @@ gcc -nostartfiles -Wl,--hash-style=sysv -o $T/sp_sysv /p/crt_only.S /p/spcheck.c
 cp $T/sp_sysv $T/sp_hash1
 {
   echo "glibc $GL $ARCH"
-  echo "=== DT_HASH rewritten in place to nbucket=1 (every symbol on one chain): dladdr test"; python3 /p/elfpatch.py $T/dl_hash1 hash1 -; $T/dl_hash1 | grep -v "libc.so"; echo "exit=$?"
-  echo; echo "=== spcheck with the 1-bucket DT_HASH (environ COPY-reloc lookup through the exe's hash must still work)"; python3 /p/elfpatch.py $T/sp_hash1 hash1 -; $T/sp_hash1 | grep -E "environ|memcpy|argc"; echo "exit=$?"
+  echo "=== DT_HASH rewritten in place to nbucket=1 (every symbol on one chain): dladdr test"; /p/elfpatch $T/dl_hash1 hash1 -; $T/dl_hash1 | grep -v "libc.so"; echo "exit=$?"
+  echo; echo "=== spcheck with the 1-bucket DT_HASH (environ COPY-reloc lookup through the exe's hash must still work)"; /p/elfpatch $T/sp_hash1 hash1 -; $T/sp_hash1 | grep -E "environ|memcpy|argc"; echo "exit=$?"
   echo; echo "=== .hash bytes after the rewrite"; objdump -s -j .hash $T/dl_hash1 | tail -n +4
 } > "$OUT/hash1.txt" 2>&1
 echo done $OUT

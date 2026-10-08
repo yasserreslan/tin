@@ -459,7 +459,7 @@ received both an eventfd and a timerfd wake-up correctly.
 Sources: `hello.c` built three ways (`out/*/hello_pie_readelf.txt`, `hello_nopie_readelf.txt`, `hello_noplt_readelf.txt`),
 the hand-written templates `start_arm64.S` / `start_amd64.S` (`out/*/start_pie.txt`, `start_nopie.txt`,
 `start_sysv_now.txt`, binaries `start_pie.bin`/`start_nopie.bin`), the crt disassembly (`crt1_objdump.txt`),
-`spcheck.txt`, `absptr_relocs.txt`, the patch experiments (`negative_tests.txt`, `elfpatch.py`),
+`spcheck.txt`, `absptr_relocs.txt`, the patch experiments (`negative_tests.txt`, `elfpatch.tin`),
 `dladdr.txt`, `hash1.txt`, `bindings_unversioned.txt`, `out/version_sections.txt`.
 
 ### 4.1 Header and program headers
@@ -730,7 +730,7 @@ if `cpu.max` has a quota, `n = min(n, max(1, ceil(quota/period)))`; fall back to
 | `hello.c` | gcc reference binary (PIE, `-no-pie`, `-fno-plt -z now`) | `out/*/hello_*_readelf.txt`, `crt1_objdump.txt` |
 | `start_arm64.S`, `start_amd64.S` | the crt-less template Tin's writer copies | `out/*/start_pie.txt`, `start_nopie.txt`, `start_sysv_now.txt`, `*.bin` |
 | `crt_only.S` + `spcheck.c` | entry state (sp alignment, argc/argv/envp, rtld_fini, auxv, `[stack]` perms) | `out/*/spcheck.txt`, `negative_tests.txt` |
-| `elfpatch.py` | drop dynamic tags / program headers / section headers, 1-bucket `DT_HASH` | used by `run_all.sh`, `bindings.sh` |
+| `elfpatch.tin` | drop dynamic tags / program headers / section headers, 1-bucket `DT_HASH` | used by `run_all.sh`, `bindings.sh` |
 | `dladdr_test.c` + `nosize_fn.S` | what `dladdr` names | `out/*/dladdr.txt`, `hash1.txt` |
 | `bindings.sh` | unversioned binding + `dlvsym` comparison, 1-bucket hash | `out/*/bindings_unversioned.txt`, `hash1.txt` |
 | `glibc231.sh` | the same on Ubuntu 20.04 / glibc 2.31 | `out/linux-*-glibc2.31/glibc231.txt` |
