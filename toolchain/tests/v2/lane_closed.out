@@ -1,0 +1,10 @@
+sum 55
+sum2 110
+send closed true false
+recv closed true false
+recvok closed 0 false
+drain 7 8 true 0 false
+deadline false true
+after deadline -1
+cancelled false true
+scope boom
