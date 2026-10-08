@@ -5,7 +5,7 @@ import "say"
 import "squash"
 import "stamp"
 
-// The Tin side of squash_twin_check.py (#448). `enc DIR` writes DIR/input.bin, an input that
+// The Tin side of squash_twin_check.tin (#448). `enc DIR` writes DIR/input.bin, an input that
 // makes DEFLATE use every length code (both ends of each one's range) and every distance code,
 // and DIR/tin1.deflate, tin6 and tin9, Tin's raw DEFLATE of it at those levels, for Go to
 // inflate. `dec DIR` inflates Go's DIR/go1.deflate, go6 and go9 and compares them with the input.

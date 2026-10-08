@@ -1,0 +1,236 @@
+// A raw HTTP/1.1 client over one connection for checks that look at the framing: status and headers, exact byte counts, chunked bodies
+// chunk by chunk, what is left up to the close.
+package rawconn
+
+import "../ci"
+import "mint"
+import "say"
+import "twine"
+import "wire"
+
+// Conn is a connection with what was read and not yet consumed.
+type Conn struct {
+	C wire.Conn
+	Buf str
+	Seconds i64
+}
+
+// Open connects to the port; every wait for data lasts up to seconds.
+fn Open(port i64, seconds i64) Conn {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		ci.Fail("cannot connect to port " + mint.Itoa(port))
+		panic("unreachable")
+	}
+	return Conn{C: c, Buf: "", Seconds: seconds}
+}
+
+// Send writes the bytes.
+fn (c mut Conn) Send(data str) {
+	c.C.Write(data) catch err {
+		ci.Fail("cannot write to the connection: " + say.Str(err))
+	}
+}
+
+// poll waits up to ns nanoseconds for data: 1 when some came (it is in Buf), 0 at the end of the stream (or a reset), -1 at the timeout.
+fn (c mut Conn) poll(ns i64) i64 {
+	let reader = c.C
+	mut buf = []u8{}
+	let got = within ns {
+		try reader.Read(mut buf, 1048576)
+	} catch err {
+		mut r = 0
+		if say.Str(err) == "deadline exceeded" {
+			r = -2
+		}
+		r
+	}
+	if got > 0 {
+		c.Buf = c.Buf + str(buf)
+		return 1
+	}
+	if got == -2 {
+		return -1
+	}
+	return 0
+}
+
+fn (c mut Conn) fill() {
+	let r = c.poll(c.Seconds * 1000000000)
+	if r == 0 {
+		ci.Fail("the connection ended early (read so far: " + mint.Itoa(len(c.Buf)) + " bytes)")
+	}
+	if r < 0 {
+		ci.Fail("timed out waiting for data")
+	}
+}
+
+// Line is the next line (without CRLF).
+fn (c mut Conn) Line() str {
+	for twine.Index(c.Buf, "\r\n") < 0 {
+		c.fill()
+	}
+	let at = twine.Index(c.Buf, "\r\n")
+	let line = c.Buf[0:at]
+	c.Buf = c.Buf[at + 2:]
+	return line
+}
+
+// Head is the status and the headers (lower-case names) of the next response.
+fn (c mut Conn) Head() (i64, map[str]str) {
+	let first = twine.Fields(c.Line())
+	ci.Check(len(first) >= 2, "no status line")
+	let status = ci.Num(first[1])
+	mut headers = map[str]str{}
+	for {
+		let h = c.Line()
+		if len(h) == 0 {
+			return status, headers
+		}
+		let at = twine.IndexByte(h, ':')
+		headers[twine.ToLower(twine.TrimSpace(h[0:at]))] = twine.TrimSpace(h[at + 1:])
+	}
+	return status, headers
+}
+
+// Exactly is the next n bytes.
+fn (c mut Conn) Exactly(n i64) str {
+	for len(c.Buf) < n {
+		c.fill()
+	}
+	let out = c.Buf[0:n]
+	c.Buf = c.Buf[n:]
+	return out
+}
+
+// ChunkedOne is the next chunk of a chunked body (fails on the last one).
+fn (c mut Conn) ChunkedOne() str {
+	let size = hexNum(c.Line())
+	ci.Check(size > 0, "expected a chunk, got the last one")
+	let data = c.Exactly(size)
+	ci.Check(c.Exactly(2) == "\r\n", "a chunk did not end with CRLF")
+	return data
+}
+
+fn hexNum(s str) i64 {
+	mut v = 0
+	for i in 0..len(s) {
+		let ch = s[i]
+		if ch >= '0' && ch <= '9' {
+			v = v * 16 + i64(ch - '0')
+		} else if ch >= 'a' && ch <= 'f' {
+			v = v * 16 + i64(ch - 'a') + 10
+		} else if ch >= 'A' && ch <= 'F' {
+			v = v * 16 + i64(ch - 'A') + 10
+		} else {
+			ci.Fail("bad chunk size line: " + s)
+		}
+	}
+	return v
+}
+
+// Chunked is the chunks of the body up to the last one.
+fn (c mut Conn) Chunked() []str {
+	mut out = []str{}
+	for {
+		let size = hexNum(c.Line())
+		if size == 0 {
+			ci.Check(len(c.Line()) == 0, "a trailer after the last chunk")
+			return out
+		}
+		out = append(out, c.Exactly(size))
+		ci.Check(c.Exactly(2) == "\r\n", "a chunk did not end with CRLF")
+	}
+	return out
+}
+
+// Rest is everything up to the end of the connection.
+fn (c mut Conn) Rest() str {
+	for {
+		let r = c.poll(c.Seconds * 1000000000)
+		if r == 0 {
+			break
+		}
+		if r < 0 {
+			ci.Fail("timed out waiting for the connection to end")
+		}
+	}
+	let out = c.Buf
+	c.Buf = ""
+	return out
+}
+
+// Closed is whether the server closes the connection within seconds (nothing more to read).
+fn (c mut Conn) Closed(seconds i64) bool {
+	return c.poll(seconds * 1000000000) == 0
+}
+
+// Body is the next response's body of its Content-Length.
+fn (c mut Conn) Body(headers map[str]str) str {
+	return c.Exactly(ci.Num(headers["content-length"]))
+}
+
+// Close ends the connection.
+fn (c mut Conn) Close() {
+	c.C.Close()
+}
+
+// GetRequest is a GET (or another method) with a Host header and extra header lines (each ending in CRLF).
+fn Request(method str, path str, version str, extra str) str {
+	return method + " " + path + " HTTP/" + version + "\r\nHost: x\r\n" + extra + "\r\n"
+}
+
+fn Get(path str) str {
+	return Request("GET", path, "1.1", "")
+}
+
+// Pattern is n bytes of the pattern the stream fixture writes: (start + i) mod 251.
+fn Pattern(n i64, start i64) str {
+	let b = make([]u8, n)
+	for i in 0..n {
+		b[i] = u8((start + i) % 251)
+	}
+	return str(b)
+}
+
+// Has is whether the response had the (lower-case) header.
+fn Has(headers map[str]str, name str) bool {
+	let (_, ok) = headers[name]
+	return ok
+}
+
+// Wait waits up to ms milliseconds for data: 1 when some came (it is in Buf), 0 at the end of the stream (or a reset), -1 at the timeout.
+fn (c mut Conn) Wait(ms i64) i64 {
+	return c.poll(ms * 1000000)
+}
+
+// TrySend writes the bytes and reports whether the connection took them (a server that refused the request may have closed it).
+fn (c mut Conn) TrySend(data str) bool {
+	c.C.Write(data) catch _ {
+		return false
+	}
+	return true
+}
+
+// HalfClose says this end sends no more; it still reads.
+fn (c mut Conn) HalfClose() {
+	c.C.CloseWrite()
+}
+
+// Drain reads until the end of the connection or a pause of ms milliseconds without data; it returns what came and whether the
+// connection ended.
+fn (c mut Conn) Drain(ms i64) (str, bool) {
+	for {
+		let r = c.Wait(ms)
+		if r == 0 {
+			let out = c.Buf
+			c.Buf = ""
+			return out, true
+		}
+		if r < 0 {
+			let out = c.Buf
+			c.Buf = ""
+			return out, false
+		}
+	}
+	return "", false
+}

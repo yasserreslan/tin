@@ -1,0 +1,1062 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./rawconn"
+import "./tlsutil"
+import "mint"
+import "say"
+import "seal"
+import "tide"
+import "twine"
+import "wire"
+
+// The TLS 1.3 server (anvil.ServeTLS, #124 phase 5) against real clients.
+//
+// - openssl s_client -tls1_3 against ECDSA P-256, ECDSA P-384 and RSA-2048 certificates generated per run: every cipher suite with
+//   X25519, P-256, and P-256 by HelloRetryRequest (the client's first share is P-384); OpenSSL verifies the chain and the
+//   CertificateVerify (ECDSA, RSA-PSS with SHA-256, -384 and -512); ALPN; a client KeyUpdate with and without update_requested; the
+//   refusals (an ECDSA-only client against an RSA key, no common ALPN protocol, TLS 1.2 only).
+// - Go's crypto/tls and net/http (tools/ci/fixtures/tlsprobe.go): https requests on one keep-alive connection (plain, chunked,
+//   streamed and SendFile bodies, a 1 MiB and a chunked upload), pipelining with close_notify at the end, ALPN, a TLS 1.2-only client
+//   refused, a ClientHello split over many records.
+// - The Tin client: tls.Dial with and without ALPN, verification through RootCAs (and the default's refusal), wire https:// GET and
+//   POST, websocket wss:// through websocket.Accept.
+// - Malformed handshakes get their alerts (unexpected_message, record_overflow, decode_error), and a client that never sends or stops
+//   halfway is closed at the handshake timeout.
+// - One core: hundreds of stalled handshakes, a burst of full ones and a waiting request do not hold up a fast request.
+// - Memory: 256 MiB streamed over TLS leaves RSS flat; the cost of idle TLS connections.
+// - Graceful shutdown: SIGTERM lets a waiting request answer, closes with close_notify, and the server exits 0.
+// - examples/https_server.tin, and a key that does not match its certificate.
+//
+// openssl s_client must be OpenSSL 3.
+
+mut serverCount = 0
+
+// Env is what the checks share.
+type Env struct {
+	Work str
+	Exe str
+	Client str
+	Probe str
+	Openssl str
+	Certs []tlsutil.Cert
+}
+
+fn certOf(e Env, kind str) tlsutil.Cert {
+	return tlsutil.Of(e.Certs, kind)
+}
+
+fn unrelated(e Env) str {
+	return ci.Join(e.Work, "other-root.pem")
+}
+
+fn pattern(n i64, start i64) str {
+	return rawconn.Pattern(n, start)
+}
+
+fn count(text str, part str) i64 {
+	return len(twine.Split(text, part)) - 1
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn secondsText(v f64, places i64) str {
+	mut scale = 1
+	for i in 0..places {
+		scale = scale * 10
+	}
+	let n = i64(v * f64(scale) + 0.5)
+	mut frac = mint.Itoa(n % scale)
+	for len(frac) < places {
+		frac = "0" + frac
+	}
+	return mint.Itoa(n / scale) + "." + frac
+}
+
+fn addr(s nettest.Server) str {
+	return "127.0.0.1:" + mint.Itoa(s.Port)
+}
+
+fn startAs(e Env, exe str, cert tlsutil.Cert, env []str, cores i64, wait bool) nettest.Server {
+	serverCount += 1
+	mut set = []str{"TIN_CORES=" + mint.Itoa(cores), "TLS_CERT=" + cert.Cert, "TLS_KEY=" + cert.Key, "FILE=" + ci.Join(e.Work, "file.bin")}
+	for x in env {
+		set = append(set, x)
+	}
+	let port = nettest.Port()
+	let s = nettest.StartCoded(exe, []str{}, set, ci.Join(e.Work, "server-" + mint.Itoa(serverCount) + ".log"), port)
+	if wait {
+		s.Ready(10)
+	}
+	return s
+}
+
+fn start(e Env, cert tlsutil.Cert, env []str, cores i64) nettest.Server {
+	return startAs(e, e.Exe, cert, env, cores, true)
+}
+
+fn output(s nettest.Server) str {
+	return ci.Read(s.Log)
+}
+
+fn stop(s nettest.Server) {
+	s.Signal("KILL")
+}
+
+fn get(path str, close bool) str {
+	mut conn = ""
+	if close {
+		conn = "Connection: close\r\n"
+	}
+	return "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n" + conn + "\r\n"
+}
+
+fn withOpts(base []str, opts []str) []str {
+	mut out = []str{}
+	for b in base {
+		out = append(out, b)
+	}
+	for o in opts {
+		out = append(out, o)
+	}
+	return out
+}
+
+// sClient is one s_client run that sends request and reads until the server closes: (exit code, output).
+fn sClientVersion(e Env, version str, port i64, args []str, request str, cafile str) (i64, str) {
+	mut argv = []str{e.Openssl, "s_client", version, "-connect", "127.0.0.1:" + mint.Itoa(port), "-servername", "localhost", "-ign_eof"}
+	for a in args {
+		argv = append(argv, a)
+	}
+	if len(cafile) > 0 {
+		argv = append(argv, "-CAfile")
+		argv = append(argv, cafile)
+		argv = append(argv, "-verify_hostname")
+		argv = append(argv, "localhost")
+		argv = append(argv, "-verify_return_error")
+	}
+	let o = ci.ExecIn(argv, "", 60, request, []str{})
+	return o.Code, o.Stdout + o.Stderr
+}
+
+fn sClient(e Env, port i64, args []str, request str, cafile str) (i64, str) {
+	return sClientVersion(e, "-tls1_3", port, args, request, cafile)
+}
+
+fn sClient12(e Env, port i64, args []str, request str, cafile str) (i64, str) {
+	return sClientVersion(e, "-tls1_2", port, args, request, cafile)
+}
+
+// pipe runs a shell pipeline (an interactive s_client fed by printf and sleep) and returns what it wrote.
+fn shellPipe(script str) str {
+	let o = ci.Exec([]str{"sh", "-c", script}, "", 120)
+	return o.Stdout + o.Stderr
+}
+
+fn crlf(s str) str {
+	return twine.Replace(twine.Replace(s, "\r", "\\r", -1), "\n", "\\n", -1)
+}
+
+fn has(out str, part str, what str) {
+	ci.Check(twine.Contains(out, part), what + ": missing " + part + " in " + out[max(0, len(out) - 1500):])
+}
+
+fn lacks(out str, part str, what str) {
+	ci.Check(!twine.Contains(out, part), what + ": unexpected " + part + " in " + out[max(0, len(out) - 1500):])
+}
+
+fn probe(e Env, args []str) (i64, str) {
+	mut argv = []str{e.Probe}
+	for a in args {
+		argv = append(argv, a)
+	}
+	let o = ci.Exec(argv, "", 120)
+	return o.Code, o.Stdout + o.Stderr
+}
+
+fn tinClient(e Env, args []str, env []str) str {
+	mut argv = []str{e.Client}
+	for a in args {
+		argv = append(argv, a)
+	}
+	let o = ci.ExecEnv(argv, "", 60, env, []str{})
+	ci.Check(o.Code == 0, "tls_client " + twine.Join(args, " ") + ": " + o.Stdout + o.Stderr)
+	return o.Stdout
+}
+
+// word is a fixture line split into fields, with the suite name checked for the shape TLS_...
+fn fieldsOf(line str) []str {
+	return twine.Fields(line)
+}
+
+// ---- openssl s_client ----
+
+fn suiteCodes() []str {
+	return []str{"TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"}
+}
+
+fn suiteCode(name str) str {
+	if name == "TLS_AES_128_GCM_SHA256" {
+		return "1301"
+	}
+	if name == "TLS_AES_256_GCM_SHA384" {
+		return "1302"
+	}
+	return "1303"
+}
+
+fn opensslInterop(e Env) {
+	let offers = []str{"X25519", "P-256", "P-384:P-256"}
+	let wantGroups = []str{"X25519", "P-256", "P-256"}
+	mut runs = 0
+	for kind in []str{"ecdsa", "ecdsa384", "rsa"} {
+		let cert = certOf(e, kind)
+		let srv = start(e, cert, []str{}, 1)
+		for suite in suiteCodes() {
+			for i in 0..3 {
+				let (rc, out) = sClient(e, srv.Port, []str{"-ciphersuites", suite, "-groups", offers[i], "-alpn", "http/1.1"}, get("/info", true), cert.Cert)
+				has(out, "alpn=http/1.1 suite=" + suiteCode(suite) + " group=" + wantGroups[i], kind + " " + suite + " " + offers[i])
+				has(out, "Verify return code: 0 (ok)", kind + " " + suite + " " + offers[i])
+				mut sigOk = false
+				if kind == "ecdsa" {
+					sigOk = twine.Contains(out, "ecdsa_secp256r1_sha256") || twine.Contains(out, "ECDSA")
+				} else if kind == "ecdsa384" {
+					sigOk = twine.Contains(out, "ecdsa_secp384r1_sha384") || twine.Contains(out, "ECDSA")
+				} else {
+					sigOk = twine.Contains(out, "rsa_pss_rsae_sha256") || twine.Contains(out, "RSA-PSS")
+				}
+				ci.Check(sigOk, kind + ": no signature type in " + out[max(0, len(out) - 2000):])
+				runs += 1
+			}
+		}
+		if kind == "rsa" {
+			for sa in []str{"rsa_pss_rsae_sha256", "rsa_pss_rsae_sha384", "rsa_pss_rsae_sha512"} {
+				let (_, out) = sClient(e, srv.Port, []str{"-sigalgs", sa}, get("/fast", true), cert.Cert)
+				has(out, "\r\n\r\nfast", sa)
+				has(out, "Verify return code: 0 (ok)", sa)
+			}
+			let (rc, out) = sClient(e, srv.Port, []str{"-sigalgs", "ecdsa_secp256r1_sha256"}, get("/fast", true), "")
+			ci.Check(rc != 0 && twine.Contains(out, "alert number 40"), "an ECDSA-only client against an RSA key: " + out[max(0, len(out) - 1500):])
+		}
+		if kind == "ecdsa" {
+			let (rc1, out1) = sClient(e, srv.Port, []str{"-sigalgs", "rsa_pss_rsae_sha256"}, get("/fast", true), "")
+			ci.Check(rc1 != 0 && twine.Contains(out1, "alert number 40"), "an RSA-only client against an ECDSA key: " + out1[max(0, len(out1) - 1500):])
+			let (rc2, out2) = sClient(e, srv.Port, []str{"-alpn", "spdy/3"}, get("/fast", true), "")
+			ci.Check(rc2 != 0 && twine.Contains(out2, "alert number 120"), "no common ALPN protocol: " + out2[max(0, len(out2) - 1500):])
+			let (_, out3) = sClient(e, srv.Port, []str{}, get("/info", true), "")
+			has(out3, "alpn= suite=", "no ALPN offered")
+			keyUpdate(e, srv)
+			watchClosed(e, srv)
+		}
+		stop(srv)
+	}
+	say.Line("PASS openssl s_client: " + mint.Itoa(runs) + " handshakes (ECDSA P-256, ECDSA P-384 and RSA certificates verified by OpenSSL; every suite; X25519, P-256 and P-256 by HelloRetryRequest), RSA-PSS SHA-256/384/512, handshake_failure and no_application_protocol refusals, client KeyUpdate, a stream sees the client's close_notify (Out.Closed)")
+}
+
+// keyUpdate: the client's KeyUpdate: with update_requested (K) the server answers with its own.
+fn keyUpdate(e Env, srv nettest.Server) {
+	let script = "{{ printf 'K\\n'; sleep 0.4; printf '" + crlf(get("/fast", false)) + "'; sleep 0.4; printf 'k\\n'; sleep 0.4; printf '" + crlf(get("/info", true)) + "'; sleep 0.4; }} | " + e.Openssl + " s_client -tls1_3 -connect " + addr(srv) + " 2>&1"
+	let out = shellPipe(script)
+	ci.Check(count(out, "KEYUPDATE") == 2 && twine.Contains(out, "\r\n\r\nfast") && twine.Contains(out, "alpn= suite="), "client KeyUpdate: " + out[max(0, len(out) - 2000):])
+}
+
+// watchClosed: a stream's handler polling w.Closed() sees the client's close_notify (a socket peek would see only a record), then its
+// FIN. The end of input is what makes s_client close, so it is not -quiet (which implies -ign_eof).
+fn watchClosed(e Env, srv nettest.Server) {
+	shellPipe("{{ printf '" + crlf(get("/watch", false)) + "'; sleep 0.5; }} | " + e.Openssl + " s_client -tls1_3 -connect " + addr(srv) + " >/dev/null 2>&1")
+	nettest.Eventually(5.0, fn() bool {
+		return twine.Contains(output(srv), "watch saw closed")
+	})
+	ci.Check(twine.Contains(output(srv), "watch saw closed"), "the handler did not see the close: " + output(srv))
+}
+
+// ---- Go's crypto/tls ----
+
+fn goClients(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let srv = start(e, cert, []str{}, 1)
+	let file = ci.Join(e.Work, "file.bin")
+	let (rc, out) = probe(e, []str{"http", addr(srv), cert.Cert, file})
+	ci.Check(rc == 0 && twine.Contains(out, "ok http"), "Go http client: " + out)
+	let (rc2, out2) = probe(e, []str{"pipeline", addr(srv), cert.Cert})
+	ci.Check(rc2 == 0, "pipelining: " + out2)
+	let (rc3, out3) = probe(e, []str{"alpn", addr(srv), cert.Cert})
+	ci.Check(rc3 == 0, "ALPN with nothing in common: " + out3)
+	let (rc4, out4) = probe(e, []str{"fragmented", addr(srv), cert.Cert})
+	ci.Check(rc4 == 0, "a fragmented ClientHello: " + out4)
+	stop(srv)
+	say.Line("PASS Go crypto/tls: GET, POST (1 MiB and chunked), 3 MB body, streamed and SendFile bodies on one keep-alive connection; pipelining ended by close_notify; ALPN; no common protocol refused; a ClientHello in 40-byte records")
+}
+
+// ---- the Tin client ----
+
+fn tinClients(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let srv = start(e, cert, []str{}, 1)
+	let out = twine.Fields(tinClient(e, []str{"get", addr(srv)}, []str{}))
+	ci.Check(len(out) == 6 && out[0] == "ok" && twine.HasPrefix(out[1], "TLS_") && out[2] == "X25519MLKEM768" && out[3] == "alpn=" && out[4] == "1" && out[5] == "true", "get: " + twine.Join(out, " "))
+	let out2 = twine.Fields(tinClient(e, []str{"get", addr(srv), "http/1.1"}, []str{}))
+	ci.Check(len(out2) == 6 && out2[0] == "ok" && out2[2] == "X25519MLKEM768" && out2[3] == "alpn=http/1.1", "get with ALPN: " + twine.Join(out2, " "))
+	let resumed = ci.Lines(tinClient(e, []str{"resume", addr(srv), "2", cert.Cert}, []str{}))
+	ci.Check(len(resumed) == 2, "resume: " + twine.Join(resumed, "|"))
+	let r1 = twine.Fields(resumed[0])
+	let r2 = twine.Fields(resumed[1])
+	ci.Check(len(r1) == 6 && r1[0] == "resumed" && r1[1] == "false" && r1[3] == "X25519MLKEM768" && r1[4] == "1" && r1[5] == "true", "first connection: " + resumed[0])
+	ci.Check(len(r2) == 6 && r2[0] == "resumed" && r2[1] == "true" && r2[3] == "X25519MLKEM768" && (r2[4] == "0" || r2[4] == "1") && r2[5] == "true", "second connection: " + resumed[1])
+	// The system's roots (here an unrelated root, so the result does not depend on the runner's bundle) do not include the server's
+	// certificate: refused.
+	let verify = tinClient(e, []str{"verify", addr(srv), "localhost"}, []str{"SSL_CERT_FILE=" + unrelated(e)})
+	ci.Check(twine.HasPrefix(verify, "fault tls: x509: certificate signed by unknown authority"), "verification by default: " + verify)
+	let https = tinClient(e, []str{"https", "https://" + addr(srv) + "/"}, []str{})
+	ci.Check(https == "get 200 14 " + seal.Sha256Hex("hello over tls") + "\npost 200 posted over tls\n", "wire https://: " + https)
+	let wss = tinClient(e, []str{"wss", "wss://" + addr(srv) + "/ws"}, []str{})
+	ci.Check(wss == "wss true echo: hello wss\n", "wss://: " + wss)
+	stop(srv)
+	let rsa = certOf(e, "rsa")
+	let s2 = start(e, rsa, []str{}, 1)
+	let ro = twine.Fields(tinClient(e, []str{"resume", addr(s2), "1", rsa.Cert}, []str{}))
+	ci.Check(len(ro) == 6 && ro[0] == "resumed" && ro[1] == "false" && ro[3] == "X25519MLKEM768" && ro[4] == "1" && ro[5] == "true", "RSA certificate: " + twine.Join(ro, " "))
+	stop(s2)
+	say.Line("PASS Tin client: tls.Dial with and without ALPN, verified through RootCAs (ECDSA and RSA keys) and refused by default; wire https:// GET and POST; websocket wss:// through websocket.Accept")
+}
+
+// ---- session resumption (#472) ----
+
+// resumedGet is one s_client GET /fast: true when it resumed a session, false for a full handshake.
+fn resumedGet(e Env, port i64, cafile str, sessIn str, sessOut str, extra []str) bool {
+	mut args = withOpts([]str{}, extra)
+	if len(sessIn) > 0 {
+		args = append(args, "-sess_in")
+		args = append(args, sessIn)
+	}
+	if len(sessOut) > 0 {
+		args = append(args, "-sess_out")
+		args = append(args, sessOut)
+	}
+	let (rc, out) = sClient(e, port, args, get("/fast", true), cafile)
+	ci.Check(rc == 0 && twine.Contains(out, "\r\n\r\nfast"), "resumedGet: " + out[max(0, len(out) - 1500):])
+	let reused = twine.Contains(out, "Reused, TLSv1.3")
+	ci.Check(reused != twine.Contains(out, "New, TLSv1.3"), "resumedGet: neither Reused nor New in " + out[max(0, len(out) - 1500):])
+	return reused
+}
+
+fn resumption(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let sess = ci.Join(e.Work, "sess.pem")
+	let bad = ci.Join(e.Work, "sess-tampered.pem")
+	// Four cores: the accepting core deals connections round-robin, so the resumptions below land on cores that never saw the ticket.
+	let srv = start(e, cert, []str{}, 4)
+	ci.Check(!resumedGet(e, srv.Port, cert.Cert, "", sess, []str{}), "the first connection resumed")
+	mut reusedCount = 0
+	for i in 0..8 {
+		if resumedGet(e, srv.Port, cert.Cert, sess, "", []str{}) {
+			reusedCount += 1
+		}
+	}
+	ci.Check(reusedCount == 8, "resumed " + mint.Itoa(reusedCount) + " of 8")
+	// A key share the server does not take: HelloRetryRequest, then the PSK binder over it.
+	let (rc, out) = sClient(e, srv.Port, []str{"-sess_in", sess, "-groups", "P-384:X25519", "-msg"}, get("/fast", true), cert.Cert)
+	ci.Check(rc == 0 && twine.Contains(out, "Reused, TLSv1.3") && count(out, "ClientHello") == 2, "resumption after a HelloRetryRequest: " + out[max(0, len(out) - 1500):])
+	ci.Must(ci.Exec([]str{e.Probe, "tamper", sess, bad, e.Openssl}, "", 30), "tamper the ticket")
+	ci.Check(!resumedGet(e, srv.Port, cert.Cert, bad, "", []str{}), "a tampered ticket resumed")
+	let lines = ci.Lines(tinClient(e, []str{"resume", addr(srv), "3", cert.Cert}, []str{}))
+	ci.Check(len(lines) == 3, "Tin client resumption: " + twine.Join(lines, "|"))
+	for i in 0..3 {
+		let f = twine.Fields(lines[i])
+		mut want = "true"
+		if i == 0 {
+			want = "false"
+		}
+		ci.Check(len(f) == 6 && f[0] == "resumed" && f[1] == want && f[3] == "X25519MLKEM768" && f[5] == "true", "Tin client connection " + mint.Itoa(i) + ": " + lines[i])
+	}
+	let (grc, gout) = probe(e, []str{"resume", addr(srv), cert.Cert})
+	ci.Check(grc == 0 && twine.TrimSpace(gout) == "resumed false true", "Go client resumption: " + gout)
+	stop(srv)
+	// Processes that share TIN_TLS_TICKET_SECRET resume each other's sessions; another secret, a lifetime past, or tickets turned off
+	// give a full handshake.
+	let key = seal.Hex(seal.RandomBytes(32))
+	let first = start(e, cert, []str{"TIN_TLS_TICKET_SECRET=" + key}, 1)
+	ci.Check(!resumedGet(e, first.Port, cert.Cert, "", sess, []str{}), "the shared-secret first connection resumed")
+	let issued = tide.Now()
+	stop(first)
+	let envs = [][]str{[]str{"TIN_TLS_TICKET_SECRET=" + key}, []str{"TIN_TLS_TICKET_SECRET=" + seal.Hex(seal.RandomBytes(32))}, []str{"TIN_TLS_TICKET_SECRET=" + key, "TIN_TLS_TICKETS=0"}, []str{"TIN_TLS_TICKET_SECRET=" + key, "TIN_TLS_TICKET_LIFETIME_S=1"}}
+	let wants = []bool{true, false, false, false}
+	for i in 0..4 {
+		if i == 3 {
+			let waitNs = issued + 2200000000 - tide.Now()
+			if waitNs > 0 {
+				tide.Sleep(waitNs)
+			}
+		}
+		let s = start(e, cert, envs[i], 1)
+		let got = resumedGet(e, s.Port, cert.Cert, sess, "", []str{})
+		ci.Check(got == wants[i], "shared secret case " + mint.Itoa(i) + ": resumed " + boolText(got))
+		stop(s)
+	}
+	say.Line("PASS resumption: OpenSSL resumes on four cores (8 of 8) and after a HelloRetryRequest, a tampered ticket gets a full handshake, the Tin and Go clients resume; a shared TIN_TLS_TICKET_SECRET resumes across processes, another secret, TIN_TLS_TICKETS=0 and a ticket past TIN_TLS_TICKET_LIFETIME_S do not")
+}
+
+fn boolText(b bool) str {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// ---- client certificates (mutual TLS, #475) ----
+
+fn makePki(e Env) str {
+	let pki = ci.Join(e.Work, "pki")
+	ci.Mkdirs(pki)
+	ci.Must(ci.Exec([]str{"go", "run", "tools/ci/fixtures/mtlspki.go", pki}, ci.Root(), 300), "go run mtlspki.go")
+	return pki
+}
+
+fn who(pki str, name str) []str {
+	return []str{"-cert", ci.Join(pki, name + ".pem"), "-key", ci.Join(pki, name + ".key")}
+}
+
+fn mtls(e Env) {
+	let pki = makePki(e)
+	let cert = certOf(e, "ecdsa")
+	let sess = ci.Join(e.Work, "mtls-sess.pem")
+	let srv = start(e, cert, []str{"TLS_CLIENT_AUTH=2", "TLS_CLIENT_CAS=" + ci.Join(pki, "ca.pem")}, 2)
+	let names = []str{"alice", "dave", "rsa"}
+	let cns = []str{"alice", "dave", "rsa-client"}
+	for i in 0..3 {
+		let (rc, out) = sClient(e, srv.Port, withOpts(who(pki, names[i]), []str{"-sess_out", sess}), get("/whoami", true), cert.Cert)
+		ci.Check(rc == 0 && twine.Contains(out, "cn=" + cns[i] + " chain=1 resumed=false"), names[i] + ": " + out[max(0, len(out) - 1500):])
+	}
+	// A resumed session keeps the client's identity (the ticket carries the chain).
+	let (rrc, rout) = sClient(e, srv.Port, []str{"-sess_in", sess}, get("/whoami", true), cert.Cert)
+	ci.Check(rrc == 0 && twine.Contains(rout, "Reused, TLSv1.3") && twine.Contains(rout, "cn=rsa-client chain=1 resumed=true"), "a resumed session: " + rout[max(0, len(rout) - 1500):])
+	let refusals = []str{"", "bob", "carol", "mallory"}
+	let alerts = []str{"116", "42", "45", "48"}
+	for i in 0..4 {
+		mut args = []str{}
+		if len(refusals[i]) > 0 {
+			args = who(pki, refusals[i])
+		}
+		let (_, out) = sClient(e, srv.Port, args, get("/whoami", true), cert.Cert)
+		ci.Check(twine.Contains(out, "alert number " + alerts[i]) && !twine.Contains(out, "cn="), "refusal " + refusals[i] + ": " + out[max(0, len(out) - 1500):])
+	}
+	let m1 = tinClient(e, []str{"mtls", addr(srv), "2", cert.Cert, ci.Join(pki, "alice.pem"), ci.Join(pki, "alice.key")}, []str{})
+	ci.Check(m1 == "mtls false cn=alice chain=1 resumed=false\nmtls true cn=alice chain=1 resumed=true\n", "the Tin client with a certificate: " + m1)
+	let m2 = tinClient(e, []str{"mtls", addr(srv), "1", cert.Cert}, []str{})
+	ci.Check(m2 == "fault tls: remote error: certificate required\n", "the Tin client without a certificate: " + m2)
+	let (_, out12) = sClient12(e, srv.Port, []str{}, get("/whoami", true), cert.Cert)
+	ci.Check(twine.Contains(out12, "alert number 40") && !twine.Contains(out12, "cn="), "TLS 1.2 without a certificate: " + out12[max(0, len(out12) - 1500):])
+	// wire with client certificates: alice, then dave, then alice again; a kept connection is never lent to the other identity.
+	let w = tinClient(e, []str{"wiremtls", "https://localhost:" + mint.Itoa(srv.Port) + "/whoami", cert.Cert, ci.Join(pki, "alice.pem"), ci.Join(pki, "alice.key"), ci.Join(pki, "rsa.pem"), ci.Join(pki, "rsa.key")}, []str{})
+	let wl = ci.Lines(w)
+	ci.Check(len(wl) == 3 && twine.HasPrefix(wl[0], "wire 200 cn=alice ") && twine.HasPrefix(wl[1], "wire 200 cn=rsa-client ") && twine.HasPrefix(wl[2], "wire 200 cn=alice "), "wire with client certificates: " + w)
+	let (grc, gout) = probe(e, []str{"clientcert", addr(srv), cert.Cert, ci.Join(pki, "alice.pem"), ci.Join(pki, "alice.key")})
+	ci.Check(grc == 0 && twine.HasSuffix(twine.TrimSpace(gout), "cn=alice chain=1 resumed=false"), "the Go client certificate: " + gout)
+	stop(srv)
+	// RequestClientCert: a client without a certificate is served; one that sends a bad one is not.
+	let s2 = start(e, cert, []str{"TLS_CLIENT_AUTH=1", "TLS_CLIENT_CAS=" + ci.Join(pki, "ca.pem")}, 1)
+	let (_, a) = sClient(e, s2.Port, []str{}, get("/whoami", true), cert.Cert)
+	ci.Check(twine.Contains(a, "\r\n\r\nnone"), "RequestClientCert without a certificate: " + a[max(0, len(a) - 1500):])
+	let (_, b) = sClient(e, s2.Port, who(pki, "alice"), get("/whoami", true), cert.Cert)
+	has(b, "cn=alice", "RequestClientCert with alice")
+	let (_, c) = sClient(e, s2.Port, who(pki, "mallory"), get("/whoami", true), cert.Cert)
+	ci.Check(twine.Contains(c, "alert number 48") && !twine.Contains(c, "cn="), "RequestClientCert with mallory: " + c[max(0, len(c) - 1500):])
+	// Client certificates over TLS 1.2 (#473).
+	let (_, d) = sClient12(e, s2.Port, who(pki, "alice"), get("/whoami", true), cert.Cert)
+	ci.Check(twine.Contains(d, "New, TLSv1.2") && twine.Contains(d, "cn=alice"), "TLS 1.2 client certificate (ECDSA): " + d[max(0, len(d) - 1500):])
+	let (_, f) = sClient12(e, s2.Port, who(pki, "rsa"), get("/whoami", true), cert.Cert)
+	ci.Check(twine.Contains(f, "New, TLSv1.2") && twine.Contains(f, "cn=rsa-client"), "TLS 1.2 client certificate (RSA): " + f[max(0, len(f) - 1500):])
+	stop(s2)
+	// A server without ClientCAs does not start.
+	let p = ci.ExecEnv([]str{e.Exe}, "", 30, []str{"PORT=" + mint.Itoa(nettest.Port()), "TLS_CERT=" + cert.Cert, "TLS_KEY=" + cert.Key, "TLS_CLIENT_AUTH=2", "TLS_CLIENT_CAS=" + cert.Key}, []str{})
+	ci.Check(p.Code == 0 && twine.Contains(p.Stdout, "server:") && twine.Contains(p.Stdout, "ClientCAs"), "ClientCAs without a certificate: " + p.Stdout + p.Stderr)
+	say.Line("PASS client certificates: openssl (ECDSA, Ed25519 and RSA keys; TLS 1.3 and 1.2), Go and the Tin client verified; a resumed session keeps the identity; certificate_required, bad_certificate (server-only usage), certificate_expired and unknown_ca refusals; RequestClientCert serves a client without one; ClientCAs without a certificate fail at start")
+}
+
+// ---- certificates chosen by server name, and reloads (#476) ----
+
+// namedCert is a self-signed certificate for sans (DNS names) with common name name: (cert, key).
+fn namedCert(e Env, dir str, name str, sans []str, kind str, org str) (str, str) {
+	mut keyArgs = []str{"-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"}
+	if kind == "rsa" {
+		keyArgs = []str{"-newkey", "rsa:2048"}
+	}
+	let tag = twine.Replace(org, " ", "_", -1)
+	let cert = ci.Join(dir, name + "-" + kind + "-" + tag + ".pem")
+	let key = ci.Join(dir, name + "-" + kind + "-" + tag + ".key")
+	mut names = []str{}
+	for n in sans {
+		names = append(names, "DNS:" + n)
+	}
+	mut argv = []str{e.Openssl, "req", "-x509"}
+	for a in keyArgs {
+		argv = append(argv, a)
+	}
+	for a in []str{"-keyout", key, "-out", cert, "-days", "30", "-nodes", "-subj", "/CN=" + name + "/O=" + org, "-addext", "subjectAltName=" + twine.Join(names, ",")} {
+		argv = append(argv, a)
+	}
+	ci.Must(ci.Exec(argv, "", 60), "openssl req " + name)
+	return cert, key
+}
+
+// servedCert is the subject line (spaces removed) and the peer signature type s_client reports for one handshake.
+fn servedCert(e Env, port i64, servername str, extra []str) (str, str) {
+	mut argv = []str{e.Openssl, "s_client", "-tls1_3", "-connect", "127.0.0.1:" + mint.Itoa(port), "-ign_eof"}
+	for a in extra {
+		argv = append(argv, a)
+	}
+	if len(servername) > 0 {
+		argv = append(argv, "-servername")
+		argv = append(argv, servername)
+	} else {
+		argv = append(argv, "-noservername")
+	}
+	let o = ci.ExecIn(argv, "", 60, get("/fast", true), []str{})
+	let out = o.Stdout + o.Stderr
+	ci.Check(twine.Contains(out, "\r\n\r\nfast"), "servedCert: " + out[max(0, len(out) - 1500):])
+	mut subj = ""
+	mut sig = ""
+	for l in ci.Lines(out) {
+		if twine.HasPrefix(l, "subject=") && len(subj) == 0 {
+			subj = twine.Replace(l[len("subject="):], " ", "", -1)
+		}
+		if twine.HasPrefix(l, "Peer signature type: ") {
+			sig = twine.TrimSpace(l[len("Peer signature type: "):])
+		}
+	}
+	return subj, sig
+}
+
+fn isCert(subj str, cn str, what str) {
+	ci.Check(twine.HasPrefix(subj, "CN=" + cn + ","), what + ": subject " + subj + ", want CN=" + cn)
+}
+
+fn sniReload(e Env) {
+	let d = ci.Join(e.Work, "sni")
+	ci.Mkdirs(d)
+	let (defaultC, defaultK) = namedCert(e, d, "default", []str{"localhost"}, "ecdsa", "tin tests")
+	let (aC, aK) = namedCert(e, d, "a.test", []str{"a.test"}, "ecdsa", "tin tests")
+	let (aRsaC, aRsaK) = namedCert(e, d, "a.test", []str{"a.test"}, "rsa", "tin tests")
+	let (wildC, wildK) = namedCert(e, d, "wild", []str{"*.c.test"}, "ecdsa", "tin tests")
+	let spec = defaultC + "," + defaultK + ";" + aC + "," + aK + ";" + wildC + "," + wildK + ";" + aRsaC + "," + aRsaK
+	let srv = start(e, certOf(e, "ecdsa"), []str{"TLS_CERTS=" + spec, "TIN_TLS_RELOAD_S=1"}, 2)
+	let names = []str{"a.test", "x.c.test", "c.test", "nobody.test", "", "A.TEST"}
+	let cns = []str{"a.test", "wild", "default", "default", "default", "a.test"}
+	for i in 0..len(names) {
+		let (subj, _) = servedCert(e, srv.Port, names[i], []str{})
+		isCert(subj, cns[i], "server name " + names[i])
+	}
+	// A client that verifies only RSA-PSS gets a.test's RSA certificate.
+	let (rsubj, rsig) = servedCert(e, srv.Port, "a.test", []str{"-sigalgs", "rsa_pss_rsae_sha256"})
+	ci.Check(twine.HasPrefix(rsubj, "CN=a.test,") && twine.HasPrefix(twine.Replace(twine.ToLower(rsig), "-", "_", -1), "rsa_pss"), "an RSA-PSS-only client: " + rsubj + " " + rsig)
+	// A reload while handshakes run: none fails, and new connections get the new set.
+	let (bC, bK) = namedCert(e, d, "b.test", []str{"b.test", "localhost"}, "ecdsa", "tin tests")
+	let stopFile = ci.Join(d, "hammer.stop")
+	ci.Remove(stopFile)
+	let request = get("/fast", true)
+	mut hammers = []nettest.Server{}
+	mut results = []str{}
+	for i in 0..4 {
+		let result = ci.Join(d, "hammer" + mint.Itoa(i) + ".result")
+		ci.Remove(result)
+		let script = "n=0; f=0; while [ ! -e \"$1\" ]; do if printf '" + crlf(request) + "' | " + e.Openssl + " s_client -tls1_3 -connect 127.0.0.1:" + mint.Itoa(srv.Port) + " -servername localhost -ign_eof 2>&1 | grep -q fast; then n=$((n+1)); else f=$((f+1)); fi; done; echo \"$n $f\" > \"$0\""
+		hammers = append(hammers, nettest.Start("sh", []str{"-c", script, result, stopFile}, []str{}, ci.Join(d, "hammer" + mint.Itoa(i) + ".log"), 0))
+		results = append(results, result)
+	}
+	tide.Sleep(500000000)
+	let sets = []str{bC + "," + bK + ";" + aC + "," + aK, spec, bC + "," + bK + ";" + aC + "," + aK}
+	for s in sets {
+		let (_, out) = sClient(e, srv.Port, []str{}, get("/reload?set=" + s, true), "")
+		has(out, "reloaded", "reload")
+		tide.Sleep(300000000)
+	}
+	ci.Write(stopFile, "stop")
+	mut done = 0
+	mut failed = 0
+	for r in results {
+		nettest.Eventually(30.0, fn() bool {
+			return len(twine.TrimSpace(ci.Read(r))) > 0
+		})
+		let f = twine.Fields(ci.Read(r))
+		ci.Check(len(f) == 2, "a handshake loop did not finish: " + ci.Read(r))
+		done += ci.Num(f[0])
+		failed += ci.Num(f[1])
+	}
+	ci.Check(failed == 0 && done > 10, "reload under load: " + mint.Itoa(failed) + " failed, " + mint.Itoa(done) + " done")
+	let (nsubj, _) = servedCert(e, srv.Port, "localhost", []str{})
+	isCert(nsubj, "b.test", "after the reloads")
+	// A pair whose key belongs to another certificate is refused; the set in use stays.
+	let (_, refused) = sClient(e, srv.Port, []str{}, get("/reload?set=" + aC + "," + bK, true), "")
+	has(refused, "refused: anvil: certificate 1:", "a mismatched pair")
+	let (ssubj, _) = servedCert(e, srv.Port, "localhost", []str{})
+	isCert(ssubj, "b.test", "after the refused reload")
+	stop(srv)
+	// Certificates served from files: a renewal written to disk is picked up within the check interval (TIN_TLS_RELOAD_S=1), and a
+	// broken pair on disk is refused.
+	let liveC = ci.Join(d, "live.pem")
+	let liveK = ci.Join(d, "live.key")
+	ci.Copy(aC, liveC)
+	ci.Copy(aK, liveK)
+	let live = start(e, certOf(e, "ecdsa"), []str{"TLS_CERTS=" + liveC + "," + liveK, "TIN_TLS_RELOAD_S=1"}, 1)
+	let (lsubj, _) = servedCert(e, live.Port, "a.test", []str{})
+	has(lsubj, "O=tintests", "the live certificate")
+	let (renC, renK) = namedCert(e, d, "a.test", []str{"a.test"}, "ecdsa", "renewed")
+	ci.Must(ci.Exec([]str{"mv", renK, liveK}, "", 10), "replace the key")
+	ci.Must(ci.Exec([]str{"mv", renC, liveC}, "", 10), "replace the certificate")
+	let until = tide.Now() + 10000000000
+	mut seen = ""
+	for tide.Now() < until {
+		let (s, _) = servedCert(e, live.Port, "a.test", []str{})
+		seen = s
+		if twine.Contains(s, "O=renewed") {
+			break
+		}
+		tide.Sleep(300000000)
+	}
+	has(seen, "O=renewed", "the renewed certificate")
+	ci.Copy(bK, liveK)
+	tide.Sleep(2500000000)
+	let (again, _) = servedCert(e, live.Port, "a.test", []str{})
+	has(again, "O=renewed", "after a broken pair")
+	has(output(live), "certificate reload refused", "the server log")
+	stop(live)
+	for h in hammers {
+		h.Stop()
+	}
+	say.Line("PASS server names: exact, wildcard, unknown and no SNI choose their certificate, an RSA-only client gets the RSA one; three reloads under handshake load fail none and switch the set, a mismatched pair is refused; a renewed certificate file is served within the check interval and a broken one is refused")
+}
+
+// ---- TLS 1.2 (#473) ----
+
+fn tls12Server(e Env) {
+	mut runs = 0
+	for kind in []str{"ecdsa", "ecdsa384", "rsa"} {
+		let cert = certOf(e, kind)
+		let srv = start(e, cert, []str{}, 1)
+		mut ciphers = []str{"ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-ECDSA-AES256-GCM-SHA384", "ECDHE-ECDSA-CHACHA20-POLY1305"}
+		if kind == "rsa" {
+			ciphers = []str{"ECDHE-RSA-AES128-GCM-SHA256", "ECDHE-RSA-AES256-GCM-SHA384", "ECDHE-RSA-CHACHA20-POLY1305"}
+		}
+		for cipher in ciphers {
+			// TLS 1.2 also needs the certificate's curve among the groups (RFC 8422).
+			let groups = []str{"X25519:P-256:P-384", "P-256:P-384"}
+			for g in 0..2 {
+				let (_, out) = sClient12(e, srv.Port, []str{"-cipher", cipher, "-groups", groups[g]}, get("/fast", true), cert.Cert)
+				// OpenSSL 3.0 labels the line "Server Temp Key", 3.2 and later "Peer Temp Key".
+				mut tempOk = false
+				if g == 0 {
+					tempOk = twine.Contains(out, "Peer Temp Key: X25519") || twine.Contains(out, "Server Temp Key: X25519")
+				} else {
+					tempOk = twine.Contains(out, "Temp Key: ECDH, prime256v1") || twine.Contains(out, "Temp Key: ECDH, P-256")
+				}
+				ci.Check(twine.Contains(out, "New, TLSv1.2, Cipher is " + cipher) && twine.Contains(out, "\r\n\r\nfast") && twine.Contains(out, "Verify return code: 0 (ok)") && tempOk, kind + " " + cipher + " " + groups[g] + ": " + out[max(0, len(out) - 1500):])
+				runs += 1
+			}
+		}
+		if kind == "rsa" {
+			let (_, out) = sClient12(e, srv.Port, []str{"-sigalgs", "RSA+SHA256"}, get("/fast", true), cert.Cert)
+			// OpenSSL 3.0 names PKCS #1 v1.5 "RSA" (RSA-PSS is "RSA-PSS"), 3.2 and later "rsa_pkcs1_sha256".
+			mut pkcs = false
+			for l in ci.Lines(out) {
+				let t = twine.TrimSpace(l)
+				if t == "Peer signature type: rsa_pkcs1_sha256" || t == "Peer signature type: RSA" {
+					pkcs = true
+				}
+			}
+			ci.Check(twine.Contains(out, "\r\n\r\nfast") && pkcs, "PKCS #1 v1.5: " + out[max(0, len(out) - 1500):])
+		}
+		if kind == "ecdsa" {
+			let h2 = ci.ExecIn([]str{e.Openssl, "s_client", "-tls1_2", "-connect", addr(srv), "-alpn", "h2"}, "", 60, "", []str{})
+			let h2out = h2.Stdout + h2.Stderr
+			mut protoOk = false
+			for l in ci.Lines(h2out) {
+				let t = twine.TrimSpace(l)
+				if twine.HasPrefix(t, "Protocol") && twine.Contains(t, ": TLSv1.2") {
+					protoOk = true
+				}
+			}
+			ci.Check(twine.Contains(h2out, "ALPN protocol: h2") && protoOk, "h2 over TLS 1.2: " + h2out[max(0, len(h2out) - 1500):])
+			for cipher in []str{"ECDHE-ECDSA-AES128-SHA256", "AES128-GCM-SHA256"} {
+				let (rc, out) = sClient12(e, srv.Port, []str{"-cipher", cipher}, get("/fast", true), "")
+				ci.Check(rc != 0 && twine.Contains(out, "alert number 40"), cipher + ": " + out[max(0, len(out) - 1500):])
+			}
+			let (grc, gout) = probe(e, []str{"tls12", addr(srv), cert.Cert})
+			ci.Check(grc == 0 && twine.TrimSpace(gout) == "version 303 fast", "Go over TLS 1.2: " + gout)
+			// A client's renegotiation (s_client's R command) is refused with no_renegotiation.
+			let reneg = shellPipe("{{ printf 'R\\n'; sleep 1; }} | " + e.Openssl + " s_client -tls1_2 -connect " + addr(srv) + " 2>&1")
+			ci.Check(twine.Contains(reneg, "RENEGOTIATING") && twine.Contains(reneg, "alert number 100"), "renegotiation: " + reneg[max(0, len(reneg) - 1500):])
+			// The Tin client, offering 1.3, through a proxy that strips it: the server's downgrade sentinel ends the handshake.
+			let proxy = nettest.Start(ci.Join(e.Work, "tlsproxy"), []str{mint.Itoa(srv.Port)}, []str{}, ci.Join(e.Work, "tlsproxy.log"), nettest.Port())
+			proxy.Ready(10)
+			let dg = ci.Exec([]str{e.Client, "get", "127.0.0.1:" + mint.Itoa(proxy.Port)}, "", 30)
+			ci.Check(twine.HasPrefix(dg.Stdout, "fault tls: downgrade to TLS 1.2 detected"), "downgrade: " + dg.Stdout + dg.Stderr)
+			proxy.Stop()
+		}
+		stop(srv)
+	}
+	// An Ed25519 certificate in TLS 1.2 (ECDHE-ECDSA suites, RFC 8422).
+	let ed = certOf(e, "ed25519")
+	let es = start(e, ed, []str{}, 1)
+	let (_, eout) = sClient12(e, es.Port, []str{}, get("/fast", true), ed.Cert)
+	ci.Check(twine.Contains(eout, "New, TLSv1.2") && twine.Contains(eout, "\r\n\r\nfast") && twine.Contains(twine.ToLower(eout), "peer signature type: ed25519"), "Ed25519 over TLS 1.2: " + eout[max(0, len(eout) - 1500):])
+	stop(es)
+	// A server that requires TLS 1.3 refuses a TLS 1.2 client with protocol_version.
+	let only13 = start(e, certOf(e, "ecdsa"), []str{"TLS_MIN13=1"}, 1)
+	let (rc13, out13) = sClient12(e, only13.Port, []str{}, get("/fast", true), "")
+	ci.Check(rc13 != 0 && twine.Contains(out13, "alert number 70"), "a 1.3-only server: " + out13[max(0, len(out13) - 1500):])
+	let (grc2, gout2) = probe(e, []str{"tls12", addr(only13), certOf(e, "ecdsa").Cert})
+	ci.Check(grc2 == 0 && twine.HasPrefix(gout2, "refused"), "a TLS 1.2 Go client against a 1.3-only server: " + gout2)
+	stop(only13)
+	say.Line("PASS TLS 1.2: " + mint.Itoa(runs) + " openssl -tls1_2 handshakes (every suite on ECDSA P-256, P-384 and RSA certificates, X25519 and P-256), RSA PKCS #1 v1.5 and Ed25519 signatures, h2 by ALPN, CBC and RSA key exchange refused, Go, renegotiation refused, the downgrade sentinel stops a stripped ClientHello, MinVersion 1.3 refuses 1.2")
+}
+
+// ---- malformed handshakes and timeouts ----
+
+// exchange sends data, then reads until the server closes: (bytes, seconds, whether the server closed).
+fn exchange(port i64, data str, waitMs i64) (str, f64, bool) {
+	mut c = rawconn.Open(port, 5)
+	let t0 = tide.Now()
+	if len(data) > 0 {
+		c.TrySend(data)
+	}
+	let (got, closed) = c.Drain(waitMs)
+	c.Close()
+	return got, seconds(t0), closed
+}
+
+fn alertBytes(desc i64) str {
+	return "\x15\x03\x03\x00\x02\x02" + str([]u8{u8(desc)})
+}
+
+fn malformed(e Env) {
+	let srv = start(e, certOf(e, "ecdsa"), []str{"TIN_HANDSHAKE_TIMEOUT_MS=1000", "TIN_HEADER_TIMEOUT_MS=1500"}, 1)
+	let names = []str{"plain HTTP to the TLS port", "a record longer than TLS allows", "a truncated ClientHello body", "Finished before ClientHello", "an unknown record type"}
+	let datas = []str{get("/", true), "\x16\x03\x01\x4e\x20" + twine.Repeat("\x00", 16), "\x16\x03\x01\x00\x08\x01\x00\x00\x04\x03\x03\xff\xff", "\x16\x03\x01\x00\x08\x14\x00\x00\x04abcd", "\x63\x03\x03\x00\x01\x00"}
+	let wants = []str{alertBytes(10), alertBytes(22), alertBytes(50), alertBytes(10), alertBytes(10)}
+	for i in 0..len(names) {
+		let (got, took, closed) = exchange(srv.Port, datas[i], 5000)
+		ci.Check(closed && got == wants[i] && took < 3.0, names[i] + ": " + mint.Itoa(len(got)) + " bytes in " + secondsText(took, 1) + " s")
+	}
+	// A client that never sends, and one that stops in the middle of its ClientHello: closed at the handshake timeout (1 s here), after
+	// an alert.
+	let stalls = []str{"silent", "half a ClientHello"}
+	let stallData = []str{"", "\x16\x03\x01\x01\x00" + "\x01\x00\x00\xfc" + twine.Repeat("\x03", 60)}
+	for i in 0..2 {
+		let (got, took, closed) = exchange(srv.Port, stallData[i], 5000)
+		ci.Check(closed && (got == "" || got == alertBytes(80)) && took > 0.9 && took < 3.5, stalls[i] + ": " + mint.Itoa(len(got)) + " bytes in " + secondsText(took, 1) + " s")
+	}
+	// A completed handshake with no request: the header timeout (1.5 s here) closes it, with close_notify.
+	let r = ci.Exec([]str{e.Client, "truncated", addr(srv)}, "", 30)
+	ci.Check(twine.HasPrefix(r.Stdout, "fault EOF 0"), "an idle TLS connection: " + r.Stdout)
+	let g = ci.Exec([]str{e.Client, "get", addr(srv)}, "", 30)
+	ci.Check(twine.HasPrefix(g.Stdout, "ok "), "the server after the malformed handshakes: " + g.Stdout)
+	stop(srv)
+	say.Line("PASS malformed handshakes: plain HTTP, an oversized record, a truncated ClientHello, Finished first and an unknown record type get their alerts; silent and stalled clients close at the handshake timeout, an idle one at the header timeout with close_notify; the server serves on")
+}
+
+// ---- one core: handshakes never hold up a fast request ----
+
+fn httpsFast(e Env, port i64) f64 {
+	let t0 = tide.Now()
+	let o = ci.Exec([]str{e.Client, "https", "https://127.0.0.1:" + mint.Itoa(port) + "/"}, "", 60)
+	ci.Check(twine.HasPrefix(o.Stdout, "get 200 14"), "https: exit " + mint.Itoa(o.Code) + " " + o.Stdout + o.Stderr)
+	return seconds(t0)
+}
+
+fn oneCore(e Env) {
+	let srv = start(e, certOf(e, "ecdsa"), []str{"TIN_HANDSHAKE_TIMEOUT_MS=20000"}, 1)
+	mut base = httpsFast(e, srv.Port)
+	for i in 0..2 {
+		let t = httpsFast(e, srv.Port)
+		if t < base {
+			base = t
+		}
+	}
+	// 300 connections that never send and 100 that stop in their ClientHello: each is a handshake task waiting on its socket. They
+	// are held by a process of their own: a spawn while hundreds of sockets are open here breaks the child's output pipe.
+	let holdStop = ci.Join(e.Work, "hold.stop")
+	ci.Remove(holdStop)
+	let holdLog = ci.Join(e.Work, "hold.log")
+	let holder = nettest.Start(e.Probe, []str{"hold", addr(srv), "400", holdStop}, []str{}, holdLog, 0)
+	nettest.Eventually(30.0, fn() bool {
+		return twine.Contains(ci.Read(holdLog), "ready")
+	})
+	ci.Check(twine.Contains(ci.Read(holdLog), "ready"), "the stalled connections did not open: " + ci.Read(holdLog))
+	tide.Sleep(300000000)
+	mut stalled = 0.0
+	for i in 0..5 {
+		let t = httpsFast(e, srv.Port)
+		if t > stalled {
+			stalled = t
+		}
+	}
+	ci.Check(stalled < base + 1.0, "a fast request took " + secondsText(stalled, 2) + " s behind 400 stalled handshakes (alone: " + secondsText(base, 2) + " s)")
+	// A burst of 64 full handshakes at once, with a waiting request, and a fast one beside them.
+	let slowLog = ci.Join(e.Work, "waiting.log")
+	let waiting = nettest.StartCoded(e.Client, []str{"https", "https://127.0.0.1:" + mint.Itoa(srv.Port) + "/slow?ms=1500"}, []str{}, slowLog, 0)
+	mut burst = []nettest.Server{}
+	for i in 0..64 {
+		burst = append(burst, nettest.StartCoded(e.Client, []str{"get", addr(srv)}, []str{}, ci.Join(e.Work, "burst" + mint.Itoa(i) + ".log"), 0))
+	}
+	mut during = httpsFast(e, srv.Port)
+	for {
+		mut running = 0
+		for b in burst {
+			let (_, finished) = b.ExitCode(0.001)
+			if !finished {
+				running += 1
+			}
+		}
+		if running == 0 {
+			break
+		}
+		let t = httpsFast(e, srv.Port)
+		if t > during {
+			during = t
+		}
+	}
+	mut bad = 0
+	for i in 0..64 {
+		if !twine.HasPrefix(ci.Read(ci.Join(e.Work, "burst" + mint.Itoa(i) + ".log")), "ok ") {
+			bad += 1
+		}
+	}
+	ci.Check(bad == 0, mint.Itoa(bad) + " of 64 full handshakes failed")
+	let (_, waitDone) = waiting.ExitCode(20.0)
+	ci.Check(waitDone, "the waiting request never finished")
+	let first = ci.Lines(ci.Read(slowLog))[0]
+	ci.Check(first == "get 200 9 " + seal.Sha256Hex("slow done"), "the waiting request: " + first)
+	ci.Check(during < 3.0, "a fast request took " + secondsText(during, 2) + " s during 64 handshakes")
+	ci.Write(holdStop, "stop")
+	holder.Stop()
+	stop(srv)
+	say.Line("PASS one core: a fast https request takes " + secondsText(stalled, 3) + " s with 400 stalled handshakes (alone " + secondsText(base, 3) + " s) and " + secondsText(during, 3) + " s during a burst of 64 handshakes and a waiting request")
+}
+
+// ---- memory ----
+
+fn memory(e Env) {
+	let srv = start(e, certOf(e, "ecdsa"), []str{}, 1)
+	// Warm up, then stream 256 MiB in 64 KiB writes over one TLS connection.
+	sClient(e, srv.Port, []str{"-quiet"}, get("/stream?n=64&size=65536", true), "")
+	let base = nettest.RssKiB(srv.Pid)
+	mut peak = base
+	let outLog = ci.Join(e.Work, "memory-bytes.log")
+	let run = nettest.StartCoded("sh", []str{"-c", "printf '" + crlf(get("/stream?n=4096&size=65536", true)) + "' | " + e.Openssl + " s_client -tls1_3 -quiet -connect " + addr(srv) + " 2>/dev/null | wc -c"}, []str{}, outLog, 0)
+	for {
+		let (_, done) = run.ExitCode(0.05)
+		if done {
+			break
+		}
+		let now = nettest.RssKiB(srv.Pid)
+		if now > peak {
+			peak = now
+		}
+	}
+	let end = nettest.RssKiB(srv.Pid)
+	if end > peak {
+		peak = end
+	}
+	let total = ci.Num(twine.TrimSpace(ci.Read(outLog)))
+	let grew = (peak - base) / 1024
+	ci.Check(total > 256 * 1048576, "streamed " + mint.Itoa(total) + " bytes")
+	ci.Check(grew < 24, "RSS grew by " + mint.Itoa(grew) + " MiB while 256 MiB streamed over TLS")
+	// 200 idle TLS connections, each after a request.
+	let before = nettest.RssKiB(srv.Pid)
+	let stopFile = ci.Join(e.Work, "idle.stop")
+	ci.Remove(stopFile)
+	let idleLog = ci.Join(e.Work, "idle.log")
+	let idle = nettest.Start(e.Probe, []str{"idle", addr(srv), certOf(e, "ecdsa").Cert, "200", stopFile}, []str{}, idleLog, 0)
+	nettest.Eventually(60.0, fn() bool {
+		return twine.Contains(ci.Read(idleLog), "ready")
+	})
+	ci.Check(twine.Contains(ci.Read(idleLog), "ready"), "the idle connections did not open: " + ci.Read(idleLog))
+	let per = (nettest.RssKiB(srv.Pid) - before) / 200
+	ci.Write(stopFile, "stop")
+	ci.Check(per < 160, "an idle TLS connection costs " + mint.Itoa(per) + " KiB")
+	idle.Stop()
+	stop(srv)
+	say.Line("PASS memory: 256 MiB streamed over TLS, RSS grew by " + mint.Itoa(grew) + " MiB; an idle TLS connection after a request holds " + mint.Itoa(per) + " KiB")
+}
+
+// ---- graceful shutdown ----
+
+fn connects(a str) bool {
+	let c = wire.DialTimeout(a, 2000000000) catch _ {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+fn shutdownChecks(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let srv = start(e, cert, []str{"TIN_GRACE=5"}, 1)
+	let log = ci.Join(e.Work, "shutdown-client.log")
+	let client = nettest.StartCoded(e.Probe, []str{"slow", addr(srv), cert.Cert}, []str{}, log, 0)
+	nettest.Eventually(10.0, fn() bool {
+		return twine.Contains(ci.Read(log), "sent")
+	})
+	tide.Sleep(300000000)
+	srv.Signal("TERM")
+	tide.Sleep(300000000)
+	let refused = !connects(addr(srv))
+	let (_, clientDone) = client.ExitCode(15.0)
+	let (code, serverDone) = srv.ExitCode(15.0)
+	let data = ci.Read(log)
+	ci.Check(clientDone && twine.Contains(data, "eof\nHTTP/1.1 200 OK") && twine.Contains(data, "Connection: close") && twine.HasSuffix(data, "slow done"), "the request in flight: " + data)
+	ci.Check(refused, "a new connection was accepted after SIGTERM")
+	ci.Check(serverDone && code == 0, "the server exited with " + mint.Itoa(code))
+	say.Line("PASS graceful shutdown: SIGTERM lets a waiting request answer (Connection: close), the close is a close_notify, new connections are refused, exit 0")
+}
+
+// ---- the example and configuration errors ----
+
+fn opensslPq(e Env) bool {
+	let o = ci.Exec([]str{e.Openssl, "list", "-kem-algorithms"}, "", 20)
+	return twine.Contains(o.Stdout, "X25519MLKEM768")
+}
+
+// postQuantum: X25519MLKEM768 (#479): Go's crypto/tls (tools/ci/fixtures/tls_pq.go) gets the hybrid group when it offers it, alone or
+// first, and X25519 or P-256 when it offers only those; so does OpenSSL 3.5's s_client where the runner has it.
+fn postQuantum(e Env) {
+	let gopq = ci.Join(e.Work, "tls_pq")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", gopq, "tools/ci/fixtures/tls_pq.go"}, ci.Root(), 300), "go build tls_pq.go")
+	let cert = certOf(e, "ecdsa")
+	let srv = start(e, cert, []str{}, 1)
+	let prefs = []str{"X25519MLKEM768,X25519", "X25519MLKEM768", "X25519", "P-256"}
+	let wants = []str{"X25519MLKEM768", "X25519MLKEM768", "X25519", "CurveP256"}
+	for i in 0..4 {
+		let r = ci.Exec([]str{gopq, "client", addr(srv), cert.Cert, prefs[i]}, "", 60)
+		ci.Check(r.Stdout == "group " + wants[i] + " true\n", prefs[i] + ": " + r.Stdout + r.Stderr)
+	}
+	mut tried = "Go"
+	if opensslPq(e) {
+		let (_, out) = sClient(e, srv.Port, []str{"-groups", "X25519MLKEM768"}, get("/fast", true), cert.Cert)
+		ci.Check(twine.Contains(out, "Negotiated TLS1.3 group: X25519MLKEM768") && twine.Contains(out, "\r\n\r\nfast"), "OpenSSL's X25519MLKEM768: " + out[max(0, len(out) - 1500):])
+		tried = "Go and OpenSSL"
+	}
+	stop(srv)
+	say.Line("PASS X25519MLKEM768 from " + tried + " clients: chosen when offered, X25519 or P-256 otherwise")
+}
+
+fn example(e Env) {
+	let exe = ci.Join(e.Work, "https_example")
+	ci.BuildTin("examples/https_server.tin", exe, "", []str{})
+	let rsa = certOf(e, "rsa")
+	let srv = startAs(e, exe, rsa, []str{}, 1, true)
+	let (_, out) = sClient(e, srv.Port, []str{"-alpn", "http/1.1"}, get("/", true), rsa.Cert)
+	mut group = "X25519"
+	if opensslPq(e) {
+		group = "X25519MLKEM768"
+	}
+	ci.Check(twine.Contains(out, "hello over TLS 1.3 (http/1.1, group " + group + ")") && twine.Contains(out, "Verify return code: 0 (ok)"), "examples/https_server.tin: " + out[max(0, len(out) - 1500):])
+	let wss = tinClient(e, []str{"wss", "wss://127.0.0.1:" + mint.Itoa(srv.Port) + "/echo"}, []str{})
+	ci.Check(wss == "wss true echo: hello wss\n", "wss://: " + wss)
+	stop(srv)
+	say.Line("PASS examples/https_server.tin: HTTPS verified by OpenSSL, wss:// echo")
+}
+
+// serverKeylog: SSLKEYLOGFILE on the server (#478): anvil logs the four secrets openssl s_client logs.
+fn serverKeylog(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let mine = ci.Join(e.Work, "keylog-anvil.txt")
+	let theirs = ci.Join(e.Work, "keylog-s_client.txt")
+	ci.Remove(mine)
+	ci.Remove(theirs)
+	let srv = start(e, cert, []str{"SSLKEYLOGFILE=" + mine}, 1)
+	let (rc, out) = sClient(e, srv.Port, []str{"-keylogfile", theirs}, get("/fast", true), "")
+	ci.Check(rc == 0 && twine.Contains(out, "\r\n\r\nfast"), "TLS 1.3 key log run: " + out[max(0, len(out) - 1500):])
+	// TLS 1.2 (#473): one CLIENT_RANDOM line with the master secret.
+	let (rc2, out2) = sClient12(e, srv.Port, []str{"-keylogfile", theirs}, get("/fast", true), "")
+	ci.Check(rc2 == 0 && twine.Contains(out2, "\r\n\r\nfast"), "TLS 1.2 key log run: " + out2[max(0, len(out2) - 1500):])
+	stop(srv)
+	let a = keylogLines(mine)
+	let b = keylogLines(theirs)
+	ci.Check(len(a) == 5 && twine.Join(a, "|") == twine.Join(b, "|"), "key logs: " + twine.Join(a, "|") + " vs " + twine.Join(b, "|"))
+	say.Line("PASS SSLKEYLOGFILE: anvil logs the four TLS 1.3 traffic secrets and the TLS 1.2 CLIENT_RANDOM line openssl s_client logs")
+}
+
+fn keylogLines(path str) []str {
+	let labels = []str{"CLIENT_HANDSHAKE_TRAFFIC_SECRET", "SERVER_HANDSHAKE_TRAFFIC_SECRET", "CLIENT_TRAFFIC_SECRET_0", "SERVER_TRAFFIC_SECRET_0", "CLIENT_RANDOM"}
+	mut out = []str{}
+	for l in ci.Lines(ci.Read(path)) {
+		let label = twine.Split(l, " ")[0]
+		for want in labels {
+			if label == want {
+				out = append(out, l)
+			}
+		}
+	}
+	for i in 0..len(out) {
+		for j in i + 1..len(out) {
+			if out[j] < out[i] {
+				let t = out[i]
+				out[i] = out[j]
+				out[j] = t
+			}
+		}
+	}
+	return out
+}
+
+fn badConfig(e Env) {
+	let pair = tlsutil.Cert{Kind: "mismatch", Cert: certOf(e, "ecdsa").Cert, Key: certOf(e, "rsa").Key}
+	let srv = startAs(e, e.Exe, pair, []str{}, 1, false)
+	let (code, done) = srv.ExitCode(20.0)
+	let out = output(srv)
+	ci.Check(done && code == 0 && twine.HasPrefix(out, "server: ") && twine.Contains(out, "does not belong"), "a key of another certificate: " + out)
+	say.Line("PASS configuration: a key that does not match the certificate fails ServeTLS before it listens")
+}
+
+// ed25519Server (#477): OpenSSL verifies the chain and the Ed25519 CertificateVerify, and so does the Tin client.
+fn ed25519Server(e Env) {
+	let cert = certOf(e, "ed25519")
+	let srv = start(e, cert, []str{}, 1)
+	let (rc, out) = sClient(e, srv.Port, []str{}, get("/fast", true), cert.Cert)
+	ci.Check(rc == 0 && twine.Contains(out, "\r\n\r\nfast") && twine.Contains(twine.ToLower(out), "peer signature type: ed25519"), "Ed25519: " + out[max(0, len(out) - 1500):])
+	let r = twine.Fields(tinClient(e, []str{"resume", addr(srv), "1", cert.Cert}, []str{}))
+	ci.Check(len(r) == 6 && r[0] == "resumed" && r[1] == "false" && r[3] == "X25519MLKEM768" && r[4] == "1" && r[5] == "true", "the Tin client with an Ed25519 certificate: " + twine.Join(r, " "))
+	stop(srv)
+	say.Line("PASS Ed25519 certificate: OpenSSL and the Tin client verify the chain and the Ed25519 CertificateVerify")
+}
+
+fn main() {
+	mut openssl = tlsutil.Openssl3()
+	ci.Check(len(openssl) > 0, "tls_server_check needs an OpenSSL 3 command line (s_client -tls1_3)")
+	let out = ci.Join(ci.Root(), "bin/ci/tls_server")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "tls-server-")
+	let exe = ci.Join(work, "https_server")
+	let client = ci.Join(work, "tls_client")
+	ci.BuildTin("tools/ci/fixtures/https_server.tin", exe, "", []str{})
+	ci.BuildTin("tools/ci/fixtures/tls_client.tin", client, "", []str{})
+	let probeExe = ci.Join(work, "tlsprobe")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", probeExe, "tools/ci/fixtures/tlsprobe.go"}, ci.Root(), 300), "go build tlsprobe.go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(work, "tlsproxy"), "tools/ci/fixtures/tlsproxy.go"}, ci.Root(), 300), "go build tlsproxy.go")
+	ci.Must(ci.Sh("head -c 5242880 /dev/urandom > \"" + ci.Join(work, "file.bin") + "\"", "", 30), "make file.bin")
+	let certs = tlsutil.MakeCerts(openssl, work, []str{"ecdsa", "ecdsa384", "rsa", "ed25519"})
+	ci.Check(len(certs) == 4, "openssl made only " + mint.Itoa(len(certs)) + " of the four certificate kinds")
+	let e = Env{Work: work, Exe: exe, Client: client, Probe: probeExe, Openssl: openssl, Certs: certs}
+	opensslInterop(e)
+	tinClients(e)
+	resumption(e)
+	mtls(e)
+	tls12Server(e)
+	sniReload(e)
+	malformed(e)
+	oneCore(e)
+	memory(e)
+	postQuantum(e)
+	example(e)
+	badConfig(e)
+	ed25519Server(e)
+	serverKeylog(e)
+	goClients(e)
+	shutdownChecks(e)
+	ci.Remove(work)
+	ci.Pass("tls_server: OpenSSL and Go clients, the Tin client, resumption, client certificates, TLS 1.2, server names and reloads, malformed handshakes, one core, memory, shutdown")
+}

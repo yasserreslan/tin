@@ -15,12 +15,12 @@ instead of inventing a new place for it.
 | `toolchain/runtime/` | The runtime every program gets: memory (pools, the long-lived heap), strings, slices, maps, formatting, tasks, panics, the OS layer. Not a package: files are loaded together, with `_darwin`, `_linux`, `_linux_arm64`, `_linux_amd64` parts. It imports nothing. | A task about the runtime. Generated parts (`printable.tin`) come from `tools/gen/gen_unicode.tin`. |
 | `toolchain/std/NAME/`, `packages/NAME/` | One package per directory (`package NAME`), imported as `import "NAME"`: the standard library in `toolchain/std/`, the ecosystem (servers, clients, protocols) in `packages/`. Files split by topic, platform parts end in the platform name, `_test.tin` files are skipped by the loader. See `toolchain/std/README.md`. | Any library task. |
 | `toolchain/tests/v2/` | The strict test suite: `NAME.tin` plus `NAME.out` (expected stdout, sorted bytewise because the suite sorts lines) or `NAME_bad.tin` plus `NAME_bad.err` (expected compile error). Run by `tools/dev/v2test.sh`. | Every task adds tests here. |
-| `toolchain/tests/regressions/` | One reproducer per fixed bug, with its contract in `cases.json`; every entry needs an `issue` number. Run by `tools/ci/regressions.py`. | Every bug fix. |
+| `toolchain/tests/regressions/` | One reproducer per fixed bug, with its contract in `cases.json`; every entry needs an `issue` number. Run by `tools/ci/regressions.tin`. | Every bug fix. |
 | `bench/ref/NAME/` | The Go twin of a Tin test: a Go program printing the same lines. The expected output of the Tin test is Go's. Go is a comparison baseline only, never part of the product. | Library tasks, alongside the Tin test. |
 | `bench/`, `bench/v04`, `bench/http`, `bench/router` | Benchmarks and service benchmarks against Go. | Performance tasks. |
 | `toolchain/docs/` | `LANGUAGE.md` (reference), `RUNTIME.md`, `COMPILER.md`, `TOOLING.md`, `PORTING.md`, `PERFORMANCE.md`, `COVERAGE.md` (the inventory of Go's surface against Tin), `STDLIB.md` (generated), `AGENT_PRIMER.md`. | Whoever changes behavior updates the matching doc in the same PR. |
 | `design/` | `roadmap.md` (the plan), `design_foundations.md` (decided designs), `stdlib_verified.md` (what is verified against Go), the interfaces between parts. | Roadmap boxes and verification rows as work lands. |
-| `tools/` | `dev/` (`v2test.sh`, `compare_compilers.sh`, `dist.tin`, debugging helpers), `gen/` (`gendoc.tin` writes `toolchain/docs/STDLIB.md`, `gen_unicode.tin` writes the Unicode tables), `ci/` (CI checks). | `tools/ci`: extend existing files only, never add a Python file there. New tooling is written in Tin. |
+| `tools/` | `dev/` (`v2test.sh`, `compare_compilers.sh`, `dist.tin`, debugging helpers), `gen/` (`gendoc.tin` writes `toolchain/docs/STDLIB.md`, `gen_unicode.tin` writes the Unicode tables), `ci/` (CI checks). | `tools/ci`: checks are Tin programs run by `sh tools/ci/tin.sh NAME`; never add a Python file. New tooling is written in Tin. |
 | `products/` | Programs built with Tin that people use: `tinland/` (the IDE: `intellij/`, the IntelliJ Platform plugin, beside `vscode/`), `tinos/` later. Each product has its own README and tests and depends only on `toolchain/` and `packages/`. | The product's own tasks. |
 | `examples/`, `docker/`, `install.sh`, `Makefile`, `VERSION`, `.github/` | Examples, container images, installer, build entry points, CI and the PR template. | Only tasks about distribution or CI. |
 | `go.mod` | Left from the retired Go stage; Go remains only as a baseline for twins and the HTTP conformance tools until those are rewritten in Tin. | Do not add Go code to the product. |
@@ -47,7 +47,7 @@ Process:
 9. A PR is big enough to be complete: the code, the tests, the twin, the docs and the roadmap boxes it closes. No two-line PRs, no half features.
 10. Behavior changes update `toolchain/docs/LANGUAGE.md` or the matching doc, regenerate `toolchain/docs/STDLIB.md` (`sh tools/ci/tin.sh tools/gen/gendoc.tin`) and `toolchain/docs/COVERAGE.md`, and add the row to `design/stdlib_verified.md`.
 11. Names follow the role of the thing, not a language prefix. A package directory is `toolchain/std/<name>/` or `packages/<name>/`; Tin's package names are short nouns (`twine` for strings, `link` for net/url).
-12. Do not add new Python files under `tools/ci`. Do not add dependencies. Do not weaken or delete a test to make it pass.
+12. Do not add Python files (the only ones are the two lldb plugins in `tools/dev`, which lldb loads). Do not add dependencies. Do not weaken or delete a test to make it pass.
 
 ## 4. What to run before opening a PR
 

@@ -1,0 +1,412 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./rawconn"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Streaming responses (#350): w.Stream(), Write, Flush, Length, Closed, SendFile.
+//
+// The fixture (tools/ci/fixtures/stream.tin) streams server-sent events, chunks of a known byte pattern, Content-Length bodies and
+// files. The client is raw sockets, so the framing is checked: chunked bodies decode to the pattern; HTTP/1.0 gets a body up to the end
+// of the connection and no chunks; HEAD gets the head only; the connection is reused after a stream and a pipelined request waits for
+// it; a short Content-Length body, a panic and a client that stops reading end the connection without a second response in the
+// middle of the first; a client that goes away is seen; and the memory of a large streamed response stays flat.
+
+fn dial(srv nettest.Server) rawconn.Conn {
+	return rawconn.Open(srv.Port, 10)
+}
+
+fn get(path str) str {
+	return rawconn.Get(path)
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn logged(srv nettest.Server) str {
+	return ci.Read(srv.Log)
+}
+
+fn plain(c mut rawconn.Conn, what str) {
+	c.Send(get("/plain"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200 && c.Body(h) == "plain", what)
+}
+
+fn checkSse(srv nettest.Server) {
+	mut c = dial(srv)
+	let start = tide.Now()
+	c.Send(get("/sse?n=3&ms=250"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200 && h["transfer-encoding"] == "chunked" && !rawconn.Has(h, "content-length"), "sse head: " + mint.Itoa(status))
+	ci.Check(h["content-type"] == "text/event-stream" && h["cache-control"] == "no-cache", "sse headers")
+	let first = c.ChunkedOne()
+	ci.Check(first == "data: tick 0\n\n", "first event: " + first)
+	ci.Check(seconds(start) < 0.2, "the first event arrives before the stream ends")
+	let rest = c.Chunked()
+	ci.Check(len(rest) == 2 && rest[0] == "data: tick 1\n\n" && rest[1] == "data: tick 2\n\n", "the rest of the events")
+	ci.Check(seconds(start) > 0.45, "the stream ended too early")
+	// the connection is reused after a stream
+	plain(mut c, "a response after a stream")
+	// a request pipelined behind a stream waits for it, and is answered after it
+	c.Send(get("/sse?n=2&ms=50") + get("/plain"))
+	let (s2, h2) = c.Head()
+	ci.Check(s2 == 200 && h2["transfer-encoding"] == "chunked", "pipelined stream head")
+	let two = c.Chunked()
+	ci.Check(len(two) == 2 && two[0] == "data: tick 0\n\n" && two[1] == "data: tick 1\n\n", "pipelined stream body")
+	let (s3, h3) = c.Head()
+	ci.Check(s3 == 200 && c.Body(h3) == "plain", "the request pipelined behind a stream")
+	// a plain response before it in the same batch is not lost or reordered
+	c.Send(get("/plain") + get("/sse?n=1&ms=10"))
+	let (s4, h4) = c.Head()
+	ci.Check(c.Body(h4) == "plain", "a plain response before a stream")
+	let (s5, h5) = c.Head()
+	let one = c.Chunked()
+	ci.Check(h5["transfer-encoding"] == "chunked" && len(one) == 1 && one[0] == "data: tick 0\n\n", "the stream after a plain response")
+	c.Close()
+	say.Line("server-sent events: the first event is out at once, then the stream; keep-alive and pipelining work")
+}
+
+fn checkChunks(srv nettest.Server) {
+	mut c = rawconn.Open(srv.Port, 30)
+	c.Send(get("/chunks?n=8&size=100000"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200 && h["transfer-encoding"] == "chunked", "chunks head")
+	let body = twine.Join(c.Chunked(), "")
+	ci.Check(body == twine.Repeat(rawconn.Pattern(100000, 0), 8), "the bytes of eight 100000-byte writes")
+	// HEAD: the head, no body, and the connection goes on
+	c.Send(rawconn.Request("HEAD", "/chunks?n=2", "1.1", ""))
+	let (s2, h2) = c.Head()
+	ci.Check(s2 == 200 && h2["transfer-encoding"] == "chunked", "HEAD of a stream")
+	plain(mut c, "a response after a HEAD stream")
+	// HTTP/1.0: no chunks, the body ends with the connection
+	mut d = rawconn.Open(srv.Port, 30)
+	d.Send(rawconn.Request("GET", "/chunks?n=3&size=5000", "1.0", ""))
+	let (s3, h3) = d.Head()
+	ci.Check(s3 == 200 && !rawconn.Has(h3, "transfer-encoding") && h3["connection"] == "close", "HTTP/1.0 head")
+	ci.Check(d.Rest() == twine.Repeat(rawconn.Pattern(5000, 0), 3), "HTTP/1.0 body")
+	// Text and Flush: the buffered body goes out as chunks, and the last Text with the end
+	mut e = dial(srv)
+	e.Send(get("/text"))
+	let (s4, h4) = e.Head()
+	let parts = e.Chunked()
+	ci.Check(len(parts) == 3 && parts[0] == "one," && parts[1] == "two," && parts[2] == "three", "Text and Flush chunks")
+	// Stream without a write is an ordinary response
+	e.Send(get("/unsent"))
+	let (s5, h5) = e.Head()
+	ci.Check(s5 == 201 && e.Body(h5) == "not streamed", "an unsent stream")
+	say.Line("chunks: eight 100000-byte writes in order, HEAD, HTTP/1.0 up to the close, Text and Flush, an unsent stream")
+}
+
+fn checkLength(srv nettest.Server) {
+	mut c = rawconn.Open(srv.Port, 30)
+	c.Send(get("/length?n=123457"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200 && h["content-length"] == "123457" && !rawconn.Has(h, "transfer-encoding"), "length head")
+	ci.Check(c.Exactly(123457) == rawconn.Pattern(123457, 0), "length body")
+	plain(mut c, "keep-alive after a Content-Length stream")
+	// a body shorter than its Content-Length cannot be followed by another response
+	mut d = dial(srv)
+	d.Send(get("/short") + get("/plain"))
+	let (s2, h2) = d.Head()
+	ci.Check(s2 == 200 && h2["content-length"] == "10", "short head")
+	ci.Check(d.Rest() == "12345", "only the five bytes, then the connection closes")
+	// a panic mid-stream: what was sent stays, no error page follows, the connection closes
+	mut p = dial(srv)
+	p.Send(get("/panic") + get("/plain"))
+	let (s3, h3) = p.Head()
+	ci.Check(s3 == 200 && h3["transfer-encoding"] == "chunked", "panic head")
+	let tail = p.Rest()
+	ci.Check(twine.HasPrefix(tail, "7\r\npartial\r\n") && !twine.Contains(tail, "500") && !twine.Contains(tail, "plain"), "after a panic: " + tail)
+	mut q = dial(srv)
+	plain(mut q, "the server goes on")
+	say.Line("Content-Length: exact body and keep-alive; a short body and a panic close the connection")
+}
+
+fn checkFiles(srv nettest.Server) {
+	let big = 24 * 1048576
+	mut c = rawconn.Open(srv.Port, 30)
+	c.Send(get("/file?name=small"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200 && h["content-length"] == "1000" && !rawconn.Has(h, "transfer-encoding"), "small file head")
+	ci.Check(c.Exactly(1000) == rawconn.Pattern(1000, 0), "small file body")
+	// a range, and keep-alive after a file
+	c.Send(get("/file?name=small&off=100&n=250"))
+	let (s2, h2) = c.Head()
+	ci.Check(s2 == 200 && h2["content-length"] == "250", "range head")
+	ci.Check(c.Exactly(250) == rawconn.Pattern(250, 100), "range body")
+	c.Send(get("/file?name=small&off=1000"))
+	let (s3, h3) = c.Head()
+	ci.Check(s3 == 200 && h3["content-length"] == "0", "empty range")
+	// a file bigger than any buffer: every byte, in order
+	c.Send(get("/file?name=big"))
+	let (s4, h4) = c.Head()
+	ci.Check(s4 == 200 && h4["content-length"] == mint.Itoa(big), "big file head")
+	mut got = 0
+	for got < big {
+		mut k = 1048576
+		if big - got < k {
+			k = big - got
+		}
+		let part = c.Exactly(k)
+		ci.Check(part == rawconn.Pattern(k, got), "the bytes at " + mint.Itoa(got))
+		got += k
+	}
+	// HEAD and a missing file
+	c.Send(rawconn.Request("HEAD", "/file?name=big", "1.1", ""))
+	let (s5, h5) = c.Head()
+	ci.Check(s5 == 200 && h5["content-length"] == mint.Itoa(big), "HEAD of a file")
+	c.Send(get("/file?name=nothing"))
+	let (s6, h6) = c.Head()
+	ci.Check(s6 == 404, "a missing file")
+	c.Exactly(ci.Num(h6["content-length"]))
+	c.Send(get("/file?name=small&off=900&n=500"))
+	let (s7, h7) = c.Head()
+	ci.Check(s7 == 404, "a range past the end")
+	c.Exactly(ci.Num(h7["content-length"]))
+	// inside a chunked stream
+	c.Send(get("/filechunk?name=small"))
+	let (s8, h8) = c.Head()
+	ci.Check(h8["transfer-encoding"] == "chunked", "filechunk head")
+	ci.Check(twine.Join(c.Chunked(), "") == "head;" + rawconn.Pattern(1000, 0) + ";tail", "a file inside chunks")
+	// HTTP/1.0 gets the file up to the end of the connection
+	mut d = rawconn.Open(srv.Port, 30)
+	d.Send(rawconn.Request("GET", "/file?name=small", "1.0", ""))
+	let (s9, h9) = d.Head()
+	ci.Check(s9 == 200 && h9["content-length"] == "1000" && h9["connection"] == "close", "HTTP/1.0 file head")
+	ci.Check(d.Rest() == rawconn.Pattern(1000, 0), "HTTP/1.0 file body")
+	// a client that does not read a big file: the write times out and the server goes on
+	mut e = dial(srv)
+	e.Send(get("/file?name=big"))
+	e.Head()
+	nettest.Eventually(8.0, fn() bool {
+		return twine.Contains(logged(srv), "file stopped: anvil: the client stopped reading")
+	})
+	ci.Check(twine.Contains(logged(srv), "file stopped: anvil: the client stopped reading"), "the stalled file write was not logged")
+	mut q = dial(srv)
+	plain(mut q, "the server after a stalled file")
+	say.Line("SendFile: a whole file, a range, " + mint.Itoa(big / 1048576) + " MiB in order, HEAD, a missing file, inside chunks, HTTP/1.0, a client that stops reading")
+}
+
+fn checkGone(srv nettest.Server) {
+	// A client that does not read: the write times out, the stream ends, the server goes on.
+	mut c = dial(srv)
+	c.Send(get("/endless"))
+	c.Head()
+	nettest.Eventually(8.0, fn() bool {
+		return twine.Contains(logged(srv), "endless stopped:")
+	})
+	ci.Check(twine.Contains(logged(srv), "client stopped reading"), "the endless stream was not stopped by the write timeout")
+	c.Close()
+	// A client that goes away is seen by Closed.
+	mut w = dial(srv)
+	w.Send(get("/watch"))
+	w.Head()
+	ci.Check(w.ChunkedOne() == "watching\n", "watch first chunk")
+	w.Close()
+	nettest.Eventually(5.0, fn() bool {
+		return twine.Contains(logged(srv), "watch saw closed")
+	})
+	ci.Check(twine.Contains(logged(srv), "watch saw closed"), "Closed did not see the client leave")
+	mut q = dial(srv)
+	plain(mut q, "the server after a client left")
+	say.Line("a client that stops reading ends the stream at the write timeout; one that leaves is seen by Closed")
+}
+
+fn checkSseExample(out str) {
+	let exe = ci.Join(out, "sse")
+	ci.BuildTin("examples/sse.tin", exe, "", []str{})
+	let port = nettest.Port()
+	let log = ci.Join(out, "sse.log")
+	let srv = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "TIN_GRACE=1", "TICK_MS=40"}, log, port)
+	srv.Ready(10)
+	mut c = dial(srv)
+	c.Send(get("/events"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200 && h["content-type"] == "text/event-stream" && h["transfer-encoding"] == "chunked", "sse example head")
+	for i in 1..4 {
+		let ev = c.ChunkedOne()
+		let n = mint.Itoa(i)
+		ci.Check(ev == "id: " + n + "\nevent: tick\ndata: " + n + "\n\n", "event " + n + ": " + ev)
+	}
+	c.Close()
+	mut d = dial(srv)
+	d.Send(rawconn.Request("GET", "/events", "1.1", "Last-Event-ID: 41\r\n"))
+	d.Head()
+	ci.Check(d.ChunkedOne() == "id: 42\nevent: tick\ndata: 42\n\n", "Last-Event-ID resumes the numbering")
+	d.Close()
+	nettest.Eventually(5.0, fn() bool {
+		return len(twine.Split(ci.Read(log), "client left after")) - 1 >= 2
+	})
+	ci.Check(len(twine.Split(ci.Read(log), "client left after")) - 1 >= 2, "the server did not notice the clients leaving")
+	mut page = dial(srv)
+	page.Send(get("/"))
+	let (s2, h2) = page.Head()
+	ci.Check(s2 == 200 && twine.Contains(page.Body(h2), "EventSource"), "the example page")
+	srv.Stop()
+	say.Line("examples/sse.tin: numbered events, Last-Event-ID resumes, a client that leaves is noticed")
+}
+
+fn checkAbort(srv nettest.Server) {
+	// Abort and a cancelled stream end the connection without the last chunk.
+	mut c = dial(srv)
+	c.Send(get("/aborted"))
+	let (status, h) = c.Head()
+	ci.Check(status == 200, "abort head")
+	ci.Check(c.ChunkedOne() == "half", "abort first chunk")
+	let tail = c.Rest()
+	ci.Check(len(tail) == 0, "no last chunk after Abort, got " + tail)
+	say.Line("Abort: the client sees an incomplete response, not a short one")
+}
+
+fn hexDigit(ch u8) i64 {
+	if ch >= '0' && ch <= '9' {
+		return i64(ch - '0')
+	}
+	if ch >= 'a' && ch <= 'f' {
+		return i64(ch - 'a') + 10
+	}
+	return 99
+}
+
+// checkMemory: the response is never held: the server's memory stays flat while megabytes go by. The client reads into one buffer and
+// follows the chunk framing byte by byte, so it holds nothing either.
+fn checkMemory(srv nettest.Server, totalMb i64) {
+	let base = nettest.RssKiB(srv.Pid)
+	mut c = rawconn.Open(srv.Port, 60)
+	let n = totalMb * 16
+	c.Send(get("/chunks?n=" + mint.Itoa(n) + "&size=65536"))
+	let (status, _) = c.Head()
+	ci.Check(status == 200, "memory head")
+	mut phase = 0
+	mut size = 0
+	mut pos = 0
+	mut got = 0
+	mut peak = base
+	mut sampled = 0
+	mut buf = []u8{}
+	let reader = c.C
+	mut pending = c.Buf
+	mut pendingAt = 0
+	let window = 64 * 1048576
+	for phase != 7 {
+		mut chunkLen = 0
+		if pendingAt < len(pending) {
+			chunkLen = len(pending) - pendingAt
+		} else {
+			buf = buf[0:0]
+			let k = reader.Read(mut buf, 65536) catch err {
+				ci.Fail("the stream ended early: " + say.Str(err))
+				0
+			}
+			chunkLen = k
+			pending = ""
+			pendingAt = 0
+		}
+		for i in 0..chunkLen {
+			mut ch = u8(0)
+			if len(pending) > 0 {
+				ch = pending[pendingAt + i]
+			} else {
+				ch = buf[i]
+			}
+			if phase == 0 {
+				if ch == '\r' {
+					phase = 1
+				} else {
+					size = size * 16 + hexDigit(ch)
+				}
+			} else if phase == 1 {
+				ci.Check(ch == '\n', "chunk size line not ended by LF")
+				if size == 0 {
+					phase = 5
+				} else {
+					phase = 2
+					pos = 0
+				}
+			} else if phase == 2 {
+				if ch != u8(pos % 251) {
+					ci.Fail("a wrong byte at " + mint.Itoa(pos) + " of a chunk")
+				}
+				pos += 1
+				got += 1
+				if pos == size {
+					phase = 3
+				}
+			} else if phase == 3 {
+				ci.Check(ch == '\r', "chunk not ended by CR")
+				phase = 4
+			} else if phase == 4 {
+				ci.Check(ch == '\n', "chunk not ended by LF")
+				phase = 0
+				size = 0
+			} else if phase == 5 {
+				ci.Check(ch == '\r', "last chunk not ended by CR")
+				phase = 6
+			} else {
+				ci.Check(ch == '\n', "last chunk not ended by LF")
+				phase = 7
+			}
+		}
+		if len(pending) > 0 {
+			pendingAt = len(pending)
+		}
+		if got / window != sampled {
+			sampled = got / window
+			let now = nettest.RssKiB(srv.Pid)
+			if now > peak {
+				peak = now
+			}
+		}
+	}
+	ci.Check(got == totalMb * 1048576, "streamed " + mint.Itoa(got) + " bytes")
+	let end = nettest.RssKiB(srv.Pid)
+	if end > peak {
+		peak = end
+	}
+	let grew = (peak - base) / 1024
+	ci.Check(grew < 24, "RSS grew by " + mint.Itoa(grew) + " MiB while " + mint.Itoa(totalMb) + " MiB streamed")
+	say.Line("memory: " + mint.Itoa(totalMb) + " MiB streamed in 64 KiB writes, RSS grew by " + mint.Itoa(grew) + " MiB")
+	c.Close()
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/stream")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "stream")
+	ci.BuildTin("tools/ci/fixtures/stream.tin", exe, "", []str{})
+	// The deadline counts from the last write: the 2.4 s stream outlives a 1 s deadline.
+	let files = ci.Join(out, "files")
+	ci.Mkdirs(files)
+	ci.Write(ci.Join(files, "small"), rawconn.Pattern(1000, 0))
+	ci.Write(ci.Join(files, "big"), rawconn.Pattern(24 * 1048576, 0))
+	let port = nettest.Port()
+	let srv = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "TIN_GRACE=1", "TIN_DEADLINE_MS=1000", "TIN_WRITE_TIMEOUT_MS=600", "FILES_DIR=" + files}, ci.Join(out, "stream.log"), port)
+	srv.Ready(10)
+	checkSse(srv)
+	checkChunks(srv)
+	checkLength(srv)
+	checkFiles(srv)
+	checkGone(srv)
+	mut c = dial(srv)
+	c.Send(get("/sse?n=8&ms=300"))
+	c.Head()
+	ci.Check(len(c.Chunked()) == 8, "a stream that outlives the request deadline while it keeps writing")
+	c.Close()
+	say.Line("the request deadline counts from the last write")
+	checkAbort(srv)
+	mut mb = 256
+	if ci.Linux() {
+		mb = 1024
+	}
+	checkMemory(srv, mb)
+	checkSseExample(out)
+	srv.Stop()
+	ci.Pass("streaming responses: SSE, chunks, Content-Length, SendFile, disconnects, Abort and flat memory")
+}

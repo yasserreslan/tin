@@ -823,7 +823,7 @@ are ignored (the client retries them on another connection).
 lines, a `content-length` for the body, the trailers. Replayed, it comes in over HTTP/1.1, so
 `Req.Proto` says `HTTP/1.1` there.
 
-**Conformance.** `tools/ci/h2_check.py` runs h2spec's generic, http2 and hpack cases but one:
+**Conformance.** `tools/ci/h2_check.tin` runs h2spec's generic, http2 and hpack cases but one:
 http2/3.5/2 sends `INVALID CONNECTION PREFACE` to a port that also speaks HTTP/1.1, where it is a
 malformed request line and gets 400, as any HTTP/1.1 server answers it. RFC 9113 3.4 makes an
 invalid preface a connection error on a connection known to be HTTP/2: after `PRI * HTTP/2.0`, and
@@ -973,7 +973,7 @@ HTTP/1.1 over TLS 1.3 on the same per-core event loops (`packages/anvil/serve_tl
   `on_write` is unchanged. A stream's writes are sealed into a buffer freed after each write;
   `SendFile` reads its file in 256 KiB pieces on a helper thread (`pread`) and seals them (no
   `sendfile` over TLS). `seal.AEAD.SealTo` on the CPU's AES-GCM instructions allocates nothing, so
-  256 MiB streamed over TLS leaves the server's RSS flat (`tls_server_check.py`).
+  256 MiB streamed over TLS leaves the server's RSS flat (`tls_server_check.tin`).
 - **`Out.Closed`** decrypts what has arrived (`ClosedRaw`, without waiting) instead of peeking
   at the socket, which would see only a record: it reports the client's close_notify or alert,
   or end of input. Application data it reads ahead stays in TLS, and the loop keeps reading
@@ -1313,5 +1313,5 @@ Host names follow RFC 6125: DNS SANs only (the common name is ignored), one left
 label over at least two more labels, IP literals against IP SANs. The parser is strict DER and
 rejects every certificate Go's `crypto/x509` rejects (`tools/ci/x509_check.tin` checks this on
 byte-flipped certificates).
-the instructions (for tests). Vectors: `tools/ci/crypto_check.py` runs the Wycheproof files in `toolchain/tests/wycheproof/`
-(including the invalid inputs) and random inputs checked against Python's `hashlib`.
+the instructions (for tests). Vectors: `tools/ci/crypto_check.tin` runs the Wycheproof files in `toolchain/tests/wycheproof/`
+(including the invalid inputs) and random inputs checked against Go's standard library.

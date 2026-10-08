@@ -436,3 +436,41 @@ fn StartStdin(exe str, stdinFile str, set []str, log str, port i64) Server {
 	ci.Fail("the shell did not report the process of " + exe)
 	panic("unreachable")
 }
+
+// CpuSeconds is the CPU time (user and system) a process has used so far, from ps.
+fn CpuSeconds(pid i64) f64 {
+	let o = ci.Exec([]str{"ps", "-o", "time=", "-p", mint.Itoa(pid)}, "", 5)
+	mut text = twine.TrimSpace(o.Stdout)
+	mut days = 0.0
+	let dash = twine.IndexByte(text, '-')
+	if dash >= 0 {
+		days = f64(ci.Num(text[0:dash]))
+		text = text[dash + 1:]
+	}
+	mut secs = 0.0
+	for piece in twine.Split(text, ":") {
+		let part = mint.ParseFloat(piece) catch _ {
+			0.0
+		}
+		secs = secs * 60.0 + part
+	}
+	return secs + days * 86400.0
+}
+
+fn hexNibble(v i64) str {
+	return "0123456789ABCDEF"[v:v + 1]
+}
+
+// Quote is a URL query component, percent-encoded like urllib.parse.quote(safe="").
+fn Quote(s str) str {
+	mut out = ""
+	for i in 0..len(s) {
+		let c = s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' || c == '~' {
+			out += s[i:i + 1]
+		} else {
+			out += "%" + hexNibble(i64(c) / 16) + hexNibble(i64(c) % 16)
+		}
+	}
+	return out
+}

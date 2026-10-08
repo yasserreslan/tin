@@ -1,4 +1,4 @@
-// Go side of tools/ci/squash_twin_check.py (#448): inflates Tin's raw DEFLATE of DIR/input.bin
+// Go side of tools/ci/squash_twin_check.tin (#448): inflates Tin's raw DEFLATE of DIR/input.bin
 // (DIR/tin1.deflate, tin6, tin9) with compress/flate, and writes Go's own (DIR/go1.deflate, go6,
 // go9) for Tin to inflate. The input makes DEFLATE use every length and distance code, so a
 // wrong entry in Tin's tables, which its encoder and decoder share, shows here.

@@ -1,0 +1,811 @@
+package main
+
+import "./ci"
+import "./capsule"
+import "./nettest"
+import "mint"
+import "say"
+import "seal"
+import "tide"
+import "twine"
+import "wire"
+
+// Replay tapes (#241): rt_effect records results and faults, and a replay serves them without running the live call, keeps fault
+// identity, and stops at the first divergence. Capsules (#241): toolchain/std/replay writes a kept tape as an encrypted capsule into
+// the bounded spool. Replay mode (#242): a server given TIN_REPLAY_CAPSULE runs the capsule's request with its effects served from the
+// capsule, reports, and exits 0, 3 (diverged) or 4 (unreadable capsule). The peers the recorded code calls are in
+// tools/ci/fixtures/replaypeers (and mysqlfake and pgfake for the databases).
+
+mut failures = []str{}
+
+fn flag(message str) {
+	failures = append(failures, message)
+}
+
+fn expected() str {
+	let lines = []str{"record first: one true ran 1", "record fault: redis GET: deadline exceeded true ran 2", "record word: 42", "record bytes: abc", "replay first: one true", "replay fault: redis GET: deadline exceeded true", "replay word: 42", "replay bytes: abc", "bodies run while replaying: 0 left: 0 diverged: false", "past the end: replay: divergence at effect 4: got test@1 \"third\", recorded nothing more", "sticky: true ran 0", "mismatch: replay: divergence at effect 0: got test@1 \"other\", recorded test@1 \"first\"", "live kind: fresh ran 1", "secret handle unkeyed: tin-secret:unkeyed", "child shares the tape: true", "child panicked: true message on the tape: true", "scope: true"}
+	return twine.Join(lines, "\n") + "\n"
+}
+
+fn replayUnset() []str {
+	return []str{"TIN_REPLAY_DIR", "TIN_REPLAY_KEY", "TIN_REPLAY_SAMPLE", "TIN_REPLAY_CAPSULE", "TIN_REPLAY_LIVE", "TIN_REPLAY_MAX_MB", "TIN_REPLAY_SECRET_HEADERS", "TIN_REPLAY_DROP_HEADERS"}
+}
+
+fn secretTexts() []str {
+	return []str{"s3cr3t-token", "c00k1e", "k-123-secret", "alice@example.com"}
+}
+
+// Env is the private library tree and the work directory.
+type Env struct {
+	Work str
+	Out str
+	Peers i64
+}
+
+fn keyHex() str {
+	return capsule.CheckKeyHex()
+}
+
+fn secretHandle(text str) str {
+	let ks = str(seal.HmacSha256(capsule.CheckKey(), "tin replay secret"))
+	return "tin-secret:" + seal.Hex(seal.HmacSha256(ks, text))[0:32]
+}
+
+fn eff(kind str, key str, outcome i64, ident i64, data str) capsule.Effect {
+	return capsule.Effect{Seq: 0, Kind: kind, Key: key, Outcome: outcome, Ident: ident, Data: data}
+}
+
+fn hexText(s str) str {
+	if len(s) == 0 {
+		return ""
+	}
+	return seal.Hex([]u8(s))
+}
+
+// effText describes an effect for comparisons: kind, key, outcome, ident and the data in hex.
+fn effText(e capsule.Effect) str {
+	return e.Kind + "|" + e.Key + "|" + mint.Itoa(e.Outcome) + "|" + mint.Itoa(e.Ident) + "|" + hexText(e.Data)
+}
+
+fn effsText(es []capsule.Effect) str {
+	mut parts = []str{}
+	for e in es {
+		parts = append(parts, effText(e))
+	}
+	return twine.Join(parts, "\n")
+}
+
+fn seq64(v i64) str {
+	return capsule.Word(v)
+}
+
+fn equal(name str, got str, want str) {
+	if got != want {
+		flag(name + ": got " + got + ", want " + want)
+	}
+}
+
+fn sealed(effects []capsule.Effect, status i64, request str, schema i64, peer str) str {
+	return capsule.Seal(capsule.Build(effects, status, request, schema, peer), capsule.CheckKey())
+}
+
+fn emptyBody() capsule.Body {
+	return capsule.Body{Schema: 0, Tin: "", Program: "", Wall: 0, Core: 0, Status: 0, Flags: 0, Request: "", Panic: "", Peer: "", Effects: []capsule.Effect{}}
+}
+
+fn openCapsule(data str) (capsule.Body, bool) {
+	let body = capsule.Unseal(data, capsule.CheckKey()) catch _ {
+		return emptyBody(), false
+	}
+	let c = capsule.Decode(body) catch _ {
+		return emptyBody(), false
+	}
+	return c, true
+}
+
+fn rawBody(data str) (str, bool) {
+	let body = capsule.Unseal(data, capsule.CheckKey()) catch _ {
+		return "", false
+	}
+	return body, true
+}
+
+fn build(e Env, source str, exe str, extra []str) {
+	ci.BuildTin(source, exe, e.Work, extra)
+}
+
+fn flip(data str, at i64) str {
+	let b = []u8(data)
+	b[at] = b[at] ^ 1
+	return str(b)
+}
+
+fn newPeer(e Env, kind str) i64 {
+	return ci.Num(nettest.Get(e.Peers, "/new?kind=" + kind))
+}
+
+fn conns(e Env, port i64) i64 {
+	return ci.Num(twine.Split(nettest.Get(e.Peers, "/stats?port=" + mint.Itoa(port)), "=")[1])
+}
+
+// ---- tapes ----
+
+fn tapes(e Env) {
+	let exe = ci.Join(e.Work, "replay")
+	build(e, "tools/ci/fixtures/replay.tin", exe, []str{})
+	let r = ci.Exec([]str{exe}, ci.Root(), 30)
+	ci.Write(ci.Join(e.Out, "replay.log"), r.Stdout + r.Stderr)
+	ci.Check(r.Code == 0, "replay fixture exited " + mint.Itoa(r.Code) + ": " + r.Stderr)
+	ci.Check(r.Stdout == expected(), "replay tapes: output differs\n--- want\n" + expected() + "--- got\n" + r.Stdout)
+}
+
+// ---- replay mode ----
+
+mut modeFailed = 0
+mut modeLog = []str{}
+
+fn modeCase(e Env, exe str, name str, data str, wantCode i64, wantOut str, wantErr str, extra []str, withKey bool) {
+	let path = ci.Join(e.Work, twine.Replace(name, " ", "_", -1) + ".tcap")
+	ci.Write(path, data)
+	mut set = []str{"TIN_REPLAY_CAPSULE=" + path, "TIN_CORES=4", "PORT=1"}
+	mut unset = []str{"TIN_REPLAY_LIVE", "CHECKOUT_SWAP"}
+	if withKey {
+		set = append(set, "TIN_REPLAY_KEY=" + keyHex())
+	} else {
+		unset = append(unset, "TIN_REPLAY_KEY")
+	}
+	for x in extra {
+		set = append(set, x)
+	}
+	let r = ci.ExecEnv([]str{exe}, "", 30, set, unset)
+	modeLog = append(modeLog, "== " + name + ": exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+	if r.Code != wantCode || r.Stdout != wantOut || !twine.Contains(r.Stderr, wantErr) {
+		modeFailed += 1
+		say.Line("FAIL replay mode: " + name + "\n--- want exit " + mint.Itoa(wantCode) + "\n" + wantOut + wantErr + "\n--- got exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+	}
+}
+
+fn replayMode(e Env) {
+	let fixture = ci.Join(e.Work, "lib/replayserve")
+	ci.Mkdirs(fixture)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_serve_probe.tin"), ci.Join(fixture, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_serve")
+	build(e, "tools/ci/fixtures/replay_serve.tin", exe, []str{})
+	let request = "POST /checkout/7 HTTP/1.1\r\nHost: shop\r\nContent-Length: 0\r\n\r\n"
+	let charge = "POST http://payments/charge\n\ncart=2 books"
+	let cart = eff("redis@1", "GET cart:7", 0, 0, "2 books")
+	let refused = eff("wire.http@1", charge, 1, 0, "payments: connection refused")
+	let recorded = []capsule.Effect{cart, refused}
+	let none = []str{}
+	let noEffects = []capsule.Effect{}
+	let okOut = "replay: status 500 (recorded 500)\ncharge failed: payments: connection refused (live calls 0)\n"
+	modeCase(e, exe, "recorded 500", sealed(recorded, 500, request, 1, ""), 0, "replay: status 500 (recorded 500)\ncharge failed: payments: connection refused (live calls 0)\n", "", none, true)
+	modeCase(e, exe, "recorded deadline", sealed([]capsule.Effect{cart, eff("wire.http@1", charge, 1, 2, "payments: deadline exceeded")}, 504, request, 1, ""), 0, "replay: status 504 (recorded 504)\ncharge failed: payments: deadline exceeded (live calls 0)\n", "", none, true)
+	let divergence = "replay: divergence at effect 0: got wire.http@1 \"POST http://payments/charge\\n\\ncart=\", recorded redis@1 \"GET cart:7\""
+	modeCase(e, exe, "changed call order", sealed(recorded, 500, request, 1, ""), 3, "replay: status 500 (recorded 500)\n" + divergence + "\nreplay: 2 recorded effects not served\ncharge failed: " + divergence + " (live calls 0)\n", "", []str{"CHECKOUT_SWAP=1"}, true)
+	modeCase(e, exe, "effects left", sealed([]capsule.Effect{cart, refused, cart}, 500, request, 1, ""), 3, "replay: status 500 (recorded 500)\nreplay: 1 recorded effects not served\ncharge failed: payments: connection refused (live calls 0)\n", "", none, true)
+	modeCase(e, exe, "live kind", sealed(recorded, 500, request, 1, ""), 0, "replay: status 200 (recorded 500)\npaid: live for 2 books (live calls 1)\n", "", []str{"TIN_REPLAY_LIVE=Wire.HTTP"}, true)
+	let waited = twine.Replace(request, "/checkout/7 ", "/checkout/7?wait=1 ", 1)
+	modeCase(e, exe, "handler waits", sealed(recorded, 500, waited, 1, ""), 0, okOut, "", none, true)
+	let panicked = twine.Replace(request, "/checkout/7 ", "/checkout/7?panic=1 ", 1)
+	modeCase(e, exe, "handler panics", sealed([]capsule.Effect{cart, eff("wire.http@1", charge, 0, 0, "ok")}, 500, panicked, 1, ""), 0, "replay: status 500 (recorded 500)\nInternal Server Error", "checkout: paid ok", none, true)
+	modeCase(e, exe, "wrong key", capsule.Seal(capsule.Build(recorded, 500, request, 1, ""), twine.Repeat("\x00", 32)), 4, "", "replay: capsule: wrong key or damaged\n", none, true)
+	modeCase(e, exe, "damaged", flip(sealed(recorded, 500, request, 1, ""), 40), 4, "", "replay: capsule: wrong key or damaged\n", none, true)
+	modeCase(e, exe, "no key", sealed(recorded, 500, request, 1, ""), 4, "", "replay: capsule: TIN_REPLAY_KEY must be 64 hex digits\n", none, false)
+	modeCase(e, exe, "not a capsule", "GET / HTTP/1.1\r\n\r\n", 4, "", "replay: capsule: not a capsule (no TINCAP header)\n", none, true)
+	modeCase(e, exe, "unsupported kind", sealed([]capsule.Effect{eff("redis@9", "GET cart:7", 0, 0, "2 books")}, 500, request, 1, ""), 4, "", "replay: capsule: effect 0 has kind redis@9, which this build cannot replay\n", none, true)
+	modeCase(e, exe, "unsupported schema", sealed(recorded, 500, request, 3, ""), 4, "", "replay: capsule: unsupported schema 3 (this build reads schemas 1 and 2)\n", none, true)
+	modeCase(e, exe, "schema 2 capsule", sealed(recorded, 500, request, 2, "203.0.113.9:51234"), 0, okOut, "", none, true)
+	// The peer (#355): a replayed request sees the address it was recorded with, not the socket the replay sends it from; a schema 1
+	// capsule has none, and RemoteAddr and ClientIP say so.
+	let who = "GET /who HTTP/1.1\r\nHost: shop\r\nX-Forwarded-For: 198.51.100.4\r\n\r\n"
+	let trust = []str{"TRUST=203.0.113.0/24,2001:db8::/32"}
+	modeCase(e, exe, "peer replayed", sealed(noEffects, 200, who, 2, "203.0.113.9:51234"), 0, "replay: status 200 (recorded 200)\npeer 203.0.113.9:51234 client 198.51.100.4\n", "", trust, true)
+	modeCase(e, exe, "peer untrusted", sealed(noEffects, 200, who, 2, "203.0.113.9:51234"), 0, "replay: status 200 (recorded 200)\npeer 203.0.113.9:51234 client 203.0.113.9\n", "", none, true)
+	modeCase(e, exe, "peer IPv6", sealed(noEffects, 200, who, 2, "[2001:db8::7]:4000"), 0, "replay: status 200 (recorded 200)\npeer [2001:db8::7]:4000 client 198.51.100.4\n", "", trust, true)
+	modeCase(e, exe, "peer from a schema 1 capsule", sealed(noEffects, 200, who, 1, ""), 0, "replay: status 200 (recorded 200)\npeer  client \n", "", trust, true)
+	modeCase(e, exe, "peer malformed", sealed(noEffects, 200, who, 2, "not an address"), 0, "replay: status 200 (recorded 200)\npeer  client \n", "", trust, true)
+	let whole = capsule.Build(recorded, 500, request, 1, "")
+	modeCase(e, exe, "truncated body", capsule.Seal(whole[0:len(whole) - 3], capsule.CheckKey()), 4, "", "replay: capsule: damaged (truncated)\n", none, true)
+	// The driver: tin replay CAPSULE --against BUILD [--live KIND]... (exit 2 for a usage error).
+	let driver = ci.Join(e.Work, "driver.tcap")
+	ci.Write(driver, sealed(recorded, 500, request, 1, ""))
+	let liveDivergence = "replay: divergence at effect 1: got wire.http@1 \"POST http://payments/charge\\n\\ncart=live\", recorded wire.http@1 \"POST http://payments/charge\\n\\ncart=2 books\""
+	let names = []str{"tin replay", "tin replay --live", "tin replay without --against", "tin replay, missing value"}
+	let argLists = [][]str{[]str{"--against", exe}, []str{"--live", "redis", "--against", exe, "--live", "wire.http"}, []str{}, []str{"--against"}}
+	let codes = []i64{0, 3, 2, 2}
+	let outs = []str{okOut, "replay: status 500 (recorded 500)\n" + liveDivergence + "\nreplay: 1 recorded effects not served\ncharge failed: " + liveDivergence + " (live calls 1)\n", "", ""}
+	let errs = []str{"", "", "tin: replay: --against BUILD is needed", "tin: replay: missing value after the last option"}
+	for i in 0..4 {
+		mut argv = []str{ci.Join(ci.Root(), "tin"), "replay", driver}
+		for a in argLists[i] {
+			argv = append(argv, a)
+		}
+		let r = ci.ExecEnv(argv, e.Work, 60, []str{"TIN_REPLAY_KEY=" + keyHex()}, []str{"TIN_REPLAY_CAPSULE", "TIN_REPLAY_LIVE"})
+		modeLog = append(modeLog, "== " + names[i] + ": exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+		if r.Code != codes[i] || r.Stdout != outs[i] || !twine.Contains(r.Stderr, errs[i]) {
+			modeFailed += 1
+			say.Line("FAIL replay mode: " + names[i] + "\n--- want exit " + mint.Itoa(codes[i]) + "\n" + outs[i] + errs[i] + "\n--- got exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+		}
+	}
+	let missing = ci.ExecEnv([]str{ci.Join(ci.Root(), "tin"), "replay", ci.Join(e.Work, "missing.tcap"), "--against", exe}, "", 60, []str{"TIN_REPLAY_KEY=" + keyHex()}, []str{"TIN_REPLAY_CAPSULE", "TIN_REPLAY_LIVE"})
+	if missing.Code != 4 || !twine.Contains(missing.Stderr, "no such file") {
+		modeFailed += 1
+		say.Line("FAIL replay mode: tin replay of a missing capsule: exit " + mint.Itoa(missing.Code) + "\n" + missing.Stderr)
+	}
+	ci.Write(ci.Join(e.Out, "replay_mode.log"), twine.Join(modeLog, "\n"))
+	ci.Check(modeFailed == 0, "replay mode: " + mint.Itoa(modeFailed) + " case(s)")
+	say.Line("PASS replay mode: recorded 500 and fault identity without live calls, call order divergence, effects left, --live, unreadable capsules, tin replay")
+}
+
+// ---- capsules ----
+
+fn spoolNames(spool str) []str {
+	mut names = ci.Names(spool, "")
+	for i in 0..len(names) {
+		for j in i + 1..len(names) {
+			if names[j] < names[i] {
+				let t = names[i]
+				names[i] = names[j]
+				names[j] = t
+			}
+		}
+	}
+	return names
+}
+
+fn runCapsuleCase(exe str, name str, spool str, extra []str) str {
+	mut set = []str{"CAPSULE_CASE=" + name, "TIN_REPLAY_DIR=" + spool, "TIN_REPLAY_KEY=" + keyHex()}
+	for x in extra {
+		set = append(set, x)
+	}
+	let r = ci.ExecEnv([]str{exe}, "", 60, set, replayUnset())
+	if r.Code != 0 {
+		flag(name + ": exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+	}
+	return r.Stdout
+}
+
+fn capsules(e Env) {
+	let lib = ci.Join(e.Work, "lib/replaycapsule")
+	ci.Mkdirs(lib)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_capsule_probe.tin"), ci.Join(lib, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_capsule")
+	build(e, "tools/ci/fixtures/replay_capsule.tin", exe, []str{})
+	let before = len(failures)
+	// A failing request and a panicked one are kept; a 200 is not (no sample).
+	let spool = ci.Join(e.Work, "spool-basic")
+	let basic = runCapsuleCase(exe, "basic", spool, []str{"TIN_REPLAY_SECRET_HEADERS= X-Api-Key ", "TIN_REPLAY_DROP_HEADERS=x-email"})
+	equal("basic output", basic, "on: true true\neffect: 2 books true\neffect fault: true\nword: 1234567\n")
+	let names = spoolNames(spool)
+	equal("basic names", twine.Join(names, ","), "01700000000000000001-000-1.tcap,01700000000000000002-001-1.tcap")
+	if len(names) == 2 {
+		let raw0 = ci.Read(ci.Join(spool, names[0]))
+		let raw1 = ci.Read(ci.Join(spool, names[1]))
+		let (first, ok0) = openCapsule(raw0)
+		let (second, ok1) = openCapsule(raw1)
+		let (body0, _) = rawBody(raw0)
+		let (body1, _) = rawBody(raw1)
+		if !ok0 || !ok1 {
+			flag("basic: a capsule does not open with its key")
+		} else {
+			let wantReq = "POST /checkout/7?x=1 HTTP/1.1\r\nHost: shop\r\nAuthorization: " + secretHandle("Bearer s3cr3t-token") + "\r\nCookie: " + secretHandle("sid=c00k1e") + "\r\nX-Api-Key: " + secretHandle("k-123-secret") + "\r\nX-Email:\r\nContent-Length: 9\r\n\r\ncart=7&x="
+			equal("schema and peer", mint.Itoa(first.Schema) + "|" + first.Peer, "2|")
+			equal("tin", first.Tin, "dev")
+			equal("program", first.Program, exe)
+			equal("wall, core, status, flags", mint.Itoa(first.Wall) + " " + mint.Itoa(first.Core) + " " + mint.Itoa(first.Status) + " " + mint.Itoa(first.Flags), "1700000000000000001 0 500 0")
+			equal("stored request", first.Request, wantReq)
+			equal("panic", first.Panic, "")
+			let wantEffects = []capsule.Effect{eff("redis@1", "3:GET 6:cart:7\n", 0, 0, "2 books"), eff("wire.http@1", "POST http://payments/charge\nAuthorization: " + secretHandle("Bearer s3cr3t-token") + "\n\ncart=7", 1, 2, "payments: deadline exceeded"), eff("tide.now@1", "", 0, 0, seq64(1234567))}
+			equal("effects", effsText(first.Effects), effsText(wantEffects))
+			equal("panicked capsule", mint.Itoa(second.Core) + " " + mint.Itoa(second.Status) + " " + mint.Itoa(second.Flags) + " " + second.Panic + " " + mint.Itoa(len(second.Effects)), "1 500 1 boom: index 3 out of range 0")
+			for needle in secretTexts() {
+				if twine.Contains(raw0, needle) || twine.Contains(body0, needle) || twine.Contains(raw1, needle) || twine.Contains(body1, needle) {
+					flag("secret text " + needle + " in a capsule")
+				}
+			}
+			let wrong = capsule.Unseal(raw0, twine.Repeat("\x00", 32)) catch _ {
+				"refused"
+			}
+			equal("wrong key", wrong, "refused")
+			for at in []i64{3, 10, 40, len(raw0) - 40, len(raw0) - 1} {
+				let damaged = capsule.Unseal(flip(raw0, at), capsule.CheckKey()) catch _ {
+					"refused"
+				}
+				equal("changed byte " + mint.Itoa(at), damaged, "refused")
+			}
+		}
+	}
+	// TIN_REPLAY_SAMPLE=1 keeps a 200, flagged as sampled.
+	let sampleSpool = ci.Join(e.Work, "spool-sample")
+	runCapsuleCase(exe, "sample", sampleSpool, []str{"TIN_REPLAY_SAMPLE=1"})
+	let sampled = spoolNames(sampleSpool)
+	equal("sampled names", twine.Join(sampled, ","), "01700000000000000003-001-1.tcap")
+	if len(sampled) > 0 {
+		let (c, ok) = openCapsule(ci.Read(ci.Join(sampleSpool, sampled[0])))
+		ci.Check(ok, "the sampled capsule does not open")
+		equal("sampled flags", mint.Itoa(c.Status) + " " + mint.Itoa(c.Flags), "200 2")
+	}
+	let unsampledSpool = ci.Join(e.Work, "spool-unsampled")
+	runCapsuleCase(exe, "sample", unsampledSpool, []str{"TIN_REPLAY_SAMPLE=0.0"})
+	equal("unsampled", twine.Join(spoolNames(unsampledSpool), ","), "")
+	// The bound: each of the 2 cores keeps its newest capsules under 1 MiB / 2.
+	let boundSpool = ci.Join(e.Work, "spool-bound")
+	ci.Mkdirs(boundSpool)
+	for i in 0..4 {
+		ci.Write(ci.Join(boundSpool, "0160000000000000000" + mint.Itoa(i) + "-001-" + mint.Itoa(i) + ".tcap"), twine.Repeat("x", 400000))
+	}
+	ci.Write(ci.Join(boundSpool, "notes.txt"), "not a capsule")
+	runCapsuleCase(exe, "bound", boundSpool, []str{"TIN_REPLAY_MAX_MB=1"})
+	let kept = spoolNames(boundSpool)
+	equal("bound names", twine.Join(kept, ","), "01700000000000000101-001-2.tcap,01700000000000000105-000-6.tcap,notes.txt")
+	mut total = 0
+	for n in kept {
+		if twine.HasSuffix(n, ".tcap") {
+			total += len(ci.Read(ci.Join(boundSpool, n)))
+		}
+	}
+	if total > 1048576 {
+		flag("bound: the spool holds " + mint.Itoa(total) + " bytes, more than 1 MiB")
+	}
+	// Recording stays off without a valid key, and says so once.
+	let offSpool = ci.Join(e.Work, "spool-off")
+	let off = runCapsuleCase(exe, "off", offSpool, []str{"TIN_REPLAY_KEY=abc"})
+	equal("bad key", ci.Lines(off)[0], "on: false false")
+	equal("bad key spool", boolText(ci.Exists(offSpool)), "false")
+	ci.Write(ci.Join(e.Out, "capsules.log"), twine.Join(failures, "\n"))
+	ci.Check(len(failures) == before, "replay capsules:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay capsules: kept 5xx, panics and samples; secrets as handles, dropped headers; the envelope opens with the key only; the spool bound deletes the oldest")
+}
+
+fn boolText(b bool) str {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// ---- recording ----
+
+// ServeResult is what a recording server run gave: the answers (head and body), the local ports of the client connections, the log.
+type ServeResult struct {
+	Answers []nettest.Reply
+	Ports []i64
+	Log str
+}
+
+mut serveCount = 0
+
+fn serveRecording(e Env, exe str, spool str, requests []str, extra []str) ServeResult {
+	serveCount += 1
+	mut set = []str{"TIN_CORES=2", "TIN_REPLAY_KEY=" + keyHex()}
+	if len(spool) > 0 {
+		set = append(set, "TIN_REPLAY_DIR=" + spool)
+	}
+	for x in extra {
+		set = append(set, x)
+	}
+	let port = nettest.Port()
+	let server = nettest.StartCoded(exe, []str{}, set, ci.Join(e.Work, "record-" + mint.Itoa(serveCount) + ".log"), port)
+	mut replaying = false
+	for x in extra {
+		if twine.HasPrefix(x, "TIN_REPLAY_CAPSULE=") {
+			replaying = true
+		}
+	}
+	// A process that replays a capsule is not a server: it exits (here: for want of the capsule) without listening.
+	if !replaying {
+		server.Ready(10)
+	} else {
+		tide.Sleep(1000000000)
+	}
+	mut answers = []nettest.Reply{}
+	mut ports = []i64{}
+	for raw in requests {
+		let c = nettest.Send(port, raw)
+		ports = append(ports, c.LocalPort())
+		mut cc = c
+		answers = append(answers, nettest.Finish(mut cc, 30))
+	}
+	server.Signal("TERM")
+	server.ExitCode(30.0)
+	return ServeResult{Answers: answers, Ports: ports, Log: ci.Read(server.Log)}
+}
+
+fn cartRequest(path str, extra str) str {
+	return "GET " + path + " HTTP/1.1\r\nHost: shop\r\nAuthorization: Bearer s3cr3t-token\r\n" + extra + "Connection: close\r\n\r\n"
+}
+
+fn requestPath(request str) str {
+	return twine.Split(twine.Split(request, "\r\n")[0], " ")[1]
+}
+
+fn keptCapsules(spool str) map[str]capsule.Body {
+	mut out = map[str]capsule.Body{}
+	for n in spoolNames(spool) {
+		let data = ci.Read(ci.Join(spool, n))
+		let (body, ok) = rawBody(data)
+		if !ok {
+			flag(n + ": does not open with the key")
+			continue
+		}
+		let (c, good) = openCapsule(data)
+		if !good {
+			flag(n + ": does not decode")
+			continue
+		}
+		out[requestPath(c.Request)] = c
+		for needle in secretTexts() {
+			if twine.Contains(data, needle) || twine.Contains(body, needle) {
+				flag("secret text " + needle + " in capsule " + n)
+			}
+		}
+	}
+	return out
+}
+
+fn statusOf(r nettest.Reply) str {
+	return mint.Itoa(r.Status)
+}
+
+fn recording(e Env) {
+	let lib = ci.Join(e.Work, "lib/replayrecord")
+	ci.Mkdirs(lib)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_record_probe.tin"), ci.Join(lib, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_record")
+	build(e, "tools/ci/fixtures/replay_record.tin", exe, []str{})
+	let before = len(failures)
+	let spool = ci.Join(e.Work, "spool-anvil")
+	let paths = []str{"/cart/7", "/cart/7?fail=1", "/cart/8?panic=1", "/cart/9?wait=1&fail=1"}
+	mut reqs = []str{}
+	for p in paths {
+		reqs = append(reqs, cartRequest(p, "Cookie: sid=c00k1e\r\n"))
+	}
+	let first = serveRecording(e, exe, spool, reqs, []str{})
+	mut statuses = []str{}
+	for a in first.Answers {
+		statuses = append(statuses, statusOf(a))
+	}
+	equal("statuses", twine.Join(statuses, ","), "200,504,500,504")
+	let caps = keptCapsules(spool)
+	// The capsule holds the connection's peer: the client socket's own address (#355).
+	mut peers = []str{}
+	mut wantPeers = []str{}
+	for i in 1..4 {
+		let (c, found) = caps[paths[i]]
+		if found {
+			peers = append(peers, mint.Itoa(c.Schema) + " " + c.Peer)
+		}
+		wantPeers = append(wantPeers, "2 127.0.0.1:" + mint.Itoa(first.Ports[i]))
+	}
+	equal("schema and peers", twine.Join(peers, ","), twine.Join(wantPeers, ","))
+	mut keys = []str{}
+	for p in paths {
+		let (_, found) = caps[p]
+		if found && p != "/cart/7" {
+			keys = append(keys, p)
+		}
+	}
+	equal("kept", twine.Join(keys, ","), "/cart/7?fail=1,/cart/8?panic=1,/cart/9?wait=1&fail=1")
+	let handle = secretHandle("Bearer s3cr3t-token")
+	let charge = "POST http://payments/charge\n\ncart=2 books"
+	let (c1, has1) = caps["/cart/7?fail=1"]
+	if has1 {
+		equal("request as received", c1.Request, "GET /cart/7?fail=1 HTTP/1.1\r\nHost: shop\r\nAuthorization: " + handle + "\r\nCookie: " + secretHandle("sid=c00k1e") + "\r\nConnection: close\r\n\r\n")
+		equal("status and flags", mint.Itoa(c1.Status) + " " + mint.Itoa(c1.Flags) + " " + c1.Panic, "504 0 ")
+		// The request task's first run is a scheduling event on the tape too (#243).
+		let want = []capsule.Effect{eff("sched.resume@1", "", 0, 0, twine.Repeat("\x00", 8)), eff("redis@1", "GET cart:7", 0, 0, "2 books"), eff("wire.http@1", charge, 1, 2, "payments: deadline exceeded")}
+		mut got = []capsule.Effect{}
+		for x in c1.Effects {
+			got = append(got, eff(x.Kind, x.Key, x.Outcome, x.Ident, x.Data))
+		}
+		equal("effects in order", effsText(got), effsText(want))
+		let skew = tide.Wall() - c1.Wall
+		if skew > 600000000000 || skew < -600000000000 {
+			flag("wall clock " + mint.Itoa(c1.Wall) + " is not now")
+		}
+		equal("program", c1.Program, exe)
+	}
+	let (c2, has2) = caps["/cart/8?panic=1"]
+	if has2 {
+		equal("panicked", mint.Itoa(c2.Status) + " " + mint.Itoa(c2.Flags) + " " + c2.Panic + " " + mint.Itoa(len(c2.Effects)), "500 1 checkout: cart 2 books 2")
+	}
+	let (c3, has3) = caps["/cart/9?wait=1&fail=1"]
+	if has3 {
+		mut kinds = []str{}
+		for x in c3.Effects {
+			kinds = append(kinds, x.Kind)
+		}
+		equal("a request that waited", mint.Itoa(c3.Status) + " " + twine.Join(kinds, ","), "504 sched.resume@1,redis@1,sched.resume@1,wire.http@1")
+	}
+	// TIN_REPLAY_SAMPLE=1 keeps a 200 too.
+	let sampleSpool = ci.Join(e.Work, "spool-anvil-sample")
+	serveRecording(e, exe, sampleSpool, []str{cartRequest("/cart/3", "")}, []str{"TIN_REPLAY_SAMPLE=1"})
+	let sampledCaps = keptCapsules(sampleSpool)
+	mut sampled = []str{}
+	for p in []str{"/cart/3"} {
+		let (c, found) = sampledCaps[p]
+		if found {
+			sampled = append(sampled, p + " " + mint.Itoa(c.Status) + " " + mint.Itoa(c.Flags))
+		}
+	}
+	equal("sampled", twine.Join(sampled, ","), "/cart/3 200 2")
+	// A chunked request is kept decoded (#349), so a replay frames it the same way: a Content-Length for the decoded body, the trailer
+	// fields after the header block's.
+	let chunkedSpool = ci.Join(e.Work, "spool-anvil-chunked")
+	serveRecording(e, exe, chunkedSpool, []str{"POST /cart/4 HTTP/1.1\r\nHost: shop\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n2;x=1\r\nde\r\n0\r\nX-Note: t\r\n\r\n"}, []str{"TIN_REPLAY_SAMPLE=1"})
+	let (c4, has4) = keptCapsules(chunkedSpool)["/cart/4"]
+	if has4 {
+		equal("chunked request kept decoded", c4.Request, "POST /cart/4 HTTP/1.1\r\nHost: shop\r\nConnection: close\r\nContent-Length: 5\r\nX-Note: t\r\n\r\nabcde")
+	} else {
+		flag("the chunked request was not kept")
+	}
+	// Recording off: no spool, and the server answers the same.
+	let off = serveRecording(e, exe, "", []str{cartRequest("/cart/7?fail=1", "")}, []str{})
+	equal("off", statusOf(off.Answers[0]), "504")
+	// A malformed key: the server serves, says once that recording is off, and writes nothing.
+	let badSpool = ci.Join(e.Work, "spool-anvil-badkey")
+	let bad = serveRecording(e, exe, badSpool, []str{cartRequest("/cart/7?fail=1", "")}, []str{"TIN_REPLAY_KEY=zz"})
+	equal("bad key", statusOf(bad.Answers[0]) + " " + mint.Itoa(len(twine.Split(bad.Log, "recording is off")) - 1) + " " + boolText(ci.Exists(badSpool)), "504 1 false")
+	// A process that replays a capsule (TIN_REPLAY_CAPSULE, #242) records nothing.
+	let replayingSpool = ci.Join(e.Work, "spool-anvil-replaying")
+	serveRecording(e, exe, replayingSpool, []str{}, []str{"TIN_REPLAY_CAPSULE=" + ci.Join(e.Work, "none.tcap")})
+	equal("replaying records nothing", boolText(ci.Exists(replayingSpool)), "false")
+	ci.Write(ci.Join(e.Out, "recording.log"), twine.Join(failures, "\n"))
+	ci.Check(len(failures) == before, "replay recording:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay recording: anvil keeps the capsules of failed, panicked and sampled requests, with the request (secrets as handles) and its effects in order")
+}
+
+// ---- tapes written by the clients ----
+
+// Tape is the effect records of a tape file: kinds, keys.
+type Tape struct {
+	Kinds []str
+	Keys []str
+}
+
+fn word(data str, pos i64) i64 {
+	mut v = 0
+	for i in 0..8 {
+		v |= i64(data[pos + i]) << (8 * i)
+	}
+	return v
+}
+
+fn parseTape(data str) Tape {
+	mut kinds = []str{}
+	mut keys = []str{}
+	mut pos = 0
+	for pos < len(data) {
+		pos += 8
+		mut n = word(data, pos)
+		kinds = append(kinds, data[pos + 8:pos + 8 + n])
+		pos += 8 + n
+		n = word(data, pos)
+		keys = append(keys, data[pos + 8:pos + 8 + n])
+		pos += 8 + n + 16
+		n = word(data, pos)
+		pos += 8 + n
+	}
+	return Tape{Kinds: kinds, Keys: keys}
+}
+
+fn clientEnv(extra []str) []str {
+	return extra
+}
+
+fn clients(e Env) {
+	let lib = ci.Join(e.Work, "lib/replayclients")
+	ci.Mkdirs(lib)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_clients_probe.tin"), ci.Join(lib, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_clients")
+	build(e, "tools/ci/fixtures/replay_clients.tin", exe, []str{})
+	let redis = newPeer(e, "redis")
+	let http = newPeer(e, "http")
+	let echo = newPeer(e, "echo")
+	let tape = ci.Join(e.Work, "clients.tape")
+	ci.Remove(tape)
+	let httpAddr = "127.0.0.1:" + mint.Itoa(http)
+	let r = ci.ExecEnv([]str{exe}, "", 60, []str{"REDIS_ADDR=127.0.0.1:" + mint.Itoa(redis), "HTTP_ADDR=" + httpAddr, "ECHO_ADDR=127.0.0.1:" + mint.Itoa(echo), "TAPE_OUT=" + tape, "TIN_REPLAY_DIR=" + ci.Join(e.Work, "spool-clients"), "TIN_REPLAY_KEY=" + keyHex()}, replayUnset())
+	ci.Write(ci.Join(e.Out, "clients.log"), r.Stdout + r.Stderr)
+	let before = len(failures)
+	let lines = ci.Lines(r.Stdout)
+	let wantEffects = []str{"tide.now@1", "tide.wall@1", "dice.seed@1", "seal.random@1", "redis@1", "wire.http@1", "wire.dial@1", "wire.write@1", "wire.read@1", "wire.http@1", "tide.now@1"}
+	if r.Code != 0 || len(lines) < 7 {
+		flag("exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+	} else {
+		let recorded = lines[1]
+		for part in []str{"cart 2 books true <nil>", "price 200 \"12.50 for cart=2 books\" <nil>", "raw <nil> 12 \"echo PING 1\\n\" <nil>", "down wire: connect 127.0.0.1:1: Connection refused"} {
+			if !twine.Contains(recorded, part) {
+				flag("recorded summary lacks " + part + ": " + recorded)
+			}
+		}
+		equal("setup", lines[0], "recording on: true")
+		equal("effects", lines[2], "effects: " + mint.Itoa(len(wantEffects)))
+		equal("replay", lines[3], "replayed same: true left: 0 diverged: ")
+		let divergence = "replay: divergence at effect 4: got redis@1 \"3:GET 6:cart:8\\n\", recorded redis@1 \"3:GET 6:cart:7\\n\""
+		// Every later effect fails with the divergence; a clock read cannot fail, so it panics (section 3.2).
+		equal("other key panics at the clock", lines[4], "task: panic: " + divergence)
+		equal("other key", lines[5], "other key: " + divergence)
+		equal("live calls (record only)", mint.Itoa(conns(e, redis)) + " " + mint.Itoa(conns(e, http)) + " " + mint.Itoa(conns(e, echo)), "1 1 1")
+		let data = ci.Read(tape)
+		let t = parseTape(data)
+		equal("kinds in order", twine.Join(t.Kinds, ","), twine.Join(wantEffects, ","))
+		for i in 0..len(t.Kinds) {
+			if t.Kinds[i] == "wire.http@1" && twine.Contains(t.Keys[i], "/price") {
+				equal("wire.http key", t.Keys[i], "POST http://" + httpAddr + "/price\nAuthorization: " + secretHandle("Bearer s3cr3t-token") + "\nX-Trace: t1\n\ncart=2 books")
+			}
+		}
+		for needle in []str{"s3cr3t-token", "r3d1s-pass"} {
+			if twine.Contains(data, needle) {
+				flag("secret text " + needle + " on the tape")
+			}
+		}
+	}
+	ci.Check(len(failures) == before, "replay clients:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay clients: tide, dice, seal, wire (http, dial, read, write) and redis record in order, replay with no live call, and a changed key diverges")
+}
+
+// moreClients: recording in mysql, postgres, websocket and quarry: the effects of one task against fake servers and real files go on
+// its tape in order; replayed, the same code gets the same values with no connection made and no file touched.
+fn moreClients(e Env, mysql i64, postgres i64) {
+	let lib = ci.Join(e.Work, "lib/replaymore")
+	ci.Mkdirs(lib)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_more_probe.tin"), ci.Join(lib, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_more")
+	build(e, "tools/ci/fixtures/replay_more.tin", exe, []str{})
+	let ws = newPeer(e, "ws")
+	let tape = ci.Join(e.Work, "more.tape")
+	ci.Remove(tape)
+	let files = ci.Join(e.Work, "files")
+	let r = ci.ExecEnv([]str{exe}, "", 120, []str{"MYSQL_ADDR=127.0.0.1:" + mint.Itoa(mysql), "POSTGRES_ADDR=127.0.0.1:" + mint.Itoa(postgres), "WS_ADDR=127.0.0.1:" + mint.Itoa(ws), "FILES_DIR=" + files, "TAPE_OUT=" + tape, "TIN_REPLAY_DIR=" + ci.Join(e.Work, "spool-more"), "TIN_REPLAY_KEY=" + keyHex()}, replayUnset())
+	ci.Write(ci.Join(e.Out, "more.log"), r.Stdout + r.Stderr)
+	let before = len(failures)
+	let lines = ci.Lines(r.Stdout)
+	if r.Code != 0 || len(lines) < 5 {
+		flag("exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+	} else {
+		let recorded = lines[1]
+		for part in []str{"mysql 1 <nil> [1 ada] <nil> | mysql: Error 1146", "<nil> 2 <nil> <nil>", "| postgres 1 <nil> [1 ada] <nil> | <nil> 1 <nil> <nil>", "ws <nil> true \"echo: hello ws\" <nil>", "files <nil> <nil> <nil> <nil> \"alpha+beta\" <nil> 10 <nil> <nil> [b.txt sub] <nil> true true <nil> true"} {
+			if !twine.Contains(recorded, part) {
+				flag("recorded summary lacks " + part + ": " + recorded)
+			}
+		}
+		equal("replay", lines[3], "replayed same: true left: 0 diverged: ")
+		equal("no file touched", lines[4], "replay touched no file: true")
+		let t = parseTape(ci.Read(tape))
+		let want = []str{"mysql@1", "mysql@1", "mysql@1", "mysql.tx@1", "mysql@1", "mysql.tx@1", "postgres@1", "postgres@1", "postgres.tx@1", "postgres@1", "postgres.tx@1", "websocket.dial@1", "websocket.write@1", "websocket.read@1", "quarry.fs@1", "quarry.write@1", "quarry.write@1", "quarry.fs@1", "quarry.read@1", "quarry.stat@1", "quarry.stat@1", "quarry.dir@1", "quarry.stat@1", "quarry.stat@1", "quarry.fs@1", "quarry.read@1"}
+		equal("kinds in order", twine.Join(t.Kinds, ","), twine.Join(want, ","))
+		if len(t.Keys) > 17 {
+			equal("mysql key", t.Keys[0], "E INSERT INTO users (name) VALUES (\nSada\n)\n")
+			equal("mysql query key", t.Keys[1], "Q SELECT id, name FROM users WHERE id = \nI1\n\n")
+			equal("rename key", t.Keys[17], "mv " + files + "/a.txt\n" + files + "/b.txt")
+		}
+		if twine.Contains(ci.Read(tape), "tinpass") {
+			flag("a database password is on the tape")
+		}
+	}
+	ci.Check(len(failures) == before, "replay mysql, postgres, websocket, quarry:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay mysql, postgres, websocket, quarry: recorded in order (transactions too), replayed with no connection and no file touched")
+}
+
+// secretQueries: query.Hidden (section 5.3): secret values written into redis and mysql queries are sent as themselves, while the
+// tape's keys hold their handles; replayed, the keys match.
+fn secretQueries(e Env, mysql i64) {
+	let lib = ci.Join(e.Work, "lib/replaysecret")
+	ci.Mkdirs(lib)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_secret_probe.tin"), ci.Join(lib, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_secret")
+	build(e, "tools/ci/fixtures/replay_secret.tin", exe, []str{"-edition", "1"})
+	let seen = newPeer(e, "seen")
+	let tape = ci.Join(e.Work, "secret.tape")
+	ci.Remove(tape)
+	let r = ci.ExecEnv([]str{exe}, "", 120, []str{"REDIS_ADDR=127.0.0.1:" + mint.Itoa(seen), "MYSQL_ADDR=127.0.0.1:" + mint.Itoa(mysql), "TAPE_OUT=" + tape, "TIN_REPLAY_DIR=" + ci.Join(e.Work, "spool-secret"), "TIN_REPLAY_KEY=" + keyHex()}, replayUnset())
+	ci.Write(ci.Join(e.Out, "secret.log"), r.Stdout + r.Stderr)
+	let before = len(failures)
+	equal("output", r.Stdout, "recording on: true\nrecorded: redis Str(ok) mysql 0 rows\nreplayed same: true left: 0 diverged: \n")
+	let sentHex = nettest.Get(e.Peers, "/seen?port=" + mint.Itoa(seen))
+	let sent = seal.HexDecode(sentHex) catch _ {
+		[]u8{}
+	}
+	ci.Check(twine.Contains(str(sent), "$12\r\ns3cr3t-token\r\n"), "redis did not get the secret itself: " + str(sent))
+	mut data = ""
+	if ci.Exists(tape) {
+		data = ci.Read(tape)
+	}
+	let handle = secretHandle("s3cr3t-token")
+	ci.Check(twine.Contains(data, "3:GET 43:" + handle + "\n"), "the redis key does not hold the handle")
+	ci.Check(twine.Contains(data, "Q SELECT id, name FROM users WHERE id = \nH" + secretHandle("424242") + "\n\n"), "the mysql key does not hold the handle")
+	for needle in []str{"s3cr3t-token", "424242"} {
+		if twine.Contains(data, needle) {
+			flag("secret text " + needle + " on the tape")
+		}
+	}
+	ci.Check(len(failures) == before, "replay secret queries:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay secret queries: secret query values are sent as themselves and keyed by their handles; replay matches")
+}
+
+// checkoutExample is #242's done-when: examples/checkout.tin records a real 500 (Redis and the payment service live), and `tin replay`
+// reproduces it from the capsule with both of them gone.
+fn checkoutExample(e Env) {
+	let exe = ci.Join(e.Work, "checkout")
+	ci.BuildTin("examples/checkout.tin", exe, "", []str{})
+	let before = len(failures)
+	let redis = newPeer(e, "redis")
+	let payments = newPeer(e, "payments")
+	let spool = ci.Join(e.Work, "spool-checkout")
+	let port = nettest.Port()
+	let redisAddr = "127.0.0.1:" + mint.Itoa(redis)
+	let paymentsUrl = "http://127.0.0.1:" + mint.Itoa(payments)
+	let server = nettest.StartCoded(exe, []str{}, []str{"TIN_CORES=1", "TIN_REPLAY_DIR=" + spool, "TIN_REPLAY_KEY=" + keyHex(), "REDIS_ADDR=" + redisAddr, "PAYMENTS_URL=" + paymentsUrl}, ci.Join(e.Work, "checkout.log"), port)
+	server.Ready(10)
+	let answer = nettest.Parse(nettest.Raw(port, "POST /checkout/7 HTTP/1.1\r\nHost: shop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 30))
+	server.Signal("TERM")
+	server.ExitCode(30.0)
+	let body = "charge failed: payments answered 502\n"
+	equal("live answer", statusOf(answer) + " " + answer.Body, "500 " + body)
+	equal("live calls", mint.Itoa(conns(e, redis)) + " " + mint.Itoa(conns(e, payments)), "1 1")
+	let capFiles = ci.Files(spool, ".tcap")
+	equal("capsules kept", mint.Itoa(len(capFiles)), "1")
+	if len(capFiles) > 0 {
+		let (c, ok) = openCapsule(ci.Read(capFiles[0]))
+		ci.Check(ok, "the checkout capsule does not open")
+		mut kinds = []str{}
+		for x in c.Effects {
+			if !twine.HasPrefix(x.Kind, "sched.") {
+				kinds = append(kinds, x.Kind)
+			}
+		}
+		equal("recorded effects", twine.Join(kinds, ","), "redis@1,wire.http@1")
+		// The same configuration, and both servers gone: a live call would be refused and give another answer. tin replay builds the
+		// example itself.
+		let drive = []str{"REDIS_ADDR=" + redisAddr, "PAYMENTS_URL=" + paymentsUrl, "TIN_CORES=1", "TIN_REPLAY_KEY=" + keyHex()}
+		let argv = []str{ci.Join(ci.Root(), "tin"), "replay", capFiles[0], "--against", "examples/checkout.tin"}
+		let r = ci.ExecEnv(argv, ci.Root(), 120, drive, replayUnset())
+		equal("tin replay", mint.Itoa(r.Code) + "|" + r.Stdout, "0|replay: status 500 (recorded 500)\n" + body)
+		equal("calls during replay", mint.Itoa(conns(e, redis)) + " " + mint.Itoa(conns(e, payments)), "1 1")
+		// Another payment service URL changes the charge's call: replay reports it, calls nothing.
+		let r2 = ci.ExecEnv(argv, ci.Root(), 120, []str{"REDIS_ADDR=" + redisAddr, "PAYMENTS_URL=http://127.0.0.1:9", "TIN_CORES=1", "TIN_REPLAY_KEY=" + keyHex()}, replayUnset())
+		equal("another URL diverges", mint.Itoa(r2.Code) + " " + boolText(twine.Contains(r2.Stdout, "divergence at effect 2: got wire.http@1 \"POST http://127.0.0.1:9/charge")), "3 true")
+		ci.Write(ci.Join(e.Out, "checkout.log"), r.Stdout + r.Stderr + r2.Stdout + r2.Stderr)
+	}
+	ci.Check(len(failures) == before, "replay checkout example:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay checkout example: a recorded 500 replays through tin replay with Redis and the payment service gone")
+}
+
+fn startManager(e Env, name str, source str, args []str) i64 {
+	let exe = ci.Join(e.Work, name)
+	ci.Must(ci.Exec([]str{"go", "build", "-o", exe, source}, ci.Root(), 300), "go build " + source)
+	let port = nettest.Port()
+	let s = nettest.Start(exe, args, []str{}, ci.Join(e.Work, name + ".log"), port)
+	s.Ready(10)
+	return port
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/replay")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "replay-")
+	ci.CopyLib(ci.Root(), ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/replayprobe")
+	ci.Mkdirs(probe)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_probe.tin"), ci.Join(probe, "probe.tin"))
+	let peers = startManager(Env{Work: work, Out: out, Peers: 0}, "replaypeers", "./tools/ci/fixtures/replaypeers", []str{})
+	let e = Env{Work: work, Out: out, Peers: peers}
+	tapes(e)
+	replayMode(e)
+	capsules(e)
+	recording(e)
+	clients(e)
+	let mysqlManager = startManager(e, "mysqlfake", "./tools/ci/fixtures/mysqlfake", []str{})
+	let pgManager = startManager(e, "pgfake", "./tools/ci/fixtures/pgfake", []str{})
+	let mysql = ci.Num(nettest.Get(mysqlManager, "/new?tls=0"))
+	let postgres = ci.Num(nettest.Get(pgManager, "/new?tls=0"))
+	moreClients(e, mysql, postgres)
+	let mysql2 = ci.Num(nettest.Get(mysqlManager, "/new?tls=0"))
+	secretQueries(e, mysql2)
+	checkoutExample(e)
+	ci.Check(len(failures) == 0, twine.Join(failures, "\n"))
+	ci.Remove(work)
+	ci.Pass("replay tapes: record, replay without live calls, fault identity, divergence, live kinds, children share the tape, panics on it")
+}

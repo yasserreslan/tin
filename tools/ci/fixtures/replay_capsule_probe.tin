@@ -5,7 +5,7 @@ import "quarry"
 import "replay"
 import "say"
 
-// Copied into a temporary lib/replaycapsule by replay_check.py: records tapes the way anvil and
+// Copied into a temporary lib/replaycapsule by replay_check.tin: records tapes the way anvil and
 // the clients will (#241), and ends them with replay.Done, which writes their capsules.
 
 const request = "POST /checkout/7?x=1 HTTP/1.1\r\nHost: shop\r\nAuthorization: Bearer s3cr3t-token\r\nCookie: sid=c00k1e\r\nX-Api-Key: k-123-secret\r\nX-Email: alice@example.com\r\nContent-Length: 9\r\n\r\ncart=7&x="

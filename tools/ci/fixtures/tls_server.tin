@@ -1,4 +1,4 @@
-// The server side of tools/ci/tls_check.py's request-task check: on one core,
+// The server side of tools/ci/tls_check.tin's request-task check: on one core,
 //   GET /fetch?port=N  fetches https://127.0.0.1:N/ with wire (TLS without verification)
 //   GET /fast          answers at once
 // TLS handshakes and reads wait like any other client call, so fetches overlap and /fast

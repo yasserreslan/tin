@@ -1,0 +1,756 @@
+// A small HTTP/2 client for anvil's checks (#360): frames, an HPACK decoder (with Huffman) and a plain HPACK encoder. It speaks h2c by
+// prior knowledge or by Upgrade, over any byte stream a check hands it.
+package h2wire
+
+import "../ci"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+const PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+const DATA = 0
+const HEADERS = 1
+const PRIORITY = 2
+const RST_STREAM = 3
+const SETTINGS = 4
+const PUSH_PROMISE = 5
+const PING = 6
+const GOAWAY = 7
+const WINDOW_UPDATE = 8
+const CONTINUATION = 9
+
+const END_STREAM = 1
+const ACK = 1
+const END_HEADERS = 4
+const PADDED = 8
+const PRIO = 32
+
+// Field is a header field.
+type Field struct {
+	Name str
+	Value str
+}
+
+fn staticTable() []Field {
+	let names = []str{"", ":authority", ":method", ":method", ":path", ":path", ":scheme", ":scheme", ":status", ":status", ":status", ":status", ":status", ":status", ":status", "accept-charset", "accept-encoding", "accept-language", "accept-ranges", "accept", "access-control-allow-origin", "age", "allow", "authorization", "cache-control", "content-disposition", "content-encoding", "content-language", "content-length", "content-location", "content-range", "content-type", "cookie", "date", "etag", "expect", "expires", "from", "host", "if-match", "if-modified-since", "if-none-match", "if-range", "if-unmodified-since", "last-modified", "link", "location", "max-forwards", "proxy-authenticate", "proxy-authorization", "range", "referer", "refresh", "retry-after", "server", "set-cookie", "strict-transport-security", "transfer-encoding", "user-agent", "vary", "via", "www-authenticate"}
+	let values = []str{"", "", "GET", "POST", "/", "/index.html", "http", "https", "200", "204", "206", "304", "400", "404", "500", "", "gzip, deflate"}
+	mut out = []Field{}
+	for i in 0..len(names) {
+		mut v = ""
+		if i < len(values) {
+			v = values[i]
+		}
+		out = append(out, Field{Name: names[i], Value: v})
+	}
+	return out
+}
+
+// Code lengths of the HPACK Huffman code (RFC 7541 Appendix B), symbols 0 to 256; canonical.
+fn huffLens() str {
+	return "13232828282828282824302828302828282828282828302828282828282828280610101213060811101008110806" + "06060505050606060606060607081506121013060707070707070707070707070707070707070707070708070813" + "19131406150506050605060606050707060606050607060505060707070707151114132820222020222222232223" + "23232323242324242223242323232321222322232324222120222223232123222224212223232121222123222323" + "20222222232222232626201922232225262626272726242519212627272627242121262628272727202420212221" + "212322222525242426232627262627272727272827272727272630"
+}
+
+// Huff is the Huffman code: the length and code of every symbol, and the symbol of every (length, code).
+type Huff struct {
+	Lens []i64
+	Codes []i64
+	Decode map[i64]i64
+}
+
+fn buildHuff() Huff {
+	let text = huffLens()
+	mut lens = []i64{}
+	for i in 0..257 {
+		lens = append(lens, ci.Num(text[2 * i:2 * i + 2]))
+	}
+	mut codes = make([]i64, 257)
+	mut decode = map[i64]i64{}
+	mut code = 0
+	mut prev = 0
+	mut first = true
+	for l in 1..31 {
+		for s in 0..257 {
+			if lens[s] == l {
+				if first {
+					first = false
+					prev = l
+				} else {
+					code = (code + 1) << (l - prev)
+					prev = l
+				}
+				codes[s] = code
+				decode[l * 4294967296 + code] = s
+			}
+		}
+	}
+	return Huff{Lens: lens, Codes: codes, Decode: decode}
+}
+
+mut huffCache = Huff{Lens: []i64{}, Codes: []i64{}, Decode: map[i64]i64{}}
+mut huffBuilt = false
+
+fn huff() Huff {
+	if !huffBuilt {
+		huffCache = keep(buildHuff())
+		huffBuilt = true
+	}
+	return huffCache
+}
+
+// HuffmanEncode codes the bytes with the HPACK Huffman code, padded with ones.
+fn HuffmanEncode(data str) str {
+	let h = huff()
+	mut out = []u8{}
+	mut acc = 0
+	mut bits = 0
+	for i in 0..len(data) {
+		let s = i64(data[i])
+		acc = (acc << h.Lens[s]) | h.Codes[s]
+		bits += h.Lens[s]
+		for bits >= 8 {
+			bits -= 8
+			out = append(out, u8((acc >> bits) & 255))
+		}
+		acc = acc & ((1 << bits) - 1)
+	}
+	if bits > 0 {
+		out = append(out, u8(((acc << (8 - bits)) | ((1 << (8 - bits)) - 1)) & 255))
+	}
+	return str(out)
+}
+
+// EncHuff is a Huffman-coded string literal.
+fn EncHuff(s str) str {
+	let b = HuffmanEncode(s)
+	return EncInt(128, 7, len(b)) + b
+}
+
+// HuffmanDecode decodes Huffman-coded bytes; ok is false for EOS in the data or bad padding.
+fn HuffmanDecode(data str) (str, bool) {
+	let h = huff()
+	mut out = []u8{}
+	mut code = 0
+	mut bits = 0
+	for i in 0..len(data) {
+		let byte = i64(data[i])
+		mut k = 7
+		for k >= 0 {
+			code = (code << 1) | ((byte >> k) & 1)
+			bits += 1
+			let (sym, found) = h.Decode[bits * 4294967296 + code]
+			if found {
+				if sym == 256 {
+					return "", false
+				}
+				out = append(out, u8(sym))
+				code = 0
+				bits = 0
+			}
+			k -= 1
+		}
+	}
+	if bits > 7 || code != (1 << bits) - 1 {
+		return "", false
+	}
+	return str(out), true
+}
+
+// EncInt is an HPACK integer with the given prefix bits, the first byte's other bits being first.
+fn EncInt(first i64, prefix i64, v i64) str {
+	let mask = (1 << prefix) - 1
+	if v < mask {
+		return str([]u8{u8(first | v)})
+	}
+	mut out = []u8{u8(first | mask)}
+	mut rest = v - mask
+	for rest >= 128 {
+		out = append(out, u8((rest & 127) | 128))
+		rest = rest >> 7
+	}
+	out = append(out, u8(rest))
+	return str(out)
+}
+
+// EncStr is a plain (not Huffman-coded) string literal.
+fn EncStr(s str) str {
+	return EncInt(0, 7, len(s)) + s
+}
+
+// Encode is a header block of literals without indexing and without Huffman coding.
+fn Encode(fields []Field) str {
+	mut out = ""
+	for f in fields {
+		out += "\x00" + EncStr(f.Name) + EncStr(f.Value)
+	}
+	return out
+}
+
+// Pair is a header field as the checks write it.
+fn Pair(name str, value str) Field {
+	return Field{Name: name, Value: value}
+}
+
+// Encoder keeps a dynamic table as the server's decoder must: fields already in a table are sent as indexes, the others as literals
+// with incremental indexing, so entries are added and evicted; Resize starts the next block with a table size update.
+type Encoder struct {
+	Table []Field
+	Size i64
+	Max i64
+	Updates []i64
+}
+
+fn NewEncoder() Encoder {
+	return Encoder{Table: []Field{}, Size: 0, Max: 4096, Updates: []i64{}}
+}
+
+fn (e mut Encoder) Resize(n i64) {
+	e.Updates = append(e.Updates, n)
+}
+
+fn (e mut Encoder) evict(room i64) {
+	for len(e.Table) > 0 && e.Size + room > e.Max {
+		let last = e.Table[len(e.Table) - 1]
+		e.Table = e.Table[0:len(e.Table) - 1]
+		e.Size -= len(last.Name) + len(last.Value) + 32
+	}
+}
+
+fn (e mut Encoder) Encode(fields []Field) str {
+	mut out = ""
+	for n in e.Updates {
+		out += EncInt(32, 5, n)
+		e.Max = n
+		e.evict(0)
+	}
+	e.Updates = []i64{}
+	let static = staticTable()
+	for f in fields {
+		mut index = 0
+		mut nameIndex = 0
+		mut i = 1
+		for i < len(static) + len(e.Table) {
+			mut entry = Field{Name: "", Value: ""}
+			if i < len(static) {
+				entry = static[i]
+			} else {
+				entry = e.Table[i - len(static)]
+			}
+			if entry.Name == f.Name && entry.Value == f.Value {
+				index = i
+				break
+			}
+			if entry.Name == f.Name && nameIndex == 0 {
+				nameIndex = i
+			}
+			i += 1
+		}
+		if index > 0 {
+			out += EncInt(128, 7, index)
+			continue
+		}
+		out += EncInt(64, 6, nameIndex)
+		if nameIndex == 0 {
+			out += EncStr(f.Name)
+		}
+		out += EncStr(f.Value)
+		let size = len(f.Name) + len(f.Value) + 32
+		e.evict(size)
+		if size <= e.Max {
+			mut table = []Field{f}
+			for t in e.Table {
+				table = append(table, t)
+			}
+			e.Table = table
+			e.Size += size
+		}
+	}
+	return out
+}
+
+// Decoder is an HPACK decoder with its dynamic table.
+type Decoder struct {
+	Table []Field
+	Size i64
+	Max i64
+}
+
+fn NewDecoder() Decoder {
+	return Decoder{Table: []Field{}, Size: 0, Max: 4096}
+}
+
+fn (d Decoder) entry(i i64) Field {
+	let static = staticTable()
+	if i <= 0 {
+		ci.Fail("HPACK index 0")
+	}
+	if i < len(static) {
+		return static[i]
+	}
+	return d.Table[i - len(static)]
+}
+
+// Reader walks a header block.
+type blockReader struct {
+	Data str
+	Pos i64
+}
+
+fn (r mut blockReader) integer(prefix i64) i64 {
+	let mask = (1 << prefix) - 1
+	mut v = i64(r.Data[r.Pos]) & mask
+	r.Pos += 1
+	if v < mask {
+		return v
+	}
+	mut m = 0
+	for {
+		let b = i64(r.Data[r.Pos])
+		r.Pos += 1
+		v += (b & 127) << m
+		m += 7
+		if b < 128 {
+			return v
+		}
+	}
+	return v
+}
+
+fn (r mut blockReader) text() str {
+	let huffman = i64(r.Data[r.Pos]) & 128
+	let n = r.integer(7)
+	let raw = r.Data[r.Pos:r.Pos + n]
+	r.Pos += n
+	if huffman != 0 {
+		let (s, ok) = HuffmanDecode(raw)
+		ci.Check(ok, "bad Huffman string in a header block")
+		return s
+	}
+	return raw
+}
+
+fn (d mut Decoder) add(f Field) {
+	let size = len(f.Name) + len(f.Value) + 32
+	for len(d.Table) > 0 && d.Size + size > d.Max {
+		let last = d.Table[len(d.Table) - 1]
+		d.Table = d.Table[0:len(d.Table) - 1]
+		d.Size -= len(last.Name) + len(last.Value) + 32
+	}
+	if size <= d.Max {
+		mut table = []Field{f}
+		for t in d.Table {
+			table = append(table, t)
+		}
+		d.Table = table
+		d.Size += size
+	}
+}
+
+// Decode reads a header block.
+fn (d mut Decoder) Decode(data str) []Field {
+	mut fields = []Field{}
+	mut r = blockReader{Data: data, Pos: 0}
+	for r.Pos < len(data) {
+		let b = i64(data[r.Pos])
+		if b & 128 != 0 {
+			let i = r.integer(7)
+			fields = append(fields, d.entry(i))
+		} else if b & 64 != 0 || b < 32 {
+			mut prefix = 4
+			if b & 64 != 0 {
+				prefix = 6
+			}
+			let i = r.integer(prefix)
+			mut name = ""
+			if i > 0 {
+				name = d.entry(i).Name
+			} else {
+				name = r.text()
+			}
+			let value = r.text()
+			let f = Field{Name: name, Value: value}
+			fields = append(fields, f)
+			if b & 64 != 0 {
+				d.add(f)
+			}
+		} else {
+			d.Max = r.integer(5)
+			for d.Size > d.Max {
+				let last = d.Table[len(d.Table) - 1]
+				d.Table = d.Table[0:len(d.Table) - 1]
+				d.Size -= len(last.Name) + len(last.Value) + 32
+			}
+		}
+	}
+	return fields
+}
+
+fn be32(n i64) str {
+	return str([]u8{u8(n >> 24), u8(n >> 16), u8(n >> 8), u8(n)})
+}
+
+fn be16(n i64) str {
+	return str([]u8{u8(n >> 8), u8(n)})
+}
+
+// U32 is a 32-bit big-endian number (a WINDOW_UPDATE increment, an error code).
+fn U32(n i64) str {
+	return be32(n)
+}
+
+// MakeFrame is the bytes of a frame.
+fn MakeFrame(typ i64, flags i64, sid i64, payload str) str {
+	let n = len(payload)
+	return str([]u8{u8(n >> 16), u8(n >> 8), u8(n), u8(typ), u8(flags)}) + be32(sid) + payload
+}
+
+// HeadersFrames is HEADERS, then CONTINUATION frames when the block is longer than one frame.
+fn HeadersFrames(sid i64, block str, endStream bool, maxFrame i64) str {
+	mut first = block
+	mut rest = ""
+	if len(block) > maxFrame {
+		first = block[0:maxFrame]
+		rest = block[maxFrame:]
+	}
+	mut flags = 0
+	if endStream {
+		flags = END_STREAM
+	}
+	if len(rest) == 0 {
+		flags = flags | END_HEADERS
+	}
+	mut out = MakeFrame(HEADERS, flags, sid, first)
+	for len(rest) > 0 {
+		mut part = rest
+		mut more = ""
+		if len(rest) > maxFrame {
+			part = rest[0:maxFrame]
+			more = rest[maxFrame:]
+		}
+		mut f = 0
+		if len(more) == 0 {
+			f = END_HEADERS
+		}
+		out += MakeFrame(CONTINUATION, f, sid, part)
+		rest = more
+	}
+	return out
+}
+
+// Settings is a SETTINGS frame of (id, value) pairs.
+fn Settings(ids []i64, values []i64) str {
+	mut payload = ""
+	for i in 0..len(ids) {
+		payload += be16(ids[i]) + be32(values[i])
+	}
+	return MakeFrame(SETTINGS, 0, 0, payload)
+}
+
+// Frame is one received frame; Ok is false at the end of the connection, Timeout when none came in time.
+type Frame struct {
+	Typ i64
+	Flags i64
+	Sid i64
+	Payload str
+	Ok bool
+	Timeout bool
+}
+
+// FrameInfo describes a frame of a response: "HEADERS" with flags, or "DATA" with a length and flags.
+type FrameInfo struct {
+	Kind str
+	Len i64
+	Flags i64
+}
+
+// Resp is a stream's response: headers, body, trailers, a reset code (-1 when none) and the frames it came in.
+type Resp struct {
+	Headers []Field
+	HasHeaders bool
+	Body str
+	Trailers []Field
+	HasTrailers bool
+	Reset i64
+	Frames []FrameInfo
+}
+
+fn (r Resp) Field(name str) str {
+	for f in r.Headers {
+		if f.Name == name {
+			return f.Value
+		}
+	}
+	return ""
+}
+
+fn (r Resp) HasField(name str) bool {
+	for f in r.Headers {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+fn (r Resp) Status() str {
+	return r.Field(":status")
+}
+
+// Conn is one client connection: frames out, frames in, responses by stream.
+type Conn struct {
+	C wire.Conn
+	Buf str
+	Dec Decoder
+	Port i64
+	Other []Frame
+	Seconds i64
+}
+
+fn dial(port i64) wire.Conn {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		ci.Fail("cannot connect to port " + mint.Itoa(port))
+		panic("unreachable")
+	}
+	return c
+}
+
+// Open connects and sends the preface and the client's SETTINGS (pairs of id and value).
+fn Open(port i64, ids []i64, values []i64) Conn {
+	mut c = Conn{C: dial(port), Buf: "", Dec: NewDecoder(), Port: port, Other: []Frame{}, Seconds: 5}
+	c.Send(PREFACE + Settings(ids, values))
+	return c
+}
+
+// OpenBare connects without sending anything.
+fn OpenBare(port i64) Conn {
+	return Conn{C: dial(port), Buf: "", Dec: NewDecoder(), Port: port, Other: []Frame{}, Seconds: 5}
+}
+
+// Over wraps a connection that is already open (an upgraded one, a TLS bridge) with bytes read past its handshake.
+fn Over(c wire.Conn, buf str, port i64) Conn {
+	return Conn{C: c, Buf: buf, Dec: NewDecoder(), Port: port, Other: []Frame{}, Seconds: 5}
+}
+
+fn (c mut Conn) Send(data str) {
+	c.C.Write(data) catch err {
+		ci.Fail("cannot write to the connection: " + say.Str(err))
+	}
+}
+
+// TrySend writes and reports whether the connection took it.
+fn (c mut Conn) TrySend(data str) bool {
+	c.C.Write(data) catch _ {
+		return false
+	}
+	return true
+}
+
+fn (c mut Conn) Close() {
+	c.C.Close()
+}
+
+// more reads what is available: 1 when some came, 0 at the end of the connection, -1 at the timeout.
+fn (c mut Conn) more(ns i64) i64 {
+	let reader = c.C
+	mut buf = []u8{}
+	let got = within ns {
+		try reader.Read(mut buf, 1048576)
+	} catch err {
+		mut r = 0
+		if say.Str(err) == "deadline exceeded" {
+			r = -2
+		}
+		r
+	}
+	if got > 0 {
+		c.Buf = c.Buf + str(buf)
+		return 1
+	}
+	if got == -2 {
+		return -1
+	}
+	return 0
+}
+
+// ReadFrameWithin reads the next frame, waiting at most ms milliseconds for bytes.
+fn (c mut Conn) ReadFrameWithin(ms i64) Frame {
+	for {
+		if len(c.Buf) >= 9 {
+			let n = (i64(c.Buf[0]) << 16) | (i64(c.Buf[1]) << 8) | i64(c.Buf[2])
+			if len(c.Buf) >= 9 + n {
+				let sid = ((i64(c.Buf[5]) << 24) | (i64(c.Buf[6]) << 16) | (i64(c.Buf[7]) << 8) | i64(c.Buf[8])) & 2147483647
+				let f = Frame{Typ: i64(c.Buf[3]), Flags: i64(c.Buf[4]), Sid: sid, Payload: c.Buf[9:9 + n], Ok: true, Timeout: false}
+				c.Buf = c.Buf[9 + n:]
+				return f
+			}
+		}
+		let r = c.more(ms * 1000000)
+		if r == 0 {
+			return Frame{Typ: 0, Flags: 0, Sid: 0, Payload: "", Ok: false, Timeout: false}
+		}
+		if r < 0 {
+			return Frame{Typ: 0, Flags: 0, Sid: 0, Payload: "", Ok: false, Timeout: true}
+		}
+	}
+	return Frame{Typ: 0, Flags: 0, Sid: 0, Payload: "", Ok: false, Timeout: false}
+}
+
+// ReadFrame reads the next frame (waiting up to Seconds); Ok is false at the end of the connection, and a timeout fails the check.
+fn (c mut Conn) ReadFrame() Frame {
+	let f = c.ReadFrameWithin(c.Seconds * 1000)
+	ci.Check(!f.Timeout, "timed out waiting for a frame")
+	return f
+}
+
+// Request sends HEADERS for a request (and CONTINUATION frames when the block is long); body, when not empty, goes in DATA.
+fn (c mut Conn) Request(sid i64, method str, path str, headers []Field, body str, hasBody bool, end bool) {
+	mut fields = []Field{Pair(":method", method), Pair(":scheme", "http"), Pair(":path", path), Pair(":authority", "127.0.0.1:" + mint.Itoa(c.Port))}
+	for h in headers {
+		fields = append(fields, h)
+	}
+	c.Send(HeadersFrames(sid, Encode(fields), !hasBody && end, 16384))
+	if hasBody {
+		mut flags = 0
+		if end {
+			flags = END_STREAM
+		}
+		c.Send(MakeFrame(DATA, flags, sid, body))
+	}
+}
+
+// Get sends a GET with no headers and no body.
+fn (c mut Conn) Get(sid i64, path str) {
+	c.Request(sid, "GET", path, []Field{}, "", false, true)
+}
+
+fn emptyResp() Resp {
+	return Resp{Headers: []Field{}, HasHeaders: false, Body: "", Trailers: []Field{}, HasTrailers: false, Reset: -1, Frames: []FrameInfo{}}
+}
+
+fn indexOf(sids []i64, sid i64) i64 {
+	for i in 0..len(sids) {
+		if sids[i] == sid {
+			return i
+		}
+	}
+	return -1
+}
+
+// Responses reads until the streams in want have ended and returns their responses in the order of want; the connection's other frames
+// are in c.Other. A GOAWAY or the end of the connection with streams pending fails the check.
+fn (c mut Conn) Responses(want []i64, windowUpdates bool) []Resp {
+	mut out = []Resp{}
+	mut pending = []bool{}
+	mut left = len(want)
+	for s in want {
+		out = append(out, emptyResp())
+		pending = append(pending, true)
+	}
+	c.Other = []Frame{}
+	for left > 0 {
+		let f = c.ReadFrame()
+		ci.Check(f.Ok, "connection closed with streams pending")
+		let at = indexOf(want, f.Sid)
+		if f.Typ == HEADERS || f.Typ == CONTINUATION {
+			mut block = f.Payload
+			mut flags = f.Flags
+			if f.Typ == HEADERS {
+				if flags & PADDED != 0 {
+					block = block[1:len(block) - i64(f.Payload[0])]
+				}
+				if flags & PRIO != 0 {
+					block = block[5:]
+				}
+			}
+			for flags & END_HEADERS == 0 {
+				let f2 = c.ReadFrame()
+				ci.Check(f2.Ok && f2.Typ == CONTINUATION && f2.Sid == f.Sid, "a header block was not continued")
+				block += f2.Payload
+				flags = flags | (f2.Flags & END_HEADERS)
+			}
+			let fields = c.Dec.Decode(block)
+			if at >= 0 {
+				mut r = out[at]
+				r.Frames = append(r.Frames, FrameInfo{Kind: "HEADERS", Len: 0, Flags: flags})
+				if !r.HasHeaders {
+					r.Headers = fields
+					r.HasHeaders = true
+				} else {
+					r.Trailers = fields
+					r.HasTrailers = true
+				}
+				out[at] = r
+				if flags & END_STREAM != 0 && pending[at] {
+					pending[at] = false
+					left -= 1
+				}
+			}
+			continue
+		}
+		if f.Typ == DATA && at >= 0 {
+			mut r = out[at]
+			r.Frames = append(r.Frames, FrameInfo{Kind: "DATA", Len: len(f.Payload), Flags: f.Flags})
+			r.Body += f.Payload
+			out[at] = r
+			if windowUpdates && len(f.Payload) > 0 {
+				c.Send(MakeFrame(WINDOW_UPDATE, 0, 0, be32(len(f.Payload))) + MakeFrame(WINDOW_UPDATE, 0, f.Sid, be32(len(f.Payload))))
+			}
+			if f.Flags & END_STREAM != 0 && pending[at] {
+				pending[at] = false
+				left -= 1
+			}
+			continue
+		}
+		if f.Typ == RST_STREAM && at >= 0 {
+			mut r = out[at]
+			r.Reset = beNumber(f.Payload)
+			out[at] = r
+			if pending[at] {
+				pending[at] = false
+				left -= 1
+			}
+			continue
+		}
+		if f.Typ == GOAWAY {
+			ci.Fail("GOAWAY " + mint.Itoa(beNumber(f.Payload[4:8])) + " (last stream " + mint.Itoa(beNumber(f.Payload[0:4])) + ")")
+		}
+		c.Other = append(c.Other, f)
+	}
+	return out
+}
+
+// beNumber is a big-endian number.
+fn beNumber(s str) i64 {
+	mut v = 0
+	for i in 0..len(s) {
+		v = (v << 8) | i64(s[i])
+	}
+	return v
+}
+
+// One is the response of one request on a new connection (stream 1).
+fn One(port i64, path str, method str, headers []Field, body str, hasBody bool) Resp {
+	mut c = Open(port, []i64{}, []i64{})
+	c.Request(1, method, path, headers, body, hasBody, true)
+	let r = c.Responses([]i64{1}, true)[0]
+	c.Close()
+	return r
+}
+
+fn Pattern(n i64, start i64) str {
+	let b = make([]u8, n)
+	for i in 0..n {
+		b[i] = u8((start + i) % 251)
+	}
+	return str(b)
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn Lines(text str) []str {
+	return twine.Split(text, "\n")
+}

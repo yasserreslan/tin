@@ -1,0 +1,207 @@
+package main
+
+import "./ci"
+import "./dnstest"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Native Linux hosts/search/options/DNS transport and task deadline checks.
+
+const V4 = "2:7f000001"
+const V6 = "10:00000000000000000000000000000001"
+
+fn expect(port i64, name str, want str) {
+	let r = dnstest.Lookup(port, name, 0)
+	ci.Check(r.Status == 200 && r.Body == want, "lookup " + name + " answered " + mint.Itoa(r.Status) + " " + r.Body + ", want " + want)
+}
+
+fn fails(port i64, name str, status i64) {
+	let r = dnstest.Lookup(port, name, 0)
+	ci.Check(r.Status == status, "lookup " + name + " answered " + mint.Itoa(r.Status) + " " + r.Body + ", want " + mint.Itoa(status))
+}
+
+fn sameNames(names []str, want []str, what str) {
+	ci.Check(twine.Join(names, ",") == twine.Join(want, ","), what + ": asked " + twine.Join(names, ",") + ", want " + twine.Join(want, ","))
+}
+
+fn hostOf(question str) str {
+	return twine.Fields(question)[0]
+}
+
+fn lookups(fake dnstest.Fake, fx dnstest.Fixture, out str) {
+	ci.Write(fx.Hosts, "127.0.0.7 hosts.test Alias.Test\n::1 hosts6.test\n")
+	fx.Config("", []str{"127.0.0.1"}, "first.test second.test")
+	let server = fx.Run(fake, 1500, false, ci.Join(out, "server.log"))
+	let port = server.Port
+	expect(port, "127.0.0.1", V4)
+	expect(port, "[::1]", V6)
+	expect(port, "::ffff:127.0.0.1", "10:00000000000000000000ffff7f000001")
+	mut before = len(fake.Questions())
+	expect(port, "hosts.test", "2:7f000007")
+	expect(port, "ALIAS.TEST", "2:7f000007")
+	expect(port, "hosts6.test", V6)
+	ci.Check(len(fake.Questions()) == before, "hosts lookup reached DNS")
+	// Empty the hosts overrides to exercise DNS CNAMEs with the same names.
+	ci.Write(fx.Hosts, "")
+	for name in []str{"ok.test.", "alias.test.", "inline.test.", "trunc.test.", "wrongid.test."} {
+		expect(port, name, V4)
+	}
+	expect(port, "v6.test.", V6)
+	let oracle = ci.Exec([]str{"go", "run", "./bench/ref/dns", "127.0.0.1:" + mint.Itoa(fake.Port), "ok.test.", "v6.test.", "trunc.test."}, ci.Root(), 120)
+	ci.Must(oracle, "go run bench/ref/dns")
+	ci.Check(oracle.Stdout == "2:7f000001\n10:00000000000000000000000000000001\n2:7f000001\n", "the Go resolver answered " + oracle.Stdout)
+	mut sawTcp = false
+	for q in fake.Questions() {
+		let w = twine.Fields(q)
+		if w[1] == "trunc.test" && w[3] == "tcp" {
+			sawTcp = true
+		}
+	}
+	ci.Check(sawTcp, "trunc.test was never asked over TCP")
+	fails(port, "missing.test.", 502)
+	fails(port, "bad.test.", 502)
+	fx.Config("ndots:1", []str{"127.0.0.1"}, "first.test second.test")
+	mut mark = len(fake.Questions())
+	expect(port, "short", V4)
+	sameNames(fake.NamesSince(mark)[0:1], []str{"short.first.test"}, "short")
+	mark = len(fake.Questions())
+	expect(port, "fallback", V4)
+	sameNames(fake.NamesSince(mark), []str{"fallback.first.test", "fallback.second.test"}, "fallback")
+	mark = len(fake.Questions())
+	expect(port, "dots.name", V4)
+	sameNames(fake.NamesSince(mark)[0:1], []str{"dots.name"}, "dots.name")
+	// A timeout ends the search like glibc: no AAAA, no other search names.
+	mark = len(fake.Questions())
+	let dropped = dnstest.Lookup(port, "drop", 0)
+	ci.Check(dropped.Status == 502 && dropped.Body == "wire: cannot resolve \"drop\": no DNS server answered", "drop answered " + mint.Itoa(dropped.Status) + " " + dropped.Body)
+	let asked = fake.Questions()[mark:]
+	ci.Check(len(asked) == 1 && twine.Fields(asked[0])[1] == "drop.first.test" && twine.Fields(asked[0])[2] == "1", "drop asked " + twine.Join(asked, "; "))
+	fx.Config("ndots:3", []str{"127.0.0.1"}, "first.test second.test")
+	mark = len(fake.Questions())
+	expect(port, "many.dots.name", V4)
+	sameNames(fake.NamesSince(mark)[0:1], []str{"many.dots.name.first.test"}, "many.dots.name")
+	mark = len(fake.Questions())
+	expect(port, "ok.test.", V4)
+	sameNames(fake.NamesSince(mark), []str{"ok.test"}, "ok.test.")
+	fx.Config("rotate", []str{"127.0.0.1", "127.0.0.2"}, "first.test second.test")
+	mark = len(fake.Questions())
+	expect(port, "rotate.test.", V4)
+	expect(port, "rotate.test.", V4)
+	let rotated = fake.Questions()[mark:]
+	ci.Check(len(rotated) == 2 && hostOf(rotated[0]) == "127.0.0.1" && hostOf(rotated[1]) == "127.0.0.2", "rotate asked " + twine.Join(rotated, "; "))
+	fx.Config("", []str{"127.0.0.1", "127.0.0.2"}, "first.test second.test")
+	expect(port, "retry.test.", V4)
+	fx.Config("attempts:2", []str{"127.0.0.1", "127.0.0.2"}, "first.test second.test")
+	mark = len(fake.Questions())
+	// An explicit call timeout is shorter than the request's own deadline.
+	let started = tide.Now()
+	let quick = dnstest.Lookup(port, "drop.test.", 100)
+	ci.Check(quick.Status == 502, "drop.test with a timeout answered " + mint.Itoa(quick.Status))
+	ci.Check(tide.Now() - started < 700000000, "the call timeout was not shorter than the deadline")
+	// Six lookups wait on dropped questions while a core still answers /health.
+	mut waiting = []wire.Conn{}
+	for i in 0..6 {
+		waiting = append(waiting, nettest.Send(port, nettest.GetRequest("/resolve?name=drop.test.&timeout=0")))
+	}
+	nettest.Eventually(1.0, fn() bool {
+		return fake.Asked("drop.test") >= 2
+	})
+	let healthStart = tide.Now()
+	for i in 0..20 {
+		let h = nettest.Do(port, "GET", "/health", []str{}, "")
+		ci.Check(h.Status == 200 && h.Body == "healthy", "health answered " + mint.Itoa(h.Status))
+	}
+	ci.Check(tide.Now() - healthStart < 700000000, "DNS blocked a core")
+	for i in 0..6 {
+		mut c = waiting[i]
+		let r = nettest.Finish(mut c, 20)
+		ci.Check(r.Status == 504 && r.Body == "deadline exceeded", "a waiting lookup answered " + mint.Itoa(r.Status) + " " + r.Body)
+	}
+	mut drops = 0
+	for q in fake.Questions()[mark:] {
+		if twine.Fields(q)[1] == "drop.test" {
+			drops += 1
+		}
+	}
+	ci.Check(drops >= 13, "attempt retry was not made: " + mint.Itoa(drops) + " questions")
+	// Request pools and DNS socket/scratch state must remain bounded.
+	for i in 0..100 {
+		expect(port, "ok.test.", V4)
+	}
+	let baseline = nettest.RssKiB(server.Pid)
+	for i in 0..1000 {
+		expect(port, "ok.test.", V4)
+	}
+	ci.Check(nettest.RssKiB(server.Pid) <= baseline + 32 * 1024, "repeated DNS lookups retained scratch memory")
+	ci.Check(server.Running(), "the fixture exited")
+	server.Stop()
+}
+
+fn ipv6(fx dnstest.Fixture, fake dnstest.Fake, out str) {
+	let probe = ci.Join(fx.Work, "ipv6")
+	ci.BuildTin("tools/ci/fixtures/ipv6.tin", probe, fx.Work, []str{})
+	let listener = nettest.StartCoded(probe, []str{}, []str{"TIN_CORES=1"}, ci.Join(out, "ipv6.log"), 0)
+	nettest.Eventually(5.0, fn() bool {
+		return len(twine.TrimSpace(ci.Read(listener.Log))) > 0
+	})
+	let chosen = ci.Num(ci.Lines(ci.Read(listener.Log))[0])
+	let c = wire.DialTimeout("[::1]:" + mint.Itoa(chosen), 3000000000) catch _ {
+		ci.Fail("cannot connect to the IPv6 listener")
+		panic("unreachable")
+	}
+	c.Write("IPv6") catch _ {
+		ci.Fail("cannot write to the IPv6 listener")
+	}
+	let echoed = c.ReadFull(4) catch _ {
+		ci.Fail("no echo from the IPv6 listener")
+		""
+	}
+	c.Close()
+	ci.Check(echoed == "IPv6", "the IPv6 listener echoed " + echoed)
+	let (code, done) = listener.ExitCode(5.0)
+	ci.Check(done && code == 0, "the IPv6 listener exited " + mint.Itoa(code) + ": " + ci.Read(listener.Log))
+	let client = ci.Join(fx.Work, "ipv6-client")
+	ci.BuildTin("tools/ci/fixtures/ipv6_client.tin", client, fx.Work, []str{})
+	// Exercise connect's IPv6 family/length for both literals and AAAA answers.
+	let echo = wire.Listen("[::1]:0") catch _ {
+		ci.Fail("cannot listen on ::1")
+		panic("unreachable")
+	}
+	let echoPort = echo.Port()
+	for host in []str{"[::1]", "v6.test."} {
+		let log = ci.Join(out, "ipv6-client.log")
+		let run = nettest.StartCoded(client, []str{host + ":" + mint.Itoa(echoPort)}, []str{"TIN_CORES=1", "TIN_DNS_TEST=1", "TIN_DNS_HOSTS=" + fx.Hosts, "TIN_DNS_RESOLV_CONF=" + fx.Resolv, "TIN_DNS_PORT=" + mint.Itoa(fake.Port)}, log, 0)
+		let conn = echo.AcceptTimeout(5000000000) catch _ {
+			ci.Fail("the IPv6 client of " + host + " never connected")
+			panic("unreachable")
+		}
+		let data = conn.ReadFull(4) catch _ {
+			ci.Fail("IPv6 client closed early")
+			""
+		}
+		ci.Check(data == "IPv6", "the IPv6 client sent " + data)
+		conn.Write(data) catch _ {
+			ci.Fail("cannot echo to the IPv6 client")
+		}
+		let (rc, ended) = run.ExitCode(10.0)
+		ci.Check(ended && rc == 0 && ci.Read(log) == "IPv6\n", "the IPv6 client of " + host + " exited " + mint.Itoa(rc) + ": " + ci.Read(log))
+		conn.Close()
+	}
+	echo.Close()
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/dns")
+	ci.Mkdirs(out)
+	let fake = dnstest.StartFake(out)
+	let fx = dnstest.Build(out)
+	lookups(fake, fx, out)
+	ipv6(fx, fake, out)
+	fake.Stop()
+	ci.Remove(fx.Work)
+	ci.Pass("DNS: hosts precedence, A/AAAA, CNAMEs, compressed-name bounds, UDP/TCP fragments, IPv6 listen/dial, NXDOMAIN, search, ndots, rotate, attempts, timeout, concurrent request deadlines")
+}

@@ -9,7 +9,7 @@ import "say"
 import "task"
 import "tide"
 
-// A slow MySQL statement inside within blocks (#233): mysql_check.py runs it against the fake
+// A slow MySQL statement inside within blocks (#233): mysql_check.tin runs it against the fake
 // server and the runner's MySQL.
 let db = mysql.Open(mysql.Options{
 	Addr: quarry.Getenv("MYSQL_ADDR"),

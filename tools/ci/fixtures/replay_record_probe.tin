@@ -2,7 +2,7 @@ package replayrecord
 
 import "fault"
 
-// Copied into a temporary lib/replayrecord by replay_check.py: an effect made the way a client
+// Copied into a temporary lib/replayrecord by replay_check.tin: an effect made the way a client
 // library makes one (rt_effect around its live call), so anvil's recording (#241) can be checked
 // before the clients record.
 

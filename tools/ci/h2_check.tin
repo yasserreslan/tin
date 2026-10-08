@@ -1,0 +1,925 @@
+package main
+
+import "./ci"
+import "./h2wire"
+import "./nettest"
+import "./tlsutil"
+import "dice"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// HTTP/2 in anvil (#360): h2c by prior knowledge and by Upgrade: h2c, on the port that serves HTTP/1.1, and h2 over TLS by ALPN. The
+// fixture (tools/ci/fixtures/h2.tin) is checked by:
+//
+// - h2spec (H2SPEC, or h2spec on PATH; required when CI is set): every generic, http2 and hpack case but http2/3.5/2, which sends
+//   "INVALID CONNECTION PREFACE" to a port that also speaks HTTP/1.1, where it is a malformed HTTP/1.1 request line and gets 400 (RFC
+//   9113 3.4 applies once a connection is known to be HTTP/2: with prior knowledge after "PRI * HTTP/2.0", or over TLS);
+// - Go's own HTTP/2 client (fixtures/h2client.go, net/http with h2c): Huffman-coded and indexed headers, request and response
+//   trailers, large bodies both ways, a streamed body, HEAD and 600 requests on one connection;
+// - a gRPC client (grpc-go, tools/ci/grpc) against examples/grpc.tin;
+// - over TLS (ServeTLS, #124): h2 by ALPN with raw frames (through tools/ci/fixtures/tlsbridge.go, a TLS client that offers the ALPN
+//   protocols a check asks for), h2spec (every case) and Go's client, HTTP/1.1 for clients that do not offer h2, and no h2c over TLS;
+// - raw frames (tools/ci/h2wire): the server's settings, exact flow control, the HPACK dynamic table under insertions, evictions and
+//   size updates, multiplexed waits, cancels by RST_STREAM and by a closed connection, the write timeout, limits (413, 431),
+//   CONTINUATION, 100-continue, the Upgrade, streamed responses and their failures, rapid resets, flat memory, and the graceful drain.
+
+mut serverCount = 0
+
+fn startServer(exe str, out str, name str, env []str) nettest.Server {
+	mut set = []str{"TIN_CORES=2"}
+	for e in env {
+		set = append(set, e)
+	}
+	serverCount += 1
+	let server = nettest.StartCoded(exe, []str{}, set, ci.Join(out, name + ".log"), nettest.Port())
+	server.Ready(10)
+	return server
+}
+
+fn logged(srv nettest.Server) str {
+	return ci.Read(srv.Log)
+}
+
+fn count(text str, part str) i64 {
+	return len(twine.Split(text, part)) - 1
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn secondsText(v f64, places i64) str {
+	mut scale = 1
+	for i in 0..places {
+		scale = scale * 10
+	}
+	let n = i64(v * f64(scale) + 0.5)
+	mut frac = mint.Itoa(n % scale)
+	for len(frac) < places {
+		frac = "0" + frac
+	}
+	return mint.Itoa(n / scale) + "." + frac
+}
+
+fn pattern(n i64, start i64) str {
+	return h2wire.Pattern(n, start)
+}
+
+fn get(c mut h2wire.Conn, sid i64, path str) {
+	c.Get(sid, path)
+}
+
+fn one(port i64, path str) h2wire.Resp {
+	return h2wire.One(port, path, "GET", []h2wire.Field{}, "", false)
+}
+
+fn oneWith(port i64, path str, method str) h2wire.Resp {
+	return h2wire.One(port, path, method, []h2wire.Field{}, "", false)
+}
+
+fn dialH2(port i64) h2wire.Conn {
+	return h2wire.Open(port, []i64{}, []i64{})
+}
+
+fn helloPrefix(r h2wire.Resp) bool {
+	return twine.HasPrefix(r.Body, "hello")
+}
+
+// kv reads "key=value" lines.
+fn kv(body str) map[str]str {
+	mut m = map[str]str{}
+	for line in twine.Split(body, "\n") {
+		let at = twine.IndexByte(line, '=')
+		if at >= 0 {
+			m[line[0:at]] = line[at + 1:]
+		}
+	}
+	return m
+}
+
+fn serverRss(srv nettest.Server) i64 {
+	return nettest.RssKiB(srv.Pid)
+}
+
+// ---- h2spec, Go and gRPC clients ----
+
+fn h2specPath() str {
+	let env = ci.Env("H2SPEC")
+	if len(env) > 0 {
+		return env
+	}
+	let o = ci.Sh("command -v h2spec", "", 10)
+	return twine.TrimSpace(o.Stdout)
+}
+
+fn checkH2spec(port i64, out str, tls bool) {
+	let h2spec = h2specPath()
+	if len(h2spec) == 0 {
+		ci.Check(len(ci.Env("CI")) == 0, "h2spec is required in CI (set H2SPEC)")
+		say.Line("SKIP h2spec: not installed (go install github.com/summerwind/h2spec/cmd/h2spec@v1.5.1-0.20220625142712-af83a65f0b62, then H2SPEC=path)")
+		return
+	}
+	mut name = "h2spec"
+	// Over TLS a connection is HTTP/2 from its handshake (ALPN), so every case applies, 3.5/2 too.
+	mut sections = []str{"generic", "hpack", "http2/3.5/1", "http2/4", "http2/5", "http2/6", "http2/7", "http2/8"}
+	mut argv = []str{h2spec, "-h", "127.0.0.1", "-p", mint.Itoa(port), "-o", "3", "-j", ci.Join(out, name + ".xml")}
+	if tls {
+		name = "h2spec-tls"
+		sections = []str{"-t", "-k", "generic", "hpack", "http2"}
+		argv = []str{h2spec, "-h", "127.0.0.1", "-p", mint.Itoa(port), "-o", "3", "-j", ci.Join(out, name + ".xml")}
+	}
+	for s in sections {
+		argv = append(argv, s)
+	}
+	let r = ci.Exec(argv, "", 600)
+	ci.Write(ci.Join(out, name + ".log"), r.Stdout + r.Stderr)
+	mut tail = ""
+	for l in ci.Lines(r.Stdout) {
+		if twine.Contains(l, "tests,") {
+			tail = l
+		}
+	}
+	ci.Check(r.Code == 0 && len(tail) > 0 && twine.Contains(tail, " 0 failed"), "h2spec failed:\n" + r.Stdout)
+	if tls {
+		say.Line("PASS h2spec over TLS (h2 by ALPN): " + twine.TrimSpace(tail))
+	} else {
+		say.Line("PASS h2spec: " + twine.TrimSpace(tail) + " (skipped by design: http2/3.5/2)")
+	}
+}
+
+fn checkGoClient(port i64, out str, ca str) {
+	let exe = ci.Join(out, "h2client")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", exe, "./tools/ci/fixtures/h2client.go"}, ci.Root(), 300), "go build h2client.go")
+	mut argv = []str{exe, "-addr", "127.0.0.1:" + mint.Itoa(port)}
+	if len(ca) > 0 {
+		argv = append(argv, "-ca")
+		argv = append(argv, ca)
+	}
+	let r = ci.Exec(argv, "", 120)
+	say.Line(twine.TrimSpace(r.Stdout))
+	ci.Check(r.Code == 0, "Go's HTTP/2 client failed:\n" + r.Stdout + r.Stderr)
+}
+
+fn tinCalls(client str, addr str, who str) {
+	let names = []str{"tin", ""}
+	let wants = []str{"Hello tin\n", "grpc: InvalidArgument: name is required\n"}
+	for i in 0..2 {
+		let r = ci.ExecEnv([]str{client, names[i]}, "", 60, []str{"ADDR=" + addr}, []str{})
+		ci.Check(r.Stdout == wants[i], who + " " + names[i] + ": " + r.Stdout + r.Stderr)
+	}
+	say.Line("grpc: PASS the Tin client (wire, h2c) calls " + who + ": a reply, and InvalidArgument from the status")
+}
+
+fn checkGrpc(out str) {
+	let exe = ci.Join(out, "grpc")
+	ci.BuildTin("examples/grpc.tin", exe, "", []str{})
+	let client = ci.Join(out, "grpcclient")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", client, "."}, ci.Join(ci.Root(), "tools/ci/grpc"), 300), "go build grpc client")
+	// The Tin client (#480, examples/grpc_client.tin) over wire's h2c, and a grpc-go server.
+	let tinClient = ci.Join(out, "grpc_client")
+	ci.BuildTin("examples/grpc_client.tin", tinClient, "", []str{})
+	let goServer = ci.Join(out, "grpcserver")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goServer, "./server"}, ci.Join(ci.Root(), "tools/ci/grpc"), 300), "go build grpc server")
+	let srv = startServer(exe, out, "grpc", []str{})
+	let r = ci.Exec([]str{client, "-addr", "127.0.0.1:" + mint.Itoa(srv.Port)}, "", 120)
+	for l in ci.Lines(r.Stdout) {
+		say.Line("grpc: " + l)
+	}
+	ci.Check(r.Code == 0, "the gRPC client failed:\n" + r.Stdout + r.Stderr)
+	tinCalls(tinClient, "127.0.0.1:" + mint.Itoa(srv.Port), "examples/grpc.tin")
+	srv.Stop()
+	let port = nettest.Port()
+	let gs = nettest.Start(goServer, []str{"-addr", "127.0.0.1:" + mint.Itoa(port)}, []str{}, ci.Join(out, "grpcserver.log"), 0)
+	nettest.Eventually(10.0, fn() bool {
+		return twine.HasPrefix(ci.Read(gs.Log), "listening")
+	})
+	ci.Check(twine.HasPrefix(ci.Read(gs.Log), "listening"), "the grpc-go server did not report listening")
+	tinCalls(tinClient, "127.0.0.1:" + mint.Itoa(port), "a grpc-go server")
+	gs.Stop()
+}
+
+// ---- raw frames ----
+
+fn settingsOf(payload str) map[i64]i64 {
+	mut m = map[i64]i64{}
+	mut i = 0
+	for i + 6 <= len(payload) {
+		let id = (i64(payload[i]) << 8) | i64(payload[i + 1])
+		let v = (i64(payload[i + 2]) << 24) | (i64(payload[i + 3]) << 16) | (i64(payload[i + 4]) << 8) | i64(payload[i + 5])
+		m[id] = v
+		i += 6
+	}
+	return m
+}
+
+fn be(payload str) i64 {
+	mut v = 0
+	for i in 0..len(payload) {
+		v = (v << 8) | i64(payload[i])
+	}
+	return v
+}
+
+fn checkSettings(port i64) {
+	mut c = dialH2(port)
+	let f = c.ReadFrame()
+	ci.Check(f.Typ == h2wire.SETTINGS && f.Flags == 0 && f.Sid == 0, "the first frame is not SETTINGS")
+	let got = settingsOf(f.Payload)
+	ci.Check(len(got) == 3 && got[3] == 100 && got[4] == 1048576 && got[6] == 65536, "SETTINGS: " + mint.Itoa(len(got)) + " entries")
+	let w = c.ReadFrame()
+	ci.Check(w.Typ == h2wire.WINDOW_UPDATE && be(w.Payload) == 4194304 - 65535, "the connection window update")
+	c.Get(1, "/")
+	let r = c.Responses([]i64{1}, true)[0]
+	ci.Check(r.Status() == "200" && r.Field("server") == "anvil" && r.HasField("date") && r.Field("content-length") == mint.Itoa(len(r.Body)), "the / response head")
+	ci.Check(r.Body == "hello from anvil over HTTP/2.0\n", "the / body: " + r.Body)
+	c.Close()
+	say.Line("PASS preface: SETTINGS (100 streams, 1 MiB stream window, 64 KiB header list) and a 4 MiB connection window")
+}
+
+fn xs(n i64) str {
+	return twine.Repeat("x", n)
+}
+
+fn checkHpackTable(port i64) {
+	mut c = dialH2(port)
+	mut enc = h2wire.NewEncoder()
+	mut values = []str{}
+	for i in 0..60 {
+		values = append(values, "v" + mint.Itoa(i) + "-" + xs(dice.Range(0, 300)))
+	}
+	let sizes = []i64{0, 100, 1000, 4096}
+	mut sid = 1
+	for i in 0..800 {
+		if i % 97 == 0 {
+			enc.Resize(sizes[dice.Range(0, 4)])
+		}
+		let xt = values[dice.Range(0, 60)]
+		let ck = values[dice.Range(0, 60)]
+		let pad = values[dice.Range(0, 60)]
+		let block = enc.Encode([]h2wire.Field{h2wire.Pair(":method", "POST"), h2wire.Pair(":scheme", "http"), h2wire.Pair(":path", "/echo?i=" + mint.Itoa(i % 7)), h2wire.Pair(":authority", "h2.test"), h2wire.Pair("x-test", xt), h2wire.Pair("cookie", ck), h2wire.Pair("x-pad", pad)})
+		c.Send(h2wire.MakeFrame(h2wire.HEADERS, h2wire.END_HEADERS | h2wire.END_STREAM, sid, block))
+		let r = c.Responses([]i64{sid}, true)[0]
+		let m = kv(r.Body)
+		ci.Check(m["x-test"] == xt && m["cookie"] == ck && m["query"] == "i=" + mint.Itoa(i % 7) && m["host"] == "h2.test", "HPACK request " + mint.Itoa(i) + " came back as " + r.Body)
+		sid += 2
+	}
+	c.Close()
+	say.Line("PASS HPACK dynamic table: 800 requests with indexed fields, insertions, evictions and size updates")
+}
+
+fn trimBlank(s str) str {
+	mut a = 0
+	mut b = len(s)
+	for a < b && (s[a] == ' ' || s[a] == '\t') {
+		a += 1
+	}
+	for b > a && (s[b - 1] == ' ' || s[b - 1] == '\t') {
+		b -= 1
+	}
+	return s[a:b]
+}
+
+fn hasControl(v str) bool {
+	for i in 0..len(v) {
+		let b = i64(v[i])
+		if (b < 32 && b != 9) || b == 127 {
+			return true
+		}
+	}
+	return false
+}
+
+fn checkHuffman(port i64) {
+	mut c = dialH2(port)
+	mut sid = 1
+	mut malformed = 0
+	for i in 0..400 {
+		let n = dice.Range(0, 200)
+		mut bytes = []u8{}
+		for k in 0..n {
+			mut b = dice.Range(1, 256)
+			for b == 10 || b == 13 {
+				b = dice.Range(1, 256)
+			}
+			bytes = append(bytes, u8(b))
+		}
+		mut v = trimBlank(str(bytes))
+		// A value whose fields mostly avoid control bytes, so most of them are served (#748).
+		if i % 2 == 0 {
+			mut kept = []u8{}
+			for k in 0..len(v) {
+				let b = i64(v[k])
+				if (b >= 32 || b == 9) && b != 127 {
+					kept = append(kept, v[k])
+				}
+			}
+			v = trimBlank(str(kept))
+		}
+		let block = h2wire.Encode([]h2wire.Field{h2wire.Pair(":method", "GET"), h2wire.Pair(":scheme", "http"), h2wire.Pair(":path", "/echo"), h2wire.Pair(":authority", "x")}) + "\x00" + h2wire.EncHuff("x-test") + h2wire.EncHuff(v)
+		c.Send(h2wire.MakeFrame(h2wire.HEADERS, h2wire.END_HEADERS | h2wire.END_STREAM, sid, block))
+		let r = c.Responses([]i64{sid}, true)[0]
+		if hasControl(v) {
+			// Decoded, then refused: a control byte but HTAB, or DEL, makes it malformed (#748).
+			ci.Check(r.Reset == 1 && !r.HasHeaders, "value " + mint.Itoa(i) + " with a control byte was not reset")
+			malformed += 1
+		} else {
+			mut got = ""
+			for line in twine.Split(r.Body, "\n") {
+				if twine.HasPrefix(line, "x-test=") {
+					got = line[7:]
+					break
+				}
+			}
+			ci.Check(got == v, "Huffman value " + mint.Itoa(i) + " came back as " + got)
+		}
+		sid += 2
+	}
+	c.Close()
+	ci.Check(malformed > 100 && malformed < 300, "malformed values: " + mint.Itoa(malformed))
+	say.Line("PASS Huffman: 400 values of every byte but CR and LF decode exactly; the " + mint.Itoa(malformed) + " with a control byte are malformed")
+}
+
+fn checkMultiplexing(port i64) {
+	mut c = dialH2(port)
+	let t = tide.Now()
+	mut waits = []i64{}
+	for i in 0..8 {
+		c.Get(1 + 2 * i, "/wait?ms=400")
+		waits = append(waits, 1 + 2 * i)
+	}
+	c.Get(17, "/")
+	c.Responses([]i64{17}, true)
+	let fast = seconds(t)
+	let r = c.Responses(waits, true)
+	let took = seconds(t)
+	for x in r {
+		ci.Check(x.Body == "waited 400", "a waiting request answered " + x.Body)
+	}
+	ci.Check(fast < 0.2 && took < 1.5, "multiplexing: " + secondsText(fast, 3) + " s, " + secondsText(took, 3) + " s")
+	c.Close()
+	say.Line("PASS multiplexing: a request behind eight waiting ones answered after " + secondsText(fast, 3) + " s, all after " + secondsText(took, 3) + " s")
+}
+
+fn checkFlowControl(port i64) {
+	mut c = h2wire.Open(port, []i64{4}, []i64{10})
+	c.Get(1, "/big?n=1000")
+	mut got = ""
+	mut connWin = 65535
+	mut win = 10
+	mut sizes = []i64{}
+	for {
+		let f = c.ReadFrame()
+		ci.Check(f.Ok, "the connection ended")
+		if f.Typ != h2wire.DATA {
+			continue
+		}
+		connWin -= len(f.Payload)
+		win -= len(f.Payload)
+		ci.Check(connWin >= 0 && win >= 0, "data past a window: " + mint.Itoa(connWin) + " " + mint.Itoa(win))
+		sizes = append(sizes, len(f.Payload))
+		got += f.Payload
+		if f.Flags & h2wire.END_STREAM != 0 {
+			break
+		}
+		if win == 0 {
+			c.Send(h2wire.MakeFrame(h2wire.WINDOW_UPDATE, 0, 1, h2wire.U32(99)))
+			win += 99
+		}
+	}
+	mut maxSize = 0
+	for s in sizes {
+		if s > maxSize {
+			maxSize = s
+		}
+	}
+	ci.Check(got == pattern(1000, 0) && sizes[0] == 10 && maxSize == 99, "flow control sizes: first " + mint.Itoa(sizes[0]) + ", max " + mint.Itoa(maxSize))
+	// A larger SETTINGS_MAX_FRAME_SIZE: DATA frames grow past 16 KiB (anvil caps them at 64 KiB).
+	mut c2 = h2wire.Open(port, []i64{5, 4}, []i64{1048576, 1073741824})
+	c2.Send(h2wire.MakeFrame(h2wire.WINDOW_UPDATE, 0, 0, h2wire.U32(1073741824)))
+	c2.Get(1, "/big?n=500000")
+	let r = c2.Responses([]i64{1}, true)[0]
+	mut maxData = 0
+	for f in r.Frames {
+		if f.Kind == "DATA" && f.Len > maxData {
+			maxData = f.Len
+		}
+	}
+	ci.Check(r.Body == pattern(500000, 0) && maxData == 65536, "large frames: max DATA " + mint.Itoa(maxData))
+	c.Close()
+	c2.Close()
+	say.Line("PASS flow control: never past either window (first frame 10 bytes, then 99 per update); 64 KiB frames when allowed")
+}
+
+// checkReadWhileWriting (#506): a client that cannot read until the server takes what it writes (Go's: its reader needs the lock its
+// writer holds) must not wait for a server that stopped reading because its own output waits. The client reads none of 32 MB of
+// responses while it sends 4 MB of requests: the server must keep reading, or both wait for the write timeout.
+fn checkReadWhileWriting(exe str, out str) {
+	let srv = startServer(exe, out, "h2rw", []str{"TIN_WRITE_TIMEOUT_MS=20000", "TIN_MAX_BODY=2000000"})
+	mut c = h2wire.OpenBare(srv.Port)
+	c.Send(h2wire.PREFACE + h2wire.Settings([]i64{4}, []i64{16777216}) + h2wire.MakeFrame(h2wire.WINDOW_UPDATE, 0, 0, h2wire.U32(268435456)))
+	mut gets = []i64{}
+	for k in 0..16 {
+		gets = append(gets, 1 + 2 * k)
+	}
+	for sid in gets {
+		c.Get(sid, "/big?n=2000000")
+	}
+	tide.Sleep(1000000000)
+	let body = pattern(100000, 0)
+	mut posts = []i64{}
+	for k in 0..40 {
+		posts = append(posts, 33 + 2 * k)
+	}
+	let t0 = tide.Now()
+	let conn = c.C
+	let finished = within 15000000000 {
+		for sid in posts {
+			let head = h2wire.HeadersFrames(sid, h2wire.Encode([]h2wire.Field{h2wire.Pair(":method", "POST"), h2wire.Pair(":scheme", "http"), h2wire.Pair(":path", "/echo"), h2wire.Pair(":authority", "127.0.0.1:" + mint.Itoa(srv.Port))}), false, 16384)
+			try conn.Write(head)
+			mut i = 0
+			for i < len(body) {
+				mut flags = 0
+				if i + 16384 >= len(body) {
+					flags = h2wire.END_STREAM
+				}
+				mut end = i + 16384
+				if end > len(body) {
+					end = len(body)
+				}
+				try conn.Write(h2wire.MakeFrame(h2wire.DATA, flags, sid, body[i:end]))
+				i += 16384
+			}
+		}
+		true
+	} catch _ {
+		false
+	}
+	ci.Check(finished, "the server stopped reading while its output waited")
+	let sent = seconds(t0)
+	mut all = []i64{}
+	for s in gets {
+		all = append(all, s)
+	}
+	for s in posts {
+		all = append(all, s)
+	}
+	let r = c.Responses(all, false)
+	for k in 0..len(gets) {
+		ci.Check(r[k].Body == pattern(2000000, 0), "response of stream " + mint.Itoa(gets[k]))
+	}
+	for k in 0..len(posts) {
+		let x = r[len(gets) + k]
+		ci.Check(x.Status() == "200" && twine.Contains(x.Body, "len=100000\n"), "echo of stream " + mint.Itoa(posts[k]))
+	}
+	c.Close()
+	ci.Check(srv.Running(), "the server died")
+	srv.Stop()
+	say.Line("PASS reading goes on while output waits: 4 MB written to a server whose 32 MB of responses the client had not read (" + secondsText(sent, 1) + "s)")
+}
+
+fn checkCancels(srv nettest.Server) {
+	let port = srv.Port
+	mut c = dialH2(port)
+	c.Get(1, "/wait?ms=5000")
+	tide.Sleep(100000000)
+	c.Send(h2wire.MakeFrame(h2wire.RST_STREAM, 0, 1, h2wire.U32(8)))
+	nettest.Eventually(2.0, fn() bool {
+		return twine.Contains(logged(srv), "the client reset the stream")
+	})
+	ci.Check(twine.Contains(logged(srv), "the client reset the stream"), "RST_STREAM did not cancel the handler")
+	c.Get(3, "/")
+	ci.Check(helloPrefix(c.Responses([]i64{3}, true)[0]), "a request after a cancel")
+	c.Close()
+	let before = count(logged(srv), "the connection closed")
+	mut d = dialH2(port)
+	for i in 0..5 {
+		d.Get(1 + 2 * i, "/wait?ms=5000")
+	}
+	tide.Sleep(100000000)
+	d.Close()
+	nettest.Eventually(2.0, fn() bool {
+		return count(logged(srv), "the connection closed") - before == 5
+	})
+	ci.Check(count(logged(srv), "the connection closed") - before == 5, "a closed connection did not cancel its five handlers")
+	say.Line("PASS cancels: RST_STREAM cancels its handler, a closed connection cancels all five")
+}
+
+fn checkWriteTimeout(srv nettest.Server) {
+	// The client never opens the stream's window again (the connection's is wide open): the stream's write fails after
+	// TIN_WRITE_TIMEOUT_MS, and the other streams go on.
+	mut c = dialH2(srv.Port)
+	c.Send(h2wire.MakeFrame(h2wire.WINDOW_UPDATE, 0, 0, h2wire.U32(1073741824)))
+	let t = tide.Now()
+	c.Get(1, "/endless")
+	mut reset = -1
+	for reset < 0 {
+		let f = c.ReadFrame()
+		ci.Check(f.Ok, "the connection ended before the reset")
+		if f.Typ == h2wire.RST_STREAM && f.Sid == 1 {
+			reset = be(f.Payload)
+		}
+	}
+	let took = seconds(t)
+	ci.Check(reset == 8 && took > 1.0 && took < 4.0, "write timeout: reset " + mint.Itoa(reset) + " after " + secondsText(took, 1) + " s")
+	nettest.Eventually(2.0, fn() bool {
+		return twine.Contains(logged(srv), "endless stopped") && twine.Contains(logged(srv), "the client stopped reading")
+	})
+	ci.Check(twine.Contains(logged(srv), "endless stopped") && twine.Contains(logged(srv), "the client stopped reading"), "the handler did not see the write timeout")
+	c.Get(3, "/")
+	ci.Check(helloPrefix(c.Responses([]i64{3}, true)[0]), "a request after the write timeout")
+	c.Close()
+	say.Line("PASS write timeout: a client that keeps its window shut gets RST_STREAM(CANCEL) after " + secondsText(took, 1) + " s; the handler sees it")
+}
+
+fn checkLimits(port i64) {
+	mut c = dialH2(port)
+	c.Request(1, "POST", "/echo", []h2wire.Field{}, "", false, false)
+	let chunk = xs(16384)
+	for i in 0..140 {
+		c.TrySend(h2wire.MakeFrame(h2wire.DATA, 0, 1, chunk))
+	}
+	c.TrySend(h2wire.MakeFrame(h2wire.DATA, h2wire.END_STREAM, 1, "end"))
+	let r = c.Responses([]i64{1}, true)[0]
+	ci.Check(r.Status() == "413", "a body past TIN_MAX_BODY: " + r.Status())
+	c.Request(3, "GET", "/", []h2wire.Field{h2wire.Pair("x-big", twine.Repeat("y", 70000))}, "", false, true)
+	ci.Check(c.Responses([]i64{3}, true)[0].Status() == "431", "70000 bytes of headers")
+	c.Request(5, "GET", "/", []h2wire.Field{h2wire.Pair("x-big", twine.Repeat("y", 40000))}, "", false, true)
+	ci.Check(c.Responses([]i64{5}, true)[0].Status() == "200", "40000 bytes of headers")
+	c.Close()
+	say.Line("PASS limits: 413 past TIN_MAX_BODY, 431 past 64 KiB of headers (sent in CONTINUATION frames); the connection goes on")
+}
+
+// checkControlBytes (#748): a field value with a control byte but HTAB, or DEL, and an :authority or host that is not uri-host [":"
+// port], make the request malformed (RST_STREAM PROTOCOL_ERROR), as on HTTP/1.1.
+fn checkControlBytes(port i64) {
+	mut c = dialH2(port)
+	c.Request(1, "GET", "/", []h2wire.Field{h2wire.Pair("x-foo", "a\x01b\x7f")}, "", false, true)
+	c.Request(3, "GET", "/", []h2wire.Field{h2wire.Pair("x-foo", "ab\x7f")}, "", false, true)
+	c.Request(5, "GET", "/", []h2wire.Field{h2wire.Pair("host", "a b")}, "", false, true)
+	c.Send(h2wire.HeadersFrames(7, h2wire.Encode([]h2wire.Field{h2wire.Pair(":method", "GET"), h2wire.Pair(":scheme", "http"), h2wire.Pair(":path", "/"), h2wire.Pair(":authority", "a/b")}), true, 16384))
+	c.Request(9, "GET", "/", []h2wire.Field{h2wire.Pair("x-foo", "a\tb")}, "", false, true)
+	let r = c.Responses([]i64{1, 3, 5, 7, 9}, true)
+	for k in 0..4 {
+		ci.Check(r[k].Reset == 1 && !r[k].HasHeaders, "stream " + mint.Itoa(1 + 2 * k) + " was not reset as malformed")
+	}
+	ci.Check(r[4].Status() == "200", "an HTAB in a value: " + r[4].Status())
+	c.Close()
+	say.Line("PASS control bytes: x-foo with \\x01 or DEL, host \"a b\" and :authority \"a/b\" are reset as malformed; an HTAB is fine (#748)")
+}
+
+fn byteSum(s str) i64 {
+	mut n = 0
+	for i in 0..len(s) {
+		n += i64(s[i])
+	}
+	return n
+}
+
+fn frameKinds(r h2wire.Resp) str {
+	mut parts = []str{}
+	for f in r.Frames {
+		parts = append(parts, f.Kind)
+	}
+	return twine.Join(parts, ",")
+}
+
+fn checkResponses(port i64, files str) {
+	mut r = one(port, "/trailers?n=100")
+	ci.Check(r.Body == pattern(100, 0) && r.HasTrailers && len(r.Trailers) == 2 && r.Trailers[0].Name == "x-sum" && r.Trailers[0].Value == mint.Itoa(byteSum(pattern(100, 0))) && r.Trailers[1].Name == "grpc-status" && r.Trailers[1].Value == "0", "trailers")
+	ci.Check(frameKinds(r) == "HEADERS,DATA,HEADERS" && r.Frames[len(r.Frames) - 1].Flags & h2wire.END_STREAM != 0, "trailers frames: " + frameKinds(r))
+	r = one(port, "/streamtrailers")
+	ci.Check(r.Body == "part one;part two" && len(r.Trailers) == 1 && r.Trailers[0].Name == "x-done" && r.Trailers[0].Value == "yes", "streamed trailers")
+	r = one(port, "/stream?n=5&size=3000&ms=20")
+	ci.Check(r.Body == pattern(15000, 0), "a streamed body")
+	r = one(port, "/length?n=50000")
+	ci.Check(r.Field("content-length") == "50000" && r.Body == pattern(50000, 0), "a Length body")
+	r = one(port, "/short")
+	ci.Check(r.Body == "12345" && r.Reset == 2, "a short Length body: reset " + mint.Itoa(r.Reset))
+	let big = ci.Read(ci.Join(files, "big"))
+	r = one(port, "/file?name=big")
+	ci.Check(r.Body == big && r.Field("content-length") == mint.Itoa(len(r.Body)), "SendFile")
+	r = one(port, "/file?name=big&off=1000&n=5000")
+	ci.Check(r.Body == big[1000:6000], "a SendFile range")
+	r = one(port, "/headers?n=30&size=1000")
+	ci.Check(len(r.Headers) == 35 && r.Body == "headers 30", "many headers: " + mint.Itoa(len(r.Headers)))
+	r = one(port, "/status?code=204")
+	ci.Check(r.Status() == "204" && len(r.Body) == 0 && !r.HasField("content-length"), "204")
+	r = oneWith(port, "/", "HEAD")
+	ci.Check(len(r.Body) == 0 && r.Field("content-length") == "31" && len(r.Frames) == 1 && r.Frames[0].Kind == "HEADERS" && r.Frames[0].Flags == 5, "HEAD")
+	r = one(port, "/abort")
+	ci.Check(r.Body == "partial" && r.Reset == 2, "Abort")
+	r = one(port, "/hijack")
+	ci.Check(r.Status() == "400" && twine.Contains(r.Body, "cannot be hijacked"), "Hijack")
+	mut c = dialH2(port)
+	c.Get(1, "/panic")
+	r = c.Responses([]i64{1}, true)[0]
+	ci.Check(r.Status() == "500" && r.Body == "Internal Server Error", "a panic before the head")
+	c.Get(3, "/streampanic")
+	r = c.Responses([]i64{3}, true)[0]
+	ci.Check(r.Body == "partial" && r.Reset == 2, "a panic after the head")
+	c.Get(5, "/")
+	ci.Check(helloPrefix(c.Responses([]i64{5}, true)[0]), "a request after the panics")
+	c.Close()
+	say.Line("PASS responses: trailers, streamed and Length bodies, SendFile, CONTINUATION, 204, HEAD; a short Length, Abort and a panic after the head reset the stream, a panic before it is 500")
+}
+
+fn checkHeaderTableSize(port i64) {
+	mut c = h2wire.Open(port, []i64{1}, []i64{0})
+	c.Get(1, "/")
+	mut f = c.ReadFrame()
+	for f.Typ != h2wire.HEADERS {
+		f = c.ReadFrame()
+	}
+	ci.Check(i64(f.Payload[0]) == 32, "the header block does not start with a table size update")
+	c.Close()
+	say.Line("PASS SETTINGS_HEADER_TABLE_SIZE 0: the next header block starts with a table size update")
+}
+
+fn checkUpgrade(port i64) {
+	let conn = nettest.Send(port, "POST /echo?u=1 HTTP/1.1\r\nHost: up.test\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAARAAAAA\r\nX-Test: up\r\nContent-Length: 12\r\n\r\nupgrade body")
+	mut buf = ""
+	let reader = conn
+	for twine.Index(buf, "\r\n\r\n") < 0 {
+		mut b = []u8{}
+		reader.Read(mut b, 4096) catch _ {
+			ci.Fail("the connection closed during the upgrade")
+		}
+		buf += str(b)
+	}
+	let at = twine.Index(buf, "\r\n\r\n")
+	let head = buf[0:at]
+	let rest = buf[at + 4:]
+	ci.Check(twine.HasPrefix(head, "HTTP/1.1 101 Switching Protocols\r\n") && twine.Contains(head, "Upgrade: h2c"), "the upgrade answered " + head)
+	mut c = h2wire.Over(conn, rest, port)
+	c.Send(h2wire.PREFACE + h2wire.Settings([]i64{}, []i64{}))
+	let r = c.Responses([]i64{1}, true)[0]
+	let m = kv(r.Body)
+	ci.Check(m["proto"] == "HTTP/2.0" && m["len"] == "12" && m["x-test"] == "up" && m["host"] == "up.test", "the upgraded request: " + r.Body)
+	c.Get(3, "/")
+	ci.Check(helloPrefix(c.Responses([]i64{3}, true)[0]), "stream 3 after the upgrade")
+	c.Close()
+	// Without a usable HTTP2-Settings the request is HTTP/1.1, as if Upgrade were not there.
+	let reply = nettest.Raw(port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, HTTP2-Settings, close\r\nUpgrade: h2c\r\nHTTP2-Settings: !!\r\n\r\n", 10)
+	ci.Check(twine.HasPrefix(reply, "HTTP/1.1 200 OK\r\n") && twine.HasSuffix(reply, "hello from anvil over HTTP/1.1\n"), "a bad HTTP2-Settings: " + reply)
+	say.Line("PASS Upgrade: h2c: 101, the request with its body is stream 1, stream 3 follows; a bad HTTP2-Settings stays HTTP/1.1")
+}
+
+fn checkContinue(port i64) {
+	mut c = dialH2(port)
+	c.Request(1, "POST", "/echo", []h2wire.Field{h2wire.Pair("expect", "100-continue")}, "", false, false)
+	mut f = c.ReadFrame()
+	for f.Typ != h2wire.HEADERS {
+		f = c.ReadFrame()
+	}
+	let fields = c.Dec.Decode(f.Payload)
+	ci.Check(len(fields) == 1 && fields[0].Name == ":status" && fields[0].Value == "100" && f.Flags & h2wire.END_STREAM == 0, "the interim response")
+	c.Send(h2wire.MakeFrame(h2wire.DATA, h2wire.END_STREAM, 1, "abc"))
+	let r = c.Responses([]i64{1}, true)[0]
+	ci.Check(r.Status() == "200" && twine.Contains(r.Body, "len=3"), "the response after 100-continue")
+	c.Close()
+	say.Line("PASS expect: 100-continue gets an interim 100 before the body")
+}
+
+fn checkHttp1(port i64) {
+	let reply = nettest.Raw(port, "GET /streamtrailers HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 10)
+	let at = twine.Index(reply, "\r\n\r\n")
+	ci.Check(twine.Contains(reply[0:at], "Transfer-Encoding: chunked") && twine.HasSuffix(reply, "0\r\nx-done: yes\r\n\r\n"), "a chunked stream with trailers: " + reply)
+	let r = oneWith(port, "/echo", "GET")
+	ci.Check(twine.Contains(r.Body, "proto=HTTP/2.0"), "/echo over HTTP/2")
+	say.Line("PASS HTTP/1.1 on the same port; a chunked stream carries its trailers after the last chunk")
+}
+
+fn checkRapidReset(srv nettest.Server) {
+	mut c = dialH2(srv.Port)
+	let block = h2wire.Encode([]h2wire.Field{h2wire.Pair(":method", "GET"), h2wire.Pair(":scheme", "http"), h2wire.Pair(":path", "/wait?ms=2000"), h2wire.Pair(":authority", "x")})
+	mut parts = []str{}
+	mut sid = 1
+	for sid < 20001 {
+		parts = append(parts, h2wire.MakeFrame(h2wire.HEADERS, h2wire.END_HEADERS | h2wire.END_STREAM, sid, block))
+		parts = append(parts, h2wire.MakeFrame(h2wire.RST_STREAM, 0, sid, h2wire.U32(8)))
+		sid += 2
+	}
+	c.Send(twine.Join(parts, ""))
+	// Past twice the stream limit of handlers still ending, new streams are refused (REFUSED_STREAM, which a client retries); the
+	// cancelled handlers end on the next turns of the loop.
+	mut refused = 0
+	for {
+		let f = c.ReadFrameWithin(500)
+		if !f.Ok {
+			break
+		}
+		if f.Typ == h2wire.RST_STREAM && be(f.Payload) == 7 {
+			refused += 1
+		}
+	}
+	c.Get(20001, "/")
+	let r = c.Responses([]i64{20001}, true)[0]
+	ci.Check(helloPrefix(r), "a request after the rapid reset")
+	c.Close()
+	ci.Check(helloPrefix(one(srv.Port, "/")), "the server after the rapid reset")
+	say.Line("PASS rapid reset: 10000 streams opened and reset in one write (" + mint.Itoa(refused) + " refused while 200 handlers were ending); the connection and the server go on")
+}
+
+fn memoryBurst(port i64, n i64) {
+	mut conns = []h2wire.Conn{}
+	for i in 0..4 {
+		conns = append(conns, dialH2(port))
+	}
+	mut sid = 1
+	let body = twine.Repeat("b", 2000)
+	for round in 0..n / 200 {
+		for i in 0..4 {
+			mut c = conns[i]
+			for k in 0..50 {
+				if k % 2 == 1 {
+					c.Request(sid + 2 * k, "POST", "/echo", []h2wire.Field{}, body, true, true)
+				} else {
+					c.Request(sid + 2 * k, "GET", "/big?n=3000", []h2wire.Field{}, "", false, true)
+				}
+			}
+			conns[i] = c
+		}
+		for i in 0..4 {
+			mut c = conns[i]
+			mut want = []i64{}
+			for k in 0..50 {
+				want = append(want, sid + 2 * k)
+			}
+			let r = c.Responses(want, true)
+			for x in r {
+				ci.Check(x.Status() == "200", "memory burst answered " + x.Status())
+			}
+			conns[i] = c
+		}
+		sid += 100
+	}
+	for i in 0..4 {
+		mut c = conns[i]
+		c.Close()
+	}
+}
+
+fn checkMemory(srv nettest.Server) {
+	memoryBurst(srv.Port, 20000)
+	let before = serverRss(srv)
+	memoryBurst(srv.Port, 40000)
+	let after = serverRss(srv)
+	ci.Check(after - before < 16 * 1024, "RSS " + mint.Itoa(before) + " KiB then " + mint.Itoa(after) + " KiB")
+	say.Line("PASS memory: RSS " + mint.Itoa(before) + " KiB after 20000 requests, " + mint.Itoa(after) + " KiB after 40000 more")
+}
+
+fn checkDrain(exe str, out str) {
+	let srv = startServer(exe, out, "drain", []str{"TIN_GRACE=3"})
+	mut idle = dialH2(srv.Port)
+	idle.Get(1, "/")
+	idle.Responses([]i64{1}, true)
+	mut busy = dialH2(srv.Port)
+	busy.Get(1, "/wait?ms=800")
+	tide.Sleep(100000000)
+	let t = tide.Now()
+	srv.Signal("TERM")
+	let f = idle.ReadFrame()
+	ci.Check(f.Ok && f.Typ == h2wire.GOAWAY && f.Payload == h2wire.U32(1) + h2wire.U32(0), "an idle connection did not get GOAWAY(NO_ERROR)")
+	ci.Check(!idle.ReadFrame().Ok, "the idle connection did not close")
+	mut seen = []i64{}
+	for {
+		let g = busy.ReadFrame()
+		if !g.Ok {
+			break
+		}
+		seen = append(seen, g.Typ)
+		if g.Typ == h2wire.DATA && g.Sid == 1 {
+			ci.Check(g.Payload == "waited 800", "the request in flight answered " + g.Payload)
+		}
+	}
+	mut goaway = -1
+	mut data = -1
+	for i in 0..len(seen) {
+		if seen[i] == h2wire.GOAWAY && goaway < 0 {
+			goaway = i
+		}
+		if seen[i] == h2wire.DATA && data < 0 {
+			data = i
+		}
+	}
+	ci.Check(goaway >= 0 && data >= 0 && goaway < data, "frames of the busy connection: GOAWAY at " + mint.Itoa(goaway) + ", DATA at " + mint.Itoa(data))
+	let (code, done) = srv.ExitCode(10.0)
+	ci.Check(done && code == 0, "the server exited with " + mint.Itoa(code))
+	let took = seconds(t)
+	ci.Check(took < 2.5, "the drain took " + secondsText(took, 2) + " s")
+	say.Line("PASS drain: idle connections get GOAWAY(NO_ERROR) and close, a request in flight finishes, exit 0 after " + secondsText(took, 2) + " s")
+}
+
+// ---- HTTP/2 over TLS (#124) ----
+
+fn startBridge(out str, name str, targetPort i64, ca str, alpn str) (nettest.Server, str) {
+	let bridgeExe = ci.Join(out, "tlsbridge")
+	let result = ci.Join(out, name + ".alpn")
+	ci.Remove(result)
+	let b = nettest.Start(bridgeExe, []str{mint.Itoa(targetPort), ca, alpn, result}, []str{}, ci.Join(out, name + ".log"), nettest.Port())
+	b.Ready(10)
+	return b, result
+}
+
+fn lastAlpn(result str) str {
+	let lines = ci.Lines(ci.Read(result))
+	if len(lines) == 0 {
+		return "(no connection)"
+	}
+	return lines[len(lines) - 1]
+}
+
+// checkTls: ServeTLS offers h2 and then http/1.1: a client that offers h2 gets HTTP/2, the others HTTP/1.1 on the same port, and the
+// cleartext ways into HTTP/2 do not apply over TLS.
+fn checkTls(exe str, out str, files str) {
+	mut openssl = tlsutil.Openssl3()
+	if len(openssl) == 0 {
+		openssl = "openssl"
+	}
+	let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+	let cert = tlsutil.Of(certs, "ecdsa")
+	let srv = startServer(exe, out, "h2tls", []str{"TLS_CERT=" + cert.Cert, "TLS_KEY=" + cert.Key, "FILES_DIR=" + files, "TIN_MAX_BODY=2000000"})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(out, "tlsbridge"), "./tools/ci/fixtures/tlsbridge.go"}, ci.Root(), 300), "go build tlsbridge.go")
+	// Raw frames over TLS: ALPN chose h2, then multiplexed streams and a body past the initial window, as over TCP.
+	let (bh2, rh2) = startBridge(out, "bridge_h2", srv.Port, cert.Cert, "h2,http/1.1")
+	mut c = h2wire.OpenBare(bh2.Port)
+	c.Send(h2wire.PREFACE + h2wire.Settings([]i64{}, []i64{}))
+	let t = tide.Now()
+	for i in 0..4 {
+		c.Get(1 + 2 * i, "/wait?ms=300")
+	}
+	c.Get(9, "/")
+	c.Get(11, "/big?n=200000")
+	let r = c.Responses([]i64{9, 11}, true)
+	let fast = seconds(t)
+	ci.Check(r[0].Body == "hello from anvil over HTTP/2.0\n", "/ over TLS: " + r[0].Body)
+	ci.Check(r[1].Body == pattern(200000, 0), "/big over TLS")
+	for x in c.Responses([]i64{1, 3, 5, 7}, true) {
+		ci.Check(x.Body == "waited 300", "a waiting request over TLS: " + x.Body)
+	}
+	ci.Check(fast < 0.25, "TLS multiplexing took " + secondsText(fast, 3) + " s")
+	ci.Check(lastAlpn(rh2) == "alpn=h2", "ALPN chose " + lastAlpn(rh2))
+	c.Close()
+	// The same port without h2: HTTP/1.1 when ALPN offers only http/1.1 and when there is none.
+	let (b1, r1) = startBridge(out, "bridge_h1", srv.Port, cert.Cert, "http/1.1")
+	let (bn, rn) = startBridge(out, "bridge_none", srv.Port, cert.Cert, "-")
+	let reply1 = nettest.Raw(b1.Port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 10)
+	ci.Check(lastAlpn(r1) == "alpn=http/1.1", "ALPN chose " + lastAlpn(r1))
+	ci.Check(twine.HasPrefix(reply1, "HTTP/1.1 200 OK\r\n") && twine.HasSuffix(reply1, "hello from anvil over HTTP/1.1\n"), "HTTP/1.1 over TLS: " + reply1)
+	let reply2 = nettest.Raw(bn.Port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 10)
+	ci.Check(lastAlpn(rn) == "alpn=", "ALPN chose " + lastAlpn(rn))
+	ci.Check(twine.HasPrefix(reply2, "HTTP/1.1 200 OK\r\n") && twine.HasSuffix(reply2, "hello from anvil over HTTP/1.1\n"), "HTTP/1.1 over TLS without ALPN: " + reply2)
+	// h2c is for cleartext (RFC 9113 3.2, 3.3): over a TLS connection that agreed on HTTP/1.1, Upgrade: h2c is ignored and the client
+	// preface is a malformed request line.
+	let up = nettest.Raw(b1.Port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, HTTP2-Settings, close\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAARAAAAA\r\n\r\n", 10)
+	ci.Check(twine.HasPrefix(up, "HTTP/1.1 200 OK\r\n") && twine.HasSuffix(up, "over HTTP/1.1\n"), "Upgrade over TLS: " + up)
+	let pre = nettest.Raw(b1.Port, h2wire.PREFACE + h2wire.Settings([]i64{}, []i64{}), 10)
+	ci.Check(twine.HasPrefix(pre, "HTTP/1.1 400 "), "the preface over an HTTP/1.1 TLS connection: " + pre)
+	say.Line("PASS h2 over TLS: ALPN chose h2 for a client offering it (multiplexed waits, a 200 KB body), HTTP/1.1 for http/1.1 and for no ALPN on the same port; Upgrade: h2c and the preface are cleartext only")
+	checkH2spec(srv.Port, out, true)
+	checkGoClient(srv.Port, out, cert.Cert)
+	ci.Check(srv.Running(), "the server died")
+	bh2.Stop()
+	b1.Stop()
+	bn.Stop()
+	srv.Stop()
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/h2")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "h2")
+	ci.BuildTin("tools/ci/fixtures/h2.tin", exe, "", []str{})
+	let files = ci.Join(out, "files")
+	ci.Mkdirs(files)
+	ci.Write(ci.Join(files, "big"), pattern(3 * 1048576, 0) + "tail")
+	let srv = startServer(exe, out, "h2", []str{"FILES_DIR=" + files, "TIN_WRITE_TIMEOUT_MS=1500", "TIN_MAX_BODY=2000000"})
+	checkSettings(srv.Port)
+	checkH2spec(srv.Port, out, false)
+	checkGoClient(srv.Port, out, "")
+	checkHpackTable(srv.Port)
+	checkHuffman(srv.Port)
+	checkMultiplexing(srv.Port)
+	checkFlowControl(srv.Port)
+	checkCancels(srv)
+	checkWriteTimeout(srv)
+	checkLimits(srv.Port)
+	checkControlBytes(srv.Port)
+	checkResponses(srv.Port, files)
+	checkHeaderTableSize(srv.Port)
+	checkUpgrade(srv.Port)
+	checkContinue(srv.Port)
+	checkHttp1(srv.Port)
+	checkRapidReset(srv)
+	checkMemory(srv)
+	ci.Check(srv.Running(), "the server died")
+	srv.Stop()
+	checkDrain(exe, out)
+	checkReadWhileWriting(exe, out)
+	checkTls(exe, out, files)
+	checkGrpc(out)
+	ci.Pass("HTTP/2: h2spec, Go and gRPC clients, raw frames over h2c and TLS, limits, resets, drain")
+}

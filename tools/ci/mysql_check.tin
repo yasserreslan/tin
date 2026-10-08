@@ -1,0 +1,441 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// The mysql client inside anvil: queries with bound values, a per-core pool whose waiters overlap on one core, deadlines that drop the
+// connection, a statement inside within blocks (#233, edition 1 fixture mysql_within.tin), concurrent inserts, both auth plugins
+// (caching_sha2_password with the RSA exchange, and an auth switch to mysql_native_password), wrong passwords, and reconnecting after
+// the server drops idle connections. Runs against a small MySQL server (tools/ci/fixtures/mysqlfake; MYSQL_ADDR=host:port with
+// MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE uses a real one, for the checks it can do).
+
+mut failures = []str{}
+
+fn flag(message str) {
+	failures = append(failures, message)
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn text(v f64, places i64) str {
+	mut scale = 1
+	for i in 0..places {
+		scale = scale * 10
+	}
+	let n = i64(v * f64(scale) + 0.5)
+	mut frac = mint.Itoa(n % scale)
+	for len(frac) < places {
+		frac = "0" + frac
+	}
+	return mint.Itoa(n / scale) + "." + frac
+}
+
+// Fake is a fake server made by the control server.
+type Fake struct {
+	Control i64
+	Port i64
+}
+
+fn newFake(control i64, tls bool) Fake {
+	mut t = "0"
+	if tls {
+		t = "1"
+	}
+	return Fake{Control: control, Port: ci.Num(nettest.Get(control, "/new?tls=" + t))}
+}
+
+// Stats are the fake's counters.
+type Stats struct {
+	Full i64
+	Fast i64
+	Switches i64
+	Keys i64
+	TlsFull i64
+	Open i64
+	Peak i64
+}
+
+fn (f Fake) Stats() Stats {
+	mut s = Stats{Full: 0, Fast: 0, Switches: 0, Keys: 0, TlsFull: 0, Open: 0, Peak: 0}
+	for w in twine.Fields(nettest.Get(f.Control, "/stats?port=" + mint.Itoa(f.Port))) {
+		let kv = twine.Split(w, "=")
+		let v = ci.Num(kv[1])
+		if kv[0] == "full" {
+			s.Full = v
+		} else if kv[0] == "fast" {
+			s.Fast = v
+		} else if kv[0] == "switches" {
+			s.Switches = v
+		} else if kv[0] == "keys" {
+			s.Keys = v
+		} else if kv[0] == "tlsfull" {
+			s.TlsFull = v
+		} else if kv[0] == "open" {
+			s.Open = v
+		} else if kv[0] == "peak" {
+			s.Peak = v
+		}
+	}
+	return s
+}
+
+fn (f Fake) ResetPeak() {
+	nettest.Get(f.Control, "/resetpeak?port=" + mint.Itoa(f.Port))
+}
+
+fn (f Fake) Drop() {
+	nettest.Get(f.Control, "/drop?port=" + mint.Itoa(f.Port))
+}
+
+// Result is one request through the example.
+type Result struct {
+	Code i64
+	Body str
+	Took f64
+}
+
+fn fetch(port i64, path str) Result {
+	let t0 = tide.Now()
+	let r = nettest.Parse(nettest.Raw(port, nettest.GetRequest(path), 20))
+	return Result{Code: r.Status, Body: r.Body, Took: seconds(t0)}
+}
+
+// burst sends the requests all at once (one connection each) and returns their results.
+fn burst(port i64, paths []str) []Result {
+	let t0 = tide.Now()
+	mut conns = []wire.Conn{}
+	for p in paths {
+		conns = append(conns, nettest.Send(port, nettest.GetRequest(p)))
+	}
+	mut out = []Result{}
+	for i in 0..len(paths) {
+		mut c = conns[i]
+		let r = nettest.Finish(mut c, 30)
+		out = append(out, Result{Code: r.Status, Body: r.Body, Took: seconds(t0)})
+	}
+	return out
+}
+
+fn startExample(exe str, out str, name str, cores i64, env []str, deadline str) nettest.Server {
+	mut set = []str{"TIN_CORES=" + mint.Itoa(cores), "MYSQL_POOL=4", "TIN_DEADLINE_MS=" + deadline}
+	for e in env {
+		set = append(set, e)
+	}
+	let server = nettest.Start(exe, []str{}, set, ci.Join(out, name + ".log"), nettest.Port())
+	server.Ready(10)
+	return server
+}
+
+fn countOf(results []Result, code i64) i64 {
+	mut n = 0
+	for r in results {
+		if r.Code == code {
+			n += 1
+		}
+	}
+	return n
+}
+
+// poolRun is the most connections at once while `requests` statements of `ms` ms run, `workers` at a time (all together by default).
+fn poolRun(exe str, out str, env []str, fake Fake, useFake bool, cores i64, extra []str, requests i64, ms i64, workers i64) (i64, f64) {
+	// Earlier servers' sessions may still be running a statement (a 3 s SLEEP): not ours.
+	if useFake {
+		for i in 0..200 {
+			if fake.Stats().Open == 0 {
+				break
+			}
+			tide.Sleep(50000000)
+		}
+	}
+	mut all = []str{}
+	for e in env {
+		all = append(all, e)
+	}
+	for e in extra {
+		all = append(all, e)
+	}
+	let srv = startExample(exe, out, "pool_cap", cores, all, "20000")
+	if useFake {
+		fake.ResetPeak()
+	}
+	mut paths = []str{}
+	for i in 0..requests {
+		paths = append(paths, "/sleep?ms=" + mint.Itoa(ms))
+	}
+	mut results = []Result{}
+	mut slowest = 0.0
+	if workers == 1 {
+		for p in paths {
+			let t0 = tide.Now()
+			results = append(results, fetch(srv.Port, p))
+			let took = seconds(t0)
+			if took > slowest {
+				slowest = took
+			}
+		}
+	} else {
+		results = burst(srv.Port, paths)
+	}
+	srv.Stop()
+	if countOf(results, 200) != requests {
+		flag("pool cap: " + mint.Itoa(requests - countOf(results, 200)) + " of " + mint.Itoa(requests) + " statements failed")
+	}
+	return fake.Stats().Peak, slowest
+}
+
+// poolCap (#359): Options.MaxTotal caps the connections of the whole process, whatever the core count, and Pool defaults to max(2,
+// 64/cores) per core. fixtures/pool_cap_mysql.tin holds statements open; the fake counts the connections it has at once.
+fn poolCap(out str, env []str, fake Fake) {
+	let exe = ci.Join(out, "mysql_pool_cap")
+	ci.BuildTin("tools/ci/fixtures/pool_cap_mysql.tin", exe, "", []str{})
+	// A core that takes the slot of another's idle connection shuts that socket down and dials its own; the server notices the close a
+	// moment after the new connection arrives, so its count may run one or two over the cap while that happens (the process never
+	// holds more).
+	let slack = 2
+	// Eight cores, four per core, six for the process: the cap holds, and every request is served even though two cores can hold none
+	// of them at a time.
+	let (peak1, _) = poolRun(exe, out, env, fake, true, 8, []str{"MYSQL_POOL=4", "MYSQL_MAX_TOTAL=6"}, 48, 150, 0)
+	say.Line("8 cores, Pool 4, MaxTotal 6: 48 statements, at most " + mint.Itoa(peak1) + " connections")
+	if peak1 < 5 || peak1 > 6 + slack {
+		flag("MaxTotal 6 on 8 cores: " + mint.Itoa(peak1) + " connections")
+	}
+	// One request at a time, spread over eight cores by new connections, with four connections for the process: a core that has none
+	// finds them idle on the others and takes the slot of one, at once (it would otherwise wait for a release on cores that serve
+	// nothing else).
+	let (peak2, slowest) = poolRun(exe, out, env, fake, true, 8, []str{"MYSQL_POOL=4", "MYSQL_MAX_TOTAL=4"}, 32, 5, 1)
+	say.Line("8 cores, MaxTotal 4: 32 statements one after the other, at most " + mint.Itoa(peak2) + " connections, slowest " + text(slowest, 2) + " s")
+	if peak2 > 4 + slack || slowest > 1.5 {
+		flag("quiet cores at the cap: " + mint.Itoa(peak2) + " connections, slowest " + text(slowest, 2) + " s")
+	}
+	// The cap alone (Pool unset): 64/8 = 8 per core would allow 64.
+	let (peak3, _) = poolRun(exe, out, env, fake, true, 8, []str{"MYSQL_POOL=", "MYSQL_MAX_TOTAL=10"}, 48, 150, 0)
+	say.Line("8 cores, default Pool, MaxTotal 10: 48 statements, at most " + mint.Itoa(peak3) + " connections")
+	if peak3 < 8 || peak3 > 10 + slack {
+		flag("MaxTotal 10 on 8 cores: " + mint.Itoa(peak3) + " connections")
+	}
+	// No cap: Pool is max(2, 64/cores) per core: 32 on two cores, 2 on thirty-two.
+	for cores in []i64{2, 32} {
+		let (peak, _) = poolRun(exe, out, env, fake, true, cores, []str{"MYSQL_POOL=", "MYSQL_MAX_TOTAL="}, 100, 700, 0)
+		say.Line(mint.Itoa(cores) + " cores, default Pool: 100 statements, " + mint.Itoa(peak) + " connections (" + mint.Itoa(cores) + " x " + mint.Itoa(64 / cores) + ")")
+		if peak < 58 || peak > 66 {
+			flag("default Pool on " + mint.Itoa(cores) + " cores: " + mint.Itoa(peak) + " connections, want about 64")
+		}
+	}
+}
+
+// numberAfter reads the digits that follow prefix in s, and the rest of s after them ("" and -1 when prefix is absent).
+fn numberAfter(s str, prefix str) (i64, str) {
+	if !twine.HasPrefix(s, prefix) {
+		return -1, ""
+	}
+	let rest = s[len(prefix):]
+	mut n = 0
+	mut i = 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		n = n * 10 + i64(rest[i] - '0')
+		i += 1
+	}
+	if i == 0 {
+		return -1, ""
+	}
+	return n, rest[i:]
+}
+
+// within: a statement inside within 50ms against a slow server fails with fault.DeadlineExceeded after about 50 ms, nested blocks take
+// the earlier deadline, and task.Deadline reads the request's and the block's deadlines (#233; edition 1 fixture mysql_within.tin).
+fn withinChecks(out str, env []str) {
+	let exe = ci.Join(out, "mysql_within")
+	ci.BuildTin("tools/ci/fixtures/mysql_within.tin", exe, "", []str{"-edition", "1"})
+	let srv = startExample(exe, out, "within", 1, env, "5000")
+	let req = fetch(srv.Port, "/request")
+	say.Line("task.Deadline in a request: " + req.Body + " ms left of TIN_DEADLINE_MS=5000")
+	let left = ci.Num(req.Body)
+	if req.Code != 200 || left <= 4500 || left > 5000 {
+		flag("request deadline: " + mint.Itoa(req.Code) + " " + req.Body)
+	}
+	for i in 0..3 {
+		let r = fetch(srv.Port, "/within?ms=50")
+		say.Line("3 s statement within 50ms: " + mint.Itoa(r.Code) + " " + r.Body + " in " + text(r.Took, 3) + " s")
+		let (deadline, rest) = numberAfter(r.Body, "deadline exceeded; true; deadline ")
+		let (took, tail) = numberAfter(rest, " ms; took ")
+		if r.Code != 200 || (deadline != 50 && deadline != 51) || tail != " ms; after ok" || took < 45 || took >= 500 || r.Took > 1.5 {
+			flag("within 50ms: " + mint.Itoa(r.Code) + " " + r.Body + " " + text(r.Took, 3))
+		}
+	}
+	let nested = fetch(srv.Port, "/nested")
+	say.Line("3 s statement within 10s within 50ms: " + mint.Itoa(nested.Code) + " " + nested.Body + " in " + text(nested.Took, 3) + " s")
+	let (nt, ntail) = numberAfter(nested.Body, "deadline exceeded; true; took ")
+	if nested.Code != 200 || ntail != " ms" || nt < 45 || nt >= 500 || nested.Took > 1.5 {
+		flag("nested within: " + mint.Itoa(nested.Code) + " " + nested.Body + " " + text(nested.Took, 3))
+	}
+	srv.Stop()
+}
+
+fn check(out str, exe str, real str, tls bool, control i64) {
+	let useFake = len(real) == 0
+	mut fake = Fake{Control: control, Port: 0}
+	mut env = []str{}
+	if useFake {
+		fake = newFake(control, tls)
+		env = []str{"MYSQL_ADDR=127.0.0.1:" + mint.Itoa(fake.Port), "MYSQL_USER=tin", "MYSQL_PASSWORD=tinpass", "MYSQL_DATABASE=tin"}
+	}
+	if tls {
+		env = append(env, "MYSQL_TLS=insecure")
+	}
+	mut srv = startExample(exe, out, "mysql_a", 1, env, "1000")
+	fetch(srv.Port, "/setup")
+	let name = "o'brien \"x\"; DROP TABLE users"
+	let added = fetch(srv.Port, "/add?name=" + nettest.Quote(name))
+	let uid = ci.Num(added.Body)
+	let user = fetch(srv.Port, "/user?id=" + mint.Itoa(uid))
+	let want = "{{\"id\":" + mint.Itoa(uid) + ",\"name\":\"o'brien \\\"x\\\"; DROP TABLE users\"}}"
+	say.Line("bound values: " + user.Body)
+	if user.Body != want {
+		flag("user: " + user.Body + ", want " + want)
+	}
+	if fetch(srv.Port, "/user?id=999999999").Code != 404 {
+		flag("missing user")
+	}
+	let t0 = tide.Now()
+	mut sleepers = []str{}
+	for i in 0..8 {
+		sleepers = append(sleepers, "/sleep?ms=300")
+	}
+	let slept = burst(srv.Port, sleepers)
+	let total = seconds(t0)
+	say.Line("8 x 300 ms statements on a pool of 4, one core: " + text(total, 2) + " s")
+	if countOf(slept, 200) != 8 || total <= 0.55 || total >= 0.95 {
+		flag("pool: " + text(total, 2) + " s, " + mint.Itoa(countOf(slept, 200)) + " of 8 answered")
+	}
+	let dead = fetch(srv.Port, "/sleep?ms=3000")
+	say.Line("deadline: " + mint.Itoa(dead.Code) + " " + dead.Body + " in " + text(dead.Took, 2) + " s")
+	if dead.Code != 502 || dead.Body != "deadline exceeded" || dead.Took > 1.5 {
+		flag("deadline: " + mint.Itoa(dead.Code) + " " + dead.Body + " " + text(dead.Took, 2))
+	}
+	let before0 = fetch(srv.Port, "/count")
+	if before0.Code != 200 {
+		flag("after the deadline: " + mint.Itoa(before0.Code) + " " + before0.Body)
+	}
+	if useFake {
+		fake.Drop()
+		tide.Sleep(100000000)
+		mut codes = []str{}
+		mut allOk = true
+		for i in 0..3 {
+			let c = fetch(srv.Port, "/count").Code
+			codes = append(codes, mint.Itoa(c))
+			if c != 200 {
+				allOk = false
+			}
+		}
+		say.Line("after the server dropped the connections: " + twine.Join(codes, " "))
+		if !allOk {
+			flag("no reconnect: " + twine.Join(codes, " "))
+		}
+	}
+	srv.Stop()
+	if !tls {
+		withinChecks(out, env)
+		if useFake {
+			poolCap(out, env, fake)
+		}
+	}
+	// The load checks that every insert lands, not how fast a shared runner's MySQL is: against a real server a disk flush can hold a
+	// few inserts past the 1 s deadline (#133), so it gets 10 s there.
+	mut deadline = "1000"
+	if !useFake {
+		deadline = "10000"
+	}
+	srv = startExample(exe, out, "mysql_load", 2, env, deadline)
+	let countBefore = ci.Num(fetch(srv.Port, "/count").Body)
+	mut errs = 0
+	mut slowest = []f64{}
+	let t1 = tide.Now()
+	for i in 0..50 {
+		mut paths = []str{}
+		for k in 0..20 {
+			paths = append(paths, "/add?name=u" + mint.Itoa(i))
+		}
+		for r in burst(srv.Port, paths) {
+			if r.Code != 200 {
+				errs += 1
+			}
+			slowest = append(slowest, r.Took)
+		}
+	}
+	let countAfter = ci.Num(fetch(srv.Port, "/count").Body)
+	say.Line("1000 inserts from 20 clients on 2 cores: " + text(seconds(t1), 2) + " s, " + mint.Itoa(errs) + " errors, count " + mint.Itoa(countBefore) + " -> " + mint.Itoa(countAfter))
+	if errs > 0 || countAfter - countBefore != 1000 {
+		flag("inserts: " + mint.Itoa(errs) + " errors, " + mint.Itoa(countBefore) + " -> " + mint.Itoa(countAfter))
+	}
+	srv.Stop()
+	if useFake {
+		let users = []str{"native", "tin"}
+		let passwords = []str{"nativepass", "wrong"}
+		let codes = []i64{200, 502}
+		for i in 0..2 {
+			mut e2 = []str{}
+			for e in env {
+				e2 = append(e2, e)
+			}
+			e2 = append(e2, "MYSQL_USER=" + users[i])
+			e2 = append(e2, "MYSQL_PASSWORD=" + passwords[i])
+			let s2 = startExample(exe, out, "mysql_auth", 1, e2, "1000")
+			let r = fetch(s2.Port, "/count")
+			say.Line(users[i] + "/" + passwords[i] + ": " + mint.Itoa(r.Code) + " " + r.Body)
+			if r.Code != codes[i] || (codes[i] == 502 && !twine.Contains(r.Body, "Error 1045 (28000)")) {
+				flag(users[i] + "/" + passwords[i] + ": " + mint.Itoa(r.Code) + " " + r.Body)
+			}
+			s2.Stop()
+		}
+		let st = fake.Stats()
+		if !tls {
+			say.Line("auth: " + mint.Itoa(st.Full) + " full (RSA, " + mint.Itoa(st.Keys) + " key requests), " + mint.Itoa(st.Fast) + " fast, " + mint.Itoa(st.Switches) + " switches to mysql_native_password")
+			if st.Full < 1 || st.Keys < 1 || st.Fast < 1 || st.Switches < 1 {
+				flag("auth paths not all taken")
+			}
+		} else {
+			say.Line("auth over TLS: " + mint.Itoa(st.TlsFull) + " full (password in the clear, " + mint.Itoa(st.Full + st.Keys) + " RSA), " + mint.Itoa(st.Fast) + " fast, " + mint.Itoa(st.Switches) + " switches to mysql_native_password")
+			if st.TlsFull < 1 || st.Full > 0 || st.Keys > 0 || st.Fast < 1 || st.Switches < 1 {
+				flag("auth paths over TLS not all taken")
+			}
+		}
+	}
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/mysql")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "mysql")
+	ci.BuildTin("examples/mysql.tin", exe, "", []str{})
+	let real = ci.Env("MYSQL_ADDR")
+	mut control = 0
+	if len(real) == 0 {
+		let fakeExe = ci.Join(out, "mysqlfake")
+		ci.Must(ci.Exec([]str{"go", "build", "-o", fakeExe, "./tools/ci/fixtures/mysqlfake"}, ci.Root(), 300), "go build mysqlfake")
+		mut openssl = tlsutil.Openssl3()
+		if len(openssl) == 0 {
+			openssl = "openssl"
+		}
+		let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+		let cert = tlsutil.Of(certs, "ecdsa")
+		control = nettest.Port()
+		let fakes = nettest.Start(fakeExe, []str{cert.Cert, cert.Key}, []str{}, ci.Join(out, "fake.log"), control)
+		fakes.Ready(10)
+	}
+	check(out, exe, real, false, control)
+	// Once more over TLS 1.3: SSLRequest, then the same checks. The fake server goes behind TLS; a real MySQL 8 has TLS on with its own
+	// self-signed certificate.
+	say.Line("-- over TLS 1.3 (SSLRequest)")
+	check(out, exe, real, true, control)
+	ci.Check(len(failures) == 0, twine.Join(failures, "\n"))
+	ci.Pass("mysql: queries, pool, deadlines, within, inserts, both auth plugins, reconnect and TLS")
+}

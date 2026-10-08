@@ -3,7 +3,7 @@ package schedprobe
 import "say"
 import "tide"
 
-// Copied into a temporary lib/schedprobe by sched_check.py: puts replay tapes
+// Copied into a temporary lib/schedprobe by sched_check.tin: puts replay tapes
 // (toolchain/runtime/replay.tin, design/interface_replay.md) on the running task, as anvil will for a
 // request, and reads back the scheduling events (toolchain/runtime/sched_replay.tin, #243).
 

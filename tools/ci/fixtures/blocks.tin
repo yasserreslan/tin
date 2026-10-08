@@ -9,7 +9,7 @@ import "tide"
 import "twine"
 
 // #345: long-lived blocks above 4 KiB. blocks <mode> <size> <count> keeps count values of size
-// bytes in a global map and prints what the heap and the process hold; heap_check.py runs it.
+// bytes in a global map and prints what the heap and the process hold; heap_check.tin runs it.
 //   churn  keep and overwrite one key count times
 //   fill   keep count distinct keys, delete every other one, then keep that many again
 //   large  allocate and drop a block of size bytes count times (no map)

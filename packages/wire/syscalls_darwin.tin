@@ -17,6 +17,8 @@ extern fn getsockopt(fd i64, level i64, name i64, val i64, n i64) i64
 fn rt_sys_getsockopt(fd i64, level i64, name i64, val i64, n i64) i64 { return getsockopt(fd, level, name, val, n) }
 extern fn listen(fd i64, backlog i64) i64
 fn rt_sys_listen(fd i64, backlog i64) i64 { return listen(fd, backlog) }
+extern fn shutdown(fd i64, how i64) i64
+fn rt_sys_shutdown(fd i64, how i64) i64 { return shutdown(fd, how) }
 extern fn poll(fds i64, n i64, timeout i64) i64
 fn rt_sys_poll(fds i64, n i64, timeout i64) i64 { return poll(fds, n, timeout) }
 extern fn setsockopt(fd i64, level i64, name i64, val i64, n i64) i64

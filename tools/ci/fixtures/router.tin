@@ -8,7 +8,7 @@ import "say"
 import "tide"
 import "websocket"
 
-// The routed server tools/ci/router_check.py drives. Every request goes through two root
+// The routed server tools/ci/router_check.tin drives. Every request goes through two root
 // middleware; /api adds one that waits before calling next. Handlers wait too, and read
 // their path parameters and middleware values after the wait.
 

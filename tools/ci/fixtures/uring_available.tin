@@ -1,0 +1,16 @@
+package main
+
+import "say"
+
+// Prints "yes" when this kernel lets a process make an io_uring (io_uring_setup, the same number on arm64 and x86-64), else "no"
+// (tools/ci/file_io_check.tin decides from this whether the io_uring path must be used).
+fn main() {
+	let params = calloc(15, 8)
+	let fd = linux_raw(425, 4, params, 0, 0, 0, 0)
+	if fd < 0 {
+		say.Line("no")
+		return
+	}
+	rt_sys_close(fd)
+	say.Line("yes")
+}

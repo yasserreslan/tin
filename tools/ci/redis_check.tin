@@ -1,0 +1,277 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./rawconn"
+import "./tlsutil"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// The redis client inside anvil: correct answers under concurrent load, commands from concurrent requests batched on one connection,
+// deadlines that leave the connection in step, reconnecting after the server drops it, and AUTH. Runs against a small RESP server
+// (tools/ci/fixtures/redis_fake.go; REDIS_ADDR=host:port uses a real one instead, for the checks it can do).
+
+mut failures = []str{}
+
+fn flag(message str) {
+	failures = append(failures, message)
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn text(v f64, places i64) str {
+	mut scale = 1
+	for i in 0..places {
+		scale = scale * 10
+	}
+	let n = i64(v * f64(scale) + 0.5)
+	mut frac = mint.Itoa(n % scale)
+	for len(frac) < places {
+		frac = "0" + frac
+	}
+	return mint.Itoa(n / scale) + "." + frac
+}
+
+// Fake is a fake server made by the control server.
+type Fake struct {
+	Control i64
+	Port i64
+	TLS bool
+}
+
+fn newFake(control i64, tls bool, password str) Fake {
+	mut t = "0"
+	if tls {
+		t = "1"
+	}
+	let port = ci.Num(nettest.Get(control, "/new?tls=" + t + "&password=" + nettest.Quote(password)))
+	return Fake{Control: control, Port: port, TLS: tls}
+}
+
+fn (f Fake) Commands() i64 {
+	return ci.Num(twine.Split(twine.Fields(nettest.Get(f.Control, "/stats?port=" + mint.Itoa(f.Port)))[0], "=")[1])
+}
+
+fn (f Fake) Reads() i64 {
+	return ci.Num(twine.Split(twine.Fields(nettest.Get(f.Control, "/stats?port=" + mint.Itoa(f.Port)))[1], "=")[1])
+}
+
+fn (f Fake) Drop() {
+	nettest.Get(f.Control, "/drop?port=" + mint.Itoa(f.Port))
+}
+
+// envFor is how the example finds the server: REDIS_ADDR in the clear, REDIS_URL over TLS.
+fn envFor(port i64, tls bool, password str) []str {
+	if !tls {
+		return []str{"REDIS_ADDR=127.0.0.1:" + mint.Itoa(port), "REDIS_PASSWORD=" + password}
+	}
+	mut auth = ""
+	if len(password) > 0 {
+		auth = ":" + password + "@"
+	}
+	return []str{"REDIS_ADDR=", "REDIS_URL=rediss://" + auth + "127.0.0.1:" + mint.Itoa(port), "REDIS_TLS_INSECURE=1"}
+}
+
+// Result is one request through the example.
+type Result struct {
+	Code i64
+	Body str
+	Took f64
+}
+
+fn fetch(port i64, path str) Result {
+	let t0 = tide.Now()
+	let r = nettest.Parse(nettest.Raw(port, nettest.GetRequest(path), 10))
+	return Result{Code: r.Status, Body: r.Body, Took: seconds(t0)}
+}
+
+fn startExample(exe str, out str, name str, cores i64, env []str) nettest.Server {
+	mut set = []str{"TIN_CORES=" + mint.Itoa(cores), "TIN_DEADLINE_MS=500"}
+	for e in env {
+		set = append(set, e)
+	}
+	let server = nettest.Start(exe, []str{}, set, ci.Join(out, name + ".log"), nettest.Port())
+	server.Ready(10)
+	return server
+}
+
+// load: conns keep-alive connections each send per INCR requests, one after the other; a wave puts one request on every connection.
+fn load(port i64, key str, conns i64, per i64) (f64, i64) {
+	mut cs = []rawconn.Conn{}
+	for i in 0..conns {
+		cs = append(cs, rawconn.Open(port, 10))
+	}
+	mut errors = 0
+	let t0 = tide.Now()
+	for n in 0..per {
+		for i in 0..conns {
+			mut c = cs[i]
+			c.Send("GET /incr?key=" + key + " HTTP/1.1\r\nHost: x\r\n\r\n")
+			cs[i] = c
+		}
+		for i in 0..conns {
+			mut c = cs[i]
+			let (status, h) = c.Head()
+			c.Body(h)
+			cs[i] = c
+			if status != 200 {
+				errors += 1
+			}
+		}
+	}
+	for i in 0..conns {
+		mut c = cs[i]
+		c.Close()
+	}
+	return seconds(t0), errors
+}
+
+fn check(exe str, out str, tls bool, control i64, real str) {
+	let useFake = len(real) == 0
+	mut fake = Fake{Control: control, Port: 0, TLS: tls}
+	mut addr = real
+	mut extra = []str{}
+	if useFake {
+		fake = newFake(control, tls, "")
+		addr = "127.0.0.1:" + mint.Itoa(fake.Port)
+		extra = envFor(fake.Port, tls, "")
+	} else {
+		extra = []str{"REDIS_ADDR=" + real}
+	}
+	let key = "tin-check-" + mint.Itoa(tide.Now() % 1000000)
+	mut srv = startExample(exe, out, "redis_a", 2, extra)
+	let (dt, errs) = load(srv.Port, key, 40, 100)
+	let final = fetch(srv.Port, "/get?key=" + key)
+	say.Line("4000 INCR from 40 connections on 2 cores: " + text(dt, 2) + " s, " + mint.Itoa(errs) + " errors, final " + final.Body)
+	if errs > 0 || final.Body != "4000" {
+		flag("load: " + mint.Itoa(errs) + " errors, final " + final.Body)
+	}
+	if useFake {
+		let commands = fake.Commands()
+		let reads = fake.Reads()
+		say.Line("fake server: " + mint.Itoa(commands) + " commands in " + mint.Itoa(reads) + " reads")
+		if commands < 2 * reads {
+			flag("commands were not batched: " + mint.Itoa(commands) + " commands, " + mint.Itoa(reads) + " reads")
+		}
+	}
+	let val = "hello world; DEL x {{braces}} \"quotes\""
+	fetch(srv.Port, "/set?key=" + key + "-v&value=" + nettest.Quote(val))
+	let back = fetch(srv.Port, "/get?key=" + key + "-v")
+	say.Line("value with spaces round trip: " + back.Body)
+	if back.Body != val {
+		flag("value round trip: " + back.Body)
+	}
+	let none = fetch(srv.Port, "/get?key=" + key + "-none")
+	if none.Code != 404 {
+		flag("missing key: " + mint.Itoa(none.Code) + " " + none.Body)
+	}
+	fetch(srv.Port, "/set?key=" + key + "-t&value=5")
+	let twice = fetch(srv.Port, "/twice?key=" + key + "-t")
+	say.Line("MULTI/EXEC: " + twice.Body)
+	if twice.Code != 200 || !twine.Contains(twice.Body, "Int(7)") {
+		flag("MULTI/EXEC: " + mint.Itoa(twice.Code) + " " + twice.Body)
+	}
+	// Integer replies at the edge of i64, then the error line Redis sends past it: a reply is parsed without overflowing (#362).
+	fetch(srv.Port, "/set?key=" + key + "-big&value=9223372036854775806")
+	let top = fetch(srv.Port, "/incr?key=" + key + "-big")
+	let past = fetch(srv.Port, "/incr?key=" + key + "-big")
+	say.Line("INCR to the i64 maximum: " + mint.Itoa(top.Code) + " " + top.Body + "; past it: " + mint.Itoa(past.Code) + " " + past.Body)
+	if top.Code != 200 || top.Body != "9223372036854775807" || past.Code != 502 || !twine.Contains(past.Body, "would overflow") {
+		flag("INCR at the i64 maximum: " + top.Body + " then " + past.Body)
+	}
+	srv.Stop()
+	// One core: the queued request shares the paused connection.
+	srv = startExample(exe, out, "redis_b", 1, extra)
+	if useFake {
+		// A 1 s pause with a 500 ms deadline: the request gives up, and the replies that come later still go to the right callers.
+		fetch(srv.Port, "/set?key=" + key + "-d&value=0")
+		let t0 = tide.Now()
+		let sleeping = nettest.Send(srv.Port, nettest.GetRequest("/sleep?ms=1000"))
+		tide.Sleep(50000000)
+		let queued = fetch(srv.Port, "/incr?key=" + key + "-d")
+		mut sc = sleeping
+		let slept = nettest.Finish(mut sc, 20)
+		let sleepTook = seconds(t0)
+		say.Line("deadline: sleep -> " + mint.Itoa(slept.Status) + " " + slept.Body + " in " + text(sleepTook, 2) + " s; queued incr -> " + mint.Itoa(queued.Code) + " " + queued.Body)
+		if slept.Status != 502 || !twine.Contains(slept.Body, "deadline exceeded") || sleepTook > 0.9 {
+			flag("deadline (sleep): " + mint.Itoa(slept.Status) + " " + slept.Body)
+		}
+		if queued.Code != 502 || !twine.Contains(queued.Body, "deadline exceeded") || queued.Took > 0.9 {
+			flag("deadline (queued): " + mint.Itoa(queued.Code) + " " + queued.Body)
+		}
+		tide.Sleep(700000000)
+		mut seq = []str{}
+		for i in 0..3 {
+			seq = append(seq, fetch(srv.Port, "/incr?key=" + key + "-d").Body)
+		}
+		say.Line("after the pause: " + twine.Join(seq, " "))
+		if twine.Join(seq, " ") != "2 3 4" {
+			flag("replies out of step after a deadline: " + twine.Join(seq, " "))
+		}
+		fake.Drop()
+		tide.Sleep(100000000)
+		mut codes = []str{}
+		mut allOk = true
+		for i in 0..4 {
+			let c = fetch(srv.Port, "/incr?key=" + key + "-r").Code
+			codes = append(codes, mint.Itoa(c))
+			if c != 200 {
+				allOk = false
+			}
+		}
+		say.Line("after the server dropped the connections: " + twine.Join(codes, " "))
+		if !allOk {
+			flag("no reconnect: " + twine.Join(codes, " "))
+		}
+	}
+	srv.Stop()
+	if useFake {
+		let pws = []str{"s3cret", "wrong"}
+		let wants = []i64{200, 502}
+		for i in 0..2 {
+			let locked = newFake(control, tls, "s3cret")
+			let s = startExample(exe, out, "redis_auth", 1, envFor(locked.Port, tls, pws[i]))
+			let r = fetch(s.Port, "/incr?key=a")
+			say.Line("AUTH " + pws[i] + ": " + mint.Itoa(r.Code) + " " + r.Body)
+			if r.Code != wants[i] || (wants[i] == 502 && !twine.Contains(r.Body, "WRONGPASS")) {
+				flag("AUTH " + pws[i] + ": " + mint.Itoa(r.Code) + " " + r.Body)
+			}
+			s.Stop()
+		}
+	}
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/redis")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "redis")
+	ci.BuildTin("examples/redis.tin", exe, "", []str{})
+	let real = ci.Env("REDIS_ADDR")
+	mut control = 0
+	if len(real) == 0 {
+		let fakeExe = ci.Join(out, "redis_fake")
+		ci.Must(ci.Exec([]str{"go", "build", "-o", fakeExe, "tools/ci/fixtures/redis_fake.go"}, ci.Root(), 300), "go build redis_fake.go")
+		mut openssl = tlsutil.Openssl3()
+		if len(openssl) == 0 {
+			openssl = "openssl"
+		}
+		let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+		let cert = tlsutil.Of(certs, "ecdsa")
+		control = nettest.Port()
+		let fakes = nettest.Start(fakeExe, []str{cert.Cert, cert.Key}, []str{}, ci.Join(out, "fake.log"), control)
+		fakes.Ready(10)
+	}
+	check(exe, out, false, control, real)
+	if len(real) == 0 {
+		// Once more over TLS 1.3: the fake server behind TLS, the client on rediss://.
+		say.Line("-- over TLS 1.3 (rediss://)")
+		check(exe, out, true, control, "")
+	}
+	ci.Check(len(failures) == 0, twine.Join(failures, "\n"))
+	ci.Pass("redis: concurrent load, batching, deadlines, reconnect, AUTH and TLS")
+}

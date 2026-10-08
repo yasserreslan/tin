@@ -4,14 +4,8 @@ cd "$(dirname "$0")/../.." || exit 1
 c=$1; f=$2; shift 2
 TIN_ROOT=$PWD "$c" -o bin/t "$f"; rc=$?
 if [ $rc -ge 128 ]; then
-  python3 - "$c" "$f" <<'PY'
-import subprocess,os,sys
-env=dict(os.environ,TIN_ROOT=os.getcwd())
-try:
-    r=subprocess.run(["lldb","--batch","-o","command script import tools/dev/tinbt.py","-o","run","-k","tinbt 30","-k","quit","--",sys.argv[1],"-o","bin/t",sys.argv[2]],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=60,env=env)
-    o=r.stdout; i=o.find("stop reason"); print(o[i:])
-except subprocess.TimeoutExpired: print("lldb timeout")
-PY
+  o=$(TIN_ROOT=$PWD perl -e 'alarm shift; exec @ARGV' 60 lldb --batch -o "command script import tools/dev/tinbt.py" -o run -k "tinbt 30" -k quit -- "$c" -o bin/t "$f" </dev/null 2>&1) || echo "lldb timeout"
+  printf '%s\n' "$o" | sed -n '/stop reason/,$p'
   exit $rc
 fi
 [ $rc -eq 0 ] && bin/t "$@"

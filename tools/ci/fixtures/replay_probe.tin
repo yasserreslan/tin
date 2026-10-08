@@ -3,7 +3,7 @@ package replayprobe
 import "fault"
 import "say"
 
-// Copied into a temporary lib/replayprobe by replay_check.py: drives the runtime's replay tape
+// Copied into a temporary lib/replayprobe by replay_check.tin: drives the runtime's replay tape
 // (toolchain/runtime/replay.tin, design/interface_replay.md) directly, before anvil and the clients use it.
 
 mut ran i64

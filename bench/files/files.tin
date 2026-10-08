@@ -7,7 +7,7 @@ import "say"
 
 // bench/files (#357): GET /read?n=N reads N of the files $FILES_DIR/f0 .. f{$FILES_COUNT-1}, one
 // after another, with quarry.ReadFile (each core goes on where its last request stopped) and
-// answers the bytes read. run.py drives it.
+// answers the bytes read. run.tin drives it.
 
 mut next i64 = 0
 

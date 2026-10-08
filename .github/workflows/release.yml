@@ -40,7 +40,7 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 -c 'import re,os; assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?",os.environ["TAG"])'
+          printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
           # The tag is VERSION, or a later patch of its major.minor (tools/ci/next_version.tin).
           sh tools/ci/tin.sh next_version check VERSION "$TAG"
           version=${TAG#v}
@@ -144,7 +144,7 @@ jobs:
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           image=ghcr.io/$GITHUB_REPOSITORY
           docker buildx imagetools create -t "$image:$VERSION" "$image:$VERSION-linux-amd64" "$image:$VERSION-linux-arm64"
-          docker buildx imagetools inspect "$image:$VERSION" --raw | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sorted(m["platform"]["architecture"] for m in d["manifests"]) == ["amd64","arm64"]'
+          docker buildx imagetools inspect "$image:$VERSION" --raw | jq -e '[.manifests[].platform.architecture] | sort == ["amd64","arm64"]'
           if [ "${VERSION#*-}" = "$VERSION" ]; then
             docker buildx imagetools create -t "$image:latest" "$image:$VERSION"
             gh release create "v$VERSION" release/*.tar.gz release/*.zip release/SHA256SUMS release/install.sh --verify-tag --title "Tin $VERSION" --generate-notes

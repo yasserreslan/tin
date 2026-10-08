@@ -8,7 +8,7 @@ import "replay"
 import "say"
 import "websocket"
 
-// Copied into a temporary lib/replaymore by replay_check.py: one task records what mysql,
+// Copied into a temporary lib/replaymore by replay_check.tin: one task records what mysql,
 // postgres, websocket and quarry do against live servers and files (#241), then the same code
 // replays from that tape with no live call.
 

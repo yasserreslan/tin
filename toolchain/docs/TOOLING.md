@@ -135,7 +135,7 @@ reports one error; a file that parses reports every checker error. `tin lsp` pub
 ### 3.2 Formatting: `tin fmt`
 
 `tin fmt` (the package `packages/tinfmt`, the command `tools/fmt`) rewrites whitespace and nothing else: formatting never
-changes a token (`tinc -tokens` of the file is the same before and after, which `tools/ci/test_tinfmt.py` checks over the
+changes a token (`tinc -tokens` of the file is the same before and after, which `tools/ci/test_tinfmt.tin` checks over the
 tests and the examples) and formatting twice changes nothing. The rules:
 
 - **Indentation** is tabs, one level for each line that has an open bracket (`(`, `[`, `{`), so `f(a, fn() {` indents its
@@ -151,7 +151,7 @@ tests and the examples) and formatting twice changes nothing. The rules:
 - **Left as written**: the spaces inside a line (so aligned fields and aligned trailing comments stay aligned), strings, raw
   strings (every line of one, including its indentation), rune literals, the order and line breaks of the code.
 
-The tree is formatted, and `tools/ci/test_fmt_gate.py` fails when `tin fmt -l` lists a tracked `.tin` file, except the ones it
+The tree is formatted, and `tools/ci/test_fmt_gate.tin` fails when `tin fmt -l` lists a tracked `.tin` file, except the ones it
 names: the hot files of AGENTS.md rule 6 (so work in flight there is not disturbed; they join when their owners take the one
 reformatting), the `_bad` tests and the other files whose position in the source is part of what a test checks (expected error
 positions, recorded effect sites, a hash in a `tin.lock`, edition 0 syntax), and the VS Code fixtures.
@@ -440,7 +440,7 @@ are followed), no lexical blocks and no inlined calls. `lldb` shows a `str` or a
 (`p label->len`); `command script import tools/dev/tin_lldb.py` (or that line in `~/.lldbinit`) makes it show the text and the
 first elements: `label = "pt"`, `xs = len=3 cap=3 [4, 5, 6]`. The language of the unit is C, which is what debuggers need to print values.
 
-`tools/ci/test_dwarf.py` reads the sections back for all three targets without a debugger.
+`tools/ci/test_dwarf.tin` reads the sections back for all three targets without a debugger.
 
 ### 8.1 Replaying a recorded request: `tin replay`
 

@@ -356,6 +356,12 @@ fn (c Conn) LocalPort() i64 {
 	return port
 }
 
+// CloseWrite half-closes the connection: the peer reads the end of the stream after what was written, and this end still reads what
+// the peer sends.
+fn (c Conn) CloseWrite() {
+	rt_sys_shutdown(c.fd, 1)
+}
+
 // Accept waits for the next connection.
 fn (l Listener) Accept() !Conn {
 	return try l.AcceptTimeout(0)

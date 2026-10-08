@@ -1,0 +1,332 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "dice"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Request bodies read as they arrive (#481): the fixture tools/ci/fixtures/stream_body.tin, one core, Router.Stream routes reading
+// q.BodyStream().
+//
+// - 1 GiB uploads, Content-Length and chunked over HTTP/1.1 and over h2c (curl), with the server's RSS flat: the handler gets the body
+//   as it comes, in the memory of its read buffer.
+// - A handler that reads slowly holds the client back: a 64 MiB upload to a handler that waits 10 ms per 64 KiB leaves the server's
+//   RSS flat, over HTTP/1.1 (TCP) and h2c (the stream's window).
+// - The same digests over HTTPS, with h2 by ALPN and HTTP/1.1.
+// - A request after a chunked body on the same connection (pipelined) is answered.
+// - A handler that reads part of the body: HTTP/1.1 closes after the response.
+// - A body that stops arriving ends at the request's deadline (TIN_DEADLINE_MS), and a client that leaves half way fails the read; the
+//   server serves on.
+// - A regular route reads its whole body through BodyStream too.
+
+const GIB = 1073741824
+
+fn digest(b str) i64 {
+	mut s = 0
+	for i in 0..len(b) {
+		s = (s * 31 + i64(b[i])) % 1000000007
+	}
+	return s
+}
+
+fn pattern(blocks i64) str {
+	let b = make([]u8, 256 * blocks)
+	for i in 0..len(b) {
+		b[i] = u8(i % 256)
+	}
+	return str(b)
+}
+
+fn hexOf(n i64) str {
+	if n == 0 {
+		return "0"
+	}
+	mut out = ""
+	mut v = n
+	for v > 0 {
+		out = "0123456789abcdef"[v % 16:v % 16 + 1] + out
+		v = v / 16
+	}
+	return out
+}
+
+// Peak follows a process's RSS: sample() is called while the client works.
+type Peak struct {
+	Pid i64
+	Base i64
+	Top i64
+}
+
+fn newPeak(pid i64) Peak {
+	let base = nettest.RssKiB(pid)
+	return Peak{Pid: pid, Base: base, Top: base}
+}
+
+fn (p mut Peak) sample() {
+	let now = nettest.RssKiB(p.Pid)
+	if now > p.Top {
+		p.Top = now
+	}
+}
+
+// grew is how many MiB the peak is above the base.
+fn (p mut Peak) grew() i64 {
+	p.sample()
+	return (p.Top - p.Base) / 1024
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn secondsText(v f64) str {
+	let tenths = i64(v * 10.0 + 0.5)
+	return mint.Itoa(tenths / 10) + "." + mint.Itoa(tenths % 10)
+}
+
+fn dial(port i64) wire.Conn {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		ci.Fail("cannot connect to port " + mint.Itoa(port))
+		panic("unreachable")
+	}
+	return c
+}
+
+fn send(c wire.Conn, s str) {
+	c.Write(s) catch _ {
+		ci.Fail("cannot write to the server")
+	}
+}
+
+// uploadH1 posts size bytes of a repeating pattern and returns the response.
+fn uploadH1(port i64, path str, size i64, chunked bool, piece i64, every i64, peak mut Peak) nettest.Reply {
+	let c = dial(port)
+	mut framing = "Content-Length: " + mint.Itoa(size)
+	if chunked {
+		framing = "Transfer-Encoding: chunked"
+	}
+	send(c, "POST " + path + " HTTP/1.1\r\nHost: x\r\n" + framing + "\r\n\r\n")
+	let block = pattern(piece / 256)
+	let tail = block
+	mut sent = 0
+	mut count = 0
+	for sent < size {
+		mut k = piece
+		if size - sent < k {
+			k = size - sent
+		}
+		mut part = block
+		if k < piece {
+			part = tail[0:k]
+		}
+		if chunked {
+			send(c, hexOf(k) + "\r\n" + part + "\r\n")
+		} else {
+			send(c, part)
+		}
+		sent += k
+		count += 1
+		if count % every == 0 {
+			peak.sample()
+		}
+	}
+	if chunked {
+		send(c, "0\r\n\r\n")
+	}
+	mut client = nettest.Client{C: c, Buf: ""}
+	let r = client.Answer(120.0)
+	client.Close()
+	return r
+}
+
+// bigFile makes a file of blocks MiB of the pattern.
+fn bigFile(dir str, name str, mib i64) str {
+	let block = ci.Join(dir, "block.bin")
+	ci.Write(block, pattern(4096))
+	let big = ci.Join(dir, name)
+	ci.Must(ci.Sh("i=0; while [ $i -lt " + mint.Itoa(mib) + " ]; do cat \"" + block + "\"; i=$((i+1)); done > \"" + big + "\"", "", 600), "make " + name)
+	return big
+}
+
+// uploadCurl posts the file through curl (HTTP/2 DATA frames with --http2-prior-knowledge) while the RSS is sampled; it returns what curl
+// printed.
+fn uploadCurl(url str, file str, extra str, log str, peak mut Peak) str {
+	let run = nettest.StartCoded("sh", []str{"-c", "curl -s -X POST -T \"$0\" " + extra + " \"$1\"", file, url}, []str{}, log, 0)
+	for {
+		let (_, done) = run.ExitCode(0.05)
+		if done {
+			break
+		}
+		peak.sample()
+	}
+	return ci.Read(log)
+}
+
+fn randomData(n i64) str {
+	let b = make([]u8, n)
+	for i in 0..n {
+		b[i] = u8(dice.Range(0, 256))
+	}
+	return str(b)
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/stream_body")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "server")
+	ci.BuildTin("tools/ci/fixtures/stream_body.tin", exe, "", []str{})
+	let curlV = ci.Exec([]str{"curl", "-V"}, "", 10)
+	let haveCurl = curlV.Code == 0
+	let h2curl = haveCurl && twine.Contains(curlV.Stdout, "HTTP2")
+	mut servers = []nettest.Server{}
+	let port = nettest.Port()
+	let srv = nettest.Start(exe, []str{}, []str{"TIN_CORES=1"}, ci.Join(out, "plain.log"), port)
+	servers = append(servers, srv)
+	srv.Ready(10)
+	// Uploads of a GiB, as they arrive.
+	for pass in 0..2 {
+		let chunked = pass == 1
+		mut peak = newPeak(srv.Pid)
+		let t0 = tide.Now()
+		let r = uploadH1(port, "/count", GIB, chunked, 1048576, 8, mut peak)
+		let grew = peak.grew()
+		ci.Check(r.Ok && r.Status == 200 && r.Body == "count=" + mint.Itoa(GIB), "1 GiB upload answered " + r.Head + " " + r.Body)
+		ci.Check(grew < 64, "RSS grew " + mint.Itoa(grew) + " MiB over a 1 GiB upload")
+		mut kind = "Content-Length"
+		if chunked {
+			kind = "chunked"
+		}
+		say.Line("PASS 1 GiB HTTP/1.1 " + kind + " upload read as it came in " + secondsText(seconds(t0)) + " s, RSS grew " + mint.Itoa(grew) + " MiB")
+	}
+	let gib = bigFile(out, "gib.bin", 1024)
+	if h2curl {
+		mut peak = newPeak(srv.Pid)
+		let got = uploadCurl("http://127.0.0.1:" + mint.Itoa(port) + "/count", gib, "--http2-prior-knowledge", ci.Join(out, "curl1.log"), mut peak)
+		let grew = peak.grew()
+		ci.Check(got == "count=" + mint.Itoa(GIB), "h2c upload answered " + got)
+		ci.Check(grew < 64, "RSS grew " + mint.Itoa(grew) + " MiB over a 1 GiB h2c upload")
+		say.Line("PASS 1 GiB h2c upload read as it came, RSS grew " + mint.Itoa(grew) + " MiB")
+	} else {
+		say.Line("SKIP h2c uploads: no curl with HTTP/2")
+	}
+	ci.Remove(gib)
+	// A slow reader holds the client back: the server does not buffer what it has not read.
+	let size = 64 * 1048576
+	mut peak = newPeak(srv.Pid)
+	let t0 = tide.Now()
+	let slow = uploadH1(port, "/upload?slow=10", size, false, 65536, 16, mut peak)
+	let took = seconds(t0)
+	let grew = peak.grew()
+	ci.Check(slow.Status == 200 && twine.HasPrefix(slow.Body, "len=" + mint.Itoa(size) + " "), "slow upload answered " + slow.Head + " " + slow.Body)
+	ci.Check(took > 5.0 && grew < 32, "a slow reader: " + secondsText(took) + " s, RSS grew " + mint.Itoa(grew) + " MiB")
+	say.Line("PASS a slow reader holds an HTTP/1.1 client: 64 MiB in " + secondsText(took) + " s, RSS grew " + mint.Itoa(grew) + " MiB")
+	if h2curl {
+		let mb64 = bigFile(out, "mb64.bin", 64)
+		mut peak2 = newPeak(srv.Pid)
+		let t1 = tide.Now()
+		let got = uploadCurl("http://127.0.0.1:" + mint.Itoa(port) + "/upload?slow=10", mb64, "--http2-prior-knowledge", ci.Join(out, "curl2.log"), mut peak2)
+		let took2 = seconds(t1)
+		let grew2 = peak2.grew()
+		ci.Check(twine.HasPrefix(got, "len=" + mint.Itoa(size) + " "), "slow h2c upload answered " + got)
+		ci.Check(took2 > 5.0 && grew2 < 32, "a slow h2c reader: " + secondsText(took2) + " s, RSS grew " + mint.Itoa(grew2) + " MiB")
+		say.Line("PASS a slow reader holds an h2c client by the stream window: 64 MiB in " + secondsText(took2) + " s, RSS grew " + mint.Itoa(grew2) + " MiB")
+		ci.Remove(mb64)
+	}
+	// Digests of a random body: every framing gives the same bytes.
+	let data = randomData(3145728)
+	let want = "len=" + mint.Itoa(len(data)) + " sum=" + mint.Itoa(digest(data))
+	for path in []str{"/upload", "/whole"} {
+		let r = nettest.Parse(nettest.Raw(port, "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + mint.Itoa(len(data)) + "\r\n\r\n" + data, 60))
+		ci.Check(twine.Contains(r.Body, want), path + " answered " + r.Body)
+	}
+	// A request after a chunked body, in the same write: both are answered.
+	mut chunks = ""
+	mut at = 0
+	for at < len(data) {
+		mut end = at + 100000
+		if end > len(data) {
+			end = len(data)
+		}
+		chunks += hexOf(end - at) + "\r\n" + data[at:end] + "\r\n"
+		at = end
+	}
+	let pc = dial(port)
+	send(pc, "POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" + chunks + "0\r\nX-T: 1\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n")
+	mut pclient = nettest.Client{C: pc, Buf: ""}
+	let first = pclient.Answer(60.0)
+	let second = pclient.Answer(10.0)
+	pclient.Close()
+	ci.Check(twine.Contains(first.Body, want) && twine.Contains(second.Body, "ok HTTP/1.1"), "pipelined answers: " + first.Body + " | " + second.Body)
+	say.Line("PASS digests through Content-Length, chunked (with trailers) and a regular route; a pipelined request after a chunked body")
+	// Part of the body read: the connection closes after the response.
+	let part = dial(port)
+	send(part, "POST /partial HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n" + data[0:300000])
+	mut partClient = nettest.Client{C: part, Buf: ""}
+	let pr = partClient.Answer(30.0)
+	ci.Check(twine.Contains(pr.Head, "Connection: close") && pr.Body == "read 10", "partial read answered " + pr.Head + " | " + pr.Body)
+	let closeStart = tide.Now()
+	let more = partClient.Ready(5.0)
+	ci.Check(!more && seconds(closeStart) < 4.0, "the connection did not end after a partial read")
+	partClient.Close()
+	say.Line("PASS a handler that reads part of the body: the response says Connection: close and the connection ends")
+	// A client that leaves half way: the handler's read fails; the server goes on.
+	let gone = dial(port)
+	send(gone, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n" + data[0:5000])
+	tide.Sleep(200000000)
+	gone.Close()
+	tide.Sleep(200000000)
+	let alive = nettest.Parse(nettest.Raw(port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 10))
+	ci.Check(alive.Body == "ok HTTP/1.1", "after a client left half way: " + alive.Body)
+	// A body that stops arriving ends at the request's deadline.
+	let dport = nettest.Port()
+	let dserver = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_DEADLINE_MS=500"}, ci.Join(out, "deadline.log"), dport)
+	servers = append(servers, dserver)
+	dserver.Ready(10)
+	let dc = dial(dport)
+	let t2 = tide.Now()
+	send(dc, "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n" + data[0:1000])
+	mut dclient = nettest.Client{C: dc, Buf: ""}
+	let dr = dclient.Answer(10.0)
+	let took3 = seconds(t2)
+	dclient.Close()
+	ci.Check(twine.Contains(dr.Body, "deadline") && took3 < 3.0, "a stalled body answered " + dr.Head + " | " + dr.Body + " after " + secondsText(took3) + " s")
+	say.Line("PASS a body that stops arriving ends at the deadline (" + secondsText(took3) + " s); a client that leaves half way does not stop the server")
+	// HTTPS: h2 by ALPN and HTTP/1.1.
+	mut openssl = tlsutil.Openssl3()
+	if len(openssl) == 0 {
+		openssl = "openssl"
+	}
+	let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+	let cert = tlsutil.Of(certs, "ecdsa")
+	let tport = nettest.Port()
+	let tserver = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TLS_CERT=" + cert.Cert, "TLS_KEY=" + cert.Key}, ci.Join(out, "tls.log"), tport)
+	servers = append(servers, tserver)
+	tserver.Ready(10)
+	if haveCurl {
+		let body = ci.Join(out, "random.bin")
+		ci.Write(body, data)
+		for proto in []str{"--http1.1", "--http2"} {
+			if proto == "--http2" && !h2curl {
+				continue
+			}
+			let up = ci.Exec([]str{"curl", "-s", "--cacert", cert.Cert, proto, "-X", "POST", "--data-binary", "@" + body, "https://localhost:" + mint.Itoa(tport) + "/upload"}, "", 60)
+			ci.Check(twine.Contains(up.Stdout, want), proto + " upload answered " + up.Stdout + up.Stderr)
+			let echo = ci.Exec([]str{"curl", "-s", "--cacert", cert.Cert, proto, "-X", "POST", "--data-binary", "@" + body, "https://localhost:" + mint.Itoa(tport) + "/echo"}, "", 60)
+			ci.Check(echo.Stdout == data, proto + " echo returned " + mint.Itoa(len(echo.Stdout)) + " bytes")
+		}
+		say.Line("PASS HTTPS: streamed bodies and an echo while reading, over h2 (ALPN) and HTTP/1.1")
+	}
+	for s in servers {
+		ci.Check(s.Running(), "a server exited")
+	}
+	for s in servers {
+		s.Stop()
+	}
+	say.Line("stream_body: all checks passed")
+	ci.Pass("stream_body: streamed uploads, slow readers, pipelining, partial reads and deadlines")
+}

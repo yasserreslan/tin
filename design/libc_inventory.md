@@ -43,7 +43,7 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `free` | `toolchain/runtime/runtime.tin`, `lib/std.tin` | 2 | removed | Tin mmap allocator or byte/word operations | Memory/OOM injection; overlap/alignment/microbenchmarks; bootstrap (phase 2) |
 | `freeaddrinfo` | `packages/wire/wire.tin` | 4 | removed | Tin resolver result ownership | DNS repeated lookup memory stability (phase 4) |
 | `fstat` | `toolchain/std/quarry/quarry.tin` | 3 | removed | Per-architecture fstat syscall and kernel layout | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
-| `getaddrinfo` | `packages/wire/wire.tin` | 4 | removed | Task-based hosts/resolv.conf UDP/TCP DNS resolver | tools/ci/dns_check.py fake DNS contract (phase 4) |
+| `getaddrinfo` | `packages/wire/wire.tin` | 4 | removed | Task-based hosts/resolv.conf UDP/TCP DNS resolver | tools/ci/dns_check.tin fake DNS contract (phase 4) |
 | `getauxval` | `toolchain/runtime/vdso_linux.tin`, `toolchain/std/seal/seal_linux.tin`, `toolchain/compiler/host_linux.tin` | 5 | removed | Initial-stack auxv lookup (`rt_getauxval`; the compiler's `host_auxval`) | toolchain/tests/v2/seal.tin (AT_HWCAP); vDSO clock (AT_SYSINFO_EHDR); page size (AT_PAGESZ); bootstrap (phase 5) |
 | `getcwd` | `toolchain/std/quarry/quarry.tin` | 3 | removed | getcwd raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `getenv` | `packages/anvil/anvil.tin`, `toolchain/std/quarry/quarry.tin`, `toolchain/runtime/memory_rt.tin`, `toolchain/runtime/runtime_linux.tin`, `toolchain/compiler/main.tin` | 5 | removed | Tin environment initialized from envp (`rt_getenv`; the compiler's `host_getenv`) | toolchain/tests/v2/quarry.tin; compiler TIN_ROOT; cgroup/HTTP configuration (phase 5) |
@@ -71,9 +71,9 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `pipe` | `packages/anvil/anvil.tin`, `toolchain/std/relay/relay.tin`, `toolchain/runtime/runtime.tin` | 3 | removed | pipe2 | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `poll` | `toolchain/std/relay/relay.tin`, `toolchain/runtime/runtime.tin`, `packages/wire/wire.tin` | 3 | removed | ppoll with timespec timeout | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `posix_memalign` | `toolchain/runtime/runtime.tin` | 2 | removed | Tin mmap allocator or byte/word operations | Memory/OOM injection; overlap/alignment/microbenchmarks; bootstrap (phase 2) |
-| `pthread_attr_init` | `toolchain/runtime/runtime.tin` | 5 | removed | Tin thread stack configuration (`rt_thread_start` in runtime_linux.tin) | tools/ci/thread_check.py stacks, guard and reaping (phase 5) |
-| `pthread_attr_setstacksize` | `toolchain/runtime/runtime.tin` | 5 | removed | Tin mmap stack and guard page | tools/ci/thread_check.py stacks, guard and reaping (phase 5) |
-| `pthread_create` | `toolchain/runtime/runtime.tin` | 5 | removed | Raw clone (`rt_sys_clone` leaf) with parent-owned stacks and child trampoline | tools/ci/thread_check.py returning cores, masks, alternate stacks and child faults; task_check.tin helper threads (phase 5) |
+| `pthread_attr_init` | `toolchain/runtime/runtime.tin` | 5 | removed | Tin thread stack configuration (`rt_thread_start` in runtime_linux.tin) | tools/ci/thread_check.tin stacks, guard and reaping (phase 5) |
+| `pthread_attr_setstacksize` | `toolchain/runtime/runtime.tin` | 5 | removed | Tin mmap stack and guard page | tools/ci/thread_check.tin stacks, guard and reaping (phase 5) |
+| `pthread_create` | `toolchain/runtime/runtime.tin` | 5 | removed | Raw clone (`rt_sys_clone` leaf) with parent-owned stacks and child trampoline | tools/ci/thread_check.tin returning cores, masks, alternate stacks and child faults; task_check.tin helper threads (phase 5) |
 | `pthread_sigmask` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | rt_sigprocmask with kernel sigset_t | tools/ci/http_check.tin shutdown; per-thread signal-mask tests (phase 3) |
 | `read` | `toolchain/runtime/runtime.tin`, `lib/std.tin` | 3 | removed | read raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `readdir` | `toolchain/std/quarry/quarry.tin`, `toolchain/compiler/main.tin` | 3 | removed | Tin linux_dirent64 parsing and buffer refills | toolchain/tests/v2/quarry.tin; directory refill/unknown-type/symlink cases; bootstrap (phase 3) |
@@ -114,6 +114,6 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `shutdown` | `packages/anvil/anvil.tin` | 3 | removed | shutdown raw syscall | HTTP conformance and graceful shutdown |
 | `sigaction` | `toolchain/runtime/runtime.tin` | 3 | removed | rt_sigaction and per-architecture restorer | Existing native stack-overflow/bad-access probes; signal-return tests (phase 3) |
 | `sigaltstack` | `toolchain/runtime/runtime.tin` | 3 | removed | sigaltstack raw syscall | Existing native per-thread stack-overflow probes (issue #175) |
-| `munmap` | `toolchain/runtime/memory.tin` | 3 | removed | munmap raw syscall | memory_check.py; task_memory_check.tin |
+| `munmap` | `toolchain/runtime/memory.tin` | 3 | removed | munmap raw syscall | memory_check.tin; task_memory_check.tin |
 | `madvise` | `toolchain/runtime/runtime.tin` | 3 | removed | madvise raw syscall | task_memory_check.tin after heavy burst |
 | `syscall` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | Generated leaf uses svc/syscall directly; the fallback went with the seed refresh (#339) | syscall_check.tin dynamic-import assertion; bootstrap |

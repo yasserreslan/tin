@@ -139,7 +139,7 @@ is 2.4 ms in every round. Two artifacts of the harness made the tails jump, for 
 server: all cached keys came from one warm-up with a 60 s TTL and expired together in the
 middle of a later run (a burst of MySQL reads), and the default Redis configuration forked
 a snapshot every minute. In run 37209296644, before the fix, Go had single rounds at 109 ms
-and 145 ms p99. `run.py` now empties Redis before every run and turns snapshots off. A
+and 145 ms p99. `run.tin` now empties Redis before every run and turns snapshots off. A
 route that does not touch Redis showed the same occasional spikes as `/users/{id}` in a
 side-by-side test on a shared VM, and Redis added about 1.5 ms at p99, its round trip.
 
@@ -649,7 +649,7 @@ function, selected at run time (`TIN_SEAL_SOFT=1` keeps the portable code, and t
   three `monty.sel` calls per entry;
 - `fe_mul_hw`, `fe_sq_hw`: X25519's multiplication and squaring in radix 2^51
   (`tools/gen/fe25519_asm.tin` writes both architectures from one product table, and checks it on
-  a model against Python integers).
+  an integer model).
 
 [bench-linux run 37646094544](https://github.com/yasserreslan/tin/actions/runs/37646094544) on
 Linux 6.17.0-1022-azure (Intel Xeon Platinum 8573C on amd64, Neoverse-N2 on arm64, Go 1.26.8),
@@ -705,7 +705,7 @@ The ingot heap served only blocks up to 4 KiB from slabs: a bigger kept value ha
 page-rounded mapping of its own, unmapped when dropped (#345). The classes now continue to
 256 KiB about 25% apart, and the mappings of blocks up to 4 MiB are kept for reuse.
 
-`tools/ci/heap_check.py` (fixture `blocks.tin`) runs on every CI build. From the run of
+`tools/ci/heap_check.tin` (fixture `blocks.tin`) runs on every CI build. From the run of
 2026-10-05 on GitHub-hosted runners (run 37315794425), after the change:
 
 | workload | ubuntu-24.04 (x86-64) | ubuntu-24.04-arm |
@@ -754,7 +754,7 @@ over 4 connections per core, in 5 alternating rounds of 3 s per side; the table 
 A map rebuilt its entries and index when full, so inserting into a map of 2^21 entries stalled
 the core (the issue, #346, recorded 94 ms on Linux arm64 before the change). Past 4096 entries
 a map now keeps its entries in chunks and moves its index into a bigger one 16 entries per
-set or delete. `tools/ci/map_growth_check.py` (fixture `mapgrow.tin`) bounds the slowest
+set or delete. `tools/ci/map_growth_check.tin` (fixture `mapgrow.tin`) bounds the slowest
 insert of 4 million integer keys and of a million str keys to under a millisecond (best of
 five runs: one descheduled thread can make a single run slower). From the same CI run, after
 the change:

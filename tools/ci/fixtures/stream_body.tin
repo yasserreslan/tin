@@ -6,7 +6,7 @@ import "quarry"
 import "say"
 import "tide"
 
-// Request bodies read as they arrive (#481), for tools/ci/stream_body_check.py:
+// Request bodies read as they arrive (#481), for tools/ci/stream_body_check.tin:
 //
 //	POST /upload[?slow=MS]  (Router.Stream) reads the body in 64 KiB pieces, sleeping MS between
 //	                        them, and answers "len=N sum=S first=MS" (S a checksum; first the ms
