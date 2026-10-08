@@ -30,3 +30,13 @@ TINLAND_TINC="$tinc" TINLAND_SCRIPT="$script" "$tmp/tinland" > "$tmp/editor.out"
 cmp "$tmp/editor.out" products/tinland/tests/golden/editor.out || { echo "FAIL darwin editor"; exit 1; }
 [ "$(head -c 4 "$tmp/editor.png" | od -An -c | tr -d ' ')" = '211PNG' ] || { echo "FAIL darwin editor snapshot"; exit 1; }
 echo "PASS darwin editor"
+# the whole window on the GPU: a PNG of it (skipped on a machine without a GPU)
+"$compiler" -o "$tmp/workspace_snapshot" products/tinland/tests/programs/workspace_snapshot.tin
+"$tmp/workspace_snapshot" products/tinland/tests/fixtures products/tinland/tests/fixtures/sample.txt "$tmp/workspace.png" > "$tmp/workspace_snapshot.out"
+if head -1 "$tmp/workspace_snapshot.out" | grep -q '^no gpu'; then
+	echo "SKIP tinland window snapshot: $(head -1 "$tmp/workspace_snapshot.out")"
+else
+	printf 'instances true\nwritten true\n' | cmp - "$tmp/workspace_snapshot.out" || { echo "FAIL tinland window snapshot"; exit 1; }
+	[ "$(head -c 4 "$tmp/workspace.png" | od -An -c | tr -d ' ')" = '211PNG' ] || { echo "FAIL tinland window snapshot png"; exit 1; }
+	echo "PASS tinland window snapshot"
+fi
