@@ -3,7 +3,7 @@ package main
 import "./ci"
 import "say"
 
-fn main() {
+fn main() ! {
 	let root = ci.Root()
 	let exe = ci.Join(root, "bin/ci/tar-strict")
 	ci.BuildTin("toolchain/tests/v2/tar.tin", exe, "", []str{})
@@ -11,5 +11,43 @@ fn main() {
 	ci.Must(result, "tar strict test")
 	let want = ci.Read(ci.Join(root, "toolchain/tests/v2/tar.out"))
 	ci.Check(result.Stdout == want, "tar strict output differs from toolchain/tests/v2/tar.out")
-	say.Line("PASS tar: ustar round trip and archive limit")
+	try interop(root)
+	say.Line("PASS tar: ustar round trip and Go archive/tar interoperability")
+}
+
+fn interop(root str) ! {
+	let dir = ci.TempDir(ci.Join(root, "bin/ci"), "tar-")
+	let goexe = ci.Join(dir, "tar-go")
+	let tinexe = ci.Join(dir, "tar-tin")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "tools/ci/fixtures/tar_oracle.go"}, root, 300), "build Go tar oracle")
+	ci.BuildTin("tools/ci/fixtures/tar_interop.tin", tinexe, "", []str{})
+	let goArchive = ci.Join(dir, "go.tar")
+	let tinArchive = ci.Join(dir, "tin.tar")
+	ci.Must(ci.Exec([]str{goexe, "generate", goArchive}, root, 60), "Go generate tar")
+	let goExpected = ci.Exec([]str{goexe, "verify", goArchive}, root, 60)
+	ci.Must(goExpected, "Go verify its tar archive")
+	let tinReadGo = ci.Exec([]str{tinexe, "read", goArchive}, root, 60)
+	ci.Must(tinReadGo, "Tin read Go tar")
+	let expectedLines = ci.Lines(goExpected.Stdout)
+	let actualLines = ci.Lines(tinReadGo.Stdout)
+	if len(expectedLines) == len(actualLines) {
+		for i in 0..len(expectedLines) { if expectedLines[i] != actualLines[i] { say.Line("tar line", i, "Go:", expectedLines[i], "Tin:", actualLines[i]) } }
+	}
+	ci.Check(sameLines(actualLines, expectedLines), "tar: Tin read of Go archive differs from Go fields")
+	let tinWrite = ci.Exec([]str{tinexe, "write", tinArchive}, root, 120)
+	ci.Must(tinWrite, "Tin write tar")
+	let goTin = ci.Exec([]str{goexe, "verify", tinArchive}, root, 120)
+	ci.Must(goTin, "Go read Tin tar")
+	let tinOwn = ci.Exec([]str{tinexe, "read", tinArchive}, root, 60)
+	ci.Must(tinOwn, "Tin read its tar")
+	ci.Check(sameLines(ci.Lines(goTin.Stdout), ci.Lines(tinOwn.Stdout)), "tar: Go read of Tin archive differs from Tin fields")
+	ci.Remove(dir)
+	ci.Pass("tar: Go archive/tar metadata and 32 MiB payload interoperate in both directions")
+	return
+}
+
+fn sameLines(a []str, b []str) bool {
+	if len(a) != len(b) { return false }
+	for i in 0..len(a) { if a[i] != b[i] { return false } }
+	return true
 }

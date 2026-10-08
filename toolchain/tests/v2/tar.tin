@@ -2,6 +2,7 @@ package main
 
 import "say"
 import "tar"
+import "fault"
 
 fn main() ! {
 	mut w = tar.NewWriter()
@@ -41,8 +42,8 @@ fn main() ! {
 }
 
 fn tooSmall(archive []u8) bool {
-	let _ = tar.NewReader(archive, 1) catch _ { return true }
-	return false
+	let (_, err) = tar.NewReader(archive, 1)
+	return fault.Is(err, fault.LimitExceeded)
 }
 
 fn badChecksum(archive mut []u8) bool {

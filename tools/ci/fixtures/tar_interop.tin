@@ -1,0 +1,90 @@
+package main
+
+import "quarry"
+import "say"
+import "tar"
+
+const largeSize = 33554432
+
+fn main() ! {
+	let args = quarry.Args()
+	if len(args) != 3 { fail "usage: tar_interop read|write path" }
+	if args[1] == "read" { try readArchive(args[2]) }
+	if args[1] == "write" { try writeArchive(args[2]) }
+	return
+}
+
+fn readArchive(path str) ! {
+	let raw = try quarry.ReadFileBound(path, tar.MaxArchiveSize)
+	mut r = try tar.NewReader([]u8(raw), tar.MaxArchiveSize)
+	mut index = i64(0)
+	for {
+		let h = try r.Next()
+		if h == nil { break }
+		say.Line(say.Fmt("%s %o %d %d %d %d %q %q %q %d %d", h.Name, h.Mode, h.Uid, h.Gid, h.Size, flagByte(h.Type), h.Linkname, h.Uname, h.Gname, h.Devmajor, h.Devminor))
+		mut remain = h.Size
+		mut buf = make([]u8, 65536)
+		mut offset = i64(0)
+		for remain > 0 {
+			let n = try r.Read(mut buf)
+			if n == 0 { fail "tar interop: early payload end" }
+			for i in 0..n {
+				mut expected = u8(0)
+				if index == 0 { expected = "hello"[offset+i] } else { expected = "0123456789abcdef\n"[(offset+i)%17] }
+				if buf[i] != expected { fail "tar interop: payload mismatch" }
+			}
+			offset += n
+			remain -= n
+		}
+		index += 1
+	}
+	if index != 9 { fail "tar interop: wrong entry count" }
+	return
+}
+
+fn writeArchive(path str) ! {
+	mut w = tar.NewWriter()
+	try w.WriteHeader(tar.Header{Name: "regular.txt", Mode: 0o640, Uid: 12, Gid: 34, Size: 5, Mtime: 1700000000, Type: tar.TypeFlag.Regular, Linkname: "", Uname: "user", Gname: "group"})
+	try w.Write([]u8("hello"))
+	try w.WriteHeader(tar.Header{Name: "dir/", Mode: 0o755, Uid: 1, Gid: 2, Size: 0, Mtime: 0, Type: tar.TypeFlag.Directory, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "sym", Mode: 0o777, Uid: 0, Gid: 0, Size: 0, Mtime: 0, Type: tar.TypeFlag.Symlink, Linkname: "target"})
+	try w.WriteHeader(tar.Header{Name: "hard", Mode: 0o644, Uid: 0, Gid: 0, Size: 0, Mtime: 0, Type: tar.TypeFlag.HardLink, Linkname: "regular.txt"})
+	try w.WriteHeader(tar.Header{Name: "fifo", Mode: 0o600, Uid: 0, Gid: 0, Size: 0, Mtime: 0, Type: tar.TypeFlag.Fifo, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "device-char", Mode: 0o600, Uid: 0, Gid: 0, Size: 0, Mtime: 0, Type: tar.TypeFlag.Character, Linkname: "", Devmajor: 8, Devminor: 1})
+	try w.WriteHeader(tar.Header{Name: "device-block", Mode: 0o600, Uid: 0, Gid: 0, Size: 0, Mtime: 0, Type: tar.TypeFlag.Block, Linkname: "", Devmajor: 8, Devminor: 2})
+	mut boundary = ""
+	for i in 0..155 { boundary += "p" }
+	boundary += "/"
+	for i in 0..100 { boundary += "n" }
+	try w.WriteHeader(tar.Header{Name: boundary, Mode: 0o600, Uid: 3, Gid: 4, Size: 0, Mtime: 0, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "large.bin", Mode: 0o600, Uid: 0, Gid: 0, Size: largeSize, Mtime: 0, Type: tar.TypeFlag.Regular, Linkname: ""})
+	let chunk = []u8("0123456789abcdef\n")
+	mut left = largeSize
+	for left > 0 {
+		let n = min(left, 65536)
+		mut buf = make([]u8, n)
+		let offset = largeSize - left
+		for i in 0..n { buf[i] = chunk[(offset + i) % 17] }
+		try w.Write(buf)
+		left -= n
+	}
+	try w.Close()
+	let archive = try w.Bytes()
+	try quarry.WriteFile(path, str(archive))
+	return
+}
+
+fn flagByte(t tar.TypeFlag) i64 {
+	return match t {
+		tar.TypeFlag.Regular => i64('0')
+		tar.TypeFlag.Directory => i64('5')
+		tar.TypeFlag.Symlink => i64('2')
+		tar.TypeFlag.HardLink => i64('1')
+		tar.TypeFlag.Fifo => i64('6')
+		tar.TypeFlag.Character => i64('3')
+		tar.TypeFlag.Block => i64('4')
+		tar.TypeFlag.PAX => i64('x')
+		tar.TypeFlag.GNULongName => i64('L')
+		tar.TypeFlag.GNULongLink => i64('K')
+	}
+}

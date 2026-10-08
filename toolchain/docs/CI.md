@@ -159,6 +159,7 @@ sh tools/ci/tin.sh crypto_check          # seal primitives: Wycheproof and hashl
 sh tools/ci/tin.sh cipher_check          # seal's MD5, AES/DES blocks, RC4 and cipher modes against Go (needs Go)
 sh tools/ci/tin.sh hpke_check            # RFC 9180 HPKE base mode against Go crypto/hpke
 sh tools/ci/tin.sh nist_check            # NIST curves, DSA verification and FIPS status against Go (needs Go)
+sh tools/ci/tin.sh tar_check             # strict ustar regression plus Go archive/tar headers and a 32 MiB payload in both directions
 sh tools/ci/tin.sh tls_check             # TLS 1.3 client: RFC 8448, openssl/Go interop, https, wss
 sh tools/ci/tin.sh tls_server_check      # TLS 1.3 server: anvil.ServeTLS against openssl, Go and Tin clients
 sh tools/ci/tin.sh x509_check            # certificates and RSA signatures against Go (needs Go)

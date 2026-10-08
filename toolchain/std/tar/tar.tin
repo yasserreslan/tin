@@ -1,7 +1,7 @@
 package tar
 
 // Package tar reads and writes bounded ustar archive records.
-// Writer stores names up to 100 bytes directly or splits paths at a slash into the 155-byte prefix and 100-byte name fields; longer names need PAX or GNU records, which Writer does not synthesize. Sparse formats are not supported.
+// Writer stores names up to 100 bytes directly or splits paths at a slash into the 155-byte prefix and 100-byte name fields; longer names need PAX or GNU records, which Writer does not synthesize. Reader exposes PAX and GNU extension entries as raw headers and does not apply their metadata to following entries. Sparse formats are not supported.
 // Reader uses the supplied archive bytes; Writer buffers at most MaxArchiveSize bytes.
 
 import "say"
@@ -17,6 +17,9 @@ type TypeFlag enum {
 	Directory
 	Symlink
 	HardLink
+	Fifo
+	Character
+	Block
 	PAX
 	GNULongName
 	GNULongLink
@@ -32,6 +35,10 @@ type Header struct {
 	Mtime i64
 	Type TypeFlag
 	Linkname str
+	Uname str
+	Gname str
+	Devmajor i64
+	Devminor i64
 }
 
 // Reader reads entries from a bounded archive in order.
@@ -39,6 +46,7 @@ type Reader struct {
 	data []u8
 	at i64
 	left i64
+	pad i64
 	maxBytes i64
 	ended bool
 }
@@ -51,7 +59,7 @@ fn NewReader(data []u8, maxBytes i64) !Reader {
 	if i64(len(data)) > maxBytes {
 		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
 	}
-	return Reader{data: data, at: 0, left: 0, maxBytes: maxBytes, ended: false}
+	return Reader{data: data, at: 0, left: 0, pad: 0, maxBytes: maxBytes, ended: false}
 }
 
 // Next advances to the next header, returning nil at the end of the archive.
@@ -60,12 +68,16 @@ fn (r mut Reader) Next() !?Header {
 		return nil
 	}
 	if r.left > 0 {
-		let padded = (r.left + BlockSize - 1) / BlockSize * BlockSize
-		if padded > i64(len(r.data)) - r.at {
+		if r.left > i64(len(r.data)) - r.at {
 			fail "tar: unexpected EOF in file data"
 		}
-		r.at += padded
+		r.at += r.left
 		r.left = 0
+	}
+	if r.pad > 0 {
+		if r.pad > i64(len(r.data)) - r.at { fail "tar: unexpected EOF in file data padding" }
+		r.at += r.pad
+		r.pad = 0
 	}
 	if r.at + BlockSize > i64(len(r.data)) {
 		fail "tar: unexpected EOF in header"
@@ -100,6 +112,9 @@ fn (r mut Reader) Next() !?Header {
 	if f == u8('5') { ty = TypeFlag.Directory }
 	if f == u8('2') { ty = TypeFlag.Symlink }
 	if f == u8('1') { ty = TypeFlag.HardLink }
+	if f == u8('6') { ty = TypeFlag.Fifo }
+	if f == u8('3') { ty = TypeFlag.Character }
+	if f == u8('4') { ty = TypeFlag.Block }
 	if f == u8('x') { ty = TypeFlag.PAX }
 	if f == u8('L') { ty = TypeFlag.GNULongName }
 	if f == u8('K') { ty = TypeFlag.GNULongLink }
@@ -108,12 +123,13 @@ fn (r mut Reader) Next() !?Header {
 	let gid = octal(b, 116, 8)
 	let mtime = octal(b, 136, 12)
 	if mode < 0 || uid < 0 || gid < 0 || mtime < 0 { fail "tar: invalid octal header field" }
-	if f != 0 && f != u8('0') && f != u8('5') && f != u8('2') && f != u8('1') && f != u8('x') && f != u8('L') && f != u8('K') && f != u8('7') {
+	if f != 0 && f != u8('0') && f != u8('5') && f != u8('2') && f != u8('1') && f != u8('6') && f != u8('3') && f != u8('4') && f != u8('x') && f != u8('L') && f != u8('K') && f != u8('7') {
 		fail "tar: unsupported type flag"
 	}
-	let h = Header{Name: fullName, Mode: mode, Uid: uid, Gid: gid, Size: size, Mtime: mtime, Type: ty, Linkname: cstring(b, 157, 100)}
+	let h = Header{Name: fullName, Mode: mode, Uid: uid, Gid: gid, Size: size, Mtime: mtime, Type: ty, Linkname: cstring(b, 157, 100), Uname: cstring(b, 265, 32), Gname: cstring(b, 297, 32), Devmajor: octal(b, 329, 8), Devminor: octal(b, 337, 8)}
 	r.at += BlockSize
 	r.left = size
+	r.pad = (BlockSize - size % BlockSize) % BlockSize
 	return h
 }
 
@@ -151,8 +167,13 @@ fn (w mut Writer) WriteHeader(h Header) ! {
 	if w.closed || w.pending > 0 {
 		fail "tar: invalid writer state"
 	}
-	if len(w.data) % BlockSize != 0 {
-		fail "tar: invalid writer alignment"
+	let previousRem = len(w.data) % BlockSize
+	if previousRem > 0 {
+		let needed = BlockSize - previousRem
+		if i64(len(w.data)) + needed + BlockSize > MaxArchiveSize {
+			fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+		}
+		for i in 0..needed { w.data = append(w.data, 0) }
 	}
 	if len(h.Name) == 0 || len(h.Name) > 256 || h.Size < 0 || h.Size > 0o77777777777 || h.Mode < 0 || h.Mode > 0o7777777 || h.Uid < 0 || h.Uid > 0o7777777 || h.Gid < 0 || h.Gid > 0o7777777 || h.Mtime < 0 || h.Mtime > 0o77777777777 {
 		fail "tar: header field is outside ustar limits"
@@ -160,7 +181,7 @@ fn (w mut Writer) WriteHeader(h Header) ! {
 	if h.Type == TypeFlag.PAX || h.Type == TypeFlag.GNULongName || h.Type == TypeFlag.GNULongLink {
 		fail "tar: extension records are read-only"
 	}
-	if h.Type != TypeFlag.Regular && h.Type != TypeFlag.Directory && h.Type != TypeFlag.Symlink && h.Type != TypeFlag.HardLink {
+	if h.Type != TypeFlag.Regular && h.Type != TypeFlag.Directory && h.Type != TypeFlag.Symlink && h.Type != TypeFlag.HardLink && h.Type != TypeFlag.Fifo && h.Type != TypeFlag.Character && h.Type != TypeFlag.Block {
 		fail "tar: unsupported writer type flag"
 	}
 	let split = splitName(h.Name)
@@ -186,9 +207,16 @@ fn (w mut Writer) WriteHeader(h Header) ! {
 		TypeFlag.Directory => u8('5')
 		TypeFlag.Symlink => u8('2')
 		TypeFlag.HardLink => u8('1')
+		TypeFlag.Fifo => u8('6')
+		TypeFlag.Character => u8('3')
+		TypeFlag.Block => u8('4')
 		_ => u8('0')
 	}
 	putString(mut b, 157, 100, h.Linkname)
+	putString(mut b, 265, 32, h.Uname)
+	putString(mut b, 297, 32, h.Gname)
+	putOctal(mut b, 329, 8, h.Devmajor)
+	putOctal(mut b, 337, 8, h.Devminor)
 	putString(mut b, 345, 155, split.prefix)
 	putString(mut b, 257, 6, "ustar")
 	b[262] = 0
