@@ -62,6 +62,7 @@ fn commands() []command {
 		command{name: "View: Zoom In", cmd: CmdZoomIn},
 		command{name: "View: Zoom Out", cmd: CmdZoomOut},
 		command{name: "View: Reset Zoom", cmd: CmdZoomReset},
+		command{name: "View: Toggle Whitespace", cmd: CmdToggleWhitespace},
 	}
 }
 

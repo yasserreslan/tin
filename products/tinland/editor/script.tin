@@ -82,6 +82,7 @@ fn (ed Editor) dump() {
 //   output           prints the output panel
 //   prompt           prints the find or go-to-line prompt
 //   open:PATH        loads a file
+//   whitespace       toggles the whitespace marks (prints the new state)
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
 fn RunScript(ed mut Editor, script str) {
@@ -183,6 +184,8 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("prompt:", ed.Mode, ed.Prompt, ed.Message)
 		} else if twine.HasPrefix(step, "open:") {
 			ed.Load(step[5:])
+		} else if step == "whitespace" {
+			say.Line("whitespace:", ToggleWhitespace())
 		} else if twine.HasPrefix(step, "snap:") {
 			ed.Snapshot(step[5:])
 		} else if twine.HasPrefix(step, "view:") {

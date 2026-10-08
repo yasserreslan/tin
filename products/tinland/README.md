@@ -39,6 +39,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+D, Cmd+Shift+K, Alt+Up/Down | duplicate, delete, move lines |
 | Cmd+[ and Cmd+] , Tab, Shift+Tab | unindent, indent |
 | Alt+Left/Right, Cmd+Left/Right/Up/Down | by word, line start/end, document start/end |
+| View > Toggle Whitespace (also in the palette) | show spaces as dots and tabs as arrows |
 | Cmd+Shift+I | format the file with the rules of `tin fmt` |
 | Cmd+Shift+B or Cmd+click, Cmd+Alt+Left | go to the declaration of the name (in another file too), and back |
 | Ctrl+Q | quick info: the signature and documentation of the name |
