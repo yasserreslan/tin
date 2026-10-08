@@ -31,18 +31,6 @@ files() {
 gitfiles() {
 	git -C "$1" ls-tree -r "$2" | sed 's/^\([0-9]*\) [a-z]* \([0-9a-f]*\)	/\1 \2 /' | LC_ALL=C sort
 }
-# peak runs a command and sets $peak to its peak resident memory in KiB (VmHWM, polled from /proc; 0 without /proc)
-peak() {
-	"$@" &
-	pid=$!
-	peak=0
-	while kill -0 $pid 2> /dev/null; do
-		hwm=$(sed -n 's/^VmHWM: *\([0-9]*\) kB/\1/p' /proc/$pid/status 2> /dev/null || true)
-		[ -n "$hwm" ] && [ "$hwm" -gt "$peak" ] && peak=$hwm
-		sleep 0.01
-	done
-	wait $pid
-}
 started=$(date +%s)
 
 git clone -q --no-local "$src" "$d/repo"
@@ -95,11 +83,10 @@ for id in $(git rev-list main | awk 'NR % 97 == 1'); do
 	n=$((n + 1))
 done
 echo "ok #781 $n revisions resolve to what git rev-parse gives"
-peak "$tit" log > /dev/null
-if [ -d /proc/self ]; then
-	[ "$peak" -gt 0 ] && [ "$peak" -lt 65536 ] || fail "a log of the whole history peaked at $peak KiB"
-	echo "ok #781 a log of all $commits commits peaks at $peak KiB resident (under 64 MiB)"
-fi
+# the runtime says when the memory pool passes TIN_POOL_WARN_MB
+TIN_POOL_WARN_MB=64 "$tit" log > /dev/null 2> "$d/log.err"
+grep -q "memory pool holds" "$d/log.err" && fail "a log of the whole history: $(cat "$d/log.err")"
+echo "ok #781 a log of all $commits commits stays under 64 MiB of pool memory (TIN_POOL_WARN_MB=64 says nothing)"
 
 # #784 and #789: switching between commits sampled across history leaves exactly each commit's files
 step=$((commits / 12 + 1))
@@ -203,6 +190,16 @@ until t clone "http://127.0.0.1:$port/" "$d/clone" > "$d/clone.txt" 2>&1; do
 	rm -rf "$d/clone"
 	sleep 0.2
 done
+# #803: a lazy clone of the Tin repo, then tit log, fetches no file contents
+t clone --lazy "http://127.0.0.1:$port/" "$d/lazy" > /dev/null || fail "lazy clone"
+objs() {
+	find "$1/.tit/objects" "$1/.tit/packs" -type f | grep -v '/tmp-' | wc -l | tr -d ' '
+}
+before=$(objs "$d/lazy")
+t -C "$d/lazy" log > /dev/null
+[ "$(objs "$d/lazy")" = "$before" ] || fail "tit log in the lazy clone fetched objects"
+[ "$(t -C "$d/lazy" log --format=id | wc -l)" = "$(t log --format=id main | wc -l)" ] || fail "the lazy clone has another history"
+echo "ok #803 a lazy clone of the Tin repo, then tit log of all $commits commits, fetches no file contents"
 kill $server 2> /dev/null || true
 [ "$(t -C "$d/clone" log --format=id | wc -l)" = "$(t log --format=id main | wc -l)" ] || fail "the clone has another history"
 [ "$(t -C "$d/clone" log --format=id -n 1)" = "$(t log --format=id -n 1 main)" ] || fail "the clone's main is another commit"

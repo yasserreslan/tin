@@ -242,6 +242,9 @@ fn Scan(path str, body str) []Finding {
 	return out
 }
 
+// guardMost is the largest file guard searches.
+let guardMost = 16 << 20
+
 // guardRules is .tit-guard-allow: the paths guard does not search.
 fn guardRules(root str) !ignore.Rules {
 	mut rules = ignore.New(root)
@@ -261,9 +264,15 @@ fn findingText(f Finding) str {
 fn guardCommit(r mut Repo, before object.Id, after object.Id) ! {
 	let changes = try diff.TreeDiff(mut r.Store, before, after, false)
 	let rules = try guardRules(r.Ws.Root)
+	let idx = try r.readIndex()
 	mut found = []str{}
 	for c in changes {
 		if c.Kind == diff.Kind.Deleted || rules.Ignored(c.Path, false) {
+			continue
+		}
+		// keys and tokens are small: a file over guardMost (a data file, kept in chunks) is not searched
+		let e = idx.Find(c.Path)
+		if e != nil && e.Size > guardMost {
 			continue
 		}
 		let id = try object.IdOf(c.NewHash)

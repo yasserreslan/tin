@@ -117,16 +117,21 @@ the new version records it, `tit stack` shows it, and `tit edit` puts git's mark
 Kept versions stay in `.tit/workspaces/<ws>/snapshots` for 14 days. They never leave the machine (no commit names
 their blobs), a file `tit guard` flags is never kept, and neither is a file over 16 MiB.
 
+## Large files
+
+A file over 8 MiB is stored in content-defined chunks (design/tit.md section 5): an edit stores the chunks it
+touches, not the whole file again. Nothing changes in how the file is used; commits and git mirrors see one blob.
+
 ## Sharing
 
 | command | |
 |---|---|
 | `tit remote` / `tit remote add <name> <url>` | the remotes, or add one |
-| `tit clone <url> [dir]` | copy a repository and check out `main` (or the first branch) |
+| `tit clone [--lazy] <url> [dir]` | copy a repository and check out `main` (or the first branch); `--lazy` takes every commit and tree but only the files it checks out: any other file comes from the server the first time something reads it (`lazy.remote` in the config), so `tit log` needs nothing more |
 | `tit fetch [remote]` | bring a remote's new commits in, as `refs/remotes/<remote>/*` |
 | `tit push [remote] [branch]` | send a branch (origin and the current branch by default); refuses when the server's branch has moved on (`tit pull` first) |
 | `tit pull [remote]` | fetch, then merge `<remote>/<current branch>` |
-| `tit serve [--addr host:port] [--public] [--allow file]` | serve this repository; `.tit/allowed-keys` (or `--allow`) lists the keys that may sign, one `<email> ed25519 <base64>` a line; `--public` lets clone and fetch go unsigned |
+| `tit serve [--addr host:port] [--public] [--allow file]` | serve this repository (anvil's recording applies: a request kept with `TIN_REPLAY_DIR` replays with `tin replay`); `.tit/allowed-keys` (or `--allow`) lists the keys that may sign, one `<email> ed25519 <base64>` a line; `--public` lets clone and fetch go unsigned |
 
 ## git
 

@@ -216,6 +216,7 @@ fn moveTo(r mut Repo, from object.Id, to object.Id, force bool) ! {
 	if !force {
 		try checkMove(mut r, from, to)
 	}
+	try prefetch(mut r, from, to)
 	mut idx = try r.readIndex()
 	try worktree.Checkout(mut r.Store, r.Ws, mut idx, from, to, true)
 	try idx.Write(r.Ws.IndexPath())

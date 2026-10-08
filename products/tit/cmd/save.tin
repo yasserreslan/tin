@@ -101,7 +101,7 @@ fn doAdd(g Global, paths []str, o mut Out) ! {
 				fail "{p} is ignored by a .gitignore rule; it was not staged"
 			}
 		}
-		try index.Add(mut idx, mut loose, r.Ws.Root, rel)
+		try index.AddFile(mut idx, mut loose, r.Ws.Root, rel)
 	}
 	try idx.Write(r.Ws.IndexPath())
 }
@@ -126,7 +126,7 @@ fn addDir(root str, dir str, idx mut index.Index, s mut store.Loose, rules mut i
 			try rules.Enter(rel)
 			try addDir(root, rel, mut idx, mut s, mut rules)
 		} else {
-			try index.Add(mut idx, mut s, root, rel)
+			try index.AddFile(mut idx, mut s, root, rel)
 		}
 	}
 }
@@ -368,7 +368,7 @@ fn stageTracked(r Repo, idx mut index.Index, s mut store.Loose) ! {
 		}
 		let changed = try changedOnDisk(r.Ws.Root, e)
 		if changed {
-			try index.Add(mut idx, mut s, r.Ws.Root, p)
+			try index.AddFile(mut idx, mut s, r.Ws.Root, p)
 		}
 	}
 }

@@ -338,7 +338,7 @@ fn TestFetch(t mut crucible.T) {
 	crucible.Equal(mut t, "heads", len(h.Refs), 1)
 	crucible.Equal(mut t, "main", h.Refs[0].Target, c2.Hex())
 	// a clone: no haves, everything comes
-	let (a1, p1) = l.Fetch(FetchRequest{Wants: []str{c2.Hex()}, Haves: []str{}}) catch e {
+	let (a1, p1) = l.Fetch(FetchRequest{Wants: []str{c2.Hex()}, Haves: []str{}, NoBlobs: false, Objects: []str{}}) catch e {
 		t.Error("fetch: {e}")
 		return
 	}
@@ -351,12 +351,12 @@ fn TestFetch(t mut crucible.T) {
 	crucible.Equal(mut t, "in the pack", len(got), 6)
 	t.True("the tip", fresh.Has(c2))
 	// with c1 already: only c2, its tree and its blob
-	let (a2, _) = l.Fetch(FetchRequest{Wants: []str{c2.Hex()}, Haves: []str{c1.Hex(), "0123"}}) catch e {
+	let (a2, _) = l.Fetch(FetchRequest{Wants: []str{c2.Hex()}, Haves: []str{c1.Hex(), "0123"}, NoBlobs: false, Objects: []str{}}) catch e {
 		t.Error("fetch with haves: {e}")
 		return
 	}
 	crucible.Equal(mut t, "three objects", a2.Objects, 3)
-	let (_, _, nerr) = l.Fetch(FetchRequest{Wants: []str{object.Hash(object.Kind.Blob, "nowhere").Hex()}, Haves: []str{}})
+	let (_, _, nerr) = l.Fetch(FetchRequest{Wants: []str{object.Hash(object.Kind.Blob, "nowhere").Hex()}, Haves: []str{}, NoBlobs: false, Objects: []str{}})
 	t.True("an unknown want", nerr != nil && twine.Contains(fault.Message(nerr), "NotFound"))
 	quarry.RemoveAll(dir) catch _ {
 	}

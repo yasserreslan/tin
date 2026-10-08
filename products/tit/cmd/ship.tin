@@ -102,7 +102,7 @@ fn doShip(g Global, a ShipArgs, o mut Out) ! {
 		o.Line("No remote " + a.Remote + ": the tag is made here only.")
 		return
 	}
-	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(branch), Dir: "", Lease: false}, mut o)
+	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(branch), Dir: "", Lease: false, Lazy: false}, mut o)
 	try pushTag(g, a.Remote, a.Version, tagId)
 	o.Line("Pushed the tag " + a.Version + " to " + a.Remote + ".")
 }

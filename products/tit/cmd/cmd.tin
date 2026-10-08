@@ -183,7 +183,8 @@ commands:
   oplog [show N | restore N [--yes]]
                              the operations, newest first; one in full; every ref as it was after one
   remote [add <name> <url>]  the remotes, or add one
-  clone <url> [dir]          copy a repository from a tit server
+  clone [--lazy] <url> [dir] copy a repository from a tit server (--lazy: every commit, but file contents only
+                             when something reads them)
   fetch [remote]             bring a remote's new commits in (refs/remotes/<remote>/...)
   push [remote] [branch]     send a branch to a remote (origin and the current branch by default)
   pull [remote]              fetch, then merge the remote's copy of the current branch
@@ -583,17 +584,26 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Remote(ra)
 	}
 	if name == "clone" {
-		if len(rest) == 0 || len(rest) > 2 {
-			fail fault.Wrap(ErrUsage, "clone takes a URL and, if you like, a directory")
+		mut pos = []str{}
+		mut lazy = false
+		for a in rest {
+			if a == "--lazy" {
+				lazy = true
+			} else {
+				pos = append(pos, a)
+			}
+		}
+		if len(pos) == 0 || len(pos) > 2 {
+			fail fault.Wrap(ErrUsage, "clone [--lazy] takes a URL and, if you like, a directory")
 		}
 		mut dir = ""
-		if len(rest) == 2 {
-			dir = rest[1]
+		if len(pos) == 2 {
+			dir = pos[1]
 		}
-		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir, Lease: false})
+		return g, Command.Clone(ShareArgs{Remote: pos[0], Branch: "", Dir: dir, Lease: false, Lazy: lazy})
 	}
 	if name == "sync" {
-		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: true}
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: true, Lazy: false}
 		if len(rest) == 1 {
 			sa.Remote = rest[0]
 		} else if len(rest) > 1 {
@@ -602,7 +612,7 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Sync(sa)
 	}
 	if name == "fetch" || name == "pull" || name == "push" {
-		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: false}
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: false, Lazy: false}
 		if len(rest) > 0 {
 			sa.Remote = rest[0]
 		}

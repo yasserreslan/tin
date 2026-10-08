@@ -9,11 +9,32 @@ import "fault"
 // Layered is an ObjectStore over several: a read tries each in order, a write goes to the first.
 type Layered struct {
 	stores []dyn ObjectStore
+	// fallback is read when no layer holds an object (a lazy clone's remote, #803); Has does not count it
+	fallback []dyn ObjectStore
 }
 
 // NewLayered is a layered store over stores (at least one), the first taking the writes.
 fn NewLayered(stores []dyn ObjectStore) Layered {
-	return Layered{stores: stores}
+	return Layered{stores: stores, fallback: []dyn ObjectStore{}}
+}
+
+// Under is l with first in front of its layers, taking the writes.
+fn (l Layered) Under(first dyn ObjectStore) Layered {
+	mut stores = []dyn ObjectStore{first}
+	for s in l.stores {
+		stores = append(stores, s)
+	}
+	return Layered{stores: stores, fallback: l.fallback}
+}
+
+// WithFallback is l reading s when none of its layers holds an object.
+fn (l Layered) WithFallback(s dyn ObjectStore) Layered {
+	mut fb = []dyn ObjectStore{}
+	for f in l.fallback {
+		fb = append(fb, f)
+	}
+	fb = append(fb, s)
+	return Layered{stores: l.stores, fallback: fb}
 }
 
 // Has reports whether any layer holds the object.
@@ -33,6 +54,10 @@ fn (l mut Layered) GetRaw(id object.Id) !(object.Kind, str) {
 		if s.Has(id) {
 			return try s.GetRaw(id)
 		}
+	}
+	for i in 0..len(l.fallback) {
+		mut f = l.fallback[i]
+		return try f.GetRaw(id)
 	}
 	fail fault.Wrap(ErrNotFound, id.Hex())
 }

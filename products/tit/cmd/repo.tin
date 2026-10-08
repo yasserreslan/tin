@@ -70,7 +70,13 @@ fn open(g Global) !Repo {
 			}
 		}
 	}
-	return Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}, layers: layers}
+	mut r = Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}, layers: layers}
+	// a lazy clone reads what it left out from its remote (lazy.tin)
+	let z = try lazyOf(r)
+	if z != nil {
+		r.Store = r.Store.WithFallback(z)
+	}
+	return r
 }
 
 fn recoverPending(store str) ! {
@@ -91,11 +97,7 @@ fn recoverPending(store str) ! {
 // scratch is the repository's store with an in-memory layer in front that takes the writes: for objects a command
 // needs only while it runs (the working directory's files for a diff, the index's tree), which never reach .tit.
 fn (r Repo) scratch() store.Layered {
-	mut layers = []dyn store.ObjectStore{store.NewMem()}
-	for l in r.layers {
-		layers = append(layers, l)
-	}
-	return store.NewLayered(layers)
+	return r.Store.Under(store.NewMem())
 }
 
 // rel is a path the user gave (relative to the current directory, or -C) as a path relative to the working

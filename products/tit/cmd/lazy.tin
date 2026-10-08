@@ -1,0 +1,124 @@
+package cmd
+
+import "../diff"
+import "../identity"
+import "../object"
+import "../packfile"
+import "../store"
+import "../transport"
+import "fault"
+import "quarry"
+
+// Lazy clones (#803): tit clone --lazy takes every commit and tree but no file contents. The repository's store then
+// reads a missing object from the remote (lazy.remote in the config) the first time something needs it, and keeps it
+// in the loose store; a switch fetches the files it is about to write in one request.
+
+// lazyStore is the remote a lazy clone reads what it left out from: the fallback layer of the repository's store.
+type lazyStore struct {
+	url     str
+	email   str
+	keyPath str
+	dir     str
+}
+
+fn (z lazyStore) Has(id object.Id) bool {
+	return false
+}
+
+fn (z mut lazyStore) GetRaw(id object.Id) !(object.Kind, str) {
+	try fetchObjects(z, []object.Id{id})
+	mut loose = store.NewLoose(z.dir + "/objects")
+	return try loose.GetRaw(id)
+}
+
+fn (z mut lazyStore) Get(id object.Id) !object.Object {
+	let (kind, body) = try z.GetRaw(id)
+	return try object.Decode(kind, body)
+}
+
+fn (z mut lazyStore) PutRaw(kind object.Kind, body str) !object.Id {
+	fail "a lazy clone's remote takes no writes"
+}
+
+fn (z mut lazyStore) Put(o object.Object) !object.Id {
+	fail "a lazy clone's remote takes no writes"
+}
+
+// clientFor is a connection to url, signing as email with the key at keyPath when there is one.
+fn clientFor(url str, email str, keyPath str) !transport.Http {
+	if len(email) == 0 || !quarry.Exists(keyPath) {
+		return transport.NewHttp(url, "", fn(payload str) ![]u8 {
+			fail fault.Wrap(identity.ErrNoIdentity, "no key to sign with")
+		})
+	}
+	let signer = try identity.LoadKey(keyPath)
+	return transport.NewHttp(url, email, fn(payload str) ![]u8 {
+		return try signer.Sign(payload)
+	})
+}
+
+// fetchObjects brings these objects from the lazy remote into the loose store, in requests of up to 5,000.
+fn fetchObjects(z lazyStore, ids []object.Id) ! {
+	if len(ids) == 0 {
+		return
+	}
+	mut c = try clientFor(z.url, z.email, z.keyPath)
+	mut loose = store.NewLoose(z.dir + "/objects")
+	mut at = 0
+	for at < len(ids) {
+		mut hexes = []str{}
+		for k in at..min(len(ids), at + 5000) {
+			hexes = append(hexes, ids[k].Hex())
+		}
+		at += len(hexes)
+		let (_, data) = c.Fetch(transport.FetchRequest{Wants: []str{}, Haves: []str{}, NoBlobs: false, Objects: hexes}) catch e {
+			fail fault.Wrap(e, "this lazy clone reads file contents from {z.url}")
+		}
+		mut mem = store.NewMem()
+		let got = try packfile.Unpack(data, mut mem, transport.MaxObject)
+		for id in got {
+			let (kind, body) = try mem.GetRaw(id)
+			_ = try loose.PutRaw(kind, body)
+		}
+	}
+}
+
+// lazyOf is the lazy remote of a repository, when it is a lazy clone.
+fn lazyOf(r Repo) !?lazyStore {
+	let cfg = try r.config()
+	let remote = cfg.Get("lazy.remote")
+	if remote == nil {
+		return nil
+	}
+	let url = cfg.Get("remote." + remote + ".url")
+	if url == nil {
+		return nil
+	}
+	mut email = ""
+	let e = cfg.Get("user.email")
+	if e != nil {
+		email = e
+	}
+	return lazyStore{url: url, email: email, keyPath: identity.DefaultKeyPath(cfg), dir: r.Ws.Store}
+}
+
+// prefetch brings the blobs a move of the working directory from one tree to another writes, when the repository is
+// a lazy clone, in one request instead of one each.
+fn prefetch(r mut Repo, from object.Id, to object.Id) ! {
+	let z = try lazyOf(r)
+	if z == nil {
+		return
+	}
+	let changes = try diff.TreeDiff(mut r.Store, from, to, false)
+	mut missing = []object.Id{}
+	for c in changes {
+		if c.Kind == diff.Kind.Deleted || len(c.NewHash) == 0 {
+			continue
+		}
+		let id = try object.IdOf(c.NewHash)
+		if !r.Store.Has(id) {
+			missing = append(missing, id)
+		}
+	}
+	try fetchObjects(z, missing)
+}

@@ -154,7 +154,8 @@ type CommitData struct {
 **tag**: `object <hex id>`, `type <kind>`, `tag <name>`, `tagger <person>`, optional `signature`, an empty
 line, the message. `TagData` mirrors it.
 
-A fifth kind for large files split into chunks is reserved for #803, which adds it with its own approval.
+Large files need no fifth kind: a blob over 8 MiB keeps its id and is stored in chunks by the loose store (section
+5), so every other part of tit, and git mirrors, see an ordinary blob (#803).
 
 **Worked example.** The blob `hello, tin!\n` (12 bytes) encodes as `blob 12\0hello, tin!\n` and has id
 `ebc9953649c58cea3a38091425f91d38386dfcc68628332dd79cc6c84b3556e6`.
@@ -186,6 +187,14 @@ itself.
 to `.tit/objects/tmp-<16 random hex>`, synced, then renamed into place; when the target already exists the
 temporary file is removed (objects are immutable, so the existing one is the same). A reader inflates with a
 bound of the declared size plus the header, so a lying header is `fault.LimitExceeded`, not a huge allocation.
+
+**Large blobs in chunks (#803).** A blob over 8 MiB is written by the loose store as a *manifest*: its file at the
+blob's path holds zlib of `chunks <size>\0` followed, for each chunk in order, by the chunk's SHA-256 (32 bytes) and
+its length (8 bytes, little-endian). Each chunk is its own file, `objects/chunks/ab/cdef…` (named by the hex of its
+SHA-256), holding zlib of its bytes. Chunks are cut by content (FastCDC: a gear rolling hash over 256 values from
+splitmix64 seeded with `tit-cdc1`; no cut before 256 KiB, a 22-bit mask up to 1 MiB, an 18-bit mask after, a cut at
+4 MiB at the latest), so an edit changes the chunks it touches and the rest are stored once. Reading assembles the
+chunks, checks each against its hash and the whole against the blob's id. Packs and the protocol carry the whole blob.
 
 ## 6. Packs (version 1)
 
