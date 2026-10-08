@@ -1,0 +1,17 @@
+package main
+
+import "say"
+
+fn main() {
+	let i = 3
+	let a = f64((-32 << u64(i)) | i)
+	let b = u64((41 << u64(i)) ^ i)
+	let c = u64((-29 >> u64(i)) + i + 100)
+	say.Line(a, b, c)
+	let s = 3
+	let n = 5
+	let x u8 = 200
+	say.Line((1 << u64(s)) + x, n + (1 << u64(s)), (3 << u64(s)) == n, (1 << u64(s)) | (2 << u64(s)))
+	let alone = u64(1 << u64(s))
+	say.Line(alone)
+}
