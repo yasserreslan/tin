@@ -1,0 +1,131 @@
+package seal
+
+// ---- HPKE base mode (RFC 9180) ----
+
+// HPKEKEM selects the DHKEM curve used by the RFC 9180 base mode.
+type HPKEKEM enum { HPKEP256, HPKEX25519 }
+
+// HPKEAEAD selects an authenticated encryption algorithm for HPKE.
+type HPKEAEAD enum { HPKEAES128GCM, HPKEAES256GCM, HPKEChaCha20Poly1305 }
+
+// HPKESeal performs one RFC 9180 base-mode encryption with HKDF-SHA256. recipientPublic is the
+// uncompressed 65-byte P-256 or 32-byte X25519 public key. It returns enc and ciphertext||tag.
+fn HPKESeal(kem HPKEKEM, aead HPKEAEAD, recipientPublic []u8, info []u8, aad []u8, plaintext secret []u8) !([]u8, []u8) {
+	let ephemeral = hpkeNewPrivate(kem)
+	let enc = try hpkePublic(kem, ephemeral)
+	let dh = try hpkeDH(kem, ephemeral, recipientPublic)
+	let sharedSecret = try hpkeShared(kem, enc, recipientPublic, dh)
+	let (key, nonce) = try hpkeKeySchedule(kem, aead, sharedSecret, info)
+	let cipher = try hpkeAEAD(aead, key)
+	let ciphertext = try cipher.Seal(nonce, plaintext, aad)
+	return enc, ciphertext
+}
+
+// HPKEOpen opens one RFC 9180 base-mode ciphertext using the recipient's private key and enc.
+// Authentication failures, invalid keys and malformed enc values return a fault.
+fn HPKEOpen(kem HPKEKEM, aead HPKEAEAD, recipientPrivate []u8, enc []u8, info []u8, aad []u8, ciphertext []u8) ![]u8 {
+	let recipientPublic = try hpkePublic(kem, recipientPrivate)
+	let dh = try hpkeDH(kem, recipientPrivate, enc)
+	let sharedSecret = try hpkeShared(kem, enc, recipientPublic, dh)
+	let (key, nonce) = try hpkeKeySchedule(kem, aead, sharedSecret, info)
+	return try hpkeOpenNonce(aead, key, nonce, aad, ciphertext)
+}
+
+fn hpkeOpenNonce(aead HPKEAEAD, key []u8, nonce []u8, aad []u8, ciphertext []u8) ![]u8 {
+	let cipher = try hpkeAEAD(aead, key)
+	return try cipher.Open(nonce, ciphertext, aad)
+}
+
+fn hpkeNewPrivate(kem HPKEKEM) []u8 {
+	return match kem {
+		HPKEKEM.HPKEP256 => P256NewPrivateKey()
+		HPKEKEM.HPKEX25519 => X25519NewPrivateKey()
+	}
+}
+
+fn hpkePublic(kem HPKEKEM, priv []u8) ![]u8 {
+	return match kem {
+		HPKEKEM.HPKEP256 => try P256PublicKey(priv)
+		HPKEKEM.HPKEX25519 => try X25519PublicKey(priv)
+	}
+}
+
+fn hpkeDH(kem HPKEKEM, priv []u8, peer []u8) ![]u8 {
+	return match kem {
+		HPKEKEM.HPKEP256 => try P256ECDH(priv, peer)
+		HPKEKEM.HPKEX25519 => try X25519(priv, peer)
+	}
+}
+
+fn hpkeKemID(kem HPKEKEM) i64 {
+	return match kem {
+		HPKEKEM.HPKEP256 => 0x0010
+		HPKEKEM.HPKEX25519 => 0x0020
+	}
+}
+
+fn hpkeAEADID(aead HPKEAEAD) i64 {
+	return match aead {
+		HPKEAEAD.HPKEAES128GCM => 0x0001
+		HPKEAEAD.HPKEAES256GCM => 0x0002
+		HPKEAEAD.HPKEChaCha20Poly1305 => 0x0003
+	}
+}
+
+fn hpkeAEAD(aead HPKEAEAD, key []u8) !AEAD {
+	return match aead {
+		HPKEAEAD.HPKEAES128GCM => try NewAESGCM(key)
+		HPKEAEAD.HPKEAES256GCM => try NewAESGCM(key)
+		HPKEAEAD.HPKEChaCha20Poly1305 => try NewChaCha20Poly1305(key)
+	}
+}
+
+fn hpkeID(id i64) []u8 {
+	return []u8{u8(id >> 8), u8(id)}
+}
+
+fn hpkeLabeledExtract(suite str, salt []u8, label str, ikm []u8) []u8 {
+	let labeled = "HPKE-v1" + suite + label + str(ikm)
+	return HkdfExtract(Hash.SHA256, str(salt), labeled)
+}
+
+fn hpkeLabeledExpand(suite str, prk []u8, label str, info []u8, n i64) ![]u8 {
+	mut labeled = []u8{}
+	labeled = append(labeled, u8(n >> 8), u8(n))
+	labeled = append(labeled, "HPKE-v1"...)
+	labeled = append(labeled, suite...)
+	labeled = append(labeled, label...)
+	labeled = append(labeled, info...)
+	return try HkdfExpand(Hash.SHA256, str(prk), str(labeled), n)
+}
+
+fn hpkeShared(kem HPKEKEM, enc []u8, recipientPublic []u8, dh []u8) ![]u8 {
+	let suite = "KEM" + str(hpkeID(hpkeKemID(kem)))
+	let eae = hpkeLabeledExtract(suite, []u8{}, "eae_prk", dh)
+	mut context = []u8{}
+	context = append(context, enc...)
+	context = append(context, recipientPublic...)
+	return try hpkeLabeledExpand(suite, eae, "shared_secret", context, 32)
+}
+
+fn hpkeKeySchedule(kem HPKEKEM, aead HPKEAEAD, sharedSecret []u8, info []u8) !([]u8, []u8) {
+	mut suite = []u8{}
+	suite = append(suite, "HPKE"...)
+	suite = append(suite, hpkeID(hpkeKemID(kem))...)
+	suite = append(suite, hpkeID(0x0001)...)
+	suite = append(suite, hpkeID(hpkeAEADID(aead))...)
+	let suiteID = str(suite)
+	let pskIDHash = hpkeLabeledExtract(suiteID, []u8{}, "psk_id_hash", []u8{})
+	let infoHash = hpkeLabeledExtract(suiteID, []u8{}, "info_hash", info)
+	mut context = []u8{0}
+	context = append(context, pskIDHash...)
+	context = append(context, infoHash...)
+	let secretVal = hpkeLabeledExtract(suiteID, sharedSecret, "secret", []u8{})
+	mut keySize = 16
+	if aead == HPKEAEAD.HPKEAES256GCM || aead == HPKEAEAD.HPKEChaCha20Poly1305 {
+		keySize = 32
+	}
+	let key = try hpkeLabeledExpand(suiteID, secretVal, "key", context, keySize)
+	let nonce = try hpkeLabeledExpand(suiteID, secretVal, "base_nonce", context, 12)
+	return key, nonce
+}

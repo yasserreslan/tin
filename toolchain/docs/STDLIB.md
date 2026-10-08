@@ -1858,6 +1858,10 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `HkdfExtract(h Hash, salt str, ikm secret str) []u8`: HkdfExtract is HKDF-Extract(salt, ikm) (RFC 5869): a pseudorandom key of Size(h) bytes. An empty salt means Size(h) zero bytes. ikm may be secret.
 - `HkdfExpand(h Hash, prk secret str, info str, n i64) ![]u8`: HkdfExpand is HKDF-Expand(prk, info, n) (RFC 5869): n bytes, at most 255*Size(h). prk may be secret.
 - `HkdfExpandLabel(h Hash, key secret str, label str, context str, n i64) ![]u8`: HkdfExpandLabel is TLS 1.3's HKDF-Expand-Label(secret, label, context, n) (RFC 8446 section 7.1); label is given without the "tls13 " prefix. key may be secret.
+- `type HPKEKEM enum { HPKEP256, HPKEX25519 }`: HPKEKEM selects the DHKEM curve used by the RFC 9180 base mode.
+- `type HPKEAEAD enum { HPKEAES128GCM, HPKEAES256GCM, HPKEChaCha20Poly1305 }`: HPKEAEAD selects an authenticated encryption algorithm for HPKE.
+- `HPKESeal(kem HPKEKEM, aead HPKEAEAD, recipientPublic []u8, info []u8, aad []u8, plaintext secret []u8) !([]u8, []u8)`: HPKESeal performs one RFC 9180 base-mode encryption with HKDF-SHA256. recipientPublic is the uncompressed 65-byte P-256 or 32-byte X25519 public key. It returns enc and ciphertext||tag.
+- `HPKEOpen(kem HPKEKEM, aead HPKEAEAD, recipientPrivate []u8, enc []u8, info []u8, aad []u8, ciphertext []u8) ![]u8`: HPKEOpen opens one RFC 9180 base-mode ciphertext using the recipient's private key and enc. Authentication failures, invalid keys and malformed enc values return a fault.
 - `type RSAPrivateKey struct`: RSAPrivateKey is an RSA key with its CRT values; the private parts can only be read by seal.
 - `type ECPrivateKey struct`: ECPrivateKey is an ECDSA key on P-256 or P-384: the curve, the scalar and the uncompressed public point.
 - `type PrivateKey struct`: PrivateKey is an RSA, ECDSA or Ed25519 private key, as ParsePrivateKeyPEM reads it.

@@ -161,6 +161,8 @@ jobs:
         run: sh tools/ci/tin.sh crypto_check
       - name: MD5, AES and DES blocks, RC4 and the CBC/CTR/CFB/OFB modes against Go (a generated corpus, both AES paths)
         run: sh tools/ci/tin.sh cipher_check
+      - name: HPKE base mode (RFC 9180 vectors and Go crypto/hpke twin)
+        run: sh tools/ci/tin.sh hpke_check
       - name: TLS 1.3 client (RFC 8448 trace, openssl and Python interop, https and wss)
         run: sh tools/ci/tin.sh tls_check
       - name: TLS 1.3 server (anvil.ServeTLS against openssl, Python and Tin clients; malformed handshakes, one core, shutdown)
