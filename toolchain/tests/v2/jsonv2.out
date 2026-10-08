@@ -1,0 +1,15 @@
+"{\"X\":1,\"Y\":-2}"
+"{\"Title\":\"a<&>\",\"Tags\":[\"x\",\"\u2028\"],\"At\":null,\"Ok\":true}"
+"{\"Title\":\"a\\u003c\\u0026\\u003e\",\"Tags\":[],\"At\":null,\"Ok\":false}"
+"{\n  \"Title\": \"t\",\n  \"Tags\": [\n    \"y\"\n  ],\n  \"At\": null,\n  \"Ok\": false\n}"
+"{\n\t\"Title\": \"t\",\n\t\"Tags\": [\n\t\t\"y\"\n\t],\n\t\"At\": null,\n\t\"Ok\": false\n}"
+"{\"X\": 1, \"Y\": 2}"
+point: 5 6
+unmarshal error: jsontext: duplicate object member name "X"
+after duplicate: 0 0
+allowed duplicate: 2 0
+ignored unknown: 3 0
+rejected unknown: argo: unknown key "Z" at offset 7
+unchanged after fault: 3 0
+unmarshal error: jsontext: invalid character ']' at start of value within "/1" after offset 3
+slice after fault: 1 7

@@ -31,6 +31,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
 | [ore](#ore) | byte slices (bytes) |
 | [jsontext](#jsontext) | JSON tokens and values, token by token (encoding/json/jsontext) |
+| [jsonv2](#jsonv2) | JSON Marshal and Unmarshal with options (encoding/json/v2) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
 | [user](#user) | users and groups (os/user) |
@@ -1171,6 +1172,14 @@ Package jsontext reads and writes JSON token by token, as Go's encoding/json/jso
 - `(d mut Decoder) ReadValue() !str`: ReadValue returns the raw text of the next whole value, from its first byte to its last (the white space between its tokens is kept), or EOF at the end of the input. Go reads a value in one pass, so a comma before a close is reported at the close.
 - `(e mut Encoder) WriteToken(t Token) !`: WriteToken writes the next token: a name where the innermost object expects one, a value otherwise, and the closing delimiter of the innermost container. A complete top-level value ends with a newline.
 - `(e mut Encoder) WriteValue(v str) !`: WriteValue writes the JSON value v (validated, and formatted with the encoder's options).
+
+## jsonv2
+
+Package jsonv2 is encoding/json/v2's surface over argo and jsontext: Marshal and Unmarshal with options (#931). argo does the typed work (its encoders and decoders are generated per type); jsontext rewrites the encoded text with the options and checks text for the v2 rules argo does not apply (malformed text and duplicate member names are refused). The differences from v2 are in README.md.
+
+- `type Options struct`: Options are the v2 options this package implements: the formatting of Marshal's output (jsontext's options), whether Unmarshal accepts duplicate member names, and whether it refuses members that match no field.
+- `Marshal[T constraints.Any](v T, opts Options) !str`: Marshal returns the JSON encoding of v, formatted with opts. It has no newline at the end, as Go's Marshal has none. Strings are not HTML-escaped unless opts asks for it.
+- `Unmarshal[T constraints.Any](s str, v mut T, opts Options) !`: Unmarshal parses the JSON text s into v, a struct, slice or map. Malformed text and duplicate member names are faults (unless AllowDuplicateNames); a member that matches no field is a fault with RejectUnknownMembers. A fault leaves v unchanged.
 
 ## flume
 
