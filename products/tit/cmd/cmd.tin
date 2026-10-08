@@ -39,6 +39,7 @@ type Command enum {
 	Push(ShareArgs)
 	Pull(ShareArgs)
 	Serve(ServeArgs)
+	Mirror(str)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -169,6 +170,7 @@ commands:
   pull [remote]              fetch, then merge the remote's copy of the current branch
   serve [--addr host:port] [--public] [--allow file]
                              serve this repository over the tit protocol (keys: .tit/allowed-keys)
+  mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
   help [command]             this text
@@ -546,6 +548,15 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Serve(va)
 	}
+	if name == "mirror" {
+		mut path = ""
+		if len(rest) == 1 {
+			path = rest[0]
+		} else if len(rest) > 1 {
+			fail fault.Wrap(ErrUsage, "mirror takes one git directory")
+		}
+		return g, Command.Mirror(path)
+	}
 	if name == "adopt" {
 		mut path = ""
 		if len(rest) > 0 {
@@ -660,6 +671,7 @@ fn commandName(c Command) str {
 		Push(_) => "push"
 		Pull(_) => "pull"
 		Serve(_) => "serve"
+		Mirror(_) => "mirror"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -749,6 +761,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Serve(va) => {
 			try doServe(g, va, mut o)
+		}
+		Mirror(path) => {
+			try doMirror(g, path, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
