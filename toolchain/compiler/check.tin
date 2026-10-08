@@ -2275,6 +2275,8 @@ fn shared_let_write(pos i64, e i64) {
 	}
 }
 
+shared mut ck_init_label str = "" // the global whose try/catch initializer is being lowered (#815): a fault there ends startup
+shared mut ck_init_seq i64 // numbers the temps of those initializers
 shared mut ck_sentinel i64 // the initializer of the package-level var being checked: fault("...") there is a sentinel
 shared mut sentinel_seq i64 // numbers sentinel identities (the runtime's own are below 64)
 
@@ -2343,6 +2345,26 @@ fn check_var(v Decl) {
 		cast(Composite, init).elems = []i64{}
 		cast(Composite, init).keys = []i64{}
 	}
+	mut prelude = 0
+	if cast(Node, init).kind == EX_TRY || cast(Node, init).kind == EX_CATCH || cast(Node, init).kind == EX_WRAP {
+		// try f() aborts startup with the fault; f() catch e { v } handles it in place (#815). The call and its fault
+		// check run first, into a temp the global then takes.
+		ck_init_seq = ck_init_seq + 1
+		let tn = life_name("$ginit", ck_init_seq)
+		let l = cast(LetStmt, node_new(ST_LET, v.pos))
+		l.name = tn
+		l.init = init
+		ck_init_label = "initializing " + v.name
+		lower_try_stmt(cast(i64, l), init, 1, s.type_)
+		ck_init_label = ""
+		if cast(Node, l).kind != ST_BLOCK {
+			return
+		}
+		prelude = cast(i64, cast(Block, l).stmts)
+		let ref = cast(IdentExpr, node_new(EX_IDENT, v.pos))
+		ref.name = tn
+		init = cast(i64, ref)
+	}
 	ck_sentinel = init
 	let t = chk(cast(Node, init), s.type_)
 	ck_sentinel = 0
@@ -2380,6 +2402,9 @@ fn check_var(v Decl) {
 		} else {
 			a.value = mk_conv(v.pos, rt_call(v.pos, "rt_vdup", args2(init, mk_int(v.pos, vt.size, ty_int)), cast(i64, vt)), CV_SAME, ty_int)
 		}
+	}
+	if prelude != 0 {
+		a.value = mk_seq(v.pos, prelude, a.value, cast(Node, a.value).type_)
 	}
 	s.uninit = 1
 	if s.tls != 0 {
@@ -7799,7 +7824,7 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 	let f = cast(Fn, ck_fn)
 	let frs = f.rtypes
 	let hasf = i64(len(frs) > 0 && kind_of(cast(Ty, frs[len(frs) - 1])) == K_ERROR)
-	if handler == 0 && hasf == 0 {
+	if handler == 0 && hasf == 0 && len(ck_init_label) == 0 {
 		err_code_at(pos, "E411 NO_FAULT_RESULT", "try needs the enclosing function to return a fault (write its result as !T)")
 		return
 	}
@@ -7894,7 +7919,12 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 			fx = rt_call(pos, "rt_fault_wrap", args2(fx, cast(i64, wrapmsg)), ty_error)
 		}
 		mut vs2 = cast(Block, ifs.then).stmts
-		vs2 = append(vs2, fault_return(pos, cast(Block, ifs.then).stmts, fx))
+		if len(ck_init_label) != 0 {
+			// A package-level initializer: the fault ends startup, naming the global.
+			vs2 = append(vs2, expr_stmt(cast(Node, rt_call(pos, "rt_use_fail", args2(lit_string(pos, ck_init_label), fx), ty_void))))
+		} else {
+			vs2 = append(vs2, fault_return(pos, cast(Block, ifs.then).stmts, fx))
+		}
 	}
 	stmts = append(stmts, cast(i64, ifs))
 	if mode == 5 {
