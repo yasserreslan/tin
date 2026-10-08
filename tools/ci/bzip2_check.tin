@@ -1,0 +1,243 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "seal"
+import "twine"
+
+// Compare squash.Bunzip2 with Go's compress/bzip2 (#754).
+//
+// The base corpus is bzip2 streams made by Python's bz2 module (libbzip2, so the reference encoder; checked in under
+// toolchain/tests/data/bzip2, whose README has the generator) and Go's own testdata files and test vectors: empty input,
+// one byte, random bytes, run-heavy data, every byte value, UTF-8 text, text at every block size 1 to 9, Fibonacci words
+// that fill whole 100 kB and 900 kB blocks, and Go's damaged streams. The check derives the rest: streams back to back
+// (multistream, also with the block size changing between streams), trailing bytes after a stream, every base stream cut
+// short at a dozen places, flipped bytes in the header, the block header, the Huffman data and the trailer, and lowered
+// block size digits so a block no longer fits. Each case is a file; bench/ref/bzip2 and tools/ci/fixtures/bzip2.tin print
+// one line per file, the length and SHA-256 of the decompressed bytes or the fault, and the lines must be equal, faults
+// included (Go's messages).
+
+const SEED = 754
+
+// the Go test vectors (compress/bzip2's bzip2_test.go), in hex.
+const goHello = "425a68393141592653594eece83600000251800010400006449080200031064c4101a7a9a580bb9431f8bb9229c28482776741b0"
+const goZeros32 = "425a6839314159265359b5aa5098000000600040000004200021008283177245385090b5aa5098"
+const goZeros1M = "425a683931415926535938571ce50008084000c0040008200030cc0529a60806c4201e2ee48a70a12070ae39ca"
+const goRle1 = "425a6839314159265359d992d0f60000137dfe84020310091c1e280e100e042801099210094806c0110002e70806402000546034000034000000f2830000032000d3403264049270eb7a9280d308ca06ad28f6981bee1bf8160727c7364510d73a1e123083421b63f031f63993a0f40051fbf177245385090d992d0f60"
+const goIssue8363 = "425a68393141592653594eece83600000251800010400006449080200031064c4101a7a9a580bb943117724538509000000000"
+const goIssue13941 = "425a683131415926535936dc55330063ffc0006000200020a40830008b0008b8bb9229c28481b6e2a998"
+const goBadDelta = "425a6836314159265359b1f7404b000000400040002000217d184682ee48a70a12163ee80960"
+
+type corpusCase struct {
+	name str
+	data str
+}
+
+fn unhex(s str) str {
+	let b = seal.HexDecode(s) catch err {
+		ci.Fail("bad hex in the check: " + say.Str(err))
+		return ""
+	}
+	return str(b)
+}
+
+// flip is s with the byte at off xored with mask.
+fn flip(s str, off i64, mask u8) str {
+	mut b = []u8(s)
+	b[off] = b[off] ^ mask
+	return str(b)
+}
+
+// setByte is s with the byte at off replaced.
+fn setByte(s str, off i64, v u8) str {
+	mut b = []u8(s)
+	b[off] = v
+	return str(b)
+}
+
+fn baseFiles() []corpusCase {
+	mut out = []corpusCase{}
+	let ours = ci.Join(ci.Root(), "toolchain/tests/data/bzip2")
+	for path in ci.Files(ours, ".bz2") {
+		out = append(out, corpusCase{name: twine.TrimPrefix(path, ours + "/"), data: ci.Read(path)})
+	}
+	ci.Check(len(out) == 18, "bzip2: expected 18 streams in toolchain/tests/data/bzip2, found " + mint.Itoa(len(out)))
+	let o = ci.Exec([]str{"go", "env", "GOROOT"}, ci.Root(), 60)
+	ci.Must(o, "go env GOROOT")
+	let testdata = ci.Join(twine.TrimSpace(o.Stdout), "src/compress/bzip2/testdata")
+	for name in []str{"e.txt.bz2", "Isaac.Newton-Opticks.txt.bz2", "random.data.bz2", "pass-random1.bz2", "pass-random2.bz2", "pass-sawtooth.bz2"} {
+		let path = ci.Join(testdata, name)
+		ci.Check(ci.Exists(path), "bzip2: Go's test file " + path + " is missing")
+		out = append(out, corpusCase{name: "go/" + name, data: ci.Read(path)})
+	}
+	let b64 = ci.Read(ci.Join(testdata, "fail-issue5747.bz2.base64"))
+	let raw = seal.B64Decode(twine.ReplaceAll(twine.ReplaceAll(b64, "\n", ""), "\r", "")) catch err {
+		ci.Fail("bzip2: cannot decode fail-issue5747.bz2.base64: " + say.Str(err))
+		return out
+	}
+	out = append(out, corpusCase{name: "go/fail-issue5747", data: str(raw)})
+	out = append(out, corpusCase{name: "go/hello", data: unhex(goHello)})
+	out = append(out, corpusCase{name: "go/zeros32", data: unhex(goZeros32)})
+	out = append(out, corpusCase{name: "go/zeros1M", data: unhex(goZeros1M)})
+	out = append(out, corpusCase{name: "go/rle1", data: unhex(goRle1)})
+	out = append(out, corpusCase{name: "go/issue8363", data: unhex(goIssue8363)})
+	out = append(out, corpusCase{name: "go/issue13941", data: unhex(goIssue13941)})
+	out = append(out, corpusCase{name: "go/baddelta", data: unhex(goBadDelta)})
+	return out
+}
+
+// find is the base stream named name.
+fn find(base []corpusCase, name str) str {
+	for c in base {
+		if c.name == name {
+			return c.data
+		}
+	}
+	ci.Fail("bzip2: no base stream " + name)
+	return ""
+}
+
+fn corpus() []corpusCase {
+	let base = baseFiles()
+	mut cases = []corpusCase{}
+	for c in base {
+		cases = append(cases, c)
+	}
+
+	// Not bzip2, or only its start.
+	let starts = []str{"", "B", "BZ", "BZh", "BZh9", "BZh0", "BZhA", "BZx9", "XYZh9", "\x1f\x8b\x08\x00", "BZh91AY&SY"}
+	for i, s in starts {
+		cases = append(cases, corpusCase{name: "start " + mint.Itoa(i), data: s})
+	}
+
+	// Streams back to back, with the block size changing between them, and bytes after the last one.
+	let hello = find(base, "hello.bz2")
+	let joins = [][]str{
+		[]str{"empty.bz2", "empty.bz2"},
+		[]str{"hello.bz2", "hello.bz2"},
+		[]str{"hello.bz2", "text3.bz2", "byte.bz2"},
+		[]str{"text1.bz2", "fib1.bz2", "hello.bz2"},
+		[]str{"fib1.bz2", "fib9.bz2"},
+		[]str{"fib9.bz2", "byte.bz2", "fib1.bz2"},
+		[]str{"text2.bz2", "text4.bz2", "text5.bz2", "text6.bz2", "text7.bz2", "text8.bz2"},
+		[]str{"empty.bz2", "random.bz2", "empty.bz2", "runs.bz2"},
+		[]str{"unicode.bz2", "all256.bz2", "go/hello", "go/zeros32"},
+	}
+	for parts in joins {
+		mut s = ""
+		for p in parts {
+			s = s + find(base, p)
+		}
+		cases = append(cases, corpusCase{name: "join " + twine.Join(parts, "+"), data: s})
+	}
+	let tails = []str{"B", "BZ", "BZh", "BZh9", "BZh0", "BZx9", "XY", "\x00", "\x00\x00", "BZh91AY&SY", "BZh9\x17\x72\x45\x38\x50\x90\x00\x00\x00\x00", "BZh9\x17\x72\x45\x38\x50\x90\x00\x00\x00\x01"}
+	for i, t in tails {
+		cases = append(cases, corpusCase{name: "tail " + mint.Itoa(i), data: hello + t})
+	}
+
+	// Every base stream cut short.
+	for c in base {
+		let n = len(c.data)
+		let cuts = []i64{0, 1, 2, 3, 4, 5, 10, 14, 20, n / 4, n / 2, 3 * n / 4, n - 10, n - 6, n - 5, n - 4, n - 1}
+		mut seen = map[i64]bool{}
+		for k in cuts {
+			if k < 0 || k >= n || seen[k] {
+				continue
+			}
+			seen[k] = true
+			cases = append(cases, corpusCase{name: "cut " + c.name + " at " + mint.Itoa(k), data: c.data[0:k]})
+		}
+	}
+
+	// Flipped bytes: the header, the block header, the trailer, and random places.
+	let rng = dice.New(SEED)
+	for c in base {
+		let n = len(c.data)
+		mut offs = []i64{0, 1, 2, 3, 4, 7, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 24, 30, n - 10, n - 7, n - 5, n - 3, n - 1}
+		for i in 0..16 {
+			if n > 0 {
+				offs = append(offs, rng.I64n(n))
+			}
+		}
+		for i, off in offs {
+			if off < 0 || off >= n {
+				continue
+			}
+			let masks = []u8{1, 0x80, 0x10, 0xff}
+			let mask = masks[i % len(masks)]
+			cases = append(cases, corpusCase{name: "flip " + c.name + " at " + mint.Itoa(off) + " by " + mint.Itoa(i64(mask)), data: flip(c.data, off, mask)})
+		}
+	}
+
+	// Lower block size digits: blocks made for 900 kB no longer fit (the digit is outside every CRC).
+	for name in []str{"fib9.bz2", "text9.bz2", "go/Isaac.Newton-Opticks.txt.bz2", "go/pass-sawtooth.bz2", "go/zeros1M"} {
+		let s = find(base, name)
+		for digit in []u8{'1', '2', '5', '8'} {
+			cases = append(cases, corpusCase{name: "level " + name + " to " + str(digit), data: setByte(s, 3, digit)})
+		}
+	}
+	return cases
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 900, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let cases = corpus()
+	let directory = ci.Join(ci.Root(), "bin/ci/bzip2")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "bzip2-")
+	let files = ci.Join(work, "cases")
+	ci.Mkdirs(files)
+	mut paths = []str{}
+	for i, c in cases {
+		let path = ci.Join(files, mint.Itoa(i) + ".bz2")
+		ci.Write(path, c.data)
+		paths = append(paths, path)
+	}
+	let input = twine.Join(paths, "\n") + "\n"
+	let tin = ci.Join(work, "bzip2-tin")
+	ci.BuildTin("tools/ci/fixtures/bzip2.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "bzip2-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/bzip2"}, ci.Root(), 300), "go build bzip2")
+	let want = run(goexe, input)
+	let got = run(tin, input)
+	ci.Check(len(want) == len(cases), "bzip2: Go printed " + mint.Itoa(len(want)) + " lines for " + mint.Itoa(len(cases)) + " cases")
+	ci.Check(len(got) == len(want), "bzip2: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	mut decoded = 0
+	mut faults = map[str]i64{}
+	for i in 0..len(want) {
+		if twine.HasPrefix(want[i], "ok ") {
+			decoded += 1
+		} else {
+			faults[want[i]] += 1
+		}
+		if want[i] != got[i] {
+			say.Line("case " + mint.Itoa(i) + " (" + cases[i].name + "):")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "bzip2: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " cases differ")
+
+	// The corpus must reach the faults it is meant to reach.
+	let expected = []str{"bzip2: unexpected EOF", "bzip2 data invalid: bad magic value", "bzip2 data invalid: non-Huffman entropy encoding", "bzip2 data invalid: invalid compression level", "bzip2 data invalid: bad magic value found", "bzip2 data invalid: block checksum mismatch", "bzip2 data invalid: file checksum mismatch", "bzip2 data invalid: bad magic value in continuation file", "bzip2 data invalid: data exceeds block size", "bzip2 data invalid: repeats past end of block", "bzip2 data invalid: Huffman length out of range", "bzip2 data invalid: deprecated randomized files", "bzip2 data invalid: invalid number of Huffman trees", "bzip2 data invalid: tree index too large", "bzip2 data invalid: equal symbols in Huffman tree", "bzip2 data invalid: repeat count too large", "bzip2 data invalid: insufficient selector indices for number of symbols", "bzip2 data invalid: origPtr out of bounds"}
+	for e in expected {
+		ci.Check(faults["fault " + e] > 0, "bzip2: no case gives \"" + e + "\"")
+	}
+	for k, v in faults {
+		say.Line("  " + mint.Itoa(v) + " x " + k)
+	}
+	ci.Remove(work)
+	ci.Pass("bzip2: " + mint.Itoa(len(want)) + " cases (" + mint.Itoa(decoded) + " decoded, " + mint.Itoa(len(want) - decoded) + " faults) match Go's compress/bzip2")
+}

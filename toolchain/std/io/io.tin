@@ -3,13 +3,18 @@
 // ReadWriteCloser by satisfying every listed shape. The helpers read and write over any
 // reader or writer: ReadAll, ReadFull, ReadAtLeast, Copy, CopyN, CopyBuffer, LimitReader,
 // TeeReader, MultiReader, MultiWriter, WriteString and Discard. A stream ends when Read
-// returns 0 (flume's and ledger's readers do), not with a sentinel fault.
+// returns 0 (flume's and ledger's readers do), not with a sentinel fault; ReadByte and
+// ReadRune say the same with ok false and size 0.
 //
-// The byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...), Go's
-// ReaderFrom and WriterTo, and Pipe and the file system interface (io/fs) are the next steps
-// of #736. Reading, writing, closing and seeking change the stream, so those methods are mut
-// (#644): a type's method may take its receiver mut, and a call through a dyn value needs a
-// mut one (w mut dyn io.Writer).
+// Pipe connects a writer and a reader on different tasks or cores: it waits through the
+// scheduler, never blocking a core, and holds back a writer while it is full. The byte, rune
+// and string shapes (ByteReader, ByteScanner, RuneReader, RuneScanner, ByteWriter,
+// StringWriter) and ReaderFrom and WriterTo are declared for code that wants them; a generic
+// helper cannot ask a value which shapes it has, so Copy always copies through its buffer and a
+// caller with a WriterTo calls WriteTo itself. The file system interface (Go's io/fs) is package
+// fs. Reading, writing, closing and seeking change the stream, so those methods are mut (#644):
+// a type's method may take its receiver mut, and a call through a dyn value needs a mut one
+// (w mut dyn io.Writer).
 package io
 
 import "say"
@@ -83,6 +88,39 @@ shape ReadWriteSeeker {
 	Seeker
 }
 
+// ByteReader reads one byte at a time: ok is false at the end of the stream.
+shape ByteReader { mut ReadByte() !(u8, bool) }
+
+// ByteScanner is a ByteReader that can step back: UnreadByte makes the next ReadByte return the
+// byte the last one returned.
+shape ByteScanner {
+	ByteReader
+	mut UnreadByte() !
+}
+
+// ByteWriter writes one byte.
+shape ByteWriter { mut WriteByte(c u8) ! }
+
+// RuneReader reads one UTF-8 encoded rune: its value and its size in bytes, size 0 at the end of
+// the stream (an invalid encoding is U+FFFD of size 1, as Go's readers give).
+shape RuneReader { mut ReadRune() !(i32, i64) }
+
+// RuneScanner is a RuneReader that can step back: UnreadRune makes the next ReadRune return the
+// rune the last one returned.
+shape RuneScanner {
+	RuneReader
+	mut UnreadRune() !
+}
+
+// StringWriter writes a str without making a []u8 of it, and returns how many bytes it took.
+shape StringWriter { mut WriteString(s str) !i64 }
+
+// ReaderFrom reads src until its end into itself and returns how many bytes it took.
+shape ReaderFrom { mut ReadFrom(src mut dyn Reader) !i64 }
+
+// WriterTo writes its data to dst until it has none left and returns how many bytes it wrote.
+shape WriterTo { mut WriteTo(dst mut dyn Writer) !i64 }
+
 // ---- helpers ----
 
 // ReadAll reads until the stream ends and returns what it read.
@@ -129,10 +167,66 @@ fn ReadAtLeast[R Reader](src R, buf mut []u8, min i64) !i64 {
 }
 
 // Copy reads from src and writes every chunk to dst until the stream ends, and returns how many
-// bytes it copied. The scratch buffer is 32 KiB, as Go's is.
+// bytes it copied. The scratch buffer is 32 KiB, as Go's is, taken from this core's pool of them
+// and given back when Copy returns, so a loop of copies allocates nothing; a Reader must not keep
+// the buffer it is given (Go's rule too).
 fn Copy[W Writer, R Reader](dst W, src R) !i64 {
-	mut buf = make([]u8, 32768)
+	let raw = copyTake()
+	defer copyGive(raw)
+	mut buf = copyView(raw)
 	return try CopyBuffer(dst, src, mut buf)
+}
+
+// copySize is Copy's buffer size, Go's.
+const copySize = 32768
+
+// copyMax is how many Copy buffers a core keeps: more copies at once on one core (tasks that wait
+// inside Copy) use request memory for theirs.
+const copyMax = 4
+
+// copyFree is this core's stack of free Copy buffers (copyMax words, made once in the ingot heap),
+// copyTop how many it holds and copyMade how many buffers this core has made.
+mut copyFree i64
+mut copyTop i64
+mut copyMade i64
+
+// copyTake is a free 32 KiB ingot block of this core's Copy pool, or 0 when all are in use.
+fn copyTake() i64 {
+	if copyTop > 0 {
+		copyTop -= 1
+		return (copyFree + 8*copyTop)[0]
+	}
+	if copyMade >= copyMax {
+		return 0
+	}
+	if copyFree == 0 {
+		copyFree = rt_ingot_alloc(8 * copyMax)
+	}
+	copyMade += 1
+	return rt_ingot_alloc(copySize)
+}
+
+// copyGive returns a block copyTake gave to the pool (0: none was taken).
+fn copyGive(raw i64) {
+	if raw == 0 {
+		return
+	}
+	(copyFree + 8*copyTop)[0] = raw
+	copyTop += 1
+}
+
+// copyView is a []u8 over the block raw (a slice header in request memory, the data in the ingot
+// heap), or a fresh request-memory buffer when raw is 0.
+fn copyView(raw i64) []u8 {
+	if raw == 0 {
+		return make([]u8, copySize)
+	}
+	let h = rt_alloc(32)
+	h[0] = copySize
+	h[1] = copySize
+	h[2] = raw
+	h[3] = 1
+	return cast([]u8, h)
 }
 
 // CopyBuffer is Copy with the caller's scratch buffer, which must not be empty.

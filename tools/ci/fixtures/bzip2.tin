@@ -1,0 +1,34 @@
+package main
+
+// The bzip2 twin, Tin side: read file paths on stdin, one per line, and print for each what
+// squash.Bunzip2 makes of the file, as bench/ref/bzip2 prints Go's compress/bzip2 (#754):
+//
+//	ok <length> <sha256>    the decompressed bytes
+//	fault <message>         the fault, without the "squash: " prefix
+
+import "quarry"
+import "say"
+import "seal"
+import "squash"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for path in twine.Split(body, "\n") {
+		if len(path) == 0 {
+			continue
+		}
+		let data = quarry.ReadFile(path) catch err {
+			say.Line("cannot read", path, err)
+			return
+		}
+		let out = squash.Bunzip2(data, 1 << 30) catch err {
+			say.Line("fault " + twine.TrimPrefix(say.Str(err), "squash: "))
+			continue
+		}
+		say.Line("ok", len(out), seal.Sha256Hex(out))
+	}
+}

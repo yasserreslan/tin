@@ -34,8 +34,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      # Go is still needed by tools/ci/http_check.tin (the conformance client and the graceful
-      # shutdown test). Remove this step when those are rewritten in Tin.
+      # Go is still needed by tools/ci/http_check.tin and iofs_check.tin (reference implementations).
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -81,14 +80,20 @@ jobs:
         run: sh tools/ci/tin.sh io_check
       - name: Aligned columns against Go's text/tabwriter (every flag and padding)
         run: sh tools/ci/tin.sh column_check
+      - name: io/fs and Pipe against Go (generated tree, paths and reader corpus)
+        run: sh tools/ci/tin.sh iofs_check
       - name: CRC-64 and LZW against Go's hash/crc64 and compress/lzw (a generated corpus)
         run: sh tools/ci/tin.sh hash_check
+      - name: bzip2 against Go's compress/bzip2 (libbzip2 streams, cut, flipped and back to back)
+        run: sh tools/ci/tin.sh bzip2_check
       - name: UTF-16 against Go's unicode/utf16 (a generated rune corpus)
         run: sh tools/ci/tin.sh utf16_check
       - name: Path rules against Go's path (Clean, Split, Join and Match)
         run: sh tools/ci/tin.sh path_check
       - name: MIME, quoted-printable and multipart against Go
         run: sh tools/ci/tin.sh mime_check
+      - name: IP addresses, ports and prefixes against Go's net/netip (38,094 generated and edge cases)
+        run: sh tools/ci/tin.sh netip_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)

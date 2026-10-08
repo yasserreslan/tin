@@ -1,0 +1,27 @@
+empty 0 00000000 ""
+one byte 1 e8b7be43 "a"
+hello 13 f4247453 "hello, world\n"
+unicode 13000 héllo wörld, مرحبا بالعالم, 你好世界,
+fib9 1000000 45f96d9a
+fib1 250000 ef6062b8
+hello+one+empty 14 1a219a79 "hello, world\na"
+fib1+hello+fib9 1250013 431fcded
+nothing fault: squash: bzip2: unexpected EOF | limit: false
+zip fault: squash: bzip2 data invalid: bad magic value | limit: false
+header only fault: squash: bzip2: unexpected EOF | limit: false
+not huffman fault: squash: bzip2 data invalid: non-Huffman entropy encoding | limit: false
+level 0 fault: squash: bzip2 data invalid: invalid compression level | limit: false
+cut fault: squash: bzip2: unexpected EOF | limit: false
+cut in a block fault: squash: bzip2: unexpected EOF | limit: false
+block crc fault: squash: bzip2 data invalid: block checksum mismatch | limit: false
+stream crc fault: squash: bzip2 data invalid: file checksum mismatch | limit: false
+randomized fault: squash: bzip2 data invalid: deprecated randomized files | limit: false
+trailing XY fault: squash: bzip2 data invalid: bad magic value in continuation file | limit: false
+trailing B fault: squash: bzip2: unexpected EOF | limit: false
+trailing BZh fault: squash: bzip2: unexpected EOF | limit: false
+900k block in a 100k stream fault: squash: bzip2 data invalid: repeats past end of block | limit: false
+fib9 max 1000000 1000000 45f96d9a
+fib9 max 999999 fault: squash: bzip2 over 999999 bytes: limit exceeded | limit: true
+bomb fault: squash: bzip2 over 4194304 bytes: limit exceeded | limit: true
+bomb 22200 bytes in: -1
+8 x fib9 within 64 MiB: 8000000

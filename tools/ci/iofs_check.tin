@@ -1,0 +1,90 @@
+package main
+
+import "ci"
+import "mint"
+import "say"
+import "twine"
+
+// The Go twin compares io/fs and io.Pipe over a deterministic tree and reader corpus.
+
+fn hex(s str) str {
+	if len(s) == 0 {
+		return "-"
+	}
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for c in []u8(s) {
+		out = append(out, digits[c>>4], digits[c&15])
+	}
+	return str(out)
+}
+
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci"), "iofs-")
+	let tree = ci.Join(work, "tree")
+	ci.Mkdirs(ci.Join(tree, "alpha/deep"))
+	ci.Mkdirs(ci.Join(tree, "beta"))
+	ci.Write(ci.Join(tree, "alpha/a.txt"), "alpha\nline two\n")
+	ci.Write(ci.Join(tree, "alpha/deep/z.bin"), str([]u8{0, 1, 2, 127, 128, 255}))
+	ci.Write(ci.Join(tree, "beta/a.txt"), "beta")
+	ci.Write(ci.Join(tree, "empty"), "")
+	ci.Link("alpha/a.txt", ci.Join(tree, "link"))
+	ci.Link("missing", ci.Join(tree, "dangling"))
+	let tin = ci.Join(work, "iofs-tin")
+	let goexe = ci.Join(work, "iofs-go")
+	ci.BuildTin("tools/ci/fixtures/iofs.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/iofs"}, root, 300), "go build iofs")
+	let lines = corpus()
+	let input = twine.Join(lines, "\n") + "\n"
+	let want = ci.ExecIn([]str{goexe, tree}, root, 600, input, []str{})
+	let got = ci.ExecIn([]str{tin, tree}, root, 600, input, []str{})
+	ci.Must(want, "Go iofs")
+	ci.Must(got, "Tin iofs")
+	let wl = ci.Lines(want.Stdout)
+	let gl = ci.Lines(got.Stdout)
+	ci.Check(len(wl) == len(gl), "iofs: " + mint.Itoa(len(gl)) + " output lines against Go's " + mint.Itoa(len(wl)))
+	mut bad = 0
+	for i in 0..len(wl) {
+		if wl[i] != gl[i] {
+			mut source = "(multi-line output)"
+			if i < len(lines) {
+				source = lines[i]
+			}
+			say.Line("line", i+1, "corpus", source)
+			say.Line("  Go: ", wl[i])
+			say.Line("  Tin:", gl[i])
+			bad += 1
+			if bad == 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "iofs: " + mint.Itoa(bad) + " of " + mint.Itoa(len(wl)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("io/fs and Pipe: " + mint.Itoa(len(lines)) + " generated tree, path, walk, glob and reader cases match Go")
+}
+
+fn corpus() []str {
+	mut out = []str{}
+	for p in []str{".", "alpha", "alpha/a.txt", "alpha/deep/z.bin", "beta/a.txt", "empty", "link", "dangling", "missing", "alpha/missing", "../alpha", "/alpha", "alpha/", "alpha//a.txt"} {
+		out = append(out, "S " + hex(p), "L " + hex(p), "D " + hex(p), "F " + hex(p), "O " + hex(p))
+	}
+	for p in []str{"", ".", "alpha", "alpha/a.txt", "a//b", "a/../b", "../x", "/x", "x/", "x\\y", "é", str([]u8{0xff}), str([]u8{0xc0, 0xaf})} {
+		out = append(out, "V " + hex(p))
+	}
+	for p in []str{"*", "*.txt", "alpha/*", "alpha/*/*.bin", "**", "[ab]eta/*", "[", "alpha/[z-a]"} {
+		out = append(out, "G " + hex(p))
+	}
+	for m in []str{"-", "skipdir", "skipall", "stop"} {
+		out = append(out, "W " + hex(".") + " " + m + " " + hex("alpha"))
+	}
+	for spec in []str{"1,1,1", "7", "32,16", "128,128,128"} {
+		out = append(out, "P " + spec + " 0", "P " + spec + " 1", "P " + spec + " 17", "E " + spec + " " + hex("reader failed"))
+	}
+	for spec in []str{"2,3,1", "1,1,1,1"} {
+		out = append(out, "R " + spec + " 20")
+	}
+	out = append(out, "R 100000 4")
+	return out
+}

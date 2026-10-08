@@ -8,6 +8,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [fault](#fault) | fault chains and standard sentinels (errors) |
 | [argo](#argo) | JSON (encoding/json) |
 | [io](#io) | streaming shapes (io) |
+| [fs](#fs) | file system interfaces and helpers (io/fs) |
 | [anvil](#anvil) | HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http) |
 | [hearth](#hearth) | cores and threads (runtime) |
 | [relay](#relay) | messages between cores (channels) |
@@ -21,6 +22,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [gauge](#gauge) | math (math) |
 | [bits](#bits) | bit counting and manipulation (math/bits) |
 | [link](#link) | URLs and their escaping (net/url) |
+| [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
 | [ore](#ore) | byte slices (bytes) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
@@ -34,7 +36,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [atlas](#atlas) | functions on maps (maps) |
 | [cairn](#cairn) | containers (container/heap, sets, LRU) |
 | [stamp](#stamp) | hashes and checksums (hash/*) |
-| [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib) |
+| [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2) |
 | [ledger](#ledger) | CSV reading and writing (encoding/csv) |
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
@@ -90,9 +92,9 @@ Package argo writes JSON. argo.Put(b, v) appends v to the []u8 buffer b; the com
 
 ## io
 
-Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or Seeker by having the methods, with no declaration, and compositions like ReadWriteCloser by satisfying every listed shape. The helpers read and write over any reader or writer: ReadAll, ReadFull, ReadAtLeast, Copy, CopyN, CopyBuffer, LimitReader, TeeReader, MultiReader, MultiWriter, WriteString and Discard. A stream ends when Read returns 0 (flume's and ledger's readers do), not with a sentinel fault.
+Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or Seeker by having the methods, with no declaration, and compositions like ReadWriteCloser by satisfying every listed shape. The helpers read and write over any reader or writer: ReadAll, ReadFull, ReadAtLeast, Copy, CopyN, CopyBuffer, LimitReader, TeeReader, MultiReader, MultiWriter, WriteString and Discard. A stream ends when Read returns 0 (flume's and ledger's readers do), not with a sentinel fault; ReadByte and ReadRune say the same with ok false and size 0.
 
-The byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...), Go's ReaderFrom and WriterTo, and Pipe and the file system interface (io/fs) are the next steps of #736. Reading, writing, closing and seeking change the stream, so those methods are mut (#644): a type's method may take its receiver mut, and a call through a dyn value needs a mut one (w mut dyn io.Writer).
+Pipe connects a writer and a reader on different tasks or cores: it waits through the scheduler, never blocking a core, and holds back a writer while it is full. The byte, rune and string shapes (ByteReader, ByteScanner, RuneReader, RuneScanner, ByteWriter, StringWriter) and ReaderFrom and WriterTo are declared for code that wants them; a generic helper cannot ask a value which shapes it has, so Copy always copies through its buffer and a caller with a WriterTo calls WriteTo itself. The file system interface (Go's io/fs) is package fs. Reading, writing, closing and seeking change the stream, so those methods are mut (#644): a type's method may take its receiver mut, and a call through a dyn value needs a mut one (w mut dyn io.Writer).
 
 - `shape Reader { mut Read(buf mut []u8) !i64 }`: Reader is anything with Read: it fills buf and returns how many bytes it wrote.
 - `shape Writer { mut Write(data []u8) !i64 }`: Writer is anything with Write: it takes data and returns how many bytes it took.
@@ -108,10 +110,18 @@ The byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...), Go
 - `shape ReadWriteCloser`: ReadWriteCloser reads, writes and closes.
 - `shape ReadSeeker`: ReadSeeker reads and seeks.
 - `shape ReadWriteSeeker`: ReadWriteSeeker reads, writes and seeks.
+- `shape ByteReader { mut ReadByte() !(u8, bool) }`: ByteReader reads one byte at a time: ok is false at the end of the stream.
+- `shape ByteScanner`: ByteScanner is a ByteReader that can step back: UnreadByte makes the next ReadByte return the byte the last one returned.
+- `shape ByteWriter { mut WriteByte(c u8) ! }`: ByteWriter writes one byte.
+- `shape RuneReader { mut ReadRune() !(i32, i64) }`: RuneReader reads one UTF-8 encoded rune: its value and its size in bytes, size 0 at the end of the stream (an invalid encoding is U+FFFD of size 1, as Go's readers give).
+- `shape RuneScanner`: RuneScanner is a RuneReader that can step back: UnreadRune makes the next ReadRune return the rune the last one returned.
+- `shape StringWriter { mut WriteString(s str) !i64 }`: StringWriter writes a str without making a []u8 of it, and returns how many bytes it took.
+- `shape ReaderFrom { mut ReadFrom(src mut dyn Reader) !i64 }`: ReaderFrom reads src until its end into itself and returns how many bytes it took.
+- `shape WriterTo { mut WriteTo(dst mut dyn Writer) !i64 }`: WriterTo writes its data to dst until it has none left and returns how many bytes it wrote.
 - `ReadAll[R Reader](src R) !str`: ReadAll reads until the stream ends and returns what it read.
 - `ReadFull[R Reader](src R, buf mut []u8) !i64`: ReadFull reads exactly len(buf) bytes; a stream that ends first fails with "unexpected end of stream". A zero-length buffer reads nothing.
 - `ReadAtLeast[R Reader](src R, buf mut []u8, min i64) !i64`: ReadAtLeast reads at least min bytes (or until the stream ends) into buf; fewer than min bytes is the "unexpected end of stream" fault.
-- `Copy[W Writer, R Reader](dst W, src R) !i64`: Copy reads from src and writes every chunk to dst until the stream ends, and returns how many bytes it copied. The scratch buffer is 32 KiB, as Go's is.
+- `Copy[W Writer, R Reader](dst W, src R) !i64`: Copy reads from src and writes every chunk to dst until the stream ends, and returns how many bytes it copied. The scratch buffer is 32 KiB, as Go's is, taken from this core's pool of them and given back when Copy returns, so a loop of copies allocates nothing; a Reader must not keep the buffer it is given (Go's rule too).
 - `CopyBuffer[W Writer, R Reader](dst W, src R, buf mut []u8) !i64`: CopyBuffer is Copy with the caller's scratch buffer, which must not be empty.
 - `CopyN[W Writer, R Reader](dst W, src R, n i64) !i64`: CopyN copies exactly n bytes; fewer means the stream ended first, which is the "unexpected end of stream" fault.
 - `WriteString[W Writer](dst W, s str) !i64`: WriteString writes s to dst.
@@ -131,6 +141,75 @@ The byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...), Go
 - `type DiscardWriter struct{}`: DiscardWriter is a writer that throws everything away, like Go's io.Discard.
 - `Discard() DiscardWriter`: Discard returns the writer that throws everything away.
 - `(d mut DiscardWriter) Write(data []u8) !i64`: Write takes data and reports all of it written.
+- `type PipeReader struct`: PipeReader is the read end of a Pipe: an io.Reader whose stream ends when the writer closes.
+- `type PipeWriter struct`: PipeWriter is the write end of a Pipe: an io.Writer that waits while the pipe is full.
+- `Pipe() !(PipeReader, PipeWriter)`: Pipe makes a pipe: what is written to the PipeWriter is read from the PipeReader, in order. Unlike Go's, which hands each Write to a Read, the pipe holds what the system's pipe buffer holds (64 KiB on Linux): a Write returns once its bytes are in the pipe, and waits while it is full, so a writer is held back by a slow reader. Close the writer to end the reader's stream; close both ends to give back the descriptors. Making a pipe ignores SIGPIPE in the process (as Go's runtime does for every descriptor but the standard ones), so a write to a pipe whose reader closed fails instead of ending the program.
+- `(p PipeReader) Read(buf mut []u8) !i64`: Read reads what the writer wrote into buf, waiting until some is there, and returns how many bytes came: 0 once the writer closed and everything was read. A writer's CloseWithError makes the end of the stream that fault (its text) instead; a Read after this end's Close fails with ErrClosedPipe.
+- `(p mut PipeReader) Close() !`: Close closes the read end: the writer's next Write fails with ErrClosedPipe. A second Close does nothing.
+- `(p mut PipeReader) CloseWithError(err fault) !`: CloseWithError closes the read end; the writer's next Write fails with err's text (ErrClosedPipe for nil). Only the first close of an end counts.
+- `(p PipeWriter) Write(data []u8) !i64`: Write writes all of data to the pipe, waiting while it is full, and returns len(data). Once the reader has closed it fails with ErrClosedPipe (or the reader's CloseWithError text) and the count of bytes that went in is lost with the fault, as a short write is; after this end's own Close it fails with ErrClosedPipe.
+- `(p PipeWriter) WriteString(s str) !i64`: WriteString writes s to the pipe, as Write does.
+- `(p mut PipeWriter) Close() !`: Close closes the write end: the reader reads what is left and then its stream ends (Read returns 0). A second Close does nothing.
+- `(p mut PipeWriter) CloseWithError(err fault) !`: CloseWithError closes the write end; once the reader has read what is left, its Read fails with err's text instead of returning 0 (nil: the plain end). Only the first close counts.
+
+## fs
+
+Package fs is the file system interface, like Go's io/fs: a file system is anything with Open (the FS shape), and ReadDirFS, StatFS and SubFS add what WalkDir, Glob and Sub use. Names are slash-separated and unrooted ("a/b.txt", "." for the root; ValidPath says which are). ReadFile, ReadDir, Stat, Sub, Glob and WalkDir work over any file system with the shape they need; Dir is the operating system's file tree under a directory (Go's os.DirFS), read through quarry.
+
+Where Go asks an interface at run time (fs.ReadDir tries ReadDirFS, then a file's ReadDir), a helper here names the shape it needs at compile time: WalkDir and Glob take a TreeFS (ReadDir and Stat). A File has Stat and ReadDir itself (ReadDir fails on a file that is not a directory). Faults are Go's PathError text ("open a/b: no such file or directory") and match ErrNotExist, ErrPermission, ErrExist and ErrInvalid with fault.Is as Go's errors.Is does. A directory listing ends with an empty slice, not a sentinel fault, as a Read ends with 0.
+
+- `const ModeDir = 1 << 31`: ModeDir is the mode bit of a directory (Go's fs.ModeDir); modes are i64 values of Go's FileMode bits.
+- `const ModeAppend = 1 << 30`: ModeAppend is the append-only bit.
+- `const ModeExclusive = 1 << 29`: ModeExclusive is the exclusive-use bit.
+- `const ModeTemporary = 1 << 28`: ModeTemporary is the temporary-file bit.
+- `const ModeSymlink = 1 << 27`: ModeSymlink is the mode bit of a symbolic link.
+- `const ModeDevice = 1 << 26`: ModeDevice is the mode bit of a device file.
+- `const ModeNamedPipe = 1 << 25`: ModeNamedPipe is the mode bit of a FIFO.
+- `const ModeSocket = 1 << 24`: ModeSocket is the mode bit of a Unix domain socket.
+- `const ModeSetuid = 1 << 23`: ModeSetuid is the setuid bit.
+- `const ModeSetgid = 1 << 22`: ModeSetgid is the setgid bit.
+- `const ModeCharDevice = 1 << 21`: ModeCharDevice is the bit of a character device (set with ModeDevice).
+- `const ModeSticky = 1 << 20`: ModeSticky is the sticky bit.
+- `const ModeIrregular = 1 << 19`: ModeIrregular is the bit of a file of no other known type.
+- `const ModeType = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice | ModeCharDevice | ModeIrregular`: ModeType is the type bits: a mode with none of them is a regular file.
+- `const ModePerm = 0o777`: ModePerm is the Unix permission bits.
+- `type FileInfo struct`: FileInfo describes a file, as Stat reports it (Go's fs.FileInfo).
+- `(i FileInfo) IsDir() bool`: IsDir reports whether the file is a directory.
+- `(i FileInfo) Type() i64`: Type is the file's type bits (Mode & ModeType).
+- `type DirEntry struct`: DirEntry is a name in a directory with its type bits (Go's fs.DirEntry); fs.Stat gives the rest.
+- `(d DirEntry) IsDir() bool`: IsDir reports whether the entry is a directory.
+- `FileInfoToDirEntry(info FileInfo) DirEntry`: FileInfoToDirEntry is the DirEntry of a file described by info.
+- `shape File`: File is an open file: Read until it returns 0, Stat, ReadDir for a directory, and Close. ReadDir(n) with n > 0 gives at most n entries and an empty slice at the end; n <= 0 gives all that are left.
+- `type FileReader struct`: FileReader is an open File as an io.Reader, what Reader returns: a dyn File satisfies only its own shape (dyn-to-dyn widening, E514, is not built), so io.Copy and io.ReadAll take this.
+- `Reader(f dyn File) FileReader`: Reader is f as an io.Reader: its Read is f's.
+- `(r mut FileReader) Read(buf mut []u8) !i64`: Read reads from the file.
+- `shape FS`: FS is a file system: Open opens a file by a name ValidPath accepts.
+- `shape ReadDirFS`: ReadDirFS is a file system that lists a directory by name, sorted by name.
+- `shape StatFS`: StatFS is a file system that describes a file by name.
+- `shape ReadFileFS`: ReadFileFS is a file system that reads a whole file by name.
+- `shape TreeFS`: TreeFS lists directories and describes files: what WalkDir and Glob need.
+- `shape SubFS[S constraints.Any]`: SubFS is a file system whose Sub gives the file system of one of its directories, of type S.
+- `ValidPath(name str) bool`: ValidPath reports whether name is a valid file system name: UTF-8, slash-separated elements that are not empty, "." or "..", no leading or trailing slash; "." alone names the root.
+- `PathError(op str, path str, err fault) !`: PathError is err with the operation and the name in front ("op path: err"), as Go's fs.PathError prints; err stays reachable with fault.Is.
+- `ReadFile[F FS](fsys F, name str) !str`: ReadFile reads the named file to its end: Open, Read until 0, Close.
+- `ReadDir[F ReadDirFS](fsys F, name str) ![]DirEntry`: ReadDir lists the named directory, sorted by name.
+- `Stat[F StatFS](fsys F, name str) !FileInfo`: Stat describes the named file.
+- `Glob[F TreeFS](fsys F, pattern str) ![]str`: Glob lists the names that match pattern (trail.Match's syntax, per element), in lexical order within each directory, like Go's fs.Glob: a directory that cannot be read is skipped, a pattern with no special bytes gives itself when Stat finds it, and only a malformed pattern is a fault (ErrBadPattern).
+- `WalkDir[F TreeFS](fsys F, root str, f fn(str, ?DirEntry, fault) !) !`: WalkDir calls f for root and every file and directory below it, in lexical order, like Go's fs.WalkDir: f gets the path (root joined with the names), the entry (nil when root cannot be described) and nil, or a fault: Stat's for root, or ReadDir's in a second call for a directory that cannot be listed. f's fault ends the walk and is WalkDir's, except SkipDir (skip this directory, or the rest of the one a file is in) and SkipAll (stop, with no fault). Symbolic links inside the tree are not followed; a root that is one is.
+- `ModeString(m i64) str`: ModeString is a mode as Go's FileMode.String prints it: the type and special letters ("dalTLDpSugct?") or "-", then rwxrwxrwx with "-" for a missing permission.
+- `type DirFS struct`: DirFS is the file tree under a directory of the operating system, read through quarry (Go's os.DirFS): it is a TreeFS, a ReadFileFS and a SubFS[DirFS]. Names are joined to the root with a slash; a name ValidPath refuses fails with ErrInvalid, and the faults name the name, not the joined path, as Go's do.
+- `Dir(root str) DirFS`: Dir is the file tree under root.
+- `(d DirFS) Root() str`: Root is the directory the file system was made with.
+- `(d DirFS) Open(name str) !dyn File`: Open opens the named file or directory for reading.
+- `(d DirFS) Stat(name str) !FileInfo`: Stat describes the named file, following a symbolic link.
+- `(d DirFS) Lstat(name str) !FileInfo`: Lstat describes the named file; a symbolic link is described itself.
+- `(d DirFS) ReadDir(name str) ![]DirEntry`: ReadDir lists the named directory, sorted by name, with each entry's type (not following links).
+- `(d DirFS) ReadFile(name str) !str`: ReadFile reads the whole named file with quarry.ReadFile (its 64 MiB bound and its waits in a task).
+- `(d DirFS) Sub(dir str) !DirFS`: Sub is the file tree under the directory dir of this one.
+- `(f mut osFile) Read(buf mut []u8) !i64`: Read reads the next bytes of the file into buf: 0 at the end. A directory cannot be read.
+- `(f osFile) Stat() !FileInfo`: Stat describes the file as it was when it was opened.
+- `(f mut osFile) ReadDir(n i64) ![]DirEntry`: ReadDir gives the directory's next n entries (all that are left for n <= 0), sorted by name; an empty slice at the end.
+- `(f mut osFile) Close() !`: Close closes the file; a second Close fails with ErrClosed.
 
 ## anvil
 
@@ -788,6 +867,93 @@ Package link parses, builds and resolves URLs, and escapes and unescapes their p
 - `ParseQuery(query str) !Values`: ParseQuery parses a URL query ("a=1&b=2&a=3") into Values. It faults on the first malformed parameter (a bad escape, or a semicolon separator); URL.Query keeps the good ones instead.
 - `(v Values) Encode() str`: Encode returns the values URL-encoded ("a=1&a=3&b=2"), sorted by key.
 
+## netip
+
+Package netip holds IP addresses, address/port pairs and prefixes as small value types, like Go's net/netip. An Addr is a value struct of 16 bytes, a zone and a kind byte: it is copied by every store, compares with == and is a map key by value. Comparing, classifying, Contains, Overlaps and AppendTo allocate nothing.
+
+```tin body
+let a = try netip.ParseAddr("192.168.1.10")
+let p = try netip.ParsePrefix("192.168.0.0/16")
+p.Contains(a)                                   // true
+a.IsPrivate()                                   // true
+let ap = try netip.ParseAddrPort("[fe80::1%eth0]:8080")
+ap.Port()                                       // 8080
+ap.Addr().Zone()                                // "eth0"
+```
+
+Parsing, formatting, the fault messages and every classification follow net/netip exactly: an IPv4 address is stored as its IPv4-mapped IPv6 form with the IPv4 kind, IPv4 fields with leading zeros are refused, an IPv6 address may end in an embedded IPv4 address and carry a zone after %, and the zero Addr is invalid.
+
+- `type Addr value struct`: Addr is an IPv4 or IPv6 address, with an IPv6 zone or none; the zero Addr is not a valid address.
+- `type AddrPort value struct`: AddrPort is an IP address and a port number.
+- `type Prefix value struct`: Prefix is an IP network: an address and the number of leading bits that name the network.
+- `AddrFrom4(b []u8) Addr`: AddrFrom4 is the IPv4 address of the four bytes b (it panics unless len(b) is 4).
+- `AddrFrom16(b []u8) Addr`: AddrFrom16 is the IPv6 address of the sixteen bytes b (it panics unless len(b) is 16); a mapped IPv4 address stays IPv6.
+- `AddrFromSlice(b []u8) (Addr, bool)`: AddrFromSlice is the IPv4 address of 4 bytes or the IPv6 address of 16, and false for any other length.
+- `IPv4Unspecified() Addr`: IPv4Unspecified is 0.0.0.0.
+- `IPv6Unspecified() Addr`: IPv6Unspecified is ::.
+- `IPv6Loopback() Addr`: IPv6Loopback is ::1.
+- `IPv6LinkLocalAllNodes() Addr`: IPv6LinkLocalAllNodes is ff02::1.
+- `IPv6LinkLocalAllRouters() Addr`: IPv6LinkLocalAllRouters is ff02::2.
+- `ParseAddr(s str) !Addr`: ParseAddr parses an IPv4 address ("192.0.2.1"), an IPv6 address ("2001:db8::68") or one with a zone ("fe80::1%eth0").
+- `MustParseAddr(s str) Addr`: MustParseAddr is ParseAddr that panics with the fault's message.
+- `(a Addr) IsValid() bool`: IsValid reports whether a is an address, not the zero Addr (0.0.0.0 and :: are valid).
+- `(a Addr) BitLen() i64`: BitLen is 32 for IPv4, 128 for IPv6 (mapped IPv4 included) and 0 for the zero Addr.
+- `(a Addr) Zone() str`: Zone is a's IPv6 zone, or "".
+- `(a Addr) Is4() bool`: Is4 reports whether a is an IPv4 address (not an IPv4-mapped IPv6 one).
+- `(a Addr) Is6() bool`: Is6 reports whether a is an IPv6 address, IPv4-mapped ones included.
+- `(a Addr) Is4In6() bool`: Is4In6 reports whether a is an IPv4-mapped IPv6 address (in ::ffff:0:0/96).
+- `(a Addr) Unmap() Addr`: Unmap is a without its IPv4-mapped prefix: the IPv4 address of ::ffff:a.b.c.d, else a unchanged.
+- `(a Addr) WithZone(zone str) Addr`: WithZone is a with the given IPv6 zone ("" removes it); an IPv4 or zero Addr is returned unchanged.
+- `(a Addr) IsLoopback() bool`: IsLoopback reports whether a is a loopback address: 127.0.0.0/8 or ::1.
+- `(a Addr) IsMulticast() bool`: IsMulticast reports whether a is a multicast address: 224.0.0.0/4 or ff00::/8.
+- `(a Addr) IsInterfaceLocalMulticast() bool`: IsInterfaceLocalMulticast reports whether a is an IPv6 interface-local multicast address (ff01::/16 and its flags).
+- `(a Addr) IsLinkLocalMulticast() bool`: IsLinkLocalMulticast reports whether a is a link-local multicast address: 224.0.0.0/24 or ff02::/16 and its flags.
+- `(a Addr) IsLinkLocalUnicast() bool`: IsLinkLocalUnicast reports whether a is a link-local unicast address: 169.254.0.0/16 or fe80::/10.
+- `(a Addr) IsGlobalUnicast() bool`: IsGlobalUnicast reports whether a is a global unicast address, as Go's net.IP.IsGlobalUnicast (private ranges included).
+- `(a Addr) IsPrivate() bool`: IsPrivate reports whether a is in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or fc00::/7 (RFC 1918, RFC 4193).
+- `(a Addr) IsUnspecified() bool`: IsUnspecified reports whether a is 0.0.0.0 or :: (with no zone).
+- `(a Addr) Compare(b Addr) i64`: Compare is -1, 0 or +1 as a sorts before, with or after b: by bit length, then address, then zone.
+- `(a Addr) Less(b Addr) bool`: Less reports whether a sorts before b: by bit length, then address, then zone (a zone sorts after none).
+- `(a Addr) As16() []u8`: As16 is a's 16 bytes (an IPv4 address in its IPv4-mapped IPv6 form).
+- `(a Addr) As4() []u8`: As4 is the 4 bytes of an IPv4 or IPv4-mapped address; it panics for another IPv6 address or the zero Addr.
+- `(a Addr) AsSlice() []u8`: AsSlice is a's 4 bytes (IPv4) or 16 bytes (IPv6), or an empty slice for the zero Addr.
+- `(a Addr) Next() Addr`: Next is the address after a (same zone), or the zero Addr past the last address of its family.
+- `(a Addr) Prev() Addr`: Prev is the address before a (same zone), or the zero Addr before the first address of its family.
+- `(a Addr) Prefix(bits i64) !Prefix`: Prefix is the network of a's first bits bits, the rest cleared and the zone dropped; the zero Addr gives the zero Prefix.
+- `(a Addr) AppendTo(b mut []u8) []u8`: AppendTo appends a's text form (String) to b, nothing for the zero Addr, and returns b.
+- `(a Addr) String() str`: String is a's text form: dotted IPv4, ::ffff:a.b.c.d, RFC 5952 IPv6 with %zone, or "invalid IP".
+- `(a Addr) StringExpanded() str`: StringExpanded is String with every IPv6 group written as four hex digits and no :: shortening.
+- `(a Addr) MarshalText() []u8`: MarshalText is a's text form as bytes, empty for the zero Addr.
+- `(a mut Addr) UnmarshalText(text []u8) !`: UnmarshalText sets a from its text form; empty text gives the zero Addr.
+- `(a Addr) MarshalBinary() []u8`: MarshalBinary is 4 bytes for IPv4, 16 bytes and the zone for IPv6, and none for the zero Addr.
+- `(a mut Addr) UnmarshalBinary(b []u8) !`: UnmarshalBinary sets a from MarshalBinary's bytes: 0 (zero Addr), 4, 16, or more than 16 (the rest is the zone).
+- `AddrPortFrom(ip Addr, port u16) AddrPort`: AddrPortFrom is the pair of an address and a port.
+- `(p AddrPort) Addr() Addr`: Addr is p's address.
+- `(p AddrPort) Port() u16`: Port is p's port.
+- `(p AddrPort) IsValid() bool`: IsValid reports whether p's address is valid.
+- `ParseAddrPort(s str) !AddrPort`: ParseAddrPort parses "1.2.3.4:80" or "[2001:db8::1%eth0]:80"; an IPv6 address must be bracketed and an IPv4 one must not.
+- `MustParseAddrPort(s str) AddrPort`: MustParseAddrPort is ParseAddrPort that panics with the fault's message.
+- `(p AddrPort) Compare(q AddrPort) i64`: Compare is -1, 0 or +1 as p sorts before, with or after q: by address, then port.
+- `(p AddrPort) AppendTo(b mut []u8) []u8`: AppendTo appends p's text form (String) to b, nothing when p's address is the zero Addr, and returns b.
+- `(p AddrPort) String() str`: String is "1.2.3.4:80", "[2001:db8::1]:80" or "invalid AddrPort".
+- `(p AddrPort) MarshalText() []u8`: MarshalText is p's text form as bytes, empty when p's address is the zero Addr.
+- `(p mut AddrPort) UnmarshalText(text []u8) !`: UnmarshalText sets p from its text form; empty text gives the zero AddrPort.
+- `PrefixFrom(ip Addr, bits i64) Prefix`: PrefixFrom is the prefix of ip's first bits bits, with ip's zone dropped and its other bits kept (see Masked); bits out of range for ip, or the zero Addr, give an invalid Prefix.
+- `ParsePrefix(s str) !Prefix`: ParsePrefix parses "192.168.0.0/16" or "2001:db8::/32"; the address bits after the prefix are kept (see Masked).
+- `MustParsePrefix(s str) Prefix`: MustParsePrefix is ParsePrefix that panics with the fault's message.
+- `(p Prefix) Addr() Addr`: Addr is p's address, with the bits after the prefix as given (see Masked).
+- `(p Prefix) Bits() i64`: Bits is p's prefix length, or -1 for an invalid Prefix.
+- `(p Prefix) IsValid() bool`: IsValid reports whether p has a valid address and a length in range for it.
+- `(p Prefix) IsSingleIP() bool`: IsSingleIP reports whether p holds exactly one address (/32 for IPv4, /128 for IPv6).
+- `(p Prefix) Masked() Prefix`: Masked is p in canonical form: the address bits after the prefix cleared; an invalid p gives the zero Prefix.
+- `(p Prefix) Contains(ip Addr) bool`: Contains reports whether ip is in p; an address with a zone, or of another family, never is.
+- `(p Prefix) Overlaps(o Prefix) bool`: Overlaps reports whether p and o share an address; prefixes of different families never do.
+- `(p Prefix) Compare(o Prefix) i64`: Compare is -1, 0 or +1 as p sorts before, with or after o: by masked address, then length, then address.
+- `(p Prefix) AppendTo(b mut []u8) []u8`: AppendTo appends p's text form (String) to b, nothing for the zero Prefix, and returns b.
+- `(p Prefix) String() str`: String is "192.168.0.0/16", "2001:db8::/32", "::ffff:1.2.3.0/120" or "invalid Prefix".
+- `(p Prefix) MarshalText() []u8`: MarshalText is p's text form as bytes, empty for the zero Prefix.
+- `(p mut Prefix) UnmarshalText(text []u8) !`: UnmarshalText sets p from its text form; empty text gives the zero Prefix.
+
 ## ore
 
 Package ore works on byte slices ([]u8), like Go's bytes. Functions that append take the slice as mut and grow it in place.
@@ -828,6 +994,8 @@ Package flume reads and writes file descriptors through 64 KiB buffers: lines, w
 - `(r mut Reader) Line() !(str, bool)`: Line returns the next line without its "\n" (or "\r\n"); ok is false at the end.
 - `(r mut Reader) Byte() (u8, bool)`: Byte returns the next byte; ok is false at the end.
 - `(r mut Reader) Read(buf mut []u8) !i64`: Read fills buf with the next buffered bytes, waiting for them, and returns how many it wrote: 0 at the end. It is what makes a flume.Reader an io.Reader (ledger.NewStream).
+- `(r mut Reader) ReadByte() !(u8, bool)`: ReadByte returns the next byte; ok is false at the end. It makes a flume.Reader an io.ByteReader.
+- `(r mut Reader) ReadRune() !(i32, i64)`: ReadRune returns the next UTF-8 encoded rune and its size in bytes: size 0 at the end, and U+FFFD of size 1 for an invalid encoding, as Go's bufio.Reader does. It makes a flume.Reader an io.RuneReader.
 - `(r mut Reader) ReadAll() !str`: ReadAll returns everything left.
 - `ReadFile(path str) !str`: ReadFile returns the contents of the file at path.
 - `NewWriter(fd i64) Writer`: NewWriter writes to fd.
@@ -837,6 +1005,9 @@ Package flume reads and writes file descriptors through 64 KiB buffers: lines, w
 - `(w mut Writer) Sync() !`: Sync flushes the writer and waits until the file is on stable storage (fsync; on macOS F_FULLFSYNC).
 - `(w mut Writer) Str(s str)`: Str appends s.
 - `(w mut Writer) Byte(c u8)`: Byte appends c.
+- `(w mut Writer) Write(data []u8) !i64`: Write appends data, flushing first when the buffer would pass 64 KiB, and returns len(data); it fails with the writer's fault (a failed flush, or a closed writer). It makes a flume.Writer an io.Writer.
+- `(w mut Writer) WriteString(s str) !i64`: WriteString is Write for a str (an io.StringWriter).
+- `(w mut Writer) WriteByte(c u8) !`: WriteByte is Write for one byte (an io.ByteWriter).
 - `(w mut Writer) Int(v i64)`: Int appends v in decimal.
 - `(w mut Writer) Line(s str)`: Line appends s and a newline.
 - `(w mut Writer) Flush() !`: Flush writes everything buffered (with as few writes as the descriptor allows).
@@ -1293,13 +1464,14 @@ Package stamp computes non-cryptographic hashes and checksums: FNV-1a, CRC-32 (I
 
 ## squash
 
-Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4 and Zstandard (RFC 8878). Every decoder takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input cannot make a huge output.
+Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4, Zstandard (RFC 8878), LZW (compress/lzw) and bzip2 decompression (compress/bzip2). Every decoder takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input cannot make a huge output.
 
 ```tin body
 let z = squash.Gzip("hello, hello, hello", squash.Default)
 let back = try squash.Gunzip(z, 64mb)
 ```
 
+- `Bunzip2(data str, max i64) !str`: Bunzip2 decompresses bzip2 data (one stream or several back to back, as Go's compress/bzip2 reads them), checking every block CRC and stream CRC and failing past max bytes of output.
 - `Deflate(data str, level i64) str`: Deflate compresses data as raw DEFLATE at level (Store to Best).
 - `const Store = 0`: Levels for Deflate, Gzip, Zlib and Zstd: Store writes the data uncompressed (in valid frames), Fastest and Best trade speed against size, Default is between.
 - `const Fastest = 1`

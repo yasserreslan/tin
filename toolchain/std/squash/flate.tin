@@ -1,7 +1,8 @@
 // Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib
-// (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4
-// and Zstandard (RFC 8878). Every decoder takes the most bytes it may produce and fails with
-// fault.LimitExceeded past it, so a small input cannot make a huge output.
+// (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4,
+// Zstandard (RFC 8878), LZW (compress/lzw) and bzip2 decompression (compress/bzip2). Every decoder
+// takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input
+// cannot make a huge output.
 //
 //	let z = squash.Gzip("hello, hello, hello", squash.Default)
 //	let back = try squash.Gunzip(z, 64mb)
