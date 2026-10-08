@@ -3,6 +3,10 @@ fn linux_nr_read() i64 {
 	return 63
 }
 
+fn linux_nr_pread64() i64 {
+	return 67
+}
+
 fn linux_nr_write() i64 {
 	return 64
 }

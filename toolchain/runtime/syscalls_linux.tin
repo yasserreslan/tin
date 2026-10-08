@@ -19,6 +19,10 @@ fn rt_sys_read(fd i64, buf i64, n i64) i64 {
 	return linux_result(linux_raw(linux_nr_read(), fd, buf, n, 0, 0, 0))
 }
 
+fn rt_sys_pread(fd i64, buf i64, n i64, off i64) i64 {
+	return linux_result(linux_raw(linux_nr_pread64(), fd, buf, n, off, 0, 0))
+}
+
 fn rt_sys_write(fd i64, buf i64, n i64) i64 {
 	return linux_result(linux_raw(linux_nr_write(), fd, buf, n, 0, 0, 0))
 }

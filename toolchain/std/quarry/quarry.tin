@@ -181,6 +181,52 @@ fn limitFault(path str, cap i64) ! {
 	fail cast(fault, rt_fault_wrap(rt_fault_limit(), "read " + path + ": more than " + say.Str(cap) + " bytes (quarry.ReadFileBound sets another bound)"))
 }
 
+// ReadAt returns up to n bytes of the file at path from offset off: fewer at the file's end, "" past it. Only those
+// bytes are read (pread), so one record of a large file costs its own size. Inside a request task, or recording or
+// replaying a tape, it reads the file through ReadFileBound and gives the same bytes.
+fn ReadAt(path str, off i64, n i64) !str {
+	if off < 0 || n < 0 {
+		fail invalidFault("read", path)
+	}
+	if rt_tape() != 0 || rt_task_current() != 0 {
+		let s = try ReadFileBound(path, 1 << 60)
+		if off >= len(s) {
+			return ""
+		}
+		return s[off:min(len(s), off + n)]
+	}
+	if badPath(path) {
+		fail invalidFault("open", path)
+	}
+	let fd = c32(rt_sys_open(rt_cstr(path), oRdonly, 0))
+	if fd < 0 {
+		fail pathFault("open", path)
+	}
+	if n == 0 {
+		rt_sys_close(fd)
+		return ""
+	}
+	let p = rt_str_new(n)
+	mut got = 0
+	for got < n {
+		let k = rt_sys_pread(fd, p + 8 + got, n - got, off + got)
+		if k < 0 {
+			rt_sys_close(fd)
+			fail pathFault("read", path)
+		}
+		if k == 0 {
+			break
+		}
+		got += k
+	}
+	rt_sys_close(fd)
+	if got == 0 {
+		return ""
+	}
+	p[0] = got
+	return cast(str, p)
+}
+
 // ReadFile returns the whole content of the file at path. A file larger than 64 MiB (anvil's
 // request limit) fails with fault.LimitExceeded before it is read, and so does a device or pipe
 // past it, read by read (#745); ReadFileBound sets another bound.

@@ -27,6 +27,8 @@ extern fn pthread_sigmask(how i64, set i64, old i64) i64
 fn rt_sys_pthread_sigmask(how i64, set i64, old i64) i64 { return pthread_sigmask(how, set, old) }
 extern fn read(fd i64, buf i64, n i64) i64
 fn rt_sys_read(fd i64, buf i64, n i64) i64 { return read(fd, buf, n) }
+extern fn pread(fd i64, buf i64, n i64, off i64) i64
+fn rt_sys_pread(fd i64, buf i64, n i64, off i64) i64 { return pread(fd, buf, n, off) }
 extern fn sigaction(sig i64, act i64, old i64) i64
 fn rt_sys_sigaction(sig i64, act i64, old i64) i64 { return sigaction(sig, act, old) }
 extern fn sigaltstack(ss i64, old i64) i64
