@@ -1,0 +1,143 @@
+package diff
+
+// Unified output, as `diff -u` and `git diff` write it (#785).
+
+// Lines splits text into lines, each keeping its "\n"; the last line has none when the text does not end with one.
+fn Lines(text str) []str {
+	mut out = []str{}
+	mut start = 0
+	for i in 0..len(text) {
+		if text[i] == '\n' {
+			out = append(out, text[start:i + 1])
+			start = i + 1
+		}
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
+}
+
+type op struct {
+	kind i64
+	ai   i64
+	bi   i64
+}
+
+// Unified is the unified diff of a and b with context lines around each change, under the names oldName and
+// newName ("" when nothing changed). A line without a final newline is followed by git's marker line.
+fn Unified(oldName str, newName str, a str, b str, context i64) str {
+	let la = Lines(a)
+	let lb = Lines(b)
+	return UnifiedLines(oldName, newName, la, lb, Diff(la, lb), context)
+}
+
+// UnifiedLines is Unified for lines already split and diffed (with Diff or DiffLimit).
+fn UnifiedLines(oldName str, newName str, la []str, lb []str, es []Edit, context i64) str {
+	mut ops = make([]op, 0, len(la) + len(lb))
+	mut i = 0
+	mut j = 0
+	for e in es {
+		match e {
+			Keep(n) => {
+				for k in 0..n {
+					ops = append(ops, op{kind: kindKeep, ai: i + k, bi: j + k})
+				}
+				i += n
+				j += n
+			}
+			Delete(n) => {
+				for k in 0..n {
+					ops = append(ops, op{kind: kindDelete, ai: i + k, bi: j})
+				}
+				i += n
+			}
+			Insert(n) => {
+				for k in 0..n {
+					ops = append(ops, op{kind: kindInsert, ai: i, bi: j + k})
+				}
+				j += n
+			}
+		}
+	}
+	mut out = []u8{}
+	mut x = 0
+	for x < len(ops) {
+		if ops[x].kind == kindKeep {
+			x += 1
+			continue
+		}
+		// a hunk: from context lines before this change to context lines after the last change within reach
+		let first = max(0, x - context)
+		mut last = x
+		mut y = x
+		for y < len(ops) {
+			if ops[y].kind != kindKeep {
+				last = y
+				y += 1
+				continue
+			}
+			mut run = y
+			for run < len(ops) && ops[run].kind == kindKeep {
+				run += 1
+			}
+			if run == len(ops) || run - y > 2 * context {
+				break
+			}
+			y = run
+		}
+		let end = min(len(ops), last + 1 + context)
+		if len(out) == 0 {
+			appendText(mut out, "--- {oldName}\n+++ {newName}\n")
+		}
+		mut acount = 0
+		mut bcount = 0
+		for k in first..end {
+			if ops[k].kind != kindInsert {
+				acount += 1
+			}
+			if ops[k].kind != kindDelete {
+				bcount += 1
+			}
+		}
+		appendText(mut out, "@@ -{span(ops[first].ai, acount)} +{span(ops[first].bi, bcount)} @@\n")
+		for k in first..end {
+			let o = ops[k]
+			if o.kind == kindKeep {
+				line(mut out, " ", la[o.ai])
+			} else if o.kind == kindDelete {
+				line(mut out, "-", la[o.ai])
+			} else {
+				line(mut out, "+", lb[o.bi])
+			}
+		}
+		x = end
+	}
+	return str(out)
+}
+
+// span is a hunk range: the 1-based first line and the count, the count left out when it is 1, and the line
+// before the hunk when it is empty.
+fn span(start0 i64, count i64) str {
+	if count == 0 {
+		return "{start0},0"
+	}
+	if count == 1 {
+		return "{start0 + 1}"
+	}
+	return "{start0 + 1},{count}"
+}
+
+fn line(out mut []u8, mark str, text str) {
+	appendText(mut out, mark)
+	appendText(mut out, text)
+	if len(text) == 0 || text[len(text) - 1] != '\n' {
+		appendText(mut out, "\n\\ No newline at end of file\n")
+	}
+}
+
+fn appendText(out mut []u8, s str) {
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+}
