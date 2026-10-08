@@ -1786,7 +1786,9 @@ let back = try squash.Gunzip(z, 64mb)
 - `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
 - `const LSB = 1`
 - `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `LzwWidth(data str, order i64, litWidth i64) str`: LzwWidth compresses bytes with the given literal width (2 through 8), as GIF requires.
 - `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `UnlzwWidth(data str, order i64, max i64, litWidth i64) !str`: UnlzwWidth decompresses an LZW stream with the given literal width (2 through 8).
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
