@@ -2,14 +2,14 @@
 // identifiers, numbers, char, string and raw string literals and comments, with Go's white space
 // and position rules, for tokenizing source code, configuration files and small languages.
 //
-//	mut s = scan.New(src)
+//	mut s = scan.New("let x = 1.5 + y // the sum")
 //	s.Filename = "example"
 //	for {
 //		let tok = s.Scan()
 //		if tok == scan.EOF {
 //			break
 //		}
-//		say.Line(s.Position(), scan.TokenString(tok), s.TokenText())
+//		say.Line(s.Position().String(), scan.TokenString(tok), s.TokenText())
 //	}
 //
 // The Scanner reads a whole str (a stream is read with io.ReadAll first), so a token's text is a
@@ -18,7 +18,7 @@
 // other character. Mode selects the tokens recognized (GoTokens by default: comments are skipped),
 // Whitespace the characters skipped, and SetIdentRune the identifier characters. Errors (a literal
 // not terminated, a bad escape, invalid UTF-8, a NUL) do not stop the scan: they are counted in
-// ErrorCount and the first maxErrors are kept with their positions, read with Errors and Err.
+// ErrorCount and the first thousand are kept with their positions, read with Errors and Err.
 // Lines and columns are 1-based, a column counts characters, and a leading byte order mark is
 // skipped; the Go twin (bench/ref/scan and tools/ci/scan_check.tin) checks every token, position
 // and error against Go's.
@@ -27,7 +27,7 @@ package scan
 import "glyph"
 import "mint"
 
-// The token kinds Scan returns; any other result is the Unicode character itself.
+// EOF is the end of the source. The token kinds are negative, so a character Scan returns is never one.
 const EOF = -1
 
 // Ident is an identifier.
