@@ -825,6 +825,7 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `Readlink(path str) !str`: Readlink is the target of the symlink at path.
 - `Sync(path str) !`: Sync waits until the file or directory at path is on stable storage (fsync; on macOS F_FULLFSYNC, which also flushes the drive's cache). Sync a directory after creating or renaming in it.
 - `ReadDirEntries(path str) ![]DirEntry`: ReadDirEntries lists the directory at path, sorted by name, with each entry's type. The type comes from the directory itself where the file system records it, and from lstat where it does not.
+- `Alive(pid i64) bool`: Alive reports whether a process with this id exists on this machine (kill with signal 0; a process this one may not signal still exists).
 - `Args() []str`: Args returns the command line, program name first.
 - `Getenv(key str) str`: Getenv returns the value of environment variable key, or "" when it is unset.
 - `LookupEnv(key str) (str, bool)`: LookupEnv returns the value of key and whether it is set (an empty value is still set).

@@ -198,3 +198,15 @@ fn sortEntries(xs mut []DirEntry) {
 		xs[j] = x
 	}
 }
+
+// Alive reports whether a process with this id exists on this machine (kill with signal 0; a process this one may
+// not signal still exists).
+fn Alive(pid i64) bool {
+	if pid <= 0 {
+		return false
+	}
+	if c32(rt_sys_kill(pid, 0)) == 0 {
+		return true
+	}
+	return errno() == 1
+}
