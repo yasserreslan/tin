@@ -103,7 +103,7 @@ make bootstrap                # tinc rebuilds itself twice; the binaries must be
 Documentation: [toolchain/docs/README.md](toolchain/docs/README.md), the index. The language reference is
 [toolchain/docs/LANGUAGE.md](toolchain/docs/LANGUAGE.md) (agents start with the short
 [toolchain/docs/AGENT_PRIMER.md](toolchain/docs/AGENT_PRIMER.md)), the standard library [toolchain/docs/STDLIB.md](toolchain/docs/STDLIB.md)
-(generated from the sources by `tools/gen/gendoc.py`), commands and builds
+(generated from the sources by `tools/gen/gendoc.tin`), commands and builds
 [toolchain/docs/TOOLING.md](toolchain/docs/TOOLING.md), targets and containers [toolchain/docs/PORTING.md](toolchain/docs/PORTING.md),
 the runtime [toolchain/docs/RUNTIME.md](toolchain/docs/RUNTIME.md), the compiler
 [toolchain/docs/COMPILER.md](toolchain/docs/COMPILER.md), and full benchmark results

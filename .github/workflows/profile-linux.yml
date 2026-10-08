@@ -57,5 +57,5 @@ jobs:
           {
             echo "## Linux ${{ matrix.arch }} handshake profile"
             echo '```'; uname -srm; lscpu | grep -E '^(Model name|CPU\(s\)):' || true; echo '```'
-            python3 bench/http/profile_https.py "$SECONDS_TO_SAMPLE"
+            sh tools/ci/tin.sh bench/http/profile_https.tin "$SECONDS_TO_SAMPLE"
           } | tee bin/profile.txt | tee -a "$GITHUB_STEP_SUMMARY"

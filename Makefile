@@ -43,7 +43,7 @@ test: bin/tinc
 	tools/dev/v2test.sh bin/tinc
 
 bench: bin/tinc
-	bench/run.py
+	sh tools/ci/tin.sh bench/run.tin
 
 # Put `tin` on the PATH (a symlink: the tree stays where it is); a leading ~/ in PREFIX means $HOME.
 INSTALL_BIN = $(patsubst ~/%,$(HOME)/%,$(PREFIX))/bin

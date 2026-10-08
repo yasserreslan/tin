@@ -1,6 +1,7 @@
 #!/bin/sh
 # run_all.sh: runs every probe inside a Linux container and writes raw outputs to out/<platform>-glibc<ver>/.
-# docker run --rm -v $PWD:/p -w /p golang:1.27 sh run_all.sh
+# Build the ELF patcher for the container first (tin build tools/dev/linux_probe/elfpatch.tin -o tools/dev/linux_probe/elfpatch --target linux-arm64,
+# or linux-amd64), then from tools/dev/linux_probe: docker run --rm -v $PWD:/p -w /p golang:1.27 sh run_all.sh
 set -u
 ARCH=$(uname -m)
 case "$ARCH" in aarch64) PLAT=linux-arm64; ASM=start_arm64.S;; x86_64) PLAT=linux-amd64; ASM=start_amd64.S;; *) echo "unknown arch $ARCH"; exit 1;; esac
@@ -70,7 +71,7 @@ log negative-tests
 run_patched() { # name file ops...
   name=$1; src=$2; shift 2
   cp "$src" $T/$name
-  echo "=== $name: $*"; python3 /p/elfpatch.py $T/$name "$@"
+  echo "=== $name: $*"; /p/elfpatch $T/$name "$@"
   "$T/$name" x y; echo "exit=$?"
   echo
 }
@@ -95,7 +96,7 @@ log dladdr
 gcc -O0 -o $T/dl_plain dladdr_test.c nosize_fn.S -ldl
 gcc -O0 -rdynamic -o $T/dl_rdyn dladdr_test.c nosize_fn.S -ldl
 gcc -O0 -rdynamic -Wl,--hash-style=sysv -o $T/dl_sysv dladdr_test.c nosize_fn.S -ldl
-cp $T/dl_rdyn $T/dl_nohash; python3 /p/elfpatch.py $T/dl_nohash droptag 0x6ffffef5 droptag 0x4 > /dev/null
+cp $T/dl_rdyn $T/dl_nohash; /p/elfpatch $T/dl_nohash droptag 0x6ffffef5 droptag 0x4 > /dev/null
 {
   echo "=== plain link (no -rdynamic): functions NOT in .dynsym"; $T/dl_plain
   echo; echo "=== -rdynamic (all globals exported to .dynsym, DT_GNU_HASH)"; $T/dl_rdyn

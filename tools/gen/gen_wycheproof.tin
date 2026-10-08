@@ -1,0 +1,95 @@
+package main
+
+import "../ci/ci"
+import "mint"
+import "quarry"
+import "say"
+import "tinjson"
+import "twine"
+
+// Convert Wycheproof signature vectors to the compact files under toolchain/tests/wycheproof/rsa/, toolchain/tests/wycheproof/ecdsa/ and
+// toolchain/tests/wycheproof/ed25519/.
+//
+// Usage: gen_wycheproof PATH/TO/wycheproof   (a checkout of github.com/C2SP/wycheproof)
+//
+// Each output file starts with a comment naming its source, then one line per key group and one per test:
+//     group rsa-pkcs1 SHA-256 - KEYHEX          (KEYHEX: DER PKCS #1 RSAPublicKey)
+//     group rsa-pss SHA-256 32 KEYHEX           (salt length; MGF1 uses the same hash)
+//     group ecdsa SHA-256 P-256 KEYHEX          (KEYHEX: uncompressed point; signatures in DER)
+//     group ed25519 - - KEYHEX                  (KEYHEX: 32-byte public key; MSG is the message itself)
+//     TCID valid|invalid|acceptable MSGHEX SIGHEX   ("-" for an empty field)
+// Only groups whose hashes seal implements are kept (SHA-256, SHA-384, SHA-512). The output is deterministic. The vectors are Apache-2.0;
+// toolchain/tests/wycheproof/README.md names the commit they come from.
+
+fn files() []str {
+	return []str{"rsa_signature_2048_sha256_test.json", "rsa_signature_2048_sha384_test.json", "rsa_signature_2048_sha512_test.json", "rsa_signature_3072_sha256_test.json", "rsa_signature_4096_sha256_test.json", "rsa_signature_4096_sha384_test.json", "rsa_signature_4096_sha512_test.json", "rsa_pss_2048_sha256_mgf1_0_test.json", "rsa_pss_2048_sha256_mgf1_32_test.json", "rsa_pss_2048_sha384_mgf1_48_test.json", "rsa_pss_4096_sha256_mgf1_32_test.json", "rsa_pss_4096_sha512_mgf1_64_test.json", "rsa_pss_misc_test.json", "ecdsa_secp256r1_sha256_test.json", "ecdsa_secp256r1_sha512_test.json", "ecdsa_secp384r1_sha256_test.json", "ecdsa_secp384r1_sha384_test.json", "ecdsa_secp384r1_sha512_test.json", "ed25519_test.json"}
+}
+
+fn hashKept(h str) bool {
+	return h == "SHA-256" || h == "SHA-384" || h == "SHA-512"
+}
+
+fn curve(name str) str {
+	if name == "secp256r1" {
+		return "P-256"
+	}
+	return "P-384"
+}
+
+fn orDash(s str) str {
+	if len(s) == 0 {
+		return "-"
+	}
+	return s
+}
+
+fn convert(src str, out str, name str) {
+	let (data, ok) = tinjson.Parse(ci.Read(ci.Join(src, name)))
+	ci.Check(ok, name + ": not JSON")
+	mut lines = []str{"# " + name + " from github.com/C2SP/wycheproof testvectors_v1 (Apache-2.0)"}
+	mut kept = 0
+	for group in data.Get("testGroups").Items() {
+		let kind = group.Get("type").Text()
+		if kind != "EddsaVerify" && !hashKept(group.Get("sha").Text()) {
+			continue
+		}
+		if kind == "RsassaPkcs1Verify" {
+			lines = append(lines, "group rsa-pkcs1 " + group.Get("sha").Text() + " - " + group.Get("publicKeyAsn").Text())
+		} else if kind == "RsassaPssVerify" {
+			if group.Get("mgf").Text() != "MGF1" || group.Get("mgfSha").Text() != group.Get("sha").Text() {
+				continue
+			}
+			lines = append(lines, "group rsa-pss " + group.Get("sha").Text() + " " + mint.Itoa(group.Get("sLen").Int()) + " " + group.Get("publicKeyAsn").Text())
+		} else if kind == "EddsaVerify" {
+			lines = append(lines, "group ed25519 - - " + group.Get("publicKey").Get("pk").Text())
+		} else if kind == "EcdsaVerify" {
+			lines = append(lines, "group ecdsa " + group.Get("sha").Text() + " " + curve(group.Get("publicKey").Get("curve").Text()) + " " + group.Get("publicKey").Get("uncompressed").Text())
+		} else {
+			continue
+		}
+		for t in group.Get("tests").Items() {
+			lines = append(lines, mint.Itoa(t.Get("tcId").Int()) + " " + t.Get("result").Text() + " " + orDash(t.Get("msg").Text()) + " " + orDash(t.Get("sig").Text()))
+			kept += 1
+		}
+	}
+	ci.Check(kept > 0, name + ": no usable groups")
+	let dir = ci.Join(out, name[0:twine.IndexByte(name, '_')])
+	ci.Mkdirs(dir)
+	let file = ci.Join(dir, twine.Replace(name, "_test.json", ".txt", 1))
+	ci.Write(file, twine.Join(lines, "\n") + "\n")
+	say.Line(twine.TrimPrefix(file, ci.Root() + "/") + ": " + mint.Itoa(kept) + " tests")
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) != 2 {
+		say.Line("usage: gen_wycheproof PATH/TO/wycheproof")
+		quarry.Exit(2)
+	}
+	let src = ci.Join(args[1], "testvectors_v1")
+	let out = ci.Join(ci.Root(), "toolchain/tests/wycheproof")
+	ci.Mkdirs(out)
+	for name in files() {
+		convert(src, out, name)
+	}
+}

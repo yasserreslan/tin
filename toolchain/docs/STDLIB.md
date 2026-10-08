@@ -1,6 +1,6 @@
 # Tin standard library
 
-Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/gen/gendoc.py`.
+Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/gen/gendoc.tin`.
 
 | package | role (Go equivalent) |
 |---|---|
@@ -338,6 +338,7 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `(c mut Conn) Close()`: Close closes the connection.
 - `Listen(addr str) !Listener`: Listen opens a TCP listener on "host:port" (":0" picks a free port: see Port).
 - `(l Listener) Port() i64`: Port is the port the listener is bound to.
+- `(c Conn) LocalPort() i64`: LocalPort is the port this end of the connection uses (what the peer sees as the source port).
 - `(l Listener) Accept() !Conn`: Accept waits for the next connection.
 - `(l Listener) AcceptTimeout(timeout i64) !Conn`: AcceptTimeout waits at most timeout ns for the next connection (0: no limit), failing with a fault that says "timed out" when none came. A negative timeout is refused.
 - `(l mut Listener) Close()`: Close stops listening.
@@ -849,6 +850,7 @@ Package spawn starts child processes, like Go's os/exec: Run a program and colle
 - `Start(c Cmd) !Process`: Start starts c and returns the running child. A start error names the program, like Go's exec.Error.
 - `Run(c Cmd) !Result`: Run starts c, collects its output and waits for it. Stdout and Stderr are captured unless they are File or Null; more than MaxOutput (DefaultMaxOutput when 0) bytes of the two together fail with fault.LimitExceeded and the child is killed. A non-zero exit is not a fault, and a task deadline (within) kills the child, reaps it and fails with fault.DeadlineExceeded.
 - `(p mut Process) Wait() !i64`: Wait waits for the child, reaps it and returns its exit code, or -1 when a signal killed it. A task deadline (within) interrupts the wait, kills the child and reaps it.
+- `(p Process) Pid() i64`: Pid is the child's process number.
 - `(p Process) Signal(sig i64) !`: Signal sends sig to the child.
 - `(p Process) Kill() !`: Kill sends SIGKILL to the child.
 - `(p mut Process) Write(data str) !i64`: Write writes data to the child's standard input (Stdio.Pipe on Cmd.Stdin) and returns how many bytes went out. A task deadline interrupts the write with fault.DeadlineExceeded.
@@ -2010,6 +2012,8 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(j J) IsNull() bool`: IsNull reports whether the value is null (or missing).
 - `(j J) IsNumber() bool`: IsNumber reports whether the value is a number.
 - `(j J) Items() []J`: Items are the elements of an array.
+- `(j J) Keys() []str`: Keys are the keys of an object, in the order they were written (none for another kind of value).
+- `(j J) IsObject() bool`: IsObject reports whether the value is an object.
 
 ## tinsym
 

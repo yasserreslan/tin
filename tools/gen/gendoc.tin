@@ -1,0 +1,383 @@
+package main
+
+import "../ci/ci"
+import "../ci/pyre"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// Generate toolchain/docs/STDLIB.md from the comments in toolchain/std/*/ and packages/*/ (run from the repo root).
+//
+// A package gets a section when it is listed below: PACKAGES is each package with its role (and the Go package it stands for), in the order
+// of the page. A package directory that is neither listed nor in SKIP stops the generator, so a new package cannot be forgotten.
+
+fn skipped() []str {
+	return []str{
+		"fmt", "runtime", "say", "std",
+	}
+}
+
+// packages is name, role, name, role...
+fn packages() []str {
+	return []str{
+		"say", "formatting and printing (fmt)",
+		"fault", "fault chains and standard sentinels (errors)",
+		"argo", "JSON (encoding/json)",
+		"io", "streaming shapes (io)",
+		"anvil", "HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http)",
+		"hearth", "cores and threads (runtime)",
+		"relay", "messages between cores (channels)",
+		"task", "deadline and cancellation of the running code (context)",
+		"wire", "TCP and HTTP/1.1 and HTTP/2 client (net, net/http)",
+		"tls", "TLS 1.3 client and server (crypto/tls)",
+		"hpack", "HTTP/2 header compression (golang.org/x/net/http2/hpack)",
+		"twine", "strings (strings)",
+		"glyph", "UTF-8 and Unicode (unicode/utf8, unicode)",
+		"mint", "number and string conversion (strconv)",
+		"gauge", "math (math)",
+		"bits", "bit counting and manipulation (math/bits)",
+		"link", "URLs and their escaping (net/url)",
+		"ore", "byte slices (bytes)",
+		"flume", "buffered I/O (bufio)",
+		"quarry", "files, environment, process (os)",
+		"spawn", "starting child processes (os/exec)",
+		"trail", "paths (path/filepath)",
+		"lever", "command-line flags (flag)",
+		"tide", "time (time)",
+		"dice", "random numbers (math/rand)",
+		"sift", "sorting, searching and the generic slice functions (sort, slices, cmp)",
+		"atlas", "functions on maps (maps)",
+		"cairn", "containers (container/heap, sets, LRU)",
+		"stamp", "hashes and checksums (hash/*)",
+		"squash", "compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib)",
+		"ledger", "CSV reading and writing (encoding/csv)",
+		"abacus", "arbitrary-precision integers (math/big)",
+		"seal", "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)",
+		"herald", "logging (log/slog)",
+		"crucible", "testing helpers (testing)",
+		"constraints", "named generic constraint shapes",
+		"policy", "with policies and slots (context values, retry/cache/trace middleware)",
+		"redis", "Redis client (go-redis)",
+		"mysql", "MySQL client (database/sql with go-sql-driver/mysql)",
+		"postgres", "PostgreSQL client (database/sql with pgx)",
+		"kafka", "Kafka client (franz-go, sarama)",
+		"websocket", "WebSocket server and client (gorilla/websocket)",
+		"atomic", "counters and flags every core may change (sync/atomic)",
+		"lane", "a bounded queue between the tasks of one core (buffered channels)",
+		"replay", "recording and reading request capsules for tin replay",
+		"stencil", "text templates loaded at run time (text/template)",
+		"scroll", "XML tokenizer and writer (encoding/xml)",
+		"lasso", "regular expressions with linear-time matching (regexp)",
+		"pack", "numbers as bytes: byte order and varints (encoding/binary)",
+		"appkit", "macOS frameworks for the Tinland editor (Cocoa, WebKit)",
+		"metal", "Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor",
+		"gpuwin", "a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU",
+		"textedit", "the editing model behind Tinland (buffer, cursor, undo, highlighting)",
+		"tinjson", "a JSON reader and writer for the developer tools",
+		"tinsym", "the compiler's declarations and errors, name resolution and completion (tin lsp, Tinland)",
+		"tinfmt", "the whitespace formatter (tin fmt, Tinland)",	}
+}
+
+fn names() []str {
+	let all = packages()
+	mut out = []str{}
+	mut i = 0
+	for i < len(all) {
+		out = append(out, all[i])
+		i += 2
+	}
+	return out
+}
+
+fn roleOf(name str) str {
+	let all = packages()
+	mut i = 0
+	for i < len(all) {
+		if all[i] == name {
+			return all[i + 1]
+		}
+		i += 2
+	}
+	return ""
+}
+
+fn has(xs []str, x str) bool {
+	for y in xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
+fn isDigit(c u8) bool {
+	return c >= '0' && c <= '9'
+}
+
+fn isUpper(c u8) bool {
+	return c >= 'A' && c <= 'Z'
+}
+
+fn isIdent(c u8) bool {
+	return c == '_' || isDigit(c) || isUpper(c) || (c >= 'a' && c <= 'z')
+}
+
+// isOsFile reports whether a file name ends _darwin, _linux, optionally followed by _arm64 or _amd64, then .tin.
+fn isOsFile(f str) bool {
+	for os in []str{"_darwin", "_linux"} {
+		for arch in []str{"", "_arm64", "_amd64"} {
+			if twine.HasSuffix(f, os + arch + ".tin") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// packageFiles are the files of the package directory that document the package: every .tin file except tests and the per-OS and
+// per-CPU parts, in name order.
+fn packageFiles(name str) []str {
+	mut directory = ""
+	for d in []str{"toolchain/std/" + name, "packages/" + name} {
+		if quarry.IsDir(ci.Join(ci.Root(), d)) && len(directory) == 0 {
+			directory = d
+		}
+	}
+	if len(directory) == 0 {
+		return []str{}
+	}
+	let entries = quarry.ReadDir(ci.Join(ci.Root(), directory)) catch _ {
+		[]str{}
+	}
+	mut sorted = []str{}
+	for e in entries {
+		sorted = append(sorted, e)
+	}
+	quarry.SortStrs(mut sorted)
+	mut files = []str{}
+	for f in sorted {
+		if twine.HasSuffix(f, ".tin") && !twine.HasSuffix(f, "_test.tin") && !isOsFile(f) {
+			files = append(files, directory + "/" + f)
+		}
+	}
+	return files
+}
+
+// Item is a documented declaration: its kind, its text and the comment above it.
+type Item struct {
+	Kind str
+	Text str
+	Comment str
+}
+
+// File is what a file documents: the package comment lines and the items.
+type File struct {
+	Doc []str
+	Items []Item
+}
+
+fn trimmed(lines []str) str {
+	mut parts = []str{}
+	for l in lines {
+		parts = append(parts, twine.TrimSpace(l))
+	}
+	return twine.Join(parts, " ")
+}
+
+// declName reads a capitalised identifier after a keyword prefix.
+fn declName(line str, keyword str) bool {
+	return twine.HasPrefix(line, keyword + " ") && len(line) > len(keyword) + 1 && isUpper(line[len(keyword) + 1])
+}
+
+fn compile(pattern str) pyre.Regex {
+	let r = pyre.Compile(pattern) catch _ {
+		ci.Fail("gendoc: pattern " + pattern)
+		panic("unreachable")
+	}
+	return r
+}
+
+fn parse(path str, funcLine pyre.Regex, funcPrefix pyre.Regex) File {
+	let lines = twine.Split(ci.Read(path), "\n")
+	mut pkgdoc = []str{}
+	mut items = []Item{}
+	mut comment = []str{}
+	mut seenPkg = false
+	for line in lines {
+		if twine.HasPrefix(line, "//") {
+			comment = append(comment, line[2:])
+			continue
+		}
+		if twine.HasPrefix(line, "package ") {
+			pkgdoc = comment
+			seenPkg = true
+			comment = []str{}
+			continue
+		}
+		// Edition 1 declares functions with fn (attributes such as @nopoll first); edition 0 with func.
+		let (_, _, isFunc) = funcLine.Search(line, 0)
+		if isFunc && seenPkg {
+			let (_, end, _) = funcPrefix.Search(line, 0)
+			items = append(items, Item{Kind: "func", Text: twine.TrimRight(line[end:], " {{"), Comment: trimmed(comment)})
+		} else if declName(line, "type") && seenPkg {
+			items = append(items, Item{Kind: "type", Text: twine.TrimRight(line, " {{"), Comment: trimmed(comment)})
+		} else if declName(line, "shape") && seenPkg {
+			items = append(items, Item{Kind: "shape", Text: twine.TrimRight(line, " {{"), Comment: trimmed(comment)})
+		} else if declName(line, "const") && seenPkg {
+			items = append(items, Item{Kind: "const", Text: line, Comment: trimmed(comment)})
+		}
+		comment = []str{}
+	}
+	return File{Doc: pkgdoc, Items: items}
+}
+
+fn startsWord(line str, words []str) bool {
+	for w in words {
+		if twine.HasPrefix(line, w) && (len(line) == len(w) || !isIdent(line[len(w)])) {
+			return true
+		}
+	}
+	return false
+}
+
+// fence is a package comment's example as a code block: Tin declarations (```tin), statements (```tin body, which docs_check compiles
+// inside a function), or program output (```text).
+fn fence(code []str, out mut []str) {
+	mut lines = code
+	for len(lines) > 0 && len(twine.TrimSpace(lines[len(lines) - 1])) == 0 {
+		lines = lines[0:len(lines) - 1]
+	}
+	mut lang = "tin body"
+	if len(lines[0]) > 0 && (isDigit(lines[0][0]) || twine.HasPrefix(lines[0], "$ ")) {
+		lang = "text"
+	} else {
+		for c in lines {
+			if startsWord(c, []str{"fn", "type", "const", "shape", "on", "import", "package"}) {
+				lang = "tin"
+			}
+		}
+	}
+	out = append(out, "```" + lang)
+	for l in lines {
+		out = append(out, l)
+	}
+	out = append(out, "```")
+	out = append(out, "")
+}
+
+fn main() {
+	let order = names()
+	let funcLine = compile(`^(?:@\w+(?:\([^)]*\))? )*(?:func|fn) (\([a-z]+ (mut )?[A-Za-z0-9_\[\], ]+\) )?([A-Z][A-Za-z0-9_]*)(\[[^\]]*\])?\((.*)$`)
+	let funcPrefix = compile(`^(?:@\w+(?:\([^)]*\))? )*(?:func|fn) `)
+	mut out = []str{"# Tin standard library", "", "Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/gen/gendoc.tin`.", ""}
+	out = append(out, "| package | role (Go equivalent) |")
+	out = append(out, "|---|---|")
+	for p in order {
+		out = append(out, "| [" + p + "](#" + p + ") | " + roleOf(p) + " |")
+	}
+	out = append(out, "")
+	out = append(out, "## say")
+	out = append(out, "")
+	out = append(out, "Built into the compiler (formatting by static type, no reflection): `say.Line(a, b...)`, `say.Text(...)`, `say.Out(format, ...)`, `say.Fmt(format, ...) str`, `say.Str(x) str`, `say.Fault(format, ...) fault`, `say.To(fd, ...)`, `say.LineTo(fd, ...)`. See toolchain/docs/LANGUAGE.md.")
+	out = append(out, "")
+	for p in order {
+		if p == "say" {
+			continue
+		}
+		let files = packageFiles(p)
+		if len(files) == 0 {
+			continue
+		}
+		mut doc = []str{}
+		mut items = []Item{}
+		for path in files {
+			let f = parse(path, funcLine, funcPrefix)
+			if len(doc) == 0 {
+				doc = f.Doc
+			}
+			for i in f.Items {
+				items = append(items, i)
+			}
+		}
+		out = append(out, "## " + p)
+		out = append(out, "")
+		if len(doc) > 0 {
+			mut text = []str{}
+			mut code = []str{}
+			for i in 0..len(doc) {
+				let c = doc[i]
+				// A blank comment line between two indented lines belongs to the example.
+				if len(code) > 0 && len(twine.TrimSpace(c)) == 0 && i + 1 < len(doc) && twine.HasPrefix(doc[i + 1], "\t") {
+					code = append(code, "")
+					continue
+				}
+				if twine.HasPrefix(c, "\t") {
+					if len(text) > 0 {
+						out = append(out, twine.Join(text, " "))
+						out = append(out, "")
+						text = []str{}
+					}
+					code = append(code, c[1:])
+				} else {
+					if len(code) > 0 {
+						fence(code, mut out)
+						code = []str{}
+					}
+					if len(twine.TrimSpace(c)) > 0 {
+						text = append(text, twine.TrimSpace(c))
+					} else if len(text) > 0 {
+						out = append(out, twine.Join(text, " "))
+						out = append(out, "")
+						text = []str{}
+					}
+				}
+			}
+			if len(text) > 0 {
+				out = append(out, twine.Join(text, " "))
+				out = append(out, "")
+			}
+			if len(code) > 0 {
+				fence(code, mut out)
+			}
+		}
+		for item in items {
+			if len(item.Comment) > 0 {
+				out = append(out, "- `" + item.Text + "`: " + item.Comment)
+			} else {
+				out = append(out, "- `" + item.Text + "`")
+			}
+		}
+		out = append(out, "")
+	}
+	mut missing = []str{}
+	for part in []str{"toolchain/std", "packages"} {
+		let entries = quarry.ReadDir(ci.Join(ci.Root(), part)) catch _ {
+			[]str{}
+		}
+		for d in entries {
+			if quarry.IsDir(ci.Join(ci.Join(ci.Root(), part), d)) && !has(order, d) && !has(skipped(), d) {
+				missing = append(missing, d)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		quarry.SortStrs(mut missing)
+		say.Line("gendoc: packages missing from PACKAGES: " + twine.Join(missing, ", "))
+		quarry.Exit(1)
+	}
+	let text = twine.Join(out, "\n")
+	let args = quarry.Args()
+	if len(args) > 1 && args[1] == "--check" {
+		ci.Check(ci.Read(ci.Join(ci.Root(), "toolchain/docs/STDLIB.md")) == text, "toolchain/docs/STDLIB.md is stale: run sh tools/ci/tin.sh tools/gen/gendoc.tin")
+		return
+	}
+	ci.Write(ci.Join(ci.Root(), "toolchain/docs/STDLIB.md"), text)
+	mut entries = 0
+	for l in out {
+		if twine.HasPrefix(l, "- ") {
+			entries += 1
+		}
+	}
+	say.Line(mint.Itoa(entries) + " entries")
+}

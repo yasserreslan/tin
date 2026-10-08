@@ -1,0 +1,196 @@
+package main
+
+import "mint"
+import "quarry"
+import "say"
+
+// elfpatch: in-place edits of an ELF64 little-endian file for the negative tests.
+//
+// usage: elfpatch FILE OP ARG [OP ARG ...]
+//   droptag  0xTAG      rewrite dynamic entries with d_tag == TAG to DT_LOOS (0x60000000, ignored by ld.so)
+//   dropphdr TYPE       set p_type of every program header of that type to PT_NULL (0)
+//   phflags  TYPE FLAGS set p_flags of every program header of that type
+//   noshdr   -          zero e_shoff/e_shnum/e_shstrndx (section-header-less executable)
+//   hash1    -          rewrite the DT_HASH table in place to nbucket=1 with every symbol on one chain
+//
+// Built for the Linux target and run in the probe containers (tools/dev/linux_probe/run_all.sh):
+//   tin build tools/dev/linux_probe/elfpatch.tin -o tools/dev/linux_probe/elfpatch --target linux-arm64   (or linux-amd64)
+
+const PT_DYNAMIC = 2
+
+fn get(b []u8, at i64, n i64) i64 {
+	mut v = i64(0)
+	for i in 0..n {
+		v = v | (i64(b[at + i]) << (8 * i))
+	}
+	return v
+}
+
+fn put(b mut []u8, at i64, n i64, v i64) {
+	for i in 0..n {
+		b[at + i] = u8((v >> (8 * i)) & 255)
+	}
+}
+
+fn number(s str) i64 {
+	if len(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		return mint.ParseInt(s[2:], 16) catch _ {
+			0
+		}
+	}
+	return mint.Atoi(s) catch _ {
+		0
+	}
+}
+
+fn hex(v i64) str {
+	return mint.FormatInt(v, 16)
+}
+
+fn die(message str) {
+	say.Line("elfpatch: " + message)
+	quarry.Exit(1)
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) < 4 {
+		die("usage: elfpatch FILE OP ARG [OP ARG ...]")
+	}
+	let path = args[1]
+	let data = quarry.ReadFile(path) catch _ {
+		die("cannot read " + path)
+		return
+	}
+	mut b = make([]u8, len(data))
+	for i in 0..len(data) {
+		b[i] = data[i]
+	}
+	if len(b) < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2 || b[5] != 1 {
+		die("need ELF64 LE")
+	}
+	let phoff = get(b, 0x20, 8)
+	let phentsize = get(b, 0x36, 2)
+	let phnum = get(b, 0x38, 2)
+	mut phdrs = []i64{}
+	for i in 0..phnum {
+		phdrs = append(phdrs, phoff + i * phentsize)
+	}
+	// a program header: type 0 (4 bytes), flags 4 (4), offset 8, vaddr 16, paddr 24, filesz 32, memsz 40, align 48 (8 bytes each)
+	let rest = args[2:]
+	mut i = 0
+	for i < len(rest) {
+		let op = rest[i]
+		if op == "droptag" {
+			let tag = number(rest[i + 1])
+			i += 2
+			for off in phdrs {
+				if get(b, off, 4) != PT_DYNAMIC {
+					continue
+				}
+				let dynOff = get(b, off + 8, 8)
+				let dynSize = get(b, off + 32, 8)
+				mut n = 0
+				mut k = i64(0)
+				for k < dynSize {
+					let dTag = get(b, dynOff + k, 8)
+					if dTag == 0 {
+						break
+					}
+					if dTag == tag {
+						put(mut b, dynOff + k, 8, 0x60000000)
+						n += 1
+					}
+					k += 16
+				}
+				say.Line("droptag 0x" + hex(tag) + ": rewrote " + mint.Itoa(n) + " entries")
+			}
+		} else if op == "dropphdr" {
+			let t = number(rest[i + 1])
+			i += 2
+			mut n = 0
+			for off in phdrs {
+				if get(b, off, 4) == t {
+					put(mut b, off, 4, 0)
+					n += 1
+				}
+			}
+			say.Line("dropphdr 0x" + hex(t) + ": rewrote " + mint.Itoa(n) + " headers")
+		} else if op == "phflags" {
+			let t = number(rest[i + 1])
+			let fl = number(rest[i + 2])
+			i += 3
+			mut n = 0
+			for off in phdrs {
+				if get(b, off, 4) == t {
+					put(mut b, off + 4, 4, fl)
+					n += 1
+				}
+			}
+			say.Line("phflags 0x" + hex(t) + " -> " + mint.Itoa(fl) + ": rewrote " + mint.Itoa(n) + " headers")
+		} else if op == "hash1" {
+			i += 2
+			mut dynOff = i64(-1)
+			mut dynSize = i64(0)
+			for off in phdrs {
+				if get(b, off, 4) == PT_DYNAMIC {
+					dynOff = get(b, off + 8, 8)
+					dynSize = get(b, off + 32, 8)
+				}
+			}
+			if dynOff < 0 {
+				die("no PT_DYNAMIC")
+			}
+			mut hashVaddr = i64(-1)
+			mut k = i64(0)
+			for k < dynSize {
+				if get(b, dynOff + k, 8) == 4 {
+					hashVaddr = get(b, dynOff + k + 8, 8)
+				}
+				k += 16
+			}
+			if hashVaddr < 0 {
+				die("no DT_HASH")
+			}
+			mut hoff = i64(-1)
+			for off in phdrs {
+				let vaddr = get(b, off + 16, 8)
+				if get(b, off, 4) == 1 && vaddr <= hashVaddr && hashVaddr < vaddr + get(b, off + 32, 8) {
+					hoff = hashVaddr - vaddr + get(b, off + 8, 8)
+				}
+			}
+			if hoff < 0 {
+				die("DT_HASH is in no PT_LOAD")
+			}
+			let nbucket = get(b, hoff, 4)
+			let nchain = get(b, hoff + 4, 4)
+			put(mut b, hoff, 4, 1)
+			put(mut b, hoff + 4, 4, nchain)
+			// bucket[0] -> symbol 1
+			if nchain > 1 {
+				put(mut b, hoff + 8, 4, 1)
+			} else {
+				put(mut b, hoff + 8, 4, 0)
+			}
+			for sym in 0..nchain {
+				mut next = i64(0)
+				if sym >= 1 && sym < nchain - 1 {
+					next = sym + 1
+				}
+				put(mut b, hoff + 12 + 4 * sym, 4, next)
+			}
+			say.Line("hash1: DT_HASH at 0x" + hex(hashVaddr) + " (file 0x" + hex(hoff) + "): nbucket " + mint.Itoa(nbucket) + "->1, nchain " + mint.Itoa(nchain) + ", chain 1->2->...->" + mint.Itoa(nchain - 1) + "->0")
+		} else if op == "noshdr" {
+			i += 2
+			put(mut b, 0x28, 8, 0)
+			put(mut b, 0x3c, 2, 0)
+			put(mut b, 0x3e, 2, 0)
+			say.Line("noshdr: e_shoff=0 e_shnum=0 e_shstrndx=0")
+		} else {
+			die("unknown op " + op)
+		}
+	}
+	quarry.WriteFile(path, str(b)) catch _ {
+		die("cannot write " + path)
+	}
+}

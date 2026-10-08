@@ -19,4 +19,4 @@ if [ "$image" = debian:bookworm-slim ]; then
 fi
 docker run --rm --platform linux/arm64 -v "$w:/w" "$image" \
   sh -c "${install}x86_64-linux-gnu-objdump -D -b binary -m i386:x86-64 -M intel /w/out.bin" > "$w/objdump.txt" || exit 1
-python3 tools/dev/x64fuzz/compare.py "$w/ours.txt" "$w/objdump.txt"
+sh tools/ci/tin.sh tools/dev/x64fuzz/compare.tin "$w/ours.txt" "$w/objdump.txt"

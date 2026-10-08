@@ -12,7 +12,7 @@ instead of inventing a new place for it.
 |---|---|---|
 | `toolchain/compiler/` | The compiler `tinc`, written in typed edition 1 (trusted code): `lex`, `parse`, `check`, `lower`, `generics`, `region` (the compile-time memory checker), `inline`, `opt`, back ends `gen` (arm64) and `gen_x64`, assemblers `asm` and `asm_x64`, object writers `macho` and `elf`, `elf_x64`, `main`, host parts `host_darwin` and `host_linux`. | Only a task that is about the compiler. Always finish with `make bootstrap` (a fixed point). |
 | `toolchain/seed/` | Checked-in compiler binaries that build the compiler from source (`tinc-darwin-arm64`, `tinc-linux-arm64`, `tinc-linux-amd64`). | Only through `make seed`, in a PR that says why a new seed is needed. Never edit by hand. |
-| `toolchain/runtime/` | The runtime every program gets: memory (pools, the long-lived heap), strings, slices, maps, formatting, tasks, panics, the OS layer. Not a package: files are loaded together, with `_darwin`, `_linux`, `_linux_arm64`, `_linux_amd64` parts. It imports nothing. | A task about the runtime. Generated parts (`printable.tin`) come from `tools/gen/gen_unicode.py`. |
+| `toolchain/runtime/` | The runtime every program gets: memory (pools, the long-lived heap), strings, slices, maps, formatting, tasks, panics, the OS layer. Not a package: files are loaded together, with `_darwin`, `_linux`, `_linux_arm64`, `_linux_amd64` parts. It imports nothing. | A task about the runtime. Generated parts (`printable.tin`) come from `tools/gen/gen_unicode.tin`. |
 | `toolchain/std/NAME/`, `packages/NAME/` | One package per directory (`package NAME`), imported as `import "NAME"`: the standard library in `toolchain/std/`, the ecosystem (servers, clients, protocols) in `packages/`. Files split by topic, platform parts end in the platform name, `_test.tin` files are skipped by the loader. See `toolchain/std/README.md`. | Any library task. |
 | `toolchain/tests/v2/` | The strict test suite: `NAME.tin` plus `NAME.out` (expected stdout, sorted bytewise because the suite sorts lines) or `NAME_bad.tin` plus `NAME_bad.err` (expected compile error). Run by `tools/dev/v2test.sh`. | Every task adds tests here. |
 | `toolchain/tests/regressions/` | One reproducer per fixed bug, with its contract in `cases.json`; every entry needs an `issue` number. Run by `tools/ci/regressions.py`. | Every bug fix. |
@@ -20,7 +20,7 @@ instead of inventing a new place for it.
 | `bench/`, `bench/v04`, `bench/http`, `bench/router` | Benchmarks and service benchmarks against Go. | Performance tasks. |
 | `toolchain/docs/` | `LANGUAGE.md` (reference), `RUNTIME.md`, `COMPILER.md`, `TOOLING.md`, `PORTING.md`, `PERFORMANCE.md`, `COVERAGE.md` (the inventory of Go's surface against Tin), `STDLIB.md` (generated), `AGENT_PRIMER.md`. | Whoever changes behavior updates the matching doc in the same PR. |
 | `design/` | `roadmap.md` (the plan), `design_foundations.md` (decided designs), `stdlib_verified.md` (what is verified against Go), the interfaces between parts. | Roadmap boxes and verification rows as work lands. |
-| `tools/` | `dev/` (`v2test.sh`, `compare_compilers.sh`, `dist.tin`, debugging helpers), `gen/` (`gendoc.py` writes `toolchain/docs/STDLIB.md`, `gen_unicode.py` writes the Unicode tables), `ci/` (CI checks). | `tools/ci`: extend existing files only, never add a Python file there. New tooling is written in Tin. |
+| `tools/` | `dev/` (`v2test.sh`, `compare_compilers.sh`, `dist.tin`, debugging helpers), `gen/` (`gendoc.tin` writes `toolchain/docs/STDLIB.md`, `gen_unicode.tin` writes the Unicode tables), `ci/` (CI checks). | `tools/ci`: extend existing files only, never add a Python file there. New tooling is written in Tin. |
 | `products/` | Programs built with Tin that people use: `tinland/` (the IDE: `intellij/`, the IntelliJ Platform plugin, beside `vscode/`), `tinos/` later. Each product has its own README and tests and depends only on `toolchain/` and `packages/`. | The product's own tasks. |
 | `examples/`, `docker/`, `install.sh`, `Makefile`, `VERSION`, `.github/` | Examples, container images, installer, build entry points, CI and the PR template. | Only tasks about distribution or CI. |
 | `go.mod` | Left from the retired Go stage; Go remains only as a baseline for twins and the HTTP conformance tools until those are rewritten in Tin. | Do not add Go code to the product. |
@@ -45,7 +45,7 @@ Process:
 7. A library function is verified against Go: a generated twin (`bench/ref/NAME/main.go`) and the Tin test (`toolchain/tests/v2/NAME.tin`) come from one description, and the Tin output must be identical to Go's. Prove the test is sensitive by breaking one constant and seeing it fail.
 8. Every bug found gets an issue, a regression case in `toolchain/tests/regressions/` tied to it, and a fix in the same PR (or its own PR). Fix bugs you find along the way.
 9. A PR is big enough to be complete: the code, the tests, the twin, the docs and the roadmap boxes it closes. No two-line PRs, no half features.
-10. Behavior changes update `toolchain/docs/LANGUAGE.md` or the matching doc, regenerate `toolchain/docs/STDLIB.md` (`python3 tools/gen/gendoc.py`) and `toolchain/docs/COVERAGE.md`, and add the row to `design/stdlib_verified.md`.
+10. Behavior changes update `toolchain/docs/LANGUAGE.md` or the matching doc, regenerate `toolchain/docs/STDLIB.md` (`sh tools/ci/tin.sh tools/gen/gendoc.tin`) and `toolchain/docs/COVERAGE.md`, and add the row to `design/stdlib_verified.md`.
 11. Names follow the role of the thing, not a language prefix. A package directory is `toolchain/std/<name>/` or `packages/<name>/`; Tin's package names are short nouns (`twine` for strings, `link` for net/url).
 12. Do not add new Python files under `tools/ci`. Do not add dependencies. Do not weaken or delete a test to make it pass.
 
@@ -56,7 +56,7 @@ make bootstrap                       # the compiler rebuilds itself to an identi
 tools/dev/v2test.sh                      # the strict suite: every line must PASS
 sh tools/ci/tin.sh regressions       # regression cases
 sh tools/ci/tin.sh test_tooling     # harness tests
-python3 tools/gen/gendoc.py              # when package docs or exports changed
+sh tools/ci/tin.sh tools/gen/gendoc.tin              # when package docs or exports changed
 bin/tinc -target linux-arm64 -o /tmp/x FILE.tin ; bin/tinc -target linux-amd64 -o /tmp/x FILE.tin   # cross-build what you touched
 ```
 

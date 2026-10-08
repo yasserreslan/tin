@@ -30,7 +30,7 @@ An import name is looked up in `toolchain/std/` and then `packages/`; the layout
   tests; see toolchain/docs/TOOLING.md). The suites for the standard library are in `toolchain/tests/v2/`.
 - **Nested packages** are subdirectories: `packages/postgres/sasl/` is imported as
   `"postgres/sasl"`. The parent package does not include them.
-- **Documentation comes from the code.** `tools/gen/gendoc.py` writes `toolchain/docs/STDLIB.md` from the doc
+- **Documentation comes from the code.** `tools/gen/gendoc.tin` writes `toolchain/docs/STDLIB.md` from the doc
   comments of every file of each package; the comment on the `package` clause is the package's
   description.
 - A package may import any package that does not import it back. The runtime imports nothing.
@@ -38,4 +38,4 @@ An import name is looked up in `toolchain/std/` and then `packages/`; the layout
 ## Adding a package
 
 Create `toolchain/std/NAME/NAME.tin` (or `packages/NAME/NAME.tin`) starting with `package NAME`, add the name and a one-line role to
-`ORDER` and `ROLE` in `tools/gen/gendoc.py`, run it, and add a test under `toolchain/tests/v2/`.
+`PACKAGES` in `tools/gen/gendoc.tin`, run it, and add a test under `toolchain/tests/v2/`.

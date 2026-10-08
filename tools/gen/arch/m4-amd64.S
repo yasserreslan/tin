@@ -1,5 +1,5 @@
 // m4_mont for seal (#488), x86-64 with BMI2: mont_mul for four limbs (P-256's field and order,
-// Ed25519's order), everything in registers. tools/gen/gen_aes_hw.py turns it into
+// Ed25519's order), everything in registers. tools/gen/aes_hw.tin turns it into
 // toolchain/compiler/aes_hw.tin. Relocation-free, never touches r15 (the core context); rbx, rbp
 // and r12-r14 are saved. Constant-time: straight-line code, a conditional move at the end.
 .intel_syntax noprefix

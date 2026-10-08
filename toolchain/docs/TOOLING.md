@@ -209,7 +209,7 @@ global's dot does too.
 | `make linux-test` | cross-compile every strict test for linux-arm64 and run it in an arm64 container (`tools/dev/linuxtest.sh`) |
 | `make linux-bootstrap` | cross-compile a Linux compiler, then in the container it must rebuild itself identically; refreshes `toolchain/seed/tinc-linux-arm64` |
 | `make linux-amd64-bootstrap` | the same for x86-64 in `tin-debian-amd64` (emulated on an arm64 Mac); refreshes `toolchain/seed/tinc-linux-amd64` |
-| `make bench` | the CPU benchmarks vs Go (`bench/run.py`) |
+| `make bench` | the CPU benchmarks vs Go (`bench/run.tin`) |
 | `make install` | link `tin` into `$(PREFIX)/bin` (created if needed; see §1 for the default) |
 | `make dist` | package the native compiler, library and sources in a versioned archive with a SHA-256 checksum |
 | `make print-VAR` | print a Makefile variable (e.g. `make print-SELF`, the compiler's sources) |
@@ -361,7 +361,7 @@ Go binaries for the container: `GOOS=linux GOARCH=arm64 go build -o bin/linux/x 
 | `bench/http/hammer` | a Go load generator (wrk-like) with exact latency histograms |
 | `bench/router/router.tin` + `bench/router/go` | routing cost with 1, 20 and 200 routes: a lookup (`Match`) and a whole request through the router (`Run`), against chi's `Find` and `ServeHTTP` |
 | `bench/http/routes.tin` | `/json` and `/plaintext` behind a router of `ROUTES` routes (port 9180, like `examples/api.tin`), for routing inside a served request |
-| `bench/v04/run.py` | `GET /users/{id}` through Redis over MySQL, Tin vs Go + chi under wrk2: max req/s, req per CPU-second, p50/p99/p99.9 at a fixed rate, RSS (needs Redis, MySQL seeded by `bench/v04/seed.py`, and `WRK2`) |
+| `bench/v04/run.tin` | `GET /users/{id}` through Redis over MySQL, Tin vs Go + chi under wrk2: max req/s, req per CPU-second, p50/p99/p99.9 at a fixed rate, RSS (needs Redis, MySQL seeded by `bench/v04/seed.tin` (`sh tools/ci/tin.sh bench/v04/seed.tin`), and `WRK2`) |
 
 Servers used: `examples/api.tin` (port 9180, `TIN_CORES=n`), `bench/http/fast` (fasthttp,
 9182), `bench/http/gonet` (net/http, 9181), with `GOMAXPROCS=n`. Results and analysis:
@@ -513,7 +513,7 @@ toolchain/tests/v2/           strict tests and expected outputs
 toolchain/seed/               tinc-darwin-arm64, tinc-linux-arm64, tinc-linux-amd64: the compilers that start a build
 examples/           api.tin (HTTP server), tasks.tin, redis.tin, mysql.tin, websocket.tin, demo.tin, demo_go/
 bench/              v2/ CPU benchmarks, http/ HTTP benchmarks and tools, v04/ the service benchmark, ref/ Go references
-tools/              ci/ (the CI checks), dev/ (v2test.sh, dist.tin, debugging helpers, x64fuzz/), gen/ (gendoc.py, gencoverage.tin, table generators)
+tools/              ci/ (the CI checks), dev/ (v2test.sh, dist.tin, debugging helpers, x64fuzz/), gen/ (gendoc.tin, gencoverage.tin, table generators)
 toolchain/docs/               this documentation
 products/           programs built with Tin (tinland/: editor tooling)
 design/             design decisions, interfaces, verification, roadmap
@@ -523,7 +523,7 @@ bin/                build output (ignored)
 ## 10. Version control
 
 The tree is ready to become a git repository: `.gitignore` excludes `bin/` and scratch
-output, every generated file can be regenerated (`make`, `tools/gen/gendoc.py`,
+output, every generated file can be regenerated (`make`, `tools/gen/gendoc.tin`,
 `tools/gen/gencoverage.tin`), seeds are
 plain files, and no script depends on a machine-specific path.
 
@@ -537,18 +537,14 @@ where the bootstrap passed, together with the compiler change that needed them.
 
 ## 11. Regenerating the docs
 
-`python3 tools/gen/gendoc.py` rewrites `toolchain/docs/STDLIB.md` from the comments in `toolchain/std/` and `packages/`
+`sh tools/ci/tin.sh tools/gen/gendoc.tin` rewrites `toolchain/docs/STDLIB.md` from the comments in `toolchain/std/` and `packages/`
 (package comment, then one line per exported function, type and constant). Write a
 one-line comment above every exported declaration.
 
 `bin/tinc -o /tmp/gencoverage tools/gen/gencoverage.tin && /tmp/gencoverage` rewrites
 `toolchain/docs/COVERAGE.md` from the maintained inventory in `design/coverage.md`.
 
-`python3 tools/dev/legacy2tin.py [--analyze FILE]... FILE...` converts files of the compiler's untyped word
-dialect to typed edition 1 written with `i64` words (#228); a one-time migration tool, kept until the
-dialect is gone.
-
-`python3 tools/gen/gen_unicode.py` rewrites `toolchain/std/glyph/tables.tin` and `toolchain/runtime/printable.tin` (the Unicode
+`sh tools/ci/tin.sh tools/gen/gen_unicode.tin` rewrites `toolchain/std/glyph/tables.tin` and `toolchain/runtime/printable.tin` (the Unicode
 tables) from Go's `unicode/tables.go`; it needs a Go tree only to read that one file.
 
 ## Integer overflow checks

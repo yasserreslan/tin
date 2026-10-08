@@ -52,12 +52,12 @@ that a shared runner measures a 5% change precisely.
 With two already bootstrapped checkouts, run on the same native Linux machine:
 
 ```sh
-python3 bench/compare.py --base-root /path/to/base --head-root /path/to/head --json bin/bench-cpu-compare.json
-python3 bench/compare.py --base-root /path/to/base --head-root /path/to/head --suite http --json bin/bench-http-compare.json
+sh tools/ci/tin.sh bench/compare.tin --base-root /path/to/base --head-root /path/to/head --json bin/bench-cpu-compare.json
+sh tools/ci/tin.sh bench/compare.tin --base-root /path/to/base --head-root /path/to/head --suite http --json bin/bench-http-compare.json
 # A focused CPU rerun (same seven samples per side):
-python3 bench/compare.py --base-root /path/to/base --head-root /path/to/head nbody
+sh tools/ci/tin.sh bench/compare.tin --base-root /path/to/base --head-root /path/to/head nbody
 # Reference measurements still compare against Go:
-BENCH_DIR=bench/v2 python3 bench/run.py --json bin/bench-cpu-reference.json
+BENCH_DIR=bench/v2 sh tools/ci/tin.sh bench/run.tin --json bin/bench-cpu-reference.json
 ```
 
 The default CPU input suite is the comparison script's `bench/v2`; `--bench-dir` selects
@@ -69,7 +69,7 @@ with both compilers and their matching library trees. The shell entrypoint
 ## v0.4 service benchmark (Linux)
 
 `GET /users/{id}` through Redis over MySQL, Tin (`bench/v04/users.tin`) against Go + chi,
-go-redis and go-sql-driver/mysql (`bench/v04/go`), under wrk2 (`bench/v04/run.py`, workflow
+go-redis and go-sql-driver/mysql (`bench/v04/go`), under wrk2 (`bench/v04/run.tin`, workflow
 `.github/workflows/bench.yml`). Three scenarios over random ids 1..10000: **cached** (every
 read hits Redis), **db** (`/db/users/{id}`, a MySQL prepared statement per request) and
 **mixed** (cached reads with 0.5% `/slow` requests that answer after 50 ms). Each runs at an
@@ -144,7 +144,7 @@ route that does not touch Redis showed the same occasional spikes as `/users/{id
 side-by-side test on a shared VM, and Redis added about 1.5 ms at p99, its round trip.
 
 Run it yourself: Actions, Benchmark v0.4, Run workflow (inputs: rounds, seconds per run).
-Locally, `bench/v04/run.py` needs Redis, MySQL seeded by `bench/v04/seed.py` and a wrk2
+Locally, `bench/v04/run.tin` needs Redis, MySQL seeded by `bench/v04/seed.tin` and a wrk2
 binary; `SERVER_CPUS` / `WRK_CPUS` pin the servers and wrk2 to separate CPUs.
 
 ## Measurement setup of the existing numbers (macOS development machine)
@@ -575,7 +575,7 @@ benchmark can be code placement.
 
 ## HTTPS: anvil.ServeTLS against Go's crypto/tls (Linux)
 
-`bench/http/run_https.py` (a step of `.github/workflows/bench-linux.yml`) serves the same routes
+`bench/http/run_https.tin` (a step of `.github/workflows/bench-linux.yml`) serves the same routes
 with `anvil.ServeTLS` (`bench/http/https.tin`) and with Go's net/http on crypto/tls
 (`bench/http/gotls`). Each server gets one core (TIN_CORES=1, GOMAXPROCS=1); wrk `-t2` runs on
 the same runner over TLS 1.3. The figures are medians of five alternating 5-second rounds. Full
@@ -648,7 +648,7 @@ function, selected at run time (`TIN_SEAL_SOFT=1` keeps the portable code, and t
 - `p256_pick`: one call reads a digit's row of the k·G table (every entry touched) instead of
   three `monty.sel` calls per entry;
 - `fe_mul_hw`, `fe_sq_hw`: X25519's multiplication and squaring in radix 2^51
-  (`tools/gen/gen_fe25519_asm.py` writes both architectures from one product table, and checks it on
+  (`tools/gen/fe25519_asm.tin` writes both architectures from one product table, and checks it on
   a model against Python integers).
 
 [bench-linux run 37646094544](https://github.com/yasserreslan/tin/actions/runs/37646094544) on
@@ -775,7 +775,7 @@ anvil serves h2c (#360). [Run 37347324727](https://github.com/yasserreslan/tin/a
 runners with four vCPUs, Linux 6.17.0-1022-azure, Go 1.26.8, h2load nghttp2 1.59.0: AMD EPYC
 9V45 on amd64, Neoverse-N2 on arm64). One server core each (`TIN_CORES=1`, `GOMAXPROCS=1`),
 `h2load -t2 -c32 -m10` (h2c by prior knowledge) on the same runner, 10 s after a 2 s warm-up,
-medians of five alternating rounds (`bench/http/run_h2load.py`; Go is `bench/http/goh2c`,
+medians of five alternating rounds (`bench/http/run_h2load.tin`; Go is `bench/http/goh2c`,
 net/http with `Protocols.SetUnencryptedHTTP2`). Only the ratios are meaningful on these runners.
 
 | architecture, path | anvil req/s | net/http req/s | anvil / net/http |

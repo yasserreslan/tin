@@ -1,0 +1,421 @@
+package main
+
+import "../ci/ci"
+import "../ci/pyre"
+import "mint"
+import "quarry"
+import "say"
+import "sift"
+import "twine"
+
+// Generate toolchain/std/glyph/tables.tin and toolchain/runtime/printable.tin from Go's unicode/tables.go (run from the repo root).
+//
+//     gen_unicode [GOROOT/src/unicode/tables.go]
+//
+// The tables are the Unicode Character Database as Go ships it: general categories, scripts, properties, case ranges and the case orbit.
+// Each range table is packed into one string constant, 8 bytes per range (low, high: 3 bytes each, little endian; stride: 2 bytes), so a
+// binary links them as read-only data and starts without running any initializer. The runtime cannot import glyph, so it gets its own
+// copy of one set, the printable runes (categories L, M, N, P and S), as merged runs.
+
+const OUT = "toolchain/std/glyph/tables.tin"
+const OUT_PRINT = "toolchain/runtime/printable.tin"
+
+// Range is lo, hi and stride.
+type Range struct {
+	Lo i64
+	Hi i64
+	Stride i64
+}
+
+// Table is a named list of ranges.
+type Table struct {
+	Name str
+	Ranges []Range
+}
+
+type Case struct {
+	Lo i64
+	Hi i64
+	A i64
+	B i64
+	C i64
+}
+
+fn number(s str) i64 {
+	let t = twine.TrimSpace(s)
+	if twine.HasPrefix(t, "0x") {
+		return mint.ParseInt(t[2:], 16) catch _ {
+			0
+		}
+	}
+	return mint.Atoi(t) catch _ {
+		0
+	}
+}
+
+// block is the text between a line starting with the header and the line "}" that closes it (without the closing line).
+fn block(text str, header str) (str, bool) {
+	let at = twine.Index(text, "\n" + header)
+	if at < 0 {
+		return "", false
+	}
+	let start = at + 1 + len(header)
+	let end = twine.Index(text[start:], "\n}}\n")
+	if end < 0 {
+		return "", false
+	}
+	return text[start:start + end + 1], true
+}
+
+// range triples "{lo, hi, stride}" in a block.
+fn rangesIn(body str, re pyre.Regex) []Range {
+	mut out = []Range{}
+	mut from = 0
+	for from < len(body) {
+		let (s, e, ok) = re.Search(body, from)
+		if !ok {
+			break
+		}
+		let inner = body[s + 1:e - 1]
+		let parts = twine.Split(inner, ",")
+		out = append(out, Range{Lo: number(parts[0]), Hi: number(parts[1]), Stride: number(parts[2])})
+		from = e
+	}
+	return out
+}
+
+fn compile(p str) pyre.Regex {
+	let r = pyre.Compile(p) catch _ {
+		ci.Fail("gen_unicode: pattern " + p)
+		panic("unreachable")
+	}
+	return r
+}
+
+fn tableNamed(names []str, tables []Table, name str) []Range {
+	for t in tables {
+		if t.Name == name {
+			return t.Ranges
+		}
+	}
+	return []Range{}
+}
+
+// namedMap reads `var NAME = map[string]*RangeTable{ "Key": ident, ... }` into (key, ranges) pairs in file order.
+fn namedMap(text str, name str, raw []Table, aliasNames []str, aliasTargets []str) ([]str, [][]Range) {
+	let (body, ok) = block(text, "var " + name + " = map[string]*RangeTable{{\n")
+	ci.Check(ok, "gen_unicode: no map " + name)
+	mut keys = []str{}
+	mut values = [][]Range{}
+	for line in twine.Split(body, "\n") {
+		let t = twine.TrimSpace(line)
+		if !twine.HasPrefix(t, "\"") {
+			continue
+		}
+		let close = twine.IndexByte(t[1:], '"')
+		let key = t[1:1 + close]
+		let rest = twine.Trim(twine.TrimSpace(t[close + 2:]), ":, \t")
+		mut ident = rest
+		for i in 0..len(aliasNames) {
+			if aliasNames[i] == ident {
+				ident = aliasTargets[i]
+			}
+		}
+		keys = append(keys, key)
+		values = append(values, tableNamed(aliasNames, raw, ident))
+	}
+	return keys, values
+}
+
+fn literal(data []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{'"'}
+	for b in data {
+		let alnum = (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+		if alnum {
+			out = append(out, b)
+		} else {
+			out = append(out, '\\')
+			out = append(out, 'x')
+			out = append(out, digits[b >> 4])
+			out = append(out, digits[b & 15])
+		}
+	}
+	out = append(out, '"')
+	return str(out)
+}
+
+fn le(v i64, n i64) []u8 {
+	mut out = []u8{}
+	for i in 0..n {
+		out = append(out, u8((v >> (8 * i)) & 255))
+	}
+	return out
+}
+
+fn pack(ranges []Range) []u8 {
+	mut data = []u8{}
+	for r in ranges {
+		for b in le(r.Lo, 3) {
+			data = append(data, b)
+		}
+		for b in le(r.Hi, 3) {
+			data = append(data, b)
+		}
+		for b in le(r.Stride, 2) {
+			data = append(data, b)
+		}
+	}
+	return data
+}
+
+fn main() {
+	let args = quarry.Args()
+	mut source = ""
+	if len(args) > 1 {
+		source = args[1]
+	} else {
+		let root = twine.TrimSpace(ci.Exec([]str{"go", "env", "GOROOT"}, "", 30).Stdout)
+		source = ci.Join(root, "src/unicode/tables.go")
+	}
+	let text = ci.Read(source)
+	ci.Check(len(text) > 0, "gen_unicode: cannot read " + source)
+	// the version
+	let vat = twine.Index(text, "Version = \"")
+	let version = text[vat + 11:vat + 11 + twine.IndexByte(text[vat + 11:], '"')]
+	// every `var _X = &RangeTable{ ... }` and the `\tName = _X` aliases
+	let triple = compile(`\{(0x[0-9a-fA-F]+|\d+), (0x[0-9a-fA-F]+|\d+), (0x[0-9a-fA-F]+|\d+)\}`)
+	mut raw = []Table{}
+	mut aliasNames = []str{}
+	mut aliasTargets = []str{}
+	mut inTable = false
+	mut current = ""
+	mut ranges = []Range{}
+	for line in twine.Split(text, "\n") {
+		if inTable {
+			if line == "}}" {
+				raw = append(raw, Table{Name: current, Ranges: ranges})
+				inTable = false
+			} else {
+				for r in rangesIn(line, triple) {
+					ranges = append(ranges, r)
+				}
+			}
+			continue
+		}
+		if twine.HasPrefix(line, "var _") && twine.HasSuffix(line, " = &RangeTable{{") {
+			current = line[4:twine.Index(line, " = &RangeTable")]
+			ranges = []Range{}
+			inTable = true
+			continue
+		}
+		if twine.HasPrefix(line, "\t") && !twine.HasPrefix(line, "\t\t") && twine.Contains(line, "= _") {
+			let eq = twine.IndexByte(line, '=')
+			let n = twine.TrimSpace(line[1:eq])
+			mut t = twine.TrimSpace(line[eq + 1:])
+			mut stop = 0
+			for stop < len(t) && (t[stop] == '_' || (t[stop] >= 'a' && t[stop] <= 'z') || (t[stop] >= 'A' && t[stop] <= 'Z') || (t[stop] >= '0' && t[stop] <= '9')) {
+				stop += 1
+			}
+			t = t[0:stop]
+			mut word = len(n) > 0
+			for k in 0..len(n) {
+				let c = n[k]
+				if !(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+					word = false
+				}
+			}
+			if word && len(t) > 1 && t[0] == '_' && twine.HasPrefix(twine.TrimSpace(line[eq + 1:]), t) {
+				aliasNames = append(aliasNames, n)
+				aliasTargets = append(aliasTargets, t)
+			}
+		}
+	}
+	let (catNames, catRanges) = namedMap(text, "Categories", raw, aliasNames, aliasTargets)
+	let (scriptNames, scriptRanges) = namedMap(text, "Scripts", raw, aliasNames, aliasTargets)
+	let (propNames, propRanges) = namedMap(text, "Properties", raw, aliasNames, aliasTargets)
+	// the case ranges: {0x0041, 0x005A, d{0, 32, 0}}
+	let (caseBody, caseOk) = block(text, "var _CaseRanges = []CaseRange{{\n")
+	ci.Check(caseOk, "gen_unicode: no _CaseRanges")
+	mut cases = []Case{}
+	for line in twine.Split(caseBody, "\n") {
+		let t = twine.TrimSpace(line)
+		if !twine.HasPrefix(t, "{{0x") {
+			continue
+		}
+		let dAt = twine.Index(t, "d{{")
+		let head = twine.Split(t[1:dAt], ",")
+		let deltas = twine.Split(t[dAt + 2:twine.IndexByte(t[dAt:], '}') + dAt], ",")
+		mut d = []i64{}
+		for x in deltas {
+			if twine.TrimSpace(x) == "UpperLower" {
+				d = append(d, 0x110000)
+			} else {
+				d = append(d, number(x))
+			}
+		}
+		cases = append(cases, Case{Lo: number(head[0]), Hi: number(head[1]), A: d[0], B: d[1], C: d[2]})
+	}
+	// the case orbit: {0x004B, 0x006B}
+	let (orbitBody, orbitOk) = block(text, "var caseOrbit = []foldPair{{\n")
+	ci.Check(orbitOk, "gen_unicode: no caseOrbit")
+	mut orbitA = []i64{}
+	mut orbitB = []i64{}
+	for line in twine.Split(orbitBody, "\n") {
+		let t = twine.TrimSpace(line)
+		if twine.HasPrefix(t, "{{0x") {
+			let parts = twine.Split(t[1:twine.IndexByte(t, '}')], ",")
+			orbitA = append(orbitA, number(parts[0]))
+			orbitB = append(orbitB, number(parts[1]))
+		}
+	}
+	// a name must be one kind only
+	let kinds = []str{"category", "script", "property"}
+	let groups = [][]str{catNames, scriptNames, propNames}
+	mut seen = []str{}
+	mut seenKind = []str{}
+	for g in 0..3 {
+		for name in groups[g] {
+			let k = indexOf(seen, name)
+			if k >= 0 {
+				say.Line("name " + name + " is both a " + seenKind[k] + " and a " + kinds[g])
+				quarry.Exit(1)
+			}
+			seen = append(seen, name)
+			seenKind = append(seenKind, kinds[g])
+		}
+	}
+	let allRanges = [][][]Range{catRanges, scriptRanges, propRanges}
+	mut w = []str{"// Code generated by tools/gen/gen_unicode.tin from Go's unicode/tables.go; DO NOT EDIT.", "", "package glyph", "", "// UnicodeVersion is the version of the Unicode Character Database the tables come from.", "const UnicodeVersion = \"" + version + "\"", ""}
+	mut sortedNames = [][]str{}
+	for g in 0..3 {
+		mut s = []str{}
+		for name in groups[g] {
+			s = append(s, name)
+		}
+		sift.Sort(mut s)
+		sortedNames = append(sortedNames, s)
+	}
+	w = append(w, "// Table names a set of code points by Unicode's own name: a general category (Lu, Nd, P), a")
+	w = append(w, "// script (Latin, Han, Arabic) or a property (White_Space, Dash). Use it with Is.")
+	w = append(w, "type Table enum {{")
+	for g in 0..3 {
+		for name in sortedNames[g] {
+			w = append(w, "\t" + name)
+		}
+	}
+	w = append(w, "}}")
+	w = append(w, "")
+	w = append(w, "// TableOf returns the table with a Unicode name: a general category (Lu, Nd, P), a script")
+	w = append(w, "// (Latin, Han, Arabic) or a property (White_Space, Dash). It returns nil for a name with no")
+	w = append(w, "// table, so a pattern like \\p{{Greek}} can be refused.")
+	w = append(w, "fn TableOf(name str) ?Table {{")
+	for g in 0..3 {
+		for name in sortedNames[g] {
+			w = append(w, "\tif name == \"" + name + "\" {{")
+			w = append(w, "\t\treturn Table." + name)
+			w = append(w, "\t}}")
+		}
+	}
+	w = append(w, "\treturn nil")
+	w = append(w, "}}")
+	w = append(w, "")
+	w = append(w, "// tableData returns the packed ranges of t: 8 bytes each (low, high, stride).")
+	w = append(w, "fn tableData(t Table) str {{")
+	w = append(w, "\tmatch t {{")
+	for g in 0..3 {
+		for name in sortedNames[g] {
+			w = append(w, "\t\t" + name + " => {{")
+			w = append(w, "\t\t\treturn t_" + name)
+			w = append(w, "\t\t}}")
+		}
+	}
+	w = append(w, "\t}}")
+	w = append(w, "\treturn \"\"")
+	w = append(w, "}}")
+	w = append(w, "")
+	for g in 0..3 {
+		for name in sortedNames[g] {
+			let k = indexOf(groups[g], name)
+			w = append(w, "const t_" + name + " = " + literal(pack(allRanges[g][k])))
+		}
+	}
+	w = append(w, "")
+	w = append(w, "// caseData holds Go's CaseRanges: low, high (3 bytes each) and the deltas to upper, lower and title")
+	w = append(w, "// case (4 bytes each, signed; 0x110000 means the upper/lower alternation).")
+	mut caseData = []u8{}
+	for c in cases {
+		for b in le(c.Lo, 3) {
+			caseData = append(caseData, b)
+		}
+		for b in le(c.Hi, 3) {
+			caseData = append(caseData, b)
+		}
+		for d in []i64{c.A, c.B, c.C} {
+			for b in le(d & 0xFFFFFFFF, 4) {
+				caseData = append(caseData, b)
+			}
+		}
+	}
+	w = append(w, "const caseData = " + literal(caseData))
+	w = append(w, "")
+	w = append(w, "// orbitData holds Go's caseOrbit: pairs (3 bytes each) of a code point and the next one in its")
+	w = append(w, "// simple case-folding orbit.")
+	mut orbitData = []u8{}
+	for i in 0..len(orbitA) {
+		for b in le(orbitA[i], 3) {
+			orbitData = append(orbitData, b)
+		}
+		for b in le(orbitB[i], 3) {
+			orbitData = append(orbitData, b)
+		}
+	}
+	w = append(w, "const orbitData = " + literal(orbitData))
+	w = append(w, "")
+	ci.Write(ci.Join(ci.Root(), OUT), twine.Join(w, "\n"))
+	// the printable runes: categories L, M, N, P and S as merged runs
+	mut marks = make([]bool, 1114112)
+	for name in []str{"L", "M", "N", "P", "S"} {
+		let k = indexOf(catNames, name)
+		for r in catRanges[k] {
+			mut cp = r.Lo
+			for cp <= r.Hi {
+				marks[cp] = true
+				cp += r.Stride
+			}
+		}
+	}
+	mut runs = []Range{}
+	for cp in 0..1114112 {
+		if marks[cp] {
+			let n = len(runs)
+			if n > 0 && runs[n - 1].Hi == cp - 1 {
+				runs[n - 1] = Range{Lo: runs[n - 1].Lo, Hi: cp, Stride: 1}
+			} else {
+				runs = append(runs, Range{Lo: cp, Hi: cp, Stride: 1})
+			}
+		}
+	}
+	mut printable = []u8{}
+	for r in runs {
+		for b in le(r.Lo, 3) {
+			printable = append(printable, b)
+		}
+		for b in le(r.Hi, 3) {
+			printable = append(printable, b)
+		}
+	}
+	let p = []str{"// Code generated by tools/gen/gen_unicode.tin from Go's unicode/tables.go; DO NOT EDIT.", "", "// The runes Go's unicode.IsPrint accepts beyond the ASCII space, as merged runs of 6 bytes (low,", "// high: 3 bytes each, little endian), for %q. Unicode " + version + ".", "fn rt_print_runs() str {{", "\treturn " + literal(printable), "}}", ""}
+	ci.Write(ci.Join(ci.Root(), OUT_PRINT), twine.Join(p, "\n"))
+	say.Line(OUT_PRINT + ": " + mint.Itoa(len(runs)) + " printable runs")
+	say.Line(OUT + ": " + mint.Itoa(len(seen)) + " tables, " + mint.Itoa(len(cases)) + " case ranges, " + mint.Itoa(len(orbitA)) + " orbit pairs, Unicode " + version)
+}
+
+fn indexOf(xs []str, x str) i64 {
+	for i in 0..len(xs) {
+		if xs[i] == x {
+			return i
+		}
+	}
+	return -1
+}
