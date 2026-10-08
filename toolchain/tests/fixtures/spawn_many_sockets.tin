@@ -9,18 +9,27 @@ package main
 
 import "fault"
 import "mint"
+import "quarry"
 import "say"
 import "spawn"
 import "twine"
 import "wire"
 
 // child is the program spawned while the reads are parked: the exit code and what it printed, a
-// spawn failure as a negative code.
+// spawn failure as a negative code. The child writes its answer to a file of its own too: when the
+// pipe is the broken part, the file is there and the text is not.
 fn child() (i64, str) {
-	let r = spawn.Run(spawn.Cmd{Argv: []str{"sh", "-c", "echo ready"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Pipe, MaxOutput: 0}) catch err {
+	let mark = quarry.TempDir() + "/spawn_mark.txt"
+	let script = "echo ready > \"" + mark + "\"; echo ready"
+	let r = within 20s {
+		try spawn.Run(spawn.Cmd{Argv: []str{"sh", "-c", script}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Pipe, MaxOutput: 0})
+	} catch err {
 		return -1, "spawn failed: " + say.Str(err)
 	}
-	return r.Code, r.Stdout + r.Stderr
+	let marked = quarry.ReadFile(mark) catch _ {
+		""
+	}
+	return r.Code, r.Stdout + r.Stderr + " mark=" + marked
 }
 
 // wait is a read that waits up to ten seconds for data that never comes: a task parked on the
