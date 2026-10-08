@@ -104,6 +104,15 @@ fn main2() {}
 	say.Line("active", ws.Ed.Name())
 	ws.CloseSplit()
 	say.Line("closed split", len(ws.Panes), ws.Active)
+	// keyboard in the project panel
+	ws.Focus = workspace.FocusProject
+	ws.Proj.Select(0)
+	ws.Key(126, 0, "")
+	ws.Key(125, 0, "")
+	ws.Key(125, 0, "")
+	say.Line("selected", ws.Proj.Entries[ws.Proj.Selected].Name)
+	ws.Key(36, 0, "")
+	say.Line("opened by Return", ws.Ed.Name(), ws.Focus)
 	// git: the marks in the gutter and the panel's list of changed files
 	appkit.RunCapture("git -C '" + root + "' init -q && git -C '" + root + "' add -A && git -C '" + root + "' -c user.email=t@t -c user.name=t commit -qm first")
 	put(root + "/main.tin", `package changed

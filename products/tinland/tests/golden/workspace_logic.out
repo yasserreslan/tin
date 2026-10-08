@@ -16,6 +16,8 @@ split 2 1 main.tin
 right pane notes.md left pane main.tin
 active main.tin
 closed split 1 0
+selected util.tin
+opened by Return util.tin 0
 marks [2 9]
 git [ M main.tin]
 restored true true notes.md 4

@@ -87,10 +87,19 @@ fn (ws mut Workspace) Event(e i64) {
 	}
 }
 
+// Key handles a key press (the events deliver keys here; tests call it directly).
+fn (ws mut Workspace) Key(code i64, flags i64, chars str) {
+	ws.key(code, flags, chars)
+}
+
 // key handles a key press: the workspace's own shortcuts first, then the editor.
 fn (ws mut Workspace) key(code i64, flags i64, chars str) {
 	if ws.Picker.Open {
 		ws.pickerKey(code, flags, chars)
+		return
+	}
+	if ws.Focus == FocusProject && (flags & appkit.ModCmd) == 0 {
+		ws.projectKey(code)
 		return
 	}
 	if ws.Focus == FocusTerminal && (flags & appkit.ModCmd) == 0 {
@@ -228,6 +237,7 @@ fn (ws mut Workspace) clickRow(r i64) {
 	}
 	let i = ws.Proj.Rows[r]
 	ws.Proj.Select(i)
+	ws.Focus = FocusProject
 	if ws.Proj.Entries[i].Dir {
 		ws.Proj.Toggle(i)
 	} else {
@@ -388,4 +398,71 @@ fn paneId(pane i64) i64 {
 		return idEditor2
 	}
 	return idEditor
+}
+
+// projectKey handles a key while the project panel has the keyboard: Up and Down move the selection, Right opens a folder, Left
+// closes it (or goes to the one above), Return opens the file or toggles the folder, Delete asks to delete, Escape gives the
+// keyboard back to the editor.
+fn (ws mut Workspace) projectKey(code i64) {
+	if !ws.HasProj {
+		ws.Focus = FocusEditor
+		return
+	}
+	mut row = -1
+	for r in 0..len(ws.Proj.Rows) {
+		if ws.Proj.Rows[r] == ws.Proj.Selected {
+			row = r
+		}
+	}
+	if code == keyEscape {
+		ws.Focus = FocusEditor
+	} else if code == keyDown {
+		if row + 1 < len(ws.Proj.Rows) {
+			ws.Proj.Select(ws.Proj.Rows[row + 1])
+			ws.showRow(row + 1)
+		}
+	} else if code == keyUp {
+		if row > 0 {
+			ws.Proj.Select(ws.Proj.Rows[row - 1])
+			ws.showRow(row - 1)
+		}
+	} else if code == 124 && row >= 0 {
+		let e = ws.Proj.Entries[ws.Proj.Selected]
+		if e.Dir && !e.Open {
+			ws.Proj.Toggle(ws.Proj.Selected)
+		}
+	} else if code == 123 && row >= 0 {
+		let e = ws.Proj.Entries[ws.Proj.Selected]
+		if e.Dir && e.Open && ws.Proj.Selected != 0 {
+			ws.Proj.Toggle(ws.Proj.Selected)
+		} else if e.Parent >= 0 {
+			ws.Proj.Select(e.Parent)
+			ws.Proj.Rebuild()
+			for r in 0..len(ws.Proj.Rows) {
+				if ws.Proj.Rows[r] == e.Parent {
+					ws.showRow(r)
+				}
+			}
+		}
+	} else if code == keyReturn && row >= 0 {
+		ws.clickRow(row)
+		if !ws.Proj.Entries[ws.Proj.Rows[row]].Dir {
+			ws.Focus = FocusEditor
+		}
+	} else if code == 117 || code == keyBackspace {
+		ws.deleteSelected()
+	}
+	ws.Dirty = true
+}
+
+// showRow scrolls the project panel so that row r is in view.
+fn (ws mut Workspace) showRow(r i64) {
+	let viewH = ws.H - titleH - statusH - 34.0
+	let top = f64(r) * rowH
+	let off = ws.Scrolls.Offset[idLeftScroll]
+	if top < off {
+		ws.Scrolls.Offset[idLeftScroll] = top
+	} else if top + rowH > off + viewH {
+		ws.Scrolls.Offset[idLeftScroll] = top + rowH - viewH
+	}
 }

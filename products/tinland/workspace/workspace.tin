@@ -115,6 +115,7 @@ const FocusEditor = 0
 const FocusSearch = 1
 const FocusPicker = 2
 const FocusTerminal = 3
+const FocusProject = 4
 
 // New makes a workspace around an editor.
 fn New(th theme.Theme, ed editor.Editor) Workspace {
