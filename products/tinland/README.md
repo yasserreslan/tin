@@ -62,6 +62,6 @@ Double click selects a word, triple click a line; the wheel scrolls what is unde
 ## Settings and keys
 
 `Tinland > Settings...` (Cmd+,) opens `~/.config/tinland/settings`, creating it with a commented template. One `name = value` per line:
-`theme = dark` or `light`, `font_size`, `code_font` and `ui_font` (PostScript names), and key bindings by menu title: `key.toggle-terminal =
+`theme = dark` or `light`, `autosave = on` (write the files with changes when the window has been quiet for a moment; off by default), `font_size`, `code_font` and `ui_font` (PostScript names), and key bindings by menu title: `key.toggle-terminal =
 ctrl+\`` (the title in lower case with dashes; `cmd`, `shift`, `alt` and `ctrl` then the key; `none` removes the key). Restart Tinland to
 apply them.

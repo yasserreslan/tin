@@ -338,6 +338,35 @@ fn (ed mut Editor) save(asNew bool) bool {
 	return true
 }
 
+// SaveDirty writes every open file that has unsaved changes (auto-save: the app calls it when the window has been quiet for a moment).
+// Tabs without a file name are left alone. It reports how many files it wrote.
+fn (ed mut Editor) SaveDirty() i64 {
+	ed.stash()
+	mut written = 0
+	for i in 0..len(ed.Tabs) {
+		let path = ed.Tabs[i].Buf.Path
+		if len(path) == 0 || !ed.Tabs[i].Buf.Dirty {
+			continue
+		}
+		quarry.WriteFile(path, ed.Tabs[i].Buf.FileText()) catch _ {
+			continue
+		}
+		ed.Tabs[i].Buf.Dirty = false
+		ed.Tabs[i].Mtime = quarry.ModTime(path) catch _ {
+			0
+		}
+		written += 1
+	}
+	if written > 0 {
+		ed.Saves += written
+		if ed.Active >= 0 {
+			ed.Buf.Dirty = ed.Tabs[ed.Active].Buf.Dirty
+		}
+		ed.Redraw = true
+	}
+	return written
+}
+
 // rows is how many text lines fit in the text area.
 fn (ed Editor) rows() i64 {
 	let n = i64(ed.AreaH / ed.LineH)
