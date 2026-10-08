@@ -1,0 +1,25 @@
+package main
+
+import "say"
+
+fn bad() ! {
+	fail "x"
+}
+
+fn ok() ! {
+}
+
+fn run() ! {
+	let c = bad() catch err {
+		say.Line(err)
+		try ok()
+		return
+	}
+	say.Line(c)
+}
+
+fn main() {
+	run() catch err {
+		say.Line(err)
+	}
+}

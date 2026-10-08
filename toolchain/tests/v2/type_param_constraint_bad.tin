@@ -1,0 +1,12 @@
+package main
+
+import "say"
+
+type Page[T] struct {
+	items []T
+}
+
+fn main() {
+	let p = Page[i64]{items: []i64{1}}
+	say.Line(len(p.items))
+}

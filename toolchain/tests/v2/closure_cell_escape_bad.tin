@@ -1,0 +1,22 @@
+package main
+
+import "say"
+
+type R struct {
+	n i64
+}
+
+fn each(xs []R, f fn(R)) {
+	for x in xs {
+		f(x)
+	}
+}
+
+fn main() {
+	let src = []R{R{n: 1}, R{n: 2}}
+	mut all = []R{}
+	each(src, fn(r R) {
+		all = append(all, r)
+	})
+	say.Line(len(all))
+}

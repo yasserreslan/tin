@@ -436,6 +436,29 @@ example.tin:3:9: error E046 EMPTY_TYPE_PARAMS: a type parameter list needs at le
 
 Fix: name the parameters (`fn first[T constraints.Any](xs []T) T`), or leave the brackets out.
 
+### E047 TYPE_PARAM_CONSTRAINT
+
+A generic type's parameter is written with its constraint. `type Page[T] struct { ... }` would read as
+an array type of length `T`, so it is reported here instead of as an undefined `T` and an error for
+every use of `Page`.
+
+```tin edition=1
+package main
+
+type Page[T] struct {
+	items []T
+}
+
+fn main() {
+}
+```
+
+```text
+example.tin:3:11: error E047 TYPE_PARAM_CONSTRAINT: type parameter T needs a constraint: write [T constraints.Any]
+```
+
+Fix: `type Page[T constraints.Any] struct { ... }` (and `import "constraints"`).
+
 ### E050 LABEL_PLACEMENT
 
 A label names a loop for `break` and `continue`, so it goes right before `for`.
@@ -1509,7 +1532,8 @@ Fix: write the type (`let x ?Point = nil`).
 
 An assignment has one target per value, and places that take one value (a `try` that
 initializes a variable, a line of `parallel`, the last expression of a boundary block) get
-exactly one.
+exactly one. `let c = f() catch err { ... }` where `f` gives only a fault is reported the same
+way, naming `c`: drop `let c =`.
 
 ```tin edition=1
 package main
@@ -2251,7 +2275,9 @@ Fix: write `(A, A)` where the results go, in each generic function that returns 
 
 Memory allocated during a request lives in the core's request pool, which is wiped when the
 request ends. Storing it into a global, or into anything a global can reach, would leave a
-dangling reference, so `keep(x)` must copy it into the long-lived heap first.
+dangling reference, so `keep(x)` must copy it into the long-lived heap first. The same holds for
+a variable captured by a closure that is not passed only to functions that call it: the message
+names the variable.
 
 ```tin edition=1
 package main
@@ -2565,7 +2591,9 @@ Fix: pass it upward with `try`, handle it with `catch`, or test the `err` you as
 ### E411 NO_FAULT_RESULT
 
 `try`, `fail` and `use` can leave the function with a fault, so the function's result says
-it can fail (`!T`).
+it can fail (`!T`). So does `select`, which ends with a fault when its boundary is cancelled or
+its deadline passes, and whose lane and task arms fail like any other wait: the function that
+contains it returns `!` too.
 
 ```tin edition=1
 package main
