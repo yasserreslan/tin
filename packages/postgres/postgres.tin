@@ -24,7 +24,6 @@ package postgres
 
 import "gauge"
 import "mint"
-import "postgres/md5"
 import "postgres/sasl"
 import "seal"
 import "tls"
@@ -585,8 +584,8 @@ fn handshake(c i64, rec i64) ! {
 			if method == 5 && phase == 0 {
 				let salt = try k.bytes(4)
 				try k.done()
-				let inner = seal.Hex(md5.Sum(pass+user))
-				try password_message(c, "md5"+seal.Hex(md5.Sum(inner+salt)), true)
+				let inner = seal.Hex(seal.Md5(pass+user))
+				try password_message(c, "md5"+seal.Hex(seal.Md5(inner+salt)), true)
 				phase = 4
 				continue
 			}
