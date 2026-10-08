@@ -296,6 +296,19 @@ fn responseHeaders(port i64) {
 	say.Line("204/304 without a body, header injection refused: " + boolText(len(failures) == before))
 }
 
+// cookies (#823): the Cookie fields of a request are read (several fields, a quoted value), and two Set-Cookie fields come back as two
+// lines.
+fn cookies(port i64) {
+	let before = len(failures)
+	let got = raw(port, "GET /cookies HTTP/1.1\r\nHost: x\r\nCookie: sid=abc; theme=dark\r\nCookie: x=\"q\"\r\nConnection: close\r\n\r\n")
+	let lines = headLines(got)
+	let split = twine.Index(got, "\r\n\r\n")
+	if got[split + 4:] != "sid=abc n=3" || !hasLine(lines, "Set-Cookie: one=1; Path=/; HttpOnly") || !hasLine(lines, "Set-Cookie: two=\"a b\"; Max-Age=60; SameSite=Lax") {
+		flag("cookies: " + got)
+	}
+	say.Line("cookies read from two Cookie fields, two Set-Cookie fields written: " + boolText(len(failures) == before))
+}
+
 fn boolText(b bool) str {
 	if b {
 		return "true"
@@ -931,6 +944,7 @@ fn main() {
 		protocol(port)
 		if cores == 1 {
 			responseHeaders(port)
+			cookies(port)
 			conformance(port)
 			overlap(port)
 			websockets(port)

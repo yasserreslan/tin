@@ -4609,6 +4609,12 @@ fn chk_conversion(e i64, to Ty) i64 {
 		if is_untyped(cast(i64, from)) != 0 {
 			reconvert(cast(Node, x), cast(i64, to))
 		}
+		if tk == K_FLOAT && cast(Node, x).kind == EX_BINARY && cast(Binary, x).op == "*" {
+			// f64(x * y) + z: the conversion rounds the product, so arm64 must not fuse it into a multiply-add, as in Go
+			// (spec, Floating-point operators). The node is a no-op for the code generator, which looks for the multiply.
+			replace_node(e, mk_conv(pos, x, CV_SAME, cast(i64, to)))
+			return cast(i64, to)
+		}
 		replace_node(e, x)
 		return cast(i64, to)
 	}

@@ -19,7 +19,7 @@ fn changePath(dir str, c object.ChangeId) str {
 fn AddVersion(dir str, c object.ChangeId, v Version) ! {
 	let path = changePath(dir, c)
 	try quarry.MkdirAll(dirOf(path))
-	try quarry.AppendFile(path, "{v.Op} {v.Commit.Hex()} {v.Time}\n")
+	try quarry.AppendFile(path, "{v.Op} {v.Commit().Hex()} {v.Time}\n")
 	try quarry.Sync(path)
 }
 
@@ -42,7 +42,7 @@ fn Versions(dir str, c object.ChangeId) ![]Version {
 		let op = try mint.Atoi(f[0])
 		let id = try object.ParseId(f[1])
 		let t = try mint.Atoi(f[2])
-		out = append(out, Version{Op: op, Commit: id, Time: t})
+		out = append(out, NewVersion(op, id, t))
 	}
 	return out
 }

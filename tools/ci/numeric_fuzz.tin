@@ -1,0 +1,930 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// Compare compiled integer and float code with Go over generated programs (#811).
+//
+// Each round writes one Tin program and one Go program from the same random syntax trees: helper functions the inliner takes
+// (calls, clamps, branches), then many functions that keep eight integers, nine floats and a slice live and update them with random
+// statements (assignments, element stores, branches, short loops) over random expressions (wrapping arithmetic, shifts, comparisons,
+// float to integer conversions, calls). Both print every variable of every function; the check compares the lines. The first
+// miscompiled amd64 program (a value in rax lost across a call under float pressure) was found this way.
+//
+// Wrapping arithmetic (+% -% *%) is Go's ordinary integer arithmetic, a product of floats is written f64(a * b) in both (an explicit
+// conversion prevents fusion on arm64, #814), and a float assigned to a variable passes through clampf, so no NaN or infinity appears.
+// Constant-only float subexpressions are never generated: Go folds those exactly (LANGUAGE.md section 23).
+//
+// Usage: numeric_fuzz [seed [rounds [functions]]] [docker-amd64 | docker-arm64] [reduce=K]. With docker-amd64 (or docker-arm64) the Tin
+// program is built for that Linux target and run in a debian:bookworm-slim container (emulated on a Mac or the other architecture).
+// A difference prints the round's seed and the function; reduce=K shrinks function K of the round (seed rounds=1) to the statements and
+// subexpressions that still differ, which takes minutes.
+
+const DEFAULT_SEED = 811
+const DEFAULT_ROUNDS = 3
+const DEFAULT_FUNCS = 40
+const HELPERS = 5
+const FHELPERS = 2
+
+// Node is an expression: a leaf (text) or an operator over kids.
+type Node struct {
+	kind str
+	text str
+	kids []Node
+}
+
+// Stmt is a statement: an assignment, a store, an if or a loop with a body.
+type Stmt struct {
+	kind str
+	name str
+	a Node
+	b Node
+	body []Stmt
+}
+
+// Gen is what the generator draws on; names holds the variable names of the context (a function or a helper).
+type Gen struct {
+	rng dice.Rand
+	ints []str
+	floats []str
+	slice bool
+	helpers i64
+	fhelpers i64
+}
+
+fn leaf(text str) Node {
+	return Node{kind: "leaf", text: text, kids: []Node{}}
+}
+
+fn op(kind str, kids []Node) Node {
+	return Node{kind: kind, text: "", kids: kids}
+}
+
+fn op1(kind str, a Node) Node {
+	return op(kind, []Node{a})
+}
+
+fn op2(kind str, a Node, b Node) Node {
+	return op(kind, []Node{a, b})
+}
+
+fn isNum(n Node) bool {
+	return n.kind == "leaf" && n.text[0] >= '0' && n.text[0] <= '9'
+}
+
+fn pick(rng dice.Rand, n i64) i64 {
+	return rng.I64n(n)
+}
+
+fn intConst(rng dice.Rand) Node {
+	let k = pick(rng, 6)
+	if k == 0 {
+		return leaf("0")
+	}
+	if k == 1 {
+		return leaf("1")
+	}
+	if k == 2 {
+		return leaf("31")
+	}
+	if k == 3 {
+		return leaf("1000003")
+	}
+	if k == 4 {
+		return leaf("4611686018427387905")
+	}
+	return leaf(mint.Itoa(rng.Range(2, 200)))
+}
+
+fn intVar(g Gen) Node {
+	return leaf(g.ints[pick(g.rng, len(g.ints))])
+}
+
+fn floatVar(g Gen) Node {
+	return leaf(g.floats[pick(g.rng, len(g.floats))])
+}
+
+// ibin builds an integer operation; a constant never meets a constant (Go would fold it with an overflow error), and a shifted
+// operand is never a bare constant (it would take the type of the conversion around the shift, LANGUAGE.md section 6).
+fn ibin(g Gen, o str, a Node, b Node) Node {
+	mut x = a
+	if isNum(x) && (isNum(b) || o == "<<" || o == ">>") {
+		x = intVar(g)
+	}
+	return op2(o, x, b)
+}
+
+fn iexpr(g Gen, depth i64) Node {
+	let rng = g.rng
+	if depth <= 0 {
+		let k = pick(rng, 4)
+		if k == 0 {
+			return intConst(rng)
+		}
+		if k == 1 && g.slice {
+			return op1("idx", intVar(g))
+		}
+		return intVar(g)
+	}
+	let k = pick(rng, 20)
+	if k < 3 {
+		return ibin(g, "+%", iexpr(g, depth - 1), iexpr(g, depth - 1))
+	}
+	if k < 5 {
+		return ibin(g, "-%", iexpr(g, depth - 1), iexpr(g, depth - 1))
+	}
+	if k < 7 {
+		return ibin(g, "*%", iexpr(g, depth - 1), iexpr(g, depth - 1))
+	}
+	if k < 9 {
+		let ops = []str{"^", "&", "|"}
+		return ibin(g, ops[pick(rng, 3)], iexpr(g, depth - 1), iexpr(g, depth - 1))
+	}
+	if k < 11 {
+		let ops = []str{"<<", ">>"}
+		return ibin(g, ops[pick(rng, 2)], iexpr(g, depth - 1), iexpr(g, depth - 1))
+	}
+	if k == 11 {
+		let ops = []str{"/", "%"}
+		return ibin(g, ops[pick(rng, 2)], iexpr(g, depth - 1), iexpr(g, depth - 1))
+	}
+	if k == 12 || k == 13 {
+		return op1("b2i", cond(g, depth - 1))
+	}
+	if k == 14 || k == 15 {
+		return op1("clampi", fexpr(g, depth - 1))
+	}
+	if (k == 16 || k == 17) && g.helpers > 0 {
+		let which = pick(rng, g.helpers)
+		return op("call" + mint.Itoa(which), []Node{iexpr(g, depth - 1), iexpr(g, depth - 1), iexpr(g, depth - 1), fexpr(g, depth - 1), fexpr(g, depth - 1), fexpr(g, depth - 1)})
+	}
+	if k == 18 && g.slice {
+		return op1("idx", iexpr(g, depth - 1))
+	}
+	return iexpr(g, depth - 1)
+}
+
+fn fexpr(g Gen, depth i64) Node {
+	let rng = g.rng
+	if depth <= 0 {
+		if pick(rng, 3) == 1 {
+			return op1("i2f", intVar(g))
+		}
+		return floatVar(g)
+	}
+	let k = pick(rng, 14)
+	if k < 3 {
+		return op2("+", fexpr(g, depth - 1), fexpr(g, depth - 1))
+	}
+	if k < 5 {
+		return op2("-", fexpr(g, depth - 1), fexpr(g, depth - 1))
+	}
+	if k < 8 {
+		return op2("*", fexpr(g, depth - 1), fexpr(g, depth - 1))
+	}
+	if k == 8 {
+		return op2("fdiv", fexpr(g, depth - 1), op2("+", op2("*", floatVar(g), floatVar(g)), leaf("1.5")))
+	}
+	if k == 9 || k == 10 {
+		return op1("i2f", op2("%k", op2("+%", intVar(g), iexpr(g, depth - 1)), leaf("1000")))
+	}
+	if k == 11 && g.fhelpers > 0 {
+		return op("fcall" + mint.Itoa(pick(rng, g.fhelpers)), []Node{iexpr(g, depth - 1), fexpr(g, depth - 1), fexpr(g, depth - 1)})
+	}
+	if k == 12 {
+		let c = floatConst(rng)
+		let fops = []str{"+", "-", "*"}
+		return op2(fops[pick(rng, 3)], c, floatVar(g))
+	}
+	return fexpr(g, depth - 1)
+}
+
+fn floatConst(rng dice.Rand) Node {
+	let k = pick(rng, 5)
+	if k == 0 {
+		return leaf("0.5")
+	}
+	if k == 1 {
+		return leaf("1.75")
+	}
+	if k == 2 {
+		return leaf("3.0")
+	}
+	if k == 3 {
+		return leaf("0.1")
+	}
+	return leaf("1e6")
+}
+
+fn cond(g Gen, depth i64) Node {
+	let rng = g.rng
+	let cmps = []str{"<", "<=", ">", ">=", "==", "!="}
+	let k = pick(rng, 6)
+	if k < 3 {
+		return op2(cmps[pick(rng, 6)], iexpr(g, depth + 1), iexpr(g, depth))
+	}
+	if k < 5 {
+		return op2(cmps[pick(rng, 4)], fexpr(g, depth), fexpr(g, depth))
+	}
+	if depth > 0 && k == 5 {
+		return op2("&&", cond(g, depth - 1), cond(g, depth - 1))
+	}
+	return op2(cmps[pick(rng, 6)], iexpr(g, depth), iexpr(g, depth))
+}
+
+// isFloat reports whether n has a float value (for / and %, which are written differently for integers).
+fn isFloat(n Node) bool {
+	if n.kind == "leaf" {
+		return n.text[0] == 'f' || n.text[0] == 'x' || n.text[0] == 'y' || n.text[0] == 'z' || (isNum(n) && twine.Contains(n.text, "."))
+	}
+	return n.kind == "i2f" || n.kind == "+" || n.kind == "-" || n.kind == "*" || n.kind == "fdiv" || twine.HasPrefix(n.kind, "fcall")
+}
+
+// render writes n as Tin or Go source.
+fn render(n Node, tin bool) str {
+	if n.kind == "leaf" {
+		return n.text
+	}
+	let k = n.kids
+	if n.kind == "+%" || n.kind == "-%" || n.kind == "*%" {
+		mut o = n.kind
+		if !tin {
+			o = n.kind[0:1]
+		}
+		return "(" + render(k[0], tin) + " " + o + " " + render(k[1], tin) + ")"
+	}
+	if n.kind == "<<" || n.kind == ">>" {
+		mut conv = "u64"
+		if !tin {
+			conv = "uint64"
+		}
+		return "(" + render(k[0], tin) + " " + n.kind + " " + conv + "(" + render(k[1], tin) + " & 15))"
+	}
+	if n.kind == "%k" {
+		return "(" + render(k[0], tin) + " % " + render(k[1], tin) + ")"
+	}
+	if n.kind == "/" || n.kind == "%" {
+		if isFloat(k[0]) {
+			return "(" + render(k[0], tin) + " " + n.kind + " " + render(k[1], tin) + ")"
+		}
+		return "(" + render(k[0], tin) + " " + n.kind + " ((" + render(k[1], tin) + " & 7) + 1))"
+	}
+	if n.kind == "idx" {
+		return "s[" + render(k[0], tin) + " & 7]"
+	}
+	if n.kind == "b2i" || n.kind == "clampi" {
+		return n.kind + "(" + render(k[0], tin) + ")"
+	}
+	if n.kind == "i2f" {
+		if tin {
+			return "f64(" + render(k[0], tin) + ")"
+		}
+		return "float64(" + render(k[0], tin) + ")"
+	}
+	if twine.HasPrefix(n.kind, "call") || twine.HasPrefix(n.kind, "fcall") {
+		mut parts = []str{}
+		for a in k {
+			parts = append(parts, render(a, tin))
+		}
+		mut name = "h" + twine.TrimPrefix(n.kind, "call")
+		if twine.HasPrefix(n.kind, "fcall") {
+			name = "fh" + twine.TrimPrefix(n.kind, "fcall")
+		}
+		return name + "(" + twine.Join(parts, ", ") + ")"
+	}
+	if n.kind == "fdiv" {
+		return "(" + render(k[0], tin) + " / " + render(k[1], tin) + ")"
+	}
+	if n.kind == "*" {
+		// An explicit conversion rounds the product, so neither compiler fuses it into a multiply-add.
+		if tin {
+			return "f64(" + render(k[0], tin) + " * " + render(k[1], tin) + ")"
+		}
+		return "float64(" + render(k[0], tin) + " * " + render(k[1], tin) + ")"
+	}
+	return "(" + render(k[0], tin) + " " + n.kind + " " + render(k[1], tin) + ")"
+}
+
+fn stmts(g Gen, depth i64, count i64, loopVar i64) []Stmt {
+	let rng = g.rng
+	mut out = []Stmt{}
+	for i in 0..count {
+		let k = pick(rng, 12)
+		let empty = leaf("0")
+		if k < 4 {
+			out = append(out, Stmt{kind: "set", name: g.ints[pick(rng, len(g.ints))], a: iexpr(g, 5), b: empty, body: []Stmt{}})
+		} else if k < 7 {
+			out = append(out, Stmt{kind: "fset", name: g.floats[pick(rng, len(g.floats))], a: fexpr(g, 3), b: empty, body: []Stmt{}})
+		} else if k < 9 {
+			out = append(out, Stmt{kind: "store", name: "", a: iexpr(g, 2), b: iexpr(g, 5), body: []Stmt{}})
+		} else if k == 9 && depth > 0 {
+			out = append(out, Stmt{kind: "if", name: "", a: cond(g, 2), b: empty, body: stmts(g, depth - 1, 2, loopVar)})
+		} else if k == 10 && depth > 0 {
+			out = append(out, Stmt{kind: "loop", name: "q" + mint.Itoa(loopVar), a: empty, b: empty, body: stmts(g, depth - 1, 2, loopVar + 1)})
+		} else {
+			out = append(out, Stmt{kind: "acc", name: g.ints[pick(rng, len(g.ints))], a: cond(g, 2), b: empty, body: []Stmt{}})
+		}
+	}
+	return out
+}
+
+fn renderStmts(list []Stmt, tin bool, indent str) []str {
+	mut out = []str{}
+	for s in list {
+		if s.kind == "set" {
+			out = append(out, indent + s.name + " = " + render(s.a, tin))
+		} else if s.kind == "fset" {
+			out = append(out, indent + s.name + " = clampf(" + render(s.a, tin) + ")")
+		} else if s.kind == "store" {
+			out = append(out, indent + "s[" + render(s.a, tin) + " & 7] = " + render(s.b, tin))
+		} else if s.kind == "acc" {
+			mut o = "+%"
+			if !tin {
+				o = "+"
+			}
+			out = append(out, indent + s.name + " = " + s.name + " " + o + " b2i(" + render(s.a, tin) + ")")
+		} else if s.kind == "if" {
+			out = append(out, indent + "if " + render(s.a, tin) + " {{")
+			for line in renderStmts(s.body, tin, indent + "\t") {
+				out = append(out, line)
+			}
+			out = append(out, indent + "}}")
+		} else {
+			if tin {
+				out = append(out, indent + "for " + s.name + " in 0..3 {{")
+			} else {
+				out = append(out, indent + "for " + s.name + " := 0; " + s.name + " < 3; " + s.name + "++ {{")
+			}
+			out = append(out, indent + "\t" + "i7 = i7 " + plus(tin) + " " + loopTerm(s.name, tin))
+			for line in renderStmts(s.body, tin, indent + "\t") {
+				out = append(out, line)
+			}
+			out = append(out, indent + "}}")
+		}
+	}
+	return out
+}
+
+fn plus(tin bool) str {
+	if tin {
+		return "+%"
+	}
+	return "+"
+}
+
+// loopTerm uses the loop variable, which the languages would otherwise report unused.
+fn loopTerm(name str, tin bool) str {
+	if tin {
+		return "i64(" + name + ")"
+	}
+	return "int64(" + name + ")"
+}
+
+// helper returns the source of integer helper k: an expression of its parameters, or a clamped branch.
+fn helper(rng dice.Rand, k i64, tin bool, seed i64) str {
+	let g = Gen{rng: dice.New(u64(seed + k * 1009)), ints: []str{"a", "b", "c"}, floats: []str{"x", "y", "z"}, slice: false, helpers: k, fhelpers: 0}
+	let e = iexpr(g, 3)
+	let e2 = iexpr(g, 2)
+	let c = cond(g, 1)
+	mut sig = ""
+	if tin {
+		sig = "fn h" + mint.Itoa(k) + "(a i64, b i64, c i64, x f64, y f64, z f64) i64 {{\n"
+	} else {
+		sig = "func h" + mint.Itoa(k) + "(a, b, c int64, x, y, z float64) int64 {{\n"
+	}
+	if k % 2 == 0 {
+		return sig + "\treturn " + render(e, tin) + "\n}}\n\n"
+	}
+	return sig + "\tif " + render(c, tin) + " {{\n\t\treturn " + render(e2, tin) + "\n\t}}\n\treturn " + render(e, tin) + "\n}}\n\n"
+}
+
+fn fhelper(k i64, tin bool, seed i64) str {
+	let g = Gen{rng: dice.New(u64(seed + k * 7919)), ints: []str{"a"}, floats: []str{"x", "y"}, slice: false, helpers: 0, fhelpers: 0}
+	let e = fexpr(g, 3)
+	if tin {
+		return "fn fh" + mint.Itoa(k) + "(a i64, x f64, y f64) f64 {{\n\treturn clampf(" + render(e, tin) + ")\n}}\n\n"
+	}
+	return "func fh" + mint.Itoa(k) + "(a int64, x, y float64) float64 {{\n\treturn clampf(" + render(e, tin) + ")\n}}\n\n"
+}
+
+fn prelude(tin bool) str {
+	if tin {
+		return `package main
+
+import "say"
+
+fn clampf(x f64) f64 {
+	if x != x {
+		return 0.5
+	}
+	if x > 1e12 {
+		return 1e12
+	}
+	if x < -1e12 {
+		return -1e12
+	}
+	return x
+}
+
+fn clampi(x f64) i64 {
+	let y = clampf(x)
+	return i64(y)
+}
+
+fn b2i(b bool) i64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+`
+	}
+	return `package main
+
+import "fmt"
+
+func clampf(x float64) float64 {
+	if x != x {
+		return 0.5
+	}
+	if x > 1e12 {
+		return 1e12
+	}
+	if x < -1e12 {
+		return -1e12
+	}
+	return x
+}
+
+func clampi(x float64) int64 {
+	y := clampf(x)
+	return int64(y)
+}
+
+func b2i(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+`
+}
+
+// function is run<k>: the variables from the seed, the statements, then every variable printed.
+fn function(k i64, body []Stmt, tin bool) str {
+	mut out = ""
+	if tin {
+		out += "fn run" + mint.Itoa(k) + "(seed i64) {{\n"
+	} else {
+		out += "func run" + mint.Itoa(k) + "(seed int64) {{\n"
+	}
+	for i in 0..8 {
+		let lhs = "i" + mint.Itoa(i)
+		if tin {
+			out += "\tmut " + lhs + " = seed *% " + mint.Itoa(i + 3) + " +% " + mint.Itoa(i * 7 + 1) + "\n"
+		} else {
+			out += "\t" + lhs + " := seed*" + mint.Itoa(i + 3) + " + " + mint.Itoa(i * 7 + 1) + "\n"
+		}
+	}
+	let scales = []str{"0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9"}
+	for i in 0..9 {
+		if tin {
+			out += "\tmut f" + mint.Itoa(i) + " = f64(f64(seed % 1000) * " + scales[i] + ") + " + mint.Itoa(i) + ".25\n"
+		} else {
+			out += "\tf" + mint.Itoa(i) + " := float64(float64(seed%1000)*" + scales[i] + ") + " + mint.Itoa(i) + ".25\n"
+		}
+	}
+	if tin {
+		out += "\tmut s = make([]i64, 8)\n\tfor q in 0..8 {{\n\t\ts[q] = seed +% i64(q * 3)\n\t}}\n"
+	} else {
+		out += "\ts := make([]int64, 8)\n\tfor q := 0; q < 8; q++ {{\n\t\ts[q] = seed + int64(q*3)\n\t}}\n"
+	}
+	for line in renderStmts(body, tin, "\t") {
+		out += line + "\n"
+	}
+	if tin {
+		out += "\tsay.Line(\"run" + mint.Itoa(k) + "\", i0, i1, i2, i3, i4, i5, i6, i7, f0, f1, f2, f3, f4, f5, f6, f7, f8, s)\n}}\n\n"
+	} else {
+		out += "\tfmt.Println(\"run" + mint.Itoa(k) + "\", i0, i1, i2, i3, i4, i5, i6, i7, f0, f1, f2, f3, f4, f5, f6, f7, f8, s)\n}}\n\n"
+	}
+	return out
+}
+
+fn mainFn(first i64, n i64, tin bool) str {
+	mut out = ""
+	if tin {
+		out += "fn main() {{\n"
+	} else {
+		out += "func main() {{\n"
+	}
+	for k in first..first + n {
+		for seed in []str{"0", "7", "123456789"} {
+			out += "\trun" + mint.Itoa(k) + "(" + seed + ")\n"
+		}
+	}
+	out += "}}\n"
+	return out
+}
+
+fn argOr(args []str, i i64, fallback i64) i64 {
+	if i < len(args) {
+		let v = mint.Atoi(args[i]) catch _ {
+			return fallback
+		}
+		return v
+	}
+	return fallback
+}
+
+// Round is one pair of programs: the shared head (prelude and helpers) and the body of each generated function.
+type Round struct {
+	seed i64
+	tinHead str
+	goHead str
+	bodies [][]Stmt
+}
+
+fn genRound(rseed i64, n i64) Round {
+	let rng = dice.New(u64(rseed))
+	mut tinSrc = prelude(true)
+	mut goSrc = prelude(false)
+	for k in 0..HELPERS {
+		tinSrc += helper(rng, k, true, rseed)
+		goSrc += helper(rng, k, false, rseed)
+	}
+	for k in 0..FHELPERS {
+		tinSrc += fhelper(k, true, rseed)
+		goSrc += fhelper(k, false, rseed)
+	}
+	mut bodies = [][]Stmt{}
+	for k in 0..n {
+		let g = Gen{rng: rng, ints: []str{"i0", "i1", "i2", "i3", "i4", "i5", "i6", "i7"}, floats: []str{"f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"}, slice: true, helpers: HELPERS, fhelpers: FHELPERS}
+		bodies = append(bodies, stmts(g, 2, 7, 0))
+	}
+	return Round{seed: rseed, tinHead: tinSrc, goHead: goSrc, bodies: bodies}
+}
+
+// Result is what running the pair of programs gave.
+type Result struct {
+	invalid bool
+	crashed bool
+	message str
+	got []str
+	want []str
+}
+
+fn (r Result) differs() bool {
+	if r.invalid {
+		return false
+	}
+	if r.crashed || len(r.got) != len(r.want) {
+		return true
+	}
+	for i in 0..len(r.want) {
+		if r.got[i] != r.want[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// execute builds and runs the Tin program and the Go program made of the head, the functions first.. and a main calling them.
+fn execute(work str, name str, head Round, first i64, bodies [][]Stmt, platform str) Result {
+	mut tinSrc = head.tinHead
+	mut goSrc = head.goHead
+	for j in 0..len(bodies) {
+		tinSrc += function(first + j, bodies[j], true)
+		goSrc += function(first + j, bodies[j], false)
+	}
+	tinSrc += mainFn(first, len(bodies), true)
+	goSrc += mainFn(first, len(bodies), false)
+	let tinFile = ci.Join(work, name + ".tin")
+	let goFile = ci.Join(work, name + ".go")
+	ci.Write(tinFile, tinSrc)
+	ci.Write(goFile, goSrc)
+	let tinExe = ci.Join(work, name + "-tin")
+	let goExe = ci.Join(work, name + "-go")
+	mut tinArgv = []str{ci.Tinc()}
+	if len(platform) > 0 {
+		tinArgv = append(tinArgv, "-target")
+		tinArgv = append(tinArgv, "linux-" + platform)
+	}
+	tinArgv = append(tinArgv, "-o")
+	tinArgv = append(tinArgv, tinExe)
+	tinArgv = append(tinArgv, tinFile)
+	let c = ci.ExecEnv(tinArgv, ci.Root(), 300, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+	if !c.Ok() {
+		return Result{invalid: true, crashed: false, message: "the Tin program did not compile: " + c.Both(), got: []str{}, want: []str{}}
+	}
+	let g = ci.Exec([]str{"go", "build", "-o", goExe, goFile}, work, 300)
+	if !g.Ok() {
+		return Result{invalid: true, crashed: false, message: "the Go program did not build: " + g.Both(), got: []str{}, want: []str{}}
+	}
+	let want = ci.Lines(ci.Exec([]str{goExe}, work, 300).Stdout)
+	mut run = ci.Out{Code: 0, Stdout: "", Stderr: ""}
+	if len(platform) > 0 {
+		run = ci.Exec([]str{"docker", "run", "--rm", "--platform", "linux/" + platform, "-v", tinExe + ":/fuzz", "debian:bookworm-slim", "/fuzz"}, work, 900)
+	} else {
+		run = ci.Exec([]str{tinExe}, work, 300)
+	}
+	if run.Code != 0 {
+		return Result{invalid: false, crashed: true, message: "the Tin program exited " + mint.Itoa(run.Code) + ": " + run.Stderr, got: ci.Lines(run.Stdout), want: want}
+	}
+	return Result{invalid: false, crashed: false, message: "", got: ci.Lines(run.Stdout), want: want}
+}
+
+// ---- reduction: shrink a failing function until little of it is left ----
+
+// kindOf is the type of an expression node: "i", "f" or "b".
+fn kindOf(n Node) str {
+	if n.kind == "leaf" {
+		if isFloat(n) {
+			return "f"
+		}
+		return "i"
+	}
+	if n.kind == "<" || n.kind == "<=" || n.kind == ">" || n.kind == ">=" || n.kind == "==" || n.kind == "!=" || n.kind == "&&" {
+		return "b"
+	}
+	if isFloat(n) {
+		return "f"
+	}
+	return "i"
+}
+
+fn simplest(kind str) Node {
+	if kind == "f" {
+		return leaf("1.5")
+	}
+	if kind == "b" {
+		return leaf("true")
+	}
+	return leaf("1")
+}
+
+fn nodeCount(n Node) i64 {
+	mut c = 1
+	for k in n.kids {
+		c += nodeCount(k)
+	}
+	return c
+}
+
+// replaceNode returns n with the node numbered idx (preorder; n itself is numbered base) replaced by repl.
+fn replaceNode(n Node, idx i64, repl Node, base i64) Node {
+	if base == idx {
+		return repl
+	}
+	if idx < base || idx >= base + nodeCount(n) {
+		return n
+	}
+	mut kids = []Node{}
+	mut at = base + 1
+	for k in n.kids {
+		kids = append(kids, replaceNode(k, idx, repl, at))
+		at += nodeCount(k)
+	}
+	return Node{kind: n.kind, text: n.text, kids: kids}
+}
+
+fn nodeAt(n Node, idx i64, base i64) Node {
+	if base == idx {
+		return n
+	}
+	mut at = base + 1
+	for k in n.kids {
+		let size = nodeCount(k)
+		if idx >= at && idx < at + size {
+			return nodeAt(k, idx, at)
+		}
+		at += size
+	}
+	return n
+}
+
+// slot reads the expression of statement st: which 0 is a, 1 is b.
+fn withSlot(st Stmt, which i64, e Node) Stmt {
+	if which == 0 {
+		return Stmt{kind: st.kind, name: st.name, a: e, b: st.b, body: st.body}
+	}
+	return Stmt{kind: st.kind, name: st.name, a: st.a, b: e, body: st.body}
+}
+
+fn stmtTotal(list []Stmt) i64 {
+	mut c = 0
+	for st in list {
+		c += 1 + stmtTotal(st.body)
+	}
+	return c
+}
+
+// editStmt rebuilds list with statement number idx (preorder; the first of list is numbered base) replaced by repl.
+fn editStmt(list []Stmt, idx i64, repl []Stmt, base i64) []Stmt {
+	mut out = []Stmt{}
+	mut at = base
+	for st in list {
+		let size = 1 + stmtTotal(st.body)
+		if at == idx {
+			for r in repl {
+				out = append(out, r)
+			}
+		} else if idx > at && idx < at + size {
+			out = append(out, Stmt{kind: st.kind, name: st.name, a: st.a, b: st.b, body: editStmt(st.body, idx, repl, at + 1)})
+		} else {
+			out = append(out, st)
+		}
+		at += size
+	}
+	return out
+}
+
+fn stmtAt(list []Stmt, idx i64, base i64) Stmt {
+	mut at = base
+	for st in list {
+		let size = 1 + stmtTotal(st.body)
+		if at == idx {
+			return st
+		}
+		if idx > at && idx < at + size {
+			return stmtAt(st.body, idx, at + 1)
+		}
+		at += size
+	}
+	return list[0]
+}
+
+// reduce shrinks body while the pair of programs still fails, and prints what is left.
+fn reduce(work str, round Round, k i64, platform str) {
+	mut body = round.bodies[k]
+	mut trials = 0
+	say.Line("reducing run" + mint.Itoa(k) + " of round seed " + mint.Itoa(round.seed))
+	mut progress = true
+	for progress {
+		progress = false
+		// Statements first: delete one, or put its body in its place.
+		mut idx = stmtTotal(body) - 1
+		for idx >= 0 {
+			let st = stmtAt(body, idx, 0)
+			mut tries = [][]Stmt{}
+			tries = append(tries, []Stmt{})
+			if len(st.body) > 0 {
+				tries = append(tries, st.body)
+			}
+			for t in tries {
+				let cand = editStmt(body, idx, t, 0)
+				if len(cand) == 0 {
+					continue
+				}
+				trials += 1
+				let r = execute(work, "reduce", round, k, [][]Stmt{cand}, platform)
+				if r.differs() {
+					body = cand
+					progress = true
+					break
+				}
+			}
+			if progress {
+				break
+			}
+			idx -= 1
+		}
+		if progress {
+			continue
+		}
+		// Then the expressions of what is left: each node replaced by a constant or by a child of its own type.
+		let total = stmtTotal(body)
+		for si in 0..total {
+			let st = stmtAt(body, si, 0)
+			for which in 0..2 {
+				if which == 1 {
+					if st.kind != "store" {
+						continue
+					}
+				}
+				let expr = slotOf(st, which)
+				let count = nodeCount(expr)
+				for ni in 0..count {
+					let node = nodeAt(expr, ni, 0)
+					if node.kind == "leaf" && isNum(node) {
+						continue
+					}
+					mut repls = []Node{}
+					repls = append(repls, simplest(kindOf(node)))
+					for kid in node.kids {
+						if kindOf(kid) == kindOf(node) {
+							repls = append(repls, kid)
+						}
+					}
+					for rp in repls {
+						if rp.kind == "leaf" && node.kind == "leaf" && rp.text == node.text {
+							continue
+						}
+						let newExpr = replaceNode(expr, ni, rp, 0)
+						let cand = editStmt(body, si, []Stmt{withSlot(st, which, newExpr)}, 0)
+						trials += 1
+						let r = execute(work, "reduce", round, k, [][]Stmt{cand}, platform)
+						if r.differs() {
+							body = cand
+							progress = true
+							break
+						}
+					}
+					if progress {
+						break
+					}
+				}
+				if progress {
+					break
+				}
+			}
+			if progress {
+				break
+			}
+		}
+	}
+	say.Line("reduced after " + mint.Itoa(trials) + " trials:")
+	for line in renderStmts(body, true, "\t") {
+		say.Line(line)
+	}
+	say.Line("Go:")
+	for line in renderStmts(body, false, "\t") {
+		say.Line(line)
+	}
+}
+
+fn slotOf(st Stmt, which i64) Node {
+	if which == 0 {
+		return st.a
+	}
+	return st.b
+}
+
+// checkRound runs one round and returns how many lines matched; a difference ends the program.
+fn checkRound(work str, round i64, rseed i64, n i64, platform str) i64 {
+	let r = genRound(rseed, n)
+	let res = execute(work, "fuzz" + mint.Itoa(round), r, 0, r.bodies, platform)
+	if res.invalid {
+		say.Line("round " + mint.Itoa(round) + ": " + res.message)
+		ci.Fail("numeric_fuzz: the generator wrote a program that does not build")
+	}
+	if res.crashed {
+		say.Line("round " + mint.Itoa(round) + " (seed " + mint.Itoa(rseed) + "): " + res.message + "\nsources in " + work + "\nreduce it with: numeric_fuzz " + mint.Itoa(rseed) + " 1 " + mint.Itoa(n) + " reduce=" + mint.Itoa(len(res.got) / 3) + " (and docker-amd64 where it was run there)")
+		ci.Fail("numeric_fuzz: a generated program failed")
+	}
+	mut bad = 0
+	ci.Check(len(res.got) == len(res.want), "numeric_fuzz: round " + mint.Itoa(round) + ": " + mint.Itoa(len(res.got)) + " lines against Go's " + mint.Itoa(len(res.want)))
+	for i in 0..len(res.want) {
+		if res.got[i] != res.want[i] {
+			bad += 1
+			if bad <= 3 {
+				say.Line("round " + mint.Itoa(round) + " (seed " + mint.Itoa(rseed) + ") line " + mint.Itoa(i + 1) + ":\n  Go:  " + res.want[i] + "\n  Tin: " + res.got[i] + "\n  reduce it with: numeric_fuzz " + mint.Itoa(rseed) + " 1 " + mint.Itoa(n) + " reduce=" + mint.Itoa(i / 3))
+			}
+		}
+	}
+	ci.Check(bad == 0, "numeric_fuzz: " + mint.Itoa(bad) + " of " + mint.Itoa(len(res.want)) + " lines differ in round " + mint.Itoa(round) + " (seed " + mint.Itoa(rseed) + ")")
+	return len(res.want)
+}
+
+fn main() {
+	let all = quarry.Args()
+	let args = all[1:]
+	mut platform = ""
+	mut reduceFn = -1
+	mut words = []str{}
+	for a in args {
+		if a == "docker-amd64" {
+			platform = "amd64"
+		} else if a == "docker-arm64" {
+			platform = "arm64"
+		} else if twine.HasPrefix(a, "reduce=") {
+			reduceFn = mint.Atoi(twine.TrimPrefix(a, "reduce=")) catch _ {
+				-1
+			}
+		} else {
+			words = append(words, a)
+		}
+	}
+	let seed = argOr(words, 0, DEFAULT_SEED)
+	let rounds = argOr(words, 1, DEFAULT_ROUNDS)
+	let n = argOr(words, 2, DEFAULT_FUNCS)
+	let directory = ci.Join(ci.Root(), "bin/ci/numeric_fuzz")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "fuzz-")
+	mut total = 0
+	for round in 0..rounds {
+		let rseed = seed + round * 100003
+		if reduceFn >= 0 {
+			reduce(work, genRound(rseed, n), reduceFn, platform)
+			return
+		}
+		total += arena { checkRound(work, round, rseed, n, platform) }
+	}
+	ci.Remove(work)
+	ci.Pass("numeric_fuzz: " + mint.Itoa(total) + " lines of generated integer and float code match Go")
+}

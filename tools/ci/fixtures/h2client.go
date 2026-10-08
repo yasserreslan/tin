@@ -140,6 +140,23 @@ func main() {
 	}
 	fmt.Println("PASS request trailers reach q.Header")
 
+	// Cookies (#823): the client sends them as separate fields, the server joins them for q.Cookie, and two Set-Cookie
+	// fields of one response arrive as two.
+	creq, _ := http.NewRequest("GET", base+"/cookies", nil)
+	creq.Header.Add("Cookie", "sid=abc")
+	creq.Header.Add("Cookie", "theme=dark")
+	cresp, cerr := client.Do(creq)
+	if cerr != nil {
+		fail("GET /cookies: %v", cerr)
+	}
+	cbody, _ := io.ReadAll(cresp.Body)
+	cresp.Body.Close()
+	setc := cresp.Header.Values("Set-Cookie")
+	if string(cbody) != "sid=abc n=2" || len(setc) != 2 || setc[0] != "one=1; Path=/; HttpOnly" || setc[1] != `two="a b"; Max-Age=60; SameSite=Lax` {
+		fail("cookies %q %q", cbody, setc)
+	}
+	fmt.Println("PASS cookies: two Cookie fields read, two Set-Cookie fields written")
+
 	resp, body := get("/trailers?n=1000")
 	var s int
 	for _, c := range body {
