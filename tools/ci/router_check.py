@@ -637,6 +637,72 @@ def implicit_guards(out, failures):
             failures.append('guards server exit status %r' % server.returncode)
 
 
+def sendfile_open(exe, failures):
+    """#744: SendFile opens its file within the request's deadline, off the core thread. A FIFO
+    with no writer (open(2) waits for one) fails by the deadline while /fast answers within 100 ms
+    on both cores; a directory fails before the head goes out, so the handler's 500 arrives; a
+    file is served."""
+    import tempfile
+    import threading
+    port = ws.free_port()
+    server = subprocess.Popen([str(exe)], env=dict(os.environ, PORT=str(port), TIN_CORES='2',
+                                                   TIN_DEADLINE_MS='1500', TIN_GRACE='1'))
+    with tempfile.TemporaryDirectory(prefix='sendfile-') as tmp:
+        fifo = os.path.join(tmp, 'fifo')
+        os.mkfifo(fifo)
+        plain = os.path.join(tmp, 'plain')
+        with open(plain, 'wb') as f:
+            f.write(b'0123456789' * 1000)
+        try:
+            for _ in range(100):
+                try:
+                    socket.create_connection(('127.0.0.1', port), timeout=0.1).close()
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            got = {}
+            begin = time.monotonic()
+            t = threading.Thread(target=lambda: got.setdefault('r', raw(port, b'GET /send?path=%s HTTP/1.1\r\n'
+                                 b'Host: x\r\nConnection: close\r\n\r\n' % fifo.encode())))
+            t.start()
+            time.sleep(0.2)
+            slowest = 0
+            for _ in range(40):
+                s0 = time.monotonic()
+                answer = raw(port, b'GET /fast HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+                slowest = max(slowest, time.monotonic() - s0)
+                if not answer.endswith(b'fast'):
+                    failures.append('/fast while SendFile waits on a FIFO: %r' % answer)
+                    break
+            t.join(5)
+            took = time.monotonic() - begin
+            r = got.get('r', b'')
+            fifo_answer = r.split(b'\r\n\r\n')[-1]
+            # On the helper threads the open waits for a writer until the deadline; through io_uring
+            # (Linux) the kernel's worker waits the same way.
+            if not r.startswith(b'HTTP/1.1 500 ') or b'sendfile: ' not in r or not (b'deadline exceeded' in r or b'not a regular file' in r) or took > 3.0:
+                failures.append('SendFile of a FIFO with no writer: %r after %.2f s' % (r, took))
+            if slowest > 0.1:
+                failures.append('/fast took %.0f ms while SendFile waited on a FIFO' % (slowest * 1000))
+            try:
+                # A helper still waiting in open(2) gets its writer and returns; its job closes the
+                # descriptor. (ENXIO: no open is waiting any more.)
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+            r = raw(port, b'GET /send?path=%s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' % tmp.encode())
+            if not r.startswith(b'HTTP/1.1 500 ') or b'is a directory' not in r:
+                failures.append('SendFile of a directory: %r' % r)
+            r = raw(port, b'GET /send?path=%s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' % plain.encode())
+            if not r.startswith(b'HTTP/1.1 200 ') or not r.endswith(b'0123456789' * 1000) or b'Content-Length: 10000' not in r:
+                failures.append('SendFile of a file: %r' % r[:200])
+            if server.poll() is not None:
+                failures.append('the server exited during the SendFile checks')
+        finally:
+            stop(server)
+    print('SendFile: a FIFO fails by the deadline (%.2f s, %r) while /fast answers in %.0f ms at most; a directory gets the handler\'s 500 (#744)' % (took, fifo_answer, slowest * 1000))
+
+
 def main():
     out = ROOT / 'bin/ci/router'
     out.mkdir(parents=True, exist_ok=True)
@@ -659,6 +725,8 @@ def main():
                 failures.append('the server exited on %d cores' % cores)
         finally:
             stop(server)
+    print('-- SendFile opens')
+    sendfile_open(exe, failures)
     print('-- limits')
     limits(exe, failures)
     print('-- panics')

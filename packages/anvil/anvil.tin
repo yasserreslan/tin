@@ -2971,7 +2971,10 @@ fn put_dec(buf i64, at i64, v i64) i64 {
 // the bytes go out as chunks or as part of the Content-Length body. The file goes to the socket
 // with sendfile(2) in pieces of 1 MiB on a helper thread, so it is never read into the request
 // pool and a slow disk does not stop the core; each piece waits for a slow client within the
-// write timeout.
+// write timeout. The file is opened and its size read as quarry.OpenRegular does, through the
+// core's io_uring or on a helper thread within the request's deadline, never on the core thread
+// (#744); a directory or anything else that is not a regular file fails before the head is sent,
+// so the handler can still answer.
 fn (w mut Out) SendFile(path str, off i64, n i64) ! {
 	let c = stream_conn()
 	if c == 0 {
@@ -2980,8 +2983,9 @@ fn (w mut Out) SendFile(path str, off i64, n i64) ! {
 	if c[cHijack] != 0 {
 		fail "anvil: the connection is hijacked"
 	}
-	let size = try quarry.Size(path)
+	let (fd, size) = try quarry.OpenRegular(path)
 	if off < 0 || off > size {
+		rt_sys_close(fd)
 		fail "anvil: SendFile starts past the end of the file"
 	}
 	mut count = n
@@ -2989,10 +2993,15 @@ fn (w mut Out) SendFile(path str, off i64, n i64) ! {
 		count = size - off
 	}
 	if off + count > size {
+		rt_sys_close(fd)
 		fail "anvil: SendFile asks for more than the file holds"
 	}
 	if c[cH2] != 0 {
-		try h2_sendfile(c, h2_stream(), mut w, path, off, count) // DATA frames within the windows (#360)
+		let herr = h2_sendfile(c, h2_stream(), mut w, fd, off, count) // DATA frames within the windows (#360)
+		rt_sys_close(fd)
+		if herr != nil {
+			fail herr
+		}
 		return
 	}
 	if c[cStream] == 0 {
@@ -3002,10 +3011,10 @@ fn (w mut Out) SendFile(path str, off i64, n i64) ! {
 	if c[cStream] == 1 && c[cStLen] < 0 && len(w.Body) == 0 {
 		c[cStLen] = count
 	}
-	try stream_flush_body(c, mut w)
-	let fd = c32(rt_sys_open(rt_cstr(path), 0, 0))
-	if fd < 0 {
-		fail "anvil: SendFile cannot open the file"
+	let ferr = stream_flush_body(c, mut w)
+	if ferr != nil {
+		rt_sys_close(fd)
+		fail ferr
 	}
 	let err = stream_file(c, w, fd, off, count)
 	rt_sys_close(fd)

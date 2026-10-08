@@ -2443,9 +2443,10 @@ fn h2_abort(c i64, s i64) {
 	}
 }
 
-// h2_sendfile sends count bytes of the file at path, from off, on stream s: pieces read on a
-// helper thread, each sent as DATA frames within the windows.
-fn h2_sendfile(c i64, s i64, w mut Out, path str, off i64, count i64) ! {
+// h2_sendfile sends count bytes of the open file fd, from off, on stream s: pieces read on a
+// helper thread, each sent as DATA frames within the windows. The caller opened fd (SendFile,
+// through quarry.OpenRegular) and closes it.
+fn h2_sendfile(c i64, s i64, w mut Out, fd i64, off i64, count i64) ! {
 	if s[sStream] == 0 {
 		s[sStream] = 1
 		s[sStLen] = -1
@@ -2461,10 +2462,6 @@ fn h2_sendfile(c i64, s i64, w mut Out, path str, off i64, count i64) ! {
 	if s[sStLen] >= 0 && s[sStSent]+count > s[sStLen] {
 		fail "anvil: more bytes written than the Content-Length"
 	}
-	let fd = c32(rt_sys_open(rt_cstr(path), 0, 0))
-	if fd < 0 {
-		fail "anvil: SendFile cannot open the file"
-	}
 	mut left = count
 	mut at = off
 	for left > 0 {
@@ -2478,13 +2475,11 @@ fn h2_sendfile(c i64, s i64, w mut Out, path str, off i64, count i64) ! {
 		job[2] = at
 		job[3] = piece
 		rt_helper_run(h2_pread_job, job, h2_pread_drop) catch err {
-			rt_sys_close(fd) // the helper's job frees itself when it ends
-			fail err
+			fail err // the helper's job frees itself when it ends; SendFile closes fd
 		}
 		let k = job[4]
 		if k <= 0 {
 			h2_pread_drop(job)
-			rt_sys_close(fd)
 			h2_rst(c, s, eInternal)
 			h2_flush(c)
 			fail "anvil: the file is shorter than it was when SendFile started"
@@ -2493,7 +2488,6 @@ fn h2_sendfile(c i64, s i64, w mut Out, path str, off i64, count i64) ! {
 		h2_pread_drop(job)
 		h2_flush(c)
 		if !ok {
-			rt_sys_close(fd)
 			try h2_write_err(s)
 		}
 		s[sStSent] += k
@@ -2503,7 +2497,6 @@ fn h2_sendfile(c i64, s i64, w mut Out, path str, off i64, count i64) ! {
 			rt_task_set_deadline(rt_task_current(), rt_mono_ns()+gDeadlineMs*1000000)
 		}
 	}
-	rt_sys_close(fd)
 }
 
 fn h2_pread_job(job i64) {

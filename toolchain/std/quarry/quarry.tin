@@ -348,6 +348,116 @@ fn readRing(path str) !str {
 	return s
 }
 
+// OpenRegular opens the regular file at path for reading and returns its descriptor and size; the
+// caller closes the descriptor. Inside a request task it opens the file as ReadFile does: through
+// the core's io_uring (Linux), or on a helper thread, always there under a slow mount, so an open
+// that waits (a FIFO with no writer, a hung network mount) waits within the task's deadline and
+// the core serves others meanwhile (#744). A directory ("is a directory"), a FIFO, a device or a
+// socket ("not a regular file") is refused after the open: it has no size to send. It is for
+// code that hands the file to the system, as anvil's SendFile does.
+fn OpenRegular(path str) !(i64, i64) {
+	if badPath(path) {
+		fail invalidFault("open", path)
+	}
+	if rt_task_current() == 0 {
+		let fd = c32(rt_sys_open(rt_cstr(path), oRdonly, 0))
+		if fd < 0 {
+			fail pathFault("open", path)
+		}
+		return try regularFd(fd, path)
+	}
+	if useRing(path) {
+		let fd = rt_ring_open(rt_cstr(path), oRdonly, 0)
+		if fd == ringGone {
+			fail cast(fault, rt_wait_fault()) // a late open's descriptor is closed by the ring
+		}
+		if fd < 0 {
+			fail pathFaultCode("open", path, -fd)
+		}
+		return try regularFd(fd, path)
+	}
+	let job = calloc(6, 8)
+	job[0] = rt_heap_str(path)
+	try rt_helper_run(openJob, job, openDrop)
+	if job[3] != 0 {
+		let m = rt_str_from_raw(job[3], job[4])
+		openDrop(job)
+		fail m
+	}
+	let fd = job[1] - 1
+	let size = job[2]
+	job[1] = 0
+	openDrop(job)
+	return fd, size
+}
+
+// regularCheck is 0 when fd is a regular file (its size is then in stbuf), else the error code
+// to report: an errno, or -1 for a FIFO, device or socket.
+fn regularCheck(fd i64) i64 {
+	if c32(rt_sys_fstat(fd, stbuf)) != 0 {
+		return errno()
+	}
+	let m = mode(stbuf) & 0xf000
+	if m == 0x8000 {
+		return 0
+	}
+	if m == 0x4000 {
+		return 21 // EISDIR
+	}
+	return -1
+}
+
+// regularFault fails with the fault for a regularCheck code e on path.
+fn regularFault(e i64, path str) ! {
+	if e == -1 {
+		fail say.Fault("open %s: not a regular file", path)
+	}
+	fail say.Fault("open %s: %s", path, errnoText(e))
+}
+
+// regularFd returns fd and its size when it is a regular file, and closes it otherwise.
+fn regularFd(fd i64, path str) !(i64, i64) {
+	let e = regularCheck(fd)
+	if e != 0 {
+		rt_sys_close(fd)
+		fail regularFault(e, path)
+	}
+	return fd, rt_stat_size(stbuf)
+}
+
+// openJob runs OpenRegular's open and stat on a helper thread: the descriptor plus one and the
+// size, or the fault's message.
+fn openJob(job i64) {
+	let path = cast(str, job[0])
+	let fd = c32(rt_sys_open(rt_cstr(path), oRdonly, 0))
+	if fd < 0 {
+		jobFault(job, say.Fault("open %s: %s", path, errnoText(errno())))
+		return
+	}
+	let e = regularCheck(fd)
+	if e != 0 {
+		rt_sys_close(fd)
+		let err = regularFault(e, path)
+		if err != nil {
+			jobFault(job, err)
+		}
+		return
+	}
+	job[2] = rt_stat_size(stbuf)
+	job[1] = fd + 1
+}
+
+// openDrop releases an open job, closing a descriptor no task took (its task left at its
+// deadline before the open returned).
+fn openDrop(job i64) {
+	if job[1] > 0 {
+		rt_sys_close(job[1] - 1)
+	}
+	free(job[0])
+	free(job[3])
+	free(job)
+}
+
 // readJob runs ReadFile on a helper thread, copying the result (or the fault's message)
 // into malloc'd memory the task turns back into a str.
 fn readJob(job i64) {
