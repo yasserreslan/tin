@@ -136,6 +136,9 @@ the compiler: write a minimal repro as a test, open an issue and work around it.
   would serve. HTTPS: `try r.ServeTLS(":8443", certPEM, keyPEM)` (or `anvil.ServeTLS(addr, certPEM,
   keyPEM, h)`): PEM text, chain leaf first, RSA or ECDSA key; `q.TLSConn()` is the request's TLS
   connection; `websocket.Accept` works on it (wss://). examples/https_server.tin.
+- Cookies: `q.Cookie("sid")` and `q.Cookies()` (a map) read the request's Cookie fields; `w.SetCookie(anvil.Cookie{Name: "sid",
+  Value: v, Path: "/", MaxAge: 3600, HttpOnly: true, Secure: true, SameSite: "Lax"})` adds a Set-Cookie (one field per call, with
+  Go's validation and escaping). `r.RunWith(method, target, []str{"Cookie: a=1"}, body)` is `Run` with request header fields.
 - Memory: no GC. Allocations during a request go to the core's request pool (wiped per request);
   globals live in the long-lived ingot heap. Storing request memory into a global (or anything a global
   holds) without `keep(x)` is a compile error. keep() deep-copies into the ingot heap.
