@@ -7378,6 +7378,19 @@ fn check_assignable(e Node, from i64, to Ty) {
 		if secret_assign_error(e, from, cast(i64, to)) != 0 {
 			return
 		}
+		if kind_of(to) == K_VARRAY && kind_of(cast(Ty, from)) == K_SLICE {
+			// [N]T is an inline array of a value struct: a literal written where it is wanted builds one, and a slice does not fit.
+			let m = err_code(e.pos, "E230 TYPE_MISMATCH")
+			buf_str(m, "cannot use ")
+			type_name(cast([]u8, m), cast(Ty, from))
+			buf_str(m, " as ")
+			type_name(cast([]u8, m), to)
+			buf_str(m, ": an array literal is a slice except where an inline array is wanted (a value struct's field: write the literal there, or assign another ")
+			type_name(cast([]u8, m), to)
+			buf_str(m, "); fill the array from a slice with copy(v.field, xs)")
+			err_end(cast([]u8, m))
+			return
+		}
 		err_code_types(e.pos, "E230 TYPE_MISMATCH", "cannot use ", from, " as ", cast(i64, to))
 	}
 }

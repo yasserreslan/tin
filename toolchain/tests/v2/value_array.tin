@@ -1,0 +1,80 @@
+package main
+
+import "seal"
+import "say"
+
+// An inline array of a value struct takes a literal, another array, and copy from a slice (#817).
+
+type Oid value struct {
+	b [20]u8
+}
+
+type V value struct {
+	x     i64
+	arr   [3]i64
+	names [2]str
+}
+
+type P value struct {
+	a i64
+	b i64
+}
+
+type Q value struct {
+	ps   [2]P
+	rows [2][2]i64
+}
+
+fn oidOf(data []u8) Oid {
+	mut o = Oid{}
+	copy(o.b, seal.Sha1(str(data)))
+	return o
+}
+
+fn main() {
+	let v = V{x: 1, arr: [3]i64{1, 2, 3}, names: [2]str{"a", "b"}}
+	mut w = V{x: 2}
+	w.arr = v.arr
+	w.names = v.names
+	mut vs = []V{w}
+	vs[0].arr = [3]i64{7, 8, 9}
+	vs[0].names = [2]str{"q"}
+	say.Line(v.arr[1], w.arr[2], vs[0].arr[0], w.names[1], vs[0].names[1] == "", len(vs[0].names[0]))
+	w.arr[0] = 100
+	say.Line(v.arr[0], w.arr[0])
+
+	// Fewer values than N leave zeros.
+	let short = V{arr: [3]i64{5}}
+	say.Line(short.arr[0], short.arr[1], short.arr[2])
+
+	// An object id: built from a hash, compared, and a map key.
+	let o = oidOf([]u8{1, 2, 3})
+	let p = oidOf([]u8{1, 2, 3})
+	let q = oidOf([]u8{1, 2, 4})
+	say.Line(o == p, o == q, o.b[0], o.b[19])
+	mut ids = map[Oid]i64{}
+	ids[o] = 5
+	ids[q] = 6
+	say.Line(ids[p], ids[q], len(ids))
+
+	// copy fills min(N, len) elements from a slice or, for bytes, a str.
+	mut z = Oid{}
+	let n = copy(z.b, "hello")
+	say.Line(n, z.b[0], z.b[4], z.b[5])
+	let xs = []u8{9, 9, 9}
+	let m = copy(z.b, xs)
+	say.Line(m, z.b[0], z.b[3])
+	let big = make([]u8, 30)
+	for i in 0..30 {
+		big[i] = u8(i)
+	}
+	say.Line(copy(z.b, big), z.b[19])
+
+	// Arrays of value structs and rows.
+	let qq = Q{ps: [2]P{P{a: 1, b: 2}, P{a: 3}}, rows: [2][2]i64{{1, 2}, {3, 4}}}
+	say.Line(qq.ps[0].a, qq.ps[0].b, qq.ps[1].a, qq.ps[1].b, qq.rows[1][0], qq.rows[0][1])
+	mut r = Q{}
+	r.rows[1] = qq.rows[0]
+	r.ps[1] = qq.ps[0]
+	say.Line(r.rows[1][1], r.ps[1].b)
+}

@@ -1,0 +1,10 @@
+package main
+
+type Q value struct {
+	rows [2][2]i64
+}
+
+fn main() {
+	let z = Q{}
+	copy(z.rows[0], []i64{1})
+}
