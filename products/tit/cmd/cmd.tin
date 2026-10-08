@@ -26,6 +26,10 @@ type Command enum {
 	Commit(CommitArgs)
 	Diff(DiffArgs)
 	Adopt(str)
+	Branch(BranchArgs)
+	Switch(SwitchArgs)
+	Merge(MergeArgs)
+	Tag(TagArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -131,12 +135,20 @@ commands:
                              $EDITOR asks for the message; --amend makes a new version of the last change)
   diff [--staged] [--stat] [A B] [paths]
                              changes not staged yet, the staged ones, or between two revisions
-  log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id|change|git-id]
+  log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id|change|subject|git-id]
                              the history from rev (HEAD by default)
   show [rev]                 one commit and its changes
   cat <rev or id>            an object's content
   config get <key>           a setting; config set [--user] <key> <value>; config list
   key [path]                 make your signing key if there is none, and print its public half
+  branch [-d|-D] [-m] [name [start]]
+                             list branches, make one, delete one (-D: not merged), rename one (-m old new)
+  switch [-c] [--detach] <branch or rev> [start]
+                             move the working directory to a branch (-c makes it first)
+  merge <rev> [-m msg] | merge --abort
+                             merge a branch in: fast-forward, or a merge commit; conflicts get git's markers
+  tag [-a] [-m msg] [-d] [name [rev]]
+                             list tags, make one (annotated with -a or -m, signed when you have a key), delete one
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
   help [command]             this text
@@ -298,8 +310,8 @@ fn Parse(args []str) !(Global, Command) {
 				la.Topo = true
 			} else if twine.HasPrefix(a, "--format=") {
 				la.Format = a[9:]
-				if la.Format != "git-id" && la.Format != "id" && la.Format != "change" {
-					fail fault.Wrap(ErrUsage, "log: --format takes id, change or git-id")
+				if la.Format != "git-id" && la.Format != "id" && la.Format != "change" && la.Format != "subject" {
+					fail fault.Wrap(ErrUsage, "log: --format takes id, change, subject or git-id")
 				}
 			} else if len(a) > 0 && a[0] == '-' {
 				fail fault.Wrap(ErrUsage, "log: unknown option {a}")
@@ -337,6 +349,94 @@ fn Parse(args []str) !(Global, Command) {
 			return g, Command.ConfigSet(rest[2], rest[3], true)
 		}
 		fail fault.Wrap(ErrUsage, "config get <key> | config set [--user] <key> <value> | config list")
+	}
+	if name == "branch" {
+		mut ba = BranchArgs{Delete: false, Force: false, Rename: false, Names: []str{}}
+		for a in rest {
+			if a == "-d" || a == "--delete" {
+				ba.Delete = true
+			} else if a == "-D" {
+				ba.Delete = true
+				ba.Force = true
+			} else if a == "-m" || a == "--move" {
+				ba.Rename = true
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "branch: unknown option {a}")
+			} else {
+				ba.Names = append(ba.Names, a)
+			}
+		}
+		return g, Command.Branch(ba)
+	}
+	if name == "switch" {
+		mut sa = SwitchArgs{Create: false, Detach: false, Target: "", Start: "HEAD"}
+		mut pos = []str{}
+		for a in rest {
+			if a == "-c" || a == "--create" {
+				sa.Create = true
+			} else if a == "--detach" || a == "-d" {
+				sa.Detach = true
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "switch: unknown option {a}")
+			} else {
+				pos = append(pos, a)
+			}
+		}
+		if len(pos) == 0 || len(pos) > 2 || (len(pos) == 2 && !sa.Create) {
+			fail fault.Wrap(ErrUsage, "switch takes a branch (switch -c takes a new name and where it starts)")
+		}
+		sa.Target = pos[0]
+		if len(pos) == 2 {
+			sa.Start = pos[1]
+		}
+		return g, Command.Switch(sa)
+	}
+	if name == "merge" {
+		mut ma = MergeArgs{Rev: "", Abort: false, Message: ""}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "--abort" {
+				ma.Abort = true
+			} else if a == "-m" && k + 1 < len(rest) {
+				k += 1
+				ma.Message = rest[k]
+			} else if a == "--no-edit" {
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "merge: unknown option {a}")
+			} else {
+				ma.Rev = a
+			}
+			k += 1
+		}
+		if !ma.Abort && len(ma.Rev) == 0 {
+			fail fault.Wrap(ErrUsage, "merge takes what to merge, or --abort")
+		}
+		return g, Command.Merge(ma)
+	}
+	if name == "tag" {
+		mut ta = TagArgs{Delete: false, Annotated: false, Message: "", Names: []str{}}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "-d" || a == "--delete" {
+				ta.Delete = true
+			} else if a == "-a" || a == "--annotate" || a == "-s" {
+				ta.Annotated = true
+			} else if a == "-m" && k + 1 < len(rest) {
+				k += 1
+				ta.Message = rest[k]
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "tag: unknown option {a}")
+			} else {
+				ta.Names = append(ta.Names, a)
+			}
+			k += 1
+		}
+		if ta.Annotated && len(ta.Message) == 0 {
+			fail fault.Wrap(ErrUsage, "tag -a takes -m and the message")
+		}
+		return g, Command.Tag(ta)
 	}
 	if name == "adopt" {
 		mut path = ""
@@ -439,6 +539,10 @@ fn commandName(c Command) str {
 		Commit(_) => "commit"
 		Diff(_) => "diff"
 		Adopt(_) => "adopt"
+		Branch(_) => "branch"
+		Switch(_) => "switch"
+		Merge(_) => "merge"
+		Tag(_) => "tag"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -489,6 +593,18 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Adopt(path) => {
 			try doAdopt(g, path, mut o)
+		}
+		Branch(ba) => {
+			try doBranch(g, ba, mut o)
+		}
+		Switch(sa) => {
+			try doSwitch(g, sa, mut o)
+		}
+		Merge(ma) => {
+			try doMerge(g, ma, mut o)
+		}
+		Tag(ta) => {
+			try doTag(g, ta, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

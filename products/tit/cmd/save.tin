@@ -394,6 +394,8 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 	let tree = try index.WriteTree(mut loose, idx)
 	let head = try change.ReadHead(r.Ws.State())
 	let parent = try r.headCommit()
+	// a merge that stopped at conflicts: this commit finishes it, with both parents
+	let merging = try mergeHead(r)
 	let cfg = try r.config()
 	let when = now()
 	mut author = try identity.Who(cfg, identity.FixedClock{At: when})
@@ -414,6 +416,17 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 		author = old.Author
 		if len(a.Messages) == 0 {
 			message = old.Message
+		}
+	} else if merging != nil && parent != nil {
+		parents = []object.Id{parent, merging}
+		if len(a.Messages) == 0 {
+			let saved = r.Ws.State() + "/MERGE_MSG"
+			if quarry.Exists(saved) {
+				let text = try flume.ReadFile(saved)
+				message = cleanMessage(text, true)
+			} else {
+				message = try editMessage(r, "Merge commit " + merging.Hex()[0:12])
+			}
 		}
 	} else {
 		if parent != nil {
@@ -442,6 +455,8 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 	mut op = oplog.Op.Commit(changeId.Letters())
 	if a.Amend {
 		op = oplog.Op.Amend(changeId.Letters())
+	} else if merging != nil {
+		op = oplog.Op.Merge(merging.Hex())
 	}
 	mut refChanges = []oplog.RefChange{}
 	mut where = "detached HEAD"
@@ -479,6 +494,12 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 	}
 	try change.AddVersion(r.Ws.Store, changeId, change.NewVersion(tx.Number(), id, when))
 	try idx.Write(r.Ws.IndexPath())
+	if merging != nil {
+		try quarry.Remove(r.Ws.State() + "/MERGE_HEAD")
+		if quarry.Exists(r.Ws.State() + "/MERGE_MSG") {
+			try quarry.Remove(r.Ws.State() + "/MERGE_MSG")
+		}
+	}
 	try tx.Commit()
 	mut root = ""
 	if len(parents) == 0 {

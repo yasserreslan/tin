@@ -150,7 +150,28 @@ fn stagedLines(rep index.Report, renames map[str]str) []str {
 
 // porcelain is status in git's short form: a staged and an unstaged letter per changed path, in path order, then
 // "??" for each untracked path.
-fn porcelain(rep index.Report, untracked []str, renames map[str]str) []str {
+// conflictCode is git's two letters for a conflicted path, from the stages it has.
+fn conflictCode(idx index.Index, path str) str {
+	let (b, o, t) = idx.Stages(path)
+	if !b && o && t {
+		return "AA"
+	}
+	if b && !o && t {
+		return "DU"
+	}
+	if b && o && !t {
+		return "UD"
+	}
+	if !b && o && !t {
+		return "AU"
+	}
+	if !b && !o && t {
+		return "UA"
+	}
+	return "UU"
+}
+
+fn porcelain(rep index.Report, untracked []str, renames map[str]str, idx index.Index) []str {
 	mut codes = map[str][]str{}
 	mut paths = []str{}
 	mut renamedFrom = map[str]bool{}
@@ -186,7 +207,9 @@ fn porcelain(rep index.Report, untracked []str, renames map[str]str) []str {
 	for p in paths {
 		let (c, _) = codes[p]
 		let (old, moved) = renames[p]
-		if moved && c[0] == "A" {
+		if c[0] == "U" {
+			out = append(out, conflictCode(idx, p) + " " + p)
+		} else if moved && c[0] == "A" {
 			out = append(out, "R" + c[1] + " " + old + " -> " + p)
 		} else {
 			out = append(out, c[0] + c[1] + " " + p)
@@ -213,7 +236,7 @@ fn doStatus(g Global, short bool, o mut Out) ! {
 	let untracked = collapse(rep.Untracked, idx)
 	let renames = try stagedRenames(mut r, idx, tree, rep)
 	if short && !g.Json {
-		for line in porcelain(rep, untracked, renames) {
+		for line in porcelain(rep, untracked, renames, idx) {
 			o.Line(line)
 		}
 		return
@@ -413,6 +436,10 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 		let c = try commitData(mut r, id)
 		if la.Format == "change" {
 			o.Line(c.Change.Letters())
+			continue
+		}
+		if la.Format == "subject" {
+			o.Line(firstLine(c.Message))
 			continue
 		}
 		if g.Json {

@@ -181,8 +181,10 @@ fn walk(root str, dir str, files mut map[str]quarry.FileInfo, rules mut ignore.R
 		}
 		let info = try quarry.Lstat(root + "/" + rel)
 		files[rel] = info
+		// a conflicted file has only stages 1 to 3, and is tracked all the same
+		let (b, o, t) = idx.Stages(rel)
 		let tracked = idx.Find(rel)
-		if tracked == nil && !rules.Ignored(rel, false) {
+		if tracked == nil && !b && !o && !t && !rules.Ignored(rel, false) {
 			untracked = append(untracked, rel)
 		}
 	}
