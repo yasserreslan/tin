@@ -19,7 +19,12 @@ type Command enum {
 	Help(str)
 	Version(bool)
 	Init(str)
-	Status
+	Status(bool)
+	Add([]str)
+	Rm(RmArgs)
+	Mv(str, str)
+	Commit(CommitArgs)
+	Diff(DiffArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -114,7 +119,16 @@ const usageText = `usage: tit [-C dir] [--json] [--trace] <command> [arguments]
 
 commands:
   init [dir]                 start a repository in dir (the current directory by default)
-  status                     what changed, what is staged, what is untracked
+  status [-s]                what changed, what is staged, what is untracked (-s: two letters a file, as git's)
+  add <paths>                stage files (a directory stages what is below it; . everything)
+  rm [-r] [-f] [--cached] <paths>
+                             stop tracking files and remove them (--cached keeps them on the disk)
+  mv <from> <to>             move or rename a tracked file or directory
+  commit [-m msg]... [-a] [--amend]
+                             record the staged files (-a stages every tracked change first; without -m,
+                             $EDITOR asks for the message; --amend makes a new version of the last change)
+  diff [--staged] [--stat] [A B] [paths]
+                             changes not staged yet, the staged ones, or between two revisions
   log [rev] [-n N] [--oneline] [--first-parent] [--topo]
                              the history from rev (HEAD by default)
   show [rev]                 one commit and its changes
@@ -172,8 +186,93 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Init(dir)
 	}
 	if name == "status" {
-		try noMore(rest, 0, "status")
-		return g, Command.Status
+		mut short = false
+		for a in rest {
+			if a == "-s" || a == "--short" || a == "--porcelain" {
+				short = true
+			} else {
+				fail fault.Wrap(ErrUsage, "status: unexpected {a}")
+			}
+		}
+		return g, Command.Status(short)
+	}
+	if name == "add" {
+		mut paths = []str{}
+		for a in rest {
+			paths = append(paths, a)
+		}
+		return g, Command.Add(paths)
+	}
+	if name == "rm" {
+		mut ra = RmArgs{Paths: []str{}, Cached: false, Recursive: false, Force: false}
+		for a in rest {
+			if a == "--cached" {
+				ra.Cached = true
+			} else if a == "-r" {
+				ra.Recursive = true
+			} else if a == "-f" || a == "--force" {
+				ra.Force = true
+			} else if a == "-rf" || a == "-fr" {
+				ra.Recursive = true
+				ra.Force = true
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "rm: unknown option {a}")
+			} else {
+				ra.Paths = append(ra.Paths, a)
+			}
+		}
+		return g, Command.Rm(ra)
+	}
+	if name == "mv" {
+		if len(rest) != 2 {
+			fail fault.Wrap(ErrUsage, "mv takes a path and where it goes")
+		}
+		return g, Command.Mv(rest[0], rest[1])
+	}
+	if name == "commit" {
+		mut ca = CommitArgs{Messages: []str{}, All: false, Amend: false}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if (a == "-m" || a == "--message") && k + 1 < len(rest) {
+				k += 1
+				ca.Messages = append(ca.Messages, rest[k])
+			} else if a == "-a" || a == "--all" {
+				ca.All = true
+			} else if a == "--amend" {
+				ca.Amend = true
+			} else if a == "-am" && k + 1 < len(rest) {
+				k += 1
+				ca.All = true
+				ca.Messages = append(ca.Messages, rest[k])
+			} else {
+				fail fault.Wrap(ErrUsage, "commit: unexpected {a}")
+			}
+			k += 1
+		}
+		return g, Command.Commit(ca)
+	}
+	if name == "diff" {
+		mut da = DiffArgs{Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
+		mut paths = false
+		for a in rest {
+			if paths {
+				da.Paths = append(da.Paths, a)
+			} else if a == "--" {
+				paths = true
+			} else if a == "--staged" || a == "--cached" {
+				da.Staged = true
+			} else if a == "--stat" {
+				da.Stat = true
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "diff: unknown option {a}")
+			} else if isPath(g, a) {
+				da.Paths = append(da.Paths, a)
+			} else {
+				da.Revs = append(da.Revs, a)
+			}
+		}
+		return g, Command.Diff(da)
 	}
 	if name == "log" {
 		mut la = LogArgs{Rev: "HEAD", Most: 0, OneLine: false, First: false, Topo: false}
@@ -241,6 +340,20 @@ fn Parse(args []str) !(Global, Command) {
 	fail fault.Wrap(ErrUsage, "unknown command {name}")
 }
 
+// isPath reports whether a diff argument names a file or directory, rather than a revision.
+fn isPath(g Global, a str) bool {
+	mut base = g.Dir
+	if len(base) == 0 {
+		base = quarry.Getwd() catch _ {
+			"."
+		}
+	}
+	if a[0] == '/' {
+		return quarry.Exists(a)
+	}
+	return quarry.Exists(base + "/" + a)
+}
+
 fn noMore(rest []str, n i64, name str) ! {
 	if len(rest) > n {
 		fail fault.Wrap(ErrUsage, "{name}: unexpected {rest[n]}")
@@ -304,7 +417,12 @@ fn commandName(c Command) str {
 		Help(_) => "help"
 		Version(_) => "version"
 		Init(_) => "init"
-		Status => "status"
+		Status(_) => "status"
+		Add(_) => "add"
+		Rm(_) => "rm"
+		Mv(_, _) => "mv"
+		Commit(_) => "commit"
+		Diff(_) => "diff"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -335,8 +453,23 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		Init(dir) => {
 			try doInit(g, dir, mut o)
 		}
-		Status => {
-			try doStatus(g, mut o)
+		Status(short) => {
+			try doStatus(g, short, mut o)
+		}
+		Add(paths) => {
+			try doAdd(g, paths, mut o)
+		}
+		Rm(ra) => {
+			try doRm(g, ra, mut o)
+		}
+		Mv(from, to) => {
+			try doMv(g, from, to, mut o)
+		}
+		Commit(ca) => {
+			try doCommit(g, ca, mut o)
+		}
+		Diff(da) => {
+			try doDiff(g, da, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

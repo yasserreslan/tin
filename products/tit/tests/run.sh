@@ -25,3 +25,12 @@ echo "PASS tit reveals"
 "$tmp/tit" version -v > "$tmp/version.out"
 cmp "$tmp/version.out" products/tit/tests/golden/version.out || { echo "FAIL tit version"; exit 1; }
 echo "PASS tit version"
+# scripted sessions: the same commands as git's, with the same output (golden/session_*.out, from sessions/golden.sh)
+for s in products/tit/tests/sessions/*.sh; do
+	name=$(basename "$s" .sh)
+	[ "$name" = golden ] && continue
+	mkdir "$tmp/session_$name" "$tmp/home_$name"
+	HOME="$tmp/home_$name" XDG_CONFIG_HOME="$tmp/home_$name" TZ=UTC sh "$s" "$tmp/tit" "$tmp/session_$name" > "$tmp/session_$name.out" 2>&1 || { cat "$tmp/session_$name.out"; echo "FAIL tit session $name"; exit 1; }
+	cmp "$tmp/session_$name.out" "products/tit/tests/golden/session_$name.out" || { diff "products/tit/tests/golden/session_$name.out" "$tmp/session_$name.out"; echo "FAIL tit session $name"; exit 1; }
+	echo "PASS tit session $name"
+done
