@@ -1,0 +1,19 @@
+package main
+
+import "say"
+
+fn k(x i64) i64 {
+	return x + 1
+}
+
+fn ke(x i64) i64 {
+	return x + 2
+}
+
+fn kee(x i64) i64 {
+	return x + 3
+}
+
+fn main() {
+	say.Line(k(1), ke(1), kee(1))
+}
