@@ -6,39 +6,39 @@ import "ui"
 
 type Theme struct {
 	// surfaces
-	Background ui.Color
-	Panel ui.Color
-	TitleBar ui.Color
-	StatusBar ui.Color
-	Editor ui.Color
-	TabBar ui.Color
-	TabActive ui.Color
-	Border ui.Color
+	Background i64
+	Panel i64
+	TitleBar i64
+	StatusBar i64
+	Editor i64
+	TabBar i64
+	TabActive i64
+	Border i64
 	// rows and controls
-	Hover ui.Color
-	Selected ui.Color
-	Accent ui.Color
+	Hover i64
+	Selected i64
+	Accent i64
 	// text
-	Text ui.Color
-	Muted ui.Color
-	Faint ui.Color
-	Error ui.Color
-	Warning ui.Color
+	Text i64
+	Muted i64
+	Faint i64
+	Error i64
+	Warning i64
 	// the editor
-	Gutter ui.Color
-	GutterActive ui.Color
-	Cursor ui.Color
-	Selection ui.Color
-	LineHighlight ui.Color
-	Match ui.Color
+	Gutter i64
+	GutterActive i64
+	Cursor i64
+	Selection i64
+	LineHighlight i64
+	Match i64
 	// syntax
-	Keyword ui.Color
-	String ui.Color
-	Number ui.Color
-	Comment ui.Color
-	Constant ui.Color
-	Type ui.Color
-	Func ui.Color
+	Keyword i64
+	String i64
+	Number i64
+	Comment i64
+	Constant i64
+	Type i64
+	Func i64
 }
 
 // Dark is the default theme.

@@ -13,7 +13,7 @@ import "ui"
 // so a fallback font's wider glyph cannot push the rest of a line out of its columns.
 
 // kindColor is the color of a syntax class.
-fn kindColor(th theme.Theme, kind i64) ui.Color {
+fn kindColor(th theme.Theme, kind i64) i64 {
 	if kind == textedit.KindKeyword {
 		return th.Keyword
 	}
