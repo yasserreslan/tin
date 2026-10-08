@@ -81,6 +81,8 @@ jobs:
         run: sh tools/ci/tin.sh io_check
       - name: CRC-64 and LZW against Go's hash/crc64 and compress/lzw (a generated corpus)
         run: sh tools/ci/tin.sh hash_check
+      - name: bzip2 against Go's compress/bzip2 (libbzip2 streams, cut, flipped and back to back)
+        run: sh tools/ci/tin.sh bzip2_check
       - name: UTF-16 against Go's unicode/utf16 (a generated rune corpus)
         run: sh tools/ci/tin.sh utf16_check
       - name: Path rules against Go's path (Clean, Split, Join and Match)
