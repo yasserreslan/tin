@@ -1,0 +1,1 @@
+toolchain/tests/v2/value_array_slice_bad.tin:12:10: error E230 TYPE_MISMATCH: cannot use []i64 as [3]i64: an array literal is a slice except where an inline array is wanted (a value struct's field: write the literal there, or assign another [3]i64); fill the array from a slice with copy(v.field, xs)

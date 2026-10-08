@@ -1,15 +1,31 @@
 package index
 
 import "../object"
+import "../store"
+import "fault"
+import "flume"
+import "pack"
+import "quarry"
+import "seal"
+import "sift"
+import "twine"
 
-// The staging area and status (design/tit.md section 10; #783).
+// The staging area (design/tit.md section 10; #783): the files the next commit will hold, each with its blob id and
+// the file's stat at the time, so status can skip reading files whose stat is unchanged.
 
-// Entry is one staged file.
+// ErrBadIndex is the fault of an index file that breaks the format.
+let ErrBadIndex = fault("bad index")
+
+// ErrConflicted is the fault of writing a tree from an index that still has conflicts.
+let ErrConflicted = fault("the index has conflicts")
+
+// Entry is one staged file. Its blob id is kept as its 32 bytes (Hash) and read with Id(): a field of another
+// package's value struct is laid out wrongly in some structs today (#847).
 type Entry struct {
 	Path   str
+	Hash   str
 	Mode   object.Mode
 	Stage  i64
-	Id     object.Id
 	Size   i64
 	Mtime  i64
 	Ctime  i64
@@ -17,7 +33,15 @@ type Entry struct {
 	Device i64
 }
 
-// Index is a workspace's staging area.
+// Id is the entry's blob id.
+fn (e Entry) Id() object.Id {
+	let id = object.IdOf(e.Hash) catch _ {
+		object.NoId
+	}
+	return id
+}
+
+// Index is a workspace's staging area: its entries sorted by path (and stage).
 type Index struct {
 	Entries []Entry
 }
@@ -33,7 +57,308 @@ type FileStatus enum {
 	Conflicted(str)
 }
 
-// Read reads an index file (#783).
+// New is an empty index.
+fn New() Index {
+	return Index{Entries: []Entry{}}
+}
+
+fn modeByte(m object.Mode) i64 {
+	return match m {
+		File => 0
+		Exec => 1
+		Link => 2
+		Dir => 3
+	}
+}
+
+fn modeOf(b i64) !object.Mode {
+	if b == 0 {
+		return object.Mode.File
+	}
+	if b == 1 {
+		return object.Mode.Exec
+	}
+	if b == 2 {
+		return object.Mode.Link
+	}
+	fail fault.Wrap(ErrBadIndex, "mode {b}")
+}
+
+fn before(a Entry, b Entry) bool {
+	return a.Path < b.Path || (a.Path == b.Path && a.Stage < b.Stage)
+}
+
+fn (idx mut Index) sortEntries() {
+	sift.SortStableFunc(mut idx.Entries, fn(a Entry, b Entry) i64 {
+		if before(a, b) {
+			return -1
+		}
+		if before(b, a) {
+			return 1
+		}
+		return 0
+	})
+}
+
+// Find is the stage-0 entry for path, or nil.
+fn (idx Index) Find(path str) ?Entry {
+	mut lo = 0
+	mut hi = len(idx.Entries)
+	for lo < hi {
+		let mid = (lo + hi) / 2
+		if idx.Entries[mid].Path < path {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	for i in lo..len(idx.Entries) {
+		let e = idx.Entries[i]
+		if e.Path != path {
+			break
+		}
+		if e.Stage == 0 {
+			return e
+		}
+	}
+	return nil
+}
+
+// Set adds or replaces the stage-0 entry for e.Path, dropping any conflict stages of that path.
+fn (idx mut Index) Set(e Entry) {
+	mut out = make([]Entry, 0, len(idx.Entries) + 1)
+	for x in idx.Entries {
+		if x.Path != e.Path {
+			out = append(out, x)
+		}
+	}
+	out = append(out, e)
+	idx.Entries = out
+	idx.sortEntries()
+}
+
+// Remove drops every entry for path.
+fn (idx mut Index) Remove(path str) {
+	mut out = make([]Entry, 0, len(idx.Entries))
+	for x in idx.Entries {
+		if x.Path != path {
+			out = append(out, x)
+		}
+	}
+	idx.Entries = out
+}
+
+fn le64(s str, at i64) i64 {
+	return i64(pack.LE.U64([]u8(s[at:at + 8])))
+}
+
+// Read reads an index file; a missing file is an empty index.
 fn Read(path str) !Index {
-	fail "index.Read: not implemented yet (#783)"
+	if !quarry.Exists(path) {
+		return New()
+	}
+	let data = try flume.ReadFile(path)
+	if len(data) < 20 + 32 || data[0:8] != "TITINDEX" || i64(pack.LE.U32([]u8(data[8:12]))) != 1 {
+		fail fault.Wrap(ErrBadIndex, "{path}: not a version 1 index")
+	}
+	if str(seal.Sha256(data[0:len(data) - 32])) != data[len(data) - 32:] {
+		fail fault.Wrap(ErrBadIndex, "{path}: its hash does not match")
+	}
+	let count = le64(data, 12)
+	mut at = 20
+	let end = len(data) - 32
+	mut out = make([]Entry, 0, min(count, end / 80 + 1))
+	for k in 0..count {
+		if at >= end {
+			fail fault.Wrap(ErrBadIndex, "{path}: cut off")
+		}
+		let (plen, n) = pack.Uvarint([]u8(data[at:min(end, at + 10)])) catch _ {
+			fail fault.Wrap(ErrBadIndex, "{path}: a bad path length")
+		}
+		at += n
+		let p = i64(plen)
+		if p <= 0 || at + p + 2 + 32 + 40 > end {
+			fail fault.Wrap(ErrBadIndex, "{path}: cut off")
+		}
+		let name = data[at:at + p]
+		at += p
+		let mode = try modeOf(i64(data[at]))
+		let stage = i64(data[at + 1])
+		let id = try object.IdOf(data[at + 2:at + 34])
+		at += 34
+		out = append(out, Entry{Path: name, Hash: id.Bytes(), Mode: mode, Stage: stage, Size: le64(data, at), Mtime: le64(data, at + 8), Ctime: le64(data, at + 16), Inode: le64(data, at + 24), Device: le64(data, at + 32)})
+		at += 40
+	}
+	if at != end {
+		fail fault.Wrap(ErrBadIndex, "{path}: bytes after the last entry")
+	}
+	return Index{Entries: out}
+}
+
+fn appendU64(out mut []u8, v i64) {
+	for i in 0..8 {
+		out = append(out, u8((v >> (8 * i)) & 255))
+	}
+}
+
+// Write writes the index to path: a temporary file, synced, renamed.
+fn (idx Index) Write(path str) ! {
+	mut out = []u8{}
+	for c in "TITINDEX" {
+		out = append(out, u8(c))
+	}
+	out = append(out, 1, 0, 0, 0)
+	appendU64(mut out, len(idx.Entries))
+	for e in idx.Entries {
+		mut n = u64(len(e.Path))
+		for n >= 0x80 {
+			out = append(out, u8(n & 0x7f) | 0x80)
+			n = n >> 7
+		}
+		out = append(out, u8(n))
+		out = append(out, []u8(e.Path)...)
+		out = append(out, u8(modeByte(e.Mode)), u8(e.Stage))
+		out = append(out, []u8(e.Hash)...)
+		appendU64(mut out, e.Size)
+		appendU64(mut out, e.Mtime)
+		appendU64(mut out, e.Ctime)
+		appendU64(mut out, e.Inode)
+		appendU64(mut out, e.Device)
+	}
+	let sum = seal.Sha256(str(out))
+	out = append(out, sum...)
+	let slash = twine.LastIndex(path, "/")
+	if slash > 0 {
+		try quarry.MkdirAll(path[0:slash])
+	}
+	let tmp = path + ".tmp"
+	if quarry.Exists(tmp) {
+		try quarry.Remove(tmp)
+	}
+	mut w = try flume.CreateExcl(tmp)
+	w.Str(str(out))
+	let err = w.Sync()
+	try w.Close()
+	if err != nil {
+		fail err
+	}
+	try quarry.Rename(tmp, path)
+}
+
+// FromTree is an index holding every file of a tree, with no stat (so status reads each file once).
+fn FromTree[S store.ObjectStore](s mut S, tree object.Id) !Index {
+	mut es = []Entry{}
+	if tree != object.NoId {
+		try addTree(mut s, tree, "", mut es)
+	}
+	mut idx = Index{Entries: es}
+	idx.sortEntries()
+	return idx
+}
+
+fn addTree[S store.ObjectStore](s mut S, tree object.Id, prefix str, out mut []Entry) ! {
+	let o = try s.Get(tree)
+	match o {
+		Tree(es) => {
+			for e in es {
+				let path = prefix + e.Name
+				if e.Mode == object.Mode.Dir {
+					try addTree(mut s, e.Id, path + "/", mut out)
+				} else {
+					out = append(out, unstatted(path, e.Mode, e.Id))
+				}
+			}
+		}
+		Blob(_) => {
+			fail fault.Wrap(object.ErrCorrupt, "{tree.Hex()} is not a tree")
+		}
+		Commit(_) => {
+			fail fault.Wrap(object.ErrCorrupt, "{tree.Hex()} is not a tree")
+		}
+		Tag(_) => {
+			fail fault.Wrap(object.ErrCorrupt, "{tree.Hex()} is not a tree")
+		}
+	}
+}
+
+// unstatted is an entry with no stat yet.
+fn unstatted(path str, mode object.Mode, id object.Id) Entry {
+	return Entry{Path: path, Hash: id.Bytes(), Mode: mode, Stage: 0, Size: -1, Mtime: 0, Ctime: 0, Inode: 0, Device: 0}
+}
+
+// WriteTree writes the trees the index describes and returns the root's id; an index with conflicts cannot be written.
+fn WriteTree[S store.ObjectStore](s mut S, idx Index) !object.Id {
+	for e in idx.Entries {
+		if e.Stage != 0 {
+			fail fault.Wrap(ErrConflicted, e.Path)
+		}
+	}
+	return try writeDir(mut s, idx.Entries, 0, len(idx.Entries), "")
+}
+
+fn writeDir[S store.ObjectStore](s mut S, es []Entry, lo i64, hi i64, prefix str) !object.Id {
+	mut out = []object.Entry{}
+	mut i = lo
+	for i < hi {
+		let rest = es[i].Path[len(prefix):]
+		let slash = twine.IndexByte(rest, '/')
+		if slash < 0 {
+			out = append(out, object.Entry{Mode: es[i].Mode, Name: rest, Id: es[i].Id()})
+			i += 1
+			continue
+		}
+		let name = rest[0:slash]
+		let sub = prefix + name + "/"
+		mut j = i
+		for j < hi && twine.HasPrefix(es[j].Path, sub) {
+			j += 1
+		}
+		let id = try writeDir(mut s, es, i, j, sub)
+		out = append(out, object.Entry{Mode: object.Mode.Dir, Name: name, Id: id})
+		i = j
+	}
+	sift.SortStableFunc(mut out, fn(a object.Entry, b object.Entry) i64 {
+		let ka = treeKey(a)
+		let kb = treeKey(b)
+		if ka < kb {
+			return -1
+		}
+		if ka > kb {
+			return 1
+		}
+		return 0
+	})
+	return try s.Put(object.Object.Tree(out))
+}
+
+fn treeKey(e object.Entry) str {
+	return match e.Mode {
+		Dir => e.Name + "/"
+		File, Exec, Link => e.Name
+	}
+}
+
+// ModeOf is the mode a file's stat gives it: a symlink, an executable or a plain file.
+fn ModeOf(info quarry.FileInfo) object.Mode {
+	if info.Type == quarry.FileType.Symlink {
+		return object.Mode.Link
+	}
+	if info.Perm & 73 != 0 {
+		return object.Mode.Exec
+	}
+	return object.Mode.File
+}
+
+// Add stores the file at root/path as a blob and stages it in idx with its stat.
+fn Add[S store.ObjectStore](idx mut Index, s mut S, root str, path str) ! {
+	let full = root + "/" + path
+	let info = try quarry.Lstat(full)
+	mut body = ""
+	if info.Type == quarry.FileType.Symlink {
+		body = try quarry.Readlink(full)
+	} else {
+		body = try flume.ReadFile(full)
+	}
+	let id = try s.PutRaw(object.Kind.Blob, body)
+	idx.Set(Entry{Path: path, Hash: id.Bytes(), Mode: ModeOf(info), Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device})
 }

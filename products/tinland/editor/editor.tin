@@ -109,6 +109,9 @@ type Editor struct {
 	MarksSaves i64
 	Saves    i64
 	dragging bool
+	// Folds are the folded blocks (fold.tin); FoldLines is the line count they were made for.
+	Folds    []fold
+	FoldLines i64
 	// mapDrag is true while the mouse drags in the minimap.
 	mapDrag bool
 	clicks   i64
@@ -116,7 +119,7 @@ type Editor struct {
 }
 
 fn New(buf textedit.Buffer) Editor {
-	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, Marks: []i64{}, Extra: []textedit.Pos{}, External: []tinsym.Item{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
+	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, Marks: []i64{}, Folds: []fold{}, Extra: []textedit.Pos{}, External: []tinsym.Item{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
 	ed.rawFor = -1
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1
@@ -163,6 +166,7 @@ fn (ed mut Editor) activate(i i64) {
 	ed.Scroll = ed.Tabs[i].Scroll
 	ed.HScroll = ed.Tabs[i].HScroll
 	ed.rawFor = -1
+	ed.Folds = []fold{}
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1
 	ed.Mode = modeEdit
@@ -393,8 +397,9 @@ fn (ed mut Editor) ensureVisible() {
 	if ed.Buf.Row < ed.Scroll {
 		ed.Scroll = ed.Buf.Row
 	}
-	if ed.Buf.Row >= ed.Scroll + rows {
-		ed.Scroll = ed.Buf.Row - rows + 1
+	let d = ed.dispRow(ed.Buf.Row)
+	if d >= rows {
+		ed.Scroll = ed.shownAfter(ed.Scroll, d - rows + 1)
 	}
 	let maxScroll = len(ed.Buf.Lines) - 1
 	if ed.Scroll > maxScroll {
@@ -485,13 +490,13 @@ fn (ed mut Editor) handleKey(k Key) {
 		if alt {
 			b.MoveLines(-1)
 		} else {
-			b.Up(shift)
+			ed.moveVertical(-1, shift)
 		}
 	} else if k.Code == keyDown {
 		if alt {
 			b.MoveLines(1)
 		} else {
-			b.Down(shift)
+			ed.moveVertical(1, shift)
 		}
 	} else if k.Code == keyHome {
 		b.Home(shift)

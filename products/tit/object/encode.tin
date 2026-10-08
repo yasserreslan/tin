@@ -487,8 +487,7 @@ fn tagBody(t TagData) !str {
 
 // TagSigningPayload is the bytes a tag's signature covers: its encoding without the signature line.
 fn TagSigningPayload(t TagData) !str {
-	mut u = t
-	u.Signature = ""
+	let u = TagData{Object: t.Object, Kind: t.Kind, Name: t.Name, Tagger: t.Tagger, Signature: "", Message: t.Message}
 	let body = try tagBody(u)
 	return "tag {len(body)}\x00{body}"
 }

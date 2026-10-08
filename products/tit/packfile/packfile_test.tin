@@ -1,0 +1,283 @@
+package packfile
+
+import "../object"
+import "../store"
+import "crucible"
+import "dice"
+import "fault"
+import "quarry"
+import "seal"
+import "sift"
+import "squash"
+import "stamp"
+
+// Tests for packs (#778): deltas, a write and read round trip with deltas, and hand-built hostile packs.
+
+fn TestDelta(t mut crucible.T) {
+	mut r = dice.New(8)
+	mut bad = 0
+	mut used = 0
+	for round in 0..300 {
+		let base = str(r.Bytes(200 + r.Intn(3000)))
+		mut tb = []u8(base)
+		for e in 0..r.Intn(6) {
+			let at = r.Intn(len(tb))
+			if r.Intn(2) == 0 {
+				tb[at] = u8(r.Intn(256))
+			} else {
+				mut grown = []u8{}
+				grown = append(grown, tb[0:at]...)
+				grown = append(grown, r.Bytes(1 + r.Intn(40))...)
+				grown = append(grown, tb[at:]...)
+				tb = grown
+			}
+		}
+		let target = str(tb)
+		let d = MakeDelta(base, target)
+		if len(d) == 0 {
+			continue
+		}
+		used += 1
+		let back = ApplyDelta(base, d, len(target)) catch _ {
+			"?"
+		}
+		if back != target {
+			bad += 1
+		}
+	}
+	crucible.Equal(mut t, "deltas that do not rebuild their target", bad, 0)
+	t.True("most similar pairs get a delta", used > 250)
+	crucible.Equal(mut t, "unrelated data gets none", MakeDelta(str(r.Bytes(1000)), str(r.Bytes(1000))), "")
+	let (_, e1) = ApplyDelta("abc", "\x05\x03", 10)
+	t.HasFault("wrong base size", e1)
+	let (_, e2) = ApplyDelta("abcdef", "\x06\x03\x01\x04\x05", 10)
+	t.HasFault("a copy outside the base", e2)
+	let (_, e3) = ApplyDelta("abcdef", "\x06\x09\x01\x00\x03", 5)
+	t.HasFault("a result over the bound", e3)
+	let (_, e4) = ApplyDelta("abcdef", "\x06\x03\x07", 10)
+	t.HasFault("an unknown op", e4)
+}
+
+fn fresh(name str) str {
+	let d = "/tmp/tin-test-tit-pack-" + name + "-" + seal.Hex(seal.RandomBytes(4))
+	quarry.RemoveAll(d) catch _ {
+	}
+	return d
+}
+
+fn TestRoundTrip(t mut crucible.T) {
+	mut r = dice.New(2)
+	mut s = store.NewMem()
+	mut ids = []object.Id{}
+	mut text = str(r.Bytes(4000))
+	for i in 0..120 {
+		// each version of the file edits the last one: deltas
+		let at = r.Intn(len(text) - 10)
+		text = text[0:at] + "edit {i}" + text[at + 5:]
+		let id = s.PutRaw(object.Kind.Blob, text) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+		let tree = s.Put(object.Object.Tree([]object.Entry{object.Entry{Mode: object.Mode.File, Name: "f{i}", Id: id}})) catch _ {
+			object.NoId
+		}
+		ids = append(ids, tree)
+	}
+	let small = s.PutRaw(object.Kind.Blob, "tiny") catch _ {
+		object.NoId
+	}
+	ids = append(ids, small)
+	let d = fresh("rt")
+	mut p = Write(mut s, ids, d) catch err {
+		t.Error("write: {fault.Message(err)}")
+		return
+	}
+	crucible.Equal(mut t, "count", p.Count, 241)
+	t.True("deltas used", p.Deltas() > 100)
+	mut wrong = 0
+	for id in ids {
+		let (k1, b1, e1) = p.GetRaw(id)
+		let (k2, b2, e2) = s.GetRaw(id)
+		if e1 != nil || e2 != nil || k1 != k2 || b1 != b2 {
+			wrong += 1
+		}
+	}
+	crucible.Equal(mut t, "objects read back wrong", wrong, 0)
+	t.NoFault("verify", p.Verify())
+	t.False("an absent object", p.Has(object.Hash(object.Kind.Blob, "absent")))
+	let reopened = Open(p.Path) catch err {
+		t.Error("reopen: {fault.Message(err)}")
+		return
+	}
+	crucible.Equal(mut t, "reopened count", reopened.Count, 241)
+	quarry.RemoveAll(d) catch _ {
+	}
+}
+
+// build writes a pack of raw entries (each the bytes after its offset) with a correct index for ids, and opens it.
+fn build(dir str, entries []str, ids []object.Id) !Pack {
+	mut out = []u8{}
+	appendStr(mut out, "TITPACK\x00")
+	appendLE32(mut out, 1)
+	appendLE64(mut out, len(entries))
+	mut offs = []i64{}
+	mut crcs = []u32{}
+	for e in entries {
+		offs = append(offs, len(out))
+		crcs = append(crcs, stamp.Crc32(e))
+		appendStr(mut out, e)
+	}
+	let sum = str(seal.Sha256(str(out)))
+	appendStr(mut out, sum)
+	mut order = []i64{}
+	for i in 0..len(ids) {
+		order = append(order, i)
+	}
+	sift.SortFunc(mut order, fn(a i64, b i64) i64 {
+		if ids[a].Bytes() < ids[b].Bytes() {
+			return -1
+		}
+		return 1
+	})
+	mut idx = []u8{}
+	appendStr(mut idx, "TITIDX\x00\x00")
+	appendLE32(mut idx, 1)
+	appendLE64(mut idx, len(ids))
+	mut counts = make([]i64, 256)
+	for i in order {
+		counts[i64(ids[i].Bytes()[0])] += 1
+	}
+	mut total = 0
+	for b in 0..256 {
+		total += counts[b]
+		appendLE32(mut idx, total)
+	}
+	for i in order {
+		appendStr(mut idx, ids[i].Bytes())
+	}
+	for i in order {
+		appendLE64(mut idx, offs[i])
+	}
+	for i in order {
+		appendLE32(mut idx, i64(crcs[i]))
+	}
+	appendStr(mut idx, sum)
+	appendStr(mut idx, str(seal.Sha256(str(idx))))
+	try quarry.MkdirAll(dir)
+	try quarry.WriteFile(dir + "/h.pack", str(out))
+	try quarry.WriteFile(dir + "/h.idx", str(idx))
+	return try Open(dir + "/h.pack")
+}
+
+fn whole(kind i64, body str) str {
+	mut e = []u8{u8(kind)}
+	appendUv(mut e, len(body))
+	let z = squash.Zlib(body, 6)
+	appendUv(mut e, len(z))
+	appendStr(mut e, z)
+	return str(e)
+}
+
+fn refDelta(size i64, base object.Id, delta str) str {
+	mut e = []u8{u8(typeRefDelta)}
+	appendUv(mut e, size)
+	appendStr(mut e, base.Bytes())
+	let z = squash.Zlib(delta, 6)
+	appendUv(mut e, len(z))
+	appendStr(mut e, z)
+	return str(e)
+}
+
+fn ofsDelta(size i64, dist i64, delta str) str {
+	mut e = []u8{u8(typeOfsDelta)}
+	appendUv(mut e, size)
+	appendUv(mut e, dist)
+	let z = squash.Zlib(delta, 6)
+	appendUv(mut e, len(z))
+	appendStr(mut e, z)
+	return str(e)
+}
+
+// readsAll builds a pack of entries and reads every object; false at the first fault.
+fn readsAll(dir str, entries []str, ids []object.Id) bool {
+	mut p = build(dir, entries, ids) catch _ {
+		return false
+	}
+	for id in ids {
+		let (_, _, err) = p.GetRaw(id)
+		if err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+fn TestHostile(t mut crucible.T) {
+	let d = fresh("hostile")
+	let a = object.Hash(object.Kind.Blob, "aaaa")
+	// a delta against itself
+	mut p1 = build(d + "/1", []str{refDelta(4, a, "\x04\x04\x00\x04aaaa")}, []object.Id{a}) catch err {
+		t.Error("build 1: {fault.Message(err)}")
+		return
+	}
+	let (_, _, e1) = p1.GetRaw(a)
+	t.HasFault("a delta against itself", e1)
+	// a delta against an object the pack lacks
+	let other = object.Hash(object.Kind.Blob, "other")
+	mut p2 = build(d + "/2", []str{refDelta(4, other, "\x05\x04\x00\x04aaaa")}, []object.Id{a}) catch err {
+		t.Error("build 2: {fault.Message(err)}")
+		return
+	}
+	let (_, _, e2) = p2.GetRaw(a)
+	t.HasFault("a missing base", e2)
+	// a whole entry whose size lies
+	mut p3 = build(d + "/3", []str{whole(typeBlob, "aaaaa")}, []object.Id{a}) catch err {
+		t.Error("build 3: {fault.Message(err)}")
+		return
+	}
+	let (_, _, e3) = p3.GetRaw(a)
+	t.HasFault("a lying size", e3)
+	// a chain of 60 deltas, each copying the one before
+	mut entries = []str{whole(typeBlob, "xxxx")}
+	for i in 0..60 {
+		entries = append(entries, ofsDelta(4, len(entries[len(entries) - 1]), "\x04\x04\x01\x00\x04"))
+	}
+	let last = object.Hash(object.Kind.Blob, "xxxx")
+	mut chainIds = []object.Id{}
+	for i in 0..len(entries) {
+		chainIds = append(chainIds, object.Hash(object.Kind.Blob, "chain {i}"))
+	}
+	chainIds[len(chainIds) - 1] = last
+	mut p4 = build(d + "/4", entries, chainIds) catch err {
+		t.Error("build 4: {fault.Message(err)}")
+		return
+	}
+	let (_, _, e4) = p4.GetRaw(last)
+	t.True("a chain past the depth bound", e4 != nil && fault.Is(e4, ErrBadPack))
+	// every byte of a small pack's entries damaged (with the hashes fixed up): faults, never panics
+	let good = []str{whole(typeBlob, "some content here"), refDelta(18, object.Hash(object.Kind.Blob, "some content here"), "\x11\x12\x01\x00\x11\x00\x01!")}
+	let goodIds = []object.Id{object.Hash(object.Kind.Blob, "some content here"), object.Hash(object.Kind.Blob, "some content here!")}
+	mut panics = 0
+	for which in 0..2 {
+		for i in 0..len(good[which]) {
+			mut damaged = []str{good[0], good[1]}
+			mut b = []u8(good[which])
+			b[i] = b[i] ^ 0x41
+			damaged[which] = str(b)
+			let ok = guard {
+				readsAll(d + "/m", damaged, goodIds)
+			} catch err {
+				if fault.Is(err, fault.Panic) {
+					panics += 1
+				}
+				false
+			}
+			_ = ok
+			quarry.RemoveAll(d + "/m") catch _ {
+			}
+		}
+	}
+	crucible.Equal(mut t, "panics on damaged entries", panics, 0)
+	quarry.RemoveAll(d) catch _ {
+	}
+}

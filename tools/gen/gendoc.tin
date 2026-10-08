@@ -44,6 +44,7 @@ fn packages() []str {
 		"spawn", "starting child processes (os/exec)",
 		"trail", "paths (path, path/filepath on Unix)",
 		"lever", "command-line flags (flag)",
+		"tty", "terminals: size, raw mode, colour (golang.org/x/term)",
 		"tide", "time (time)",
 		"dice", "random numbers (math/rand)",
 		"sift", "sorting, searching and the generic slice functions (sort, slices, cmp)",
