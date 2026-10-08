@@ -1,0 +1,62 @@
+int 0 0
+int 3 3
+int 42 42
+wrap -9223372036854775808 -9223372036854775808
+float 0 0
+float 0.75 0.75
+float 1e+21
+float 123456
+float 1.234567e+06
+float 100000
+float 0.0001
+float 1e-05
+float -2.5
+float +Inf
+float NaN
+str "" 0
+str "a\"b\\c\n\t\r\u003c\u003e\u0026"
+str "é日本 \u0001 \u2028" 14
+str "�ok"
+str ""
+bool false false
+bool true true
+bool false false
+map {}
+map {"a": 2, "b": true, "f": 0.5, "s": "x y", "shared": 42, "z": 11}
+get 11
+get missing: true
+shared now 42
+map {"a": 2, "b": true, "f": 0.5, "s": "x y", "shared": 42}
+map kind {"a": 2, "b": true, "f": 0.5, "s": "x y", "shared": 42}
+do a 2
+do b true
+do f 0.5
+do inner {"k": 1}
+do s "x y"
+do shared 42
+map {}
+map {"q": 7}
+get missing: true
+var a 42
+var big -9223372036854775808
+var f NaN
+var flag false
+var inner {"k": 1}
+var late 0
+var m {"q": 7}
+var s ""
+panic: panic: Reuse of exported var name: a
+panic: true
+status 200
+type application/json; charset=utf-8
+{
+"a": 42,
+"big": -9223372036854775808,
+"f": NaN,
+"flag": false,
+"inner": {"k": 1},
+"late": 0,
+"m": {"q": 7},
+"s": ""
+}
+
