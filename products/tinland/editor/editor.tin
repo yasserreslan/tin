@@ -89,7 +89,8 @@ type Editor struct {
 	Quit     bool
 	Headless bool
 	Title    str
-	rawRows  []bool
+	rawRows  []i64
+	rawLang  i64
 	rawFor   i64
 	acc      f64
 	accX     f64
