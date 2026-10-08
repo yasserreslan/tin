@@ -280,3 +280,38 @@ fn TestSigningPayload(t mut crucible.T) {
 	crucible.Equal(mut t, "payload is the unsigned encoding", payload, unsigned)
 	t.True("the signed body differs", signed != payload)
 }
+
+type pieces struct {
+	data str
+	at   i64
+	step i64
+}
+
+fn (p mut pieces) Read(buf mut []u8) !i64 {
+	mut n = 0
+	for n < len(buf) && n < p.step && p.at < len(p.data) {
+		buf[n] = p.data[p.at]
+		n += 1
+		p.at += 1
+	}
+	return n
+}
+
+fn TestHashBlob(t mut crucible.T) {
+	mut r = dice.New(21)
+	for size in []i64{0, 1, 63, 64, 65, 1000, 70000, 200000} {
+		let data = str(r.Bytes(size))
+		for step in []i64{1, 7, 4096, 100000} {
+			mut src = pieces{data: data, at: 0, step: step}
+			let (id, err) = HashBlob(mut src, size)
+			t.NoFault("hash {size} in steps of {step}", err)
+			t.True("same id for {size} in steps of {step}", id == Hash(Kind.Blob, data))
+		}
+	}
+	mut short = pieces{data: "abc", at: 0, step: 2}
+	let (_, e1) = HashBlob(mut short, 4)
+	t.True("fewer bytes than declared", e1 != nil && fault.Is(e1, ErrCorrupt))
+	mut long = pieces{data: "abcde", at: 0, step: 2}
+	let (_, e2) = HashBlob(mut long, 4)
+	t.True("more bytes than declared", e2 != nil && fault.Is(e2, ErrCorrupt))
+}
