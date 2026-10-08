@@ -1995,6 +1995,7 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `New() Buffer`: New returns an empty buffer: one empty line, the cursor at its start.
 - `FromText(text str) Buffer`: FromText returns a buffer holding text; both \n and \r\n end a line.
 - `(b Buffer) Text() str`: Text is the whole text, lines joined with \n.
+- `(b Buffer) FileText() str`: FileText is the text as a file holds it: lines joined with \r\n when the buffer was read from CRLF text, else \n.
 - `(b Buffer) Cur() Pos`: Cur is the cursor.
 - `RuneAt(s str, i i64) i64`: RuneAt is the code point of the character that starts at byte i of s (0xfffd for bytes that are not UTF-8).
 - `RuneWidth(r i64) i64`: RuneWidth is how many screen columns a code point takes: 2 for the East Asian wide and fullwidth characters and emoji, 0 for combining marks, 1 for everything else.

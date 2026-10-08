@@ -315,7 +315,7 @@ fn (ed mut Editor) save(asNew bool) bool {
 			return false
 		}
 	}
-	quarry.WriteFile(path, ed.Buf.Text()) catch _ {
+	quarry.WriteFile(path, ed.Buf.FileText()) catch _ {
 		ed.Say("cannot write " + path)
 		return false
 	}
@@ -946,7 +946,7 @@ fn (ed mut Editor) ReloadClean() {
 		let text = quarry.ReadFile(t.Buf.Path) catch _ {
 			continue
 		}
-		if text == t.Buf.Text() {
+		if text == t.Buf.FileText() {
 			continue
 		}
 		let row = t.Buf.Row
@@ -991,7 +991,7 @@ fn (ed mut Editor) CheckDisk() bool {
 		let text = quarry.ReadFile(t.Buf.Path) catch _ {
 			continue
 		}
-		if text != t.Buf.Text() {
+		if text != t.Buf.FileText() {
 			let row = t.Buf.Row
 			let col = t.Buf.Col
 			t.Buf.SetText(text)

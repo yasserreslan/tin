@@ -32,6 +32,9 @@ type Buffer struct {
 	SelRow i64
 	SelCol i64
 	Dirty  bool
+	// CRLF is true when the text the buffer was made from ended its lines with \r\n: FileText writes them back so saving does not change a
+	// file's line endings.
+	CRLF bool
 	// Version counts the edits, so a view can tell its cached highlighting is out of date.
 	Version i64
 	Path   str
@@ -50,20 +53,30 @@ fn New() Buffer {
 fn FromText(text str) Buffer {
 	let parts = twine.Split(text, "\n")
 	mut lines = []str{}
+	mut crlf = false
 	mut i = 0
 	for i < len(parts) {
 		mut line = parts[i]
-		if len(line) > 0 && line[len(line) - 1] == '\r' {
+		if i < len(parts) - 1 && len(line) > 0 && line[len(line) - 1] == '\r' {
 			line = line[:len(line) - 1]
+			crlf = true
 		}
 		lines = append(lines, line)
 		i += 1
 	}
-	return Buffer{Lines: lines}
+	return Buffer{Lines: lines, CRLF: crlf}
 }
 
 // Text is the whole text, lines joined with \n.
 fn (b Buffer) Text() str {
+	return twine.Join(b.Lines, "\n")
+}
+
+// FileText is the text as a file holds it: lines joined with \r\n when the buffer was read from CRLF text, else \n.
+fn (b Buffer) FileText() str {
+	if b.CRLF {
+		return twine.Join(b.Lines, "\r\n")
+	}
 	return twine.Join(b.Lines, "\n")
 }
 
@@ -1032,6 +1045,7 @@ fn (b mut Buffer) SetText(text str) {
 	b.record(kindOther)
 	let fresh = FromText(text)
 	b.Lines = fresh.Lines
+	b.CRLF = fresh.CRLF
 	if b.Row >= len(b.Lines) {
 		b.Row = len(b.Lines) - 1
 	}
