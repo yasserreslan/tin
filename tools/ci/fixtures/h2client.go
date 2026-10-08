@@ -140,6 +140,57 @@ func main() {
 	}
 	fmt.Println("PASS request trailers reach q.Header")
 
+	// Cookies (#823): the client sends them as separate fields, the server joins them for q.Cookie, and two Set-Cookie
+	// fields of one response arrive as two.
+	creq, _ := http.NewRequest("GET", base+"/cookies", nil)
+	creq.Header.Add("Cookie", "sid=abc")
+	creq.Header.Add("Cookie", "theme=dark")
+	cresp, cerr := client.Do(creq)
+	if cerr != nil {
+		fail("GET /cookies: %v", cerr)
+	}
+	cbody, _ := io.ReadAll(cresp.Body)
+	cresp.Body.Close()
+	setc := cresp.Header.Values("Set-Cookie")
+	if string(cbody) != "sid=abc n=2" || len(setc) != 2 || setc[0] != "one=1; Path=/; HttpOnly" || setc[1] != `two="a b"; Max-Age=60; SameSite=Lax` {
+		fail("cookies %q %q", cbody, setc)
+	}
+	fmt.Println("PASS cookies: two Cookie fields read, two Set-Cookie fields written")
+
+	// ServeFile over h2 (#823): validators, a 304, a byte range and an If-Range that does not match.
+	sresp, sbody := get("/servefile?name=big")
+	etag := sresp.Header.Get("ETag")
+	if sresp.StatusCode != 200 || len(sbody) != 3*1048576+4 || etag == "" || sresp.Header.Get("Last-Modified") == "" || sresp.Header.Get("Accept-Ranges") != "bytes" {
+		fail("servefile: %d %d %v", sresp.StatusCode, len(sbody), sresp.Header)
+	}
+	sreq, _ := http.NewRequest("GET", base+"/servefile?name=big", nil)
+	sreq.Header.Set("If-None-Match", etag)
+	sr, serr := client.Do(sreq)
+	if serr != nil || sr.StatusCode != 304 {
+		fail("servefile If-None-Match: %v %v", serr, sr)
+	}
+	sr.Body.Close()
+	sreq, _ = http.NewRequest("GET", base+"/servefile?name=big", nil)
+	sreq.Header.Set("Range", "bytes=1000-1999")
+	sr, serr = client.Do(sreq)
+	if serr != nil || sr.StatusCode != 206 || sr.Header.Get("Content-Range") != "bytes 1000-1999/3145732" {
+		fail("servefile Range: %v %v", serr, sr)
+	}
+	part, _ := io.ReadAll(sr.Body)
+	sr.Body.Close()
+	if !bytes.Equal(part, sbody[1000:2000]) {
+		fail("servefile range body: %d bytes", len(part))
+	}
+	sreq, _ = http.NewRequest("GET", base+"/servefile?name=big", nil)
+	sreq.Header.Set("Range", "bytes=1000-1999")
+	sreq.Header.Set("If-Range", `"other"`)
+	sr, serr = client.Do(sreq)
+	if serr != nil || sr.StatusCode != 200 || sr.ContentLength != int64(len(sbody)) {
+		fail("servefile If-Range: %v %v", serr, sr)
+	}
+	sr.Body.Close()
+	fmt.Println("PASS ServeFile over h2: validators, 304, a byte range and a stale If-Range")
+
 	resp, body := get("/trailers?n=1000")
 	var s int
 	for _, c := range body {

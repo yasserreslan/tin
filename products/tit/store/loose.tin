@@ -31,15 +31,16 @@ fn (l Loose) Has(id object.Id) bool {
 	return quarry.Exists(l.path(id))
 }
 
-// GetRaw is the object's kind and body. The file is inflated within a memory budget proportional to its size
-// (zlib inflates at most about 1032 times), and the content is checked against its id.
+// GetRaw is the object's kind and body. The file is inflated within a memory budget proportional to its size (zlib
+// inflates at most about 1032 times; the inflater's doubling buffers and its one copy of the result take up to 6 times
+// the output), and the content is checked against its id.
 fn (l Loose) GetRaw(id object.Id) !(object.Kind, str) {
 	let p = l.path(id)
 	if !quarry.Exists(p) {
 		fail fault.Wrap(ErrNotFound, id.Hex())
 	}
 	let z = try quarry.ReadFile(p)
-	let budget = 2064 * len(z) + 4194304
+	let budget = 6 * 1032 * len(z) + 4194304
 	// budget * 1: a bare name before { would read as a struct literal.
 	let enc = limit memory budget * 1 {
 		try squash.Unzlib(z, 1032 * len(z) + 1024)

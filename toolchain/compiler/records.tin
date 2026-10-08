@@ -196,6 +196,7 @@ type Fn struct {
 	escapes i64
 	instcycle i64
 	attrs []i64
+	cobits i64 // parameters (by argument position, receiver not counted) that the function only calls or passes to such parameters (#816)
 }
 
 type FailStmt struct {

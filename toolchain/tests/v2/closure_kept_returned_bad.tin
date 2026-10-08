@@ -1,0 +1,31 @@
+package main
+
+import "say"
+
+type R struct {
+	n i64
+}
+
+fn returnsIt(f fn(R)) fn(R) {
+	return f
+}
+
+fn inLit(f fn(R)) fn() {
+	return fn() {
+		f(R{n: 1})
+	}
+}
+
+fn main() {
+	mut all = []R{}
+	let g = returnsIt(fn(r R) {
+		all = append(all, r)
+	})
+	g(R{n: 2})
+	mut more = []R{}
+	let h = inLit(fn(r R) {
+		more = append(more, r)
+	})
+	h()
+	say.Line(len(all), len(more))
+}

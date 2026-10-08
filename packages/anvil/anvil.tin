@@ -104,6 +104,8 @@ type Out struct {
 	ci    i64 // the next middleware of that chain
 	vals  i64 // SetValue's keys and values: a []str made on first use, or 0
 	tr    i64 // Trailer's field lines: a []u8 made on first use, or 0
+	meth  str // the request's method and path, for Redirect (#823)
+	rpath str
 }
 
 const scrSize = 262144
@@ -1630,6 +1632,8 @@ fn run_request(c i64) {
 	if gRoutes != 0 {
 		dispatch(cast(rtable, gRoutes), mut q, mut w)
 	} else {
+		w.meth = q.Method
+		w.rpath = q.Path
 		gHandler(q, mut w)
 	}
 	if c[cBody] != 0 && body_end(c) {
@@ -3047,6 +3051,12 @@ fn (w mut Out) SendFile(path str, off i64, n i64) ! {
 		rt_sys_close(fd)
 		fail "anvil: SendFile asks for more than the file holds"
 	}
+	try w.send_fd(c, fd, off, count)
+}
+
+// send_fd sends count bytes from off of the open file fd (closing it) as SendFile does, once SendFile or ServeFile has opened it and
+// checked the range.
+fn (w mut Out) send_fd(c i64, fd i64, off i64, count i64) ! {
 	if c[cH2] != 0 {
 		let herr = h2_sendfile(c, h2_stream(), mut w, fd, off, count) // DATA frames within the windows (#360)
 		rt_sys_close(fd)
@@ -3748,6 +3758,28 @@ fn (r Router) Run(method str, target str, body str) Out {
 	return w
 }
 
+// RunWith is Run with request header fields, each written "Name: value" (Cookie, Content-Type ...): for tests of
+// handlers that read headers, cookies or forms.
+fn (r Router) RunWith(method str, target str, headers []str, body str) Out {
+	let t = run_table(r)
+	mut block = ""
+	for h in headers {
+		block += h + "\r\n"
+	}
+	let q = Req{Method: method, Path: target, Query: "", hp: cast(i64, block) + 8, hn: len(block), bp: cast(i64, body) + 8, bn: len(body)}
+	for i in 0..len(target) {
+		if target[i] == '?' {
+			q.Path = target[:i]
+			q.Query = target[i+1:]
+			break
+		}
+	}
+	let b = make([]u8, 0, 256)
+	let w = Out{Body: b, code: 200, ctype: "text/plain; charset=utf-8", extra: make([]u8, 0, 64), own: b}
+	dispatch(t, mut q, mut w)
+	return w
+}
+
 // Match returns the pattern of the route that would serve method and path ("/users/{id}"),
 // or "" when the request would get 404 or 405. Like Run, it panics if r has an error (see Check).
 fn (r Router) Match(method str, path str) str {
@@ -3799,6 +3831,8 @@ fn dispatch(t rtable, q mut Req, w mut Out) {
 	q.ep = ep
 	w.ep = ep
 	w.ci = 0
+	w.meth = q.Method
+	w.rpath = q.Path
 	chain_next(q, mut w)
 }
 

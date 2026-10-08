@@ -281,3 +281,29 @@ fn TestHostile(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// A large file that compresses well is read back: the reader's memory budget allows for the inflater growing its
+// output by doubling (a 2.3 MB roadmap compressing 9 to 1 failed adopting the Tin repo, #789).
+fn TestLargeCompressible(t mut crucible.T) {
+	mut s = store.NewMem()
+	mut b = make([]u8, 0, 2400000)
+	mut i = 0
+	for len(b) < 2331597 {
+		b = append(b, []u8("- [x] item {i}: done on 2026-10-{i % 28 + 1}, see #{i * 7 % 900}\n")...)
+		i += 1
+	}
+	let big = s.PutRaw(object.Kind.Blob, str(b)) catch _ {
+		object.NoId
+	}
+	let d = fresh("large")
+	mut p = Write(mut s, []object.Id{big}, d) catch e {
+		t.Error("write: {e}")
+		return
+	}
+	t.NoFault("verify", p.Verify())
+	let (_, body, err) = p.GetRaw(big)
+	t.NoFault("read", err)
+	crucible.Equal(mut t, "the same bytes", len(body), len(b))
+	quarry.RemoveAll(d) catch _ {
+	}
+}

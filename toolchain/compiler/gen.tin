@@ -1453,7 +1453,20 @@ fn gen_pair(lexp i64, rexp i64, d i64) {
 	let d2 = next_depth(l, d)
 	let rfp = e_fp(cast(Node, rexp))
 	mut r = 0
-	if is_real_call(rexp) != 0 {
+	if is_real_call(rexp) != 0 && e_fp(cast(Node, lexp)) == 0 && l == 0 && d >= t_count {
+		// l was computed past the temp pool, into x0, which gen_call does not save and the call's result overwrites
+		// (a - b2i(x > a) in a deep expression computed a - a, #811): park l on the stack across the call.
+		emit1(I_PUSH, l)
+		gen_call(rexp, d2)
+		if rfp != 0 {
+			mov(FSCR, FPR)
+			r = FSCR
+		} else {
+			mov(X17, 0)
+			r = X17
+		}
+		emit1(I_POP, l)
+	} else if is_real_call(rexp) != 0 {
 		gen_call(rexp, d2)
 		if rfp != 0 {
 			r = FPR

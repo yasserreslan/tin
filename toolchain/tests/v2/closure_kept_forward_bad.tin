@@ -6,16 +6,19 @@ type R struct {
 	n i64
 }
 
-fn each(xs []R, f fn(R)) {
-	for x in xs {
-		f(x)
-	}
+mut saved fn(R) = fn(r R) {}
+
+fn keepIt(f fn(R)) {
+	saved = f
+}
+
+fn viaKeep(f fn(R)) {
+	keepIt(f)
 }
 
 fn main() {
-	let src = []R{R{n: 1}, R{n: 2}}
 	mut all = []R{}
-	each(src, fn(r R) {
+	viaKeep(fn(r R) {
 		all = append(all, r)
 	})
 	say.Line(len(all))

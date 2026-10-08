@@ -1,0 +1,18 @@
+a=1 b=[x y z w q] n=3 c=cc
+a=put b=[] n=1 c=
+a=9 b=[] n=1 c=
+a=9 b=[] n=1 c=
+a= b=[] n=0 c=
+400 bad form: invalid URL escape "%zz"
+n=1 a=1
+n=1 a=1
+302 /x/y text/html; charset=utf-8 "<a href=\"/x/y\">Found</a>.\n\n"
+302 /dir/z?q=1 text/html; charset=utf-8 "<a href=\"/dir/z?q=1\">Found</a>.\n\n"
+302 /up/a/ text/html; charset=utf-8 "<a href=\"/up/a/\">Found</a>.\n\n"
+302 http://example.com/a b text/html; charset=utf-8 "<a href=\"http://example.com/a b\">Found</a>.\n\n"
+302 //host/p text/html; charset=utf-8 "<a href=\"//host/p\">Found</a>.\n\n"
+302 /dir/%c3%a9 text/html; charset=utf-8 "<a href=\"/dir/é\">Found</a>.\n\n"
+302 /dir/ text/html; charset=utf-8 "<a href=\"/dir/\">Found</a>.\n\n"
+302 /dir text/html; charset=utf-8 "<a href=\"/dir\">Found</a>.\n\n"
+302 /dir/x text/html; charset=utf-8 0
+302 /dir/x 0

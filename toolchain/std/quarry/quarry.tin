@@ -431,6 +431,13 @@ fn readRing(path str, cap i64) !str {
 // socket ("not a regular file") is refused after the open: it has no size to send. It is for
 // code that hands the file to the system, as anvil's SendFile does.
 fn OpenRegular(path str) !(i64, i64) {
+	let (fd, size, _) = try OpenRegularStat(path)
+	return fd, size
+}
+
+// OpenRegularStat is OpenRegular and the file's modification time too, in seconds since the Unix epoch: the descriptor, the size and
+// the time, from one open and one fstat, never on the core thread.
+fn OpenRegularStat(path str) !(i64, i64, i64) {
 	if badPath(path) {
 		fail invalidFault("open", path)
 	}
@@ -461,9 +468,10 @@ fn OpenRegular(path str) !(i64, i64) {
 	}
 	let fd = job[1] - 1
 	let size = job[2]
+	let mtime = job[5]
 	job[1] = 0
 	openDrop(job)
-	return fd, size
+	return fd, size, mtime
 }
 
 // regularCheck is 0 when fd is a regular file (its size is then in stbuf), else the error code
@@ -491,13 +499,13 @@ fn regularFault(e i64, path str) ! {
 }
 
 // regularFd returns fd and its size when it is a regular file, and closes it otherwise.
-fn regularFd(fd i64, path str) !(i64, i64) {
+fn regularFd(fd i64, path str) !(i64, i64, i64) {
 	let e = regularCheck(fd)
 	if e != 0 {
 		rt_sys_close(fd)
 		fail regularFault(e, path)
 	}
-	return fd, rt_stat_size(stbuf)
+	return fd, rt_stat_size(stbuf), rt_stat_mtime(stbuf)
 }
 
 // openJob runs OpenRegular's open and stat on a helper thread: the descriptor plus one and the
@@ -519,6 +527,7 @@ fn openJob(job i64) {
 		return
 	}
 	job[2] = rt_stat_size(stbuf)
+	job[5] = rt_stat_mtime(stbuf)
 	job[1] = fd + 1
 }
 

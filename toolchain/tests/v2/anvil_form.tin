@@ -1,0 +1,56 @@
+package main
+
+import "anvil"
+import "say"
+
+// Forms and redirects as net/http has them (#823): Request.ParseForm's Form, and http.Redirect.
+
+fn form(q anvil.Req, w mut anvil.Out) {
+	let f = q.Form() catch err {
+		w.Status(400)
+		w.Text("bad form: {err}")
+		return
+	}
+	w.Text("a={f.Get(`a`)} b={f.All(`b`)} n={f.Len()} c={q.FormValue(`c`)}")
+}
+
+fn post(q anvil.Req, w mut anvil.Out) {
+	let f = q.PostForm() catch err {
+		w.Status(400)
+		w.Text("bad form: {err}")
+		return
+	}
+	w.Text("n={f.Len()} a={f.Get(`a`)}")
+}
+
+fn red(q anvil.Req, w mut anvil.Out) {
+	w.Redirect(q.Param("to"), 302)
+}
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Any("/form", form)
+	r.Any("/post", post)
+	r.Any("/dir/red", red)
+	let urlenc = []str{"Content-Type: application/x-www-form-urlencoded; charset=utf-8"}
+	// The body's fields come first, then the query's.
+	say.Line(str(r.RunWith("POST", "/form?b=q&c=cc", urlenc, "a=1&b=x%20y&b=z+w").Body))
+	say.Line(str(r.RunWith("PUT", "/form?a=9", urlenc, "a=put").Body))
+	// A GET has no body form; another content type is not a form; a bad escape is a fault.
+	say.Line(str(r.RunWith("GET", "/form?a=9", urlenc, "a=ignored").Body))
+	say.Line(str(r.RunWith("POST", "/form?a=9", []str{"Content-Type: text/plain"}, "a=ignored").Body))
+	say.Line(str(r.RunWith("POST", "/form", []str{}, "a=ignored").Body))
+	let bad = r.RunWith("POST", "/form", urlenc, "a=%zz")
+	say.Line(bad.Code(), str(bad.Body))
+	say.Line(str(r.RunWith("POST", "/post?a=q", urlenc, "a=1&a=2").Body))
+	say.Line(str(r.RunWith("POST", "/post?a=q", []str{"content-type: Application/X-WWW-Form-Urlencoded"}, "a=1").Body))
+	// Redirect: the table of http.Redirect's cases, checked against Go.
+	for to in []str{"/x/y", "z?q=1", "../up/./a/", "http://example.com/a b", "//host/p", "é", "", "."} {
+		let w = r.RunWith("GET", "/dir/red?to=" + to, []str{}, "")
+		say.Line(w.Code(), w.Header("Location"), w.Header("Content-Type"), say.Fmt("%q", str(w.Body)))
+	}
+	let head = r.RunWith("HEAD", "/dir/red?to=x", []str{}, "")
+	say.Line(head.Code(), head.Header("Location"), head.Header("Content-Type"), len(head.Body))
+	let p = r.RunWith("POST", "/dir/red?to=x", []str{}, "")
+	say.Line(p.Code(), p.Header("Location"), len(p.Body))
+}

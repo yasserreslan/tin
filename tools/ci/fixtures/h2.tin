@@ -24,6 +24,8 @@ import "tide"
 //   /abort            one streamed write, then Abort
 //   /endless          writes 16 KiB pieces until one fails (herald logs "endless stopped")
 //   /hijack           Hijack, which an HTTP/2 stream refuses
+//   /servefile?name=  ServeFile of a file in FILES_DIR: validators and ranges (#823)
+//   /cookies          the sid cookie and how many cookies came, and two Set-Cookie fields (#823)
 // With TLS_CERT and TLS_KEY (paths) it serves HTTPS, where ALPN chooses h2 or HTTP/1.1.
 
 fn num(q anvil.Req, name str, dflt i64) i64 {
@@ -136,6 +138,14 @@ fn file(q anvil.Req, w mut anvil.Out) {
 	}
 }
 
+fn servefile(q anvil.Req, w mut anvil.Out) {
+	let path = quarry.Getenv("FILES_DIR") + "/" + q.Param("name")
+	w.ServeFile(q, path) catch err {
+		w.Status(404)
+		w.Text("cannot serve: {err}")
+	}
+}
+
 fn trailers(q anvil.Req, w mut anvil.Out) {
 	let n = num(q, "n", 10)
 	let b = pattern(n, 0)
@@ -224,6 +234,12 @@ fn endless(q anvil.Req, w mut anvil.Out) {
 	}
 }
 
+fn cookies(q anvil.Req, w mut anvil.Out) {
+	w.Text("sid={q.Cookie(`sid`)} n={len(q.Cookies())}")
+	w.SetCookie(anvil.Cookie{Name: "one", Value: "1", Path: "/", HttpOnly: true})
+	w.SetCookie(anvil.Cookie{Name: "two", Value: "a b", MaxAge: 60, SameSite: "Lax"})
+}
+
 fn hijack(q anvil.Req, w mut anvil.Out) {
 	let fd = q.Hijack() catch err {
 		w.Status(400)
@@ -243,6 +259,7 @@ fn main() {
 	r.Get("/length", length)
 	r.Get("/short", short)
 	r.Get("/file", file)
+	r.Get("/servefile", servefile)
 	r.Get("/trailers", trailers)
 	r.Get("/streamtrailers", streamtrailers)
 	r.Get("/headers", headers)
@@ -252,6 +269,7 @@ fn main() {
 	r.Get("/abort", abort)
 	r.Get("/endless", endless)
 	r.Get("/hijack", hijack)
+	r.Get("/cookies", cookies)
 	if quarry.Getenv("TLS_CERT") != "" {
 		// HTTPS: h2 by ALPN, HTTP/1.1 otherwise (#124, #360).
 		let cert = quarry.ReadFile(quarry.Getenv("TLS_CERT")) catch err {

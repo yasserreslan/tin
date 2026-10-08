@@ -488,20 +488,30 @@ fn main() {
 - **Where the closure lives.** A function literal that is called at once, or passed to one
   of the library functions that only call what they are given (`sift.Each`, `Map`,
   `Filter`, `Reduce` and the `*Func` functions of `sift`, `atlas` and `twine`, a `with`
-  policy's `Run`), keeps its captured variables on the caller's stack frame: no pool
-  allocation. Every other closure (returned, stored in a slice, a struct or a map, passed
-  to your own function, deferred) allocates its descriptor and cells in the current
-  request pool and lives as long as that pool.
+  policy's `Run`) or to a function of your own whose parameter only calls it or hands it
+  on to such a parameter (the compiler reads your functions to tell, see below), keeps its
+  captured variables on the caller's stack frame: no pool allocation. Every other closure
+  (returned, stored in a slice, a struct or a map, passed to a function that may keep it,
+  deferred) allocates its descriptor and cells in the current request pool and lives as
+  long as that pool.
 - **Long-lived closures.** Storing a closure that captures request memory in a global, or
   anywhere long-lived, without `keep` is a compile error naming the global. `keep(f)`
   deep-copies the descriptor and every captured variable into the long-lived heap.
 - **What a closure may store in its captured variables.** A closure passed only to
-  functions that call it (`sift.Each` and the others above) is part of its parent's frame,
-  so its body may store request memory in a captured local, for example
-  `out = append(out, s)` to collect results. Any other closure may be kept, after which its
-  captured variables are long-lived, so its body storing request memory in a captured
-  variable is a compile error naming the variable: store `keep(v)`, or pass the closure
-  only to functions that call it.
+  functions that call it (`sift.Each` and the others above, and your own functions such as
+  `fn each(xs []R, f fn(R)) { for x in xs { f(x) } }`, a method `s.each(f)`, a generic
+  `walk(t, f)` that recurses with `f`, a `tx(f)` or retry helper) is part of its parent's
+  frame, so its body may store request memory in a captured local, for example
+  `out = append(out, s)` to collect results. Your function qualifies when each use of the
+  parameter is a call or an argument of a call to a function that qualifies in that position
+  (read from the syntax of the program as a whole, before its bodies are checked: a parameter
+  that is stored, returned, compared, used inside a function literal, a `detach` or `go`, or
+  passed to something the compiler cannot match by name does not qualify; a method call
+  `x.m(f)` qualifies only if every method called `m` does, and no struct has a field `m`).
+  Any other closure may be kept, after which its captured variables are long-lived, so its
+  body storing request memory in a captured variable is a compile error naming the variable
+  and the call that may keep the closure: store `keep(v)`, or pass the closure only to
+  functions that call it.
 - **Captured `mut` parameters are rejected**: a function literal cannot capture a `mut`
   parameter (the parameter is the caller's variable, not a cell); copy it into a local, or
   pass it as an argument.
@@ -962,6 +972,10 @@ angle brackets, so a comparison never depends on what its operands are.
   is itself, and shift counts are taken modulo 64; it is for kernels whose arithmetic is
   modular everywhere (cipher rounds, constant-time field arithmetic). Its closures, generic
   instances and methods are `@wrap` too.
+- Float arithmetic rounds each operation, except that arm64 fuses `x*y + z`, `z + x*y` and `z - x*y` (also with
+  `f32`) into one multiply-add that rounds once, as Go does on arm64; amd64 never fuses. An explicit conversion
+  rounds the product and prevents fusion (`f64(x*y) + z`), and so does a local (`let p = x*y`, then `p + z`):
+  write one of them where the same bits are wanted on both targets (money, scores, hashes).
 - `>>` is arithmetic for signed types and logical for unsigned types. A shift count must
   be between 0 and the width of the shifted value less one: `u8(1) << 8` panics (a constant
   count out of range is E224), and so does a negative count. Bits shifted out are dropped:
@@ -2445,6 +2459,7 @@ OLD_SYNTAX, E091 ONE_PER_DECLARATION in [ERRORS.md](ERRORS.md)).
 | `goto`, `fallthrough` | not available |
 | integer arithmetic wraps; shift counts of any size; `int64(1e300)` is implementation-defined | `+ - *` panic on overflow, `+% -% *%` and `@wrap` wrap; shift counts below the width; float to integer panics out of range |
 | `http.Client` follows up to 10 redirects and accepts bare-LF responses | `wire.Do` returns a 3xx as the response and fails on bare-LF line ends |
+| arm64 fuses `x*y + z` into a multiply-add, amd64 does not; an explicit conversion prevents fusion | the same (section 6, Arithmetic): arm64 fuses, amd64 does not, and `f64(x*y) + z` or a local does not fuse |
 | untyped float constants are exact (`0.1 + 0.2` is 0.3) | float constant arithmetic rounds each operation to `f64`, as at run time (`0.1 + 0.2` is 0.30000000000000004) |
 
 <!-- docs-check: old-syntax end -->

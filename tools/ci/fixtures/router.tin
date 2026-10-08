@@ -190,6 +190,13 @@ fn echo_head(q anvil.Req, w mut anvil.Out) {
 	w.Text("echoed")
 }
 
+// cookies (#823) reads the sid cookie and the number of cookies, and sets two cookies.
+fn cookies(q anvil.Req, w mut anvil.Out) {
+	w.Text("sid={q.Cookie(`sid`)} n={len(q.Cookies())}")
+	w.SetCookie(anvil.Cookie{Name: "one", Value: "1", Path: "/", HttpOnly: true})
+	w.SetCookie(anvil.Cookie{Name: "two", Value: "a b", MaxAge: 60, SameSite: "Lax"})
+}
+
 // status answers with the status in the path and a body, which 204 and 304 must not send.
 fn status(q anvil.Req, w mut anvil.Out) {
 	let code = mint.Atoi(q.PathParam("code")) catch _ { 500 }
@@ -226,6 +233,7 @@ fn main() {
 	r.Get("/recurse", recurse)
 	r.Get("/add", add)
 	r.Get("/echo-head", echo_head)
+	r.Get("/cookies", cookies)
 	r.Get(`/status/{code}`, status)
 	r.Get(`/ws/{room}`, ws)
 	r.Route("/api", fn(g mut anvil.Router) {

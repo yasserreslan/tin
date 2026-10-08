@@ -69,6 +69,10 @@ jobs:
         run: sh tools/ci/tin.sh lasso_check
       - name: HTML template URL attributes against Go's html/template (3,000 template/value pairs)
         run: sh tools/ci/tin.sh stencil_url_check
+      - name: Generated integer and float code against Go (a differential fuzzer, 8 rounds)
+        run: sh tools/ci/tin.sh numeric_fuzz 811 8 40
+      - name: ServeFile against Go's http.ServeContent (1,500 generated conditional and range requests)
+        run: sh tools/ci/tin.sh servefile_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: sh tools/ci/tin.sh pack_check
       - name: Stream helpers against Go's io (a generated chunk corpus)
