@@ -137,3 +137,49 @@ fn Upload() {
 fn Present(layer i64, w i64, h i64, scene metal.Scene, bg ui.Color) {
 	metal.DrawLayer(cv.Gpu, layer, w, h, scene, cv.Atlas, ui.R(bg), ui.G(bg), ui.B(bg), ui.A(bg))
 }
+
+// Fill paints a solid rectangle (points).
+fn Fill(scene mut metal.Scene, x f64, y f64, w f64, h f64, c ui.Color) {
+	let s = cv.Scale
+	scene.Rect(x * s, y * s, w * s, h * s, c.R, c.G, c.B, c.A, 0.0)
+}
+
+// FillRound paints a rectangle with rounded corners.
+fn FillRound(scene mut metal.Scene, x f64, y f64, w f64, h f64, radius f64, c ui.Color) {
+	let s = cv.Scale
+	scene.Rect(x * s, y * s, w * s, h * s, c.R, c.G, c.B, c.A, radius * s)
+}
+
+// Stroke paints the edge of a rectangle, width points wide, inside it.
+fn Stroke(scene mut metal.Scene, x f64, y f64, w f64, h f64, radius f64, width f64, c ui.Color) {
+	let s = cv.Scale
+	scene.Outline(x * s, y * s, w * s, h * s, c.R, c.G, c.B, c.A, radius * s, width * s)
+}
+
+// Clip limits what is drawn next to a rectangle (points) until Unclip.
+fn Clip(scene mut metal.Scene, x f64, y f64, w f64, h f64) {
+	let s = cv.Scale
+	scene.PushClip(x * s, y * s, w * s, h * s)
+}
+
+fn Unclip(scene mut metal.Scene) {
+	scene.PopClip()
+}
+
+// Hairline is the thickness of a one pixel line, in points.
+fn Hairline() f64 {
+	return 1.0 / cv.Scale
+}
+
+// Snapshot draws the scene over the color into an offscreen texture of w by h pixels and writes it as a PNG (tests and
+// screenshots); it reports whether the file was written.
+fn Snapshot(scene metal.Scene, w i64, h i64, bg ui.Color, path str) bool {
+	let t = metal.NewTarget(cv.Gpu, w, h)
+	metal.Draw(cv.Gpu, t.Texture, w, h, scene, cv.Atlas, bg.R, bg.G, bg.B, bg.A)
+	return metal.SavePNG(t, path)
+}
+
+// HaveGPU reports whether Init found a GPU.
+fn HaveGPU() bool {
+	return cv.Gpu.Device != 0
+}
