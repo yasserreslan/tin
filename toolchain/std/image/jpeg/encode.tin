@@ -19,8 +19,8 @@ fn Encode(src dyn image.Image, quality i64) str {
 	let gray = src.Layout().Kind == image.KindGray || src.Layout().Kind == image.KindGray16
 	let subsample = !gray && quality < 90
 	let scale = match quality < 50 { true => 5000/quality _ => 200-2*quality }
-	let baseY = []i64{16,11,12,14,12,10,16,14,13,14,18,17,16,19,24,40,26,24,22,22,24,49,35,37,29,40,58,51,61,60,57,51,56,55,64,72,92,78,64,68,87,69,55,56,80,109,81,87,95,98,103,104,103,62,77,113,121,112,100,120,92,101,103,99}
-	let baseC = []i64{17,18,18,24,21,24,47,26,26,47,99,66,56,66,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99}
+	let baseY = []i64{16, 11, 12, 14, 12, 10, 16, 14, 13, 14, 18, 17, 16, 19, 24, 40, 26, 24, 22, 22, 24, 49, 35, 37, 29, 40, 58, 51, 61, 60, 57, 51, 56, 55, 64, 72, 92, 78, 64, 68, 87, 69, 55, 56, 80, 109, 81, 87, 95, 98, 103, 104, 103, 62, 77, 113, 121, 112, 100, 120, 92, 101, 103, 99}
+	let baseC = []i64{17, 18, 18, 24, 21, 24, 47, 26, 26, 47, 99, 66, 56, 66, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99}
 	mut qy = [64]u8{}
 	mut qc = [64]u8{}
 	for i in 0..64 {
@@ -83,7 +83,7 @@ fn dqtPayload(y [64]u8, c [64]u8, gray bool) []u8 {
 	mut p = []u8{0}
 	for b in y { p = append(p, b) }
 	if !gray { p = append(p, 1)
-for b in c { p = append(p, b) } }
+		for b in c { p = append(p, b) } }
 	return p
 }
 
@@ -95,7 +95,7 @@ fn dhtPayload(gray bool) []u8 {
 	for i in 0..12 { p = append(p, u8(i)) }
 	p = appendAcTable(p, 0)
 	if !gray { p = appendDCTable(p, 1)
-p = appendAcTable(p, 1) }
+		p = appendAcTable(p, 1) }
 	return p
 }
 
@@ -125,7 +125,7 @@ fn encodeBlock(src dyn image.Image, ox i64, oy i64, plane i64, q [64]u8, gray bo
 			mut yy = i64(0)
 			mut cb = i64(0)
 			mut cr = i64(0)
-		let factor = match average { true => 2 _ => 1 }
+			let factor = match average { true => 2 _ => 1 }
 			let n = factor*factor
 			for dy in 0..factor {
 				for dx in 0..factor {
@@ -151,7 +151,7 @@ fn encodeBlock(src dyn image.Image, ox i64, oy i64, plane i64, q [64]u8, gray bo
 		mut sum = f64(0.0)
 		for y in 0..8 { for x in 0..8 {
 			sum += samples[y*8+x]*gauge.Cos((2.0*f64(x)+1.0)*f64(u)*gauge.Pi/16.0)*gauge.Cos((2.0*f64(y)+1.0)*f64(v)*gauge.Pi/16.0)
-		} }
+			} }
 		let cu = match u { 0 => 0.7071067811865476 _ => 1.0 }
 		let cv = match v { 0 => 0.7071067811865476 _ => 1.0 }
 		let norm = 0.25*cu*cv
@@ -159,7 +159,7 @@ fn encodeBlock(src dyn image.Image, ox i64, oy i64, plane i64, q [64]u8, gray bo
 		mut rounded = i64(raw+0.5)
 		if raw < 0.0 { rounded = -i64(-raw+0.5) }
 		coeff[v*8+u] = rounded
-	} }
+		} }
 	return coeff
 }
 
@@ -177,9 +177,9 @@ fn emitBlock(bits mut Entropy, block [64]i64, previous i64, table i64) i64 {
 	for i in 1..64 {
 		let value = block[zig(i)]
 		if value == 0 { run += 1
-continue }
+			continue }
 		for run >= 16 { emitHuff(mut bits, 0xf0, 9)
-run -= 16 }
+			run -= 16 }
 		let size = magnitudeBits(value)
 		emitHuff(mut bits, u64(run*16+size), 9)
 		mut encoded = value
@@ -197,25 +197,25 @@ fn magnitudeBits(value i64) i64 {
 	mut v = value
 	if value < 0 { v = -value }
 	for v > 0 { n += 1
-v >>= 1 }
+		v >>= 1 }
 	return n
 }
 
 fn emitBits(bits mut Entropy, value u64, n i64) {
 	for i in 0..n { bits.acc = (bits.acc<<1) | i64((value>>(n-i-1))&1)
-bits.count += 1
-if bits.count == 8 { let b = u8(bits.acc)
-bits.data = append(bits.data, b)
-if b == 0xff { bits.data = append(bits.data, 0) }
-bits.acc = 0
-bits.count = 0 } }
+		bits.count += 1
+		if bits.count == 8 { let b = u8(bits.acc)
+			bits.data = append(bits.data, b)
+			if b == 0xff { bits.data = append(bits.data, 0) }
+			bits.acc = 0
+			bits.count = 0 } }
 }
 
 fn emitHuff(bits mut Entropy, value u64, n i64) { emitBits(mut bits, value, n) }
 
 fn bitsFlush(bits mut Entropy) {
 	if bits.count > 0 { let n = 8-bits.count
-emitBits(mut bits, u64((1<<n)-1), n) }
+		emitBits(mut bits, u64((1<<n)-1), n) }
 }
 
 fn zigIndex(natural i64) i64 {
