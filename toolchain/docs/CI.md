@@ -135,5 +135,5 @@ for the fake checks. The native Ubuntu x86-64 CI job starts the runner's Postgre
 creates a dedicated `tin` database/user with a SCRAM verifier; it does not install packages.
 `POSTGRES_TIMEOUT_MS` configures the example's operation timeout independently of
 `TIN_DEADLINE_MS`. The crypto suite checks published PBKDF2/RFC 1321 vectors and Unicode
-normalization/bidirectional/prohibited-input cases; `tools/gen/gen_saslprep.py` regenerates
-fixed Unicode 3.2 tables with Python's standard library.
+normalization/bidirectional/prohibited-input cases; the fixed Unicode 3.2 tables of
+`packages/postgres/sasl/sasl.tin` are kept as generated once (RFC 3454 and RFC 4013 pin them to Unicode 3.2, so they never change).
