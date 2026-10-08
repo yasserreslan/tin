@@ -35,6 +35,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+F, Cmd+G (Shift: backwards) | find as you type; Tab switches to the replacement, Return replaces, Cmd+Return replaces all |
 | Cmd+L | go to line |
 | Cmd+/ | comment or uncomment lines |
+| Cmd+Alt+Down, Cmd+Alt+Up | add a caret on the line below or above (typing, Backspace, Delete and the arrows then act on every caret; Escape puts them away) |
 | Cmd+D, Cmd+Shift+K, Alt+Up/Down | duplicate, delete, move lines |
 | Cmd+[ and Cmd+] , Tab, Shift+Tab | unindent, indent |
 | Alt+Left/Right, Cmd+Left/Right/Up/Down | by word, line start/end, document start/end |
