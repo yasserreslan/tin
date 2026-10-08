@@ -28,6 +28,13 @@ const CmdDefinition = 24
 const CmdBack = 25
 const CmdInfo = 26
 const CmdComplete = 27
+const CmdRevert = 28
+const CmdJumpBracket = 33
+const CmdMoveLineUp = 34
+const CmdMoveLineDown = 35
+const CmdJoinLines = 36
+const CmdUppercase = 37
+const CmdLowercase = 38
 
 // Perform does a menu command by pressing the key that does the same.
 fn (ed mut Editor) Perform(cmd i64) {
@@ -41,6 +48,44 @@ fn (ed mut Editor) Perform(cmd i64) {
 		} else {
 			ed.Say("word wrap off")
 		}
+		return
+	}
+	if cmd == CmdJumpBracket {
+		ed.JumpBracket()
+		return
+	}
+	if cmd == CmdMoveLineUp {
+		ed.Buf.MoveLines(-1)
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdMoveLineDown {
+		ed.Buf.MoveLines(1)
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdJoinLines {
+		ed.Buf.JoinLines()
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdUppercase {
+		ed.Buf.TransformCase(true)
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdLowercase {
+		ed.Buf.TransformCase(false)
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdRevert {
+		ed.Revert()
 		return
 	}
 	if cmd == CmdFold {

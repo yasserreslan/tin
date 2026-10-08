@@ -1,0 +1,59 @@
+package main
+
+import "seal"
+import "say"
+
+fn main() {
+	say.Line("md5", seal.Md5Hex("abc"))
+	let h = seal.NewMd5()
+	h.WriteStr("a")
+	h.WriteStr("bc")
+	say.Line("md5 stream", seal.Hex(h.Sum()))
+	let (_, aesErr) = seal.NewAES([]u8{0})
+	say.Line("aes invalid", aesErr != nil)
+	let aes = seal.NewAES([]u8{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}) catch _ { panic("AES fixture key") }
+	let plain = []u8{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+	mut block = make([]u8, 16)
+	aes.Encrypt(mut block, plain)
+	say.Line("aes", seal.Hex(block))
+	aes.Decrypt(mut block, block)
+	say.Line("aes decrypt", seal.Hex(block))
+	let des = seal.NewDES([]u8{0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1}) catch _ { panic("DES fixture key") }
+	let desPlain = []u8{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef}
+	mut desBlock = make([]u8, 8)
+	des.Encrypt(mut desBlock, desPlain)
+	say.Line("des", seal.Hex(desBlock))
+	des.Decrypt(mut desBlock, desBlock)
+	say.Line("des decrypt", seal.Hex(desBlock))
+	let rc4 = seal.NewRC4([]u8{0x4b, 0x65, 0x79}) catch _ { panic("RC4 fixture key") }
+	mut rc4out = make([]u8, 3)
+	rc4.XORKeyStream(mut rc4out, []u8{0x50, 0x6c, 0x61}) catch err { say.Line("rc4 error", err != nil) }
+	say.Line("rc4 error", false)
+	say.Line("rc4", seal.Hex(rc4out))
+	let iv = []u8{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
+	let ctr = seal.NewCTR(aes, iv) catch _ { panic("CTR fixture") }
+	mut stream = make([]u8, 16)
+	ctr.XORKeyStream(mut stream, plain) catch err { say.Line("ctr error", err != nil) }
+	say.Line("ctr error", false)
+	say.Line("ctr", seal.Hex(stream))
+	let modeKey = []u8{0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c}
+	let modeAES = seal.NewAES(modeKey) catch _ { panic("mode AES key") }
+	let modeIV = []u8{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
+	let modePlain = []u8{0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a}
+	let cbc = seal.NewCBCEncrypter(modeAES, modeIV) catch _ { panic("CBC fixture") }
+	mut cbcOut = make([]u8, 16)
+	cbc.CryptBlocks(mut cbcOut, modePlain) catch _ { panic("CBC blocks") }
+	say.Line("cbc", seal.Hex(cbcOut))
+	let cfb = seal.NewCFBEncrypter(modeAES, modeIV) catch _ { panic("CFB fixture") }
+	mut cfbOut = make([]u8, 16)
+	cfb.XORKeyStream(mut cfbOut, modePlain) catch _ { panic("CFB stream") }
+	say.Line("cfb", seal.Hex(cfbOut))
+	let ofb = seal.NewOFB(modeAES, modeIV) catch _ { panic("OFB fixture") }
+	mut ofbOut = make([]u8, 16)
+	ofb.XORKeyStream(mut ofbOut, modePlain) catch _ { panic("OFB stream") }
+	say.Line("ofb", seal.Hex(ofbOut))
+	let padded = seal.Pkcs7Pad([]u8{1, 2, 3}, 8) catch _ { []u8{} }
+	say.Line("pkcs7", seal.Hex(padded))
+	let unpadded = seal.Pkcs7Unpad(padded, 8) catch _ { []u8{} }
+	say.Line("unpad", seal.Hex(unpadded))
+}

@@ -1,0 +1,846 @@
+// Package jar is a cookie jar for HTTP clients, as Go's net/http/cookiejar is (#739): it keeps the cookies servers set
+// (RFC 6265 parsing, domain and path matching, Secure, expiry by Max-Age and Expires, HttpOnly) and gives each request the
+// ones it should carry. Do sends a wire request with the jar's cookies and keeps the cookies of its response.
+//
+//	mut j = jar.New()
+//	let r = try j.Do("GET", "http://127.0.0.1:8080/login", []str{}, "")
+//	let r2 = try j.Do("GET", "http://127.0.0.1:8080/account", []str{}, "") // sends the session cookie
+//
+// Public suffixes: like Go's cookiejar.New(nil), New has no public suffix list, so a host may set a cookie for its parent
+// domain whatever it is (a server at a.co.uk may set Domain=co.uk). The list is not in the standard library (Go keeps it in
+// golang.org/x/net/publicsuffix); a program that talks to hosts it does not trust passes one to WithSuffixes, a function
+// that returns a domain's public suffix as Go's PublicSuffixList.PublicSuffix does.
+//
+// Cookies are anvil.Cookie values, the type anvil's SetCookie writes: Expires is in Unix seconds and 0 means none, so an
+// Expires at the Unix epoch itself is read as -1 (also in the past). Host names must be ASCII (Go turns others into
+// punycode first: here they get no cookies). The jar is not written to a file, as Go's is not.
+package jar
+
+import "anvil"
+import "mint"
+import "tide"
+import "wire"
+
+// Jar holds cookies. The zero value is not usable: make one with New or WithSuffixes.
+type Jar struct {
+	buckets map[str][]entry // by the jar key of a host: its registrable domain, or the host itself
+	next    i64             // the sequence number of the next new cookie
+	suffix  fn(str) str     // the public suffix list, when hasList
+	hasList bool
+	clock   fn() i64        // the time in Unix nanoseconds
+}
+
+// entry is one stored cookie.
+type entry struct {
+	name       str
+	value      str
+	quoted     bool
+	domain     str
+	path       str
+	sameSite   str
+	secure     bool
+	httpOnly   bool
+	persistent bool
+	hostOnly   bool
+	expires    i64 // Unix ns; endOfTime for a session cookie
+	creation   i64
+	lastAccess i64
+	seq        i64
+}
+
+// endOfTime is the expiry of a session cookie: it lasts as long as the jar.
+const endOfTime = 9223372036854775807
+
+fn wallClock() i64 {
+	return tide.Wall()
+}
+
+// New returns an empty jar with no public suffix list.
+fn New() Jar {
+	return Jar{buckets: map[str][]entry{}, next: 0, suffix: noSuffix, hasList: false, clock: wallClock}
+}
+
+fn noSuffix(domain str) str {
+	return ""
+}
+
+// WithSuffixes returns an empty jar that asks suffix for a domain's public suffix ("co.uk" for "a.b.co.uk", "" when it has
+// none), as Go's cookiejar.Options.PublicSuffixList: a cookie's Domain may not be a public suffix but for the host itself.
+fn WithSuffixes(suffix fn(str) str) Jar {
+	return Jar{buckets: map[str][]entry{}, next: 0, suffix: suffix, hasList: true, clock: wallClock}
+}
+
+// SetClock makes the jar read the time from now (Unix nanoseconds) instead of the wall clock: for tests of expiry.
+fn (j mut Jar) SetClock(now fn() i64) {
+	j.clock = now
+}
+
+// Len is the number of cookies held, expired ones that no request has looked at yet included.
+fn (j Jar) Len() i64 {
+	mut n = 0
+	for _, b in j.buckets {
+		n += len(b)
+	}
+	return n
+}
+
+// ---- parsing ----
+
+// ParseSetCookie parses a Set-Cookie field value as Go's http.ParseSetCookie does: the name and value (a value in double
+// quotes is unquoted and marked Quoted), then the attributes Path, Domain, Expires (RFC 1123, or with dashes in the date),
+// Max-Age (0 or less becomes -1: delete), Secure, HttpOnly, SameSite and Partitioned, in any case. An attribute with a bad
+// value or an unknown one is ignored. It fails on an empty line, a missing "=", a bad name or a bad value.
+fn ParseSetCookie(line str) !anvil.Cookie {
+	mut c = anvil.Cookie{Name: "", Value: ""}
+	let parts = splitSemi(trim(line))
+	if len(parts) == 1 && len(parts[0]) == 0 {
+		fail "jar: blank cookie"
+	}
+	let first = trim(parts[0])
+	let eq = indexByte(first, '=')
+	if eq < 0 {
+		fail "jar: '=' not found in cookie"
+	}
+	let name = trim(first[:eq])
+	if !isToken(name) {
+		fail "jar: invalid cookie name"
+	}
+	let (value, quoted, ok) = cookieValue(first[eq+1:], true)
+	if !ok {
+		fail "jar: invalid cookie value"
+	}
+	c.Name = name
+	c.Value = value
+	c.Quoted = quoted
+	for i in 1..len(parts) {
+		let part = trim(parts[i])
+		if len(part) == 0 {
+			continue
+		}
+		mut attr = part
+		mut raw = ""
+		let k = indexByte(part, '=')
+		if k >= 0 {
+			attr = part[:k]
+			raw = part[k+1:]
+		}
+		let (lowerAttr, ascii) = lowerASCII(attr)
+		if !ascii {
+			continue
+		}
+		let (val, _, good) = cookieValue(raw, false)
+		if !good {
+			continue
+		}
+		if lowerAttr == "samesite" {
+			let (lv, a) = lowerASCII(val)
+			if a && lv == "lax" {
+				c.SameSite = "Lax"
+			} else if a && lv == "strict" {
+				c.SameSite = "Strict"
+			} else if a && lv == "none" {
+				c.SameSite = "None"
+			} else {
+				c.SameSite = "Default"
+			}
+		} else if lowerAttr == "secure" {
+			c.Secure = true
+		} else if lowerAttr == "httponly" {
+			c.HttpOnly = true
+		} else if lowerAttr == "domain" {
+			c.Domain = val
+		} else if lowerAttr == "max-age" {
+			let secs = mint.Atoi(val) catch _ {
+				continue
+			}
+			if secs != 0 && val[0] == '0' {
+				continue
+			}
+			if secs <= 0 {
+				c.MaxAge = -1
+			} else {
+				c.MaxAge = secs
+			}
+		} else if lowerAttr == "expires" {
+			c.Expires = 0
+			mut t = tide.Parse(tide.RFC1123, val, tide.UTCZone()) catch _ {
+				-1
+			}
+			if t == -1 {
+				t = tide.Parse("Mon, 02-Jan-2006 15:04:05 MST", val, tide.UTCZone()) catch _ {
+					-1
+				}
+			}
+			if t != -1 {
+				mut secs = t / 1000000000
+				if t < 0 && t%1000000000 != 0 {
+					secs -= 1
+				}
+				if secs == 0 {
+					secs = -1 // the epoch itself: 0 would mean no Expires
+				}
+				c.Expires = secs
+			}
+		} else if lowerAttr == "path" {
+			c.Path = val
+		} else if lowerAttr == "partitioned" {
+			c.Partitioned = true
+		}
+	}
+	return c
+}
+
+// ParseSetCookies parses every Set-Cookie field of a response (header field lines "Name: value", as wire.Resp.Fields gives them)
+// and returns the cookies that parse, in order.
+fn ParseSetCookies(fields []str) []anvil.Cookie {
+	mut out = []anvil.Cookie{}
+	for f in fields {
+		if len(f) > 11 && f[10] == ':' && foldEq(f[:10], "set-cookie") {
+			let c = ParseSetCookie(f[11:]) catch _ {
+				continue
+			}
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ---- the jar ----
+
+// SetCookies keeps the cookies a response from url set, as Go's Jar.SetCookies: a cookie without a Path gets the URL's
+// directory, one without a Domain is a host-only cookie, a Domain the host is not in (or, with a list, a public suffix) is
+// refused, and a Max-Age of 0 or less or an Expires in the past deletes the cookie of that name, domain and path. url must be
+// http:// or https://; another URL sets nothing.
+fn (j mut Jar) SetCookies(url str, cookies []anvil.Cookie) {
+	if len(cookies) == 0 {
+		return
+	}
+	let (u, ok) = splitURL(url)
+	if !ok {
+		return
+	}
+	let now = j.clock()
+	let key = j.jarKey(u.host)
+	let defPath = defaultPath(u.path)
+	mut list = j.buckets[key]
+	for c in cookies {
+		let (e, remove, good) = j.newEntry(c, now, defPath, u.host)
+		if !good {
+			continue
+		}
+		let at = find(list, e)
+		if remove {
+			if at >= 0 {
+				list = removeAt(list, at)
+			}
+			continue
+		}
+		if at >= 0 {
+			e.creation = list[at].creation
+			e.seq = list[at].seq
+			e.lastAccess = now
+			list[at] = e
+		} else {
+			e.creation = now
+			e.seq = j.next
+			j.next += 1
+			e.lastAccess = now
+			list = append(list, e)
+		}
+	}
+	if len(list) == 0 {
+		delete(j.buckets, key)
+	} else {
+		j.buckets[key] = list
+	}
+}
+
+// Cookies returns the cookies to send in a request to url, as Go's Jar.Cookies: those whose domain and path match it and that
+// have not expired (a Secure cookie only over https://), longest path first, then the oldest first. Each has only its Name,
+// Value and Quoted set. Expired cookies are dropped from the jar on the way.
+fn (j mut Jar) Cookies(url str) []anvil.Cookie {
+	mut out = []anvil.Cookie{}
+	let (u, ok) = splitURL(url)
+	if !ok {
+		return out
+	}
+	let now = j.clock()
+	let key = j.jarKey(u.host)
+	let (list0, have) = j.buckets[key]
+	if !have {
+		return out
+	}
+	mut list = list0
+	mut selected = []entry{}
+	mut i = 0
+	for i < len(list) {
+		let e = list[i]
+		if e.persistent && e.expires <= now {
+			list = removeAt(list, i)
+			continue
+		}
+		if e.shouldSend(u.https, u.host, u.path) {
+			list[i].lastAccess = now
+			selected = append(selected, list[i])
+		}
+		i += 1
+	}
+	if len(list) == 0 {
+		delete(j.buckets, key)
+	} else {
+		j.buckets[key] = list
+	}
+	// RFC 6265 5.4 point 2: the longest path first, then the earliest created (insertion sort: a request has few).
+	for a in 1..len(selected) {
+		let x = selected[a]
+		mut b = a
+		for b > 0 && before(x, selected[b-1]) {
+			selected[b] = selected[b-1]
+			b -= 1
+		}
+		selected[b] = x
+	}
+	for e in selected {
+		out = append(out, anvil.Cookie{Name: e.name, Value: e.value, Quoted: e.quoted})
+	}
+	return out
+}
+
+// Header is the Cookie field value a request to url carries ("a=1; b=2", as Go's Request.AddCookie writes each cookie), or ""
+// when the jar has none for it.
+fn (j mut Jar) Header(url str) str {
+	let cs = j.Cookies(url)
+	mut b = []u8{}
+	for i, c in cs {
+		if i > 0 {
+			b = append(b, "; "...)
+		}
+		b = append(b, c.Name...)
+		b = append(b, '=')
+		let v = c.Value
+		let q = c.Quoted || indexByte(v, ' ') >= 0 || indexByte(v, ',') >= 0
+		if q && len(v) > 0 {
+			b = append(b, '"')
+		}
+		b = append(b, v...)
+		if q && len(v) > 0 {
+			b = append(b, '"')
+		}
+	}
+	return str(b)
+}
+
+// Do sends a request with wire.Do, carrying the jar's cookies for url (added to a Cookie field in headers, if there is one, as
+// Go's client does), and keeps the cookies the response sets. headers is a list of name, value pairs.
+fn (j mut Jar) Do(method str, url str, headers []str, body str) !wire.Resp {
+	return try j.DoWith(method, url, headers, body, wire.Options{Timeout: 0, MaxBody: 0, MaxIdle: 0})
+}
+
+// DoWith is Do with wire's options.
+fn (j mut Jar) DoWith(method str, url str, headers []str, body str, opt wire.Options) !wire.Resp {
+	let h = j.Header(url)
+	mut hs = []str{}
+	mut merged = false
+	mut i = 0
+	for i+1 < len(headers) {
+		if len(h) > 0 && !merged && foldEq(headers[i], "cookie") {
+			hs = append(hs, headers[i], headers[i+1] + "; " + h)
+			merged = true
+		} else {
+			hs = append(hs, headers[i], headers[i+1])
+		}
+		i += 2
+	}
+	if len(h) > 0 && !merged {
+		hs = append(hs, "Cookie", h)
+	}
+	let r = try wire.DoWith(method, url, hs, body, opt)
+	j.SetCookies(url, ParseSetCookies(r.Fields()))
+	return r
+}
+
+// ---- matching (Go's net/http/cookiejar) ----
+
+fn before(a entry, b entry) bool {
+	if len(a.path) != len(b.path) {
+		return len(a.path) > len(b.path)
+	}
+	if a.creation != b.creation {
+		return a.creation < b.creation
+	}
+	return a.seq < b.seq
+}
+
+fn find(list []entry, e entry) i64 {
+	for i, x in list {
+		if x.name == e.name && x.domain == e.domain && x.path == e.path {
+			return i
+		}
+	}
+	return -1
+}
+
+fn removeAt(list []entry, i i64) []entry {
+	mut out = make([]entry, 0, len(list))
+	for k, x in list {
+		if k != i {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+fn (e entry) shouldSend(https bool, host str, path str) bool {
+	return e.domainMatch(host) && e.pathMatch(path) && (https || !e.secure)
+}
+
+fn (e entry) domainMatch(host str) bool {
+	if e.domain == host {
+		return true
+	}
+	return !e.hostOnly && hasDotSuffix(host, e.domain)
+}
+
+fn (e entry) pathMatch(requestPath str) bool {
+	if requestPath == e.path {
+		return true
+	}
+	if len(requestPath) > len(e.path) && requestPath[:len(e.path)] == e.path {
+		if e.path[len(e.path)-1] == '/' {
+			return true // "/any/" matches "/any/path"
+		}
+		if requestPath[len(e.path)] == '/' {
+			return true // "/any" matches "/any/path"
+		}
+	}
+	return false
+}
+
+fn hasDotSuffix(s str, suffix str) bool {
+	return len(s) > len(suffix) && s[len(s)-len(suffix)-1] == '.' && s[len(s)-len(suffix):] == suffix
+}
+
+// jarKey is the key host's cookies are kept under: its registrable domain (the public suffix and one more label), the last
+// two labels without a list, or the host itself for an IP address.
+fn (j Jar) jarKey(host str) str {
+	if isIP(host) {
+		return host
+	}
+	mut i = 0
+	if !j.hasList {
+		i = lastIndexByte(host, '.')
+		if i <= 0 {
+			return host
+		}
+	} else {
+		let suffix = j.suffix(host)
+		if suffix == host {
+			return host
+		}
+		i = len(host) - len(suffix)
+		if i <= 0 || host[i-1] != '.' {
+			return host // a broken list: the host is a safe key
+		}
+	}
+	let prevDot = lastIndexByte(host[:i-1], '.')
+	return host[prevDot+1:]
+}
+
+// newEntry makes the entry for cookie c set by host at time now; remove reports a cookie that deletes, good a cookie the jar
+// takes at all.
+fn (j Jar) newEntry(c anvil.Cookie, now i64, defPath str, host str) (entry, bool, bool) {
+	mut e = entry{name: c.Name, value: c.Value, domain: "", path: defPath, sameSite: ""}
+	if len(c.Path) > 0 && c.Path[0] == '/' {
+		e.path = c.Path
+	}
+	let (domain, hostOnly, ok) = j.domainAndType(host, c.Domain)
+	if !ok {
+		return e, false, false
+	}
+	e.domain = domain
+	e.hostOnly = hostOnly
+	if c.MaxAge < 0 {
+		return e, true, true
+	} else if c.MaxAge > 0 {
+		e.persistent = true
+		if c.MaxAge > (endOfTime - now) / 1000000000 {
+			e.expires = endOfTime
+		} else {
+			e.expires = now + c.MaxAge*1000000000
+		}
+	} else if c.Expires == 0 {
+		e.expires = endOfTime
+		e.persistent = false
+	} else {
+		mut exp = endOfTime
+		if c.Expires < endOfTime/1000000000 && c.Expires > -(endOfTime/1000000000) {
+			exp = c.Expires * 1000000000
+		}
+		if exp <= now {
+			return e, true, true
+		}
+		e.expires = exp
+		e.persistent = true
+	}
+	e.quoted = c.Quoted
+	e.secure = c.Secure
+	e.httpOnly = c.HttpOnly
+	if c.SameSite == "Default" {
+		e.sameSite = "SameSite"
+	} else if c.SameSite == "Strict" {
+		e.sameSite = "SameSite=Strict"
+	} else if c.SameSite == "Lax" {
+		e.sameSite = "SameSite=Lax"
+	}
+	return e, false, true
+}
+
+// domainAndType is the cookie's domain and whether it is host-only, or ok false for a Domain attribute host may not set.
+fn (j Jar) domainAndType(host str, domain_ str) (str, bool, bool) {
+	if len(domain_) == 0 {
+		return host, true, true // no Domain attribute: a host cookie
+	}
+	if isIP(host) {
+		// An IP address may name only itself, and the cookie is host-only.
+		if host != domain_ {
+			return "", false, false
+		}
+		return host, true, true
+	}
+	mut domain = domain_
+	if domain[0] == '.' {
+		domain = domain[1:]
+	}
+	if len(domain) == 0 || domain[0] == '.' {
+		return "", false, false // "Domain=." or "Domain=..x"
+	}
+	let (lower, ascii) = lowerASCII(domain)
+	if !ascii {
+		return "", false, false
+	}
+	domain = lower
+	if domain[len(domain)-1] == '.' {
+		return "", false, false // "Domain=www.example.com." is refused (RFC 6265 5.1.2, 5.1.3)
+	}
+	if j.hasList {
+		let ps = j.suffix(domain)
+		if len(ps) > 0 && !hasDotSuffix(domain, ps) {
+			if host == domain {
+				return host, true, true // a public suffix set by itself: a host cookie
+			}
+			return "", false, false
+		}
+	}
+	if host != domain && !hasDotSuffix(host, domain) {
+		return "", false, false // www.example.com cannot set cookies for other.com
+	}
+	return domain, false, true
+}
+
+// ---- URLs and hosts ----
+
+// target is what the jar needs of a URL: the canonical host, the path and the scheme.
+type target struct {
+	host  str
+	path  str
+	https bool
+}
+
+// splitURL takes an http:// or https:// URL apart: the host without its port, lowercased and without a final dot, and the
+// path ("/" when empty), %-decoded. ok is false for another scheme or a host that is not ASCII.
+fn splitURL(url str) (target, bool) {
+	mut t = target{host: "", path: "/", https: false}
+	mut rest = ""
+	let (lu, _) = lowerASCII(url[:min(len(url), 8)])
+	if len(url) >= 8 && lu == "https://" {
+		t.https = true
+		rest = url[8:]
+	} else if len(url) >= 7 && lu[:7] == "http://" {
+		rest = url[7:]
+	} else {
+		return t, false
+	}
+	mut end = len(rest)
+	for i in 0..len(rest) {
+		let c = rest[i]
+		if c == '/' || c == '?' || c == '#' {
+			end = i
+			break
+		}
+	}
+	mut hostport = rest[:end]
+	let at = lastIndexByte(hostport, '@')
+	if at >= 0 {
+		hostport = hostport[at+1:]
+	}
+	mut path = ""
+	if end < len(rest) && rest[end] == '/' {
+		mut pe = len(rest)
+		for i in end..len(rest) {
+			if rest[i] == '?' || rest[i] == '#' {
+				pe = i
+				break
+			}
+		}
+		path = unescape(rest[end:pe])
+	}
+	if len(path) == 0 {
+		path = "/"
+	}
+	t.path = path
+	let (h, ok) = canonicalHost(hostport)
+	if !ok {
+		return t, false
+	}
+	t.host = h
+	return t, true
+}
+
+// canonicalHost strips the port, a final dot and the case from host; ok is false for a host that is not ASCII.
+fn canonicalHost(hostIn str) (str, bool) {
+	mut host = hostIn
+	if hasPort(host) {
+		if host[0] == '[' {
+			let close = indexByte(host, ']')
+			host = host[1:close]
+		} else {
+			host = host[:lastIndexByte(host, ':')]
+		}
+	}
+	if len(host) > 0 && host[len(host)-1] == '.' {
+		host = host[:len(host)-1]
+	}
+	let (lower, ascii) = lowerASCII(host)
+	if !ascii {
+		return "", false
+	}
+	return lower, true
+}
+
+fn hasPort(host str) bool {
+	mut colons = 0
+	for i in 0..len(host) {
+		if host[i] == ':' {
+			colons += 1
+		}
+	}
+	if colons == 0 {
+		return false
+	}
+	if colons == 1 {
+		return true
+	}
+	return host[0] == '[' && indexStr(host, "]:") >= 0
+}
+
+// isIP reports an IP address: a host with ':' or '%' (an IPv6 address; no host name has them) or a dotted IPv4 address.
+fn isIP(host str) bool {
+	for i in 0..len(host) {
+		if host[i] == ':' || host[i] == '%' {
+			return true
+		}
+	}
+	mut parts = 0
+	mut n = 0
+	mut digits = 0
+	for i in 0..len(host)+1 {
+		if i == len(host) || host[i] == '.' {
+			if digits == 0 {
+				return false
+			}
+			parts += 1
+			n = 0
+			digits = 0
+			continue
+		}
+		let c = host[i]
+		if c < '0' || c > '9' || (digits > 0 && n == 0) {
+			return false
+		}
+		n = n*10 + i64(c-'0')
+		digits += 1
+		if n > 255 {
+			return false
+		}
+	}
+	return parts == 4
+}
+
+// defaultPath is the default Path of a cookie set by a request to path: its directory (RFC 6265 5.1.4).
+fn defaultPath(path str) str {
+	if len(path) == 0 || path[0] != '/' {
+		return "/"
+	}
+	let i = lastIndexByte(path, '/')
+	if i == 0 {
+		return "/"
+	}
+	return path[:i]
+}
+
+// ---- small string helpers ----
+
+fn unescape(s str) str {
+	if indexByte(s, '%') < 0 {
+		return s
+	}
+	mut b = make([]u8, 0, len(s))
+	mut i = 0
+	for i < len(s) {
+		if s[i] == '%' && i+2 < len(s) && hexVal(s[i+1]) >= 0 && hexVal(s[i+2]) >= 0 {
+			b = append(b, u8(hexVal(s[i+1])*16+hexVal(s[i+2])))
+			i += 3
+			continue
+		}
+		b = append(b, s[i])
+		i += 1
+	}
+	return str(b)
+}
+
+fn hexVal(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c-'a') + 10
+	}
+	if c >= 'A' && c <= 'F' {
+		return i64(c-'A') + 10
+	}
+	return -1
+}
+
+// trim drops the spaces and tabs around s (textproto.TrimString).
+fn trim(s str) str {
+	mut a = 0
+	mut b = len(s)
+	for a < b && (s[a] == ' ' || s[a] == '\t') {
+		a += 1
+	}
+	for b > a && (s[b-1] == ' ' || s[b-1] == '\t') {
+		b -= 1
+	}
+	return s[a:b]
+}
+
+fn splitSemi(s str) []str {
+	mut out = []str{}
+	mut start = 0
+	for i in 0..len(s) {
+		if s[i] == ';' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	out = append(out, s[start:])
+	return out
+}
+
+fn indexByte(s str, c u8) i64 {
+	for i in 0..len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+fn lastIndexByte(s str, c u8) i64 {
+	mut i = len(s) - 1
+	for i >= 0 {
+		if s[i] == c {
+			return i
+		}
+		i -= 1
+	}
+	return -1
+}
+
+fn indexStr(s str, sub str) i64 {
+	mut i = 0
+	for i+len(sub) <= len(s) {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+		i += 1
+	}
+	return -1
+}
+
+// lowerASCII is s in lower case, and false when s has a byte that is not ASCII.
+fn lowerASCII(s str) (str, bool) {
+	mut upper = false
+	for i in 0..len(s) {
+		if s[i] >= 0x80 {
+			return "", false
+		}
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			upper = true
+		}
+	}
+	if !upper {
+		return s, true
+	}
+	let b = make([]u8, len(s))
+	for i in 0..len(s) {
+		mut c = s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		b[i] = c
+	}
+	return str(b), true
+}
+
+fn foldEq(a str, b str) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i in 0..len(a) {
+		mut x = a[i]
+		mut y = b[i]
+		if x >= 'A' && x <= 'Z' {
+			x += 32
+		}
+		if y >= 'A' && y <= 'Z' {
+			y += 32
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// isToken reports an HTTP token (RFC 9110 5.6.2), the bytes a cookie name may have.
+fn isToken(s str) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i in 0..len(s) {
+		let c = s[i]
+		let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !alnum && c != '!' && c != '#' && c != '$' && c != '%' && c != '&' && c != '\'' && c != '*' && c != '+' && c != '-' && c != '.' && c != '^' && c != '_' && c != '`' && c != '|' && c != '~' {
+			return false
+		}
+	}
+	return true
+}
+
+// cookieValue strips the double quotes of a value (when allowed) and checks its bytes: printable ASCII but '"', ';' and '\'.
+fn cookieValue(rawIn str, allowQuote bool) (str, bool, bool) {
+	mut raw = rawIn
+	mut quoted = false
+	if allowQuote && len(raw) > 1 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		raw = raw[1:len(raw)-1]
+		quoted = true
+	}
+	for i in 0..len(raw) {
+		let b = raw[i]
+		if b < 0x20 || b >= 0x7f || b == '"' || b == ';' || b == '\\' {
+			return "", quoted, false
+		}
+	}
+	return raw, quoted, true
+}

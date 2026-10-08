@@ -1,0 +1,248 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare seal's MD5, AES and DES block ciphers, RC4, cipher modes and PKCS #7 helpers with Go's crypto/md5, crypto/aes,
+// crypto/des, crypto/rc4 and crypto/cipher (#755).
+//
+// A corpus (published vectors, then generated cases from a fixed seed, so both sides see the same ones) is fed to bench/ref/cipher
+// and tools/ci/fixtures/cipher.tin; the check compares their lines: MD5 of every length across one and two padding blocks (Sum and
+// a streamed hash), AES-128/192/256, DES and 3DES blocks both ways, CBC (two calls split at a block) and CTR, CFB and OFB (two calls
+// split at any byte) encrypted and decrypted back, CTR's counter carrying across 32 bits and wrapping at 2^128, RC4's keystream,
+// PKCS #7 padding and unpadding, and as faults: bad key sizes, bad IV lengths, input that is not whole blocks, a short
+// destination and bad padding. The Tin side runs twice, on the CPU's AES instructions where present and on the software path.
+
+const SEED = 755
+
+fn hex(b []u8) str {
+	if len(b) == 0 {
+		return "-"
+	}
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+fn random(rng mut dice.Rand, n i64) []u8 {
+	mut out = []u8{}
+	for i in 0..n {
+		out = append(out, u8(rng.I64n(256)))
+	}
+	return out
+}
+
+// keyLen is the key length of a block cipher.
+fn keyLen(name str, aesBits i64) i64 {
+	return match name {
+		"aes" => aesBits / 8
+		"des" => 8
+		_ => 24
+	}
+}
+
+fn blockSize(name str) i64 {
+	if name == "aes" {
+		return 16
+	}
+	return 8
+}
+
+fn corpus() []str {
+	mut rng = dice.New(SEED)
+	mut lines = []str{}
+
+	// MD5: RFC 1321's suite, then every length from 0 to 200 (one and two padding blocks, 55/56/63/64 and 119/120)
+	// and longer random inputs.
+	for s in []str{"", "a", "abc", "message digest", "abcdefghijklmnopqrstuvwxyz",
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+		"12345678901234567890123456789012345678901234567890123456789012345678901234567890"} {
+		lines = append(lines, "M " + hex(bytesOf(s)))
+	}
+	for n in 0..201 {
+		lines = append(lines, "M " + hex(random(mut rng, n)))
+	}
+	for i in 0..40 {
+		lines = append(lines, "M " + hex(random(mut rng, rng.Range(201, 5000))))
+	}
+
+	// Published vectors: FIPS 197 appendix C, the DES textbook block, SP 800-38A's CBC/CTR/CFB/OFB F.2-F.5 with AES-128.
+	let nist = "2b7e151628aed2a6abf7158809cf4f3c"
+	let nistIV = "000102030405060708090a0b0c0d0e0f"
+	let nistPT = "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710"
+	lines = append(lines, "B aes 000102030405060708090a0b0c0d0e0f 00112233445566778899aabbccddeeff")
+	lines = append(lines, "B aes 000102030405060708090a0b0c0d0e0f1011121314151617 00112233445566778899aabbccddeeff")
+	lines = append(lines, "B aes 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 00112233445566778899aabbccddeeff")
+	lines = append(lines, "B des 133457799bbcdff1 0123456789abcdef")
+	lines = append(lines, "B 3des 0123456789abcdef23456789abcdef01456789abcdef0123 5468652071756663")
+	lines = append(lines, "CBC aes " + nist + " " + nistIV + " " + nistPT)
+	lines = append(lines, "CTR aes " + nist + " f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff " + nistPT + " 17")
+	lines = append(lines, "CFB aes " + nist + " " + nistIV + " " + nistPT + " 33")
+	lines = append(lines, "OFB aes " + nist + " " + nistIV + " " + nistPT + " 5")
+	// RC4: RFC 6229's 40-bit key, and the "Key"/"Plaintext" textbook case.
+	lines = append(lines, "RC4 0102030405 " + hex(make([]u8, 64)) + " 16")
+	lines = append(lines, "RC4 4b6579 " + hex(bytesOf("Plaintext")) + " 4")
+	// CTR's counter is the whole block: it carries across 32 bits and wraps at 2^128.
+	lines = append(lines, "CTR aes " + nist + " 000000000000000000000000ffffffff " + hex(random(mut rng, 80)) + " 16")
+	lines = append(lines, "CTR aes " + nist + " ffffffffffffffffffffffffffffffff " + hex(random(mut rng, 80)) + " 7")
+	lines = append(lines, "CTR des 0123456789abcdef ffffffffffffffff " + hex(random(mut rng, 40)) + " 3")
+	lines = append(lines, "CTR aes " + nist + " 00000000000000fffffffffffffffffe " + hex(random(mut rng, 1100)) + " 600")
+
+	// Generated round trips over every cipher, key size and mode, with lengths across the 32-block chunks.
+	let ciphers = []str{"aes", "aes", "aes", "des", "3des"}
+	let aesBits = []i64{128, 192, 256}
+	let modes = []str{"CTR", "CFB", "OFB"}
+	for i in 0..600 {
+		let c = ciphers[rng.Range(0, len(ciphers))]
+		let key = random(mut rng, keyLen(c, aesBits[rng.Range(0, 3)]))
+		let bs = blockSize(c)
+		let iv = random(mut rng, bs)
+		let sizes = []i64{0, 1, 2, 3, 5, 8, 15, 16, 17, 31, 32, 33, 64, 100, 255, 256, 257, 511, 512, 513, 1000, 2049}
+		let n = sizes[rng.Range(0, len(sizes))] + rng.Range(0, 3)
+		let kind = i % 5
+		if kind == 0 {
+			lines = append(lines, "B " + c + " " + hex(key) + " " + hex(random(mut rng, n / bs * bs)))
+		} else if kind == 1 {
+			lines = append(lines, "CBC " + c + " " + hex(key) + " " + hex(iv) + " " + hex(random(mut rng, n / bs * bs)))
+		} else if kind == 2 {
+			lines = append(lines, "RC4 " + hex(random(mut rng, rng.Range(1, 257))) + " " + hex(random(mut rng, n)) + " " + mint.Itoa(rng.Range(0, n + 1)))
+		} else {
+			let m = modes[rng.Range(0, 3)]
+			lines = append(lines, m + " " + c + " " + hex(key) + " " + hex(iv) + " " + hex(random(mut rng, n)) + " " + mint.Itoa(rng.Range(0, n + 1)))
+		}
+	}
+
+	// PKCS #7: padding for every block size class, and unpadding of good and broken padding.
+	for i in 0..120 {
+		let bs = []i64{1, 2, 8, 16, 32, 255}[rng.Range(0, 6)]
+		let d = random(mut rng, rng.Range(0, 3 * bs + 2))
+		lines = append(lines, "PAD " + mint.Itoa(bs) + " " + hex(d))
+		mut padded = bytesOf("")
+		let p = bs - len(d) % bs
+		padded = append(padded, d...)
+		for k in 0..p {
+			padded = append(padded, u8(p))
+		}
+		lines = append(lines, "UNPAD " + mint.Itoa(bs) + " " + hex(padded))
+		// Broken: a changed pad byte, a pad value of 0 or past the block, a cut-off block.
+		let bad = append([]u8{}, padded...)
+		bad[len(bad) - 1 - rng.Range(0, p)] ^= u8(1 + rng.Range(0, 255))
+		lines = append(lines, "UNPAD " + mint.Itoa(bs) + " " + hex(bad))
+		let zero = append([]u8{}, padded...)
+		zero[len(zero) - 1] = 0
+		lines = append(lines, "UNPAD " + mint.Itoa(bs) + " " + hex(zero))
+		if bs < 255 {
+			let big = append([]u8{}, padded...)
+			big[len(big) - 1] = u8(bs + 1)
+			lines = append(lines, "UNPAD " + mint.Itoa(bs) + " " + hex(big))
+		}
+		if len(padded) > 1 {
+			lines = append(lines, "UNPAD " + mint.Itoa(bs) + " " + hex(padded[0:len(padded) - 1]))
+		}
+	}
+	lines = append(lines, "UNPAD 16 -")
+
+	// Faults: every bad key size, bad IV lengths, input that is not whole blocks, a short destination.
+	for n in 0..41 {
+		if n != 16 && n != 24 && n != 32 {
+			lines = append(lines, "B aes " + hex(random(mut rng, n)) + " -")
+		}
+		if n != 8 {
+			lines = append(lines, "B des " + hex(random(mut rng, n)) + " -")
+		}
+		if n != 24 {
+			lines = append(lines, "B 3des " + hex(random(mut rng, n)) + " -")
+		}
+	}
+	for n in []i64{0, 257, 300} {
+		lines = append(lines, "RC4 " + hex(random(mut rng, n)) + " 00 0")
+	}
+	for c in []str{"aes", "des", "3des"} {
+		let key = hex(random(mut rng, keyLen(c, 128)))
+		let bs = blockSize(c)
+		for n in []i64{0, 1, bs - 1, bs + 1, 2 * bs} {
+			lines = append(lines, "CBC " + c + " " + key + " " + hex(random(mut rng, n)) + " " + hex(random(mut rng, bs)))
+			for m in modes {
+				lines = append(lines, m + " " + c + " " + key + " " + hex(random(mut rng, n)) + " 00 0")
+			}
+		}
+		for n in []i64{1, bs - 1, bs + 1, 3 * bs + 5} {
+			lines = append(lines, "CBC " + c + " " + key + " " + hex(random(mut rng, bs)) + " " + hex(random(mut rng, n)))
+		}
+		for m in []str{"cbc", "ctr", "cfb", "ofb"} {
+			lines = append(lines, "SHORT " + m + " " + c + " " + key)
+		}
+	}
+	lines = append(lines, "SHORT rc4 aes " + hex(random(mut rng, 16)))
+	return lines
+}
+
+fn run(argv []str, data str, env []str) []str {
+	let o = ci.ExecIn(argv, ci.Root(), 900, data, env)
+	ci.Must(o, argv[0])
+	return ci.Lines(o.Stdout)
+}
+
+fn compare(what str, lines []str, want []str, got []str) {
+	ci.Check(len(got) == len(want), what + ": " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line(what + " line " + mint.Itoa(i + 1) + " (" + short(lines[i]) + "):")
+			say.Line("  Go:  " + short(want[i]))
+			say.Line("  Tin: " + short(got[i]))
+			bad += 1
+			if bad >= 6 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, what + ": " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/cipher")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "cipher-")
+	let tin = ci.Join(work, "cipher-tin")
+	ci.BuildTin("tools/ci/fixtures/cipher.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "cipher-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/cipher"}, ci.Root(), 300), "go build cipher")
+	let want = run([]str{goexe}, data, []str{})
+	mut faults = 0
+	for w in want {
+		if twine.Contains(w, " fault ") {
+			faults += 1
+		}
+		ci.Check(!twine.Contains(w, "other:"), "cipher: Go refused a case for an unexpected reason: " + short(w))
+	}
+	compare("cipher", lines, want, run([]str{tin}, data, []str{}))
+	compare("cipher (TIN_SEAL_SOFT=1)", lines, want, run([]str{tin}, data, []str{"TIN_SEAL_SOFT=1"}))
+	ci.Remove(work)
+	ci.Pass("cipher: " + mint.Itoa(len(want)) + " cases (" + mint.Itoa(faults) + " faults) match Go's crypto/md5, aes, des, rc4 and cipher, on both AES paths")
+}
+
+// short keeps a diff line readable: the first and last part of the hex fields.
+fn short(line str) str {
+	if len(line) <= 120 {
+		return line
+	}
+	return line[0:60] + " ... " + line[len(line)-40:len(line)]
+}

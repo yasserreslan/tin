@@ -229,3 +229,46 @@ xztwo
 xzthreezq
 complete Line true true
 complete NoSuchWord false true
+at untitled 1 13
+at untitled 1 7
+--- untitled row 1 col 7 dirty true
+hello world
+--- untitled row 1 col 12 dirty true
+HELLO WORLD
+--- untitled row 1 col 12 dirty true
+hello world
+--- untitled row 1 col 12 dirty true
+selection: hello world
+hello world
+--- sample.txt row 1 col 8 dirty true
+mutated
+--- sample.txt row 1 col 8 dirty false
+package main
+
+fn main() {
+	let x = 1
+	say.Line(x)
+}
+
+at untitled 1 13
+at untitled 1 7
+--- untitled row 1 col 7 dirty true
+hello world
+--- untitled row 1 col 12 dirty true
+HELLO WORLD
+--- untitled row 1 col 12 dirty true
+hello world
+--- untitled row 1 col 12 dirty true
+selection: hello world
+hello world
+--- sample.txt row 1 col 8 dirty true
+mutated
+--- sample.txt row 1 col 8 dirty false
+package main
+
+fn main() {
+	let x = 1
+	say.Line(x)
+}
+
+message: reverted sample.txt

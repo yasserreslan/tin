@@ -1,0 +1,240 @@
+package seal
+
+// ---- block ciphers: the Block shape and AES as one (Go's cipher.Block and crypto/aes) ----
+// The modes (modes.tin: CBC, CTR, CFB, OFB) work over any Block; AES and DES (des.tin) are the two
+// seal has. AES encryption runs on the CPU's AES instructions where AESHardware says so, else
+// bitsliced as GCM's does (aes.tin); decryption is always the bitsliced inverse cipher below (the
+// compiler has no hook for the CPU's AES decryption instructions), constant-time either way.
+
+// Block is a block cipher with its key, as Go's cipher.Block; AES and DES satisfy it. Encrypt and
+// Decrypt transform the first block of src into dst (dst may be src). EncryptBlocks and
+// DecryptBlocks transform every whole block of src on its own: the batch form the modes call. On its
+// own that is ECB, which shows which blocks are equal: never use it as a mode.
+shape Block {
+	BlockSize() i64
+	Encrypt(dst mut []u8, src []u8)
+	Decrypt(dst mut []u8, src []u8)
+	EncryptBlocks(dst mut []u8, src []u8)
+	DecryptBlocks(dst mut []u8, src []u8)
+}
+
+// inexact_overlap reports whether the n bytes at a and the m bytes at b share memory without
+// starting at the same byte (Go's alias.InexactOverlap: in place is fine, shifted is not).
+fn inexact_overlap(a i64, n i64, b i64, m i64) bool {
+	if n == 0 || m == 0 || a == b {
+		return false
+	}
+	return a < b+m && b < a+n
+}
+
+// block_args checks one block's buffers as Go's ciphers do, and panics as they do: a short buffer
+// or a shifted overlap is a programming error, not bad input.
+fn block_args(name str, bs i64, dst []u8, src []u8) {
+	if len(src) < bs {
+		panic("seal: {name} input not full block")
+	}
+	if len(dst) < bs {
+		panic("seal: {name} output not full block")
+	}
+	if inexact_overlap(cast(i64, dst)[2], bs, cast(i64, src)[2], bs) {
+		panic("seal: {name} invalid buffer overlap")
+	}
+}
+
+// blocks_args checks the buffers of a batch: whole blocks in, room for them out.
+fn blocks_args(name str, bs i64, dst []u8, src []u8) {
+	if len(src)%bs != 0 {
+		panic("seal: {name} input not full blocks")
+	}
+	if len(dst) < len(src) {
+		panic("seal: {name} output smaller than input")
+	}
+	if inexact_overlap(cast(i64, dst)[2], len(src), cast(i64, src)[2], len(src)) {
+		panic("seal: {name} invalid buffer overlap")
+	}
+}
+
+// AES is the AES block cipher with its key (AES-128, AES-192 or AES-256 by the key's length), as
+// Go's aes.NewCipher; it satisfies Block. It keeps scratch space for its blocks, so it allocates
+// nothing per call: use it on one core (not from a shared let).
+type AES struct {
+	nr  i64   // the number of rounds
+	hw  bool  // encryption runs on the CPU's AES instructions
+	rkb []u8  // the round keys as bytes, for the CPU's instructions
+	rk  []u64 // the bitsliced round keys
+	q   []u64 // scratch: the bit planes of four blocks
+	tmp []u8  // scratch: four blocks, a counter block and a zero block
+}
+
+// NewAES is AES with a 16-, 24- or 32-byte key; another length fails as Go's KeySizeError does.
+fn NewAES(key secret []u8) !AES {
+	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+		fail "seal: invalid AES key size {len(key)}"
+	}
+	let rkb = aes_expand(key)
+	return AES{nr: len(key)/4 + 6, hw: gcm_hw, rkb: rkb, rk: aes_bitslice_keys(rkb), q: make([]u64, 8), tmp: make([]u8, 96)}
+}
+
+// BlockSize is AES's block length, 16 bytes.
+fn (a AES) BlockSize() i64 {
+	return 16
+}
+
+// Encrypt encrypts the first 16 bytes of src into dst (dst may be src).
+fn (a AES) Encrypt(dst mut []u8, src []u8) {
+	block_args("AES", 16, dst, src)
+	a.encrypt(cast(i64, dst)[2], cast(i64, src)[2], 1)
+}
+
+// Decrypt decrypts the first 16 bytes of src into dst (dst may be src).
+fn (a AES) Decrypt(dst mut []u8, src []u8) {
+	block_args("AES", 16, dst, src)
+	a.decrypt(cast(i64, dst)[2], cast(i64, src)[2], 1)
+}
+
+// EncryptBlocks encrypts every 16-byte block of src on its own into dst (the modes' batch form).
+fn (a AES) EncryptBlocks(dst mut []u8, src []u8) {
+	blocks_args("AES", 16, dst, src)
+	if len(src) > 0 {
+		a.encrypt(cast(i64, dst)[2], cast(i64, src)[2], len(src)/16)
+	}
+}
+
+// DecryptBlocks decrypts every 16-byte block of src on its own into dst (the modes' batch form).
+fn (a AES) DecryptBlocks(dst mut []u8, src []u8) {
+	blocks_args("AES", 16, dst, src)
+	if len(src) > 0 {
+		a.decrypt(cast(i64, dst)[2], cast(i64, src)[2], len(src)/16)
+	}
+}
+
+// encrypt encrypts the n blocks at src into dst (dst may be src). On the CPU's instructions a block
+// is the keystream of a counter set to it XORed into zeros; else four blocks go through the bitsliced
+// rounds at a time.
+fn (a AES) encrypt(dst i64, src i64, n i64) {
+	let t = cast(i64, a.tmp)[2]
+	if a.hw {
+		let ctr = t + 64
+		let zero = t + 80
+		let rkp = cast(i64, a.rkb)[2]
+		for i in 0..n {
+			memcpy(ctr, src+16*i, 16)
+			aes_hw_ctr(rkp, a.nr, ctr, zero, dst+16*i, 1)
+		}
+		return
+	}
+	let q = cast([]u64, cast(i64, a.q))
+	mut i = 0
+	for i < n {
+		let m = min(n-i, 4)
+		memcpy(t, src+16*i, 16*m)
+		aes_pack(mut q, t)
+		aes_encrypt4(mut q, a.rk, a.nr)
+		aes_unpack(q, t)
+		memcpy(dst+16*i, t, 16*m)
+		i += m
+	}
+}
+
+// decrypt decrypts the n blocks at src into dst (dst may be src), four at a time.
+fn (a AES) decrypt(dst i64, src i64, n i64) {
+	let t = cast(i64, a.tmp)[2]
+	let q = cast([]u64, cast(i64, a.q))
+	mut i = 0
+	for i < n {
+		let m = min(n-i, 4)
+		memcpy(t, src+16*i, 16*m)
+		aes_pack(mut q, t)
+		aes_decrypt4(mut q, a.rk, a.nr)
+		aes_unpack(q, t)
+		memcpy(dst+16*i, t, 16*m)
+		i += m
+	}
+}
+
+// ---- the AES inverse cipher, bitsliced (FIPS 197 section 5.3) ----
+
+// aes_inv_affine is the inverse of the S-box's affine map on every byte: XOR 0x63, then the linear
+// map whose bit i is bits i+2, i+5 and i+7.
+fn aes_inv_affine(q mut []u64) {
+	let q0 = ^q[0]
+	let q1 = ^q[1]
+	let q2 = q[2]
+	let q3 = q[3]
+	let q4 = q[4]
+	let q5 = ^q[5]
+	let q6 = ^q[6]
+	let q7 = q[7]
+	q[7] = q1 ^ q4 ^ q6
+	q[6] = q0 ^ q3 ^ q5
+	q[5] = q7 ^ q2 ^ q4
+	q[4] = q6 ^ q1 ^ q3
+	q[3] = q5 ^ q0 ^ q2
+	q[2] = q4 ^ q7 ^ q1
+	q[1] = q3 ^ q6 ^ q0
+	q[0] = q2 ^ q5 ^ q7
+}
+
+// aes_inv_sbox is the inverse S-box on every byte: S is A(inv(x)) ^ 0x63, so the inverse is the
+// inverse affine map around the forward circuit (the inversion in GF(2^8) is its own inverse).
+fn aes_inv_sbox(q mut []u64) {
+	aes_inv_affine(mut q)
+	aes_sbox(mut q)
+	aes_inv_affine(mut q)
+}
+
+// aes_inv_shift_rows moves the byte at (column c, row r) to (c + r mod 4, r) in every lane.
+fn aes_inv_shift_rows(q mut []u64) {
+	for i in 0..8 {
+		let x = q[i]
+		q[i] = (x & 0x1111111111111111) |
+			((x << 4) & 0x2220222022202220) | ((x >> 12) & 0x0002000200020002) |
+			((x >> 8) & 0x0044004400440044) | ((x << 8) & 0x4400440044004400) |
+			((x << 12) & 0x8000800080008000) | ((x >> 4) & 0x0888088808880888)
+	}
+}
+
+// aes_inv_mix_columns is MixColumns after the circulant {05, 00, 04, 00}, whose product is the
+// inverse matrix {0e, 0b, 0d, 09}: b_r = a_r + 4(a_r + a_r+2), then MixColumns.
+fn aes_inv_mix_columns(q mut []u64) {
+	let t0 = q[0] ^ aes_rot2(q[0])
+	let t1 = q[1] ^ aes_rot2(q[1])
+	let t2 = q[2] ^ aes_rot2(q[2])
+	let t3 = q[3] ^ aes_rot2(q[3])
+	let t4 = q[4] ^ aes_rot2(q[4])
+	let t5 = q[5] ^ aes_rot2(q[5])
+	let t6 = q[6] ^ aes_rot2(q[6])
+	let t7 = q[7] ^ aes_rot2(q[7])
+	// 4t: two doublings, each bit plane moving up with x^8 = x^4 + x^3 + x + 1 folded in.
+	q[0] ^= t6
+	q[1] ^= t7 ^ t6
+	q[2] ^= t0 ^ t7
+	q[3] ^= t1 ^ t6
+	q[4] ^= t2 ^ t7 ^ t6
+	q[5] ^= t3 ^ t7
+	q[6] ^= t4
+	q[7] ^= t5
+	aes_mix_columns(mut q)
+}
+
+// aes_decrypt4 decrypts the four blocks in q with the bitsliced round keys rk (nr rounds), the
+// rounds of aes_encrypt4 undone in reverse order.
+fn aes_decrypt4(q mut []u64, rk []u64, nr i64) {
+	for i in 0..8 {
+		q[i] ^= rk[8*nr+i]
+	}
+	for k in 1..nr {
+		let r = nr - k
+		aes_inv_shift_rows(mut q)
+		aes_inv_sbox(mut q)
+		for i in 0..8 {
+			q[i] ^= rk[8*r+i]
+		}
+		aes_inv_mix_columns(mut q)
+	}
+	aes_inv_shift_rows(mut q)
+	aes_inv_sbox(mut q)
+	for i in 0..8 {
+		q[i] ^= rk[i]
+	}
+}

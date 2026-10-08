@@ -22,6 +22,11 @@ fn WrapShown() bool {
 	return wrapOn
 }
 
+// WrapOn is whether wrapping is on for this editor.
+fn (ed Editor) WrapOn() bool {
+	return wrapOn
+}
+
 // ToggleWrapView does the view's part of turning wrapping on or off: the scroll goes back to whole lines and the sideways
 // scroll to nothing.
 fn (ed mut Editor) ToggleWrapView() bool {

@@ -1058,3 +1058,79 @@ fn (b mut Buffer) SetText(text str) {
 	b.Version += 1
 	b.last = kindNone
 }
+
+// JoinLines joins the current line with the line below, collapsing leading indentation into a single space.
+fn (b mut Buffer) JoinLines() {
+	if b.Row + 1 >= len(b.Lines) {
+		return
+	}
+	b.record(kindOther)
+	let line = b.Lines[b.Row]
+	let next = b.Lines[b.Row + 1]
+	let trimmed = twine.TrimLeft(next, " \t")
+	mut sep = " "
+	if len(line) == 0 || len(trimmed) == 0 || line[len(line) - 1] == ' ' {
+		sep = ""
+	}
+	let joinCol = len(line) + len(sep)
+	b.Lines[b.Row] = line + sep + trimmed
+	mut out = []str{}
+	mut i = 0
+	for i <= b.Row {
+		out = append(out, b.Lines[i])
+		i += 1
+	}
+	i = b.Row + 2
+	for i < len(b.Lines) {
+		out = append(out, b.Lines[i])
+		i += 1
+	}
+	b.Lines = out
+	b.Col = joinCol
+	b.HasSel = false
+	b.want = -1
+	b.Dirty = true
+	b.Version += 1
+}
+
+// TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
+fn (b mut Buffer) TransformCase(upper bool) {
+	if !b.HasSel {
+		b.SelectWordAt(b.Row, b.Col)
+	}
+	if !b.HasSel {
+		return
+	}
+	let text = b.SelectedText()
+	mut conv = twine.ToLower(text)
+	if upper {
+		conv = twine.ToUpper(text)
+	}
+	if conv != text {
+		b.record(kindOther)
+		b.ReplaceSelection(conv)
+	}
+}
+
+// SelectLine selects line row, including its newline when it is not the last line.
+fn (b mut Buffer) SelectLine(row i64) {
+	mut r = row
+	if r < 0 {
+		r = 0
+	}
+	if r >= len(b.Lines) {
+		r = len(b.Lines) - 1
+	}
+	b.last = kindNone
+	b.HasSel = true
+	b.SelRow = r
+	b.SelCol = 0
+	if r + 1 < len(b.Lines) {
+		b.Row = r + 1
+		b.Col = 0
+	} else {
+		b.Row = r
+		b.Col = len(b.Lines[r])
+	}
+	b.want = -1
+}

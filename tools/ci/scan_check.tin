@@ -1,0 +1,205 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare scan with Go's text/scanner.
+//
+// A corpus of source texts (Tin-like source with comments, strings, raw strings, chars, ints, floats, operators,
+// unicode, unterminated literals, NULs and invalid bytes, texts longer than Go's 1024-byte read buffer, and texts
+// generated from a fixed seed) is run under the mode flags, white space sets, identifier predicate and Scan/Next/Peek
+// orders of each case through bench/ref/scan and tools/ci/fixtures/scan.tin; the check compares their lines: every
+// token's kind, text, Position and Pos (with offsets), every error with its position, and the error count.
+
+const SEED = 753
+
+const goWhitespace = 4294977024
+
+fn hex(s str) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, digits[s[i] >> 4])
+		out = append(out, digits[s[i] & 15])
+	}
+	return str(out)
+}
+
+// sources are the hand-written texts.
+fn sources() []str {
+	return []str{
+		"", " ", "\n", "\n\n\n", "x", "\t\tx", "x\n\n  \n", "a\r\nb\r\n", "\r",
+		"\xef\xbb\xbfx", "\xef\xbb\xbf", "a\xef\xbb\xbfb", "\xef\xbb\xbf\xef\xbb\xbfx",
+		"package main\n\nimport \"say\"\n\n// main prints.\nfn main() {{\n\tlet x = 1_000 + 0x_ff\n\tsay.Line(\"hi {{x}}\", 'c', `raw\nstring`)\n}}\n",
+		"type P struct {{\n\tx f64 // the x\n\ty f64 /* the y */\n}}\n\nfn (p P) dist() f64 {{ return gauge.Sqrt(p.x*p.x + p.y*p.y) }}\n",
+		"/* a */ b // c\nd /* multi\nline */ e", "// only", "/* unterminated", "/* unterminated\n\n", "/**/", "/***/", "/* * / */x",
+		"a/b", "a//b\nc", "/", "//", "/*", "a /*\n*/ b", "x // c\r\ny", "/*/ x */ y", "// a\n// b\n// c\n",
+		"0 1 9 00 07 08 09 0x 0X1f 0xg 0o 0o17 0O8 0b 0b101 0B2",
+		"1_000 1__0 _1 1_ 0_1 0x_1 0b_1 0o_7 0_x1 1_.5 1._5 0x1_p2 1e1_0 1e_1 0x__1 0b1_ 07_7 0_ 0__",
+		"1.5 1. .5 . .. ... 1e5 1E+5 1e- 1e 1.5e-3 0.e5 1e+ 1e+-1 5.e",
+		"0x1p4 0x1P-2 0x1.8p1 0x.8p0 0x1.8 0x1.p1 0xp1 0x_p1 0x.p1 0x1e3 0X1E3 0x1.e3",
+		"0o1.2 0b1.0 0o1e3 0b1p1 0o1p1 017.5 08.5 09e1 1p3 0p3 00x1 123abc 0x123xyz 0b1012 0o78 089 0.08",
+		"9223372036854775807 18446744073709551616 0xffffffffffffffffff 1e999 .0 0. 0.0e0",
+		"'a' 'ab' '' '\\n' '\\x41' '\\x4' '\\u00e9' '\\U0001F600' '\\777' '\\8' '\\'' '\\\"' 'é' '😀'",
+		"'\n' 'a", "'", "'\\", "'\\u12'", "'\\U123'", "'\\x'", "'\\z'",
+		"\"\" \"a\" \"a\\\"b\" \"\\t\\v\\a\\b\\f\\r\\\\\" \"\\'\" \"é😀\" \"\\xzz\" \"\\u12\" \"\\U1234567\" \"\\0\" \"\\012\"",
+		"\"unterminated\nnext\" \"eof", "\"", "\"\\", "\"\\\"", "\"a\\\nb\"", "\"\\u00e9\\U0001f600\\xff\\377\"",
+		"`` `a` `multi\nline\n` `unterminated", "`\\n` `\"` `'`", "`", "`\n\n", "`a\r\nb`",
+		"αβγ 日本語 _x x1 1x x_1 éé ñ Ω٣ a٣ ٣a ǅ ʰ ⅷ 𝔸 $x a-b-c -a $",
+		"+-*/%&|^<<>>&^+=-=*=/=%=&&||<-++--==<=>=!=:=...(){{}}[];,.:!~@#$?\\",
+		"€ © ° ½ — “q” ‘s’ … → ✓ 😀 🇱🇧 \u00a0 \u2028 \u3000",
+		"\xff", "a\xffb", "\"\xff\"", "'\xff'", "`\xff`", "// \xff\n", "\xc0\x80", "\xe2\x82", "x\xe2\x82", "\xed\xa0\x80",
+		"\x80\x80", "\xf4\x90\x80\x80", "\xf0\x9f\x98", "1\xff", "0x\xff",
+		"\x00", "a\x00b", "\"\x00\"", "'\x00'", "//\x00\n", "/*\x00*/", "`\x00`", "\x00\x00",
+		"\x01\x7f\x0b\x0c", "a\x0bb\x0cc", "\t \n\r",
+		"x.y.z a.1 1.a 1..2 1.e3 .e3 x.5",
+	}
+}
+
+// bigSources are texts longer than Go's 1024-byte read buffer, with tokens and multi-byte characters across its edge.
+fn bigSources() []str {
+	mut out = []str{}
+	out = append(out, twine.Repeat("a", 2000) + " b")
+	out = append(out, twine.Repeat("a", 1022) + " é" + twine.Repeat("ñ", 600) + "\n x")
+	out = append(out, twine.Repeat(" ", 1023) + "日本" + twine.Repeat("\n", 5) + "y")
+	out = append(out, "/* " + twine.Repeat("long comment é 😀 ", 300) + " */ z")
+	out = append(out, "// " + twine.Repeat("line comment ", 200) + "\nz")
+	out = append(out, "\"" + twine.Repeat("string \\n \\u00e9 ", 300) + "\" z")
+	out = append(out, "`" + twine.Repeat("raw\n", 600) + "` z")
+	out = append(out, twine.Repeat("1", 1500) + "." + twine.Repeat("2", 600) + "e+1_0")
+	out = append(out, twine.Repeat("1_", 700) + "1")
+	out = append(out, twine.Repeat("x = 'c' + \"s\" // c\n", 200))
+	out = append(out, twine.Repeat("a", 1023) + "\xff" + twine.Repeat("b", 10))
+	out = append(out, twine.Repeat("a", 1021) + "😀" + "b")
+	out = append(out, twine.Repeat("a", 1022) + "\xe2\x82")
+	out = append(out, "\"" + twine.Repeat("x", 1500))
+	out = append(out, "/*" + twine.Repeat("y", 1500))
+	return out
+}
+
+// fragments are the pieces the generated texts are made of.
+fn fragments() []str {
+	return []str{
+		"x", "abc", "_", "_1", "αβ", "日本", "$a", "a-b", "x1", "fn", "let", "0", "1", "42", "007", "08", "0x1F", "0b101",
+		"0o17", "1_000", "1__0", "1_", "1.5", ".5", "1.", "1e3", "1E-3", "1e", "0x1p-2", "0x1.8", "0x.p1", "'a'", "'ab'",
+		"'\\n'", "'\\x4'", "'é'", "''", "\"s\"", "\"a\\\"b\"", "\"\\q\"", "\"é😀\"", "\"open", "`raw`", "`multi\nline`",
+		"`open", "// c", "/* c */", "/* c\nc */", "/* open", "/**/", "+", "-", "*", "/", "%", "(", ")", "{{", "}}", "[",
+		"]", ".", "..", ",", ";", ":", "=", "==", "!=", "<=", "&&", "|", "^", "~", "@", "#", "?", "\\", "€", "😀",
+		"\xff", "\xc0", "\x00", "\xef\xbb\xbf", "\x0b", "\x7f",
+	}
+}
+
+fn separators() []str {
+	return []str{"", " ", " ", "\n", "\t", "\r\n", "  ", "\n\n"}
+}
+
+fn modes() []u64 {
+	return []u64{1012, 0, 4, 8, 16, 12, 96, 32, 64, 128, 256, 768, 512, 500, 276, 776, 20}
+}
+
+fn whitespaces() []u64 {
+	return []u64{goWhitespace, goWhitespace - 1024, 0, 4294967297, 18446744073709551615, 1 << 32 | 1 << 11 | 1 << 12}
+}
+
+fn opsList() []str {
+	return []str{"S", "N", "SP", "PNS", "SSN", "NPS", "SMS", "SWS", "PPS", "NN"}
+}
+
+fn caseLine(mode u64, ws u64, flags i64, ops str, src str) str {
+	return "C " + mint.FormatUint(mode, 10) + " " + mint.FormatUint(ws, 10) + " " + mint.Itoa(flags) + " " + ops + " " + hex(src)
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	let srcs = sources()
+	// Every hand-written text under every mode.
+	for src in srcs {
+		for m in modes() {
+			lines = append(lines, caseLine(m, goWhitespace, 0, "S", src))
+		}
+	}
+	// Every hand-written text with the other white space sets, flags and step orders.
+	for src in srcs {
+		for ws in whitespaces() {
+			lines = append(lines, caseLine(1012, ws, 0, "S", src))
+		}
+		for flags in 1..8 {
+			lines = append(lines, caseLine(1012, goWhitespace, flags, "S", src))
+			lines = append(lines, caseLine(12, goWhitespace, flags, "SP", src))
+		}
+		for ops in opsList() {
+			lines = append(lines, caseLine(1012, goWhitespace, 0, ops, src))
+			lines = append(lines, caseLine(500, goWhitespace - 1024, 2, ops, src))
+		}
+	}
+	// The long texts.
+	for src in bigSources() {
+		for m in []u64{1012, 500, 0, 12} {
+			lines = append(lines, caseLine(m, goWhitespace, 0, "S", src))
+		}
+		lines = append(lines, caseLine(1012, goWhitespace, 3, "SN", src))
+		lines = append(lines, caseLine(1012, goWhitespace, 0, "N", src))
+	}
+	// Generated texts.
+	let frags = fragments()
+	let seps = separators()
+	let ms = modes()
+	let wss = whitespaces()
+	let opss = opsList()
+	for i in 0..600 {
+		mut src = ""
+		for k in 0..rng.Range(0, 30) {
+			src = src + frags[rng.Range(0, len(frags))] + seps[rng.Range(0, len(seps))]
+		}
+		mut ws = u64(goWhitespace)
+		if rng.I64n(4) == 0 {
+			ws = wss[rng.Range(0, len(wss))]
+		}
+		mut ops = "S"
+		if rng.I64n(3) == 0 {
+			ops = opss[rng.Range(0, len(opss))]
+		}
+		lines = append(lines, caseLine(ms[rng.Range(0, len(ms))], ws, rng.Range(0, 8), ops, src))
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/scan")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "scan-")
+	let tin = ci.Join(work, "scan-tin")
+	ci.BuildTin("tools/ci/fixtures/scan.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "scan-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/scan"}, ci.Root(), 300), "go build scan")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "scan: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "scan: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("scan: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's text/scanner")
+}

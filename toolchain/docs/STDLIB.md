@@ -14,6 +14,9 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [relay](#relay) | messages between cores (channels) |
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
+| [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
+| [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
+| [assay](#assay) | HTTP test requests, recorders and local test servers (net/http/httptest) |
 | [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
 | [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
 | [twine](#twine) | strings (strings) |
@@ -58,6 +61,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
+| [scan](#scan) | a scanner and tokenizer for UTF-8 text (text/scanner) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
 | [metal](#metal) | Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor |
 | [gpuwin](#gpuwin) | a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU |
@@ -287,6 +291,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `Limits(maxBody i64, maxBuffered i64, maxConns i64)`: Limits sets the largest request body in bytes (413 past it), the bytes of requests still arriving that one core may buffer (a new partial request past it gets 503 and close), and the connections per core (0: no limit). Past maxConns a core still accepts up to 64 more connections and answers each request on them 503 with Retry-After and Connection: close, so a load balancer reads an answer instead of a reset; only past that margin is a new connection closed at accept. Defaults 64 MiB, 256 MiB and 16384; TIN_MAX_BODY, TIN_MAX_BUFFERED and TIN_MAX_CONNS override them. Call before Serve.
 - `Deadline(ms i64)`: Deadline makes every request's waits (tide.Wait, client calls) fail with "deadline exceeded" once ms have passed since the request started (0: no deadline; call before Serve). TIN_DEADLINE_MS sets it too; the default is 30000.
 - `(q Req) Header(name str) str`: Header returns the value of the request header name (any case), or "". A chunked request's trailer fields are read after the header block's, whether or not a Trailer field announced them: a field of the header block wins, and the framing fields (Host, Content-Length, Transfer-Encoding) are never taken from trailers. Go keeps trailers apart, in Request.Trailer. For an absolute-form target ("GET http://host/path", as proxies send), "host" is the target's authority, which replaces the Host field (RFC 9112 3.2.2, #749).
+- `(q Req) Fields() []str`: Fields returns every field of the request's header block as "Name: value", in the order they came, the name as sent and the value without the blanks around it: for dumps and proxies (#739). Trailer fields are not among them.
 - `(q Req) Proto() str`: Proto is the protocol the request came in: "HTTP/2.0" (h2c, or h2 over TLS), "HTTP/1.1" or "HTTP/1.0". A request made with Router.Run is "HTTP/1.1".
 - `(q Req) Hijack() !i64`: Hijack takes the request's connection out of HTTP for a protocol of its own (the websocket package uses it): the responses before this request are written, the core stops reading the connection and the request's deadline no longer applies. It returns the non-blocking descriptor, for the caller's I/O until the handler returns; then anvil closes it. The handler's Out is not sent. An HTTP/2 stream cannot be hijacked: Hijack fails there.
 - `(w mut Out) Stream() !`: Stream switches the response to streaming. The status, content type and headers set so far are sent with the first Write or Flush (set them before). The body is then written with Write and Flush, in chunks (Transfer-Encoding: chunked), or as a plain body of the size Length gave; an HTTP/1.0 client, which cannot read chunks, gets the body up to the end of the connection. Each write waits for a slow client within the write timeout (TIN_WRITE_TIMEOUT_MS), and the request deadline (TIN_DEADLINE_MS) counts from the last write, so a stream lives as long as it keeps writing. Calling Stream again does nothing. On HTTP/2 the body goes in DATA frames within the client's flow-control windows, and Length sets content-length.
@@ -310,6 +315,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `(w mut Out) Json()`: Json sets the JSON content type; the body is then written with argo.Put(mut w.Body, v).
 - `(w Out) Code() i64`: Code returns the response status set so far (200 unless Status changed it).
 - `(w Out) Header(k str) str`: Header returns response header k as set so far (Type sets Content-Type, Head the rest), or "".
+- `(w Out) Fields() []str`: Fields returns every header field Head (and SetCookie) added so far as "Name: value", in order: Content-Type, which Type sets, is read with Header (#739).
 - `(w mut Out) SetValue(key str, value str)`: SetValue stores value under key for the rest of the request: middleware hand data (a user id, a request id) to the handlers after them this way. Value reads it back.
 - `(w Out) Value(key str) str`: Value returns what SetValue stored under key in this request, or "".
 - `OnRelay(h fn(i64, str))`: OnRelay makes every core run h(from, msg) for each relay message it receives (call before Serve). Handlers run between requests, with their own request pool.
@@ -336,6 +342,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `(r Router) ServeN(addr str, n i64) !`: ServeN is Serve on exactly n cores.
 - `(r Router) Run(method str, target str, body str) Out`: Run sends one request through r on this thread, as Serve would (middleware, 404, 405), and returns the response: for tests. target is the path and query ("/users/7?full=1"), the request has no headers, and a HEAD response keeps its body. Run panics if r has an error (see Check).
 - `(r Router) RunWith(method str, target str, headers []str, body str) Out`: RunWith is Run with request header fields, each written "Name: value" (Cookie, Content-Type ...): for tests of handlers that read headers, cookies or forms.
+- `NewRequest(method str, target str, headers []str, body str) Req`: NewRequest builds an in-process request for test helpers; headers are "Name: value" lines and body is the decoded body.
 - `(r Router) Match(method str, path str) str`: Match returns the pattern of the route that would serve method and path ("/users/{id}"), or "" when the request would get 404 or 405. Like Run, it panics if r has an error (see Check).
 - `type Cookie struct`: Cookie is a Set-Cookie: the name, the value and the attributes. Expires is in Unix seconds and left out when 0; MaxAge in seconds is left out when 0 and, when negative, is written as Max-Age=0 (delete the cookie). SameSite is "", "Lax", "Strict" or "None".
 - `(q Req) Cookie(name str) str`: Cookie returns the value of the request's cookie name, or "" when there is none (or it is not well formed): see Cookies.
@@ -462,6 +469,70 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `DoWith(method str, url str, headers []str, body str, opt Options) !Resp`: DoWith is Do with options: an overall timeout and a response size limit.
 - `(r Resp) Header(name str) str`: Header returns the response header name (any case), or "".
 - `(r Resp) Trailer(name str) str`: Trailer returns the response trailer name (any case), or "": HTTP/2 responses carry trailers (gRPC's grpc-status, for one; #480).
+- `(r Resp) Fields() []str`: Fields returns every header field of the response as "Name: value", in the order they came, the name as sent and the value without the blanks around it: all the Set-Cookie fields, for a cookie jar, and the whole head, for a dump (#739).
+- `(r Resp) Proto() str`: Proto is the protocol of the response: "HTTP/1.1" or "HTTP/1.0" as its status line says, "HTTP/2.0" for HTTP/2.
+- `(r Resp) Reason() str`: Reason is the reason phrase of the status line ("OK" in "HTTP/1.1 200 OK"), "" when there is none (HTTP/2 has none).
+
+## jar
+
+Package jar is a cookie jar for HTTP clients, as Go's net/http/cookiejar is (#739): it keeps the cookies servers set (RFC 6265 parsing, domain and path matching, Secure, expiry by Max-Age and Expires, HttpOnly) and gives each request the ones it should carry. Do sends a wire request with the jar's cookies and keeps the cookies of its response.
+
+```tin body
+mut j = jar.New()
+let r = try j.Do("GET", "http://127.0.0.1:8080/login", []str{}, "")
+let r2 = try j.Do("GET", "http://127.0.0.1:8080/account", []str{}, "") // sends the session cookie
+```
+
+Public suffixes: like Go's cookiejar.New(nil), New has no public suffix list, so a host may set a cookie for its parent domain whatever it is (a server at a.co.uk may set Domain=co.uk). The list is not in the standard library (Go keeps it in golang.org/x/net/publicsuffix); a program that talks to hosts it does not trust passes one to WithSuffixes, a function that returns a domain's public suffix as Go's PublicSuffixList.PublicSuffix does.
+
+Cookies are anvil.Cookie values, the type anvil's SetCookie writes: Expires is in Unix seconds and 0 means none, so an Expires at the Unix epoch itself is read as -1 (also in the past). Host names must be ASCII (Go turns others into punycode first: here they get no cookies). The jar is not written to a file, as Go's is not.
+
+- `type Jar struct`: Jar holds cookies. The zero value is not usable: make one with New or WithSuffixes.
+- `New() Jar`: New returns an empty jar with no public suffix list.
+- `WithSuffixes(suffix fn(str) str) Jar`: WithSuffixes returns an empty jar that asks suffix for a domain's public suffix ("co.uk" for "a.b.co.uk", "" when it has none), as Go's cookiejar.Options.PublicSuffixList: a cookie's Domain may not be a public suffix but for the host itself.
+- `(j mut Jar) SetClock(now fn() i64)`: SetClock makes the jar read the time from now (Unix nanoseconds) instead of the wall clock: for tests of expiry.
+- `(j Jar) Len() i64`: Len is the number of cookies held, expired ones that no request has looked at yet included.
+- `ParseSetCookie(line str) !anvil.Cookie`: ParseSetCookie parses a Set-Cookie field value as Go's http.ParseSetCookie does: the name and value (a value in double quotes is unquoted and marked Quoted), then the attributes Path, Domain, Expires (RFC 1123, or with dashes in the date), Max-Age (0 or less becomes -1: delete), Secure, HttpOnly, SameSite and Partitioned, in any case. An attribute with a bad value or an unknown one is ignored. It fails on an empty line, a missing "=", a bad name or a bad value.
+- `ParseSetCookies(fields []str) []anvil.Cookie`: ParseSetCookies parses every Set-Cookie field of a response (header field lines "Name: value", as wire.Resp.Fields gives them) and returns the cookies that parse, in order.
+- `(j mut Jar) SetCookies(url str, cookies []anvil.Cookie)`: SetCookies keeps the cookies a response from url set, as Go's Jar.SetCookies: a cookie without a Path gets the URL's directory, one without a Domain is a host-only cookie, a Domain the host is not in (or, with a list, a public suffix) is refused, and a Max-Age of 0 or less or an Expires in the past deletes the cookie of that name, domain and path. url must be http:// or https://; another URL sets nothing.
+- `(j mut Jar) Cookies(url str) []anvil.Cookie`: Cookies returns the cookies to send in a request to url, as Go's Jar.Cookies: those whose domain and path match it and that have not expired (a Secure cookie only over https://), longest path first, then the oldest first. Each has only its Name, Value and Quoted set. Expired cookies are dropped from the jar on the way.
+- `(j mut Jar) Header(url str) str`: Header is the Cookie field value a request to url carries ("a=1; b=2", as Go's Request.AddCookie writes each cookie), or "" when the jar has none for it.
+- `(j mut Jar) Do(method str, url str, headers []str, body str) !wire.Resp`: Do sends a request with wire.Do, carrying the jar's cookies for url (added to a Cookie field in headers, if there is one, as Go's client does), and keeps the cookies the response sets. headers is a list of name, value pairs.
+- `(j mut Jar) DoWith(method str, url str, headers []str, body str, opt wire.Options) !wire.Resp`: DoWith is Do with wire's options.
+
+## dump
+
+Package dump writes HTTP requests and responses out as text, byte for byte as Go's httputil.DumpRequest and httputil.DumpResponse do (#739): for logs, for debugging a client or a handler, and for tests that compare what went over the wire.
+
+```tin
+fn handle(q anvil.Req, w mut anvil.Out) {
+	herald.Info(dump.Request(q, false))
+}
+```
+
+Dumping the response a client got:
+
+```tin body
+let r = try wire.Get("http://127.0.0.1:8080/")
+say.Text(dump.Response(r, true))
+```
+
+Request takes the request a handler serves (Go's server-side Request); Response takes the response a wire call returned. The header fields are written as Go writes them: names in canonical form ("content-type" becomes "Content-Type"), sorted by name, the values of one name in the order they came. Bodies are written as they were framed: a chunked body as one chunk and the last chunk, any other as it is. tools/ci/dump_check.tin compares both with Go's over a corpus.
+
+Not reproduced: an absolute-form request target ("GET http://host/x") is written as its path with a Host field (Go keeps the URL and writes no Host); a status line without a reason phrase ("HTTP/1.1 200") is written "HTTP/1.1 200 " (Go writes "HTTP/1.1 200 200"); the trailers of an HTTP/1.1 chunked response, which wire does not keep.
+
+- `Request(q anvil.Req, body bool) str`: Request returns the request q as text, as Go's httputil.DumpRequest(req, body): the request line, the Host field, a Transfer-Encoding: chunked field for a chunked request, the other fields (Cache-Control: no-cache added after a Pragma: no-cache, as Go's server does), an empty line and, when body is true, the body (chunked again when it came chunked). A request on a Router.Stream route has no body here: its body is read with BodyStream.
+- `Response(r wire.Resp, body bool) str`: Response returns the response r as text, as Go's httputil.DumpResponse(resp, body): the status line, a Connection: close field when the connection ends after it (HTTP/1.0 without keep-alive, a body read to the end of the connection), the framing (Content-Length, or Transfer-Encoding: chunked), the other fields, an empty line and, when body is true, the body.
+
+## assay
+
+Package assay provides small HTTP test helpers for anvil handlers, like net/http/httptest (#739).
+
+- `type Server value struct`: Server is a local HTTP/1.1 test server. Close stops its listener and waits for the accept loop.
+- `NewRecorder() anvil.Out`: NewRecorder returns an empty anvil response recorder.
+- `NewRequest(method str, target str, headers []str, body str) anvil.Req`: NewRequest builds a request for a handler test; headers are "Name: value" lines.
+- `NewServer(router anvil.Router) !Server`: NewServer starts an HTTP/1.1 server for router on a random loopback port.
+- `(s Server) Close()`: Close stops accepting requests and waits for the accept loop. A request already accepted may finish before Close returns.
 
 ## tls
 
@@ -1565,7 +1636,7 @@ It is not constant-time: use seal for cryptography. There is no formatting hook 
 
 ## seal
 
-Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-256, SHA3-512, and SHAKE128 and SHAKE256), HMAC over any of the SHA-2 hashes, HKDF, PBKDF2-HMAC-SHA-256, P-256 ECDH, ML-KEM-768 (FIPS 203), RSA signature verification (PKCS #1 v1.5 and PSS), X.509 certificates with chain and host name verification, constant-time comparison, secure random bytes, the hex, base64 and PEM encodings, and RSA-OAEP encryption with a public key.
+Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SHA3-256, SHA3-512, and SHAKE128 and SHAKE256), HMAC over any of the SHA-2 hashes, HKDF, PBKDF2-HMAC-SHA-256, AES and DES/3DES block ciphers, CBC, CTR, CFB and OFB modes, RC4, PKCS #7 padding, AES-GCM, ChaCha20-Poly1305, P-256 ECDH, ML-KEM-768 (FIPS 203), RSA signature verification (PKCS #1 v1.5 and PSS), X.509 certificates with chain and host name verification, constant-time comparison, secure random bytes, the hex, base64 and PEM encodings, and RSA-OAEP encryption with a public key. MD5, DES/3DES, RC4, CBC, CFB and OFB are for legacy interoperability only; prefer an authenticated cipher for new protocols.
 
 - `type AEAD struct`: AEAD is an authenticated cipher with its key (AES-GCM or ChaCha20-Poly1305): Seal encrypts and appends a 16-byte tag, Open checks the tag in constant time and decrypts.
 - `NewChaCha20Poly1305(key secret []u8) !AEAD`: NewChaCha20Poly1305 is the RFC 8439 AEAD with a 32-byte key.
@@ -1578,8 +1649,24 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `AESHardware() bool`: AESHardware reports whether AES-GCM runs on the CPU's AES instructions here (AES-NI and PCLMULQDQ, or ARMv8 AES and PMULL); without them it runs a slower constant-time software path and ChaCha20-Poly1305 is the faster choice.
 - `NewAESGCM(key secret []u8) !AEAD`: NewAESGCM is AES-GCM (16-byte tags, 12-byte nonces) with a 16-, 24- or 32-byte key (AES-128, AES-192 or AES-256).
 - `ArithDigest() str`: ArithDigest is the SHA-256 of the results of seal's multi-word arithmetic on a fixed set of operands (#488): the Montgomery multiplication and squaring for n = 2 to 48 limbs over random moduli and moduli of all-one limbs, with operands 0, 1, m-1, all-ones limbs and random values, z aliasing x and y; and the X25519 field multiplication and squaring on limbs of every size up to 2^52 - 1. Where the CPU's assembly (mont_mul, m4_mont, fe_mul_hw, fe_sq_hw) is in use the digest must equal the portable code's (run with TIN_SEAL_SOFT=1): the test pins the value.
+- `shape Block`: Block is a block cipher with its key, as Go's cipher.Block; AES and DES satisfy it. Encrypt and Decrypt transform the first block of src into dst (dst may be src). EncryptBlocks and DecryptBlocks transform every whole block of src on its own: the batch form the modes call. On its own that is ECB, which shows which blocks are equal: never use it as a mode.
+- `type AES struct`: AES is the AES block cipher with its key (AES-128, AES-192 or AES-256 by the key's length), as Go's aes.NewCipher; it satisfies Block. It keeps scratch space for its blocks, so it allocates nothing per call: use it on one core (not from a shared let).
+- `NewAES(key secret []u8) !AES`: NewAES is AES with a 16-, 24- or 32-byte key; another length fails as Go's KeySizeError does.
+- `(a AES) BlockSize() i64`: BlockSize is AES's block length, 16 bytes.
+- `(a AES) Encrypt(dst mut []u8, src []u8)`: Encrypt encrypts the first 16 bytes of src into dst (dst may be src).
+- `(a AES) Decrypt(dst mut []u8, src []u8)`: Decrypt decrypts the first 16 bytes of src into dst (dst may be src).
+- `(a AES) EncryptBlocks(dst mut []u8, src []u8)`: EncryptBlocks encrypts every 16-byte block of src on its own into dst (the modes' batch form).
+- `(a AES) DecryptBlocks(dst mut []u8, src []u8)`: DecryptBlocks decrypts every 16-byte block of src on its own into dst (the modes' batch form).
 - `ChaCha20(key secret []u8, nonce []u8, counter u32, data []u8) ![]u8`: ChaCha20 XORs data with the ChaCha20 keystream (RFC 8439) for a 32-byte key, a 12-byte nonce and the initial block counter.
 - `ParseRSAPublicKeyDER(der []u8) !RSAPublicKey`: ParseRSAPublicKeyDER reads a DER RSAPublicKey (PKCS #1) or SubjectPublicKeyInfo holding one.
+- `type DES struct`: DES is the DES or triple-DES (EDE, three keys) block cipher with its key, as Go's des.NewCipher and des.NewTripleDESCipher; it satisfies Block. Broken or deprecated: legacy protocols only.
+- `NewDES(key secret []u8) !DES`: NewDES is DES with an 8-byte key, as Go's des.NewCipher (the parity bits are ignored); another length fails as Go's KeySizeError does. DES is broken: legacy protocols only.
+- `NewTripleDES(key secret []u8) !DES`: NewTripleDES is triple DES (encrypt with the first 8 key bytes, decrypt with the next 8, encrypt with the last 8) with a 24-byte key, as Go's des.NewTripleDESCipher; another length fails as Go's KeySizeError does. Two-key 3DES is a key whose last 8 bytes repeat the first. Deprecated.
+- `(d DES) BlockSize() i64`: BlockSize is DES's block length, 8 bytes.
+- `(d DES) Encrypt(dst mut []u8, src []u8)`: Encrypt encrypts the first 8 bytes of src into dst (dst may be src).
+- `(d DES) Decrypt(dst mut []u8, src []u8)`: Decrypt decrypts the first 8 bytes of src into dst (dst may be src).
+- `(d DES) EncryptBlocks(dst mut []u8, src []u8)`: EncryptBlocks encrypts every 8-byte block of src on its own into dst (the modes' batch form).
+- `(d DES) DecryptBlocks(dst mut []u8, src []u8)`: DecryptBlocks decrypts every 8-byte block of src on its own into dst (the modes' batch form).
 - `VerifyECDSA(curve str, pub []u8, digest []u8, sig []u8) !`: VerifyECDSA checks a DER-encoded ECDSA signature over digest (a hash of the message) by the public key pub, an uncompressed point on curve ("P-256" or "P-384"). A digest longer than the curve's order is truncated to its leftmost bytes, as FIPS 186-5 says.
 - `SignECDSA(k ECPrivateKey, h Hash, digest []u8) ![]u8`: SignECDSA signs digest (a hash of the message, made with h) with k and returns a DER ECDSA-Sig-Value. The nonce is RFC 6979's, derived with HMAC over h, so equal inputs give equal signatures.
 - `(k PrivateKey) SignTLS12(scheme i64, msg []u8) ![]u8`: SignTLS12 signs msg for TLS 1.2 (ServerKeyExchange, CertificateVerify; #473) with scheme: also RSA PKCS #1 v1.5 (0x0401, 0x0501, 0x0601) and ECDSA with the scheme's hash on either curve.
@@ -1588,12 +1675,14 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `type Ed25519PrivateKey struct`: Ed25519PrivateKey is an Ed25519 key: the 32-byte seed and the public key it gives.
 - `Ed25519PublicKey(seed secret []u8) ![]u8`: Ed25519PublicKey is the 32-byte public key of a 32-byte Ed25519 seed.
 - `SignEd25519(seed secret []u8, msg []u8) ![]u8`: SignEd25519 is the 64-byte Ed25519 signature of msg by the key with the 32-byte seed (pure Ed25519: msg is not hashed first).
-- `type Hasher struct`: Hasher is an incremental SHA-256 or SHA-1; it satisfies io.Writer.
+- `type Hasher struct`: Hasher is an incremental SHA-256, SHA-1 or MD5; it satisfies io.Writer.
 - `NewSha256() Hasher`: NewSha256 is an incremental SHA-256.
 - `NewSha1() Hasher`: NewSha1 is an incremental SHA-1; use it only where a protocol requires SHA-1.
+- `NewMd5() Hasher`: NewMd5 is an incremental MD5, as Go's md5.New; MD5 is broken, use it only where a protocol names it.
 - `(x mut Hasher) Reset()`: Reset forgets everything written, as if the hasher were new.
-- `(x Hasher) Size() i64`: Size is the length of the digest: 32 for SHA-256, 20 for SHA-1.
+- `(x Hasher) Size() i64`: Size is the length of the digest: 32 for SHA-256, 20 for SHA-1, 16 for MD5.
 - `(x Hasher) Len() i64`: Len is the number of bytes written since the hasher was made or reset.
+- `(x Hasher) BlockSize() i64`: BlockSize is the hash's block length in bytes (64 for all three).
 - `(x mut Hasher) Write(data []u8) !i64`: Write adds data to the hash; it never fails, and returns len(data).
 - `(x mut Hasher) WriteStr(s str)`: WriteStr adds the bytes of s to the hash.
 - `(x Hasher) Sum() []u8`: Sum is the digest of everything written so far; the hasher can go on taking data.
@@ -1611,6 +1700,8 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `ParsePrivateKeyDER(der []u8) !PrivateKey`: ParsePrivateKeyDER reads a PKCS #8 PrivateKeyInfo, a PKCS #1 RSAPrivateKey or a SEC 1 ECPrivateKey.
 - `ParsePrivateKeyPEM(pem str) !PrivateKey`: ParsePrivateKeyPEM reads the first "PRIVATE KEY", "RSA PRIVATE KEY" or "EC PRIVATE KEY" block of pem.
 - `(k PrivateKey) MatchesCertificate(c Certificate) bool`: MatchesCertificate reports whether k is the private key of c's public key.
+- `Md5(s secret str) []u8`: Md5 is the MD5 digest of s (16 bytes), as Go's md5.Sum; s may be secret. MD5 is broken: use it only where a protocol names it (PostgreSQL's md5 login), never for new designs.
+- `Md5Hex(s secret str) str`: Md5Hex is the MD5 digest of s in lower-case hex; s may be secret.
 - `const MLKEM768EncapsulationKeySize = 1184`: MLKEM768EncapsulationKeySize, MLKEM768DecapsulationKeySize and MLKEM768CiphertextSize are ML-KEM-768's sizes in bytes; the shared key is 32 bytes.
 - `const MLKEM768DecapsulationKeySize = 2400`
 - `const MLKEM768CiphertextSize = 1088`
@@ -1619,9 +1710,29 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `MLKEM768Encapsulate(ek []u8) !([]u8, []u8)`: MLKEM768Encapsulate makes a shared key for the holder of encapsulation key ek: the shared key (32 bytes) and the ciphertext to send (1088 bytes). A key of the wrong size or with a value not below q is refused (FIPS 203's input check).
 - `MLKEM768EncapsulateDerand(ek []u8, m secret []u8) !([]u8, []u8)`: MLKEM768EncapsulateDerand is MLKEM768Encapsulate with its 32 random bytes given (FIPS 203's ML-KEM.Encaps_internal): for known-answer tests only.
 - `MLKEM768Decapsulate(dk secret []u8, c []u8) ![]u8`: MLKEM768Decapsulate is the shared key in ciphertext c for decapsulation key dk. A ciphertext that was not made for dk gives a key derived from dk's secret z and c (implicit rejection), in the same time; only wrong sizes fail.
+- `shape BlockMode`: BlockMode is a block cipher mode that works on whole blocks, as Go's cipher.BlockMode; CBC satisfies it.
+- `shape Stream`: Stream is a stream cipher, as Go's cipher.Stream: XORKeyStream XORs src with the keystream into dst, keeping its place between calls. BlockStream (CTR, CFB, OFB) and RC4 satisfy it.
+- `type CBC struct`: CBC is cipher block chaining over a Block, encrypting or decrypting, with its current IV; it satisfies BlockMode. CBC needs padding (Pkcs7Pad) and a MAC over the ciphertext: CBC decryption that reports bad padding is a padding oracle.
+- `NewCBCEncrypter(b dyn Block, iv []u8) !CBC`: NewCBCEncrypter is CBC encryption with b and a one-block IV, as Go's cipher.NewCBCEncrypter; an IV of another length is a fault. The IV must be unpredictable (RandomBytes) for each message.
+- `NewCBCDecrypter(b dyn Block, iv []u8) !CBC`: NewCBCDecrypter is CBC decryption with b and a one-block IV, as Go's cipher.NewCBCDecrypter; an IV of another length is a fault.
+- `(c CBC) BlockSize() i64`: BlockSize is the block length of the mode's cipher.
+- `(c mut CBC) SetIV(iv []u8) !`: SetIV starts a new message with iv, as Go's CBC SetIV; an IV of another length is a fault.
+- `(c mut CBC) CryptBlocks(dst mut []u8, src []u8) !`: CryptBlocks encrypts or decrypts src into dst (dst may be src), carrying the chain into the next call. It fails, writing nothing, when src is not whole blocks, dst is shorter than src, or dst overlaps src shifted (Go's panics, in the same order).
+- `Pkcs7Pad(data []u8, bs i64) ![]u8`: Pkcs7Pad is data followed by PKCS #7 padding for blocks of bs bytes (1 to 255): n bytes of value n, 1 <= n <= bs, so the result is whole blocks. It is a helper for CBC, not part of the mode.
+- `Pkcs7Unpad(data []u8, bs i64) ![]u8`: Pkcs7Unpad is data without its PKCS #7 padding for blocks of bs bytes (1 to 255), sharing data's memory. Empty data, data that is not whole blocks and wrong padding all fail with one fault, and the padding is read in time that depends only on bs. A CBC decryption that reports bad padding to an attacker who can send ciphertexts is a padding oracle: check a MAC first.
+- `type BlockStream struct`: BlockStream is a Block run as a stream cipher (CTR, CFB or OFB), with its place in the keystream; it satisfies Stream. Never use one key and IV for two messages.
+- `NewCTR(b dyn Block, iv []u8) !BlockStream`: NewCTR is counter mode with b and a one-block initial counter, as Go's cipher.NewCTR: the counter is the whole block, big-endian, wrapping to zero. An IV of another length is a fault.
+- `NewCFBEncrypter(b dyn Block, iv []u8) !BlockStream`: NewCFBEncrypter is full-block cipher feedback encryption with b and a one-block IV, as Go's cipher.NewCFBEncrypter (deprecated there: use CTR or an AEAD). An IV of another length is a fault.
+- `NewCFBDecrypter(b dyn Block, iv []u8) !BlockStream`: NewCFBDecrypter is full-block cipher feedback decryption with b and a one-block IV, as Go's cipher.NewCFBDecrypter (deprecated there: use CTR or an AEAD). An IV of another length is a fault.
+- `NewOFB(b dyn Block, iv []u8) !BlockStream`: NewOFB is output feedback mode with b and a one-block IV, as Go's cipher.NewOFB (deprecated there: use CTR or an AEAD). An IV of another length is a fault.
+- `(x mut BlockStream) XORKeyStream(dst mut []u8, src []u8) !`: XORKeyStream XORs src with the keystream into dst (dst may be src), going on from where the last call stopped. It fails, writing nothing, when dst is shorter than src or overlaps it shifted.
 - `P256NewPrivateKey() []u8`: P256NewPrivateKey returns a random P-256 private key: 32 big-endian bytes in [1, n-1].
 - `P256PublicKey(priv secret []u8) ![]u8`: P256PublicKey is the uncompressed public key (65 bytes) of a P-256 private key; it fails unless priv is 32 bytes in [1, n-1]. Constant-time in priv.
 - `P256ECDH(priv secret []u8, peer []u8) ![]u8`: P256ECDH is the P-256 Diffie-Hellman shared secret (the 32-byte x coordinate of priv*peer). peer is an uncompressed or compressed public key; it fails for an invalid private key, a point not on the curve, or a result at infinity. Constant-time in priv.
+- `type RC4 struct`: RC4 is an RC4 keystream with its state, as Go's rc4.Cipher; it satisfies Stream. Broken: legacy protocols only.
+- `NewRC4(key secret []u8) !RC4`: NewRC4 is RC4 keyed with 1 to 256 bytes, as Go's rc4.NewCipher; another length fails as Go's KeySizeError does.
+- `(c mut RC4) Reset()`: Reset zeroes the key state; the RC4 is unusable afterwards (Go's deprecated Reset).
+- `(c mut RC4) XORKeyStream(dst mut []u8, src []u8) !`: XORKeyStream XORs src with the keystream into dst (dst may be src); it fails, writing nothing, when dst is shorter than src or overlaps it shifted.
 - `RSAKeyBits(key RSAPublicKey) i64`: RSAKeyBits is the size of key's modulus in bits.
 - `VerifyPKCS1v15(key RSAPublicKey, h Hash, digest []u8, sig []u8) !`: VerifyPKCS1v15 checks an RSASSA-PKCS1-v1_5 signature over digest, a hash made with h.
 - `VerifyPSS(key RSAPublicKey, h Hash, digest []u8, sig []u8, saltLen i64) !`: VerifyPSS checks an RSASSA-PSS signature over digest, a hash made with h, with MGF1 over the same hash. saltLen is the exact salt length, or -1 to accept any.
@@ -2236,6 +2347,62 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `type WordEncoder struct{}`: WordEncoder encodes header text as encoded words when it needs to be, like Go's WordEncoder.
 - `(e WordEncoder) EncodeWord(charset str, s str) str`: EncodeWord returns the text as an RFC 2047 encoded word when it has bytes that are not printable ASCII, and the text itself when it does not.
 
+## scan
+
+Package scan is a scanner and tokenizer for UTF-8 text, Go's text/scanner: it reads Go-style identifiers, numbers, char, string and raw string literals and comments, with Go's white space and position rules, for tokenizing source code, configuration files and small languages.
+
+```tin body
+mut s = scan.New("let x = 1.5 + y // the sum")
+s.Filename = "example"
+for {
+	let tok = s.Scan()
+	if tok == scan.EOF {
+		break
+	}
+	say.Line(s.Position().String(), scan.TokenString(tok), s.TokenText())
+}
+```
+
+The Scanner reads a whole str (a stream is read with io.ReadAll first), so a token's text is a slice of the source and positions are byte offsets into it. Scan returns a token kind (EOF, Ident, Int, Float, Char, String, RawString, Comment, all negative) or the rune itself for any other character. Mode selects the tokens recognized (GoTokens by default: comments are skipped), Whitespace the characters skipped, and SetIdentRune the identifier characters. Errors (a literal not terminated, a bad escape, invalid UTF-8, a NUL) do not stop the scan: they are counted in ErrorCount and the first thousand are kept with their positions, read with Errors and Err. Lines and columns are 1-based, a column counts characters, and a leading byte order mark is skipped; the Go twin (bench/ref/scan and tools/ci/scan_check.tin) checks every token, position and error against Go's.
+
+- `const EOF = -1`: EOF is the end of the source. The token kinds are negative, so a character Scan returns is never one.
+- `const Ident = -2`: Ident is an identifier.
+- `const Int = -3`: Int is an integer literal.
+- `const Float = -4`: Float is a floating-point literal.
+- `const Char = -5`: Char is a character literal.
+- `const String = -6`: String is an interpreted string literal.
+- `const RawString = -7`: RawString is a raw (backquoted) string literal.
+- `const Comment = -8`: Comment is a comment, returned when ScanComments is set without SkipComments.
+- `const ScanIdents = 4`: ScanIdents recognizes identifiers (the Mode bit 1 << -Ident).
+- `const ScanInts = 8`: ScanInts recognizes integer literals.
+- `const ScanFloats = 16`: ScanFloats recognizes floating-point literals, integers and hexadecimal floats included.
+- `const ScanChars = 32`: ScanChars recognizes character literals.
+- `const ScanStrings = 64`: ScanStrings recognizes interpreted string literals.
+- `const ScanRawStrings = 128`: ScanRawStrings recognizes raw string literals.
+- `const ScanComments = 256`: ScanComments recognizes comments.
+- `const SkipComments = 512`: SkipComments, with ScanComments, makes comments white space instead of Comment tokens.
+- `const GoTokens = ScanIdents | ScanFloats | ScanChars | ScanStrings | ScanRawStrings | ScanComments | SkipComments`: GoTokens is every Go literal token with comments skipped: the Mode Init sets.
+- `const GoWhitespace = 1<<9 | 1<<10 | 1<<13 | 1<<32`: GoWhitespace is the Whitespace Init sets: tab, newline, carriage return and space.
+- `type Position value struct`: Position is a place in the source: valid when Line > 0.
+- `(p Position) IsValid() bool`: IsValid reports whether the position is valid (Line > 0).
+- `(p Position) String() str`: String is "file:line:column", with "<input>" for an empty file name and no numbers when invalid.
+- `type Error value struct`: Error is one error the scanner met: where, as Go reports it, and what.
+- `(e Error) String() str`: String is "position: message", the line Go prints when no Error function is set.
+- `type Scanner struct`: Scanner reads the characters and tokens of a source text; make one with New.
+- `New(src str) Scanner`: New returns a Scanner over src, initialized as Init does.
+- `(s mut Scanner) Init(src str)`: Init restarts s on src: no errors, Mode GoTokens, Whitespace GoWhitespace and no token position; Filename and the identifier predicate stay.
+- `(s mut Scanner) SetIdentRune(f fn(i32, i64) bool)`: SetIdentRune makes f decide the characters of identifiers: f(ch, i) accepts ch as the i-th rune (from 0) of one. It must not accept white space characters.
+- `(s mut Scanner) ResetIdentRune()`: ResetIdentRune goes back to Go identifiers: a letter or '_', then letters, digits and '_'.
+- `(s mut Scanner) Next() i32`: Next reads and returns the next character (EOF at the end) and makes Position invalid; Pos is the position after it.
+- `(s mut Scanner) Peek() i32`: Peek returns the next character without advancing (EOF at the end).
+- `(s Scanner) Errors() []Error`: Errors returns the errors met since Init, at most the first thousand (ErrorCount counts them all).
+- `(s Scanner) Err() !`: Err fails with the first error ("position: message") when there was one.
+- `(s mut Scanner) Scan() i32`: Scan reads the next token or character and returns it: a token kind for a token Mode recognizes, EOF at the end, or else the character itself. Position is where it starts, TokenText its text.
+- `(s Scanner) Position() Position`: Position is where the token Scan last returned starts; Init and Next make it invalid.
+- `(s Scanner) Pos() Position`: Pos is the position just after the character or token Next or Scan last returned.
+- `(s Scanner) TokenText() str`: TokenText is the text of the token Scan last returned ("" after Next).
+- `TokenString(tok i32) str`: TokenString is a printable form of a token kind ("EOF", "Ident", ...) or character (Go-quoted).
+
 ## textedit
 
 Package textedit is the editing model behind Tinland: a text buffer with a cursor, a selection, undo and redo, search, and the syntax highlighting of Tin source. It does no I/O and draws nothing, so it runs (and is tested) on every platform; the editor program supplies the keys, the pixels and the files.
@@ -2313,6 +2480,9 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) ReplaceAll(needle str, repl str) i64`: ReplaceAll replaces every occurrence of needle with repl as one undo step and returns how many there were; the cursor goes to the start of the text.
 - `(b mut Buffer) SelectWordAt(row i64, col i64)`: SelectWordAt selects the word (letters, digits and underscores) around column col of row, or the one character there when it is not part of a word.
 - `(b mut Buffer) SetText(text str)`: SetText replaces the whole text as one undo step, keeping the cursor on its line and column (or the nearest place that exists).
+- `(b mut Buffer) JoinLines()`: JoinLines joins the current line with the line below, collapsing leading indentation into a single space.
+- `(b mut Buffer) TransformCase(upper bool)`: TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
+- `(b mut Buffer) SelectLine(row i64)`: SelectLine selects line row, including its newline when it is not the last line.
 
 ## tinjson
 
