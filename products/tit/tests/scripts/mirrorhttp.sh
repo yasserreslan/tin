@@ -14,8 +14,8 @@ fail() {
 }
 t() { "$tit" "$@"; }
 mkdir -p "$HOME" "$d/srv"
-git init -q --bare "$d/srv/a.git"
-git init -q --bare "$d/srv/b.git"
+git init -q --bare -b main "$d/srv/a.git"
+git init -q --bare -b main "$d/srv/b.git"
 git -C "$d/srv/a.git" config http.receivepack true
 git -C "$d/srv/b.git" config http.receivepack true
 port=$((20000 + ($$ + 11) % 20000))

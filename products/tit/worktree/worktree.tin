@@ -85,7 +85,7 @@ fn dirOf(path str) str {
 
 // dirty reports whether the working file at path has changes the index does not hold (or is absent when it should be
 // there, which is not a change worth keeping).
-fn dirty(root str, e index.Entry) !bool {
+fn dirty(root str, e index.Entry, written i64) !bool {
 	let full = root + "/" + e.Path
 	let (info, err) = quarry.Lstat(full)
 	if err != nil {
@@ -95,7 +95,9 @@ fn dirty(root str, e index.Entry) !bool {
 	if mode != e.Mode {
 		return true
 	}
-	if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device {
+	// the stat is trusted only for a file older than the index (a same-size change within the clock's granularity
+	// looks the same otherwise)
+	if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && e.Mtime < written {
 		return false
 	}
 	let id = try cores.HashPath(full)
@@ -211,7 +213,7 @@ fn check(w Workspace, idx index.Index, changes []diff.FileChange) ! {
 	for c in changes {
 		let e = idx.Find(c.Path)
 		if e != nil {
-			let d = try dirty(w.Root, e)
+			let d = try dirty(w.Root, e, idx.Written)
 			if d {
 				blocked = append(blocked, c.Path)
 			}

@@ -141,7 +141,9 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 			rep.Unstaged = append(rep.Unstaged, FileStatus.TypeChanged(e.Path))
 			continue
 		}
-		if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && mode == e.Mode {
+		// the stat says unchanged, unless the file changed no earlier than the index was written: then a change of
+		// the same size within the clock's granularity would look the same (git's racily clean entries)
+		if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && mode == e.Mode && e.Mtime < idx.Written {
 			continue
 		}
 		toHash = append(toHash, root + "/" + e.Path)

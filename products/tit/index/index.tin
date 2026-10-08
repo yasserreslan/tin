@@ -45,6 +45,10 @@ fn (e Entry) Id() object.Id {
 // Index is a workspace's staging area: its entries sorted by path (and stage).
 type Index struct {
 	Entries []Entry
+	// Written is when the index file was last written (its mtime, in ns; 0 for an index not read from a file): an
+	// entry whose file changed at that time or after cannot be trusted by its stat (status hashes it, as git does
+	// with "racily clean" entries)
+	Written i64
 }
 
 // FileStatus is how a path differs.
@@ -60,7 +64,7 @@ type FileStatus enum {
 
 // New is an empty index.
 fn New() Index {
-	return Index{Entries: []Entry{}}
+	return Index{Entries: []Entry{}, Written: 0}
 }
 
 fn modeByte(m object.Mode) i64 {
@@ -238,6 +242,8 @@ fn Read(path str) !Index {
 	if !quarry.Exists(path) {
 		return New()
 	}
+	let st = try quarry.Lstat(path)
+	let written = st.Mtime
 	let data = try flume.ReadFile(path)
 	if len(data) < 20 + 32 || data[0:8] != "TITINDEX" || i64(pack.LE.U32([]u8(data[8:12]))) != 1 {
 		fail fault.Wrap(ErrBadIndex, "{path}: not a version 1 index")
@@ -273,7 +279,7 @@ fn Read(path str) !Index {
 	if at != end {
 		fail fault.Wrap(ErrBadIndex, "{path}: bytes after the last entry")
 	}
-	return Index{Entries: out}
+	return Index{Entries: out, Written: written}
 }
 
 fn appendU64(out mut []u8, v i64) {
@@ -333,7 +339,7 @@ fn FromTree[S store.ObjectStore](s mut S, tree object.Id) !Index {
 	if tree != object.NoId {
 		try addTree(mut s, tree, "", mut es)
 	}
-	mut idx = Index{Entries: es}
+	mut idx = Index{Entries: es, Written: 0}
 	idx.sortEntries()
 	return idx
 }
