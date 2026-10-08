@@ -1,0 +1,371 @@
+package cmd
+
+import "fault"
+import "flume"
+import "policy"
+import "quarry"
+import "spawn"
+import "tty"
+import "twine"
+
+// The tit command (#788): each subcommand is a variant of Command, parsed from the arguments; output goes to a buffer
+// that is paged when it does not fit a terminal; colour only on a terminal; --json for tools; --trace times each step.
+
+// ErrUsage is the fault of arguments the command does not take.
+let ErrUsage = fault("see tit help")
+
+// Command is one subcommand with its arguments.
+type Command enum {
+	Help(str)
+	Version(bool)
+	Init(str)
+	Status
+	Log(LogArgs)
+	Show(str)
+	Cat(str)
+	ConfigGet(str)
+	ConfigSet(str, str, bool)
+	ConfigList
+	Key(str)
+}
+
+// LogArgs are tit log's arguments.
+type LogArgs struct {
+	Rev     str
+	Most    i64
+	OneLine bool
+	First   bool
+	Topo    bool
+}
+
+// Global holds the options every command takes.
+type Global struct {
+	Json  bool
+	Trace bool
+	Dir   str
+	Color bool
+}
+
+// Out is where a command writes: a buffer, paged on a terminal when it is longer than the screen.
+type Out struct {
+	buf []u8
+}
+
+// Line writes s and a newline.
+fn (o mut Out) Line(s str) {
+	o.buf = append(o.buf, []u8(s)...)
+	o.buf = append(o.buf, '\n')
+}
+
+// Text writes s.
+fn (o mut Out) Text(s str) {
+	o.buf = append(o.buf, []u8(s)...)
+}
+
+// flush writes the buffer to standard output, through `less -FRX` when it is a terminal and the text is taller than it.
+fn (o mut Out) flush() {
+	let text = str(o.buf)
+	if len(text) == 0 {
+		return
+	}
+	if tty.IsTerminal(1) && len(quarry.Getenv("TIT_NO_PAGER")) == 0 {
+		let (_, rows, err) = tty.Size(1)
+		mut lines = 0
+		for i in 0..len(text) {
+			if text[i] == '\n' {
+				lines += 1
+			}
+		}
+		if err == nil && rows > 0 && lines >= rows {
+			mut pager = quarry.Getenv("PAGER")
+			if len(pager) == 0 {
+				pager = "less"
+			}
+			mut argv = []str{pager}
+			if pager == "less" {
+				argv = append(argv, "-FRX")
+			}
+			mut p = spawn.Start(spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Pipe, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch _ {
+				writeOut(text)
+				return
+			}
+			_ = p.Write(text) catch _ {
+				0
+			}
+			p.CloseStdin() catch _ {
+			}
+			_ = p.Wait() catch _ {
+				0
+			}
+			return
+		}
+	}
+	writeOut(text)
+}
+
+fn writeOut(text str) {
+	mut w = flume.Stdout()
+	w.Str(text)
+	w.Flush() catch _ {
+	}
+}
+
+const usageText = `usage: tit [-C dir] [--json] [--trace] <command> [arguments]
+
+commands:
+  init [dir]                 start a repository in dir (the current directory by default)
+  status                     what changed, what is staged, what is untracked
+  log [rev] [-n N] [--oneline] [--first-parent] [--topo]
+                             the history from rev (HEAD by default)
+  show [rev]                 one commit and its changes
+  cat <rev or id>            an object's content
+  config get <key>           a setting; config set [--user] <key> <value>; config list
+  key [path]                 make your signing key if there is none, and print its public half
+  version [-v]               the version
+  help [command]             this text
+
+Revisions: HEAD, a branch or tag, a short or full id, a change id (letters k-z), git:<hex> for an adopted git
+commit, each followed by ~N or ^N.`
+
+// Parse reads the global options and the command from the arguments (without the program name).
+fn Parse(args []str) !(Global, Command) {
+	mut g = Global{Json: false, Trace: false, Dir: "", Color: tty.Colors(1)}
+	mut i = 0
+	for i < len(args) && len(args[i]) > 0 && args[i][0] == '-' {
+		let a = args[i]
+		if a == "--json" {
+			g.Json = true
+		} else if a == "--trace" {
+			g.Trace = true
+		} else if a == "--no-color" {
+			g.Color = false
+		} else if a == "-C" && i + 1 < len(args) {
+			i += 1
+			g.Dir = args[i]
+		} else if a == "-h" || a == "--help" {
+			return g, Command.Help("")
+		} else {
+			fail fault.Wrap(ErrUsage, "unknown option {a}")
+		}
+		i += 1
+	}
+	if i >= len(args) {
+		return g, Command.Help("")
+	}
+	let name = args[i]
+	let rest = args[i + 1:]
+	if name == "help" {
+		mut topic = ""
+		if len(rest) > 0 {
+			topic = rest[0]
+		}
+		return g, Command.Help(topic)
+	}
+	if name == "version" {
+		return g, Command.Version(len(rest) > 0 && rest[0] == "-v")
+	}
+	if name == "init" {
+		mut dir = "."
+		if len(rest) > 0 {
+			dir = rest[0]
+		}
+		return g, Command.Init(dir)
+	}
+	if name == "status" {
+		try noMore(rest, 0, "status")
+		return g, Command.Status
+	}
+	if name == "log" {
+		mut la = LogArgs{Rev: "HEAD", Most: 0, OneLine: false, First: false, Topo: false}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "-n" && k + 1 < len(rest) {
+				k += 1
+				la.Most = parseCount(rest[k]) catch _ {
+					-1
+				}
+				if la.Most < 0 {
+					fail fault.Wrap(ErrUsage, "log: -n takes a number")
+				}
+			} else if a == "--oneline" {
+				la.OneLine = true
+			} else if a == "--first-parent" {
+				la.First = true
+			} else if a == "--topo" {
+				la.Topo = true
+			} else if len(a) > 0 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "log: unknown option {a}")
+			} else {
+				la.Rev = a
+			}
+			k += 1
+		}
+		return g, Command.Log(la)
+	}
+	if name == "show" {
+		mut rev = "HEAD"
+		if len(rest) > 0 {
+			rev = rest[0]
+		}
+		return g, Command.Show(rev)
+	}
+	if name == "cat" {
+		if len(rest) != 1 {
+			fail fault.Wrap(ErrUsage, "cat takes one revision or id")
+		}
+		return g, Command.Cat(rest[0])
+	}
+	if name == "config" {
+		if len(rest) == 0 || rest[0] == "list" {
+			return g, Command.ConfigList
+		}
+		if rest[0] == "get" && len(rest) == 2 {
+			return g, Command.ConfigGet(rest[1])
+		}
+		if rest[0] == "set" && len(rest) == 3 {
+			return g, Command.ConfigSet(rest[1], rest[2], false)
+		}
+		if rest[0] == "set" && len(rest) == 4 && rest[1] == "--user" {
+			return g, Command.ConfigSet(rest[2], rest[3], true)
+		}
+		fail fault.Wrap(ErrUsage, "config get <key> | config set [--user] <key> <value> | config list")
+	}
+	if name == "key" {
+		mut path = ""
+		if len(rest) > 0 {
+			path = rest[0]
+		}
+		return g, Command.Key(path)
+	}
+	fail fault.Wrap(ErrUsage, "unknown command {name}")
+}
+
+fn noMore(rest []str, n i64, name str) ! {
+	if len(rest) > n {
+		fail fault.Wrap(ErrUsage, "{name}: unexpected {rest[n]}")
+	}
+}
+
+fn parseCount(s str) !i64 {
+	mut n = 0
+	if len(s) == 0 {
+		fail ErrUsage
+	}
+	for i in 0..len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			fail ErrUsage
+		}
+		n = n * 10 + i64(s[i] - '0')
+	}
+	return n
+}
+
+// Main runs the command line and returns the exit status: 0, 1 for a failure, 2 for a usage error.
+fn Main(args []str) i64 {
+	let (g, c, perr) = Parse(args)
+	if perr != nil {
+		quarry.Eprintln("tit: " + fault.Message(perr))
+		return 2
+	}
+	mut o = Out{buf: []u8{}}
+	let err = run(g, c, mut o)
+	o.flush()
+	if err != nil {
+		quarry.Eprintln("tit: " + fault.Message(err))
+		if fault.Is(err, ErrUsage) {
+			return 2
+		}
+		return 1
+	}
+	return 0
+}
+
+fn run(g Global, c Command, o mut Out) ! {
+	if g.Trace {
+		let name = commandName(c)
+		// the traced block writes to its own buffer: a function literal cannot hold the mut parameter
+		let (text, terr) = with policy.Trace[[]u8]("tit " + name) {
+			mut b = Out{buf: []u8{}}
+			try dispatch(g, c, mut b)
+			b.buf
+		}
+		if terr != nil {
+			fail terr
+		}
+		o.buf = append(o.buf, text...)
+		return
+	}
+	try dispatch(g, c, mut o)
+}
+
+fn commandName(c Command) str {
+	return match c {
+		Help(_) => "help"
+		Version(_) => "version"
+		Init(_) => "init"
+		Status => "status"
+		Log(_) => "log"
+		Show(_) => "show"
+		Cat(_) => "cat"
+		ConfigGet(_) => "config"
+		ConfigSet(_, _, _) => "config"
+		ConfigList => "config"
+		Key(_) => "key"
+	}
+}
+
+fn dispatch(g Global, c Command, o mut Out) ! {
+	match c {
+		Help(topic) => {
+			o.Line(usageText)
+			if len(topic) > 0 {
+				o.Line("")
+				o.Line("(tit {topic}: see the line above)")
+			}
+		}
+		Version(verbose) => {
+			o.Line("tit 0 (design/tit.md, #769)")
+			if verbose {
+				for f in sentinels() {
+					o.Line("  " + f)
+				}
+			}
+		}
+		Init(dir) => {
+			try doInit(g, dir, mut o)
+		}
+		Status => {
+			try doStatus(g, mut o)
+		}
+		Log(la) => {
+			try doLog(g, la, mut o)
+		}
+		Show(rev) => {
+			try doShow(g, rev, mut o)
+		}
+		Cat(rev) => {
+			try doCat(g, rev, mut o)
+		}
+		ConfigGet(key) => {
+			try doConfigGet(g, key, mut o)
+		}
+		ConfigSet(key, value, user) => {
+			try doConfigSet(g, key, value, user, mut o)
+		}
+		ConfigList => {
+			try doConfigList(g, mut o)
+		}
+		Key(path) => {
+			try doKey(g, path, mut o)
+		}
+	}
+}
+
+fn paint(g Global, code str, s str) str {
+	return tty.Paint(g.Color && !g.Json, code, s)
+}
+
+fn joinWords(xs []str) str {
+	return twine.Join(xs, " ")
+}
