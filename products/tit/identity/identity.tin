@@ -1,5 +1,6 @@
 package identity
 
+import "../object"
 import "fault"
 import "tide"
 
@@ -10,6 +11,9 @@ let ErrNoIdentity = fault("no identity")
 
 // ErrBadSignature is the fault of a signature that does not verify against the signers file.
 let ErrBadSignature = fault("bad signature")
+
+// ErrBadKey is the fault of a key file that cannot be used: unreadable, malformed, or readable by others.
+let ErrBadKey = fault("bad key file")
 
 // Clock is where tit reads the time; tests freeze it.
 shape Clock {
@@ -26,16 +30,24 @@ fn (c SystemClock) Now() i64 {
 	return tide.Wall()
 }
 
-// Config is the merged repository and user configuration.
-type Config struct {
-	values map[str]str
+// FixedClock always says the same time, for tests.
+type FixedClock struct {
+	At i64
 }
 
-// Get is the value of a key, or nil.
-fn (c Config) Get(key str) ?str {
-	let (v, ok) = c.values[key]
-	if !ok {
-		return nil
+// Now is the fixed time.
+fn (c FixedClock) Now() i64 {
+	return c.At
+}
+
+// Who is the person in new commits: user.name and user.email from the config, at the clock's time in the local zone.
+fn Who[C Clock](cfg Config, clock C) !object.Person {
+	let name = cfg.Get("user.name")
+	let email = cfg.Get("user.email")
+	if name == nil || email == nil {
+		fail fault.Wrap(ErrNoIdentity, "set user.name and user.email: tit config set user.name 'Your Name'")
 	}
-	return v
+	let now = clock.Now()
+	let civil = tide.In(now, tide.Local())
+	return object.Person{Name: name, Email: email, When: now / 1000000000, Zone: civil.Offset / 60}
 }
