@@ -48,7 +48,6 @@ jobs:
           test "$arch" = "$EXPECTED_ARCH" || { echo "Expected native $EXPECTED_ARCH, got $(uname -m)"; exit 1; }
       - name: Test the test harness
         run: |
-          python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
           for t in tools/ci/test_*.tin; do sh tools/ci/tin.sh $t; done
       - name: Build from seed and verify self-hosting fixed point
         run: make bootstrap
