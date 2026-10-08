@@ -244,6 +244,8 @@ jobs:
           MYSQL_ADDR=127.0.0.1:3306 MYSQL_USER=tin MYSQL_PASSWORD=tinpass MYSQL_DATABASE=tin sh tools/ci/tin.sh mysql_check
       - name: PostgreSQL client (SCRAM, binary parameters, pool, transactions, reconnects)
         run: sh tools/ci/tin.sh postgres_check
+      - name: Generic database/sql client against Go database/sql
+        run: sh tools/ci/tin.sh dbsql_check
       - name: PostgreSQL client against the runner's PostgreSQL (Linux x86-64)
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |

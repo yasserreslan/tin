@@ -75,6 +75,7 @@ fn packages() []str {
 		"redis", "Redis client (go-redis)",
 		"mysql", "MySQL client (database/sql with go-sql-driver/mysql)",
 		"postgres", "PostgreSQL client (database/sql with pgx)",
+		"database", "generic SQL drivers, pooling and queries (database/sql)",
 		"kafka", "Kafka client (franz-go, sarama)",
 		"websocket", "WebSocket server and client (gorilla/websocket)",
 		"atomic", "counters and flags every core may change (sync/atomic)",
@@ -184,6 +185,9 @@ fn packageFiles(name str) []str {
 	}
 	if name == "image" {
 		files = append(files, "toolchain/std/image/jpeg/jpeg.tin")
+	}
+	if name == "database" {
+		files = append(files, "toolchain/std/database/sql/sql.tin")
 	}
 	return files
 }

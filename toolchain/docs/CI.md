@@ -144,6 +144,7 @@ sh tools/ci/tin.sh loop_memory_check     # Linux: binary-trees within 3x of Go's
 sh tools/ci/tin.sh redis_check           # REDIS_ADDR=host:port for a real Redis
 sh tools/ci/tin.sh mysql_check           # MYSQL_ADDR, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE for a real MySQL
 sh tools/ci/tin.sh postgres_check        # POSTGRES_ADDR, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE for a real PostgreSQL
+sh tools/ci/tin.sh dbsql_check           # generic database/sql client and Go database/sql driver comparison
 sh tools/ci/tin.sh websocket_check
 sh tools/ci/tin.sh signal_check            # process signals and task delivery
 H2SPEC=path/to/h2spec sh tools/ci/tin.sh h2_check   # HTTP/2; without H2SPEC (and outside CI) h2spec is skipped
@@ -159,6 +160,8 @@ sh tools/ci/tin.sh x509_check            # certificates and RSA signatures again
 `tools/dev/linuxtest.sh` and `tools/dev/x64fuzz/linuxtest_amd64.sh` use the same strict runner for Docker cross-tests. They check negative diagnostics on the build host and positive outputs/exit codes in the chosen image. `TIN_LINUX_IMAGE` chooses the image; `TIN_ROOT` can select a library tree. The old `X64_TEST_DIR` output option is replaced by unique temporary directories and logs under `bin/ci/`.
 
 Diagnostics are uploaded for 14 days even if a job fails. No compiled output is cached: a stale compiler or test binary cannot make a fresh checkout pass.
+
+`dbsql_check` compares the strict generic database/sql path against Go's `database/sql` driver for driver registration, queries, rows, results, transactions, and closed-handle faults; `postgres_check` also runs that interface over its PostgreSQL fake server in plain and TLS modes.
 
 PostgreSQL checks use a private users table in the selected database; choose a throwaway
 instance/database for local real-server checks. They exercise `examples/postgres.tin`

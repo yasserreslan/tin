@@ -1,0 +1,23 @@
+package main
+
+import "./ci"
+import "mint"
+
+// database/sql's generic client and PostgreSQL adapter: compare the strict repository path with Go's database/sql driver path.
+fn main() {
+	let root = ci.Root()
+	let want = ci.Read(ci.Join(root, "toolchain/tests/v2/dbsql.out"))
+	let goResult = ci.Exec([]str{"go", "run", "./bench/ref/dbsql"}, root, 180)
+	ci.Must(goResult, "Go database/sql reference")
+	ci.Check(goResult.Stdout == want, "Go database/sql differs from dbsql.out:\n" + goResult.Stdout)
+	let directory = ci.Join(root, "bin/ci")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "dbsql-")
+	let exe = ci.Join(work, "dbsql")
+	ci.BuildTin("toolchain/tests/v2/dbsql.tin", exe, "", []str{})
+	let tin = ci.Exec([]str{exe}, root, 60)
+	ci.Remove(work)
+	ci.Must(tin, "strict database/sql test")
+	ci.Check(tin.Stdout == want, "Tin database/sql differs from dbsql.out:\n" + tin.Stdout)
+	ci.Pass("database/sql: strict generic client and Go database/sql agree on " + mint.Itoa(len(ci.Lines(want))) + " output lines")
+}

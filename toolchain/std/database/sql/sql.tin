@@ -1,0 +1,287 @@
+// Package sql provides a generic, task-aware database client and driver registry.
+package sql
+
+// Value is one database value returned by a driver.
+type Value enum {
+	Null // Null is SQL NULL.
+	Int(v i64) // Int is an integer or boolean value.
+	Float(v f64) // Float is a floating-point value.
+	Text(v str) // Text is a textual or binary value.
+}
+
+// Result reports the affected row count and optional inserted ID.
+type Result struct {
+	affected i64
+	lastID ?i64
+}
+
+// NewResult creates a result with the affected count and optional inserted ID.
+fn NewResult(affected i64, lastID ?i64) Result {
+	return Result{affected: affected, lastID: lastID}
+}
+
+// Driver opens a connection for a driver-specific data source name.
+shape Driver { Open(name str) !dyn Conn }
+
+// Conn prepares statements and closes a driver connection.
+shape Conn {
+	// Prepare compiles a query for this connection.
+	Prepare(query query) !dyn Stmt
+	// Begin starts a transaction on this connection.
+	Begin() !dyn Conn
+	// Finish commits or rolls back a transaction.
+	Finish(commit bool) !bool
+	// SetMaxOpen sets the process-wide open connection limit.
+	SetMaxOpen(n i64) !bool
+	// SetMaxIdle sets the per-core idle connection limit.
+	SetMaxIdle(n i64) !bool
+	// Close closes the connection.
+	Close() !
+}
+
+// Stmt executes queries and closes a prepared statement.
+shape Stmt {
+	// Query executes the prepared query.
+	Query() !Rows
+	// Exec executes the prepared query without returning rows.
+	Exec() !Result
+	// Close releases the statement.
+	Close() !
+}
+
+// Rows is a materialized result set with a deterministic cursor.
+type Rows struct {
+	columns []str
+	values [][]Value
+	index i64
+	closed bool
+}
+
+// NewRows creates a result set from column names and row values.
+fn NewRows(columns []str, values [][]Value) Rows {
+	return Rows{columns: columns, values: values, index: 0, closed: false}
+}
+
+// Row holds the first row of a query result, or its query fault.
+type Row struct {
+	values []Value
+	err fault
+}
+
+// DB is a database handle backed by the registered driver's connection pool.
+type DB struct {
+	state dbState
+}
+
+type dbState struct {
+	conn dyn Conn
+	closed bool
+}
+
+// Stmt is a prepared statement tied to its database connection.
+type Statement struct {
+	state statementState
+}
+
+type statementState struct {
+	db DB
+	stmt dyn Stmt
+	closed bool
+}
+
+// Tx is a transaction that uses its connection until it finishes.
+type Tx struct {
+	state txState
+}
+
+type txState struct {
+	conn dyn Conn
+	active bool
+}
+
+// ErrNoRows is returned by Scan when a query has no rows.
+let ErrNoRows = fault("sql: no rows in result set")
+mut drivers = map[str]?dyn Driver{}
+
+// Register adds a driver under a unique non-empty name.
+fn Register(name str, driver dyn Driver) ! {
+	if name == "" { fail "sql: Register called with empty name" }
+	let previous = drivers[name]
+	if previous != nil { fail "sql: Register called twice for driver " + name }
+	drivers[name] = driver
+}
+
+// Drivers returns the registered names in lexical order.
+fn Drivers() []str {
+	mut names = []str{}
+	for name, driver in drivers { if driver != nil { names = append(names, name) } }
+	for i in 1..len(names) {
+		let name = names[i]
+		mut j = i
+		for j > 0 && names[j-1] > name {
+			names[j] = names[j-1]
+			j -= 1
+		}
+		names[j] = name
+	}
+	return names
+}
+
+// Open opens a database by its registered driver name and data source name.
+fn Open(driverName str, dataSourceName str) !DB {
+	let driver = drivers[driverName]
+	if driver == nil { fail "sql: unknown driver \"" + driverName + "\" (forgotten import?)" }
+	let conn = try driver.Open(dataSourceName)
+	return DB{state: dbState{conn: conn, closed: false}}
+}
+
+// Close closes the database and prevents later operations.
+fn (db mut DB) Close() ! {
+	if db.state.closed { return }
+	db.state.closed = true
+	try db.state.conn.Close()
+}
+
+// Prepare creates a reusable statement for query.
+fn (db DB) Prepare(query query) !Statement {
+	if db.state.closed { fail "sql: database is closed" }
+	let stmt = try db.state.conn.Prepare(query)
+	return Statement{state: statementState{db: db, stmt: stmt, closed: false}}
+}
+
+// Query executes query and returns its rows.
+fn (db DB) Query(query query) !Rows {
+	if db.state.closed { fail "sql: database is closed" }
+	let stmt = try db.state.conn.Prepare(query)
+	let rows = stmt.Query() catch err {
+		stmt.Close() catch _ { }
+		fail err
+	}
+	stmt.Close() catch _ { }
+	return rows
+}
+
+// QueryRow executes query and returns its first row or deferred query fault.
+fn (db DB) QueryRow(query query) Row {
+	let rows = db.Query(query) catch err { return Row{values: []Value{}, err: err} }
+	if len(rows.values) == 0 { return Row{values: []Value{}, err: ErrNoRows} }
+	return Row{values: rows.values[0], err: nil}
+}
+
+// Exec executes a statement and returns its result.
+fn (db DB) Exec(query query) !Result {
+	if db.state.closed { fail "sql: database is closed" }
+	let stmt = try db.state.conn.Prepare(query)
+	let result = stmt.Exec() catch err {
+		stmt.Close() catch _ { }
+		fail err
+	}
+	stmt.Close() catch _ { }
+	return result
+}
+
+// SetMaxOpen sets the process-wide cap on open connections.
+fn (db DB) SetMaxOpen(n i64) !bool {
+	if db.state.closed { fail "sql: database is closed" }
+	return try db.state.conn.SetMaxOpen(n)
+}
+
+// SetMaxIdle sets the per-core cap on idle connections.
+fn (db DB) SetMaxIdle(n i64) !bool {
+	if db.state.closed { fail "sql: database is closed" }
+	return try db.state.conn.SetMaxIdle(n)
+}
+
+// Close closes a prepared statement.
+fn (s mut Statement) Close() ! {
+	if s.state.closed { return }
+	s.state.closed = true
+	try s.state.stmt.Close()
+}
+
+// Query executes the prepared query and returns rows.
+fn (s Statement) Query() !Rows {
+	if s.state.db.state.closed { fail "sql: database is closed" }
+	if s.state.closed { fail "sql: statement is closed" }
+	return try s.state.stmt.Query()
+}
+
+// Exec executes the prepared statement and returns its result.
+fn (s Statement) Exec() !Result {
+	if s.state.db.state.closed { fail "sql: database is closed" }
+	if s.state.closed { fail "sql: statement is closed" }
+	return try s.state.stmt.Exec()
+}
+
+// Columns returns the result column names.
+fn (r Rows) Columns() []str { return r.columns }
+
+// Next advances the cursor and reports whether a row is available.
+fn (r mut Rows) Next() bool {
+	if r.closed || r.index >= len(r.values) { return false }
+	r.index += 1
+	return true
+}
+
+// Values returns the current row's values, or an empty slice before Next or after exhaustion.
+fn (r Rows) Values() []Value {
+	if r.index <= 0 || r.index > len(r.values) { return []Value{} }
+	return r.values[r.index-1]
+}
+
+// Close marks the rows exhausted.
+fn (r mut Rows) Close() ! { r.closed = true }
+
+// Scan returns the row values or its deferred query fault.
+fn (r Row) Scan() ![]Value {
+	if r.err != nil { fail r.err }
+	return r.values
+}
+
+// LastInsertId returns the inserted ID when the driver reports one.
+fn (r Result) LastInsertId() !i64 {
+	if let id = r.lastID { return id }
+	fail "sql: driver does not support LastInsertId"
+}
+
+// RowsAffected returns the number of rows affected.
+fn (r Result) RowsAffected() !i64 { return r.affected }
+
+// Begin starts a transaction on the database connection.
+fn (db DB) Begin() !Tx {
+	if db.state.closed { fail "sql: database is closed" }
+	let conn = try db.state.conn.Begin()
+	return Tx{state: txState{conn: conn, active: true}}
+}
+
+// Query executes a query inside the transaction.
+fn (tx Tx) Query(query query) !Rows {
+	if !tx.state.active { fail "sql: transaction has already been committed or rolled back" }
+	let stmt = try tx.state.conn.Prepare(query)
+	let rows = try stmt.Query()
+	stmt.Close() catch _ { }
+	return rows
+}
+
+// Exec executes a statement inside the transaction.
+fn (tx Tx) Exec(query query) !Result {
+	if !tx.state.active { fail "sql: transaction has already been committed or rolled back" }
+	let stmt = try tx.state.conn.Prepare(query)
+	let result = try stmt.Exec()
+	stmt.Close() catch _ { }
+	return result
+}
+
+// Commit commits the transaction.
+fn (tx mut Tx) Commit() ! {
+	if !tx.state.active { fail "sql: transaction has already been committed or rolled back" }
+	let _ = try tx.state.conn.Finish(true)
+	tx.state.active = false
+}
+
+// Rollback rolls back the transaction.
+fn (tx mut Tx) Rollback() ! {
+	if !tx.state.active { fail "sql: transaction has already been committed or rolled back" }
+	let _ = try tx.state.conn.Finish(false)
+	tx.state.active = false
+}

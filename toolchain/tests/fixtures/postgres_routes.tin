@@ -4,123 +4,146 @@ import "anvil"
 import "argo"
 import "gauge"
 import "postgres"
+import "database/sql"
 import "mint"
+import "quarry"
 
 // Extra routes compiled alongside a temporary copy of examples/postgres.tin by
 // postgres_check.tin. Keep the public example focused on the users service.
 fn extra(q anvil.Req, w mut anvil.Out) bool {
+	if q.Path == "/dbsql" {
+		once {
+			let options = postgres.Options{Addr: quarry.Getenv("POSTGRES_ADDR"), User: quarry.Getenv("POSTGRES_USER"), Password: quarry.Getenv("POSTGRES_PASSWORD"), Database: quarry.Getenv("POSTGRES_DATABASE"), SSLMode: quarry.Getenv("POSTGRES_SSLMODE")}
+			sql.Register("postgres", postgres.NewSQLDriver(options)) catch _ { }
+		}
+		let db = sql.Open("postgres", "") catch err { fail_with(mut w, err)
+			return true }
+		let _ = db.SetMaxOpen(4) catch err { fail_with(mut w, err)
+			return true }
+		let _ = db.SetMaxIdle(4) catch err { fail_with(mut w, err)
+			return true }
+		let rows = db.Query("SELECT 123 AS id, 'generic' AS name") catch err { fail_with(mut w, err)
+			return true }
+		if !rows.Next() { w.Status(502)
+			w.Text("no generic row")
+			return true }
+		let values = rows.Values()
+		w.Text("{values[0]} {values[1]} {rows.Columns()}")
+		db.Close() catch _ { }
+		return true
+	}
 	if q.Path == "/error" {
 		_ = db.Query("SELECT * FROM nope") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text("unexpected success")
- return true
+		return true
 	}
 	if q.Path == "/prepare-error" {
 		let id = 1
 		_ = db.Query("SELECT * FROM nope WHERE id = {id}") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text("unexpected success")
- return true
+		return true
 	}
 	if q.Path == "/execute-error" {
 		let n = mint.Atoi(q.Param("n")) catch _ { 0 }
 		let rows = db.Query("SELECT 1 / {n} AS value") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text(rows.Rows[0][0].Text())
- return true
+		return true
 	}
 	if q.Path == "/echo" {
 		let n = i64(-9223372036854775808)
- let f = 1.25
- let text = q.Param("name")
- let yes = q.Param("bool") != "false"
+		let f = 1.25
+		let text = q.Param("name")
+		let yes = q.Param("bool") != "false"
 		mut bytes = []u8{0, 255, 128}
 		if q.Param("bytes") == "empty" { bytes = []u8{} }
 		let rows = db.Query("SELECT {n} AS i, {f} AS f, {text} AS s, {yes} AS b, {bytes} AS bytes") catch err {
 			fail_with(mut w, err)
- return true
+			return true
 		}
 		let r = rows.Rows[0]
- w.Json()
+		w.Json()
 		argo.Put(mut w.Body, []str{r[0].Text(), r[1].Text(), r[2].Text(), r[3].Text(), r[4].Text()})
 		return true
 	}
 	if q.Path == "/values" {
 		let rows = db.Query("SELECT -123::int2 AS small, -123456::int4 AS medium, 9223372036854775807::int8 AS large, 1.5::float4 AS real, -2.25::float8 AS double, true AS yes, false AS no, NULL::text AS empty, '12.345'::numeric AS num, 'x'::varchar AS s, '2000-01-02'::date AS day, '2000-01-02 03:04:05'::timestamp AS ts, '2000-01-02 03:04:05+00'::timestamptz AS tz, '00000000-0000-0000-0000-000000000001'::uuid AS uid, '{{\"x\":1}}'::json AS j, '{{\"x\":1}}'::jsonb AS jb") catch err {
 			fail_with(mut w, err)
- return true
+			return true
 		}
 		let r = rows.Rows[0]
- mut out = make([]str, 0, len(r))
+		mut out = make([]str, 0, len(r))
 		for _, v in r { out = append(out, v.Text()) }
 		out = append(out, "{r[7].IsNull()}", "{rows.Col(\"uid\")}", "{rows.Col(\"absent\")}")
 		w.Json()
- argo.Put(mut w.Body, out)
- return true
+		argo.Put(mut w.Body, out)
+		return true
 	}
 	if q.Path == "/multi" {
 		let rows = db.Query("SELECT 1 AS first; SELECT 2 AS second") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text("{rows.Columns[0]} {rows.Rows[0][0].Int()} {len(rows.Rows)}")
- return true
+		return true
 	}
 	if q.Path == "/affected" {
 		let name = "missing-user"
 		let res = db.Exec("UPDATE users SET name = {name} WHERE id = -1") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text("{res.Affected}")
- return true
+		return true
 	}
 	if q.Path == "/cache" {
 		for i in 0..270 {
 			let stmt = query{Parts: []str{"SELECT ", " AS value /* cache {i} */"}, Args: []qarg{qarg.Int(i)}}
 			let rows = db.Query(stmt) catch err { fail_with(mut w, err)
- return true }
+				return true }
 			if rows.Rows[0][0].Int() != i { w.Status(502)
- w.Text("cache result")
- return true }
+				w.Text("cache result")
+				return true }
 		}
 		w.Text("ok")
- return true
+		return true
 	}
 	if q.Path == "/signature" {
 		// Identical SQL with different parameter types must use separate statements.
 		let stmt = query{Parts: []str{"SELECT ", " AS value"}, Args: []qarg{qarg.Int(123)}}
 		let a = db.Query(stmt) catch err { fail_with(mut w, err)
- return true }
+			return true }
 		stmt.Args = []qarg{qarg.Str("hello")}
 		let b = db.Query(stmt) catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text("{a.Rows[0][0].Text()} {b.Rows[0][0].Text()}")
- return true
+		return true
 	}
 	if q.Path == "/abandon" {
 		let tx = db.Begin() catch err { fail_with(mut w, err)
- return true }
+			return true }
 		let name = "abandoned"
 		_ = tx.Query("INSERT INTO users (name) VALUES ({name}) RETURNING id") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text("ok")
- return true
+		return true
 	}
 	if q.Path == "/copy" {
 		let tx = db.Begin() catch err { fail_with(mut w, err)
- return true }
+			return true }
 		let copy = tx
 		copy.Rollback() catch err { fail_with(mut w, err)
- return true }
+			return true }
 		let e = tx.Commit()
 		w.Text("{e != nil}")
- return true
+		return true
 	}
 	if q.Path == "/tx" {
 		let tx = db.Begin() catch err { fail_with(mut w, err)
- return true }
+			return true }
 		let name = q.Param("name")
 		_ = tx.Query("INSERT INTO users (name) VALUES ({name}) RETURNING id") catch err {
 			tx.Rollback() catch _ {}
- fail_with(mut w, err)
- return true
+			fail_with(mut w, err)
+			return true
 		}
 		let mode = q.Param("mode")
 		if mode == "abort" {
@@ -128,26 +151,26 @@ fn extra(q anvil.Req, w mut anvil.Out) bool {
 			let (_, e2) = tx.Query("SELECT 1")
 			let e3 = tx.Commit()
 			tx.Rollback() catch err { fail_with(mut w, err)
- return true }
+				return true }
 			let (_, e4) = tx.Query("SELECT 1")
 			w.Text("{e1 != nil} {e2 != nil} {e3 != nil} {e4 != nil}")
- return true
+			return true
 		}
 		if mode == "commit" {
 			tx.Commit() catch err { tx.Rollback() catch _ {}
- fail_with(mut w, err)
- return true }
+				fail_with(mut w, err)
+				return true }
 		} else { tx.Rollback() catch err { fail_with(mut w, err)
- return true } }
+			return true } }
 		w.Text("ok")
- return true
+		return true
 	}
 	if q.Path == "/special" {
 		let v = gauge.F64frombits(0x7ff0000000000000)
 		let rows = db.Query("SELECT {v} AS f") catch err { fail_with(mut w, err)
- return true }
+			return true }
 		w.Text(rows.Rows[0][0].Text())
- return true
+		return true
 	}
 	return false
 }

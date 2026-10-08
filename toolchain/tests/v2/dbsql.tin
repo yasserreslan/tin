@@ -1,0 +1,93 @@
+package main
+
+import "database/sql"
+import "postgres"
+import "say"
+
+type fakeDriver struct { }
+
+fn (d fakeDriver) Open(name str) !dyn sql.Conn { return fakeConn{} }
+
+type fakeConn struct { }
+
+fn (c fakeConn) Prepare(query query) !dyn sql.Stmt { return fakeStmt{} }
+fn (c fakeConn) Begin() !dyn sql.Conn { return fakeConn{} }
+fn (c fakeConn) Finish(commit bool) !bool { return true }
+fn (c fakeConn) SetMaxOpen(n i64) !bool { return true }
+fn (c fakeConn) SetMaxIdle(n i64) !bool { return true }
+fn (c fakeConn) Close() ! { }
+
+type fakeStmt struct { }
+
+fn (s fakeStmt) Query() !sql.Rows {
+	return sql.NewRows([]str{"id", "name"}, [][]sql.Value{[]sql.Value{sql.Value.Int(4), sql.Value.Text("Ada")}})
+}
+fn (s fakeStmt) Exec() !sql.Result { return sql.NewResult(3, 17) }
+fn (s fakeStmt) Close() ! { }
+
+fn main() {
+	let postgresDriver = postgres.NewSQLDriver(postgres.Options{})
+	sql.Register("pg", postgresDriver) catch _ { }
+	let driver = fakeDriver{}
+	sql.Register("fake", driver) catch _ { }
+	mut duplicate fault = nil
+	sql.Register("fake", driver) catch err { duplicate = err }
+	say.Line(duplicate)
+	let db = sql.Open("fake", "") catch err { panic(err) }
+	let _ = db.SetMaxOpen(4) catch err { panic(err) }
+	let _ = db.SetMaxIdle(2) catch err { panic(err) }
+	let rows = tryQuery(db)
+	say.Line(rows.Columns())
+	mut cursor = rows
+	say.Line(cursor.Next())
+	say.Line(cursor.Values())
+	say.Line(cursor.Next())
+	let result = db.Exec("UPDATE users SET name = 'Ada'") catch err { panic(err) }
+	let affected = result.RowsAffected() catch _ { -1 }
+	let lastID = result.LastInsertId() catch _ { -1 }
+	say.Line(affected)
+	say.Line(lastID)
+	let row = db.QueryRow("SELECT id, name FROM users")
+	let one = row.Scan() catch err { panic(err) }
+	say.Line(one)
+	mut tx = db.Begin() catch err { panic(err) }
+	let txRows = tx.Query("SELECT id, name FROM users") catch err { panic(err) }
+	say.Line(txRows.Columns())
+	let txCopy = tx
+	tx.Commit() catch err { panic(err) }
+	say.Line("tx committed")
+	mut finishedTx fault = nil
+	let _ = txCopy.Query("SELECT id, name FROM users") catch err {
+		finishedTx = err
+		sql.NewRows([]str{}, [][]sql.Value{})
+	}
+	say.Line(finishedTx)
+	let stmt = db.Prepare("SELECT 1") catch err { panic(err) }
+	db.Close() catch _ { }
+	mut closed fault = nil
+	let _ = db.Query("SELECT 1") catch err {
+		closed = err
+		sql.NewRows([]str{}, [][]sql.Value{})
+	}
+	say.Line(closed)
+	mut failedStmt fault = nil
+	let _ = stmt.Query() catch err {
+		failedStmt = err
+		sql.NewRows([]str{}, [][]sql.Value{})
+	}
+	say.Line(failedStmt)
+	let db2 = sql.Open("fake", "") catch err { panic(err) }
+	let stmt2 = db2.Prepare("SELECT 1") catch err { panic(err) }
+	let stmt2Copy = stmt2
+	stmt2.Close() catch err { panic(err) }
+	mut closedStmt fault = nil
+	let _ = stmt2Copy.Query() catch err {
+		closedStmt = err
+		sql.NewRows([]str{}, [][]sql.Value{})
+	}
+	say.Line(closedStmt)
+}
+
+fn tryQuery(db sql.DB) sql.Rows {
+	return db.Query("SELECT id, name FROM users") catch err { panic(err) }
+}
