@@ -56,7 +56,7 @@ fn linked() i64 {
 	let edits = diff.Diff[i64]([]i64{}, []i64{})
 	let rules = ignore.New("")
 	let idx = index.Index{}
-	let m = merge.Conflict{}
+	let m = merge.NewConflict("", object.NoId, object.NoId, object.NoId)
 	mut n = len(edits) + len(idx.Entries) + len(m.Path)
 	if rules.Ignored("x", false) {
 		n += 1

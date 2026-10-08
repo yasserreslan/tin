@@ -1,0 +1,178 @@
+package merge
+
+import "../object"
+import "../store"
+import "crucible"
+import "sift"
+
+// Tests for the merge (#786): the three-way table for trees, one row each, and line merges. The comparison with
+// git merge-file is products/tit/tests/programs/merge_git.tin.
+
+fn blobId(s mut store.Mem, text str) object.Id {
+	return s.PutRaw(object.Kind.Blob, text) catch _ {
+		object.NoId
+	}
+}
+
+fn file(name str, id object.Id) object.Entry {
+	return object.Entry{Mode: object.Mode.File, Name: name, Id: id}
+}
+
+// treeOf stores a tree of these entries, sorted as trees are.
+fn treeOf(s mut store.Mem, es []object.Entry) object.Id {
+	mut sorted = make([]object.Entry, 0, len(es))
+	sorted = append(sorted, es...)
+	sift.SortFunc(mut sorted, fn(x object.Entry, y object.Entry) i64 {
+		let kx = treeKey(x)
+		let ky = treeKey(y)
+		if kx < ky {
+			return -1
+		}
+		if kx > ky {
+			return 1
+		}
+		return 0
+	})
+	return s.Put(object.Object.Tree(sorted)) catch err {
+		panic("tree: {err}")
+	}
+}
+
+fn conflictsOf(r Result) []str {
+	return paths(r.Conflicts)
+}
+
+fn paths(cs []Conflict) []str {
+	mut out = []str{}
+	for c in cs {
+		out = append(out, c.Path)
+	}
+	return out
+}
+
+fn treeIdOf(r Result) object.Id {
+	return r.Tree
+}
+
+fn entryOf(s mut store.Mem, tree object.Id, name str) ?object.Entry {
+	let o = s.Get(tree) catch _ {
+		return nil
+	}
+	match o {
+		Tree(es) => {
+			for e in es {
+				if e.Name == name {
+					return e
+				}
+			}
+		}
+		Blob(_) => {
+		}
+		Commit(_) => {
+		}
+		Tag(_) => {
+		}
+	}
+	return nil
+}
+
+fn TestLines(t mut crucible.T) {
+	let base = "a\nb\nc\nd\ne\n"
+	let (m1, c1) = MergeText(base, "A\nb\nc\nd\ne\n", "a\nb\nc\nd\nE\n", "ours", "theirs")
+	t.True("far apart: clean", c1)
+	crucible.Equal(mut t, "far apart", m1, "A\nb\nc\nd\nE\n")
+	let (m2, c2) = MergeText(base, "a\nX\nc\nd\ne\n", "a\nX\nc\nd\ne\n", "ours", "theirs")
+	t.True("the same change: clean", c2 && m2 == "a\nX\nc\nd\ne\n")
+	let (m3, c3) = MergeText(base, "a\nOURS\nc\nd\ne\n", "a\nTHEIRS\nc\nd\ne\n", "ours", "theirs")
+	t.False("different changes: conflict", c3)
+	crucible.Equal(mut t, "markers", m3, "a\n<<<<<<< ours\nOURS\n=======\nTHEIRS\n>>>>>>> theirs\nc\nd\ne\n")
+	let (m4, c4) = MergeText(base, "a\nb\nc\nd\ne\nours end\n", "start\na\nb\nc\nd\ne\n", "ours", "theirs")
+	t.True("insertions at both ends: clean", c4 && m4 == "start\na\nb\nc\nd\ne\nours end\n")
+	let (m5, c5) = MergeText("x\n", "same\nmine\n", "same\ntheirs\n", "ours", "theirs")
+	t.False("conflict after a common line", c5)
+	crucible.Equal(mut t, "common lines stay out of the conflict", m5, "same\n<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n")
+}
+
+fn TestTrees(t mut crucible.T) {
+	mut s = store.NewMem()
+	let one = blobId(mut s, "one\n")
+	let two = blobId(mut s, "two\n")
+	let three = blobId(mut s, "three\n")
+	let lines = blobId(mut s, "a\nb\nc\nd\ne\n")
+	let linesOurs = blobId(mut s, "A\nb\nc\nd\ne\n")
+	let linesTheirs = blobId(mut s, "a\nb\nc\nd\nE\n")
+	let bin = blobId(mut s, "bin\x00ary")
+	let binOurs = blobId(mut s, "bin\x00ours")
+	let binTheirs = blobId(mut s, "bin\x00theirs")
+	let sub = treeOf(mut s, []object.Entry{file("f", one)})
+	let subOurs = treeOf(mut s, []object.Entry{file("f", one), file("g", two)})
+	let subTheirs = treeOf(mut s, []object.Entry{file("f", three)})
+	let base = treeOf(mut s, []object.Entry{
+		file("bin", bin), file("delmod", one), file("deldel", one), object.Entry{Mode: object.Mode.Dir, Name: "dir", Id: sub},
+		file("lines", lines), file("mode", one), file("ours", one), file("theirs", one), file("vsdir", one),
+	})
+	let ours = treeOf(mut s, []object.Entry{
+		file("addadd", two), file("addsame", two), file("bin", binOurs), object.Entry{Mode: object.Mode.Dir, Name: "dir", Id: subOurs},
+		file("lines", linesOurs), object.Entry{Mode: object.Mode.Exec, Name: "mode", Id: one}, file("ours", two), file("theirs", one),
+		object.Entry{Mode: object.Mode.Dir, Name: "vsdir", Id: sub},
+	})
+	let theirs = treeOf(mut s, []object.Entry{
+		file("addadd", three), file("addsame", two), file("bin", binTheirs), file("delmod", two), object.Entry{Mode: object.Mode.Dir, Name: "dir", Id: subTheirs},
+		file("lines", linesTheirs), file("mode", two), file("ours", one), file("theirs", three), file("vsdir", two),
+	})
+	let r = MergeTrees(mut s, base, ours, theirs) catch err {
+		t.Error("merge: {err}")
+		return
+	}
+	let got = conflictsOf(r)
+	crucible.Equal(mut t, "conflicts", joined(got), "addadd bin delmod vsdir")
+	let tree = treeIdOf(r)
+	let o = entryOf(mut s, tree, "ours")
+	t.True("changed on our side only", o != nil && o.Id == two)
+	let th = entryOf(mut s, tree, "theirs")
+	t.True("changed on their side only", th != nil && th.Id == three)
+	t.True("deleted on both sides", entryOf(mut s, tree, "deldel") == nil)
+	let same = entryOf(mut s, tree, "addsame")
+	t.True("added the same on both sides", same != nil && same.Id == two)
+	let m = entryOf(mut s, tree, "mode")
+	t.True("our mode, their content", m != nil && m.Mode == object.Mode.Exec && m.Id == two)
+	let l = entryOf(mut s, tree, "lines")
+	let merged = blobId(mut s, "A\nb\nc\nd\nE\n")
+	t.True("lines merged", l != nil && l.Id == merged)
+	let d = entryOf(mut s, tree, "dir")
+	if d != nil {
+		let g = entryOf(mut s, d.Id, "g")
+		let f = entryOf(mut s, d.Id, "f")
+		t.True("directories merged inside", g != nil && g.Id == two && f != nil && f.Id == three)
+	} else {
+		t.Error("dir missing")
+	}
+	let dm = entryOf(mut s, tree, "delmod")
+	t.True("delete against modify keeps the modified file", dm != nil && dm.Id == two)
+}
+
+fn joined(xs []str) str {
+	mut s = ""
+	for i in 0..len(xs) {
+		if i > 0 {
+			s = s + " "
+		}
+		s = s + xs[i]
+	}
+	return s
+}
+
+fn TestNoBase(t mut crucible.T) {
+	mut s = store.NewMem()
+	let a = blobId(mut s, "a\n")
+	let b = blobId(mut s, "b\n")
+	let ours = treeOf(mut s, []object.Entry{file("mine", a), file("x", a)})
+	let theirs = treeOf(mut s, []object.Entry{file("x", b), file("yours", b)})
+	let r = MergeTrees(mut s, object.NoId, ours, theirs) catch err {
+		t.Error("merge: {err}")
+		return
+	}
+	crucible.Equal(mut t, "only the name both added differently conflicts", joined(conflictsOf(r)), "x")
+	let tree = treeIdOf(r)
+	t.True("both new names kept", entryOf(mut s, tree, "mine") != nil && entryOf(mut s, tree, "yours") != nil)
+}
