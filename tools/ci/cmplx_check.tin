@@ -9,10 +9,19 @@ package main
 // and to tools/ci/fixtures/cmplx.tin, and the check compares their output line by line: every real part and imaginary
 // part as bits (a NaN is compared as NaN), and the bool and real results.
 //
-// The exception (#916). gauge.Log is not Go's math.Log in the last bit for about one input in 300,000 on arm64, and Go's own
-// math.Log differs between its amd64 (assembly) and arm64 (pure Go, fused) paths for 429 of 300,000 inputs. One Tin
-// implementation therefore cannot be bit-exact with Go on both, so the results of the functions that pass through gauge.Log
-// may differ from Go's in each component (the real part and the imaginary part) by at most these bounds:
+// The reference (#916). Go's math/cmplx, built for the platform, with one difference on amd64: there it is built with
+// Go's portable math.Exp and math.Log in place of their assembly (portableOverlay). Go's amd64 Exp is assembly that uses
+// fused multiply-adds when the CPU has them, and it differs from its portable Exp on 297 of the 8,069 Exp lines of this
+// corpus, by one or two ulps; Sin, Cos, Sinh, Cosh, Tan, Cot, Tanh and Pow inherit that. Go's amd64 Log does not normalize
+// a subnormal argument: math.Log(5e-324) is -709.09 there and -744.44 on arm64, which is the true value. The portable
+// kernels are the algorithms gauge ports (FreeBSD's e_exp.c and e_log.c, through Go's exp.go and log.go), and with them
+// Tin matches Go bit for bit on amd64, so no line of the check needs a bound there.
+//
+// The exception (#916). On arm64 the reference is Go's assembly Exp, which Tin matches bit for bit, and Go's pure-Go Log, whose
+// products the arm64 compiler fuses into multiply-adds (ten instructions in math.log). Tin's arm64 backend fuses other products
+// (six in gauge.Log), and 22 of the 8,069 Log lines of this corpus differ from Go's by one ulp. So the results of the functions
+// that pass through gauge.Log may differ from Go's in each component (the real part and the imaginary part) by at most these
+// bounds, the same table on every platform:
 //
 //	Log, Asin, Acos, Asinh, Acosh, Atan, Atanh   1 ulp
 //	Log10                                        2 ulps: Log10 multiplies Log by Log10E and rounds the product, so the
@@ -28,8 +37,9 @@ package main
 // The bounds are per function: Atanh's covers every line, including those whose Atan takes gauge.Atanh and stays exact. A
 // zero, infinite or NaN component of Go's Pow result, or an input whose Log or result is not finite, is compared exactly.
 // Every other function stays bit for bit. A difference beyond these bounds, a sign change (including +0 against -0), or a
-// NaN against a number fails the check, and every such line is counted. The fix for the last bit is a separate accuracy
-// effort in toolchain/std/gauge, not this check: the exception goes when the results match Go's on every platform.
+// NaN against a number fails the check, and every such line is counted. On amd64 every line matches exactly, so the bounds
+// are only ever used on arm64. The arm64 exception goes when gauge.Log rounds like Go's arm64 Log: that is a separate
+// accuracy effort in toolchain/std/gauge, not this check.
 
 import "./ci"
 import "cmplx"
@@ -305,6 +315,25 @@ fn run(exe str, data str) []str {
 	return ci.Lines(o.Stdout)
 }
 
+// portableOverlay writes into dir a go build overlay that replaces the amd64 selectors of math.Exp and math.Log, so Go's
+// portable code is used and the assembly files still build, and returns its path. It needs GOROOT outside the module cache
+// (setup-go and Homebrew installs have one; a toolchain fetched by GOTOOLCHAIN does not).
+fn portableOverlay(dir str) str {
+	let o = ci.Exec([]str{"go", "env", "GOROOT"}, ci.Root(), 60)
+	ci.Must(o, "go env GOROOT")
+	let goroot = twine.TrimSpace(o.Stdout)
+	ci.Mkdirs(dir)
+	let exp = ci.Join(dir, "exp_asm.go")
+	let logPath = ci.Join(dir, "log_asm.go")
+	ci.Write(exp, "package math\n\nconst haveArchExp = false\n\nfunc archExp(x float64) float64\n")
+	ci.Write(logPath, "package math\n\nconst haveArchLog = false\n\nfunc archLog(x float64) float64\n")
+	let expKey = goroot + "/src/math/exp_asm.go"
+	let logKey = goroot + "/src/math/log_asm.go"
+	let overlay = ci.Join(dir, "overlay.json")
+	ci.Write(overlay, `{"Replace": {"` + expKey + `": "` + exp + `", "` + logKey + `": "` + logPath + `"}}` + "\n")
+	return overlay
+}
+
 fn main() {
 	let lines = corpus()
 	let data = twine.Join(lines, "\n") + "\n"
@@ -314,7 +343,15 @@ fn main() {
 	let tin = ci.Join(work, "cmplx-tin")
 	ci.BuildTin("tools/ci/fixtures/cmplx.tin", tin, "", []str{})
 	let goexe = ci.Join(work, "cmplx-go")
-	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/cmplx"}, ci.Root(), 300), "go build cmplx")
+	mut build = []str{"go", "build"}
+	if ci.Arch() == "amd64" {
+		build = append(build, "-overlay")
+		build = append(build, portableOverlay(ci.Join(work, "overlay")))
+	}
+	build = append(build, "-o")
+	build = append(build, goexe)
+	build = append(build, "./bench/ref/cmplx")
+	ci.Must(ci.Exec(build, ci.Root(), 300), "go build cmplx")
 	let want = run(goexe, data)
 	let got = run(tin, data)
 	ci.Check(len(got) == len(want), "cmplx: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
