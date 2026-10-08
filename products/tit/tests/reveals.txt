@@ -2,5 +2,6 @@ products/tit/identity/keys.tin: secret value seed passed to seal.Ed25519PublicKe
 products/tit/identity/keys.tin: reveal(seed) in identity.NewKey
 products/tit/identity/keys.tin: secret value seed passed to seal.Ed25519PublicKey (parameter seed is declared secret) in identity.LoadKey
 products/tit/identity/keys.tin: secret value s.seed passed to seal.SignEd25519 (parameter seed is declared secret) in identity.Signer.SignCommit
+products/tit/identity/keys.tin: secret value s.seed passed to seal.SignEd25519 (parameter seed is declared secret) in identity.Signer.Sign
 products/tit/identity/keys.tin: secret value s.seed passed to seal.SignEd25519 (parameter seed is declared secret) in identity.Signer.SignTag
-1 reveal, 4 secrets passed to library parameters declared secret
+1 reveal, 5 secrets passed to library parameters declared secret
