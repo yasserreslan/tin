@@ -1,0 +1,15 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// The fake MySQL server (tools/ci/fixtures/mysqlfake) leaves the TLS handshake on the socket after SSLRequest, and reads consecutive
+// MySQL packets one at a time: its Go tests.
+
+fn main() {
+	let o = ci.Exec([]str{"go", "test", "./tools/ci/fixtures/mysqlfake"}, ci.Root(), 300)
+	say.Line(twine.TrimSpace(o.Stdout))
+	ci.Must(o, "go test mysqlfake")
+	ci.Pass("the fake MySQL server reads packet by packet")
+}
