@@ -124,6 +124,13 @@ fn main2() {}
 		"unreadable"
 	}
 	say.Line("replaced", ws.Search.Replaced, replaced == "baz bar baz\nbaz\n", ws.Search.Summary())
+	// a file changed by another program is read again
+	ws.OpenFile(root + "/notes.md")
+	ws.CheckDisk()
+	put(root + "/notes.md", "rewritten elsewhere\n")
+	appkit.RunCapture("touch -t 203001010000 '" + root + "/notes.md'")
+	ws.CheckDisk()
+	say.Line("reloaded", ws.Ed.Name(), ws.Ed.Buf.Lines[0])
 	// a binary file is not opened
 	put(root + "/blob.bin", "ab\x00cd")
 	let before = ws.Ed.Name()

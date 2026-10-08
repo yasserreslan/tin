@@ -227,3 +227,16 @@ fn (ws mut Workspace) RequestQuit() bool {
 	ws.Quit = true
 	return true
 }
+
+// CheckDisk looks for changes made to the open files by other programs, in every pane.
+fn (ws mut Workspace) CheckDisk() {
+	for i in 0..len(ws.Panes) {
+		if ws.Panes[i].CheckDisk() {
+			ws.Dirty = true
+		}
+	}
+	if ws.HasProj && ws.Bottom != BottomTerminal && ws.Panel == PanelGit && ws.LeftOpen {
+		ws.RefreshGit()
+		ws.Dirty = true
+	}
+}
