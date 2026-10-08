@@ -66,6 +66,7 @@ fn packages() []str {
 		"abacus", "arbitrary-precision integers (math/big)",
 		"seal", "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)",
 		"herald", "logging (log/slog)",
+		"expvar", "published variables and their JSON handler (expvar)",
 		"crucible", "testing helpers (testing)",
 		"constraints", "named generic constraint shapes",
 		"policy", "with policies and slots (context values, retry/cache/trace middleware)",
