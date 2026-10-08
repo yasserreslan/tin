@@ -100,6 +100,8 @@ jobs:
         run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)
         run: sh tools/ci/tin.sh squash_twin_check
+      - name: Streaming zlib against Go's compress/zlib (32 sizes and 4 GiB each way, 4 GiB in 1 MiB, damaged streams)
+        run: sh tools/ci/tin.sh zlib_stream_check
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
       - name: Task memory after a 300-request heavy burst

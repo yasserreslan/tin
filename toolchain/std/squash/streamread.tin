@@ -1,0 +1,421 @@
+package squash
+
+import "fault"
+
+// Streaming inflate (#772): readers that decompress raw DEFLATE or zlib from another reader as they are read, in
+// fixed memory (a 16 KiB input chunk, the 32 KiB window and what one Read asks for), so a stream of any length goes
+// through. Input is pulled from the reader below when the bit stream needs it; output stops between two symbols
+// (a literal, or a match copied whole) when the caller's buffer is full, and resumes there on the next Read.
+
+// Reader is what a streaming decompressor reads from: io.Reader's method.
+shape Reader {
+	mut Read(buf mut []u8) !i64
+}
+
+const chunkIn = 16384
+
+// the states between two Reads
+const atHeader = 0
+
+const inStored = 1
+
+const inCoded = 2
+
+const atEnd = 3
+
+// InflateReader decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src.
+type InflateReader[R Reader] struct {
+	src    R
+	in     []u8
+	inLen  i64
+	inPos  i64
+	srcEnd bool
+	acc    u64
+	nbits  i64
+	// hist[0:histLen] holds the last windowSize bytes made and those not delivered yet (from deliver); its length
+	// never changes (re-slicing or appending to a field allocates, and a long stream would pile that up)
+	hist    []u8
+	histLen i64
+	deliver i64
+	state   i64
+	last    bool
+	left    i64
+	fixed   bool
+	z       inflater
+	zlib    bool
+	adlerA  i64
+	adlerB  i64
+	made    i64
+	max     i64
+}
+
+// NewInflateReader reads raw DEFLATE from src, making at most max bytes.
+fn NewInflateReader[R Reader](src R, max i64) InflateReader[R] {
+	return InflateReader[R]{src: src, in: make([]u8, chunkIn), inLen: 0, inPos: 0, srcEnd: false, acc: 0, nbits: 0, hist: make([]u8, 5 * windowSize), histLen: 0, deliver: 0, state: atHeader, last: false, left: 0, fixed: false, z: newInflater(), zlib: false, adlerA: 1, adlerB: 0, made: 0, max: max}
+}
+
+// NewZlibReader reads a zlib stream from src (its header now, its Adler-32 at the end), making at most max bytes.
+fn NewZlibReader[R Reader](src R, max i64) !InflateReader[R] {
+	mut r = NewInflateReader(src, max)
+	r.zlib = true
+	let cmf = try r.bits(8)
+	let flg = try r.bits(8)
+	if cmf & 15 != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0 {
+		fail "squash: not zlib data (its header is damaged)"
+	}
+	if flg & 32 != 0 {
+		fail "squash: zlib data needs a preset dictionary"
+	}
+	return r
+}
+
+// fill reads the next chunk of input; false at the end of src.
+fn (r mut InflateReader[R]) fill() !bool {
+	if r.srcEnd {
+		return false
+	}
+	mut chunk = r.in
+	let n = try r.src.Read(mut chunk)
+	if n <= 0 {
+		r.srcEnd = true
+		return false
+	}
+	r.inLen = n
+	r.inPos = 0
+	return true
+}
+
+// need has at least k bits in the accumulator; false when the input ends first.
+fn (r mut InflateReader[R]) need(k i64) !bool {
+	for r.nbits < k {
+		if r.inPos >= r.inLen {
+			let more = try r.fill()
+			if !more {
+				return false
+			}
+		}
+		r.acc = r.acc | (u64(r.in[r.inPos]) << u64(r.nbits))
+		r.inPos += 1
+		r.nbits += 8
+	}
+	return true
+}
+
+fn (r mut InflateReader[R]) bits(k i64) !i64 {
+	if k == 0 {
+		return 0
+	}
+	let ok = try r.need(k)
+	if !ok {
+		fail "squash: deflate data ends early"
+	}
+	let v = i64(r.acc & ((u64(1) << u64(k)) - 1))
+	r.acc = r.acc >> u64(k)
+	r.nbits -= k
+	return v
+}
+
+fn (r mut InflateReader[R]) decode(h huff) !i64 {
+	// the table with the bits there are (near the end of the input there may be fewer)
+	_ = try r.need(fastBits)
+	if r.nbits == 0 {
+		fail "squash: deflate data ends early"
+	}
+	let avail = min(r.nbits, fastBits)
+	let e = h.fast[i64(r.acc & ((u64(1) << u64(fastBits)) - 1))]
+	if e != 0 && (e & 15) <= avail {
+		let l = e & 15
+		r.acc = r.acc >> u64(l)
+		r.nbits -= l
+		return e >> 4
+	}
+	// bit by bit (puff's method)
+	mut code = 0
+	mut first = 0
+	mut index = 0
+	for l in 1..16 {
+		let bit = try r.bits(1)
+		code = code | bit
+		let c = h.count[l]
+		if code - c < first {
+			return h.sym[index + (code - first)]
+		}
+		index += c
+		first += c
+		first = first << 1
+		code = code << 1
+	}
+	fail "squash: a damaged Huffman code"
+}
+
+// put appends a byte made.
+fn (r mut InflateReader[R]) put(b u8) ! {
+	if r.made >= r.max {
+		fail fault.Wrap(fault.LimitExceeded, "squash: output over {r.max} bytes")
+	}
+	r.hist[r.histLen] = b
+	r.histLen += 1
+	r.made += 1
+}
+
+// header reads a block's header and, for a dynamic block, its codes.
+fn (r mut InflateReader[R]) header() ! {
+	let lastBit = try r.bits(1)
+	r.last = lastBit == 1
+	let kind = try r.bits(2)
+	if kind == 0 {
+		// to the byte boundary, then the length and its complement
+		let drop = r.nbits % 8
+		r.acc = r.acc >> u64(drop)
+		r.nbits -= drop
+		let ln = try r.bits(16)
+		let nln = try r.bits(16)
+		if ln != (^nln & 0xffff) {
+			fail "squash: a stored block's length is damaged"
+		}
+		r.left = ln
+		r.state = inStored
+		return
+	}
+	if kind == 3 {
+		fail "squash: a block of the reserved kind 3"
+	}
+	r.fixed = kind == 1
+	if kind == 2 {
+		let h1 = try r.bits(5)
+		let h2 = try r.bits(5)
+		let h3 = try r.bits(4)
+		let hlit = h1 + 257
+		let hdist = h2 + 1
+		let hclen = h3 + 4
+		if hlit > 286 || hdist > 30 {
+			fail "squash: a dynamic block's header is damaged"
+		}
+		for i in 0..19 {
+			r.z.cls[i] = 0
+		}
+		for i in 0..hclen {
+			r.z.cls[clOrder[i]] = try r.bits(3)
+		}
+		if !r.z.cl.build(r.z.cls) {
+			fail "squash: a dynamic block's code-length code is damaged"
+		}
+		let total = hlit + hdist
+		mut nl = 0
+		for nl < total {
+			let s = try r.decode(r.z.cl)
+			if s < 16 {
+				r.z.lens[nl] = s
+				nl += 1
+				continue
+			}
+			mut rep = 0
+			mut v = 0
+			if s == 16 {
+				if nl == 0 {
+					fail "squash: a repeat with nothing to repeat"
+				}
+				v = r.z.lens[nl - 1]
+				let x = try r.bits(2)
+				rep = 3 + x
+			} else if s == 17 {
+				let x = try r.bits(3)
+				rep = 3 + x
+			} else {
+				let x = try r.bits(7)
+				rep = 11 + x
+			}
+			if nl + rep > total {
+				fail "squash: code lengths run past their count"
+			}
+			for i in 0..rep {
+				r.z.lens[nl] = v
+				nl += 1
+			}
+		}
+		if r.z.lens[256] == 0 {
+			fail "squash: a dynamic block has no end-of-block code"
+		}
+		if !r.z.lit.build(r.z.lens[:hlit]) || !r.z.dist.build(r.z.lens[hlit:total]) {
+			fail "squash: a dynamic block's codes are damaged"
+		}
+	}
+	r.state = inCoded
+}
+
+// produce makes output until want bytes wait to be delivered or the stream ends.
+fn (r mut InflateReader[R]) produce(want i64) ! {
+	for r.histLen - r.deliver < want && r.state != atEnd {
+		if r.state == atHeader {
+			try r.header()
+			continue
+		}
+		if r.state == inStored {
+			// whole bytes left in the accumulator first, then straight from the input
+			for r.left > 0 && r.nbits >= 8 && r.histLen - r.deliver < want {
+				let byte1 = try r.bits(8)
+				try r.put(u8(byte1))
+				r.left -= 1
+			}
+			for r.left > 0 && r.histLen - r.deliver < want {
+				if r.inPos >= r.inLen {
+					let more = try r.fill()
+					if !more {
+						fail "squash: deflate data ends early"
+					}
+				}
+				let n = min(r.left, min(r.inLen - r.inPos, want - (r.histLen - r.deliver)))
+				if r.made + n > r.max {
+					fail fault.Wrap(fault.LimitExceeded, "squash: output over {r.max} bytes")
+				}
+				// byte by byte: a sub-slice is an allocation of its own, which a long stream would pile up
+				for k in 0..n {
+					r.hist[r.histLen + k] = r.in[r.inPos + k]
+				}
+				r.histLen += n
+				r.inPos += n
+				r.made += n
+				r.left -= n
+			}
+			if r.left == 0 {
+				r.state = atHeader
+				if r.last {
+					try r.end()
+				}
+			}
+			continue
+		}
+		// a coded block: symbols until the block ends or enough is made
+		for r.histLen - r.deliver < want {
+			mut s = 0
+			if r.fixed {
+				s = try r.decode(fixedLit)
+			} else {
+				s = try r.decode(r.z.lit)
+			}
+			if s < 256 {
+				try r.put(u8(s))
+				continue
+			}
+			if s == 256 {
+				r.state = atHeader
+				if r.last {
+					try r.end()
+				}
+				break
+			}
+			let li = s - 257
+			if li >= 29 {
+				fail "squash: a length code past 285"
+			}
+			let lx = try r.bits(lenExtra[li])
+			let length = lenBase[li] + lx
+			mut ds = 0
+			if r.fixed {
+				ds = try r.decode(fixedDist)
+			} else {
+				ds = try r.decode(r.z.dist)
+			}
+			if ds >= 30 {
+				fail "squash: a damaged distance code"
+			}
+			let dx = try r.bits(distExtra[ds])
+			let d = distBase[ds] + dx
+			if d > r.histLen || d > r.made {
+				fail "squash: a distance before the start of the data"
+			}
+			if r.made + length > r.max {
+				fail fault.Wrap(fault.LimitExceeded, "squash: output over {r.max} bytes")
+			}
+			let from = r.histLen - d
+			for i in 0..length {
+				r.hist[r.histLen + i] = r.hist[from + i]
+			}
+			r.histLen += length
+			r.made += length
+		}
+	}
+}
+
+// end follows the final block: for zlib, the Adler-32 of everything made (checked once delivered, in Read).
+fn (r mut InflateReader[R]) end() ! {
+	r.state = atEnd
+}
+
+// adler adds hist[from:to] (delivered bytes) to the running Adler-32.
+fn (r mut InflateReader[R]) adler(from i64, to i64) {
+	mut a = r.adlerA
+	mut b = r.adlerB
+	mut i = from
+	for i < to {
+		let stop = min(to, i + 5552)
+		for i < stop {
+			a += i64(r.hist[i])
+			b += a
+			i += 1
+		}
+		a = a % 65521
+		b = b % 65521
+	}
+	r.adlerA = a
+	r.adlerB = b
+}
+
+// trailer reads and checks a zlib stream's Adler-32, after the final block.
+fn (r mut InflateReader[R]) trailer() ! {
+	let drop = r.nbits % 8
+	r.acc = r.acc >> u64(drop)
+	r.nbits -= drop
+	mut want = 0
+	for k in 0..4 {
+		let byte2 = try r.bits(8)
+		want = (want << 8) | byte2
+	}
+	if want != (r.adlerB << 16) | r.adlerA {
+		fail "squash: zlib checksum mismatch"
+	}
+}
+
+// Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
+fn (r mut InflateReader[R]) Read(buf mut []u8) !i64 {
+	if len(buf) == 0 {
+		return 0
+	}
+	if r.histLen - r.deliver == 0 {
+		if r.state == atEnd {
+			if r.zlib {
+				try r.trailer()
+				r.zlib = false
+			}
+			return 0
+		}
+		// at most 64 KiB a Read: hist holds the window, what is waiting and this
+		try r.produce(min(len(buf), 65536))
+		if r.histLen - r.deliver == 0 {
+			if r.zlib {
+				try r.trailer()
+				r.zlib = false
+			}
+			return 0
+		}
+	}
+	let n = min(len(buf), r.histLen - r.deliver)
+	for k in 0..n {
+		buf[k] = r.hist[r.deliver + k]
+	}
+	if r.zlib {
+		r.adler(r.deliver, r.deliver + n)
+	}
+	r.deliver += n
+	// keep the window behind the end of the output, and what is not delivered yet; drop the rest in place
+	let cut = min(r.deliver, r.histLen - windowSize)
+	if cut >= chunkIn {
+		let keepN = r.histLen - cut
+		for k in 0..keepN {
+			r.hist[k] = r.hist[cut + k]
+		}
+		r.histLen = keepN
+		r.deliver -= cut
+	}
+	return n
+}
