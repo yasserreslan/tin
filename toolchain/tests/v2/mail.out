@@ -1,0 +1,12 @@
+address <nil> Jane Doe jane@example.com
+list <nil> 3 a@example.com B, C d@example.net
+date <nil> 880127706000000000
+message <nil> one continued jane@example.com hello
+
+framing <nil> one two <nil> .dot
+
+canonical Content-Md5 bad key
+dot write line
+..dot
+.
+

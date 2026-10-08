@@ -1,0 +1,41 @@
+package main
+
+// mail and textproto: header parsing, address groups, dates and dot framing.
+
+import "mail"
+import "say"
+import "textproto"
+
+fn main() {
+	let (addr, ae) = mail.ParseAddress(`Jane Doe <jane@example.com>`)
+	say.Line("address", ae, addr.Name, addr.Address)
+	let (list, le) = mail.ParseAddressList(`Team: a@example.com, "B, C" <b@example.com>; d@example.net`)
+	say.Line("list", le, len(list), list[0].Address, list[1].Name, list[2].Address)
+	let (date, de) = mail.ParseDate("Fri, 21 Nov 1997 09:55:06 -0600")
+	say.Line("date", de, date)
+	let raw = "Subject: one\r\n\tcontinued\r\nFrom: jane@example.com\r\n\r\nhello\r\n"
+	mut source = stringReader{data: raw}
+	let (msg, me) = mail.ReadMessage(mut source)
+	say.Line("message", me, msg.Header.Get("subject"), msg.Header.Get("from"), msg.Body)
+	mut r = textproto.NewReader("one\r\n two\r\n..dot\r\n.\r\n")
+	let (line, e1) = r.ReadContinuedLine()
+	let (dot, e2) = r.ReadDotBytes()
+	say.Line("framing", e1, line, e2, dot)
+	say.Line("canonical", textproto.CanonicalMIMEHeaderKey("content-MD5"), textproto.CanonicalMIMEHeaderKey("bad key"))
+	mut w = textproto.NewWriter()
+	w.WriteDotBytes("line\r\n.dot\r\n")
+	say.Line("dot write", w.String())
+}
+
+type stringReader struct {
+	data str
+	pos i64
+}
+
+fn (r mut stringReader) Read(buf mut []u8) !i64 {
+	if r.pos >= len(r.data) { return 0 }
+	let n = min(len(buf), len(r.data)-r.pos)
+	for i in 0..n { buf[i] = r.data[r.pos+i] }
+	r.pos += n
+	return n
+}
