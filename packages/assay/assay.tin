@@ -3,18 +3,20 @@ package assay
 
 import "anvil"
 import "atomic"
+import "lane"
 import "wire"
 
 // Server is a local HTTP/1.1 test server. Close stops its listener and waits for the accept loop.
-type Server struct {
+type Server value struct {
 	URL  str // the server's base URL
 	ln   wire.Listener
-	state serverState
+	state i64
 }
 
 // serverState is shared by the detached accept loop and Server.Close.
 type serverState struct {
-	done atomic.Int
+	closing atomic.Int
+	exited lane.Lane[bool]
 }
 
 // NewRecorder returns an empty anvil response recorder.
@@ -35,31 +37,51 @@ fn NewRequest(method str, target str, headers []str, body str) anvil.Req {
 // NewServer starts an HTTP/1.1 server for router on a random loopback port.
 fn NewServer(router anvil.Router) !Server {
 	let ln = try wire.Listen("127.0.0.1:0")
-	let state = serverState{done: atomic.NewInt(0)}
+	let state = keep(serverState{closing: atomic.NewInt(0), exited: lane.New[bool](1)})
+	let stateAddr = cast(i64, state)
 	detach {
-		serve(ln, router, state)
+		serve(ln, router, stateAddr)
 	}
-	return Server{URL: "http://127.0.0.1:{ln.Port()}", ln: ln, state: state}
+	return Server{URL: "http://127.0.0.1:{ln.Port()}", ln: ln, state: stateAddr}
 }
 
-// Close stops accepting requests. The accept loop observes the close state on its next timeout.
+// Close stops accepting requests and waits for the accept loop. A request already accepted may finish before Close returns.
 fn (s Server) Close() {
-	s.state.done.Store(1)
-	mut ln = s.ln
+	stopAndWait(s.ln, s.state)
+}
+
+// stopAndWait owns the mutable copies used to close the listener and consume the task handshake.
+fn stopAndWait(listener wire.Listener, stateAddr i64) {
+	mut state = cast(serverState, stateAddr)
+	if state.closing.Swap(1) == 0 {
+		let (wake, err) = wire.Dial("127.0.0.1:{listener.Port()}")
+		if err == nil {
+			mut c = wake
+			c.Write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") catch _ {}
+			c.Close()
+		}
+	}
+	mut exited = state.exited
+	let _ = exited.Recv() catch _ { false }
+	mut ln = listener
 	ln.Close()
 }
 
 // serve accepts one-request connections until the listener closes.
-fn serve(ln wire.Listener, router anvil.Router, state serverState) {
+fn serve(ln wire.Listener, router anvil.Router, stateAddr i64) {
+	mut state = cast(serverState, stateAddr)
 	for {
-		if state.done.Load() != 0 { break }
+		if state.closing.Load() != 0 { break }
 		mut c = ln.AcceptTimeout(100000000) catch _ {
+			if state.closing.Load() != 0 { break }
 			continue
 		}
 		serveConn(mut c, router)
 		c.Close()
 	}
-	state.done.Store(2)
+	mut exited = state.exited
+	exited.Send(true) catch _ {}
+	exited.Close()
 }
 
 // serveConn reads one bounded HTTP request and writes the router's response.

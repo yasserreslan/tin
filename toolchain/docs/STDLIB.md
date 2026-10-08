@@ -442,11 +442,11 @@ Not reproduced: an absolute-form request target ("GET http://host/x") is written
 
 Package assay provides small HTTP test helpers for anvil handlers, like net/http/httptest (#739).
 
-- `type Server struct`: Server is a local HTTP/1.1 test server. Close stops its listener and waits for the accept loop.
+- `type Server value struct`: Server is a local HTTP/1.1 test server. Close stops its listener and waits for the accept loop.
 - `NewRecorder() anvil.Out`: NewRecorder returns an empty anvil response recorder.
 - `NewRequest(method str, target str, headers []str, body str) anvil.Req`: NewRequest builds a request for a handler test; headers are "Name: value" lines.
 - `NewServer(router anvil.Router) !Server`: NewServer starts an HTTP/1.1 server for router on a random loopback port.
-- `(s Server) Close() !`: Close stops accepting requests. The accept loop observes the close state on its next timeout.
+- `(s Server) Close()`: Close stops accepting requests and waits for the accept loop. A request already accepted may finish before Close returns.
 
 ## tls
 

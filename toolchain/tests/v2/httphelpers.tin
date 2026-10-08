@@ -7,6 +7,7 @@ import "anvil"
 import "assay"
 import "jar"
 import "say"
+import "wire"
 
 fn set(q anvil.Req, w mut anvil.Out) {
 	w.SetCookie(anvil.Cookie{Name: "sid", Value: "abc", Path: "/", HttpOnly: true})
@@ -49,6 +50,27 @@ fn run() ! {
 	let rec = assay.NewRecorder()
 	say.Line("recorder", rec.Code())
 	s.Close()
+	say.Line("close after request", portClosed(s.URL[7:]))
+	mut many = assay.NewServer(r) catch err {
+		say.Line("server failed", err)
+		return
+	}
+	for i in 0..25 {
+		let _ = try j.Do("GET", many.URL + "/check", []str{}, "")
+	}
+	many.Close()
+	say.Line("close after many requests", portClosed(many.URL[7:]))
+}
+
+// portClosed confirms that no listener remains at the server's loopback address.
+fn portClosed(addr str) bool {
+	let (c0, err) = wire.Dial(addr)
+	if err != nil {
+		return true
+	}
+	mut c = c0
+	c.Close()
+	return false
 }
 
 fn runAll() ! {

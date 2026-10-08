@@ -4,3 +4,5 @@ https secure 2
 expire expired 0
 request POST /item q=1 yes body
 recorder 200
+close after request true
+close after many requests true
