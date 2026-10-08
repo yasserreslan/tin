@@ -79,6 +79,6 @@ printf 'unsaved\n' >> "$d/r-w1/w1.txt"
 t workspace rm w1 > "$d/out.txt" 2>&1 && fail "rm took a workspace with changes"
 t workspace rm w2 > /dev/null
 [ ! -e "$d/r-w2" ] || fail "rm left the files"
-t workspaces | grep -q "w2" && fail "rm left the workspace"
+t workspaces | cut -f1 | grep -q "w2$" && fail "rm left the workspace"
 t branch | grep -q " w2$" || fail "rm took the branch"
 echo "ok workspace rm"
