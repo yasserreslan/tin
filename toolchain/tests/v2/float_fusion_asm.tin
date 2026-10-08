@@ -1,0 +1,16 @@
+package main
+
+import "say"
+
+// An explicit conversion keeps arm64 from fusing the product into a multiply-add (#814); the plain form fuses.
+fn fused(x f64, y f64, z f64) f64 {
+	return x * y + z
+}
+
+fn rounded(x f64, y f64, z f64) f64 {
+	return f64(x * y) + z
+}
+
+fn main() {
+	say.Line(fused(1.5, 2.0, 3.0), rounded(1.5, 2.0, 3.0))
+}
