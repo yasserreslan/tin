@@ -1,0 +1,210 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare mime, quoted-printable and multipart with Go's mime packages.
+//
+// A generated (and hand-written) corpus of media type strings, quoted-printable texts and multipart bodies is fed to
+// bench/ref/mime and tools/ci/fixtures/mime.tin; the check compares the lines: the parsed media types and parameters, the decoded
+// and re-encoded quoted-printable texts, and the parts of each multipart body (name, filename, content type, decoded body).
+
+const SEED = 735
+
+// media is the hand-written part of the media type corpus.
+fn media() []str {
+	return []str{
+		"text/html; charset=utf-8",
+		"text/plain",
+		"application/json; a=1; b=two",
+		"multipart/form-data; boundary=\"x y\"",
+		"text/plain; charset=\"UTF-8\"; name=\"a;b\"",
+		"image/svg+xml",
+		"application/x-tar; mode=0644",
+		"text/plain; charset=utf-8; charset=utf-8",
+		"text/plain; charset=utf-8; charset=latin-1",
+		"text",
+		"/plain",
+		"text/",
+		"text/plain;",
+		"text/plain; =v",
+		"text/plain; a=\"unclosed",
+		"text/plain; a=b; c=d; e=f",
+		"TEXT/HTML; CHARSET=UTF-8",
+		"application/octet-stream",
+	}
+}
+
+// qp is the hand-written part of the quoted-printable corpus.
+fn qp() [][]u8 {
+	mut out = [][]u8{}
+	for s in []str{
+		"hello world\n",
+		"café\n",
+		"=3D =20 =09\n",
+		"a soft=\r\nbreak\n",
+		"a soft=\nbreak\n",
+		"trailing=\r\n",
+		"a\r\nb\r\n",
+		"a\rb\n",
+		"=41=42=43",
+		"=zz",
+		"=4",
+		"=4z",
+		"",
+		" ",
+		"tab\there\n",
+		"line with spaces   \n",
+	} {
+		out = append(out, bytesOf(s))
+	}
+	mut long = []u8{}
+	for i in 0..200 {
+		long = append(long, u8('x'))
+	}
+	out = append(out, append(long, u8('\n')))
+	mut control = []u8{}
+	for i in 1..32 {
+		control = append(control, u8(i))
+	}
+	out = append(out, control)
+	return out
+}
+
+// body is one hand-written multipart case: a boundary and the body that uses it.
+type body struct {
+	boundary str
+	data     []u8
+}
+
+// bodies is the hand-written part of the multipart corpus.
+fn bodies() []body {
+	return []body{
+		body{boundary: "xyz", data: bytesOf("--xyz\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nvalue\r\n--xyz--\r\n")},
+		body{boundary: "xyz", data: bytesOf("--xyz\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nvalue\r\n--xyz--")},
+		body{boundary: "b", data: bytesOf("preamble\r\n--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\ncaf=C3=A9\r\n--b\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n42\r\n--b--\r\nepilogue")},
+		body{boundary: "b", data: bytesOf("--b\nContent-Disposition: form-data; name=\"a\"\n\nx\n--b--\n")},
+		body{boundary: "b", data: bytesOf("--b\r\n\r\nempty\r\n--b--\r\n")},
+		body{boundary: "b", data: bytesOf("--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ny")},
+		body{boundary: "b", data: bytesOf("garbage without a boundary")},
+		body{boundary: "b", data: bytesOf("--b--\r\n")},
+		body{boundary: "b", data: bytesOf("--b\r\nX: y\r\nX: z\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--b--\r\n")},
+	}
+}
+
+fn hex(b []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// bytesOf turns a string's bytes into a byte slice.
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	for m in media() {
+		lines = append(lines, "P " + hex(bytesOf(m)))
+	}
+	// A parameter value far longer than a line, which Go folds into several.
+	mut long = "text/plain; a="
+	for i in 0..100 {
+		long = long + "x"
+	}
+	lines = append(lines, "P " + hex(bytesOf(long)))
+	for i in 0..400 {
+		let kinds = []str{"text", "application", "image", "video", "x/y"}
+		let subs = []str{"plain", "html", "json", "octet-stream", "xml"}
+		let names = []str{"charset", "boundary", "name"}
+		let values = []str{"utf-8", "x y", "\"q\"", "A"}
+		mut m = kinds[rng.Range(0, len(kinds))] + "/" + subs[rng.Range(0, len(subs))]
+		for k in 0..rng.Range(0, 4) {
+			m = m + "; " + names[rng.Range(0, len(names))] + "=" + values[rng.Range(0, len(values))]
+		}
+		lines = append(lines, "P " + hex(bytesOf(m)))
+	}
+	mut texts = qp()
+	let alphabet = []u8{'a', 'b', 'c', ' ', '=', '0', '1', '3', '9', '\r', '\n', '\t', 0xe9, 0xff}
+	for i in 0..400 {
+		mut t = []u8{}
+		for k in 0..rng.Range(0, 41) {
+			t = append(t, alphabet[rng.Range(0, len(alphabet))])
+		}
+		texts = append(texts, t)
+	}
+	for t in texts {
+		lines = append(lines, "Q " + hex(t))
+	}
+	mut all = bodies()
+	for i in 0..50 {
+		let boundary = "bnd" + mint.Itoa(rng.Range(0, 10))
+		mut data = "preamble\r\n"
+		for k in 0..rng.Range(1, 4) {
+			data = data + "--" + boundary + "\r\nContent-Disposition: form-data; name=\"p" + mint.Itoa(k) + "\"\r\n\r\nv" + mint.Itoa(k) + "\r\n"
+		}
+		data = data + "--" + boundary + "--\r\n"
+		all = append(all, body{boundary: boundary, data: bytesOf(data)})
+	}
+	for b in all {
+		lines = append(lines, "M " + hex(bytesOf(b.boundary)) + " " + hex(b.data))
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/mime")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "mime-")
+	let tin = ci.Join(work, "mime-tin")
+	ci.BuildTin("tools/ci/fixtures/mime.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "mime-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/mime"}, ci.Root(), 300), "go build mime")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "mime: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + " (corpus line " + corpusLine(lines, i) + "):")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "mime: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("mime: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's mime, quoted-printable and multipart")
+}
+
+// corpusLine is the corpus line an output line came from (every case prints one line).
+fn corpusLine(lines []str, outIndex i64) str {
+	if outIndex < len(lines) {
+		return lines[outIndex]
+	}
+	return "?"
+}
