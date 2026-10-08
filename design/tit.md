@@ -375,8 +375,8 @@ use lock = change.Lock(dir)    // `use` is `let lock = try …` plus a deferred 
 // package store
 shape ObjectStore {
 	Has(id object.Id) bool
-	Get(id object.Id) !object.Object
-	GetRaw(id object.Id) !(object.Kind, str)    // the body, without decoding
+	mut Get(id object.Id) !object.Object        // mut: a store may remember what it read (a cache, an open pack)
+	mut GetRaw(id object.Id) !(object.Kind, str)    // the body, without decoding
 	mut Put(o object.Object) !object.Id
 	mut PutRaw(kind object.Kind, body str) !object.Id
 }
