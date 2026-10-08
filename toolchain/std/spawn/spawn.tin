@@ -107,6 +107,11 @@ fn (p mut Process) Wait() !i64 {
 	return code
 }
 
+// Pid is the child's process number.
+fn (p Process) Pid() i64 {
+	return p.pid
+}
+
 // Signal sends sig to the child.
 fn (p Process) Signal(sig i64) ! {
 	try spawnSignal(p.pid, sig)

@@ -1,0 +1,154 @@
+package nettest
+
+import "../ci"
+import "mint"
+import "seal"
+import "twine"
+import "wire"
+
+// A WebSocket client that writes frames by hand, so a check can send what a browser never would (unmasked frames, bad UTF-8).
+
+// Socket is a connected WebSocket: the TCP connection and the bytes read past the handshake.
+type Socket struct {
+	C wire.Conn
+	Rest str
+}
+
+// Frame is a message frame: its opcode and payload.
+type Frame struct {
+	Op i64
+	Data str
+}
+
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+// Connect opens a WebSocket on the path and checks the handshake answer.
+fn Connect(port i64, path str) Socket {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		ci.Fail("websocket: cannot connect to port " + mint.Itoa(port))
+		panic("unreachable")
+	}
+	let key = seal.B64(seal.RandomBytes(16))
+	c.Write("GET " + path + " HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n\r\n") catch _ {
+		ci.Fail("websocket: cannot send the handshake")
+	}
+	mut buf = []u8{}
+	mut head = ""
+	mut rest = ""
+	for {
+		c.Read(mut buf, 4096) catch _ {
+			ci.Fail("websocket: the connection closed during the handshake")
+		}
+		let text = str(buf)
+		let split = twine.Index(text, "\r\n\r\n")
+		if split >= 0 {
+			head = text[0:split]
+			rest = text[split + 4:]
+			break
+		}
+	}
+	let accept = seal.B64(seal.Sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	ci.Check(twine.HasPrefix(head, "HTTP/1.1 101"), "websocket: handshake answered " + head)
+	ci.Check(twine.Contains(head, accept), "websocket: Sec-WebSocket-Accept is not " + accept + " in " + head)
+	return Socket{C: c, Rest: rest}
+}
+
+// Send writes one frame, masked unless mask is false.
+fn (s mut Socket) Send(op i64, data str, fin bool, mask bool) {
+	mut b0 = op
+	if fin {
+		b0 = b0 | 128
+	}
+	mut maskBit = 0
+	if mask {
+		maskBit = 128
+	}
+	mut frame = []u8{u8(b0)}
+	let n = len(data)
+	if n < 126 {
+		frame = append(frame, u8(maskBit | n))
+	} else if n < 65536 {
+		frame = append(frame, u8(maskBit | 126))
+		frame = append(frame, u8(n >> 8))
+		frame = append(frame, u8(n & 255))
+	} else {
+		frame = append(frame, u8(maskBit | 127))
+		for i in 0..8 {
+			frame = append(frame, u8(n >> (8 * (7 - i))))
+		}
+	}
+	if mask {
+		let key = seal.RandomBytes(4)
+		for k in key {
+			frame = append(frame, k)
+		}
+		for i in 0..n {
+			frame = append(frame, data[i] ^ key[i % 4])
+		}
+	} else {
+		for i in 0..n {
+			frame = append(frame, data[i])
+		}
+	}
+	s.C.WriteBytes(frame) catch _ {
+		ci.Fail("websocket: cannot send a frame")
+	}
+}
+
+// Text sends a final masked text frame.
+fn (s mut Socket) Text(data str) {
+	s.Send(1, data, true, true)
+}
+
+// take returns n bytes, reading more from the connection as needed.
+fn (s mut Socket) take(n i64) str {
+	for len(s.Rest) < n {
+		mut buf = []u8{}
+		s.C.Read(mut buf, 65536) catch _ {
+			ci.Fail("websocket: the connection closed while a frame was expected")
+		}
+		s.Rest = s.Rest + str(buf)
+	}
+	let out = s.Rest[0:n]
+	s.Rest = s.Rest[n:]
+	return out
+}
+
+// Recv reads one frame (the server's frames are not masked).
+fn (s mut Socket) Recv() Frame {
+	let h = s.take(2)
+	let b0 = i64(h[0])
+	let b1 = i64(h[1])
+	ci.Check((b1 & 128) == 0, "websocket: the server masked a frame")
+	mut n = b1 & 127
+	if n == 126 {
+		let x = s.take(2)
+		n = (i64(x[0]) << 8) | i64(x[1])
+	} else if n == 127 {
+		let x = s.take(8)
+		n = 0
+		for i in 0..8 {
+			n = (n << 8) | i64(x[i])
+		}
+	}
+	return Frame{Op: b0 & 15, Data: s.take(n)}
+}
+
+// Close ends the TCP connection.
+fn (s mut Socket) Close() {
+	s.C.Close()
+}
+
+// End closes politely: a close frame, its echo, then the connection.
+fn (s mut Socket) End() {
+	s.Send(8, "\x03\xe8", true, true)
+	let f = s.Recv()
+	ci.Check(f.Op == 8 && f.Data == "\x03\xe8", "websocket: close answered " + mint.Itoa(f.Op))
+	s.C.Close()
+}

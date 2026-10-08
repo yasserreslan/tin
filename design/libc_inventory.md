@@ -114,6 +114,6 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `shutdown` | `packages/anvil/anvil.tin` | 3 | removed | shutdown raw syscall | HTTP conformance and graceful shutdown |
 | `sigaction` | `toolchain/runtime/runtime.tin` | 3 | removed | rt_sigaction and per-architecture restorer | Existing native stack-overflow/bad-access probes; signal-return tests (phase 3) |
 | `sigaltstack` | `toolchain/runtime/runtime.tin` | 3 | removed | sigaltstack raw syscall | Existing native per-thread stack-overflow probes (issue #175) |
-| `munmap` | `toolchain/runtime/memory.tin` | 3 | removed | munmap raw syscall | memory_check.py; task_memory_check.py |
-| `madvise` | `toolchain/runtime/runtime.tin` | 3 | removed | madvise raw syscall | task_memory_check.py after heavy burst |
+| `munmap` | `toolchain/runtime/memory.tin` | 3 | removed | munmap raw syscall | memory_check.py; task_memory_check.tin |
+| `madvise` | `toolchain/runtime/runtime.tin` | 3 | removed | madvise raw syscall | task_memory_check.tin after heavy burst |
 | `syscall` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | Generated leaf uses svc/syscall directly; the fallback went with the seed refresh (#339) | syscall_check.tin dynamic-import assertion; bootstrap |

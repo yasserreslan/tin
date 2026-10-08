@@ -1,0 +1,81 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// A 300-request heavy burst releases task pools/stack pages and caps cached tasks (#177).
+
+// run sends the heavy requests all at once, waits until the server holds them all, takes the peak memory, then releases them. It returns the peak memory and the answers.
+fn run(port i64, server nettest.Server) (i64, []str) {
+	mut conns = []wire.Conn{}
+	for i in 0..300 {
+		conns = append(conns, nettest.Send(port, nettest.GetRequest("/heavy")))
+		// the accept queue of a Mac is 128 deep: let the server take them as they come
+		tide.Sleep(3000000)
+	}
+	let end = tide.Now() + 15000000000
+	for ci.Num(twine.Fields(nettest.Get(port, "/stats"))[0]) != 300 {
+		ci.Check(tide.Now() < end, "task memory: 300 requests did not overlap")
+		tide.Sleep(20000000)
+	}
+	// (on a Mac the ps started here would break open sockets: the figures are Linux acceptance anyway)
+	mut peak = i64(0)
+	if ci.Linux() {
+		peak = nettest.RssKiB(server.Pid)
+	}
+	ci.Check(nettest.Get(port, "/release") == "released", "task memory: /release")
+	mut answers = []str{}
+	for i in 0..len(conns) {
+		mut c = conns[i]
+		let r = nettest.Finish(mut c, 25)
+		ci.Check(r.Status == 200, "task memory: heavy " + mint.Itoa(i) + " answered " + mint.Itoa(r.Status))
+		answers = append(answers, r.Body)
+	}
+	return peak, answers
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/task-memory")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "burst-")
+	ci.CopyLib(ci.Root(), ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/memoryprobe")
+	ci.Mkdirs(probe)
+	ci.Write(ci.Join(probe, "probe.tin"), ci.Read(ci.Join(ci.Root(), "tools/ci/fixtures/memory_probe.tin")))
+	let exe = ci.Join(work, "server")
+	ci.BuildTin("tools/ci/fixtures/memory_burst.tin", exe, work, []str{})
+	let port = nettest.Port()
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_GRACE=1", "TIN_DEADLINE_MS=20000"}, ci.Join(out, "server.log"), port)
+	server.Ready(5)
+	ci.Check(twine.Fields(nettest.Get(port, "/stats"))[0] == "0", "task memory: the server was not idle at the start")
+	let baseline = nettest.RssKiB(server.Pid)
+	let (peak, answers) = run(port, server)
+	for a in answers {
+		ci.Check(a == answers[0] && twine.HasPrefix(a, "done "), "task memory: the answers differ: " + a)
+	}
+	mut settled = false
+	for i in 0..300 {
+		let words = twine.Fields(nettest.Get(port, "/stats"))
+		let active = ci.Num(words[0])
+		let cached = ci.Num(words[1])
+		ci.Check(active == 0 && cached <= 64, "task memory: active " + mint.Itoa(active) + " cached " + mint.Itoa(cached))
+		settled = true
+	}
+	let after = nettest.RssKiB(server.Pid)
+	// RSS acceptance is Linux; macOS still exercises all task/response invariants.
+	if ci.Linux() {
+		ci.Check(peak > baseline + 300 * 1024, "task memory: peak " + mint.Itoa(peak) + " against baseline " + mint.Itoa(baseline))
+		ci.Check(after < baseline + 32 * 1024, "task memory: after " + mint.Itoa(after) + " against baseline " + mint.Itoa(baseline))
+	}
+	server.Stop()
+	ci.Remove(work)
+	if settled {
+		ci.Pass("#177: 300 overlapping heavy requests, complete responses, cached tasks <= 64")
+	}
+	say.Line("RSS KiB baseline/peak/after: " + mint.Itoa(baseline) + " " + mint.Itoa(peak) + " " + mint.Itoa(after))
+}

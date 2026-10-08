@@ -126,7 +126,11 @@ fn runIn(root str, exe str, args []str, env []str) (ci.Out, bool) {
 			argv = append(argv, e)
 		}
 	}
-	argv = append(argv, "chroot")
+	mut chroot = twine.TrimSpace(ci.Sh("command -v chroot", "", 5).Stdout)
+	if len(chroot) == 0 {
+		chroot = "/usr/sbin/chroot"
+	}
+	argv = append(argv, chroot)
 	argv = append(argv, root)
 	argv = append(argv, "/prog")
 	for a in args {

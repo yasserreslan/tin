@@ -73,15 +73,15 @@ jobs:
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
       - name: Task memory after a 300-request heavy burst
-        run: python3 tools/ci/task_memory_check.py
+        run: sh tools/ci/tin.sh task_memory_check
       - name: Long-lived blocks above 4 KiB (slab classes to 256 KiB, kept mappings, mappings after deletes)
         run: sh tools/ci/tin.sh heap_check
       - name: shared let and atomic (one copy of a 100 MB table for 1 and 8 cores, an exact atomic count)
-        run: python3 tools/ci/shared_check.py
+        run: sh tools/ci/tin.sh shared_check
       - name: Map growth (no insert into a growing long-lived map takes a millisecond)
         run: sh tools/ci/tin.sh map_growth_check
       - name: Reclamation with long-lived tasks (a parked WebSocket does not pin dropped blocks)
-        run: python3 tools/ci/limbo_check.py
+        run: sh tools/ci/tin.sh limbo_check
       - name: Arena blocks and CSV streaming (flat peak RSS; a 1 GiB file in a 64 KiB window)
         run: python3 tools/ci/arena_check.py
       - name: Replay tapes (record, replay, divergence)

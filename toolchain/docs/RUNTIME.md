@@ -176,7 +176,7 @@ A long-lived task avoids this by waiting outside the epochs (#358): `hearth.Quie
 from long-lived memory across the wait: `let u = cache[k]` before it must not be used after it
 (read `cache[k]` again). With one WebSocket connection parked on the only core, 10 million
 overwrites of a cache entry leave 80 counted blocks and an empty limbo
-(`tools/ci/limbo_check.py`); a detached loop that waits plainly in the same check pins 1.5
+(`tools/ci/limbo_check.tin`); a detached loop that waits plainly in the same check pins 1.5
 million blocks and fills the limbo. A request that
 a client closes after its response (`Connection: close`, HTTP/1.0) now also ends at a
 quiescent point; before, a core serving only such clients never released anything.
