@@ -1,4 +1,4 @@
-// An HTTP/2 client for tools/ci/fixtures/h2.tin, run by tools/ci/h2_check.py (#360): Go's own
+// An HTTP/2 client for tools/ci/fixtures/h2.tin, run by tools/ci/h2_check.tin (#360): Go's own
 // HTTP/2 implementation (net/http: h2c by prior knowledge, or h2 over TLS by ALPN with -ca)
 // against anvil's, with Huffman-coded headers and the dynamic table, request trailers, many
 // streams at once and large bodies.

@@ -1,4 +1,4 @@
-// A gRPC server (grpc-go) for wire's HTTP/2 client (#480), run by tools/ci/h2_check.py:
+// A gRPC server (grpc-go) for wire's HTTP/2 client (#480), run by tools/ci/h2_check.tin:
 // helloworld.Greeter/SayHello over cleartext HTTP/2, with wrapperspb.StringValue in place of
 // HelloRequest and HelloReply (the same bytes on the wire), so no generated code is needed. An
 // empty name is INVALID_ARGUMENT.

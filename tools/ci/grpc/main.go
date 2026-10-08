@@ -1,4 +1,4 @@
-// A gRPC client (grpc-go) for examples/grpc.tin, run by tools/ci/h2_check.py (#360). It calls
+// A gRPC client (grpc-go) for examples/grpc.tin, run by tools/ci/h2_check.tin (#360). It calls
 // helloworld.Greeter/SayHello with wrapperspb.StringValue, whose single string field 1 is
 // wire-identical to HelloRequest and HelloReply, so no generated code is needed.
 package main

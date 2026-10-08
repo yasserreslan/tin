@@ -823,7 +823,7 @@ are ignored (the client retries them on another connection).
 lines, a `content-length` for the body, the trailers. Replayed, it comes in over HTTP/1.1, so
 `Req.Proto` says `HTTP/1.1` there.
 
-**Conformance.** `tools/ci/h2_check.py` runs h2spec's generic, http2 and hpack cases but one:
+**Conformance.** `tools/ci/h2_check.tin` runs h2spec's generic, http2 and hpack cases but one:
 http2/3.5/2 sends `INVALID CONNECTION PREFACE` to a port that also speaks HTTP/1.1, where it is a
 malformed request line and gets 400, as any HTTP/1.1 server answers it. RFC 9113 3.4 makes an
 invalid preface a connection error on a connection known to be HTTP/2: after `PRI * HTTP/2.0`, and

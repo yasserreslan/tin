@@ -6,7 +6,7 @@ import "mint"
 import "quarry"
 import "tide"
 
-// #360: HTTP/2. Routes for h2_check.py (the same handlers serve HTTP/1.1):
+// #360: HTTP/2. Routes for h2_check.tin (the same handlers serve HTTP/1.1):
 //   /                 a fixed body (h2spec's requests)
 //   /echo             the protocol, method, path, query, body length and sum, x-test, cookie and x-trailer
 //   /wait?ms=M        answers after M ms (herald logs "wait canceled" when the wait fails)
