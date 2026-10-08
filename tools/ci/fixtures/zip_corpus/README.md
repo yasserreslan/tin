@@ -1,0 +1,1 @@
+These small archives are copied from Go's `src/archive/zip/testdata` in Go 1.27.1, under the repository's BSD license. They cover ordinary ZIPs, self-extracting prefixes, data descriptors, extended timestamps, Unicode names, Unix attributes, symlinks, duplicate directory entries and ZIP64.

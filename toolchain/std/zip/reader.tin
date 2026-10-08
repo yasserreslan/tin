@@ -538,7 +538,7 @@ fn (r mut FileReader) Read(buf mut []u8) !i64 {
 			r.err = ErrChecksum
 			fail r.err
 		}
-	} else if r.want != 0 && r.crc != r.want {
+	} else if r.crc != r.want {
 		r.err = ErrChecksum
 		fail r.err
 	}
