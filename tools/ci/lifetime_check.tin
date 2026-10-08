@@ -4,6 +4,7 @@ import "./ci"
 import "./nettest"
 import "mint"
 import "say"
+import "spawn"
 import "tide"
 import "twine"
 import "wire"
@@ -165,6 +166,55 @@ fn checks(port i64, directory str) {
 	say.Line("WebSocket cleanup: 300 closed connections, automatic release and repeated Close")
 }
 
+// sayLines (#747): stdout is a pipe, as under docker logs or journald. Each request's say.Line is readable within 200 ms of its
+// response, and after SIGKILL the pipe holds the line of every answered request (it used to wait in a 64 KiB buffer and be lost).
+fn sayLines(exe str, directory str, out str) {
+	let port = nettest.Port()
+	let log = ci.Join(out, "saylines.log")
+	let pidfile = log + ".pid"
+	ci.Remove(pidfile)
+	ci.Remove(log)
+	// the server's stdout is the pipe to cat, which copies it to the log
+	let argv = []str{"sh", "-c", "pidfile=$0; log=$1; shift; {{ \"$@\" 2>/dev/null & echo $! > \"$pidfile\"; wait; }} | cat > \"$log\"", pidfile, log, "env", "TIN_CORES=2", "REVIEW_DIR=" + directory, "PORT=" + mint.Itoa(port), exe}
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}
+	spawn.Start(c) catch err {
+		ci.Fail("cannot start " + exe + ": " + say.Str(err))
+		return
+	}
+	mut pid = 0
+	nettest.Eventually(5.0, fn() bool {
+		return len(twine.TrimSpace(ci.Read(pidfile))) > 0
+	})
+	pid = ci.Num(twine.TrimSpace(ci.Read(pidfile)))
+	let server = nettest.Server{Pid: pid, Port: port, Log: log}
+	server.Ready(10)
+	for i in 0..10 {
+		expectReply(port, "/log?n=" + mint.Itoa(i), 200, "logged")
+		let want = "log " + mint.Itoa(i) + " x"
+		let end = tide.Now() + 200000000
+		for tide.Now() < end && !twine.Contains(ci.Read(log), want) {
+			tide.Sleep(5000000)
+		}
+		ci.Check(twine.Contains(ci.Read(log), want), "lifetime: request " + mint.Itoa(i) + " was answered, its say.Line not on stdout within 200 ms")
+	}
+	for i in 10..20 {
+		expectReply(port, "/log?n=" + mint.Itoa(i), 200, "logged")
+	}
+	server.Signal("KILL")
+	mut lines = 0
+	nettest.Eventually(3.0, fn() bool {
+		lines = 0
+		for l in twine.Split(ci.Read(log), "\n") {
+			if twine.HasPrefix(l, "log ") && len(l) > 300 {
+				lines += 1
+			}
+		}
+		return lines == 20
+	})
+	ci.Check(lines == 20, "lifetime: after SIGKILL the pipe held " + mint.Itoa(lines) + " of 20 lines")
+	say.Line("say.Line to a pipe: each line within 200 ms of its response, all 20 still there after SIGKILL (#747)")
+}
+
 fn main() {
 	let out = ci.Join(ci.Root(), "bin/ci/lifetime")
 	ci.Mkdirs(out)
@@ -207,6 +257,7 @@ fn main() {
 		}
 		server.Stop()
 	}
+	sayLines(exe, directory, out)
 	ci.Remove(directory)
-	ci.Pass("lifetime: helper deadlines, WebSocket scope and cleanup")
+	ci.Pass("lifetime: helper deadlines, WebSocket scope and cleanup, say.Line to a pipe")
 }

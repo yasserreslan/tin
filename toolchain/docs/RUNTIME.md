@@ -220,8 +220,10 @@ fires. Messages are copied into the receiver's request pool.
 ## 6. Output and formatting
 
 - `say` output goes through a 64 KiB stdout buffer guarded by a spinlock (shared by all
-  cores). It is flushed when full, at exit, at every newline on a terminal, and by
-  `rt_flush()`.
+  cores). It is flushed when full, at exit, by `rt_flush()`, and whenever the text appended
+  holds a newline, whether stdout is a terminal, a pipe or a file (#747): one `write(2)` per
+  line, as Go pays, so a server's lines reach `docker logs` or journald at once and none is
+  lost when the process is killed. Text without a newline (`say.Text`) waits for the next one.
 - Formatting uses a per-core frame: the compiler emits one `rt_fmt_*` call per argument
   by static type (`rt_fmt_i`, `_u`, `_s`, `_f`, `_b`, `_e`, slices, maps, structs).
 - Frames, their text buffers and their scratch space for a number's digits live in the
