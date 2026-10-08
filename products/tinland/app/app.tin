@@ -3,14 +3,14 @@
 package app
 
 import "appkit"
-import "editor"
+import "../editor"
 import "gpuwin"
 import "metal"
 import "quarry"
-import "render"
+import "../render"
 import "textedit"
-import "theme"
-import "workspace"
+import "../theme"
+import "../workspace"
 
 // Run opens the window for the workspace and serves it until it is closed: AppKit calls the window's callbacks (gpuwin writes
 // each key, mouse event, menu choice and close request in a queue as it happens), and between events the workspace takes what

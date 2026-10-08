@@ -2,7 +2,7 @@
 // modelled on Zed's One Dark.
 package theme
 
-import "ui"
+import "../ui"
 
 type Theme struct {
 	// surfaces
@@ -41,37 +41,37 @@ type Theme struct {
 	Func i64
 }
 
-// Dark is the default theme.
+// Dark is the default theme: VS Code's Dark Modern.
 fn Dark() Theme {
 	return Theme{
-		Background: ui.Hex(0x282c33),
-		Panel: ui.Hex(0x2f343e),
-		TitleBar: ui.Hex(0x2f343e),
-		StatusBar: ui.Hex(0x2f343e),
-		Editor: ui.Hex(0x282c33),
-		TabBar: ui.Hex(0x2f343e),
-		TabActive: ui.Hex(0x282c33),
-		Border: ui.Hex(0x464b57),
-		Hover: ui.Hex(0x363c46),
-		Selected: ui.Hex(0x454a56),
-		Accent: ui.Hex(0x74ade8),
-		Text: ui.Hex(0xdce0e5),
-		Muted: ui.Hex(0xa9afbc),
-		Faint: ui.Hex(0x878a98),
-		Error: ui.Hex(0xd07277),
-		Warning: ui.Hex(0xdec184),
-		Gutter: ui.Hex(0x4e5a5f),
-		GutterActive: ui.Hex(0xdce0e5),
-		Cursor: ui.Hex(0x74ade8),
-		Selection: ui.HexA(0x74ade8, 0.25),
-		LineHighlight: ui.HexA(0xffffff, 0.04),
-		Match: ui.HexA(0xdec184, 0.35),
-		Keyword: ui.Hex(0xb477cf),
-		String: ui.Hex(0xa1c181),
-		Number: ui.Hex(0xbf956a),
-		Comment: ui.Hex(0x5d636f),
-		Constant: ui.Hex(0xdfc184),
-		Type: ui.Hex(0x6eb4bf),
-		Func: ui.Hex(0x73ade9)
+		Background: ui.Hex(0x1f1f1f),
+		Panel: ui.Hex(0x181818),
+		TitleBar: ui.Hex(0x181818),
+		StatusBar: ui.Hex(0x181818),
+		Editor: ui.Hex(0x1f1f1f),
+		TabBar: ui.Hex(0x181818),
+		TabActive: ui.Hex(0x1f1f1f),
+		Border: ui.Hex(0x2b2b2b),
+		Hover: ui.Hex(0x2a2d2e),
+		Selected: ui.Hex(0x37373d),
+		Accent: ui.Hex(0x0078d4),
+		Text: ui.Hex(0xcccccc),
+		Muted: ui.Hex(0x9d9d9d),
+		Faint: ui.Hex(0x6e7681),
+		Error: ui.Hex(0xf14c4c),
+		Warning: ui.Hex(0xcca700),
+		Gutter: ui.Hex(0x6e7681),
+		GutterActive: ui.Hex(0xcccccc),
+		Cursor: ui.Hex(0xaeafad),
+		Selection: ui.Hex(0x264f78),
+		LineHighlight: ui.Hex(0x282828),
+		Match: ui.HexA(0xea5c00, 0.33),
+		Keyword: ui.Hex(0x569cd6),
+		String: ui.Hex(0xce9178),
+		Number: ui.Hex(0xb5cea8),
+		Comment: ui.Hex(0x6a9955),
+		Constant: ui.Hex(0x4fc1ff),
+		Type: ui.Hex(0x4ec9b0),
+		Func: ui.Hex(0xdcdcaa)
 	}
 }

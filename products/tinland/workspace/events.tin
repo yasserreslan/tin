@@ -1,7 +1,7 @@
 package workspace
 
 import "appkit"
-import "editor"
+import "../editor"
 import "textedit"
 
 // Commands of the workspace, besides the editor's (editor.Cmd...). The menu bar sends these numbers.
@@ -10,6 +10,15 @@ const CmdToggleProject = 101
 const CmdNewFile = 102
 const CmdNewFolder = 103
 const CmdRevealInProject = 104
+const CmdQuickOpen = 105
+const CmdPalette = 106
+const CmdSearch = 107
+const CmdToggleOutput = 108
+const CmdRefresh = 109
+const CmdNewFolder2 = 110
+const CmdRename = 111
+const CmdDelete = 112
+const CmdCollapseAll = 113
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
@@ -28,7 +37,15 @@ fn (ws mut Workspace) Event(e i64) {
 		return
 	}
 	if t == evScroll {
-		ws.scroll(appkit.EventScrollX(e), appkit.EventScrollY(e))
+		let (sx, sy) = appkit.EventLocation(e)
+		ws.MouseX = sx
+		ws.MouseY = ws.H - sy
+		// a mouse wheel reports lines, a trackpad points
+		mut k = 1.0
+		if !appkit.EventPreciseScroll(e) {
+			k = 12.0
+		}
+		ws.scroll(appkit.EventScrollX(e) * k, appkit.EventScrollY(e) * k)
 		return
 	}
 	if t != evMouseDown && t != evMouseUp && t != evMouseMoved && t != evMouseDragged {
@@ -57,6 +74,14 @@ fn (ws mut Workspace) Event(e i64) {
 
 // key handles a key press: the workspace's own shortcuts first, then the editor.
 fn (ws mut Workspace) key(code i64, flags i64, chars str) {
+	if ws.Picker.Open {
+		ws.pickerKey(code, flags, chars)
+		return
+	}
+	if ws.Focus == FocusSearch && (flags & appkit.ModCmd) == 0 {
+		ws.searchKey(code, flags, chars)
+		return
+	}
 	if (flags & appkit.ModCmd) != 0 && (flags & appkit.ModShift) == 0 && (flags & appkit.ModAlt) == 0 && chars == "b" {
 		ws.Perform(CmdToggleProject)
 		return
@@ -86,8 +111,30 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.Drag = dragText
 		return
 	}
+	if ws.Picker.Open {
+		if id >= idPickerItem && id < idSearchRow {
+			ws.accept(id - idPickerItem)
+		} else if id != idPickerInput {
+			ws.ClosePicker()
+		}
+		return
+	}
+	ws.Focus = FocusEditor
 	ws.Ed.Mode = 0
-	if id == idDivider {
+	if id == idSearchInput {
+		ws.Focus = FocusSearch
+	} else if id == idSearchCase {
+		ws.Search.Case = !ws.Search.Case
+		ws.Search.Done = false
+	} else if id == idSearchWord {
+		ws.Search.Word = !ws.Search.Word
+		ws.Search.Done = false
+	} else if id == idSearchRegex {
+		ws.Search.Regex = !ws.Search.Regex
+		ws.Search.Done = false
+	} else if id >= idSearchRow {
+		ws.OpenMatch(id - idSearchRow)
+	} else if id == idDivider {
 		ws.Drag = dragDivider
 	} else if id == idTitle {
 		ws.Drag = DragTitle
@@ -99,12 +146,14 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.Ed.Activate(id - idTabBase)
 	} else if id >= idPanelBase && id < idTabBase {
 		ws.togglePanel(id - idPanelBase)
-	} else if id >= idOutputLine {
+	} else if id >= idOutputLine && id < idPickerItem {
 		ws.Ed.JumpTo(ws.Ed.Output[id - idOutputLine])
 	} else if id == idOutputClose {
 		ws.Ed.OutputOpen = false
 	} else if id == idNewFile {
 		ws.Perform(CmdNewFile)
+	} else if id == idRefresh {
+		ws.Perform(CmdRefresh)
 	}
 }
 
@@ -148,6 +197,9 @@ fn (ws mut Workspace) togglePanel(k i64) {
 	} else {
 		ws.LeftOpen = true
 		ws.Panel = k
+		if k == PanelSearch {
+			ws.Focus = FocusSearch
+		}
 	}
 }
 
@@ -161,6 +213,30 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		if len(path) > 0 {
 			ws.OpenFolder(path)
 		}
+	} else if cmd == CmdQuickOpen {
+		ws.OpenPicker(PickFile)
+	} else if cmd == CmdPalette {
+		ws.OpenPicker(PickCommand)
+	} else if cmd == CmdSearch {
+		ws.LeftOpen = true
+		ws.Panel = PanelSearch
+		ws.Focus = FocusSearch
+	} else if cmd == CmdToggleOutput {
+		ws.Ed.OutputOpen = !ws.Ed.OutputOpen
+	} else if cmd == CmdRefresh {
+		if ws.HasProj {
+			ws.Proj.Refresh()
+		}
+	} else if cmd == CmdNewFile {
+		ws.OpenPicker(PickNewFile)
+	} else if cmd == CmdNewFolder2 {
+		ws.OpenPicker(PickNewFolder)
+	} else if cmd == CmdRename {
+		ws.OpenPicker(PickRename)
+	} else if cmd == CmdDelete {
+		ws.deleteSelected()
+	} else if cmd == CmdCollapseAll {
+		ws.collapseAll()
 	} else if cmd == CmdRevealInProject {
 		if ws.HasProj && len(ws.Ed.Buf.Path) > 0 {
 			ws.Proj.Reveal(ws.Ed.Buf.Path)
@@ -175,4 +251,30 @@ fn (ws mut Workspace) Perform(cmd i64) {
 	} else {
 		ws.Ed.Perform(cmd)
 	}
+}
+
+// deleteSelected removes the selected file or folder after asking.
+fn (ws mut Workspace) deleteSelected() {
+	if !ws.HasProj || ws.Proj.Selected <= 0 {
+		return
+	}
+	let e = ws.Proj.Entries[ws.Proj.Selected]
+	if appkit.Alert("Delete " + e.Name + "?", "This removes it from disk and cannot be undone.", []str{"Delete", "Cancel"}) != 0 {
+		return
+	}
+	ws.Proj.Delete(ws.Proj.Selected) catch _ {
+		ws.Ed.Say("cannot delete " + e.Name)
+		return
+	}
+}
+
+// collapseAll closes every folder of the project panel.
+fn (ws mut Workspace) collapseAll() {
+	if !ws.HasProj {
+		return
+	}
+	for i in 1..len(ws.Proj.Entries) {
+		ws.Proj.Entries[i].Open = false
+	}
+	ws.Proj.Rebuild()
 }

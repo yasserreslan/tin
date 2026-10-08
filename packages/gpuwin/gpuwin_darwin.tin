@@ -123,6 +123,7 @@ fn Open(title str, w f64, h f64) (Window, metal.Gpu) {
 		appkit.AddMethod(view, "mouseDown:", viewEvent, "v@:@")
 		appkit.AddMethod(view, "mouseUp:", viewEvent, "v@:@")
 		appkit.AddMethod(view, "mouseDragged:", viewEvent, "v@:@")
+		appkit.AddMethod(view, "mouseMoved:", viewEvent, "v@:@")
 		appkit.AddMethod(view, "rightMouseDown:", viewEvent, "v@:@")
 		appkit.AddMethod(view, "scrollWheel:", viewEvent, "v@:@")
 		appkit.AddMethod(view, "acceptsFirstResponder", viewYes, "B@:")
@@ -145,6 +146,7 @@ fn Open(title str, w f64, h f64) (Window, metal.Gpu) {
 	win.Win.View = win.View
 	win.Win.Layer = win.Layer
 	appkit.Send1(win.Win.Win, "makeFirstResponder:", win.View)
+	appkit.Send1(win.Win.Win, "setAcceptsMouseMovedEvents:", 1)
 	win.Delegate = appkit.Send(appkit.Send(appkit.Class("TinDelegate"), "alloc"), "init")
 	appkit.Send1(win.Win.Win, "setDelegate:", win.Delegate)
 	appkit.Send1(win.Win.App, "setDelegate:", win.Delegate)
@@ -175,7 +177,6 @@ fn Pump(win Window, seconds f64) bool {
 	appkit.Dispatch(win.Win, e)
 	return true
 }
-
 
 // NewMenuBar makes the menu bar whose items call OnCommand with their tag.
 fn NewMenuBar(win Window) appkit.Menu {

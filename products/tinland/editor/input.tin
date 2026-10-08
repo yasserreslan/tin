@@ -41,6 +41,7 @@ fn (ed mut Editor) KeyDown(code i64, flags i64, chars str) {
 fn (ed mut Editor) MouseDown(x f64, y f64, clicks i64, flags i64) {
 	ed.Mode = modeEdit
 	ed.CompOpen = false
+	ed.Follow = true
 	ed.mouseTo(x, y, (flags & flagShift) != 0)
 	if (flags & flagCmd) != 0 {
 		ed.gotoDefinition()

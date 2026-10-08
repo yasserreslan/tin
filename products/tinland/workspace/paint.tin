@@ -1,8 +1,8 @@
 package workspace
 
 import "metal"
-import "render"
-import "ui"
+import "../render"
+import "../ui"
 
 // NeedsFrame reports whether anything changed since the last frame (the workspace's own state or the editor's).
 fn (ws Workspace) NeedsFrame() bool {

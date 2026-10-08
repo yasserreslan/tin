@@ -2,11 +2,11 @@ package editor
 
 import "metal"
 import "mint"
-import "render"
+import "../render"
 import "say"
 import "textedit"
-import "theme"
-import "ui"
+import "../theme"
+import "../ui"
 
 // The editor's text area, painted on the GPU: line numbers, the current line, the selection, the text in syntax colors, the
 // diagnostics, the caret, a scroll bar and the completion list. Everything is placed on a grid of cells, CharW by LineH points,
@@ -141,7 +141,10 @@ fn (ed Editor) rowTop(n i64) f64 {
 fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut metal.Scene) {
 	ed.AreaW = w
 	ed.AreaH = h
-	ed.ensureVisible()
+	if ed.Follow {
+		ed.ensureVisible()
+		ed.Follow = false
+	}
 	render.Clip(mut scene, x, y, w, h)
 	render.Fill(mut scene, x, y, w, h, th.Editor)
 	let gutter = ed.gutterW()

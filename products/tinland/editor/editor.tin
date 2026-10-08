@@ -91,6 +91,8 @@ type Editor struct {
 	rawFor   i64
 	acc      f64
 	accX     f64
+	// Follow asks the next frame to scroll the caret into view (after typing or moving it, not after a wheel).
+	Follow   bool
 	dragging bool
 	clicks   i64
 	lastClick f64
@@ -147,6 +149,7 @@ fn (ed mut Editor) activate(i i64) {
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1
 	ed.Mode = modeEdit
+	ed.Follow = true
 	ed.Redraw = true
 }
 
@@ -365,6 +368,7 @@ fn typeable(chars str) bool {
 
 // handleKey acts on one key press.
 fn (ed mut Editor) handleKey(k Key) {
+	ed.Follow = true
 	ed.Blink = true
 	ed.Redraw = true
 	ed.Message = ""

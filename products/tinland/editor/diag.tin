@@ -1,6 +1,6 @@
 package editor
 
-import "language"
+import "../language"
 import "mint"
 import "quarry"
 import "tinsym"

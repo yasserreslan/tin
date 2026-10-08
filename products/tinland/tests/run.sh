@@ -17,6 +17,12 @@ if [ "$(uname -s)" != Darwin ]; then
 	echo "SKIP tinland editor tests: not macOS"
 	exit 0
 fi
+for name in workspace_logic; do
+	"$compiler" -o "$tmp/$name" "products/tinland/tests/programs/$name.tin"
+	"$tmp/$name" > "$tmp/$name.out"
+	cmp "$tmp/$name.out" "products/tinland/tests/golden/$name.out" || { echo "FAIL tinland $name"; exit 1; }
+	echo "PASS tinland $name"
+done
 "$compiler" -o "$tmp/tinland" products/tinland/main.tin
 script=$(sed "s|@PNG@|$tmp/editor.png|" products/tinland/tests/scripts/editor.script)
 case $compiler in /*) tinc=$compiler ;; *) tinc=$PWD/$compiler ;; esac

@@ -1,6 +1,6 @@
 package editor
 
-import "language"
+import "../language"
 import "twine"
 
 // output is what the last Run printed, shown in a panel above the status line until Escape.

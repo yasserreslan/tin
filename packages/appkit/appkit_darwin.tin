@@ -377,6 +377,11 @@ fn EventScrollY(e i64) f64 {
 	return SendDouble(e, "scrollingDeltaY")
 }
 
+// EventPreciseScroll reports whether a scroll-wheel event carries points (a trackpad) rather than lines (a mouse wheel).
+fn EventPreciseScroll(e i64) bool {
+	return Send(e, "hasPreciseScrollingDeltas") & 0xff != 0
+}
+
 // EventScrollX is the horizontal scroll of a scroll-wheel event in points.
 fn EventScrollX(e i64) f64 {
 	return SendDouble(e, "scrollingDeltaX")

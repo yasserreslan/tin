@@ -1,11 +1,11 @@
 package workspace
 
 import "mint"
-import "project"
-import "render"
+import "../project"
+import "../render"
 import "textedit"
 import "twine"
-import "ui"
+import "../ui"
 
 // Build describes the window as an element tree: the title bar, the project panel, the tabs, the editor, the output panel and the
 // status bar. It runs every frame; everything it reads is state, so the same state gives the same tree.
@@ -16,6 +16,9 @@ fn (ws Workspace) Build(t mut ui.Tree) {
 	t.Open(ui.HBox().Flex(1.0), 0)
 	if ws.LeftOpen && ws.Panel == PanelProject {
 		ws.projectPanel(mut t)
+		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
+	} else if ws.LeftOpen && ws.Panel == PanelSearch {
+		ws.searchPanel(mut t)
 		t.Leaf(ui.Box().Wide(1.0).Fill(th.Border), idDivider)
 	} else if ws.LeftOpen {
 		ws.placeholderPanel(mut t)
@@ -30,6 +33,9 @@ fn (ws Workspace) Build(t mut ui.Tree) {
 	t.Close()
 	t.Close()
 	ws.statusBar(mut t)
+	if ws.Picker.Open {
+		ws.pickerOverlay(mut t)
+	}
 	t.Close()
 }
 
@@ -65,6 +71,7 @@ fn (ws Workspace) projectPanel(t mut ui.Tree) {
 	}
 	t.Text(title, render.FontUIBold, th.Text, ui.Box().Flex(1.0))
 	if ws.HasProj {
+		ws.iconButton(mut t, render.IconRefresh, idRefresh)
 		ws.iconButton(mut t, render.IconPlus, idNewFile)
 	}
 	t.Close()
@@ -263,4 +270,100 @@ fn (ws Workspace) statusBar(t mut ui.Tree) {
 // statusText is the prompt of an open find or go-to-line box, or else the editor's last message.
 fn (ws Workspace) statusText() str {
 	return ws.Ed.StatusLine()
+}
+
+// searchPanel is the project search: the box, its three switches, and the matches grouped by file.
+fn (ws Workspace) searchPanel(t mut ui.Tree) {
+	let th = ws.Th
+	t.Open(ui.VBox().Wide(ws.LeftW).Fill(th.Panel), 0)
+	t.Open(ui.HBox().High(34.0).Items(ui.Center).PadXY(12.0, 0.0), 0)
+	t.Text("Search", render.FontUIBold, th.Text, ui.Box().Flex(1.0))
+	t.Close()
+	t.Open(ui.VBox().Spacing(6.0).PadXY(10.0, 0.0), 0)
+	mut edge = th.Border
+	if ws.Focus == FocusSearch {
+		edge = th.Accent
+	}
+	t.Open(ui.HBox().High(30.0).Items(ui.Center).Spacing(4.0).PadXY(8.0, 0.0).Fill(th.Editor).Round(4.0).Outline(1.0, edge), idSearchInput)
+	t.Open(ui.HBox().Flex(1.0).Items(ui.Center).Clipped(), 0)
+	if len(ws.Search.Query) == 0 {
+		t.Text("Search", render.FontUI, th.Faint, ui.Box())
+	} else {
+		t.Text(ws.Search.Query, render.FontUI, th.Text, ui.Box())
+	}
+	if ws.Focus == FocusSearch && ws.Ed.Blink {
+		t.Leaf(ui.Box().Size(1.5, 16.0).Fill(th.Cursor), 0)
+	}
+	t.Close()
+	ws.switchButton(mut t, "Aa", ws.Search.Case, idSearchCase)
+	ws.switchButton(mut t, "ab", ws.Search.Word, idSearchWord)
+	ws.switchButton(mut t, ".*", ws.Search.Regex, idSearchRegex)
+	t.Close()
+	t.Text(ws.Search.Summary(), render.FontSmall, th.Muted, ui.Box().PadXY(2.0, 2.0))
+	t.Close()
+	t.Open(ui.VBox().Flex(1.0).Scrolls(), idSearchScroll)
+	mut last = ""
+	for i in 0..len(ws.Search.Matches) {
+		let m = ws.Search.Matches[i]
+		if m.Path != last {
+			last = m.Path
+			t.Open(ui.HBox().High(24.0).Items(ui.Center).Spacing(6.0).PadXY(12.0, 0.0).Clipped(), 0)
+			t.Icon(fileIcon(m.Path), 12.0, th.Muted, ui.Box())
+			t.Text(ws.relPath(m.Path), render.FontUI, th.Text, ui.Box())
+			t.Close()
+		}
+		t.Open(ui.HBox().High(22.0).Items(ui.Center).Spacing(8.0).PadXY(24.0, 0.0).Hover(th.Hover).Clipped(), idSearchRow + i)
+		t.Text(mint.Itoa(m.Line + 1), render.FontSmall, th.Faint, ui.Box())
+		t.Text(twine.TrimSpace(m.Text), render.FontCode, th.Muted, ui.Box())
+		t.Close()
+	}
+	t.Close()
+	t.Close()
+}
+
+// switchButton is a small toggle with a short label (Aa, ab, .*).
+fn (ws Workspace) switchButton(t mut ui.Tree, label str, on bool, id i64) {
+	let th = ws.Th
+	mut bg = ui.None()
+	mut color = th.Muted
+	if on {
+		bg = th.Selected
+		color = th.Text
+	}
+	t.Open(ui.HBox().Size(22.0, 20.0).Items(ui.Center).Content(ui.JustifyCenter).Round(4.0).Fill(bg).Hover(th.Hover), id)
+	t.Text(label, render.FontSmall, color, ui.Box())
+	t.Close()
+}
+
+// pickerOverlay is the box over the window with the input and the choices, on a dimmed backdrop.
+fn (ws Workspace) pickerOverlay(t mut ui.Tree) {
+	let th = ws.Th
+	t.Leaf(ui.Box().At(0.0, 0.0).Size(ws.W, ws.H).Fill(ui.HexA(0x000000, 0.35)), 0)
+	let w = 580.0
+	t.Open(ui.VBox().Wide(w).At((ws.W - w) / 2.0, 70.0).Fill(th.Panel).Round(8.0).Outline(1.0, th.Border), idPickerInput)
+	t.Open(ui.HBox().High(42.0).Items(ui.Center).Spacing(8.0).PadXY(14.0, 0.0), 0)
+	if len(ws.Picker.Query) == 0 {
+		t.Text(ws.pickerPrompt(), render.FontUI, th.Faint, ui.Box())
+	} else {
+		t.Text(ws.Picker.Query, render.FontUI, th.Text, ui.Box())
+	}
+	if ws.Ed.Blink {
+		t.Leaf(ui.Box().Size(1.5, 18.0).Fill(th.Cursor), 0)
+	}
+	t.Close()
+	if len(ws.Picker.Items) > 0 {
+		t.Leaf(ui.Box().High(1.0).Fill(th.Border), 0)
+		t.Open(ui.VBox().PadXY(6.0, 6.0), 0)
+		for i in 0..len(ws.Picker.Items) {
+			mut bg = ui.None()
+			if i == ws.Picker.Sel {
+				bg = th.Selected
+			}
+			t.Open(ui.HBox().High(28.0).Items(ui.Center).PadXY(10.0, 0.0).Round(5.0).Fill(bg).Hover(th.Hover).Clipped(), idPickerItem + i)
+			t.Text(ws.Picker.Items[i], render.FontUI, th.Text, ui.Box())
+			t.Close()
+		}
+		t.Close()
+	}
+	t.Close()
 }
