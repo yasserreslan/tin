@@ -34,37 +34,56 @@ const usageShaderRead = 1
 const usageRenderTarget = 4
 const triangleStrip = 4
 
-// The shader draws instanced quads: each instance is a rectangle in pixels (x, y, width, height) and a premultiplied
-// color, expanded to a triangle strip of four vertices.
+// The shader draws instances, each a rectangle (x, y, width, height in pixels) that samples a rectangle of the glyph atlas
+// (a solid rectangle samples the atlas' white texel), is multiplied by a premultiplied color and may have rounded corners.
+// Everything in a frame is one buffer of instances and one draw call, in the order it was added.
 const shaderSource = `#include <metal_stdlib>
 using namespace metal;
-struct Quad { float4 rect; float4 color; };
-struct VOut { float4 pos [[position]]; float4 color; };
-vertex VOut quad_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant Quad* quads [[buffer(0)]], constant float2& size [[buffer(1)]]) {
+struct Inst { float4 rect; float4 uv; float4 color; float4 params; };
+struct VOut { float4 pos [[position]]; float4 color; float2 uv; float2 local; float2 half_size; float radius; };
+vertex VOut scene_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant Inst* insts [[buffer(0)]], constant float2& size [[buffer(1)]], constant float2& atlas [[buffer(2)]]) {
   float2 corner = float2(vid & 1, vid >> 1);
-  Quad q = quads[iid];
+  Inst q = insts[iid];
   float2 p = q.rect.xy + corner * q.rect.zw;
   VOut o;
   o.pos = float4(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0, 0.0, 1.0);
   o.color = q.color;
+  o.uv = (q.uv.xy + corner * q.uv.zw) / atlas;
+  o.local = (corner - 0.5) * q.rect.zw;
+  o.half_size = q.rect.zw * 0.5;
+  o.radius = q.params.x;
   return o;
 }
-fragment float4 quad_fs(VOut in [[stage_in]]) { return in.color; }
+fragment float4 scene_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+  constexpr sampler s(filter::nearest);
+  float cover = tex.sample(s, in.uv).r;
+  if (in.radius > 0.0) {
+    float2 d = abs(in.local) - (in.half_size - in.radius);
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - in.radius;
+    cover *= clamp(0.5 - dist, 0.0, 1.0);
+  }
+  return in.color * cover;
+}
 `
 
-// Gpu is a Metal device with the pipeline for rectangles.
+// Gpu is a Metal device with the pipeline for scenes.
 type Gpu struct {
 	Device i64
 	Queue i64
 	Pipeline i64
 	Error str
+	// the instance buffers, used in turn: while the GPU reads one the next frame fills another
+	Buffers []i64
+	Sizes []i64
+	Pending []i64
+	Turn []i64
 }
 
-// Open makes the default device, a command queue and the rectangle pipeline. Device is 0 when the machine has no
+// Open makes the default device, a command queue and the scene pipeline. Device is 0 when the machine has no
 // GPU (a virtual machine on a CI runner); Error says what failed.
 fn Open() Gpu {
 	appkit.LoadFoundation()
-	let g = Gpu{}
+	let g = Gpu{Buffers: []i64{0, 0, 0}, Sizes: []i64{0, 0, 0}, Pending: []i64{0, 0, 0}, Turn: []i64{0}}
 	g.Device = MTLCreateSystemDefaultDevice()
 	if g.Device == 0 {
 		g.Error = "no Metal device"
@@ -78,8 +97,8 @@ fn Open() Gpu {
 		g.Device = 0
 		return g
 	}
-	let vs = appkit.Send1(lib, "newFunctionWithName:", appkit.NewString("quad_vs"))
-	let fs = appkit.Send1(lib, "newFunctionWithName:", appkit.NewString("quad_fs"))
+	let vs = appkit.Send1(lib, "newFunctionWithName:", appkit.NewString("scene_vs"))
+	let fs = appkit.Send1(lib, "newFunctionWithName:", appkit.NewString("scene_fs"))
 	let desc = appkit.Send(appkit.Send(appkit.Class("MTLRenderPipelineDescriptor"), "alloc"), "init")
 	appkit.Send1(desc, "setVertexFunction:", vs)
 	appkit.Send1(desc, "setFragmentFunction:", fs)
@@ -99,20 +118,28 @@ fn Open() Gpu {
 	return g
 }
 
-// Quads is a batch of rectangles to draw: eight floats each, x y w h and premultiplied r g b a.
-type Quads struct {
+// Scene is what a frame shows: instances of sixteen floats each, in drawing order.
+type Scene struct {
 	Data []f32
 	N i64
 }
 
-// Add appends a rectangle (pixels from the top left) of the color (components 0 to 1, not premultiplied).
-fn (q mut Quads) Add(x f64, y f64, w f64, h f64, r f64, g f64, b f64, a f64) {
-	q.Data = append(q.Data, f32(x), f32(y), f32(w), f32(h), f32(r * a), f32(g * a), f32(b * a), f32(a))
+// Rect adds a solid rectangle (pixels from the top left) of the color (components 0 to 1, not premultiplied) with
+// corners rounded by radius pixels (0 for square ones).
+fn (q mut Scene) Rect(x f64, y f64, w f64, h f64, r f64, g f64, b f64, a f64, radius f64) {
+	q.Data = append(q.Data, f32(x), f32(y), f32(w), f32(h), f32(0.5), f32(0.5), f32(0), f32(0), f32(r * a), f32(g * a), f32(b * a), f32(a), f32(radius), f32(0), f32(0), f32(0))
 	q.N += 1
 }
 
-// Reset empties the batch, keeping its memory.
-fn (q mut Quads) Reset() {
+// Sprite adds the w by h pixels of the atlas that start at (sx, sy) at (x, y), in the color (a glyph is white
+// coverage the color is applied to).
+fn (q mut Scene) Sprite(x f64, y f64, w f64, h f64, sx f64, sy f64, r f64, g f64, b f64, a f64) {
+	q.Data = append(q.Data, f32(x), f32(y), f32(w), f32(h), f32(sx), f32(sy), f32(w), f32(h), f32(r * a), f32(g * a), f32(b * a), f32(a), f32(0), f32(0), f32(0), f32(0))
+	q.N += 1
+}
+
+// Reset empties the scene, keeping its memory.
+fn (q mut Scene) Reset() {
 	q.Data = q.Data[0:0]
 	q.N = 0
 }
@@ -135,47 +162,75 @@ fn NewTarget(g Gpu, w i64, h i64) Target {
 	return t
 }
 
-// Draw clears the texture to the color and draws the batch over it, then waits for the GPU.
-fn Draw(g Gpu, texture i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) {
+// Draw clears the texture to the color and draws the scene over it (glyphs and sprites come from the atlas), then waits for
+// the GPU.
+fn Draw(g Gpu, texture i64, w i64, h i64, scene Scene, atlas Atlas, r f64, gr f64, b f64, a f64) {
 	let pool = appkit.PoolPush()
-	let cmd = encode(g, texture, w, h, quads, r, gr, b, a)
+	let cmd = encode(g, texture, w, h, scene, atlas, r, gr, b, a)
 	appkit.Send(cmd, "commit")
 	appkit.Send(cmd, "waitUntilCompleted")
 	appkit.PoolPop(pool)
 }
 
 // DrawLayer draws a frame into the next drawable of a CAMetalLayer of w by h pixels and shows it; it does not wait.
-fn DrawLayer(g Gpu, layer i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) {
+fn DrawLayer(g Gpu, layer i64, w i64, h i64, scene Scene, atlas Atlas, r f64, gr f64, b f64, a f64) {
 	let pool = appkit.PoolPush()
 	appkit.SendD2(layer, "setDrawableSize:", f64(w), f64(h))
 	let drawable = appkit.Send(layer, "nextDrawable")
 	if drawable != 0 {
-		let cmd = encode(g, appkit.Send(drawable, "texture"), w, h, quads, r, gr, b, a)
+		let cmd = encode(g, appkit.Send(drawable, "texture"), w, h, scene, atlas, r, gr, b, a)
 		appkit.Send1(cmd, "presentDrawable:", drawable)
 		appkit.Send(cmd, "commit")
+		g.Pending[g.Turn[0] % 3] = cmd
+		appkit.Send(cmd, "retain")
+		g.Turn[0] += 1
 	}
 	appkit.PoolPop(pool)
 }
 
-// encode records the clear and the quads into a command buffer for the texture and returns it uncommitted.
-fn encode(g Gpu, texture i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) i64 {
+// buffer returns an instance buffer holding the scene: the next of the three in turn, once the GPU is done with it.
+fn buffer(g Gpu, scene Scene) i64 {
+	let i = g.Turn[0] % 3
+	let need = scene.N * 64
+	if g.Pending[i] != 0 {
+		appkit.Send(g.Pending[i], "waitUntilCompleted")
+		appkit.Send(g.Pending[i], "release")
+		g.Pending[i] = 0
+	}
+	if g.Sizes[i] < need {
+		if g.Buffers[i] != 0 {
+			appkit.Send(g.Buffers[i], "release")
+		}
+		// the buffer is a little larger than needed, so the next frame's slightly longer text fits too (MTLResourceStorageModeShared is 0)
+		g.Sizes[i] = need + need / 2 + 4096
+		g.Buffers[i] = appkit.Send2(g.Device, "newBufferWithLength:options:", g.Sizes[i], 0)
+	}
+	let data = cast(i64, scene.Data)
+	memcpy(appkit.Send(g.Buffers[i], "contents"), data[2], need)
+	return g.Buffers[i]
+}
+
+// encode records the clear and the scene into a command buffer for the texture and returns it uncommitted.
+fn encode(g Gpu, texture i64, w i64, h i64, scene Scene, atlas Atlas, r f64, gr f64, b f64, a f64) i64 {
 	let pass = appkit.Send(appkit.Class("MTLRenderPassDescriptor"), "renderPassDescriptor")
 	let att = appkit.Send1(appkit.Send(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0)
 	appkit.Send1(att, "setTexture:", texture)
 	appkit.Send1(att, "setLoadAction:", loadClear)
 	appkit.Send1(att, "setStoreAction:", storeStore)
 	appkit.SendD4(att, "setClearColor:", r, gr, b, a)
+	let instances = buffer(g, scene)
 	let cmd = appkit.Send(g.Queue, "commandBuffer")
 	let enc = appkit.Send1(cmd, "renderCommandEncoderWithDescriptor:", pass)
-	if quads.N > 0 {
+	if scene.N > 0 {
 		appkit.Send1(enc, "setRenderPipelineState:", g.Pipeline)
 		// a slice value points at its header: length, capacity, then the address of the elements
-		let wh = []f32{f32(w), f32(h)}
-		let data = cast(i64, quads.Data)
-		let size = cast(i64, wh)
-		appkit.Send3(enc, "setVertexBytes:length:atIndex:", data[2], quads.N * 32, 0)
-		appkit.Send3(enc, "setVertexBytes:length:atIndex:", size[2], 8, 1)
-		appkit.Send4(enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:", triangleStrip, 0, 4, quads.N)
+		let sizes = []f32{f32(w), f32(h), f32(atlas.Size), f32(atlas.Size)}
+		let header = cast(i64, sizes)
+		appkit.Send3(enc, "setVertexBuffer:offset:atIndex:", instances, 0, 0)
+		appkit.Send3(enc, "setVertexBytes:length:atIndex:", header[2], 8, 1)
+		appkit.Send3(enc, "setVertexBytes:length:atIndex:", header[2] + 8, 8, 2)
+		appkit.Send2(enc, "setFragmentTexture:atIndex:", atlas.Texture, 0)
+		appkit.Send4(enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:", triangleStrip, 0, 4, scene.N)
 	}
 	appkit.Send(enc, "endEncoding")
 	return cmd

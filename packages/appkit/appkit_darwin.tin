@@ -208,6 +208,9 @@ extern fn CTLineCreateWithAttributedString(text i64) i64
 @framework("CoreText")
 extern fn CTLineDraw(line i64, ctx i64)
 
+@framework("CoreText")
+extern fn CTLineGetTypographicBounds(line i64, ascent i64, descent i64, leading i64) f64
+
 @framework("CoreGraphics")
 extern fn CGContextShowTextAtPoint(ctx i64, x f64, y f64, text i64, n i64)
 

@@ -167,11 +167,11 @@ fn Size(win Window) (i64, i64) {
 	return i64(w * scale), i64(h * scale)
 }
 
-// Draw shows a frame: the clear color and the rectangles.
-fn Draw(win Window, quads metal.Quads, r f64, g f64, b f64, a f64) {
+// Draw shows a frame: the clear color and the scene.
+fn Draw(win Window, scene metal.Scene, atlas metal.Atlas, r f64, g f64, b f64, a f64) {
 	let (w, h) = Size(win)
 	appkit.SendWithDouble(win.Layer, "setContentsScale:", appkit.Scale(win.Win))
-	metal.DrawLayer(gpu, win.Layer, w, h, quads, r, g, b, a)
+	metal.DrawLayer(gpu, win.Layer, w, h, scene, atlas, r, g, b, a)
 }
 
 // Run hands the thread to AppKit: it returns after Quit.
