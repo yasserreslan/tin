@@ -1,0 +1,189 @@
+// Metal for the Tinland editor: a device, a pipeline that draws batches of colored rectangles, an offscreen target
+// that can be read back (tests and screenshots) and a CAMetalLayer target (windows). Developer tools only, like appkit.
+package metal
+
+import "appkit"
+
+@framework("Metal")
+extern fn MTLCreateSystemDefaultDevice() i64
+
+@framework("QuartzCore")
+extern fn CACurrentMediaTime() f64
+
+// objc_msgSend shapes the Metal calls need (the calling convention depends on the argument types).
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg1(recv i64, sel i64, a i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg2(recv i64, sel i64, a i64, b i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg3(recv i64, sel i64, a i64, b i64, c i64) i64
+
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msg4(recv i64, sel i64, a i64, b i64, c i64, d i64) i64
+
+// two doubles (a CGSize)
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msgD2(recv i64, sel i64, a f64, b f64) i64
+
+// four doubles (an MTLClearColor)
+@framework("/usr/lib/libobjc.A.dylib")
+@symbol("objc_msgSend")
+extern fn msgD4(recv i64, sel i64, a f64, b f64, c f64, d f64) i64
+
+const pixelBGRA = 80
+const loadClear = 2
+const storeStore = 1
+const usageShaderRead = 1
+const usageRenderTarget = 4
+const triangleStrip = 4
+
+// The shader draws instanced quads: each instance is a rectangle in pixels (x, y, width, height) and a premultiplied
+// color, expanded to a triangle strip of four vertices.
+const shaderSource = `#include <metal_stdlib>
+using namespace metal;
+struct Quad { float4 rect; float4 color; };
+struct VOut { float4 pos [[position]]; float4 color; };
+vertex VOut quad_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant Quad* quads [[buffer(0)]], constant float2& size [[buffer(1)]]) {
+  float2 corner = float2(vid & 1, vid >> 1);
+  Quad q = quads[iid];
+  float2 p = q.rect.xy + corner * q.rect.zw;
+  VOut o;
+  o.pos = float4(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0, 0.0, 1.0);
+  o.color = q.color;
+  return o;
+}
+fragment float4 quad_fs(VOut in [[stage_in]]) { return in.color; }
+`
+
+// Gpu is a Metal device with the pipeline for rectangles.
+type Gpu struct {
+	Device i64
+	Queue i64
+	Pipeline i64
+	Error str
+}
+
+// Open makes the default device, a command queue and the rectangle pipeline. Device is 0 when the machine has no
+// GPU (a virtual machine on a CI runner); Error says what failed.
+fn Open() Gpu {
+	appkit.LoadFoundation()
+	let g = Gpu{}
+	g.Device = MTLCreateSystemDefaultDevice()
+	if g.Device == 0 {
+		g.Error = "no Metal device"
+		return g
+	}
+	g.Queue = appkit.Send(g.Device, "newCommandQueue")
+	let err = calloc(1, 8)
+	let lib = msg3(g.Device, appkit.Sel("newLibraryWithSource:options:error:"), appkit.NewString(shaderSource), 0, err)
+	if lib == 0 {
+		g.Error = "shader: " + appkit.StringOf(appkit.Send(err[0], "localizedDescription"))
+		g.Device = 0
+		return g
+	}
+	let vs = appkit.Send1(lib, "newFunctionWithName:", appkit.NewString("quad_vs"))
+	let fs = appkit.Send1(lib, "newFunctionWithName:", appkit.NewString("quad_fs"))
+	let desc = appkit.Send(appkit.Send(appkit.Class("MTLRenderPipelineDescriptor"), "alloc"), "init")
+	appkit.Send1(desc, "setVertexFunction:", vs)
+	appkit.Send1(desc, "setFragmentFunction:", fs)
+	let color = appkit.Send1(appkit.Send(desc, "colorAttachments"), "objectAtIndexedSubscript:", 0)
+	appkit.Send1(color, "setPixelFormat:", pixelBGRA)
+	// premultiplied alpha: source * 1 + destination * (1 - source alpha)
+	appkit.Send1(color, "setBlendingEnabled:", 1)
+	appkit.Send1(color, "setSourceRGBBlendFactor:", 1)
+	appkit.Send1(color, "setSourceAlphaBlendFactor:", 1)
+	appkit.Send1(color, "setDestinationRGBBlendFactor:", 5)
+	appkit.Send1(color, "setDestinationAlphaBlendFactor:", 5)
+	g.Pipeline = msg2(g.Device, appkit.Sel("newRenderPipelineStateWithDescriptor:error:"), desc, err)
+	if g.Pipeline == 0 {
+		g.Error = "pipeline: " + appkit.StringOf(appkit.Send(err[0], "localizedDescription"))
+		g.Device = 0
+	}
+	return g
+}
+
+// Quads is a batch of rectangles to draw: eight floats each, x y w h and premultiplied r g b a.
+type Quads struct {
+	Data []f32
+	N i64
+}
+
+// Add appends a rectangle (pixels from the top left) of the color (components 0 to 1, not premultiplied).
+fn (q mut Quads) Add(x f64, y f64, w f64, h f64, r f64, g f64, b f64, a f64) {
+	q.Data = append(q.Data, f32(x), f32(y), f32(w), f32(h), f32(r * a), f32(g * a), f32(b * a), f32(a))
+	q.N += 1
+}
+
+// Reset empties the batch, keeping its memory.
+fn (q mut Quads) Reset() {
+	q.Data = q.Data[0:0]
+	q.N = 0
+}
+
+// Target is a texture to draw into: offscreen, so it can be read back.
+type Target struct {
+	Texture i64
+	W i64
+	H i64
+}
+
+// NewTarget makes a w by h BGRA texture the CPU can read.
+fn NewTarget(g Gpu, w i64, h i64) Target {
+	let t = Target{W: w, H: h}
+	let desc = msg4(appkit.Class("MTLTextureDescriptor"), appkit.Sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), pixelBGRA, w, h, 0)
+	appkit.Send1(desc, "setUsage:", usageRenderTarget | usageShaderRead)
+	// MTLStorageModeShared
+	appkit.Send1(desc, "setStorageMode:", 0)
+	t.Texture = appkit.Send1(g.Device, "newTextureWithDescriptor:", desc)
+	return t
+}
+
+// Draw clears the texture to the color and draws the batch over it, then waits for the GPU.
+fn Draw(g Gpu, texture i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) {
+	let pool = appkit.PoolPush()
+	let pass = appkit.Send(appkit.Class("MTLRenderPassDescriptor"), "renderPassDescriptor")
+	let att = appkit.Send1(appkit.Send(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0)
+	appkit.Send1(att, "setTexture:", texture)
+	appkit.Send1(att, "setLoadAction:", loadClear)
+	appkit.Send1(att, "setStoreAction:", storeStore)
+	msgD4(att, appkit.Sel("setClearColor:"), r, gr, b, a)
+	let cmd = appkit.Send(g.Queue, "commandBuffer")
+	let enc = appkit.Send1(cmd, "renderCommandEncoderWithDescriptor:", pass)
+	if quads.N > 0 {
+		appkit.Send1(enc, "setRenderPipelineState:", g.Pipeline)
+		// a slice value points at its header: length, capacity, then the address of the elements
+		let wh = []f32{f32(w), f32(h)}
+		let data = cast(i64, quads.Data)
+		let size = cast(i64, wh)
+		appkit.Send3(enc, "setVertexBytes:length:atIndex:", data[2], quads.N * 32, 0)
+		appkit.Send3(enc, "setVertexBytes:length:atIndex:", size[2], 8, 1)
+		appkit.Send4(enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:", triangleStrip, 0, 4, quads.N)
+	}
+	appkit.Send(enc, "endEncoding")
+	appkit.Send(cmd, "commit")
+	appkit.Send(cmd, "waitUntilCompleted")
+	appkit.PoolPop(pool)
+}
+
+// Pixels reads the target back as w * h * 4 bytes (blue, green, red, alpha); the result is the address of the bytes.
+fn Pixels(t Target) i64 {
+	let bytes = calloc(t.W * t.H, 4)
+	let region = calloc(6, 8)
+	region[3] = t.W
+	region[4] = t.H
+	region[5] = 1
+	msg4(t.Texture, appkit.Sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), bytes, t.W * 4, region, 0)
+	return bytes
+}
+
+// Pixel is byte i of the bytes Pixels returned.
+fn Pixel(bytes i64, i i64) i64 {
+	return i64(load8(bytes + i))
+}
