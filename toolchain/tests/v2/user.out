@@ -1,0 +1,5 @@
+current true true true true true
+groups true true
+missing user user: lookup tin-no-such-user-911: user: unknown user tin-no-such-user-911
+missing uid user: lookup userid 987654321: user: unknown user 987654321
+missing group user: lookup groupname tin-no-such-group-911: group: unknown group tin-no-such-group-911

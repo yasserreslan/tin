@@ -1,0 +1,68 @@
+package user
+
+import "quarry"
+import "twine"
+
+fn currentUID() !str {
+	let status = try quarry.ReadFile("/proc/self/status")
+	for line in twine.Split(status, "\n") {
+		if twine.HasPrefix(line, "Uid:") {
+			let fields = twine.Fields(line)
+			if len(fields) > 1 {
+				return fields[1]
+			}
+		}
+	}
+	fail "user: cannot determine current user ID"
+}
+
+fn lookupId(uid str) !User {
+	let rows = try quarry.ReadFile("/etc/passwd")
+	for row in twine.Split(rows, "\n") {
+		let fields = twine.Split(row, ":")
+		if len(fields) >= 7 && fields[2] == uid {
+			return User{Username: fields[0], Uid: fields[2], Gid: fields[3], Name: fields[4], HomeDir: fields[5]}
+		}
+	}
+	fail "user: lookup userid {uid}: user: unknown user {uid}"
+}
+
+fn lookupName(name str) !User {
+	let rows = try quarry.ReadFile("/etc/passwd")
+	for row in twine.Split(rows, "\n") {
+		let fields = twine.Split(row, ":")
+		if len(fields) >= 7 && fields[0] == name {
+			return User{Username: fields[0], Uid: fields[2], Gid: fields[3], Name: fields[4], HomeDir: fields[5]}
+		}
+	}
+	fail "user: lookup {name}: user: unknown user {name}"
+}
+
+fn lookupGroupName(name str) !Group {
+	let rows = try quarry.ReadFile("/etc/group")
+	for row in twine.Split(rows, "\n") {
+		let fields = twine.Split(row, ":")
+		if len(fields) >= 4 && fields[0] == name {
+			return Group{Name: fields[0], Gid: fields[2]}
+		}
+	}
+	fail "user: lookup groupname {name}: group: unknown group {name}"
+}
+
+fn lookupGroupIds(u User) ![]str {
+	let rows = try quarry.ReadFile("/etc/group")
+	mut out = []str{}
+	for row in twine.Split(rows, "\n") {
+		let fields = twine.Split(row, ":")
+		if len(fields) < 4 {
+			continue
+		}
+		if contains(twine.Split(fields[3], ","), u.Username) && !contains(out, fields[2]) {
+			out = append(out, fields[2])
+		}
+	}
+	if !contains(out, u.Gid) {
+		out = append(out, u.Gid)
+	}
+	return out
+}

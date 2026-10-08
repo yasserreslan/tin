@@ -1,0 +1,97 @@
+package user
+
+import "mint"
+
+extern fn getuid() i64
+extern fn getpwuid(uid i64) i64
+extern fn getpwnam(name i64) i64
+extern fn getgrnam(name i64) i64
+extern fn getgrouplist(name i64, base i64, groups i64, ngroups i64) i64
+
+fn currentUID() !str {
+	return mint.Itoa(getuid())
+}
+
+fn lookupId(uid str) !User {
+	let n = parseUID(uid)
+	let p = getpwuid(n)
+	if p == 0 {
+		fail "user: lookup userid {uid}: user: unknown user {uid}"
+	}
+	return darwinUser(p)
+}
+
+fn lookupName(name str) !User {
+	let p = getpwnam(rt_cstr(name))
+	if p == 0 {
+		fail "user: lookup {name}: user: unknown user {name}"
+	}
+	return darwinUser(p)
+}
+
+fn lookupGroupName(name str) !Group {
+	let p = getgrnam(rt_cstr(name))
+	if p == 0 {
+		fail "user: lookup groupname {name}: group: unknown group {name}"
+	}
+	return Group{Name: cString(loadPtr(p)), Gid: mint.Itoa(loadU32(p+16))}
+}
+
+fn lookupGroupIds(u User) ![]str {
+	let n = i64(256)
+	let buf = calloc(n, 4)
+	if getgrouplist(rt_cstr(u.Username), parseUID(u.Gid), buf, cast(i64, &n)) < 0 {
+		fail "user: user {u.Username} has too many groups"
+	}
+	mut out = []str{}
+	for i in 0..n {
+		let gid = mint.Itoa(loadU32(buf+i*4))
+		if !contains(out, gid) {
+			out = append(out, gid)
+		}
+	}
+	return out
+}
+
+fn darwinUser(p i64) User {
+	let name = cString(loadPtr(p))
+	let uid = mint.Itoa(loadU32(p+16))
+	let gid = mint.Itoa(loadU32(p+20))
+	let gecos = cString(loadPtr(p+40))
+	let home = cString(loadPtr(p+48))
+	return User{Username: name, Uid: uid, Gid: gid, Name: gecos, HomeDir: home}
+}
+
+fn parseUID(s str) i64 {
+	mut n = i64(0)
+	for i in 0..len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return -1
+		}
+		n = n*10 + i64(s[i]) - '0'
+	}
+	return n
+}
+
+fn cString(p i64) str {
+	if p == 0 {
+		return ""
+	}
+	return rt_str_from_raw(p, strlen(p))
+}
+
+fn loadPtr(p i64) i64 {
+	mut n = i64(0)
+	for i in 0..8 {
+		n |= i64(load8(p+i)) << (i*8)
+	}
+	return n
+}
+
+fn loadU32(p i64) i64 {
+	mut n = i64(0)
+	for i in 0..4 {
+		n |= i64(load8(p+i)) << (i*8)
+	}
+	return n
+}
