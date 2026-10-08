@@ -61,11 +61,26 @@ fn (ed mut Editor) KeyDown(code i64, flags i64, chars str) {
 fn (ed mut Editor) MouseDown(x f64, y f64, clicks i64, flags i64) {
 	ed.Mode = modeEdit
 	ed.CompOpen = false
-	if x < ed.gutterW() && x >= ed.gutterW() - ed.CharW * 2.0 && y >= 0.0 {
-		// the fold arrow of the line under the mouse
-		let row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
-		if ed.foldable(row) {
-			ed.ToggleFold(row)
+	if x < ed.gutterW() && y >= 0.0 {
+		if x >= ed.gutterW() - ed.CharW * 2.0 {
+			// the fold arrow of the line under the mouse
+			let row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
+			if ed.foldable(row) {
+				ed.ToggleFold(row)
+				return
+			}
+		}
+		mut row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
+		if wrapOn {
+			let (r, _) = ed.rowAt(i64(y / ed.LineH))
+			row = r
+		}
+		if row >= 0 && row < len(ed.Buf.Lines) {
+			ed.gutterDrag = true
+			ed.gutterAnchor = row
+			ed.Buf.SelectLine(row)
+			ed.Follow = true
+			ed.Redraw = true
 			return
 		}
 	}
@@ -95,6 +110,33 @@ fn (ed mut Editor) MouseDrag(x f64, y f64) {
 		ed.mapScrollTo(y)
 		return
 	}
+	if ed.gutterDrag {
+		mut row = ed.shownAfter(ed.Scroll, i64(y / ed.LineH))
+		if wrapOn {
+			let (r, _) = ed.rowAt(i64(y / ed.LineH))
+			row = r
+		}
+		if row >= 0 && row < len(ed.Buf.Lines) {
+			if row >= ed.gutterAnchor {
+				ed.Buf.MoveTo(ed.gutterAnchor, 0, false)
+				if row + 1 < len(ed.Buf.Lines) {
+					ed.Buf.MoveTo(row + 1, 0, true)
+				} else {
+					ed.Buf.MoveTo(row, len(ed.Buf.Lines[row]), true)
+				}
+			} else {
+				if ed.gutterAnchor + 1 < len(ed.Buf.Lines) {
+					ed.Buf.MoveTo(ed.gutterAnchor + 1, 0, false)
+				} else {
+					ed.Buf.MoveTo(ed.gutterAnchor, len(ed.Buf.Lines[ed.gutterAnchor]), false)
+				}
+				ed.Buf.MoveTo(row, 0, true)
+			}
+			ed.Follow = true
+			ed.Redraw = true
+		}
+		return
+	}
 	if ed.dragging {
 		ed.mouseTo(x, y, true)
 	}
@@ -104,6 +146,7 @@ fn (ed mut Editor) MouseDrag(x f64, y f64) {
 fn (ed mut Editor) MouseUp() {
 	ed.dragging = false
 	ed.mapDrag = false
+	ed.gutterDrag = false
 }
 
 // mapScrollTo scrolls so the line under y in the minimap is in the middle of the window.
