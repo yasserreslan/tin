@@ -413,6 +413,15 @@ fn parse_import() {
 	let rec = cast(Import, calloc(2, 8))
 	rec.alias = alias
 	rec.path = path
+	let have = file_imports[cur_file]
+	mut i = 0
+	for i < len(have) {
+		if have[i].path == path {
+			// import "say" twice (#712); two paths that end in one name are E113.
+			err_code_quoted(t.pos, "E101 REDECLARED", "package ", alias, " is imported twice in this file")
+		}
+		i = i + 1
+	}
 	file_imports[cur_file] = append(file_imports[cur_file], rec)
 	p_end()
 }

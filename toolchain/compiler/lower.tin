@@ -2545,6 +2545,10 @@ fn chk_composite(e i64, want i64) i64 {
 				// A positional value sets the field as surely as its name would (#96).
 				private_use(cast(Node, elems[i]).pos, "field", cast(Field, t.fields[fi]).name, type_pkg(t))
 			}
+			if key != 0 && set[fi] != 0 {
+				// P{x: 1, x: 2}: the first value would be thrown away (#712).
+				err_code_quoted(cast(Node, key).pos, "E216 COMPOSITE", "duplicate field ", cast(IdentExpr, key).name, " in struct literal")
+			}
 			set[fi] = 1
 			let ft = field_type(t, fi)
 			let v = elems[i]
@@ -2642,6 +2646,9 @@ fn chk_composite(e i64, want i64) i64 {
 	if k == K_MAP {
 		let m = temp(pos, map_make_call(pos, t), cast(i64, t))
 		stmts = append(stmts, cast(i64, m))
+		// Constant keys so far, to report one given twice (#712): its first value would be lost.
+		mut int_keys = []i64{}
+		mut str_keys = []str{}
 		mut i = 0
 		for i < len(elems) {
 			let key = keys[i]
@@ -2654,6 +2661,31 @@ fn chk_composite(e i64, want i64) i64 {
 			check_assignable(cast(Node, key), kt, cast(Ty, t.key))
 			if is_untyped(kt) != 0 {
 				reconvert(cast(Node, key), t.key)
+			}
+			let kk = cast(Node, key).kind
+			if kk == EX_INT && kind_of(cast(Ty, t.key)) == K_INT {
+				if slice_has(int_keys, cast(IntLit, key).val) != 0 {
+					let u = err_code(cast(Node, key).pos, "E216 COMPOSITE")
+					buf_str(u, "duplicate key ")
+					buf_int(u, cast(IntLit, key).val)
+					buf_str(u, " in map literal")
+					err_end(cast([]u8, u))
+				}
+				int_keys = append(int_keys, cast(IntLit, key).val)
+			} else if kk == EX_STR {
+				mut j = 0
+				for j < len(str_keys) {
+					if str_keys[j] == cast(StrLit, key).ptr {
+						let u = err_code(cast(Node, key).pos, "E216 COMPOSITE")
+						buf_str(u, "duplicate key \"")
+						buf_str(u, str_keys[j])
+						buf_str(u, "\" in map literal")
+						err_end(cast([]u8, u))
+						break
+					}
+					j = j + 1
+				}
+				str_keys = append(str_keys, cast(StrLit, key).ptr)
 			}
 			let vt = chk(cast(Node, v), t.elem)
 			check_assignable(cast(Node, v), vt, cast(Ty, t.elem))

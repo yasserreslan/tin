@@ -799,6 +799,58 @@ fn value_first(t Ty) {
 	}
 }
 
+// fields_once reports a struct field, enum variant or @json name given twice (#712): the
+// second would be unreachable, or two fields would write one JSON member.
+fn fields_once(st Ty, src []i64, pos i64) {
+	if cast(i64, st.enum_) != 0 {
+		let vs = st.enum_
+		mut i = 1
+		for i < len(vs) {
+			mut j = 0
+			for j < i {
+				if vs[j].name == vs[i].name {
+					err_code_quoted(pos, "E101 REDECLARED", "variant ", vs[i].name, " is declared twice in this enum")
+				}
+				j = j + 1
+			}
+			i = i + 1
+		}
+		return
+	}
+	mut i = 1
+	for i < len(src) {
+		let f = cast(ParsedField, src[i])
+		let fpos = cast(Node, f.ty).pos
+		mut j = 0
+		for j < i {
+			let g = cast(ParsedField, src[j])
+			if g.name == f.name {
+				err_code_quoted(fpos, "E101 REDECLARED", "field ", f.name, " is declared twice in this struct")
+			} else if json_name_of(g) == json_name_of(f) {
+				let m = err_code(fpos, "E101 REDECLARED")
+				buf_str(m, "fields ")
+				buf_str(m, g.name)
+				buf_str(m, " and ")
+				buf_str(m, f.name)
+				buf_str(m, " have one JSON name: \"")
+				buf_str(m, json_name_of(f))
+				buf_str(m, "\"")
+				err_end(cast([]u8, m))
+			}
+			j = j + 1
+		}
+		i = i + 1
+	}
+}
+
+// json_name_of is the JSON member name of a parsed field: its @json name or its own.
+fn json_name_of(f ParsedField) str {
+	if len(f.attr) != 0 {
+		return f.attr
+	}
+	return f.name
+}
+
 fn resolve_fields(st Ty, tx TypeExpr) {
 	mut fs = []i64{}
 	let src = cast([]i64, tx.a)
@@ -834,6 +886,7 @@ fn resolve_fields(st Ty, tx TypeExpr) {
 	st.fields = cast([]i64, cast(i64, fs))
 	st.enum_ = cast([]EnumVariant, tx.b)
 	value_resolving = value_resolving[:len(value_resolving) - 1]
+	fields_once(st, src, cast(Node, tx).pos)
 	if st.value != 0 {
 		// Its bytes cannot hold itself, directly, in a value struct field, an inline array or an
 		// optional (#669): its size would never end.
@@ -991,11 +1044,24 @@ fn check() {
 		ti = ti + 1
 	}
 	// Named types: structs first, so fields and aliases can refer to any of them.
+	mut tseen = map[str]i64{}
 	mut i = 0
 	for i < len(prog_types) {
 		let d = prog_types[i]
 		set_file(d.file)
 		let q = qual(ck_pkg, d.name)
+		let (prev, twice) = tseen[q]
+		if twice {
+			// The first declaration is the type; a second is an error, not ignored (#712).
+			let e = err_code(d.pos, "E101 REDECLARED")
+			buf_str(e, "type '")
+			buf_str(e, d.name)
+			buf_str(e, "' redeclared (previous declaration at ")
+			buf_pos(e, prog_types[prev].pos)
+			buf_byte(e, ')')
+			err_end(cast([]u8, e))
+		}
+		tseen[q] = i
 		if is_builtin_name(d.name) {
 			// Not declared, so the builtin keeps the name everywhere (#556).
 			err_code_quoted(d.pos, "E102 BUILTIN_NAME", "", d.name, " is a builtin and cannot be redeclared")
@@ -1086,6 +1152,37 @@ fn check() {
 		}
 		v.sym = cast(i64, vs)
 		declare_global(vs)
+		i = i + 1
+	}
+	// A struct's field and method may not share a name (#712): p.m would be either.
+	i = 0
+	for i < len(prog_fns) {
+		let mf = cast(Fn, prog_fns[i])
+		if mf.recv != 0 && is_template(mf) == 0 && mf.file < len(file_pkgs) {
+			set_file(mf.file)
+			let rt = cast(Ty, find_type(qual(ck_pkg, cast(TypeName, mf.recv).name)))
+			if cast(i64, rt) != 0 && rt.kind == K_STRUCT && cast(i64, rt.enum_) == 0 && cast(i64, rt.fields) != 0 && struct_field(rt, mf.name) >= 0 {
+				err_code_quoted(mf.pos, "E101 REDECLARED", "method ", mf.name, " has the name of a field of its type: rename one")
+			}
+		}
+		i = i + 1
+	}
+	// A type and a function, constant or variable may not share a name (#712).
+	i = 0
+	for i < len(prog_types) {
+		let d = prog_types[i]
+		set_file(d.file)
+		let g = lookup_global(qual(ck_pkg, d.name))
+		let runtime_type = len(file_pkgs[d.file]) == 0 && file_trusted[d.file] != 0
+		if cast(i64, g) != 0 && sym_in_runtime(g) == 0 && !runtime_type {
+			let e = err_code(g.pos, "E101 REDECLARED")
+			buf_byte(e, '\'')
+			buf_str(e, d.name)
+			buf_str(e, "' is declared as a type (at ")
+			buf_pos(e, d.pos)
+			buf_str(e, ") and again here")
+			err_end(cast([]u8, e))
+		}
 		i = i + 1
 	}
 	i = 0
@@ -1213,8 +1310,25 @@ fn polls_for_cores() {
 }
 
 // declare_template makes a generic function's name callable; instances are declared on use.
+// tparams_once reports a type parameter named twice in one list (#712): fn f[T i64, T f64].
+fn tparams_once(pos i64, names []str) {
+	mut i = 1
+	for cast(i64, names) != 0 && i < len(names) {
+		mut j = 0
+		for j < i {
+			if names[j] == names[i] {
+				err_code_quoted(pos, "E101 REDECLARED", "type parameter ", names[i], " is declared twice")
+				return
+			}
+			j = j + 1
+		}
+		i = i + 1
+	}
+}
+
 fn declare_template(f Fn) {
 	set_file(f.file)
+	tparams_once(f.pos, cast([]str, f.tparams))
 	if f.recv != 0 {
 		f.qname = qual(ck_pkg, cast(TypeName, f.recv).name) + "[]." + f.name
 		return
@@ -7348,6 +7462,23 @@ fn check_multi(s i64) {
 	mut stmts = out.stmts
 	let n = len(targets)
 	mut temps = []i64{}
+	if define != 0 {
+		// let (a, a) = f(): one name twice (#712).
+		mut di = 1
+		for di < n {
+			mut dj = 0
+			for dj < di {
+				let a = targets[di]
+				let b = targets[dj]
+				if cast(Node, a).kind == EX_IDENT && cast(Node, b).kind == EX_IDENT && cast(IdentExpr, a).name == cast(IdentExpr, b).name && cast(IdentExpr, a).name != "_" {
+					err_code_quoted(cast(Node, a).pos, "E101 REDECLARED", "", cast(IdentExpr, a).name, " is declared twice in this let")
+					return
+				}
+				dj = dj + 1
+			}
+			di = di + 1
+		}
+	}
 	if define == 0 && len(values) == n {
 		// The pairs go through temporaries: check each value against its target here.
 		mut si = 0
@@ -7998,6 +8129,10 @@ fn lower_range(s i64) {
 	let key = cast(RangeStmt, s).key
 	let val = cast(RangeStmt, s).val
 	let body = cast(RangeStmt, s).body
+	if key != 0 && val != 0 && cast(Node, key).kind == EX_IDENT && cast(Node, val).kind == EX_IDENT && cast(IdentExpr, key).name == cast(IdentExpr, val).name && cast(IdentExpr, key).name != "_" {
+		// for i, i in xs: the second name hides the first (#712).
+		err_code_quoted(cast(Node, val).pos, "E101 REDECLARED", "", cast(IdentExpr, val).name, " redeclared in this for (it names the index and the element)")
+	}
 	mut pre = []i64{}
 	let w = cast(WhileStmt, node_new(ST_WHILE, pos))
 	mut it = ty_int

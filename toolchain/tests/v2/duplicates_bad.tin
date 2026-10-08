@@ -1,0 +1,64 @@
+package main
+
+// Names given twice are compile errors, not silently ignored or overwritten (#712).
+
+import "argo"
+import "say"
+import "say"
+
+type P struct {
+	x i64
+	x str
+}
+
+type P struct {
+	y i64
+}
+
+type E enum {
+	A
+	B(i64)
+	A
+}
+
+type J struct {
+	@json("a") x i64
+	@json("a") y i64
+}
+
+type Q struct {
+	m i64
+}
+
+fn (q Q) m() i64 {
+	return q.m
+}
+
+type F struct {
+	n i64
+}
+
+fn F() i64 {
+	return 1
+}
+
+fn g[T i64 | f64, T i64](a T) T {
+	return a
+}
+
+fn two() (i64, i64) {
+	return 1, 2
+}
+
+fn main() {
+	let q = Q{m: 1, m: 2}
+	let m = map[str]i64{"a": 1, "b": 2, "a": 3}
+	let n = map[i64]str{1: "x", 1: "y"}
+	for i, i in []i64{5, 6} {
+		say.Line(i)
+	}
+	let (a, a) = two()
+	mut b = make([]u8, 0, 16)
+	argo.Put(mut b, J{x: 1, y: 2})
+	say.Line(q, m, n, E.B(1), str(b))
+}
