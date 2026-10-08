@@ -215,7 +215,8 @@ commands:
   history <[package.]Name or Type.Method> [-n N]
                              the commits that changed one Tin declaration, following renames and moves
   overlap                    other branches (and fetched remote ones) changing the declarations this one changes
-  repack                     every pack into one, its deltas found again on every core (adopt leaves many)
+  repack                     every pack into two (commits and trees, blobs), its deltas found again on every
+                             core (adopt leaves several)
   mirror [git dir or URL]    write every branch and tag into a git directory, as git objects (mirror.url); an
                              http(s) URL gets them pushed over git's smart HTTP (TIT_MIRROR_TOKEN)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)

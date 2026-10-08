@@ -171,7 +171,7 @@ touches, not the whole file again. Nothing changes in how the file is used; comm
 | `tit focus <dir>...` | check out only these directories (and the files at the root); the others stay in every commit as they are, and status, diff, `add` and `commit -a` leave them alone; refuses, changing nothing, when a file leaving the focus has changes |
 | `tit focus` | the directories in focus |
 | `tit focus --all` | check out everything again |
-| `tit repack` | every pack into one, its deltas searched again and its entries compressed on every core (`TIN_CORES` sets how many); adopt leaves a pack for each batch, and each is one more index to search |
+| `tit repack` | every pack into two, commits, trees and tags in one and blobs in the other (a log reads only the first), its deltas searched again and its entries compressed on every core (`TIN_CORES` sets how many); adopt leaves two packs for each batch it converts |
 
 With `tit clone --lazy`, a focus also limits what is fetched: files outside it are never read.
 

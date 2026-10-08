@@ -6,7 +6,7 @@ import "../packfile"
 import "quarry"
 import "twine"
 
-// tit repack (#778): every pack into one, its deltas searched again and its entries compressed on every core. adopt
+// tit repack (#778): every pack into two (commits, trees and tags in one, blobs in the other), its deltas searched again and its entries compressed on every core. adopt
 // leaves a pack for each batch it converts, and each pack is one more index to search for every object read. Loose
 // objects stay as they are (large files among them are kept in chunks). The new pack is in place before the old ones
 // go, so a crash leaves objects twice, never missing.
@@ -24,25 +24,51 @@ fn doRepack(g Global, o mut Out) ! {
 			}
 		}
 	}
-	if len(old) < 2 {
-		o.Line("Nothing to repack: {len(old)} pack.")
+	if len(old) < 3 {
+		o.Line("Nothing to repack: {len(old)} packs.")
 		return
 	}
-	mut ids = []object.Id{}
+	// commits, trees and tags in one pack, blobs in another: a log or a walk then reads only the first
+	mut meta = []object.Id{}
+	mut blobs = []object.Id{}
 	for p in r.ids.packs {
 		for i in 0..p.Count {
-			ids = append(ids, p.IdAt(i))
+			let id = p.IdAt(i)
+			let (kind, _) = try r.Store.GetRaw(id)
+			if kind == object.Kind.Blob {
+				blobs = append(blobs, id)
+			} else {
+				meta = append(meta, id)
+			}
 		}
 	}
-	let p = try packfile.Write(mut r.Store, ids, dir)
-	let keepName = p.Path[len(dir) + 1:len(p.Path) - 5]
+	mut made = []str{}
+	mut count = 0
+	mut size = 0
+	mut deltas = 0
+	for part in [][]object.Id{meta, blobs} {
+		if len(part) == 0 {
+			continue
+		}
+		mut p = try packfile.Write(mut r.Store, part, dir)
+		made = append(made, p.Path[len(dir) + 1:len(p.Path) - 5])
+		count += p.Count
+		deltas += p.Deltas()
+		let info = try quarry.Lstat(p.Path)
+		size += info.Size
+	}
 	for n in old {
-		if n == keepName {
+		mut kept = false
+		for m in made {
+			if m == n {
+				kept = true
+			}
+		}
+		if kept {
 			continue
 		}
 		try quarry.Remove(dir + "/" + n + ".idx")
 		try quarry.Remove(dir + "/" + n + ".pack")
 	}
-	let info = try quarry.Lstat(p.Path)
-	o.Line("Packed {p.Count} objects from {len(old)} packs into one ({info.Size / 1048576} MiB, {p.Deltas()} deltas).")
+	o.Line("Packed {count} objects from {len(old)} packs into {len(made)}, commits and trees apart from blobs ({size / 1048576} MiB, {deltas} deltas).")
 }

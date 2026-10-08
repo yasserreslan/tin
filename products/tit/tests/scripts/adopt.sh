@@ -79,10 +79,11 @@ git init -q -b main .
 perl -e 'srand(7); for $i (1..160) { $c = join("", map { chr(32 + int(rand(95))) } 1..100000) . "\n"; $m = "c$i\n"; print "commit refs/heads/main\ncommitter A <a\@b> " . (1700000000 + $i) . " +0000\ndata " . length($m) . "\n$m"; print "M 100644 inline f$i.txt\ndata " . length($c) . "\n$c\n"; }' | git fast-import --quiet
 git checkout -q main
 cp -R "$d/big" "$d/big2"
-perl -e '$SIG{TERM} = "DEFAULT"; exec @ARGV' "$tit" adopt > /dev/null 2>&1 &
+TIT_ADOPT_BATCH_MB=2 perl -e '$SIG{TERM} = "DEFAULT"; exec @ARGV' "$tit" adopt > /dev/null 2>&1 &
 pid=$!
 n=0
-until [ "$(ls .tit/packs 2> /dev/null | grep -c '\.pack$')" -ge 2 ]; do
+# a batch is finished once its pairs of ids are in the git-ids table
+until [ -s .tit/git-ids ] && [ "$(ls .tit/packs 2> /dev/null | grep -c '\.pack$')" -ge 2 ]; do
 	n=$((n + 1))
 	[ $n -lt 300 ] || fail "adopt wrote no pack to interrupt"
 	sleep 0.02
@@ -91,7 +92,7 @@ kill -TERM $pid 2> /dev/null || true
 wait $pid 2> /dev/null || true
 before=$(ls .tit/packs | grep '\.pack$' | sort)
 total=$(git rev-list --all --objects | wc -l | tr -d ' ')
-"$tit" adopt > "$d/again.txt" 2>&1 || fail "adopt after SIGTERM: $(cat "$d/again.txt")"
+TIT_ADOPT_BATCH_MB=2 "$tit" adopt > "$d/again.txt" 2>&1 || fail "adopt after SIGTERM: $(cat "$d/again.txt")"
 again=$(sed -n 's/^Adopted \([0-9]*\) objects.*/\1/p' "$d/again.txt")
 [ -n "$again" ] && [ "$again" -lt "$total" ] || fail "the second adopt redid everything: $(cat "$d/again.txt") of $total"
 for p in $before; do
@@ -100,11 +101,11 @@ done
 same "log after SIGTERM" "$("$tit" log --format=git-id)" "$(git log --format=%H)"
 echo "ok an adopt cut by SIGTERM finishes when run again: $again of $total objects the second time"
 cd "$d/big2"
-TIN_CORES=1 "$tit" adopt > /dev/null
+TIT_ADOPT_BATCH_MB=2 TIN_CORES=1 "$tit" adopt > /dev/null
 rm -rf "$d/big3"
 cp -R "$d/big2" "$d/big3"
 rm -rf "$d/big3/.tit"
 cd "$d/big3"
-"$tit" adopt > /dev/null
+TIT_ADOPT_BATCH_MB=2 "$tit" adopt > /dev/null
 [ "$(ls "$d/big2/.tit/packs" | sort)" = "$(ls "$d/big3/.tit/packs" | sort)" ] || fail "two adopts wrote different packs"
 echo "ok two adopts (one core, all cores) write byte-identical packs"

@@ -9,6 +9,7 @@ import "../oplog"
 import "argo"
 import "fault"
 import "flume"
+import "mint"
 import "quarry"
 import "tty"
 import "twine"
@@ -18,7 +19,19 @@ import "twine"
 // verified pack, then moves the refs in one oplog operation. Until the cutover, run it again after new git commits.
 
 // adoptBudget is about how many bytes of objects one batch converts before it is written as a pack.
-const adoptBudget = 8 * 1024 * 1024
+const adoptBudget = 64 * 1024 * 1024
+
+// batchBudget is adoptBudget, or TIT_ADOPT_BATCH_MB when set (tests use small batches to have several).
+fn batchBudget() i64 {
+	let env = quarry.Getenv("TIT_ADOPT_BATCH_MB")
+	let mb = mint.Atoi(env) catch _ {
+		0
+	}
+	if mb > 0 {
+		return mb * 1024 * 1024
+	}
+	return adoptBudget
+}
 
 type adoptJson struct {
 	objects i64
@@ -60,13 +73,14 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 		tips = append(tips, ref.Id)
 	}
 	let order = try git.Plan(gr, ids, tips)
+	let budget = batchBudget()
 	let packs = r.Ws.Store + "/packs"
 	let shown = tty.IsTerminal(2) && !g.Json
 	mut i = 0
 	for i < len(order) {
 		let start = i
 		let b = try arena {
-			try git.ConvertBatch(gr, packs, ids, order, start, adoptBudget)
+			try git.ConvertBatch(gr, packs, ids, order, start, budget)
 		}
 		for k in 0..len(b.Git) {
 			ids.Set(b.Git[k], b.Tit[k])
