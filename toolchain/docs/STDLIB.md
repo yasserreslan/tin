@@ -426,7 +426,11 @@ Package dump writes HTTP requests and responses out as text, byte for byte as Go
 fn handle(q anvil.Req, w mut anvil.Out) {
 	herald.Info("request", "dump", dump.Request(q, false))
 }
+```
 
+Dumping the response a client got:
+
+```tin body
 let r = try wire.Get("http://127.0.0.1:8080/")
 say.Text(dump.Response(r, true))
 ```

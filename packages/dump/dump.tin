@@ -6,6 +6,8 @@
 //		herald.Info("request", "dump", dump.Request(q, false))
 //	}
 //
+// Dumping the response a client got:
+//
 //	let r = try wire.Get("http://127.0.0.1:8080/")
 //	say.Text(dump.Response(r, true))
 //
