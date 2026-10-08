@@ -261,6 +261,15 @@ fn (ws mut Workspace) SaveHygiene(trim bool, finalNl bool) {
 	ws.Ed.SaveFinalNl = finalNl
 }
 
+// UseRuler turns the ruler on or off and names the column it sits at (the whole program's setting, like
+// the whitespace marks: every editor shows the same line).
+fn (ws mut Workspace) UseRuler(on bool, column f64) {
+	editor.SetRulerColumn(i64(column))
+	if on != editor.RulerShown() {
+		editor.ToggleRuler()
+	}
+}
+
 // UseFont tells every editor the size of a character cell.
 fn (ws mut Workspace) UseFont() {
 	for i in 0..len(ws.Panes) {

@@ -13,6 +13,8 @@ import "twine"
 //	autosave = on             write the files with changes when the window has been quiet for a moment (default off)
 //	trim_trailing_whitespace = on   remove the trailing spaces and tabs of every line when a file is written (default off)
 //	insert_final_newline = on      end a written file with a newline when it does not have one (default off)
+//	ruler = on                     a vertical line at the column a line should not run past (default off)
+//	ruler_column = 80              that column (1 to 1000)
 //	key.toggle-terminal = ctrl+`      a menu item's key: its title in lower case with dashes, then the modifiers (cmd, shift, alt,
 //	                                  ctrl) and the key; `none` removes the key
 type Settings struct {
@@ -23,6 +25,8 @@ type Settings struct {
 	AutoSave bool
 	TrimTrailing bool
 	FinalNewline bool
+	Ruler bool
+	RulerColumn f64
 	Keys map[str]str
 }
 
@@ -33,7 +37,7 @@ fn SettingsPath() str {
 
 // DefaultSettings is what a missing file means.
 fn DefaultSettings() Settings {
-	return Settings{Theme: "dark", FontSize: 13.0, Keys: map[str]str{}}
+	return Settings{Theme: "dark", FontSize: 13.0, RulerColumn: 80.0, Keys: map[str]str{}}
 }
 
 // LoadSettings reads the settings file (the defaults, where it is missing or a line makes no sense).
@@ -70,6 +74,13 @@ fn LoadSettings() Settings {
 			s.TrimTrailing = v == "on" || v == "true" || v == "yes"
 		} else if n == "insert_final_newline" {
 			s.FinalNewline = v == "on" || v == "true" || v == "yes"
+		} else if n == "ruler" {
+			s.Ruler = v == "on" || v == "true" || v == "yes"
+		} else if n == "ruler_column" {
+			let col = appkit.ParseNumbers(v)
+			if len(col) > 0 && col[0] >= 1.0 && col[0] <= 1000.0 {
+				s.RulerColumn = col[0]
+			}
 		} else if twine.HasPrefix(n, "key.") {
 			s.Keys[n[4:]] = v
 		}
@@ -127,7 +138,7 @@ fn (s Settings) Binding(title str, key str, mods i64) (str, i64) {
 
 // Template is the text of a settings file that has not been written yet.
 fn Template() str {
-	return "# Tinland settings: restart Tinland to apply them.\n# theme = dark\n# font_size = 13\n# code_font = Menlo-Regular\n# ui_font = .AppleSystemUIFont\n# autosave = on\n# trim_trailing_whitespace = on\n# insert_final_newline = on\n# key.toggle-terminal = ctrl+`\n# key.go-to-file = cmd+t\n"
+	return "# Tinland settings: restart Tinland to apply them.\n# theme = dark\n# font_size = 13\n# code_font = Menlo-Regular\n# ui_font = .AppleSystemUIFont\n# autosave = on\n# trim_trailing_whitespace = on\n# insert_final_newline = on\n# ruler = on\n# ruler_column = 80\n# key.toggle-terminal = ctrl+`\n# key.go-to-file = cmd+t\n"
 }
 
 // EnsureSettingsFile writes the template when there is no settings file yet, and returns the path.

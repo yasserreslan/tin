@@ -213,6 +213,11 @@ added
 	ws.Ed.Perform(editor.CmdSelectAll)
 	ws.Ed.Perform(editor.CmdTrimTrailing)
 	say.Line("trimmed every line", ws.Ed.Buf.Lines[0], ws.Ed.Buf.Lines[1], ws.Ed.Buf.Lines[2])
+	// the ruler: on with a column, off again
+	ws.UseRuler(true, 100)
+	say.Line("ruler on", editor.RulerShown(), editor.RulerColumn())
+	ws.UseRuler(false, 80)
+	say.Line("ruler off", editor.RulerShown(), editor.RulerColumn())
 	ws.Ed.SaveDirty()
 	let noHygiene = quarry.ReadFile(root + "/messy.txt") catch _ {
 		"?"

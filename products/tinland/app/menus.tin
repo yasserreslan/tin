@@ -98,6 +98,7 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, view, "Zoom Out", "-", cmd, workspace.CmdZoomOut)
 	item(m, view, "Reset Zoom", "0", cmd, workspace.CmdZoomReset)
 	item(m, view, "Toggle Whitespace", "", 0, workspace.CmdToggleWhitespace)
+	item(m, view, "Toggle Ruler", "r", cmd | alt, editor.CmdToggleRuler)
 	item(m, view, "Toggle Word Wrap", "z", cmd | alt, editor.CmdToggleWrap)
 	appkit.AddSeparator(view)
 	item(m, view, "Split Right", "\\", cmd, workspace.CmdSplit)
