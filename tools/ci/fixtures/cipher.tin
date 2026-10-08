@@ -1,0 +1,235 @@
+package main
+
+// The cipher twin, Tin side: read the corpus of bench/ref/cipher (Go's crypto/md5, aes, des, rc4
+// and cipher) on stdin and print the same lines, so tools/ci/cipher_check.tin can compare them
+// (#755). The line forms are in bench/ref/cipher/main.go. Where Go encrypts into a fresh buffer,
+// this side decrypts in place (dst is src), so both paths are compared.
+
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		let f = twine.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		say.Line(f[0], run(f))
+	}
+}
+
+// run handles one case; a fault becomes its class, as the Go side's panics do.
+fn run(f []str) str {
+	let r = dispatch(f) catch err {
+		return "fault " + class(err)
+	}
+	return r
+}
+
+fn dispatch(f []str) !str {
+	let k = f[0]
+	if k == "M" {
+		return try md5Case(f)
+	} else if k == "B" {
+		return try blockCase(f)
+	} else if k == "CBC" {
+		return try cbcCase(f)
+	} else if k == "CTR" || k == "CFB" || k == "OFB" {
+		return try streamCase(f)
+	} else if k == "RC4" {
+		return try rc4Case(f)
+	} else if k == "SHORT" {
+		return try shortCase(f)
+	} else if k == "PAD" {
+		let out = try seal.Pkcs7Pad(unhex(f[2]), num(f[1]))
+		return enc(out)
+	} else if k == "UNPAD" {
+		let out = try seal.Pkcs7Unpad(unhex(f[2]), num(f[1]))
+		return enc(out)
+	}
+	return "unknown"
+}
+
+fn md5Case(f []str) !str {
+	let d = unhex(f[1])
+	mut h = seal.NewMd5()
+	let half = len(d) / 2
+	try h.Write(d[0:half])
+	try h.Write(d[half:len(d)])
+	return seal.Hex(seal.Md5(str(d))) + " " + seal.Hex(h.Sum())
+}
+
+// block binds each cipher before returning it: `return try` of a concrete type in a !dyn function
+// skips the conversion (#896).
+fn block(name str, key []u8) !dyn seal.Block {
+	if name == "aes" {
+		let a = try seal.NewAES(key)
+		return a
+	}
+	if name == "des" {
+		let d = try seal.NewDES(key)
+		return d
+	}
+	let t = try seal.NewTripleDES(key)
+	return t
+}
+
+// blockCase encrypts every block with Encrypt, and decrypts them back in place with DecryptBlocks.
+fn blockCase(f []str) !str {
+	let b = try block(f[1], unhex(f[2]))
+	let d = unhex(f[3])
+	let bs = b.BlockSize()
+	let ct = make([]u8, len(d))
+	let one = make([]u8, bs)
+	for i in (0..len(d)).step(bs) {
+		copy(one, d[i:i+bs])
+		b.Encrypt(mut one, one)
+		copy(ct[i:i+bs], one)
+	}
+	let pt = make([]u8, len(ct))
+	copy(pt, ct)
+	b.DecryptBlocks(mut pt, pt)
+	return enc(ct) + " " + enc(pt)
+}
+
+fn cbcCase(f []str) !str {
+	let b = try block(f[1], unhex(f[2]))
+	let iv = unhex(f[3])
+	let d = unhex(f[4])
+	mut e = try seal.NewCBCEncrypter(b, iv)
+	let bs = e.BlockSize()
+	let half = len(d) / 2 / bs * bs
+	let ct = make([]u8, len(d))
+	let c1 = make([]u8, half)
+	try e.CryptBlocks(mut c1, d[0:half])
+	let c2 = make([]u8, len(d)-half)
+	try e.CryptBlocks(mut c2, d[half:len(d)])
+	copy(ct, c1)
+	copy(ct[half:len(ct)], c2)
+	mut dc = try seal.NewCBCDecrypter(b, iv)
+	let pt = make([]u8, len(ct))
+	copy(pt, ct)
+	try dc.CryptBlocks(mut pt, pt)
+	return enc(ct) + " " + enc(pt)
+}
+
+fn streams(mode str, b dyn seal.Block, iv []u8) !(seal.BlockStream, seal.BlockStream) {
+	if mode == "CTR" {
+		let e = try seal.NewCTR(b, iv)
+		let d = try seal.NewCTR(b, iv)
+		return e, d
+	}
+	if mode == "CFB" {
+		let e = try seal.NewCFBEncrypter(b, iv)
+		let d = try seal.NewCFBDecrypter(b, iv)
+		return e, d
+	}
+	let e = try seal.NewOFB(b, iv)
+	let d = try seal.NewOFB(b, iv)
+	return e, d
+}
+
+fn streamCase(f []str) !str {
+	let b = try block(f[1], unhex(f[2]))
+	let iv = unhex(f[3])
+	let d = unhex(f[4])
+	let split = num(f[5])
+	mut (e, dc) = try streams(f[0], b, iv)
+	let c1 = make([]u8, split)
+	try e.XORKeyStream(mut c1, d[0:split])
+	let c2 = make([]u8, len(d)-split)
+	try e.XORKeyStream(mut c2, d[split:len(d)])
+	let ct = make([]u8, len(d))
+	copy(ct, c1)
+	copy(ct[split:len(ct)], c2)
+	let pt = make([]u8, len(ct))
+	copy(pt, ct)
+	try dc.XORKeyStream(mut pt, pt)
+	return enc(ct) + " " + enc(pt)
+}
+
+fn rc4Case(f []str) !str {
+	mut c = try seal.NewRC4(unhex(f[1]))
+	let d = unhex(f[2])
+	let split = num(f[3])
+	// The first part in place, the second into another buffer.
+	let ct = make([]u8, len(d))
+	copy(ct, d)
+	let first = ct[0:split]
+	try c.XORKeyStream(mut first, first)
+	let c2 = make([]u8, len(d)-split)
+	try c.XORKeyStream(mut c2, d[split:len(d)])
+	copy(ct[split:len(ct)], c2)
+	return enc(ct)
+}
+
+fn shortCase(f []str) !str {
+	let b = try block(f[2], unhex(f[3]))
+	let bs = b.BlockSize()
+	let src = make([]u8, 2*bs)
+	let dst = make([]u8, 2*bs-1)
+	let iv = make([]u8, bs)
+	if f[1] == "cbc" {
+		mut m = try seal.NewCBCEncrypter(b, iv)
+		try m.CryptBlocks(mut dst, src)
+	} else if f[1] == "rc4" {
+		mut c = try seal.NewRC4(unhex(f[3]))
+		try c.XORKeyStream(mut dst, src)
+	} else {
+		mut (e, dc) = try streams(twine.ToUpper(f[1]), b, iv)
+		try e.XORKeyStream(mut dst, src)
+		try dc.XORKeyStream(mut dst, src)
+	}
+	return "ok"
+}
+
+// class names a refusal by what its message says, as the Go side does.
+fn class(err fault) str {
+	let msg = say.Str(err)
+	if twine.Contains(msg, "invalid") && twine.Contains(msg, "key size") {
+		return "keysize"
+	}
+	if twine.Contains(msg, "IV length") {
+		return "iv"
+	}
+	if twine.Contains(msg, "not full blocks") {
+		return "notfull"
+	}
+	if twine.Contains(msg, "output smaller than input") {
+		return "short"
+	}
+	if twine.Contains(msg, "PKCS #7 padding") {
+		return "padding"
+	}
+	return "other: " + msg
+}
+
+fn enc(b []u8) str {
+	if len(b) == 0 {
+		return "-"
+	}
+	return seal.Hex(b)
+}
+
+fn unhex(s str) []u8 {
+	if s == "-" {
+		return []u8{}
+	}
+	return seal.HexDecode(s) catch err {
+		panic("bad hex {s}: {err}")
+	}
+}
+
+fn num(s str) i64 {
+	mut v = 0
+	for i in 0..len(s) {
+		v = v*10 + i64(s[i]-'0')
+	}
+	return v
+}
