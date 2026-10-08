@@ -1,0 +1,249 @@
+package main
+
+import "./ci"
+import "tinjson"
+import "twine"
+
+// tin test: builds a package with its *_test.tin files and reports each TestXxx.
+
+const LIB = `package geo
+
+// Area is the area of a w by h rectangle.
+fn Area(w i64, h i64) i64 {
+	return w * h
+}
+
+fn clampPos(x i64) i64 {
+	if x < 0 {
+		return 0
+	}
+	return x
+}
+`
+
+const TESTS = `package geo
+
+import "crucible"
+
+fn TestArea(t mut crucible.T) {
+	crucible.Equal(mut t, "2x3", Area(2, 3), 6)
+}
+
+fn TestPrivate(t mut crucible.T) {
+	t.True("clamp", clampPos(-1) == 0)
+}
+`
+
+const FAILING = `package geo
+
+import "crucible"
+
+fn TestWrong(t mut crucible.T) {
+	crucible.Equal(mut t, "area", Area(2, 2), 5)
+}
+`
+
+// Issue #94: any parameter name and spacing; Testify is not a test (Go's rule).
+const SPELLINGS = `package geo
+
+import "crucible"
+
+fn TestSpaced( t  mut  crucible.T ) {
+	t.True("spaced", true)
+}
+
+fn  TestOtherName(tt mut crucible.T) {
+	crucible.Equal(mut tt, "area", Area(1, 1), 1)
+}
+
+fn Testify(x i64) i64 {
+	return x
+}
+
+fn BenchmarkSpaced(bb  mut crucible.B) {
+}
+`
+
+const BAD_SIGNATURES = `package geo
+
+import "crucible"
+
+fn TestNoParam() {
+}
+
+fn BenchmarkTakesT(b mut crucible.T) {
+}
+`
+
+const APP = `package main
+
+import "say"
+
+fn double(x i64) i64 {
+	return 2 * x
+}
+
+fn main() {
+	say.Line(double(2))
+}
+`
+
+const APP_TEST = `package main
+
+import "crucible"
+
+fn TestDouble(t mut crucible.T) {
+	crucible.Equal(mut t, "double", double(21), 42)
+}
+`
+
+// The same package and tests in edition 1 (#226): fn declarations, found and run alike.
+const LIB_ED1 = `package geo
+
+// Area is the area of a w by h rectangle.
+fn Area(w i64, h i64) i64 {
+	return w * h
+}
+`
+
+const TESTS_ED1 = `package geo
+
+import "crucible"
+
+fn TestArea(t mut crucible.T) {
+	crucible.Equal(mut t, "2x3", Area(2, 3), 6)
+}
+`
+
+const NO_PARAM = `
+fn TestNoParam() {
+}
+`
+
+// Output a test prints, and a log line, are events of that test (-json).
+const CHATTY = `package geo
+
+import "crucible"
+import "say"
+
+fn TestLoud(t mut crucible.T) {
+	say.Line("hello from the test")
+	t.Log("a logged line")
+	crucible.Equal(mut t, "area", Area(2, 2), 4)
+}
+
+fn TestBroken(t mut crucible.T) {
+	crucible.Equal(mut t, "area", Area(2, 2), 5)
+}
+
+fn TestOther(t mut crucible.T) {
+	t.True("fine", true)
+}
+`
+
+// tinTest writes the files (name, text pairs) into a folder and runs `tin test` on it; it returns the exit code and what was printed.
+fn tinTest(names []str, texts []str, args []str) (i64, str) {
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "tintest-")
+	for i in 0..len(names) {
+		ci.Write(ci.Join(dir, names[i]), texts[i])
+	}
+	mut argv = []str{"sh", ci.Join(ci.Root(), "tin"), "test"}
+	for a in args {
+		argv = append(argv, a)
+	}
+	argv = append(argv, dir)
+	let o = ci.Exec(argv, "", 120)
+	ci.Remove(dir)
+	return o.Code, o.Stdout + o.Stderr
+}
+
+fn files2(a str, b str) ([]str, []str) {
+	return []str{"geo.tin", "geo_test.tin"}, []str{a, b}
+}
+
+fn events(out str) []tinjson.J {
+	mut list = []tinjson.J{}
+	for line in ci.Lines(out) {
+		let (j, ok) = tinjson.Parse(line)
+		if ok {
+			list = append(list, j)
+		}
+	}
+	return list
+}
+
+fn kinds(list []tinjson.J) str {
+	mut parts = []str{}
+	for e in list {
+		parts = append(parts, e.Get("event").Text() + ":" + e.Get("test").Text())
+	}
+	return twine.Join(parts, ",")
+}
+
+fn main() {
+	// an edition 1 package
+	let (n1, t1) = files2(LIB_ED1, TESTS_ED1)
+	let (code, out) = tinTest(n1, t1, []str{})
+	ci.Test("edition 1: exit 0", code == 0)
+	ci.Test("edition 1: TestArea passes", twine.Contains(out, "--- PASS: TestArea"))
+	let (code2, out2) = tinTest(n1, []str{LIB_ED1, TESTS_ED1 + NO_PARAM}, []str{})
+	ci.Test("edition 1: a wrong signature is an error", code2 == 2 && twine.Contains(out2, "wrong signature for TestNoParam, must be: fn TestNoParam(t mut crucible.T)"))
+
+	// a library package passes
+	let (n2, t2) = files2(LIB, TESTS)
+	let (code3, out3) = tinTest(n2, t2, []str{})
+	ci.Test("library: exit 0", code3 == 0)
+	ci.Test("library: both pass", twine.Contains(out3, "--- PASS: TestArea") && twine.Contains(out3, "--- PASS: TestPrivate") && twine.Contains(out3, "PASS: 2 tests"))
+
+	// a failure sets the exit status
+	let (code4, out4) = tinTest([]str{"geo.tin", "geo_test.tin", "wrong_test.tin"}, []str{LIB, TESTS, FAILING}, []str{})
+	ci.Test("failure: exit 1", code4 == 1)
+	ci.Test("failure: reported", twine.Contains(out4, "--- FAIL: TestWrong") && twine.Contains(out4, "area: got 4, want 5"))
+
+	// any parameter name and spacing
+	let (n3, t3) = files2(LIB, SPELLINGS)
+	let (code5, out5) = tinTest(n3, t3, []str{})
+	ci.Test("spellings: exit 0", code5 == 0)
+	ci.Test("spellings: found", twine.Contains(out5, "--- PASS: TestSpaced") && twine.Contains(out5, "--- PASS: TestOtherName") && twine.Contains(out5, "PASS: 2 tests"))
+
+	// a wrong signature is an error
+	let (code6, out6) = tinTest([]str{"geo.tin", "geo_test.tin", "bad_test.tin"}, []str{LIB, TESTS, BAD_SIGNATURES}, []str{})
+	ci.Test("bad signatures: exit 2", code6 == 2)
+	ci.Test("bad signatures: TestNoParam", twine.Contains(out6, "bad_test.tin:5: wrong signature for TestNoParam, must be: fn TestNoParam(t mut crucible.T)"))
+	ci.Test("bad signatures: BenchmarkTakesT", twine.Contains(out6, "bad_test.tin:8: wrong signature for BenchmarkTakesT, must be: fn BenchmarkTakesT(b mut crucible.B)"))
+	ci.Test("bad signatures: nothing ran", !twine.Contains(out6, "--- "))
+
+	// a main package
+	let (code7, out7) = tinTest([]str{"main.tin", "main_test.tin"}, []str{APP, APP_TEST}, []str{})
+	ci.Test("main package: passes", code7 == 0 && twine.Contains(out7, "--- PASS: TestDouble"))
+
+	// -run picks tests by pattern
+	let (code8, out8) = tinTest(n2, t2, []str{"-run", "^TestArea$"})
+	ci.Test("-run: TestArea only", code8 == 0 && twine.Contains(out8, "--- PASS: TestArea") && !twine.Contains(out8, "TestPrivate") && twine.Contains(out8, "PASS: 1 tests"))
+	let (code9, out9) = tinTest(n2, t2, []str{"-run", "Priv|Nothing"})
+	ci.Test("-run: alternatives", code9 == 0 && twine.Contains(out9, "--- PASS: TestPrivate") && !twine.Contains(out9, "TestArea"))
+	let (code10, out10) = tinTest(n2, t2, []str{"-run", "("})
+	ci.Test("-run: a bad pattern", code10 == 2 && twine.Contains(out10, "bad pattern"))
+
+	// json events
+	let (n4, t4) = files2(LIB, CHATTY)
+	let (code11, out11) = tinTest(n4, t4, []str{"-json"})
+	let list = events(out11)
+	ci.Test("json: exit 1", code11 == 1)
+	ci.Same("json: events", kinds(list), "run:TestLoud,output:TestLoud,output:TestLoud,pass:TestLoud,run:TestBroken,output:TestBroken,fail:TestBroken,run:TestOther,pass:TestOther,summary:")
+	if len(list) == 10 {
+		ci.Same("json: the test's output", list[1].Get("message").Text(), "hello from the test")
+		ci.Same("json: the logged line", list[2].Get("message").Text(), "a logged line")
+		ci.Same("json: the failure", list[5].Get("message").Text(), "area: got 4, want 5")
+		ci.Test("json: elapsed is a number", list[3].Get("elapsed_ms").IsNumber())
+		ci.Test("json: the summary", list[9].Get("pass").Int() == 2 && list[9].Get("fail").Int() == 1)
+	}
+	let (code12, out12) = tinTest(n4, t4, []str{"-json", "-run", "Other"})
+	ci.Test("json with -run: exit 0", code12 == 0)
+	ci.Same("json with -run: events", kinds(events(out12)), "run:TestOther,pass:TestOther,summary:")
+
+	// no test files
+	let (code13, out13) = tinTest([]str{"geo.tin"}, []str{LIB}, []str{})
+	ci.Test("no test files", code13 == 0 && twine.Contains(out13, "no *_test.tin files"))
+	ci.Finish()
+}

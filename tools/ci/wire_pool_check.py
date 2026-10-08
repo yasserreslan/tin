@@ -18,8 +18,8 @@ import time
 import urllib.request
 
 from suite import ROOT
-from lifetime_check import eventually, server_ready
-import websocket_check as ws
+from pycompat import eventually, server_ready
+import pycompat as ws
 
 
 class Upstream:

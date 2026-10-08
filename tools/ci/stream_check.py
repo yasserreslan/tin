@@ -15,9 +15,9 @@ import subprocess
 import time
 
 from suite import ROOT
-from lifetime_check import eventually, server_ready
+from pycompat import eventually, server_ready
 import socket
-import websocket_check as ws
+import pycompat as ws
 
 
 class Conn:

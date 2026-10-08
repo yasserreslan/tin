@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from suite import ROOT
-import websocket_check as ws
+import pycompat as ws
 
 
 def read_response(f):

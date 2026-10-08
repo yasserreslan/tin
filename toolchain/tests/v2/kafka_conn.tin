@@ -19,7 +19,7 @@ import "quarry"
 // ListOffsets for topic s. Broker 2 serves a fetch of 6 MiB and ends each SASL session after a
 // second, closing a connection that sends a request after its session ended. The checks that need
 // tasks overlapping their waits (Close from another task, group lanes, a deadline in a shared
-// handshake) run in an event loop: tools/ci/kafka_check.py.
+// handshake) run in an event loop: tools/ci/kafka_check.tin.
 
 // A test certificate for localhost and 127.0.0.1, valid until 2126.
 const certPEM = `-----BEGIN CERTIFICATE-----

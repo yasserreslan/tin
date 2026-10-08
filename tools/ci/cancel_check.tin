@@ -1,0 +1,314 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "spawn"
+import "tide"
+import "twine"
+import "wire"
+
+// Boundary cancellation (#231): a cancel wakes a task parked in each client, and flows down only.
+//
+// Private probes are appended to a temporary copy of toolchain/std/tide, never to the production API. The drain phase checks that the
+// end of the grace period cancels waiting requests. The budget phases check TIN_REQUEST_MEMORY and a limit block inside a handler
+// (#235). Every client points at a server that accepts connections and never answers, so each request parks in its client until
+// /cancel/{i} cancels the boundary that request marked.
+
+fn num(i i64) str {
+	return mint.Itoa(i)
+}
+
+// park sends a request that parks in the server.
+fn park(port i64, path str) nettest.Client {
+	mut c = nettest.Open(port)
+	c.Get(path, "")
+	return c
+}
+
+fn cancel(port i64, i i64) {
+	let r = nettest.Do(port, "GET", "/cancel/" + num(i), []str{}, "")
+	ci.Check(r.Status == 200 && r.Body == "ok", "cancel: /cancel/" + num(i) + " answered " + r.Body)
+}
+
+// finished: the parked request ends within seconds with the 200 answer want.
+fn finished(c mut nettest.Client, want str, seconds f64) {
+	let r = c.Answer(seconds)
+	ci.Check(r.Status == 200 && r.Body == want, "cancel: got " + num(r.Status) + " " + r.Body + ", want " + want + " within " + mint.FormatFloat(seconds, 'f', 1) + " s")
+}
+
+fn parts(body str) map[str]str {
+	mut m = map[str]str{}
+	for p in twine.Split(body, "; ") {
+		let at = twine.Index(p, ": ")
+		if at >= 0 {
+			m[p[0:at]] = p[at + 2:]
+		}
+	}
+	return m
+}
+
+fn millis(since i64) i64 {
+	return (tide.Now() - since) / 1000000
+}
+
+fn plain(port i64) nettest.Reply {
+	return nettest.Do(port, "GET", "/plain", []str{}, "")
+}
+
+fn checks(port i64, fifo str, feeder spawn.Process) {
+	// Each client: the parked request ends with the cancel's fault, not after a timeout.
+	let kinds = []str{"tide", "wire", "redis", "mysql", "postgres", "websocket", "file"}
+	for k in 0..len(kinds) {
+		let i = k + 1
+		mut s = park(port, "/park/" + num(i) + "/" + kinds[k])
+		ci.Check(!s.Ready(0.3), "cancel: " + kinds[k] + ": the wait ended before the cancel")
+		let start = tide.Now()
+		cancel(port, i)
+		finished(mut s, "fault: canceled: test reason " + num(i), 2.0)
+		say.Line(kinds[k] + " cancelled wait ended in " + num(millis(start)) + " ms with \"canceled: test reason " + num(i) + "\"")
+		if kinds[k] == "file" {
+			// Let the helper thread's blocked open finish; its late result is disposed.
+			ci.Exec([]str{"sh", "-c", ": > \"$0\"", fifo}, "", 10)
+		}
+	}
+
+	// Waits that used to block the core (#316): a relay receive, stdin and a flume reader on a pipe. Each parks its task; another
+	// request is served meanwhile; a cancel ends it.
+	let more = []str{"relay", "stdin", "flume"}
+	for k in 0..3 {
+		let i = 26 + k
+		mut s = park(port, "/park/" + num(i) + "/" + more[k])
+		ci.Check(!s.Ready(0.3), "cancel: " + more[k] + ": the wait ended before the cancel")
+		let p = plain(port)
+		ci.Check(p.Status == 200 && p.Body == "plain ok", more[k] + ": the core stopped serving while the task waited")
+		ci.Check(!s.Ready(0.05), "cancel: " + more[k] + ": serving another request ended the wait")
+		let start = tide.Now()
+		cancel(port, i)
+		finished(mut s, "fault: canceled: test reason " + num(i), 2.0)
+		say.Line(more[k] + " cancelled wait ended in " + num(millis(start)) + " ms with \"canceled: test reason " + num(i) + "\"; the core kept serving")
+		// A within deadline ends the same wait with "deadline exceeded"; the request goes on.
+		let w = nettest.Do(port, "GET", "/within/" + more[k], []str{}, "")
+		ci.Check(w.Status == 200, "cancel: /within/" + more[k] + " answered " + num(w.Status))
+		let m = parts(w.Body)
+		ci.Check(m["inner"] == "deadline exceeded" && m["after"] == "ok", "cancel: " + more[k] + ": " + w.Body)
+		ci.Check(ci.Num(m["ms"]) >= 40 && ci.Num(m["ms"]) < 1000, "cancel: " + more[k] + ": " + w.Body)
+		say.Line(more[k] + " block deadline: \"deadline exceeded\" after " + m["ms"] + " ms")
+	}
+
+	// relay.Next still receives: a parked task wakes with the message another request sends.
+	mut next = park(port, "/relay-next")
+	ci.Check(!next.Ready(0.3), "cancel: relay.Next answered before the message")
+	let sent = nettest.Do(port, "GET", "/relay-send/hello", []str{}, "")
+	ci.Check(sent.Status == 200 && sent.Body == "sent", "cancel: /relay-send answered " + sent.Body)
+	finished(mut next, "from 0: hello", 2.0)
+	say.Line("relay.Next: a parked task receives a message sent from another request")
+
+	// Input still arrives: a parked flume reader wakes with a line, ReadStdin at the end.
+	mut reader = park(port, "/park/29/flume")
+	ci.Check(!reader.Ready(0.3), "cancel: the flume reader answered before input")
+	mut feed = feeder
+	feed.Write("hi\n") catch err {
+		ci.Fail("cancel: cannot write to the server's stdin: " + say.Str(err))
+	}
+	finished(mut reader, "no fault", 2.0)
+	mut all = park(port, "/park/29/stdin")
+	ci.Check(!all.Ready(0.3), "cancel: ReadStdin answered before the end of input")
+	feed.Write("rest") catch _ {
+		ci.Fail("cancel: cannot write to the server's stdin")
+	}
+	feed.CloseStdin() catch _ {
+	}
+	finished(mut all, "no fault", 2.0)
+	say.Line("stdin: a parked flume reader and ReadStdin wake when input comes")
+
+	// A task parked for a pooled connection (mysql Pool 1): the holder stays parked.
+	mut holder = park(port, "/park/20/mysql")
+	ci.Check(!holder.Ready(0.3), "cancel: the pool holder answered")
+	mut waiter = park(port, "/park/21/mysql")
+	ci.Check(!waiter.Ready(0.3), "cancel: the pool waiter answered")
+	cancel(port, 21)
+	finished(mut waiter, "fault: canceled: test reason 21", 2.0)
+	ci.Check(!holder.Ready(0.3), "cancelling the pool waiter ended the connection holder")
+	cancel(port, 20)
+	finished(mut holder, "fault: canceled: test reason 20", 2.0)
+	say.Line("pool wait: the parked waiter ends; the holder is untouched until its own cancel")
+
+	// Sideways: cancelling one request leaves another parked request, and new ones, alone.
+	mut a = park(port, "/park/22/tide")
+	mut b = park(port, "/park/23/tide")
+	ci.Check(!a.Ready(0.3) && !b.Ready(0.3), "cancel: a sideways request answered")
+	cancel(port, 22)
+	finished(mut a, "fault: canceled: test reason 22", 2.0)
+	ci.Check(!b.Ready(0.3), "a cancel reached a sibling request")
+	let p2 = plain(port)
+	ci.Check(p2.Status == 200 && p2.Body == "plain ok", "cancel: /plain after a sideways cancel")
+	cancel(port, 23)
+	finished(mut b, "fault: canceled: test reason 23", 2.0)
+	say.Line("sideways: a sibling request keeps waiting; new requests are unaffected")
+
+	// Up: cancelling a block inside a request leaves the request's own boundary live.
+	mut nested = park(port, "/nested/24")
+	ci.Check(!nested.Ready(0.3), "cancel: /nested answered early")
+	cancel(port, 24)
+	finished(mut nested, "inner: canceled: test reason 24; outer: []; after: ok", 2.0)
+	say.Line("up: a cancelled block does not cancel its request; later waits succeed")
+
+	// Down: cancelling the request cancels the block inside it, and stays cancelled.
+	mut outer = park(port, "/outer/25")
+	ci.Check(!outer.Ready(0.3), "cancel: /outer answered early")
+	cancel(port, 25)
+	finished(mut outer, "inner: canceled: test reason 25; block: test reason 25; again: canceled: test reason 25", 2.0)
+	say.Line("down: a cancelled request cancels its blocks; its next wait fails at once")
+
+	// Explicit cancellation also stops code which never reaches another wait.
+	let start = tide.Now()
+	let cpu = nettest.Do(port, "GET", "/cpu-cancel", []str{}, "")
+	ci.Check(cpu.Status == 500 && millis(start) < 1000, "cancel: /cpu-cancel answered " + num(cpu.Status) + " in " + num(millis(start)) + " ms")
+	let p3 = plain(port)
+	ci.Check(p3.Status == 200 && p3.Body == "plain ok", "cancel: /plain after the CPU cancel")
+	say.Line("CPU cancel: a self-cancelled spin unwinds; the server keeps serving")
+
+	// A block deadline: the earlier deadline wins and is a deadline, not a cancel.
+	let w = nettest.Do(port, "GET", "/within", []str{}, "")
+	ci.Check(w.Status == 200, "cancel: /within answered " + num(w.Status))
+	let m = parts(w.Body)
+	ci.Check(m["inner"] == "deadline exceeded" && m["after"] == "ok", "cancel: /within: " + w.Body)
+	ci.Check(ci.Num(m["ms"]) >= 40 && ci.Num(m["ms"]) < 1000, "cancel: /within: " + w.Body)
+	say.Line("block deadline: \"deadline exceeded\" after " + m["ms"] + " ms; the request continues")
+}
+
+// drain: at the end of the grace period (TIN_GRACE=1) waiting requests are cancelled with "draining", answer, and the server exits 0
+// instead of being cut off.
+fn drain(port i64, server nettest.Server) {
+	mut a = park(port, "/park/30/redis")
+	mut b = park(port, "/park/31/tide")
+	ci.Check(!a.Ready(0.3) && !b.Ready(0.3), "cancel: a parked request answered before the drain")
+	let start = tide.Now()
+	server.Signal("TERM")
+	finished(mut a, "fault: canceled: draining", 3.0)
+	finished(mut b, "fault: canceled: draining", 3.0)
+	let took = millis(start)
+	ci.Check(took >= 800 && took < 2500, "cancelled after " + num(took) + " ms, want about the 1 s grace")
+	let (code, ended) = server.ExitCode(3.0)
+	ci.Check(ended && code == 0, "cancel: exit " + num(code))
+	say.Line("drain: waiting requests end with \"canceled: draining\" after " + num(took) + " ms; exit 0")
+}
+
+// budget: TIN_REQUEST_MEMORY: a request past its memory budget ends with 500; the server goes on.
+fn budget(exe str, out str) {
+	let port = nettest.Port()
+	let log = ci.Join(out, "budget.out")
+	let server = nettest.StartSplit(exe, []str{}, []str{"TIN_CORES=1", "TIN_REQUEST_MEMORY=" + num(16 * 1048576)}, log, port)
+	server.Ready(10)
+	mut got = []str{}
+	for p in []str{"/hog", "/plain", "/hog", "/plain"} {
+		got = append(got, num(nettest.Do(port, "GET", p, []str{}, "").Status))
+	}
+	ci.Check(twine.Join(got, ",") == "500,200,500,200", "cancel: budget statuses " + twine.Join(got, ","))
+	ci.Check(server.Running(), "cancel: the server exited")
+	server.Stop()
+	let err = ci.Read(log + ".err")
+	ci.Check(twine.Count(err, "limit exceeded: the request's memory budget") == 2, "cancel: the budget was not reported twice: " + err)
+	say.Line("request budget: requests past TIN_REQUEST_MEMORY get 500; others are served")
+}
+
+fn post(port i64, path str, body str) nettest.Reply {
+	return nettest.Parse(nettest.Raw(port, "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + num(len(body)) + "\r\nConnection: close\r\n\r\n" + body, 20))
+}
+
+// handlerLimit: a limit block in a handler (#235): past its memory budget it fails with fault.LimitExceeded, the handler answers with
+// that fault, and the server goes on serving.
+fn handlerLimit(out str) {
+	let exe = ci.Join(out, "limits")
+	ci.BuildTin("tools/ci/fixtures/limits.tin", exe, "", []str{"-edition", "1"})
+	let port = nettest.Port()
+	let log = ci.Join(out, "limits.out")
+	let server = nettest.StartSplit(exe, []str{}, []str{"TIN_CORES=1"}, log, port)
+	server.Ready(10)
+	let limited = "limited: limit exceeded true"
+	let paths = []str{"/limited", "/plain", "/fits", "/limited", "/plain"}
+	let wants = []str{limited, "plain ok", "fits 2000000", limited, "plain ok"}
+	for k in 0..5 {
+		let r = nettest.Do(port, "GET", paths[k], []str{}, "")
+		ci.Check(r.Status == 200 && r.Body == wants[k], "cancel: " + paths[k] + " answered " + num(r.Status) + " " + r.Body)
+	}
+	// Eighteen limit blocks wait on one core at once, then each passes its own budget.
+	mut conns = []wire.Conn{}
+	mut asked = []str{}
+	for i in 0..24 {
+		mut path = "/plain"
+		if i % 4 != 0 {
+			path = "/limited"
+		}
+		asked = append(asked, path)
+		conns = append(conns, nettest.Send(port, nettest.GetRequest(path)))
+	}
+	for i in 0..24 {
+		mut c = conns[i]
+		let r = nettest.Finish(mut c, 20)
+		mut want = "plain ok"
+		if asked[i] == "/limited" {
+			want = limited
+		}
+		ci.Check(r.Status == 200 && r.Body == want, "cancel: " + asked[i] + " answered " + r.Body)
+	}
+	// q.Body() into a bounded type (#240): up to the bound it is the body; past it, fault.LimitExceeded.
+	let bodies = []str{"sixteen bytes ok", "seventeen bytes!!", twine.Repeat("x", 100000), ""}
+	let uploads = []str{"upload 16: sixteen bytes ok", "upload: length 17 is over the bound 16: limit exceeded true", "upload: length 100000 is over the bound 16: limit exceeded true", "upload 0: "}
+	for k in 0..4 {
+		let r = post(port, "/upload", bodies[k])
+		ci.Check(r.Status == 200 && r.Body == uploads[k], "cancel: /upload of " + num(len(bodies[k])) + " bytes answered " + r.Body)
+	}
+	ci.Check(server.Running(), "cancel: the server exited")
+	server.Stop()
+	ci.Check(!twine.Contains(ci.Read(log + ".err"), "panic"), "cancel: the limits server panicked: " + ci.Read(log + ".err"))
+	// The body's length is checked before it is copied.
+	let asm = ci.ExecEnv([]str{ci.Tinc(), "-edition", "1", "-S", "tools/ci/fixtures/limits.tin"}, ci.Root(), 120, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+	ci.Must(asm, "tinc -S limits")
+	ci.Check(twine.Contains(asm.Stdout, "BodyBound"), "bound(q.Body()) copies the body before checking its length")
+	say.Line("handler limit: a limit block past its budget gives fault.LimitExceeded to its handler; q.Body() into a bounded str is checked before it is copied; the server keeps serving")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/cancel")
+	ci.Mkdirs(out)
+	let directory = ci.TempDir(out, "cancel-")
+	ci.CopyTree(ci.Root(), directory)
+	let fixtures = ci.Join(ci.Root(), "tools/ci/fixtures")
+	let tide = ci.Join(directory, "toolchain/std/tide/tide.tin")
+	ci.Write(tide, ci.Read(tide) + "\n" + ci.Read(ci.Join(fixtures, "cancel_probe.tin")))
+	let exe = ci.Join(directory, "server")
+	ci.BuildTin(ci.Join(fixtures, "cancel.tin"), exe, directory, []str{"-polls"})
+	let fifo = ci.Join(directory, "fifo")
+	ci.Must(ci.Exec([]str{"mkfifo", fifo}, "", 10), "mkfifo")
+	// A server that accepts connections and never answers: connections wait in its queue.
+	let hole = wire.Listen("127.0.0.1:0") catch _ {
+		ci.Fail("cancel: cannot listen")
+		panic("unreachable")
+	}
+	let port = nettest.Port()
+	let log = ci.Join(out, "server.log")
+	// Stdin is a pipe nothing writes to until a check does, for the stdin and flume waits (#316): a fifo kept open by a cat whose own
+	// stdin is this program.
+	let stdinPipe = ci.Join(directory, "stdin")
+	ci.Must(ci.Exec([]str{"mkfifo", stdinPipe}, "", 10), "mkfifo stdin")
+	let feeder = spawn.Start(spawn.Cmd{Argv: []str{"sh", "-c", "cat > \"$0\"", stdinPipe}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Pipe, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}) catch err {
+		ci.Fail("cancel: cannot start the stdin feeder: " + say.Str(err))
+		panic("unreachable")
+	}
+	let server = nettest.StartStdin(exe, stdinPipe, []str{"TIN_CORES=1", "TIN_GRACE=1", "TIN_DEADLINE_MS=20000", "HOLE_ADDR=127.0.0.1:" + num(hole.Port()), "FIFO=" + fifo}, log, port)
+	server.Ready(10)
+	checks(port, fifo, feeder)
+	ci.Check(server.Running(), "cancel: the server exited")
+	budget(exe, out)
+	handlerLimit(directory)
+	drain(port, server)
+	server.Stop()
+	let text = ci.Read(log)
+	ci.Check(twine.Count(text, "cpu cancel deferred") == 1, "cancel: cpu cancel deferred count in " + text)
+	ci.Check(twine.Count(text, "request canceled: canceled: cpu stop") == 1, "cancel: cpu stop count in " + text)
+	ci.Remove(directory)
+	ci.Pass("cancel: a cancel wakes each client's parked task and flows down only; drain, budgets and limits")
+}

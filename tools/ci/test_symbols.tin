@@ -1,0 +1,163 @@
+package main
+
+import "./ci"
+import "say"
+import "tinjson"
+import "twine"
+
+// tinc -symbols: the declarations of a program as JSON lines (toolchain/docs/TOOLING.md 3.3).
+
+const PROGRAM = "package main\n\nimport \"say\"\n\n// Point is a place.\n// It has two fields.\ntype Point struct {{\n\tX i64\n\tY i64\n}}\n\ntype Shape enum {{\n\tCircle(f64)\n\tEmpty\n}}\n\nconst Limit = 10\n\nlet counter i64 = 0\n\n// Dist is the distance to the origin, squared.\nfn (p Point) Dist() i64 {{\n\treturn p.X * p.X + p.Y * p.Y\n}}\n\nfn (p mut Point) Move(dx i64, dy i64) {{\n\tp.X += dx\n}}\n\nfn helper(a i64) i64 {{\n\treturn a + Limit\n}}\n\nfn main() {{\n\tlet p = Point{{X: 1, Y: 2}}\n\tsay.Line(p.Dist(), helper(1), counter)\n}}\n"
+
+// Run is what `tinc -symbols` printed: its exit code, the JSON lines and its standard error.
+type Run struct {
+	Code i64
+	Syms []tinjson.J
+	Err str
+}
+
+fn symbols(path str, flags []str, hasPath bool) Run {
+	mut argv = []str{"env", "-i", "TIN_ROOT=" + ci.Root()}
+	if hasPath {
+		argv = append(argv, "PATH=/usr/bin:/bin")
+	}
+	argv = append(argv, ci.Tinc())
+	argv = append(argv, "-symbols")
+	for f in flags {
+		argv = append(argv, f)
+	}
+	argv = append(argv, path)
+	let o = ci.Exec(argv, "", 60)
+	mut syms = []tinjson.J{}
+	for line in ci.Lines(o.Stdout) {
+		let (j, ok) = tinjson.Parse(line)
+		if ok {
+			syms = append(syms, j)
+		}
+	}
+	return Run{Code: o.Code, Syms: syms, Err: o.Stderr}
+}
+
+// mine finds the declaration of a kind and name among the symbols of the file.
+fn mine(r Run, path str, kind str, name str) (tinjson.J, bool) {
+	for s in r.Syms {
+		if s.Get("file").Text() == path && s.Get("kind").Text() == kind && s.Get("name").Text() == name {
+			return s, true
+		}
+	}
+	return tinjson.J{}, false
+}
+
+fn minesNames(r Run, path str) str {
+	mut names = []str{}
+	for s in r.Syms {
+		if s.Get("file").Text() == path && s.Get("kind").Text() != "local" {
+			names = append(names, s.Get("kind").Text() + ":" + s.Get("name").Text())
+		}
+	}
+	for i in 1..len(names) {
+		let x = names[i]
+		mut j = i - 1
+		for j >= 0 && names[j] > x {
+			names[j + 1] = names[j]
+			j -= 1
+		}
+		names[j + 1] = x
+	}
+	return twine.Join(names, ",")
+}
+
+fn memberNames(s tinjson.J) str {
+	mut names = []str{}
+	for m in s.Get("members").Items() {
+		names = append(names, m.Get("name").Text() + "/" + m.Get("detail").Text())
+	}
+	return twine.Join(names, ",")
+}
+
+fn main() {
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "symbols-")
+	let path = ci.Join(dir, "prog.tin")
+	ci.Write(path, PROGRAM)
+
+	// the declarations
+	let r = symbols(path, []str{}, true)
+	ci.Test("symbols exits 0", r.Code == 0)
+	ci.Same("the declarations", minesNames(r, path), "const:Limit,fn:helper,fn:main,method:Dist,method:Move,type:Point,type:Shape,var:counter")
+	let (point, _) = mine(r, path, "type", "Point")
+	ci.Test("Point's place", point.Get("line").Int() == 7 && point.Get("col").Int() == 6 && point.Get("endCol").Int() == 11 && point.Get("sig").Text() == "type Point struct" && point.Get("exported").Bool())
+	ci.Same("Point's doc", point.Get("doc").Text(), "Point is a place.\nIt has two fields.")
+	ci.Same("Point's members", memberNames(point), "X/i64,Y/i64")
+	let (dist, _) = mine(r, path, "method", "Dist")
+	ci.Test("Dist", dist.Get("recv").Text() == "Point" && dist.Get("sig").Text() == "fn (p Point) Dist() i64" && dist.Get("doc").Text() == "Dist is the distance to the origin, squared.")
+	let (mover, _) = mine(r, path, "method", "Move")
+	ci.Test("Move", mover.Get("recv").Text() == "Point" && mover.Get("sig").Text() == "fn (p mut Point) Move(dx i64, dy i64)")
+	let (helper, _) = mine(r, path, "fn", "helper")
+	ci.Test("helper", helper.Get("line").Int() == 30 && helper.Get("col").Int() == 4 && !helper.Get("exported").Bool() && helper.Get("recv").Text() == "")
+	let (lim, _) = mine(r, path, "const", "Limit")
+	ci.Same("Limit's signature", lim.Get("sig").Text(), "const Limit = 10")
+	let (counter, _) = mine(r, path, "var", "counter")
+	ci.Same("counter's signature", counter.Get("sig").Text(), "let counter i64 = 0")
+	let (shape, _) = mine(r, path, "type", "Shape")
+	mut shapeNames = []str{}
+	for m in shape.Get("members").Items() {
+		shapeNames = append(shapeNames, m.Get("name").Text())
+	}
+	ci.Same("Shape's members", twine.Join(shapeNames, ","), "Circle,Empty")
+
+	// locals and parameters of the named files
+	mut locals = []str{}
+	mut foreign = 0
+	mut pMain = tinjson.J{}
+	for s in r.Syms {
+		if s.Get("kind").Text() == "local" {
+			locals = append(locals, s.Get("name").Text() + ":" + s.Get("fn").Text() + ":" + say.Str(s.Get("fnLine").Int()) + ":" + s.Get("type").Text())
+			if s.Get("file").Text() != path {
+				foreign += 1
+			}
+			if s.Get("name").Text() == "p" && s.Get("fn").Text() == "main" {
+				pMain = s
+			}
+		}
+	}
+	for i in 1..len(locals) {
+		let x = locals[i]
+		mut j = i - 1
+		for j >= 0 && locals[j] > x {
+			locals[j + 1] = locals[j]
+			j -= 1
+		}
+		locals[j + 1] = x
+	}
+	ci.Same("locals and parameters", twine.Join(locals, ","), "a:helper:30:i64,dx:Move:26:i64,dy:Move:26:i64,p:Dist:22:Point,p:Move:26:Point,p:main:34:Point")
+	// only the files named on the command line: none of the runtime's or the packages' locals
+	ci.Test("only the named files' locals", foreign == 0)
+	ci.Test("a local's place", pMain.Get("line").Int() == 35 && pMain.Get("col").Int() == 6 && pMain.Get("endCol").Int() == 7)
+
+	// packages come with their names
+	let t = ci.ExecEnv([]str{ci.Tinc(), "-symbols", "-edition", "1", ci.Join(ci.Root(), "toolchain/tests/v2/twine.tin")}, "", 60, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+	mut haveSplit = false
+	mut haveJoin = false
+	for line in ci.Lines(t.Stdout) {
+		let (j, ok) = tinjson.Parse(line)
+		if ok && j.Get("pkg").Text() == "twine" {
+			if j.Get("name").Text() == "Split" {
+				haveSplit = true
+			}
+			if j.Get("name").Text() == "Join" {
+				haveJoin = true
+			}
+		}
+	}
+	ci.Test("twine.Split and twine.Join are listed", haveSplit && haveJoin)
+
+	// errors do not hide the declarations
+	ci.Write(path, twine.Replace(PROGRAM, "return a + Limit", "return a + Missing", 1))
+	let bad = symbols(path, []str{}, true)
+	ci.Test("an error exits 1", bad.Code == 1)
+	ci.Test("with E103", twine.Contains(bad.Err, "E103"))
+	let (_, found) = mine(bad, path, "fn", "helper")
+	ci.Test("the declarations stay", found)
+	ci.Remove(dir)
+	ci.Finish()
+}

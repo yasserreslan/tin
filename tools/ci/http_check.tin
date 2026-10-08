@@ -1,0 +1,34 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+
+// Bounded HTTP correctness, request-pool RSS, and graceful-shutdown checks.
+
+fn check(argv []str, what str) {
+	ci.Must(ci.Exec(argv, ci.Root(), 300), what)
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/http")
+	ci.Mkdirs(out)
+	ci.BuildTin("examples/api.tin", ci.Join(out, "api"), "", []str{})
+	check([]str{"go", "build", "-o", ci.Join(out, "conformance"), "./bench/http/conformance/main.go"}, "go build conformance")
+	check([]str{"go", "build", "-o", ci.Join(out, "graceful"), "./toolchain/tests/graceful/graceful.go"}, "go build graceful")
+	let number = nettest.Port()
+	let server = nettest.Start(ci.Join(out, "api"), []str{}, []str{"TIN_CORES=2", "TIN_GRACE=2"}, ci.Join(out, "server.log"), number)
+	server.Ready(15)
+	let base = []str{ci.Join(out, "conformance"), "-addr", "127.0.0.1:" + mint.Itoa(number), "-pid", mint.Itoa(server.Pid)}
+	mut quick = base
+	quick = append(quick, "-heavy=false")
+	check(quick, "conformance")
+	// Throughput is informational, not a timing gate. Warm up before measuring RSS.
+	mut rss = base
+	rss = append(rss, "-only=rss")
+	rss = append(rss, "-reqs=2000000")
+	check(rss, "conformance rss")
+	server.Stop()
+	check([]str{ci.Join(out, "graceful"), ci.Join(out, "api"), mint.Itoa(nettest.Port())}, "graceful")
+	ci.Pass("http: conformance, request-pool RSS and graceful shutdown")
+}

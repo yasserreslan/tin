@@ -36,9 +36,9 @@ jobs:
         run: |
           version=$(cat VERSION)
           if [ "$RUNNER_OS" = Linux ]; then
-            python3 tools/ci/distribution_check.py "bin/dist/tin-$version-$TARGET.tar.gz" --docker
+            sh tools/ci/tin.sh distribution_check "bin/dist/tin-$version-$TARGET.tar.gz" --docker
           else
-            python3 tools/ci/distribution_check.py "bin/dist/tin-$version-$TARGET.tar.gz"
+            sh tools/ci/tin.sh distribution_check "bin/dist/tin-$version-$TARGET.tar.gz"
           fi
       - name: Tinland.app builds with its icon (macOS)
         if: runner.os == 'macOS'

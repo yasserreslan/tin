@@ -29,7 +29,7 @@ example.tin:11:6: error E510 NOT_IN_UNION: type str does not satisfy the constra
 | E9xx | building: targets, linking and limits |
 
 Each entry below gives the rule, a program that breaks it with the exact output the compiler
-prints for it, and the fixes. `tools/ci/diagnostics_check.py` compiles every example and
+prints for it, and the fixes. `tools/ci/diagnostics_check.tin` compiles every example and
 requires that output, and checks that the compiler, this page and the tests' expected
 diagnostics agree on every code and name. Examples are edition 1, the syntax of LANGUAGE.md,
 opened with ```` ```tin edition=1 ```` and compiled with `-edition 1`. Edition 0, the syntax

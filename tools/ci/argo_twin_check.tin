@@ -1,0 +1,95 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// argo.Get and argo.GetStrict against encoding/json, case by case (#354). Where Go decides, Tin agrees (type errors, ranges, trailing
+// garbage, unknown members under DisallowUnknownFields); Tin is stricter on purpose for duplicate members (GetStrict), invalid UTF-8
+// and lone surrogates (both), and null for a value that cannot be nil (GetStrict).
+
+// Row is one case: the result of Get and of GetStrict.
+type Row struct {
+	Name str
+	Default str
+	Strict str
+}
+
+// stricter is where Tin differs from Go by design: case, Tin's default and Tin's strict. null for a value that cannot be nil: Get reads
+// it as Go does (#715), GetStrict refuses it.
+fn stricter(name str) (str, str, bool) {
+	if name == "duplicate" || name == "null_scalars" || name == "null_slice" || name == "null_element" || name == "null_top" {
+		return "ok", "fault", true
+	}
+	if name == "bad_utf8" || name == "lone_surrogate" {
+		return "fault", "fault", true
+	}
+	return "", "", false
+}
+
+fn rows(out str) []Row {
+	mut result = []Row{}
+	for line in ci.Lines(out) {
+		let words = twine.Fields(line)
+		if len(words) != 3 {
+			continue
+		}
+		result = append(result, Row{Name: words[0], Default: words[1][twine.IndexByte(words[1], '=') + 1:], Strict: words[2][twine.IndexByte(words[2], '=') + 1:]})
+	}
+	return result
+}
+
+fn find(rs []Row, name str) i64 {
+	for i in 0..len(rs) {
+		if rs[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+fn main() {
+	let exe = ci.Join(ci.Root(), "bin/ci/argo_twin")
+	ci.Mkdirs(ci.Join(ci.Root(), "bin/ci"))
+	ci.BuildTin("tools/ci/fixtures/argo_twin.tin", exe, "", []str{})
+	let run = ci.Exec([]str{exe}, "", 60)
+	ci.Must(run, "argo_twin")
+	let tin = rows(run.Stdout)
+	let haveGo = ci.Exec([]str{"go", "version"}, "", 20).Code == 0
+	mut goRows = []Row{}
+	if haveGo {
+		let g = ci.Exec([]str{"go", "run", "tools/ci/fixtures/argo_twin.go"}, ci.Root(), 180)
+		ci.Must(g, "go run argo_twin.go")
+		goRows = rows(g.Stdout)
+	} else {
+		say.Line("go is not installed: Tin results only")
+	}
+	mut bad = []str{}
+	for r in tin {
+		mut wantDefault = ""
+		mut wantStrict = ""
+		let (sd, ss, by) = stricter(r.Name)
+		if by {
+			wantDefault = sd
+			wantStrict = ss
+		} else {
+			let k = find(goRows, r.Name)
+			if k < 0 {
+				continue
+			}
+			wantDefault = goRows[k].Default
+			wantStrict = goRows[k].Strict
+		}
+		if r.Default != wantDefault || r.Strict != wantStrict {
+			bad = append(bad, r.Name + ": tin " + r.Default + "/" + r.Strict + ", want " + wantDefault + "/" + wantStrict)
+		} else if haveGo && by {
+			let k = find(goRows, r.Name)
+			ci.Check(k >= 0 && goRows[k].Default == "ok", "the twin says Go rejects " + r.Name)
+		}
+	}
+	ci.Check(len(bad) == 0, "argo twin: " + twine.Join(bad, "; "))
+	for r in tin {
+		say.Line(r.Name + " Get " + r.Default + " GetStrict " + r.Strict)
+	}
+	ci.Pass("argo twin: " + say.Str(len(tin)) + " cases")
+}

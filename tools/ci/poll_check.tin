@@ -1,0 +1,167 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+
+// CPU-bound request deadlines and Linux drain must release a blocked single core (#234).
+
+fn millis(since i64) i64 {
+	return (tide.Now() - since) / 1000000
+}
+
+fn run(exe str, out str, drain bool) {
+	let port = nettest.Port()
+	let log = ci.Join(out, "poll.out")
+	mut deadline = "200"
+	if drain {
+		deadline = "20000"
+	}
+	let server = nettest.StartSplit(exe, []str{}, []str{"TIN_CORES=1", "TIN_GRACE=1", "TIN_DEADLINE_MS=" + deadline}, log, port)
+	server.Ready(10)
+	mut spinning = nettest.Send(port, nettest.GetRequest("/spin"))
+	mut start = tide.Now()
+	mut elapsed = i64(0)
+	if drain {
+		tide.Sleep(100000000)
+		start = tide.Now()
+		server.Signal("TERM")
+		let r = nettest.Finish(mut spinning, 10)
+		elapsed = millis(start)
+		ci.Check(r.Status == 500, "poll: the spinning request answered " + mint.Itoa(r.Status))
+		ci.Check(elapsed > 800 && elapsed < 3000, "poll: drain took " + mint.Itoa(elapsed) + " ms")
+		let (_, ended) = server.ExitCode(5.0)
+		ci.Check(ended, "poll: the drained server did not exit")
+	} else {
+		// This request queues on the very same core while /spin runs.
+		mut plain = nettest.Send(port, nettest.GetRequest("/plain"))
+		let r = nettest.Finish(mut spinning, 10)
+		elapsed = millis(start)
+		ci.Check(r.Status == 504, "poll: the spinning request answered " + mint.Itoa(r.Status))
+		ci.Check(elapsed > 100 && elapsed < 1000, "poll: the deadline took " + mint.Itoa(elapsed) + " ms")
+		let p = nettest.Finish(mut plain, 10)
+		ci.Check(p.Status == 200 && p.Body == "ok", "poll: /plain answered " + p.Body)
+		ci.Check(nettest.Get(port, "/count") == "1", "poll: /count is not 1")
+		// Reuse the task and its boundary; no stale poll may kill the next request.
+		let again = nettest.Do(port, "GET", "/spin", []str{}, "")
+		ci.Check(again.Status == 504, "poll: the second /spin answered " + mint.Itoa(again.Status))
+		ci.Check(nettest.Get(port, "/plain") == "ok", "poll: /plain after the second /spin")
+		ci.Check(nettest.Get(port, "/count") == "2", "poll: /count is not 2")
+		ci.Check(server.Running(), "poll: the server exited")
+	}
+	if server.Running() {
+		server.Stop()
+	}
+	let err = ci.Read(log + ".err")
+	mut want = "deadline exceeded"
+	mut times = 2
+	if drain {
+		want = "canceled: draining"
+		times = 1
+	}
+	ci.Check(twine.Count(err, "request canceled: " + want) == times, "poll: the request cancellations in the log: " + err)
+	ci.Check(!twine.Contains(err, "panic:") && !twine.Contains(err, "core 0:"), "poll: the server panicked: " + err)
+	mut name = "deadline"
+	if drain {
+		name = "drain"
+	}
+	ci.Pass("CPU " + name + ": " + mint.Itoa(elapsed) + " ms, defers and server recovery")
+}
+
+// guardCleanup: a guard's defer may park; it must not suspend polling in another running task.
+fn guardCleanup(exe str, out str) {
+	let port = nettest.Port()
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_DEADLINE_MS=200"}, ci.Join(out, "guard.out"), port)
+	server.Ready(10)
+	mut waiting = nettest.Send(port, nettest.GetRequest("/guard-wait"))
+	tide.Sleep(10000000)
+	mut spinning = nettest.Send(port, nettest.GetRequest("/spin"))
+	let start = tide.Now()
+	let r = nettest.Finish(mut spinning, 10)
+	ci.Check(r.Status == 504 && millis(start) < 1000, "poll: the guarded spin answered " + mint.Itoa(r.Status) + " in " + mint.Itoa(millis(start)) + " ms")
+	let w = nettest.Finish(mut waiting, 10)
+	ci.Check(w.Status == 200 && w.Body == "guard ok", "poll: /guard-wait answered " + w.Body)
+	ci.Check(nettest.Get(port, "/plain") == "ok", "poll: /plain after the guard")
+	server.Stop()
+	say.Line("PASS parked guard cleanup: another task still polls and the guard resumes")
+}
+
+// pollsIn are the poll loads in the arm64 listing of the source, by function (a program's own code only).
+fn pollsIn(args []str, source str) map[str]i64 {
+	mut argv = []str{ci.Tinc(), "-S", "-target", "linux-arm64", "-o", "/dev/null"}
+	for a in args {
+		argv = append(argv, a)
+	}
+	argv = append(argv, ci.Join(ci.Root(), source))
+	let o = ci.ExecEnv(argv, ci.Root(), 120, []str{"TIN_ROOT=" + ci.Root(), "TINC_POLLS="}, []str{})
+	ci.Must(o, "tinc -S " + source)
+	mut byFn = map[str]i64{}
+	mut fn_ = ""
+	for line in twine.Split(o.Stdout, "\n") {
+		if len(line) > 0 && line[0] != '\t' && line[0] != ' ' && line[0] != '.' && line[0] != 'L' && twine.HasSuffix(line, ":") {
+			fn_ = twine.TrimLeft(line[0:len(line) - 1], "_")
+		} else if twine.TrimSpace(line) == "ldr x16, [x28, #96]" {
+			byFn[fn_] = byFn[fn_] + 1
+		}
+	}
+	return byFn
+}
+
+fn total(m map[str]i64) i64 {
+	mut n = 0
+	for k, v in m {
+		n += v
+	}
+	return n
+}
+
+// defaults (#341): a program that starts cores polls in its own code without -polls; the standard library (anvil here) does not;
+// -nopolls turns it off; a program without cores never polls.
+fn defaults() {
+	let on = pollsIn([]str{}, "tools/ci/fixtures/poll.tin")
+	ci.Check(on["spin"] >= 1 && on["main.main"] == 1, "poll: polls by function " + mint.Itoa(total(on)))
+	for f, _ in on {
+		ci.Check(!twine.HasPrefix(f, "anvil.") && !twine.HasPrefix(f, "hearth.") && !twine.HasPrefix(f, "rt_"), "poll: library code polls: " + f)
+	}
+	ci.Check(total(pollsIn([]str{"-nopolls"}, "tools/ci/fixtures/poll.tin")) == 0, "poll: -nopolls still polls")
+	ci.Check(total(pollsIn([]str{}, "bench/v2/indexsum.tin")) == 0, "poll: a program without cores polls")
+	ci.Pass("default polls: " + mint.Itoa(total(on)) + " in a server program's own code, none in lib/, none with -nopolls or in a program without cores")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/poll")
+	ci.Mkdirs(out)
+	defaults()
+	// Built with -polls, and with no flag at all: a server program polls by default (#341).
+	let flagSets = [][]str{[]str{"-polls"}, []str{}}
+	let names = []str{"server", "server-default"}
+	for k in 0..2 {
+		let exe = ci.Join(out, names[k])
+		mut extra = []str{}
+		for f in flagSets[k] {
+			extra = append(extra, f)
+		}
+		extra = append(extra, "-edition")
+		extra = append(extra, "1")
+		let built = ci.ExecEnv(append(prefix(exe, extra), ci.Join(ci.Root(), "tools/ci/fixtures/poll.tin")), ci.Root(), 300, []str{"TIN_ROOT=" + ci.Root(), "TINC_POLLS="}, []str{})
+		ci.Must(built, "compile poll.tin")
+		run(exe, out, false)
+		guardCleanup(exe, out)
+		if ci.Linux() {
+			run(exe, out, true)
+		}
+	}
+}
+
+fn prefix(exe str, extra []str) []str {
+	mut argv = []str{ci.Tinc()}
+	for a in extra {
+		argv = append(argv, a)
+	}
+	argv = append(argv, "-o")
+	argv = append(argv, exe)
+	return argv
+}

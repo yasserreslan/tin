@@ -1,0 +1,101 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// Structured concurrency in requests (#232): children of a scope overlap their waits on the request's core, and the first child fault
+// cancels the others at once.
+//
+// The fixture (tools/ci/fixtures/scopes.tin, edition 1) runs fetchAll from design_semantics section 6 inside handlers, many requests
+// at a time on one core.
+
+const ALL = "[p0 p1 p2 p3] 4 at once"
+const FAULT = "fault: child 2 failed"
+
+// timed is a GET and how many milliseconds it took.
+fn timed(port i64, path str) (nettest.Reply, i64) {
+	let start = tide.Now()
+	let r = nettest.Do(port, "GET", path, []str{}, "")
+	return r, (tide.Now() - start) / 1000000
+}
+
+fn checks(port i64) {
+	// The children count how many of them are waiting at once, so overlap shows in the body rather than in timings a slow runner can
+	// stretch; the time bounds are far from the 5 s a sibling waits when a fault does not cancel it.
+	let (all, took) = timed(port, "/all")
+	ci.Check(all.Status == 200 && all.Body == ALL, "scope: /all answered " + mint.Itoa(all.Status) + " " + all.Body)
+	ci.Check(took < 500, "four overlapping 100 ms children took " + mint.Itoa(took) + " ms")
+	say.Line("fetchAll: 4 children waiting 100 ms each, all at once, answered in " + mint.Itoa(took) + " ms")
+
+	let (fault, ftook) = timed(port, "/fail")
+	ci.Check(fault.Status == 200 && fault.Body == FAULT, "scope: /fail answered " + mint.Itoa(fault.Status) + " " + fault.Body)
+	ci.Check(ftook < 500, "a child fault should cancel the siblings that wait 5 s (" + mint.Itoa(ftook) + " ms)")
+	say.Line("first fault: siblings cancelled, answered in " + mint.Itoa(ftook) + " ms")
+
+	// Many requests with scopes on one core: each gets its own children and results.
+	mut conns = []wire.Conn{}
+	mut paths = []str{}
+	let start = tide.Now()
+	for i in 0..60 {
+		mut path = "/fail"
+		if i % 3 != 0 {
+			path = "/all"
+		}
+		paths = append(paths, path)
+		conns = append(conns, nettest.Send(port, nettest.GetRequest(path)))
+	}
+	for i in 0..60 {
+		mut c = conns[i]
+		let r = nettest.Finish(mut c, 20)
+		mut want = ALL
+		if paths[i] == "/fail" {
+			want = FAULT
+		}
+		ci.Check(r.Status == 200 && r.Body == want, "scope: " + paths[i] + " answered " + mint.Itoa(r.Status) + " " + r.Body)
+	}
+	let total = (tide.Now() - start) / 1000000
+	ci.Check(total < 2000, "60 concurrent scoped requests took " + mint.Itoa(total) + " ms")
+	say.Line("60 concurrent requests with scopes on one core: all correct in " + mint.Itoa(total) + " ms")
+}
+
+// detaching: detach outlives its request: the response comes first, the work 20 ms later, and what it captured from the request is still intact.
+fn detaching(port i64) {
+	let (one, took) = timed(port, "/later/one")
+	ci.Check(one.Status == 200 && one.Body == "detached" && took < 20, "detach: " + one.Body + " in " + mint.Itoa(took) + " ms")
+	ci.Check(nettest.Get(port, "/later/two") == "detached", "detach: /later/two")
+	ci.Check(nettest.Get(port, "/failing") == "detached", "detach: /failing")
+	nettest.Eventually(3.0, fn() bool {
+		return nettest.Get(port, "/seen") == "/later/one;/later/two;"
+	})
+	say.Line("detach: answered before the work ran; the work then saw its captured request path")
+}
+
+fn selecting(port i64) {
+	let (r, took) = timed(port, "/select")
+	ci.Check(r.Status == 200 && r.Body == "job" && took < 500, "select: " + r.Body + " in " + mint.Itoa(took) + " ms")
+	say.Line("select in a request: the lane value won after " + mint.Itoa(took) + " ms")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/scopes")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "server")
+	ci.BuildTin("tools/ci/fixtures/scopes.tin", exe, "", []str{"-edition", "1"})
+	let port = nettest.Port()
+	let log = ci.Join(out, "server.log")
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1"}, log, port)
+	server.Ready(10)
+	checks(port)
+	detaching(port)
+	selecting(port)
+	ci.Check(server.Running(), "scope: the server exited")
+	server.Stop()
+	let text = ci.Read(log)
+	ci.Check(twine.Count(text, "detached task failed: background work failed") == 1, "scope: the failing detached task is not logged once:\n" + text)
+	ci.Pass("scope: children overlap, a fault cancels the siblings; detach and select work; a failing detached task is logged once and the server kept serving")
+}

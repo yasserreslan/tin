@@ -1,0 +1,102 @@
+package main
+
+import "./ci"
+import "./docscheck"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// Docs are edition 1 (#227): no edition-0 syntax in the docs or examples, and every docs code block compiles. Without a compiler it
+// checks the text only; with one (`docs_check bin/tinc`) it also compiles every ```tin block of README.md and toolchain/docs/ with
+// -edition 1. The rules are in tools/ci/docscheck.
+
+// Job is one block to compile: where it is, and the folder with its files.
+type Job struct {
+	Where str
+	Dir str
+	Expect str
+	HasExpect bool
+	Source str
+}
+
+fn main() {
+	let root = ci.Root()
+	let args = quarry.Args()
+	let checked = docscheck.CheckStatic(root)
+	mut problems = checked.Problems
+	mut compiled = 0
+	if len(args) > 1 {
+		mut compiler = args[1]
+		if !twine.HasPrefix(compiler, "/") {
+			compiler = ci.Join(root, compiler)
+		}
+		let packages = docscheck.LibraryPackages(root)
+		let work = ci.TempDir(ci.Join(root, "bin/ci"), "docs-")
+		mut jobs = []Job{}
+		for k in 0..len(checked.Pages) {
+			for b in docscheck.AttachFiles(checked.Blocks[k]) {
+				let n = len(jobs)
+				let dir = ci.Join(work, "job" + mint.Itoa(n))
+				let source = docscheck.Program(b, packages)
+				ci.Mkdirs(dir)
+				let pkg = docscheck.PackageOf(source)
+				if pkg == "main" {
+					ci.Write(ci.Join(dir, "example.tin"), source)
+				} else {
+					// A library package is compiled through a program that imports it.
+					ci.Write(ci.Join(dir, pkg + ".tin"), source)
+					ci.Write(ci.Join(dir, "example.tin"), "package main\n\nimport \"./" + pkg + "\"\n\nfn main() {{}}\n")
+				}
+				for f in 0..len(b.FileNames) {
+					let path = ci.Join(dir, b.FileNames[f])
+					ci.Mkdirs(path[0:twine.LastIndex(path, "/")])
+					ci.Write(path, b.FileBodies[f])
+				}
+				ci.Write(ci.Join(dir, "run.sh"), "cd \"$(dirname \"$0\")\" || exit 1\nTIN_ROOT=" + root + " LC_ALL=C " + compiler + " -edition 1 -S -o example.s example.tin > out.txt 2>&1\necho $? > code.txt\n")
+				let (expect, has) = b.Attr("error")
+				jobs = append(jobs, Job{Where: docscheck.Relative(checked.Pages[k], root) + ":" + mint.Itoa(b.Line), Dir: dir, Expect: expect, HasExpect: has, Source: source})
+			}
+		}
+		compiled = len(jobs)
+		// every block compiles in a process of its own, as many at a time as there are processors
+		ci.Must(ci.Sh("ls -d \"" + work + "\"/job* | xargs -P \"$(getconf _NPROCESSORS_ONLN)\" -I{{}} sh {{}}/run.sh", "", 1800), "compile the blocks")
+		for j in jobs {
+			let out = ci.Read(ci.Join(j.Dir, "out.txt"))
+			let code = ci.Num(twine.TrimSpace(ci.Read(ci.Join(j.Dir, "code.txt"))))
+			if j.HasExpect {
+				if code == 0 {
+					problems = append(problems, j.Where + ": the block is marked error but compiles")
+				} else if len(j.Expect) > 0 && !twine.Contains(out, "error " + j.Expect + " ") {
+					problems = append(problems, j.Where + ": the block must fail with " + j.Expect + ", but printed:\n" + out)
+				}
+			} else if code != 0 {
+				mut numbered = ""
+				let lines = twine.Split(j.Source, "\n")
+				for i in 0..len(lines) {
+					if i == len(lines) - 1 && len(lines[i]) == 0 {
+						break
+					}
+					mut num = mint.Itoa(i + 1)
+					for len(num) < 4 {
+						num = " " + num
+					}
+					numbered += num + " " + lines[i] + "\n"
+				}
+				problems = append(problems, j.Where + ": the block does not compile:\n" + out + "as compiled:\n" + numbered)
+			}
+		}
+		ci.Remove(work)
+	}
+	for p in problems {
+		say.Line("FAIL docs: " + p)
+	}
+	if len(problems) > 0 {
+		quarry.Exit(1)
+	}
+	mut built = ""
+	if len(args) > 1 {
+		built = ", " + mint.Itoa(compiled) + " code blocks compile"
+	}
+	ci.Pass("docs: no edition-0 syntax in " + mint.Itoa(len(checked.Pages) + 1) + " pages and " + mint.Itoa(checked.Examples) + " examples" + built)
+}

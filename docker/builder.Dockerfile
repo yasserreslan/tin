@@ -1,4 +1,4 @@
-# Context: an extracted native archive in tin/. See tools/ci/distribution_check.py.
+# Context: an extracted native archive in tin/. See tools/ci/distribution_check.tin.
 FROM debian:bookworm-slim
 ARG TIN_VERSION
 LABEL org.opencontainers.image.title="Tin compiler" \

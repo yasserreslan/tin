@@ -1,0 +1,114 @@
+package main
+
+import "./ci"
+import "./diagcheck"
+import "say"
+import "twine"
+
+// The diagnostic-code checker (#244) finds every kind of disagreement, and the tree has none.
+
+const HEAD = "## E5xx Generics\n\n### E501 NOT_GENERIC\n\n"
+const BODY = "```tin\npackage main\n```\n\n```text\nexample.tin:1:1: error E501 NOT_GENERIC: 'P' is not a generic type\n```\n"
+const SOURCE = "err_code(pos, \"E501 NOT_GENERIC\");\n"
+
+// problems of a tree with this page, compiler source and expected-diagnostics file.
+fn check(doc str, source str, err str) diagcheck.Static {
+	let root = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "diag-test-")
+	ci.Mkdirs(ci.Join(root, "toolchain/docs"))
+	ci.Write(ci.Join(root, "toolchain/docs/ERRORS.md"), "# Compiler diagnostics\n\n" + doc)
+	ci.Mkdirs(ci.Join(root, "toolchain/compiler"))
+	ci.Write(ci.Join(root, "toolchain/compiler/x.tin"), source)
+	ci.Mkdirs(ci.Join(root, "toolchain/tests/v2"))
+	ci.Write(ci.Join(root, "toolchain/tests/v2/a_bad.err"), err)
+	let s = diagcheck.CheckStatic(root)
+	ci.Remove(root)
+	return s
+}
+
+fn has(s diagcheck.Static, part str) bool {
+	for p in s.Problems {
+		if twine.Contains(p, part) {
+			return true
+		}
+	}
+	return false
+}
+
+fn entryOf(doc str) diagcheck.Entry {
+	let entries = diagcheck.ParseDoc("# Compiler diagnostics\n\n" + doc) catch err {
+		ci.Fail(say.Str(err))
+		panic("unreachable")
+	}
+	return entries[0]
+}
+
+fn main() {
+	let entry = HEAD + "Rule.\n\n" + BODY
+	// agreement
+	let agree = check(entry, SOURCE, "a.tin:1:1: error E501 NOT_GENERIC: x\nerror E501 NOT_GENERIC: y\n")
+	ci.Test("agreement has no problems", len(agree.Problems) == 0)
+	ci.Test("agreement: two coded lines", agree.Coded == 2 && agree.Uncoded == 0)
+	// an expected diagnostic needs a code
+	for err in []str{"a.tin:2:1: error: y\n", "error: y\n", "a.tin:2:1: y\n"} {
+		let s = check(entry, SOURCE, err)
+		ci.Test("needs a code: " + twine.TrimSpace(err), has(s, "without a code") && s.Coded == 0 && s.Uncoded == 1)
+	}
+	// the source prints only coded errors
+	let uncoded = check(entry, SOURCE + "buf_str(b, \"error: \");\n", "")
+	ci.Test("source prints only coded errors", has(uncoded, "x.tin:2: prints an error without a code"))
+	// an undocumented code
+	let undocumented = check(entry, SOURCE + "err_code(pos, \"E502 COUNT\");\n", "")
+	ci.Test("undocumented code", has(undocumented, "E502 COUNT is not documented"))
+	// a wrong name
+	let wrong = check(entry, "err_code(pos, \"E501 NOT_TEMPLATE\");\n", "")
+	ci.Test("wrong name", has(wrong, "E501 is NOT_GENERIC"))
+	// an unused code must be retired
+	let unused = check(entry, "", "")
+	ci.Test("unused code", has(unused, "not printed by the compiler"))
+	let retiredDoc = HEAD + "Retired: replaced by E502.\n"
+	ci.Test("a retired code needs no source", len(check(retiredDoc, "", "").Problems) == 0)
+	// an internal error needs no example
+	let internalDoc = HEAD + "No example: only a compiler bug reaches it.\n"
+	ci.Test("an internal error needs no example", len(check(internalDoc, SOURCE, "").Problems) == 0)
+	// a retired code is never reused
+	ci.Test("a retired code is never reused", has(check(retiredDoc, SOURCE, ""), "never reused"))
+	// an expected diagnostic must be documented
+	ci.Test("an expected diagnostic must be documented", has(check(entry, SOURCE, "a.tin:1:1: error E599 OTHER: x\n"), "E599 OTHER is not documented"))
+	// an entry needs an example and order
+	let second = twine.Replace(twine.Replace(entry, "## E5xx Generics\n\n", "", 1), "```tin\npackage main\n```\n\n", "", 1)
+	let twice = check(entry + "\n" + second, SOURCE, "")
+	ci.Test("documented twice", has(twice, "code documented twice"))
+	ci.Test("code order", has(twice, "code order"))
+	ci.Test("needs an example", has(twice, "one ```tin example"))
+	// an entry in the wrong group
+	ci.Test("wrong group", has(check(twine.Replace(entry, "## E5xx", "## E4xx", 1), SOURCE, ""), "## E5xx"))
+	// the example's edition
+	let plain = diagcheck.ExampleOf(entryOf(entry))
+	ci.Same("default edition", plain.Edition, "0")
+	let one = diagcheck.ExampleOf(entryOf(twine.Replace(entry, "```tin\n", "```tin edition=1\n", 1)))
+	ci.Same("edition 1", one.Edition, "1")
+	ci.Same("edition 1 program", one.Program, "package main\n")
+	// command and files
+	let doc = twine.Replace(entry, "```tin\npackage main\n```", "```sh\nTIN_ROOT=/x tinc -edition 1 a.tin\n```\n\n```text file=tin.lock\nlock\n```", 1)
+	let cmdEntry = entryOf(doc)
+	let ex = diagcheck.ExampleOf(cmdEntry)
+	ci.Test("a command runs without a program", !ex.HasProgram && len(ex.Why) == 0)
+	let c = diagcheck.CommandOf(cmdEntry, "tinc", "0")
+	ci.Same("command env", twine.Join(c.Env, ","), "TIN_ROOT=/x")
+	ci.Same("command argv", twine.Join(c.Argv, " "), "tinc -edition 1 a.tin")
+	ci.Test("block names", !cmdEntry.Blocks[0].HasName && cmdEntry.Blocks[1].HasName && cmdEntry.Blocks[1].Name == "tin.lock" && !cmdEntry.Blocks[2].HasName)
+	let defaults = diagcheck.CommandOf(entryOf(entry), "tinc", "0")
+	ci.Same("default command", twine.Join(defaults.Argv, " "), "tinc -edition 0 -o example example.tin")
+	// the text form of a diagnostic
+	let t = diagcheck.ParseTextError("a/b.tin:12:5: error E501 NOT_GENERIC: 'P' is not")
+	ci.Test("positioned diagnostic", t.Ok && t.File == "a/b.tin" && t.Line == "12" && t.Col == "5" && t.Code == "E501" && t.Name == "NOT_GENERIC" && t.Message == "'P' is not")
+	let noCol = diagcheck.ParseTextError("a.tin:3: error E501 NOT_GENERIC: m")
+	ci.Test("diagnostic without a column", noCol.Ok && noCol.File == "a.tin" && noCol.Line == "3" && noCol.Col == "")
+	let bare = diagcheck.ParseTextError("error E501 NOT_GENERIC: m")
+	ci.Test("diagnostic without a position", bare.Ok && bare.File == "" && bare.Line == "")
+	ci.Test("not a diagnostic", !diagcheck.ParseTextError("hello").Ok)
+	// the tree agrees
+	let tree = diagcheck.CheckStatic(ci.Root())
+	ci.Test("the tree agrees", len(tree.Problems) == 0 && len(tree.Entries) > 0)
+	ci.Finish()
+}

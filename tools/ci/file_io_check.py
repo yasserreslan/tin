@@ -22,7 +22,7 @@ import tempfile
 import time
 
 from suite import ROOT
-import websocket_check as ws
+import pycompat as ws
 from treeutil import copy_lib
 
 

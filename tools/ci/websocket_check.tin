@@ -1,0 +1,150 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+import "seal"
+import "tide"
+import "twine"
+
+// WebSocket server (examples/websocket.tin, one core) and client (examples/websocket_client.tin): handshake, text and binary,
+// fragments with a ping between them, a 70000-byte message, UTF-8 and masking rules, the close handshake, 300 idle connections on one
+// core, 20 tick streams waiting at the same time, and no request deadline on an upgraded connection.
+
+mut fails = []str{}
+
+fn expect(ok bool, name str) {
+	if !ok {
+		fails = append(fails, name)
+	}
+}
+
+fn checks(port i64) {
+	mut c = nettest.Connect(port, "/echo")
+	c.Text("hello")
+	let r = c.Recv()
+	say.Line("text", r.Op, r.Data)
+	expect(r.Op == 1 && r.Data == "echo: hello", "text")
+	c.Send(2, "\x00\x01\xff", true, true)
+	let b = c.Recv()
+	say.Line("binary", b.Op)
+	expect(b.Op == 2 && b.Data == "\x00\x01\xff", "binary")
+	c.Send(1, "frag", false, true)
+	c.Send(9, "pp", true, true)
+	c.Send(0, "ment", false, true)
+	c.Send(0, "ed", true, true)
+	let r1 = c.Recv()
+	let r2 = c.Recv()
+	say.Line("ping during fragments", r1.Op, r1.Data, r2.Op, r2.Data)
+	expect(r1.Op == 10 && r1.Data == "pp" && r2.Op == 1 && r2.Data == "echo: fragmented", "frag")
+	let big = str(seal.RandomBytes(70000))
+	c.Send(2, big, true, true)
+	let rb = c.Recv()
+	say.Line("70000 bytes", rb.Op, len(rb.Data), rb.Data == big)
+	expect(rb.Op == 2 && rb.Data == big, "big")
+	c.Text("héllo ✓")
+	let ru = c.Recv()
+	expect(ru.Op == 1 && ru.Data == "echo: héllo ✓", "utf8")
+	c.Text("\xff\xfe")
+	let rbad = c.Recv()
+	say.Line("bad utf-8 ->", rbad.Op)
+	expect(rbad.Op == 8 && rbad.Data[0:2] == "\x03\xef", "badutf8")
+	mut c2 = nettest.Connect(port, "/echo")
+	c2.Send(1, "x", true, false)
+	let ru2 = c2.Recv()
+	say.Line("unmasked ->", ru2.Op)
+	expect(ru2.Op == 8 && ru2.Data[0:2] == "\x03\xea", "unmasked")
+	mut c3 = nettest.Connect(port, "/echo")
+	c3.Send(8, "\x03\xe8bye", true, true)
+	let rc = c3.Recv()
+	say.Line("close ->", rc.Op)
+	expect(rc.Op == 8 && rc.Data == "\x03\xe8", "close")
+	// many concurrent idle connections + ticks
+	mut conns = []nettest.Socket{}
+	for i in 0..300 {
+		conns = append(conns, nettest.Connect(port, "/echo"))
+	}
+	let t0 = tide.Now()
+	for i in 0..300 {
+		mut k = conns[i]
+		k.Text(mint.Itoa(i))
+	}
+	mut ok = true
+	for i in 0..300 {
+		mut k = conns[i]
+		let f = k.Recv()
+		if f.Op != 1 || f.Data != "echo: " + mint.Itoa(i) {
+			ok = false
+		}
+	}
+	say.Line("300 connections echo:", ok, (tide.Now() - t0) / 1000000, "ms")
+	expect(ok, "many")
+	mut streams = []nettest.Socket{}
+	let t1 = tide.Now()
+	for i in 0..20 {
+		streams = append(streams, nettest.Connect(port, "/ticks"))
+	}
+	mut okTicks = true
+	for i in 0..20 {
+		mut k = streams[i]
+		mut got = []str{}
+		for {
+			let f = k.Recv()
+			if f.Op == 8 {
+				break
+			}
+			got = append(got, f.Data)
+		}
+		if len(got) != 10 {
+			okTicks = false
+		} else {
+			for j in 0..10 {
+				if got[j] != "tick " + mint.Itoa(j + 1) {
+					okTicks = false
+				}
+			}
+		}
+	}
+	let dt = tide.Now() - t1
+	say.Line("20 tick streams:", dt / 1000000, "ms ok =", okTicks)
+	expect(okTicks && dt < 1600000000, "ticks")
+	for i in 0..300 {
+		mut k = conns[i]
+		k.Close()
+	}
+	c.Close()
+	c2.Close()
+	c3.Close()
+	let plain = nettest.Do(port, "GET", "/echo", []str{}, "")
+	say.Line("plain GET /echo -> status", plain.Status)
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/websocket")
+	ci.Mkdirs(out)
+	for name in []str{"websocket", "websocket_client"} {
+		ci.BuildTin("examples/" + name + ".tin", ci.Join(out, name), "", []str{})
+	}
+	let port = nettest.Port()
+	// A 300 ms request deadline: upgraded connections must not be subject to it.
+	let server = nettest.Start(ci.Join(out, "websocket"), []str{}, []str{"TIN_CORES=1", "TIN_DEADLINE_MS=300"}, ci.Join(out, "server.log"), port)
+	server.Ready(10)
+	checks(port)
+	let client = ci.Exec([]str{ci.Join(out, "websocket_client"), "ws://127.0.0.1:" + mint.Itoa(port)}, "", 30)
+	say.Line("tin client:", twine.Join(ci.Lines(client.Stdout), " | "))
+	let want = []str{"true echo: hi from tin", "false 100000 true", "tick 1", "end: websocket: closed (1000) true", "ticks 10", "websocket: the server refused the upgrade: HTTP/1.1 200 OK"}
+	let lines = ci.Lines(client.Stdout)
+	mut matches = len(lines) >= 6
+	if matches {
+		for i in 0..6 {
+			if lines[i] != want[i] {
+				matches = false
+			}
+		}
+	}
+	expect(matches, "tin client: " + client.Stdout)
+	server.Stop()
+	ci.Check(len(fails) == 0, "failed: " + twine.Join(fails, ", "))
+	ci.Pass("websocket: handshake, frames, fragments, 300 connections, 20 tick streams and the Tin client")
+}

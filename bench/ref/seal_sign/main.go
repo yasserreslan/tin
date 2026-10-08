@@ -4,7 +4,7 @@
 //	go run ./bench/ref/seal_sign | sort        the twin's lines
 //	go run ./bench/ref/seal_sign gen DIR       writes a fresh set of test keys (good and bad)
 //	go run ./bench/ref/seal_sign verify DIR    reads "KEY SCHEME MSGHEX SIGHEX" lines on stdin and
-//	                                           prints "KEY SCHEME ok|bad" (tools/ci/x509_check.py)
+//	                                           prints "KEY SCHEME ok|bad" (tools/ci/x509_check.tin)
 //
 // Tin is stricter than Go in two places, applied here: RSA keys of 2048 to 8192 bits, and a
 // public key inside a SEC 1 key must match the private scalar.

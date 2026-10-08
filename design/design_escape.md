@@ -167,7 +167,7 @@ stays at its working set, so the #629 warning stops firing for these loops.
    contained loop.
 2. Iteration arenas (section 3): the issue's plain-program loop in constant memory without
    `arena`, binary-trees' resident size within 3x of Go's on Linux (each depth's trees are made
-   and checked inside one iteration), and a `task_check.py`-style check that `limit memory` on a
+   and checked inside one iteration), and a `task_check.tin`-style check that `limit memory` on a
    request that builds and drops temporaries counts live data only.
 3. Frame slices and closures (sections 2's slices and design_foundations §1).
 

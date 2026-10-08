@@ -1,0 +1,107 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Loop iterations give their memory back (#633): binary-trees (bench/v2/bintrees.tin), which builds and checks each depth's trees
+// inside one loop iteration, peaks within 3x of its Go twin's resident size, and the plain-program loop of the issue (5 million steps
+// of a struct and a string) under 16 MiB, and the loop bodies of #714 (an inlined call that allocates, a slice literal, an inner loop)
+// under 16 MiB each. Linux only: peak RSS is the child's ru_maxrss as /usr/bin/time reports it.
+
+const LOOP = `package main
+
+import "say"
+
+type Row struct {
+	id i64
+	name str
+}
+
+fn parse(i i64) Row {
+	return Row{id: i, name: "row {i}"}
+}
+
+fn main() {
+	mut total = 0
+	for i in 0..5000000 {
+		let r = parse(i)
+		total += len(r.name)
+	}
+	say.Line(total)
+}
+`
+
+// Loop bodies that keep nothing but were not given back before #714: 3 million steps each.
+fn bodyNames() []str {
+	return []str{"inlined mint.Itoa", "str slice literal", "make and store", "inner loop"}
+}
+
+fn bodies() []str {
+	return []str{"let s = mint.Itoa(i)\n\t\tif len(s) > 0 {{\n\t\t\ttotal += 1\n\t\t}}", "let parts = []str{{\"a\", mint.Itoa(i)}}\n\t\ttotal += len(parts[1])", "let parts = make([]str, 2)\n\t\tparts[1] = mint.Itoa(i)\n\t\ttotal += len(parts[1])", "let s = mint.Itoa(i)\n\t\tfor c in s {{\n\t\t\ttotal += i64(c)\n\t\t}}"}
+}
+
+fn wants() []str {
+	return []str{"3000000", "19888890", "19888890", "1038666720"}
+}
+
+fn bodyProgram(body str) str {
+	return "package main\n\nimport \"mint\"\nimport \"say\"\n\nfn main() {{\n\tmut total = 0\n\tfor i in 0..3000000 {{\n\t\t" + body + "\n\t}}\n\tsay.Line(total)\n}}\n"
+}
+
+// peak runs the program under /usr/bin/time and returns its exit status, stdout and peak resident KiB.
+fn peak(exe str) (i64, str, i64) {
+	let o = ci.Exec([]str{"/usr/bin/time", "-f", "PEAK %M", exe}, "", 300)
+	mut kib = -1
+	for line in ci.Lines(o.Stderr) {
+		if twine.HasPrefix(line, "PEAK ") {
+			kib = ci.Num(line[5:])
+		}
+	}
+	ci.Check(kib >= 0, "no peak in " + o.Stderr)
+	return o.Code, o.Stdout, kib
+}
+
+fn main() {
+	if !ci.Linux() {
+		say.Line("SKIP loop memory: peak RSS is measured on Linux")
+		return
+	}
+	let haveTime = ci.Exists("/usr/bin/time")
+	let haveGo = ci.Exec([]str{"go", "version"}, "", 20).Code == 0
+	if !haveTime || !haveGo {
+		ci.Check(len(ci.Env("CI")) == 0, "loop memory: needs /usr/bin/time and go on Linux CI runners")
+		say.Line("SKIP loop memory: needs /usr/bin/time and go")
+		return
+	}
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "loop-memory-")
+	ci.BuildTin("bench/v2/bintrees.tin", ci.Join(dir, "bintrees"), "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(dir, "bintrees_go"), "bench/v2/bintrees.go"}, ci.Root(), 300), "go build bintrees")
+	ci.Write(ci.Join(dir, "loop.tin"), LOOP)
+	ci.BuildTin(ci.Join(dir, "loop.tin"), ci.Join(dir, "loop"), "", []str{})
+	let (code, tinOut, tin) = peak(ci.Join(dir, "bintrees"))
+	ci.Check(code == 0, "bintrees exit " + mint.Itoa(code))
+	let (goCode, goOut, goPeak) = peak(ci.Join(dir, "bintrees_go"))
+	ci.Check(goCode == 0, "bintrees_go exit " + mint.Itoa(goCode))
+	ci.Check(tinOut == goOut, "bintrees: output differs from Go's")
+	say.Line("binary-trees depth 18: Tin peak " + mint.Itoa(tin) + " KiB, Go peak " + mint.Itoa(goPeak) + " KiB")
+	ci.Check(tin <= 3 * goPeak, "binary-trees peaks at " + mint.Itoa(tin) + " KiB, more than 3x Go (" + mint.Itoa(goPeak) + " KiB)")
+	let (loopCode, loopOut, loop) = peak(ci.Join(dir, "loop"))
+	ci.Check(loopCode == 0 && loopOut == "53888890\n", "loop: exit " + mint.Itoa(loopCode) + " " + loopOut)
+	say.Line("plain loop of 5M structs and strings: peak " + mint.Itoa(loop) + " KiB")
+	ci.Check(loop < 16 * 1024, "the plain loop peaks at " + mint.Itoa(loop) + " KiB")
+	let names = bodyNames()
+	let texts = bodies()
+	let want = wants()
+	for i in 0..len(names) {
+		ci.Write(ci.Join(dir, "body.tin"), bodyProgram(texts[i]))
+		ci.BuildTin(ci.Join(dir, "body.tin"), ci.Join(dir, "body"), "", []str{})
+		let (bodyCode, bodyOut, kib) = peak(ci.Join(dir, "body"))
+		ci.Check(bodyCode == 0 && bodyOut == want[i] + "\n", names[i] + ": exit " + mint.Itoa(bodyCode) + " " + bodyOut)
+		say.Line("loop body " + names[i] + ": peak " + mint.Itoa(kib) + " KiB")
+		ci.Check(kib < 16 * 1024, "the loop body " + names[i] + " peaks at " + mint.Itoa(kib) + " KiB (#714)")
+	}
+	ci.Remove(dir)
+	ci.Pass("loop memory: binary-trees within 3x of Go, the plain loop and the #714 bodies under 16 MiB")
+}

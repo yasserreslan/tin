@@ -1,0 +1,274 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Certificates and signatures in seal (#124 phase 2), against Go's crypto/x509 and crypto/rsa.
+//
+// 1. A fresh test PKI (bench/ref/x509_pki: a root, intermediates, leaves and every bad case) is generated for this run;
+//    toolchain/tests/v2/seal_x509.tin and its Go twin bench/ref/seal_x509 verify every case, and both must give the outcome cases.txt
+//    expects.
+// 2. The checked-in PKI (toolchain/tests/data/x509: chains and parsed fields) and the Wycheproof vectors (toolchain/tests/wycheproof/rsa,
+//    ecdsa and ed25519) give the same results in Go as the strict suite's expected Tin output.
+// 3. Every byte of every certificate in the fresh PKI, in toolchain/tests/data/x509_real (public roots that found differences before) and
+//    in the system bundle is flipped three ways; Tin must reject every mutant Go rejects (Tin may reject more: Go ignores trailing bytes
+//    in a few places).
+// 4. Private keys and signing (toolchain/tests/data/keys): signatures Tin makes for TLS (RSA-PSS with random salts, RFC 6979 ECDSA)
+//    verify in Go; deterministic ones equal Go's (toolchain/tests/v2/seal_sign.tin).
+// 5. SystemRoots reads the operating system's bundle and parses the same certificates Go does.
+// Needs Go (as http_check does).
+
+fn bundles() []str {
+	return []str{"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/ca-bundle.pem", "/etc/pki/tls/cacert.pem", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "/etc/ssl/cert.pem"}
+}
+
+// run executes the command from the repository root and returns its standard output; a failure shows what it printed.
+fn run(argv []str, seconds i64) str {
+	let o = ci.ExecEnv(argv, ci.Root(), seconds, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+	ci.Must(o, twine.Join(argv, " "))
+	return o.Stdout
+}
+
+fn build(source str, out str) str {
+	ci.BuildTin(source, out, "", []str{})
+	return out
+}
+
+// Outcomes maps NAME to "OK n" or the failure class, from "NAME OK n" / "NAME FAIL class[: fault]" lines.
+type Outcomes struct {
+	Names []str
+	Values []str
+}
+
+fn (o Outcomes) Get(name str) str {
+	for i in 0..len(o.Names) {
+		if o.Names[i] == name {
+			return o.Values[i]
+		}
+	}
+	return "<none>"
+}
+
+fn outcomes(text str) Outcomes {
+	mut o = Outcomes{Names: []str{}, Values: []str{}}
+	for line in ci.Lines(text) {
+		let at = twine.IndexByte(line, ' ')
+		let name = line[0:at]
+		mut rest = line[at + 1:]
+		if twine.HasPrefix(rest, "FAIL ") {
+			rest = rest[5:]
+			let colon = twine.IndexByte(rest, ':')
+			if colon >= 0 {
+				rest = rest[0:colon]
+			}
+		}
+		o.Names = append(o.Names, name)
+		o.Values = append(o.Values, rest)
+	}
+	return o
+}
+
+fn sortedLines(text str) []str {
+	mut xs = ci.Lines(text)
+	for i in 1..len(xs) {
+		let x = xs[i]
+		mut j = i - 1
+		for j >= 0 && xs[j] > x {
+			xs[j + 1] = xs[j]
+			j -= 1
+		}
+		xs[j + 1] = x
+	}
+	return xs
+}
+
+fn equalLines(a []str, b []str) bool {
+	return twine.Join(a, "\n") == twine.Join(b, "\n")
+}
+
+// differ lists the lines in only one of two sorted line lists (at most most).
+fn differ(a []str, b []str, most i64) str {
+	mut out = []str{}
+	for x in a {
+		mut found = false
+		for y in b {
+			if x == y {
+				found = true
+			}
+		}
+		if !found && len(out) < most {
+			out = append(out, x)
+		}
+	}
+	for y in b {
+		mut found = false
+		for x in a {
+			if x == y {
+				found = true
+			}
+		}
+		if !found && len(out) < most {
+			out = append(out, y)
+		}
+	}
+	return twine.Join(out, "\n")
+}
+
+fn checkPki(tin str, pki str) {
+	let cases = ci.Lines(ci.Read(ci.Join(pki, "cases.txt")))
+	let gotTin = outcomes(run([]str{tin, pki}, 300))
+	let gotGo = outcomes(run([]str{"go", "run", "./bench/ref/seal_x509", pki}, 300))
+	mut bad = []str{}
+	mut count = 0
+	for line in cases {
+		let f = twine.Fields(line)
+		if len(f) == 0 || f[0] == "now" {
+			continue
+		}
+		count += 1
+		let want = twine.Join(f[6:], " ")
+		if gotTin.Get(f[0]) != want || gotGo.Get(f[0]) != want {
+			bad = append(bad, f[0] + ": expected " + want + ", Tin " + gotTin.Get(f[0]) + ", Go " + gotGo.Get(f[0]))
+		}
+	}
+	ci.Check(len(bad) == 0, "fresh PKI:\n" + twine.Join(bad, "\n"))
+	ci.Pass("fresh test PKI: " + mint.Itoa(count) + " cases agree with Go and the expectations")
+}
+
+fn checkCheckedIn() {
+	let root = ci.Root()
+	let tin = outcomes(ci.Read(ci.Join(root, "toolchain/tests/v2/seal_x509.out")))
+	let goOut = outcomes(run([]str{"go", "run", "./bench/ref/seal_x509"}, 300))
+	ci.Check(twine.Join(tin.Names, ",") == twine.Join(goOut.Names, ",") && twine.Join(tin.Values, ",") == twine.Join(goOut.Values, ","), "checked-in PKI: Tin and Go differ")
+	let want = sortedLines(ci.Read(ci.Join(root, "toolchain/tests/v2/seal_wycheproof.out")) + ci.Read(ci.Join(root, "toolchain/tests/v2/seal_wycheproof_ecdsa.out")) + ci.Read(ci.Join(root, "toolchain/tests/v2/seal_wycheproof_ed25519.out")))
+	let got = sortedLines(run([]str{"go", "run", "./bench/ref/seal_wycheproof"}, 300))
+	ci.Check(equalLines(got, want), "Wycheproof: Go output differs from toolchain/tests/v2/seal_wycheproof*.out:\n" + differ(got, want, 40))
+	let wantSign = sortedLines(ci.Read(ci.Join(root, "toolchain/tests/v2/seal_sign.out")))
+	let gotSign = sortedLines(run([]str{"go", "run", "./bench/ref/seal_sign"}, 300))
+	ci.Check(equalLines(gotSign, wantSign), "signing: Go output differs from toolchain/tests/v2/seal_sign.out:\n" + differ(gotSign, wantSign, 40))
+	let wantInfo = sortedLines(ci.Read(ci.Join(root, "toolchain/tests/v2/seal_certinfo.out")))
+	let gotInfo = sortedLines(run([]str{"go", "run", "./bench/ref/seal_certinfo"}, 300))
+	ci.Check(equalLines(gotInfo, wantInfo), "certificate fields: Go output differs from toolchain/tests/v2/seal_certinfo.out:\n" + differ(gotInfo, wantInfo, 40))
+	ci.Pass("checked-in PKI (" + mint.Itoa(len(tin.Names)) + " cases), certificate fields (" + mint.Itoa(len(wantInfo)) + " lines) and Wycheproof (" + mint.Itoa(len(want)) + " files) agree with Go")
+}
+
+fn systemBundle() str {
+	let given = ci.Env("SSL_CERT_FILE")
+	mut paths = bundles()
+	if len(given) > 0 {
+		paths = []str{given}
+	} else if ci.OS() == "darwin" {
+		paths = []str{"/etc/ssl/cert.pem"}
+	}
+	for p in paths {
+		if ci.Exists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
+fn certCount(path str) i64 {
+	return twine.Count(ci.Read(path), "-----BEGIN CERTIFICATE-----")
+}
+
+// checkMutants: Tin runs once per certificate (a plain program frees memory only at exit); Go once.
+fn checkMutants(mutate str, gomutate str, files []str) {
+	mut tinSet = map[str]bool{}
+	for f in files {
+		for k in 0..certCount(f) {
+			for line in ci.Lines(run([]str{mutate, f, mint.Itoa(k)}, 300)) {
+				if twine.Contains(line, "rejected") {
+					let w = twine.Fields(line)
+					tinSet[f + " " + w[0] + " " + w[1] + " " + w[2]] = true
+				}
+			}
+		}
+	}
+	mut goSet = []str{}
+	mut argv = []str{gomutate}
+	for f in files {
+		argv = append(argv, f)
+	}
+	for line in ci.Lines(run(argv, 900)) {
+		if twine.Contains(line, "rejected") {
+			let w = twine.Fields(line)
+			goSet = append(goSet, files[ci.Num(w[0]) - 1] + " " + w[1] + " " + w[2] + " " + w[3])
+		}
+	}
+	mut lax = []str{}
+	for g in goSet {
+		let (_, found) = tinSet[g]
+		if !found {
+			lax = append(lax, g)
+		}
+	}
+	ci.Check(len(lax) == 0, "Tin accepts " + mint.Itoa(len(lax)) + " mutants Go rejects (file, cert, byte, xor):\n" + twine.Join(lax[0:min(len(lax), 50)], "\n"))
+	ci.Pass("mutated certificates: " + mint.Itoa(len(goSet)) + " Go rejections all rejected by Tin (" + mint.Itoa(len(tinSet) - len(goSet)) + " more rejected by Tin only), " + mint.Itoa(len(files)) + " files")
+}
+
+// checkSignatures: signatures Tin makes with the test keys (random PSS salts included) verify in Go.
+fn checkSignatures(signer str) {
+	let lines = run([]str{signer}, 300)
+	ci.Check(!twine.Contains(lines, "error"), "signing: " + lines)
+	let proc = ci.ExecIn([]str{"go", "run", "./bench/ref/seal_sign", "verify", "toolchain/tests/data/keys"}, ci.Root(), 300, lines, []str{})
+	ci.Must(proc, "go run seal_sign verify")
+	let out = ci.Lines(proc.Stdout)
+	mut bad = []str{}
+	for l in out {
+		if !twine.HasSuffix(l, " ok") {
+			bad = append(bad, l)
+		}
+	}
+	mut want = 0
+	for l in ci.Lines(lines) {
+		if len(twine.TrimSpace(l)) > 0 {
+			want += 1
+		}
+	}
+	ci.Check(len(bad) == 0 && len(out) == want, "Go rejected Tin signatures: " + twine.Join(bad, ", ") + " (" + mint.Itoa(len(out)) + " of " + mint.Itoa(want) + " checked)")
+	ci.Pass("signatures: Go verifies all " + mint.Itoa(want) + " TLS signatures Tin made (RSA-PSS, ECDSA and Ed25519)")
+}
+
+fn checkSystemRoots(roots str) {
+	let out = twine.TrimSpace(run([]str{roots}, 300))
+	let path = systemBundle()
+	if len(path) == 0 {
+		say.Line("SKIP SystemRoots: no system bundle on this machine")
+		return
+	}
+	let want = twine.TrimSpace(run([]str{"go", "run", "./bench/ref/x509_roots", path}, 300))
+	let blocks = certCount(path)
+	ci.Check(out == want, "SystemRoots: Tin " + out + ", Go " + want + " of the " + mint.Itoa(blocks) + " certificates in " + path)
+	ci.Pass("SystemRoots: " + twine.Fields(out)[1] + " of the " + mint.Itoa(blocks) + " certificates in " + path + ", as Go")
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/x509")
+	ci.Mkdirs(directory)
+	let tmp = ci.TempDir(directory, "x509-")
+	let tin = build("toolchain/tests/v2/seal_x509.tin", ci.Join(tmp, "seal_x509"))
+	let mutate = build("tools/ci/fixtures/x509_mutate.tin", ci.Join(tmp, "x509_mutate"))
+	let gomutate = ci.Join(tmp, "x509_mutate_go")
+	run([]str{"go", "build", "-o", gomutate, "./bench/ref/x509_mutate"}, 300)
+	let roots = build("tools/ci/fixtures/x509_roots.tin", ci.Join(tmp, "x509_roots"))
+	let signer = build("tools/ci/fixtures/sign_tls.tin", ci.Join(tmp, "sign_tls"))
+	let pki = ci.Join(tmp, "pki")
+	run([]str{"go", "run", "./bench/ref/x509_pki", pki}, 300)
+	checkPki(tin, pki)
+	checkCheckedIn()
+	mut files = ci.Files(ci.Join(pki, "certs"), ".pem")
+	for f in ci.Files(ci.Join(ci.Root(), "toolchain/tests/data/x509_real"), ".pem") {
+		files = append(files, f)
+	}
+	let bundle = systemBundle()
+	if len(bundle) > 0 {
+		files = append(files, bundle)
+	}
+	checkMutants(mutate, gomutate, files)
+	checkSignatures(signer)
+	checkSystemRoots(roots)
+	ci.Remove(tmp)
+}

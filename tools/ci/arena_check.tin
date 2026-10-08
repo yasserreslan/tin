@@ -1,0 +1,176 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+import "wire"
+
+// arena { } (#236): a batch loop whose steps run in arenas keeps a flat peak RSS, and arenas in request handlers that wait inside them
+// interleave on one core with correct answers.
+//
+// The fixture (tools/ci/fixtures/arenas.tin, edition 1) writes every page of about 8 MB per step. Without arenas the steps pile up in
+// the pool, which the check uses as a control: the measurement must see that growth, so a flat arena run is not a measurement that
+// sees nothing. The check also streams a generated 1 GiB CSV file through ledger.NewStream with every read in an arena (fixture
+// tools/ci/fixtures/ledger_stream.tin): the reader's fixed 64 KiB window makes the per-record memory arena memory, so it is released as
+// the loop goes. Peak RSS is Linux acceptance (toolchain/docs/CI.md); macOS runs everything and reports the numbers.
+
+const MIB = 1048576
+
+fn mib(bytes i64) str {
+	return mint.Itoa(bytes / MIB) + "." + mint.Itoa(bytes * 10 / MIB % 10)
+}
+
+// peakRss runs one batch and returns its peak RSS in bytes.
+fn peakRss(exe str, mode str, steps i64) i64 {
+	let (code, out, peak, err) = ci.PeakRun(exe, []str{}, []str{"ARENA_BATCH=" + mode, "ARENA_STEPS=" + mint.Itoa(steps), "TIN_CORES=1"}, 600)
+	ci.Check(code == 0, "arena " + mode + " " + mint.Itoa(steps) + ": exit " + mint.Itoa(code) + " " + err)
+	ci.Check(out == "total " + mint.Itoa(999999 * steps) + "\n", "arena " + mode + " " + mint.Itoa(steps) + ": printed " + out)
+	return peak
+}
+
+fn batches(exe str) {
+	let small = peakRss(exe, "arena", 10)
+	let large = peakRss(exe, "arena", 200)
+	let plainSmall = peakRss(exe, "plain", 10)
+	let plainLarge = peakRss(exe, "plain", 40)
+	say.Line("arena batch: peak RSS " + mib(small) + " MiB after 10 steps, " + mib(large) + " MiB after 200 steps (8 MB each)")
+	say.Line("plain batch (control): peak RSS " + mib(plainSmall) + " MiB after 10 steps, " + mib(plainLarge) + " MiB after 40 steps")
+	if ci.Linux() {
+		ci.Check(plainLarge - plainSmall > 150 * MIB, "the control did not grow: " + mint.Itoa(plainSmall) + " -> " + mint.Itoa(plainLarge))
+		ci.Check(large - small < 16 * MIB, "arena batch peak RSS grew: " + mint.Itoa(small) + " -> " + mint.Itoa(large))
+		ci.Check(large < 64 * MIB, "arena batch peak RSS " + mint.Itoa(large) + " is more than a few steps")
+		say.Line("arena batch: peak RSS stays flat (Linux)")
+	}
+}
+
+// smallSteps (examples/batch.tin, #629): a million small steps, each in an arena, keep a plain program's peak flat, and the pool
+// warning (TIN_POOL_WARN_MB) never fires. An arena left 16 bytes in the enclosing pool per step, so this grew by 32 MB over two
+// million steps.
+fn smallSteps(out str) {
+	let exe = ci.Join(out, "batch")
+	ci.BuildTin("examples/batch.tin", exe, "", []str{})
+	mut peaks = []i64{}
+	for n in []i64{20000, 2000000} {
+		let (code, stdout, peak, err) = ci.PeakRun(exe, []str{mint.Itoa(n)}, []str{"TIN_POOL_WARN_MB=8"}, 600)
+		ci.Check(code == 0, "batch " + mint.Itoa(n) + ": exit " + mint.Itoa(code) + " " + err)
+		ci.Check(twine.HasPrefix(stdout, "records " + mint.Itoa(n) + " "), "batch: printed " + stdout)
+		ci.Check(len(twine.TrimSpace(err)) == 0 || !twine.Contains(err, "pool"), "batch " + mint.Itoa(n) + ": " + err)
+		peaks = append(peaks, peak)
+	}
+	if ci.Linux() {
+		ci.Check(peaks[1] <= peaks[0] + 2 * MIB, "batch: " + mint.Itoa(peaks[0]) + " then " + mint.Itoa(peaks[1]))
+	}
+	say.Line("batch example: peak RSS " + mib(peaks[0]) + " MiB after 20k steps, " + mib(peaks[1]) + " MiB after 2M steps, no pool warning")
+}
+
+fn handlers(port i64, server nettest.Server) {
+	mut parts = []str{}
+	for i in 0..8 {
+		parts = append(parts, mint.Itoa(i) + ":499999")
+	}
+	let want = "[" + twine.Join(parts, " ") + "]"
+	mut peaks = []i64{}
+	for round in 0..4 {
+		mut conns = []wire.Conn{}
+		for i in 0..40 {
+			conns = append(conns, nettest.Send(port, nettest.GetRequest("/work/" + mint.Itoa(i))))
+		}
+		for i in 0..40 {
+			mut c = conns[i]
+			let r = nettest.Finish(mut c, 20)
+			ci.Check(r.Status == 200 && r.Body == "work " + mint.Itoa(i) + " " + want, "arena: /work/" + mint.Itoa(i) + " answered " + mint.Itoa(r.Status) + " " + r.Body)
+		}
+		peaks = append(peaks, nettest.RssKiB(server.Pid) * 1024)
+	}
+	mut shown = []str{}
+	for p in peaks {
+		shown = append(shown, mib(p))
+	}
+	say.Line("40 concurrent requests x 4 rounds, 8 waiting arenas each on one core: all correct; RSS after each round " + twine.Join(shown, " ") + " MiB")
+	if ci.Linux() {
+		ci.Check(peaks[3] - peaks[0] < 32 * MIB, "RSS grew across rounds")
+	}
+}
+
+fn pad(v i64, width i64) str {
+	let s = "000000000" + mint.Itoa(v)
+	return s[len(s) - width:]
+}
+
+// csvStreaming: a generated 1 GiB CSV file through ledger.NewStream, every Read in an arena (#572).
+//
+// The fixture (tools/ci/fixtures/ledger_stream.tin) counts the records and field bytes over the file with each read in an arena, so
+// the reader's per-record memory is released as it goes; a fixed window is what makes that possible, and a line longer than the window
+// must fail.
+fn csvStreaming(out str) {
+	let exe = ci.Join(out, "ledger_stream")
+	ci.BuildTin("tools/ci/fixtures/ledger_stream.tin", exe, "", []str{"-edition", "1"})
+	let path = ci.Join(out, "stream.csv")
+	ci.Remove(path)
+	let padding = twine.Repeat("x", 100)
+	let records = 1150000
+	mut fieldBytes = 0
+	for first in 0..records / 2000 + 1 {
+		arena {
+			mut lines = []str{}
+			for i in first * 2000..first * 2000 + 2000 {
+				if i >= records {
+					break
+				}
+				mut row = []str{}
+				for j in 0..8 {
+					mut v = "f" + pad(i, 7) + "-" + pad(j, 2) + "-" + padding
+					if i % 1000 == 0 && j == 0 {
+						v = v + ",tail"
+						row = append(row, "\"" + v + "\"")
+					} else if i % 997 == 0 && j == 1 {
+						v = "line" + mint.Itoa(i) + "\nsecond"
+						row = append(row, "\"" + v + "\"")
+					} else {
+						row = append(row, v)
+					}
+					fieldBytes += len(v)
+				}
+				lines = append(lines, twine.Join(row, ",") + "\r\n")
+			}
+			quarry.AppendFile(path, twine.Join(lines, "")) catch err {
+				ci.Fail("cannot write the CSV: " + say.Str(err))
+			}
+		}
+	}
+	let (code, got, peak, err) = ci.PeakRun(exe, []str{}, []str{"LEDGER_STREAM_FILE=" + path, "TIN_CORES=1"}, 900)
+	ci.Check(code == 0, "csv: exit " + mint.Itoa(code) + " " + err)
+	let want = "records " + mint.Itoa(records) + " bytes " + mint.Itoa(fieldBytes) + "\n"
+	ci.Check(got == want, "csv: printed " + got + ", want " + want)
+	say.Line("CSV: " + mint.Itoa(records) + " records, " + mint.Itoa(fieldBytes) + " field bytes, 1 GiB in a 64 KiB window; peak RSS " + mib(peak) + " MiB")
+	if ci.Linux() {
+		ci.Check(peak < 64 * MIB, "CSV streaming peak RSS " + mint.Itoa(peak) + " over 64 MiB")
+		say.Line("CSV streaming: peak RSS stays under 64 MiB (Linux)")
+	}
+	ci.Remove(path)
+	ci.Write(path, twine.Repeat("a", 80000) + "\nok,ok\n")
+	let (_, long, _, _) = ci.PeakRun(exe, []str{}, []str{"LEDGER_STREAM_FILE=" + path, "TIN_CORES=1"}, 60)
+	ci.Check(twine.HasPrefix(long, "fault ledger: line longer than 65536 bytes"), "csv: the long line answered " + long)
+	say.Line("CSV: an 80 KiB line stops inside the 64 KiB window")
+	ci.Remove(path)
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/arenas")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "arenas")
+	ci.BuildTin("tools/ci/fixtures/arenas.tin", exe, "", []str{"-edition", "1"})
+	batches(exe)
+	let port = nettest.Port()
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1"}, ci.Join(out, "server.log"), port)
+	server.Ready(10)
+	handlers(port, server)
+	ci.Check(server.Running(), "arena: the server exited")
+	server.Stop()
+	csvStreaming(out)
+	smallSteps(out)
+	ci.Pass("arena: flat batches, waiting arenas in handlers, 1 GiB CSV in a 64 KiB window, a million small steps")
+}

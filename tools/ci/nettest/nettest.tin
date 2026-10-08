@@ -36,7 +36,8 @@ type Server struct {
 
 // Start runs the program with extra environment entries (NAME=value), its output in the log file, and PORT set when port is not 0.
 fn Start(exe str, args []str, set []str, log str, port i64) Server {
-	mut argv = []str{"env"}
+	// one shell redirects both streams to the one log (two descriptors opened on a file would overwrite each other)
+	mut argv = []str{"sh", "-c", "exec \"$@\" > \"$0\" 2>&1", log, "env"}
 	for e in set {
 		argv = append(argv, e)
 	}
@@ -47,7 +48,7 @@ fn Start(exe str, args []str, set []str, log str, port i64) Server {
 	for a in args {
 		argv = append(argv, a)
 	}
-	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.File(log), Stderr: spawn.Stdio.File(log), MaxOutput: 0}
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}
 	let p = spawn.Start(c) catch err {
 		ci.Fail("cannot start " + exe + ": " + say.Str(err))
 		panic("unreachable")
@@ -237,4 +238,201 @@ fn Finish(c mut wire.Conn, seconds i64) Reply {
 // GetRequest is the text of a GET with Connection: close.
 fn GetRequest(path str) str {
 	return "GET " + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+}
+
+// StartCoded is Start with the exit status recorded: a shell runs the program in the background, leaving its process number and,
+// when it ends, its exit status in files beside the log. Pid is the program's.
+fn StartCoded(exe str, args []str, set []str, log str, port i64) Server {
+	let pidfile = log + ".pid"
+	ci.Remove(pidfile)
+	ci.Remove(log + ".code")
+	mut argv = []str{"sh", "-c", "pidfile=$0; code=$1; log=$2; shift 2; \"$@\" > \"$log\" 2>&1 & echo $! > \"$pidfile\"; wait $!; echo $? > \"$code\"", pidfile, log + ".code", log, "env"}
+	for e in set {
+		argv = append(argv, e)
+	}
+	if port != 0 {
+		argv = append(argv, "PORT=" + mint.Itoa(port))
+	}
+	argv = append(argv, exe)
+	for a in args {
+		argv = append(argv, a)
+	}
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}
+	spawn.Start(c) catch err {
+		ci.Fail("cannot start " + exe + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	let end = tide.Now() + 5000000000
+	for tide.Now() < end {
+		let text = twine.TrimSpace(ci.Read(pidfile))
+		if len(text) > 0 {
+			return Server{Pid: ci.Num(text), Port: port, Log: log}
+		}
+		tide.Sleep(10000000)
+	}
+	ci.Fail("the shell did not report the process of " + exe)
+	panic("unreachable")
+}
+
+// ExitCode waits up to seconds for a StartCoded program to end and returns its exit status (ok false when it is still running).
+fn (s Server) ExitCode(seconds f64) (i64, bool) {
+	let end = tide.Now() + i64(seconds * 1000000000.0)
+	for tide.Now() < end {
+		let text = twine.TrimSpace(ci.Read(s.Log + ".code"))
+		if len(text) > 0 {
+			return ci.Num(text), true
+		}
+		tide.Sleep(10000000)
+	}
+	return 0, false
+}
+
+// Signal sends a signal to the program ("TERM", "KILL"...).
+fn (s Server) Signal(name str) {
+	ci.Exec([]str{"kill", "-" + name, mint.Itoa(s.Pid)}, "", 5)
+}
+
+// Client is a kept-alive connection: requests go out one after another and each answer is read by its Content-Length.
+type Client struct {
+	C wire.Conn
+	Buf str
+}
+
+// Open connects to the port.
+fn Open(port i64) Client {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		ci.Fail("cannot connect to port " + mint.Itoa(port))
+		panic("unreachable")
+	}
+	return Client{C: c, Buf: ""}
+}
+
+// Write sends raw bytes.
+fn (c mut Client) Write(raw str) {
+	c.C.Write(raw) catch _ {
+		ci.Fail("cannot write to the connection")
+	}
+}
+
+// Get sends a keep-alive GET.
+fn (c mut Client) Get(path str, headers str) {
+	c.Write("GET " + path + " HTTP/1.1\r\nHost: x\r\n" + headers + "\r\n")
+}
+
+// more reads what is available (waiting up to seconds) and reports whether anything came; false at the end of the stream or at the
+// deadline.
+fn (c mut Client) more(seconds f64) bool {
+	let reader = c.C
+	mut buf = []u8{}
+	let got = within i64(seconds * 1000000000.0) {
+		try reader.Read(mut buf, 65536)
+	} catch _ {
+		-1
+	}
+	if got <= 0 {
+		return false
+	}
+	c.Buf = c.Buf + str(buf)
+	return true
+}
+
+// Ready reports whether data arrived within seconds (the answer to a waiting request would be there).
+fn (c mut Client) Ready(seconds f64) bool {
+	if len(c.Buf) > 0 {
+		return true
+	}
+	return c.more(seconds)
+}
+
+// Answer reads one response (head and the body its Content-Length says) within seconds.
+fn (c mut Client) Answer(seconds f64) Reply {
+	let end = tide.Now() + i64(seconds * 1000000000.0)
+	for twine.Index(c.Buf, "\r\n\r\n") < 0 {
+		if tide.Now() > end || !c.more(0.5) {
+			if tide.Now() > end {
+				return Reply{Status: 0, Head: "", Body: c.Buf, Ok: false}
+			}
+		}
+	}
+	let split = twine.Index(c.Buf, "\r\n\r\n")
+	let head = c.Buf[0:split]
+	let probe = Parse(head + "\r\n\r\n")
+	let want = ci.Num(probe.Header("content-length"))
+	for len(c.Buf) < split + 4 + want {
+		if tide.Now() > end {
+			return Reply{Status: 0, Head: head, Body: c.Buf[split + 4:], Ok: false}
+		}
+		c.more(0.5)
+	}
+	let body = c.Buf[split + 4:split + 4 + want]
+	c.Buf = c.Buf[split + 4 + want:]
+	return Reply{Status: probe.Status, Head: head, Body: body, Ok: true}
+}
+
+// Close ends the connection.
+fn (c mut Client) Close() {
+	c.C.Close()
+}
+
+// StartSplit is StartCoded with the two output streams kept apart: standard output in the log, standard error in log + ".err".
+fn StartSplit(exe str, args []str, set []str, log str, port i64) Server {
+	let pidfile = log + ".pid"
+	ci.Remove(pidfile)
+	ci.Remove(log + ".code")
+	mut argv = []str{"sh", "-c", "pidfile=$0; code=$1; log=$2; shift 2; \"$@\" > \"$log\" 2> \"$log.err\" & echo $! > \"$pidfile\"; wait $!; echo $? > \"$code\"", pidfile, log + ".code", log, "env"}
+	for e in set {
+		argv = append(argv, e)
+	}
+	if port != 0 {
+		argv = append(argv, "PORT=" + mint.Itoa(port))
+	}
+	argv = append(argv, exe)
+	for a in args {
+		argv = append(argv, a)
+	}
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}
+	spawn.Start(c) catch err {
+		ci.Fail("cannot start " + exe + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	let end = tide.Now() + 5000000000
+	for tide.Now() < end {
+		let text = twine.TrimSpace(ci.Read(pidfile))
+		if len(text) > 0 {
+			return Server{Pid: ci.Num(text), Port: port, Log: log}
+		}
+		tide.Sleep(10000000)
+	}
+	ci.Fail("the shell did not report the process of " + exe)
+	panic("unreachable")
+}
+
+// StartStdin is StartCoded with the program's standard input read from the named file (a FIFO somebody feeds).
+fn StartStdin(exe str, stdinFile str, set []str, log str, port i64) Server {
+	let pidfile = log + ".pid"
+	ci.Remove(pidfile)
+	ci.Remove(log + ".code")
+	mut argv = []str{"sh", "-c", "pidfile=$0; code=$1; log=$2; input=$3; shift 3; cat \"$input\" | \"$@\" > \"$log\" 2>&1 & echo $! > \"$pidfile\"; wait $!; echo $? > \"$code\"", pidfile, log + ".code", log, stdinFile, "env"}
+	for e in set {
+		argv = append(argv, e)
+	}
+	if port != 0 {
+		argv = append(argv, "PORT=" + mint.Itoa(port))
+	}
+	argv = append(argv, exe)
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}
+	spawn.Start(c) catch err {
+		ci.Fail("cannot start " + exe + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	let end = tide.Now() + 5000000000
+	for tide.Now() < end {
+		let text = twine.TrimSpace(ci.Read(pidfile))
+		if len(text) > 0 {
+			return Server{Pid: ci.Num(text), Port: port, Log: log}
+		}
+		tide.Sleep(10000000)
+	}
+	ci.Fail("the shell did not report the process of " + exe)
+	panic("unreachable")
 }

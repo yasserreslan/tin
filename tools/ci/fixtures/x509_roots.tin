@@ -3,7 +3,7 @@ package main
 import "say"
 import "seal"
 
-// Prints how many certificates seal.SystemRoots loaded (tools/ci/x509_check.py compares the bundle).
+// Prints how many certificates seal.SystemRoots loaded (tools/ci/x509_check.tin compares the bundle).
 fn main() {
 	let roots = seal.SystemRoots() catch err {
 		say.Line("error", err)

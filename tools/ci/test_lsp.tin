@@ -1,0 +1,349 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "spawn"
+import "tide"
+import "tinjson"
+import "twine"
+
+// tin lsp: the language server answers over standard input and output (diagnostics, outline, definition, hover, completion), with the
+// editor's unsaved text as what is checked.
+
+const PROGRAM = `package main
+
+import "say"
+import "twine"
+
+// Point is a place.
+type Point struct {
+	X i64
+	Y i64
+}
+
+// Dist is the distance to the origin, squared.
+fn (p Point) Dist() i64 {
+	return p.X * p.X + p.Y * p.Y
+}
+
+fn helper(a i64) i64 {
+	return a + 1
+}
+
+type Other struct {
+	Z i64
+}
+
+type Line struct {
+	From Point
+	n    i64
+	name str
+}
+
+fn (o Other) Ping() i64 {
+	return o.Z
+}
+
+fn main() {
+	let p = Point{X: 1, Y: 2}
+	let parts = twine.Split("a,b", ",")
+	let o = Other{Z: 3}
+	let ln = Line{From: p, n: 1, name: "ln"}
+	say.Line(p.Dist(), o.Ping(), ln.From.X, ln.name, ln.n, helper(1), len(parts))
+}
+`
+
+// Client is the state of a conversation with the server: the bytes read and not yet used, and the number of the last request.
+type Client struct {
+	Buf str
+	Next i64
+}
+
+fn quote(s str) str {
+	return tinjson.Quote(s)
+}
+
+fn send(p mut spawn.Process, message str) {
+	p.Write("Content-Length: " + mint.Itoa(len(message)) + "\r\n\r\n" + message) catch _ {
+		ci.Fail("lsp: cannot write to the server")
+	}
+}
+
+// fill reads more of the server's output into the client's buffer.
+fn fill(p mut spawn.Process, c mut Client) {
+	mut buf = make([]u8, 65536)
+	let n = p.Read(mut buf) catch _ {
+		-1
+	}
+	if n <= 0 {
+		ci.Fail("lsp: the server closed its output")
+	}
+	c.Buf = c.Buf + str(buf[0:n])
+}
+
+// receive reads one message of the server.
+fn receive(p mut spawn.Process, c mut Client) tinjson.J {
+	for twine.Index(c.Buf, "\r\n\r\n") < 0 {
+		fill(mut p, mut c)
+	}
+	let split = twine.Index(c.Buf, "\r\n\r\n")
+	mut length = 0
+	for line in twine.Split(c.Buf[0:split], "\r\n") {
+		if twine.HasPrefix(twine.ToLower(line), "content-length:") {
+			length = ci.Num(twine.TrimSpace(line[15:]))
+		}
+	}
+	for len(c.Buf) < split + 4 + length {
+		fill(mut p, mut c)
+	}
+	let body = c.Buf[split + 4:split + 4 + length]
+	c.Buf = c.Buf[split + 4 + length:]
+	let (j, ok) = tinjson.Parse(body)
+	ci.Check(ok, "lsp: the server sent " + body)
+	return j
+}
+
+fn request(p mut spawn.Process, c mut Client, method str, params str) tinjson.J {
+	c.Next += 1
+	send(mut p, "{{\"jsonrpc\":\"2.0\",\"id\":" + mint.Itoa(c.Next) + ",\"method\":" + quote(method) + ",\"params\":" + params + "}}")
+	for {
+		let m = receive(mut p, mut c)
+		if m.Get("id").IsNumber() && m.Get("id").Int() == c.Next {
+			return m
+		}
+	}
+	return tinjson.J{}
+}
+
+fn notify(p mut spawn.Process, method str, params str) {
+	send(mut p, "{{\"jsonrpc\":\"2.0\",\"method\":" + quote(method) + ",\"params\":" + params + "}}")
+}
+
+fn diagnostics(p mut spawn.Process, c mut Client) []tinjson.J {
+	for {
+		let m = receive(mut p, mut c)
+		if m.Get("method").Text() == "textDocument/publishDiagnostics" {
+			return m.Get("params").Get("diagnostics").Items()
+		}
+	}
+	return []tinjson.J{}
+}
+
+fn openDoc(p mut spawn.Process, c mut Client, path str, text str) []tinjson.J {
+	notify(mut p, "textDocument/didOpen", "{{\"textDocument\":{{\"uri\":" + quote("file://" + path) + ",\"languageId\":\"tin\",\"version\":1,\"text\":" + quote(text) + "}}}}")
+	return diagnostics(mut p, mut c)
+}
+
+fn change(p mut spawn.Process, c mut Client, path str, text str) []tinjson.J {
+	notify(mut p, "textDocument/didChange", "{{\"textDocument\":{{\"uri\":" + quote("file://" + path) + ",\"version\":2}},\"contentChanges\":[{{\"text\":" + quote(text) + "}}]}}")
+	return diagnostics(mut p, mut c)
+}
+
+// utf16Len is the length of the text in UTF-16 code units.
+fn utf16Len(s str) i64 {
+	mut n = 0
+	mut i = 0
+	for i < len(s) {
+		let b = i64(s[i])
+		if b < 128 {
+			n += 1
+			i += 1
+		} else if b < 224 {
+			n += 1
+			i += 2
+		} else if b < 240 {
+			n += 1
+			i += 3
+		} else {
+			n += 2
+			i += 4
+		}
+	}
+	return n
+}
+
+// at is the LSP position "line:character" of the start of the needle in the text (the nth time).
+fn at(text str, needle str, nth i64) str {
+	mut index = -1
+	for k in 0..nth + 1 {
+		index = index + 1 + twine.Index(text[index + 1:], needle)
+	}
+	let line = twine.Count(text[0:index], "\n")
+	let last = twine.LastIndex(text[0:index], "\n")
+	return mint.Itoa(line) + ":" + mint.Itoa(utf16Len(text[last + 1:index]))
+}
+
+fn pos(position str) str {
+	let parts = twine.Split(position, ":")
+	return "{{\"line\":" + parts[0] + ",\"character\":" + parts[1] + "}}"
+}
+
+fn startOf(span tinjson.J) str {
+	return mint.Itoa(span.Get("start").Get("line").Int()) + ":" + mint.Itoa(span.Get("start").Get("character").Int())
+}
+
+fn labels(items []tinjson.J) []str {
+	mut out = []str{}
+	for i in items {
+		out = append(out, i.Get("label").Text())
+	}
+	return out
+}
+
+fn has(xs []str, x str) bool {
+	for y in xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
+fn sameSet(xs []str, want []str) bool {
+	if len(xs) != len(want) {
+		return false
+	}
+	for w in want {
+		if !has(xs, w) {
+			return false
+		}
+	}
+	return true
+}
+
+fn main() {
+	let work = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "lsp-")
+	let exe = ci.Join(work, "tinlsp")
+	ci.Must(ci.ExecEnv([]str{ci.Tinc(), "-o", exe, ci.Join(ci.Root(), "tools/lsp/main.tin"), ci.Join(ci.Root(), "tools/lsp/exec_" + ci.OS() + ".tin")}, ci.Root(), 300, []str{"TIN_ROOT=" + ci.Root()}, []str{}), "build tinlsp")
+	let dir = ci.Join(work, "project")
+	ci.Mkdirs(dir)
+	let path = ci.Join(dir, "prog.tin")
+	ci.Write(path, PROGRAM)
+	let uri = "file://" + path
+	let td = "{{\"uri\":" + quote(uri) + "}}"
+	let command = spawn.Cmd{Argv: []str{"env", "TIN_ROOT=" + ci.Root(), "TINLSP_TINC=" + ci.Tinc(), exe}, Env: spawn.Env.Inherit, Dir: dir, Stdin: spawn.Stdio.Pipe, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Null, MaxOutput: 0}
+	mut p = spawn.Start(command) catch err {
+		ci.Fail("lsp: cannot start the server: " + say.Str(err))
+		panic("unreachable")
+	}
+	mut c = Client{Buf: "", Next: 1}
+	let init = request(mut p, mut c, "initialize", "{{\"processId\":null,\"rootUri\":null,\"capabilities\":{{}}}}")
+	let caps = init.Get("result").Get("capabilities")
+	for name in []str{"definitionProvider", "hoverProvider", "documentSymbolProvider", "completionProvider", "textDocumentSync"} {
+		ci.Test("capability " + name, !caps.Get(name).IsNull() && (caps.Get(name).Bool() || caps.Get(name).IsObject() || caps.Get(name).IsNumber()))
+	}
+
+	// diagnostics follow the unsaved text
+	ci.Test("a clean program has no diagnostics", len(openDoc(mut p, mut c, path, PROGRAM)) == 0)
+	let broken = twine.Replace(PROGRAM, "return a + 1", "return a + missing", 1)
+	let found = change(mut p, mut c, path, broken)
+	ci.Test("one diagnostic", len(found) == 1)
+	if len(found) == 1 {
+		let d = found[0]
+		ci.Test("its code, source and severity", d.Get("code").Text() == "E103" && d.Get("source").Text() == "tinc" && d.Get("severity").Int() == 1)
+		let start = at(broken, "missing", 0)
+		let parts = twine.Split(start, ":")
+		ci.Same("its range starts at the name", startOf(d.Get("range")), start)
+		ci.Test("its range ends after the name", d.Get("range").Get("end").Get("line").Int() == ci.Num(parts[0]) && d.Get("range").Get("end").Get("character").Int() == ci.Num(parts[1]) + len("missing"))
+	}
+	ci.Test("the fix clears it", len(change(mut p, mut c, path, PROGRAM)) == 0)
+	ci.Test("the file on disk is untouched", ci.Read(path) == PROGRAM)
+
+	// outline, definition and hover
+	let outline = request(mut p, mut c, "textDocument/documentSymbol", "{{\"textDocument\":" + td + "}}").Get("result").Items()
+	mut kindsSeen = []str{}
+	for s in outline {
+		kindsSeen = append(kindsSeen, s.Get("name").Text() + ":" + mint.Itoa(s.Get("kind").Int()))
+	}
+	ci.Test("the outline", sameSet(kindsSeen, []str{"Dist:6", "Line:23", "Other:23", "Ping:6", "Point:23", "helper:12", "main:12"}))
+	let helperAt = at(PROGRAM, "helper(1)", 0)
+	let defs = request(mut p, mut c, "textDocument/definition", "{{\"textDocument\":" + td + ",\"position\":" + pos(helperAt) + "}}").Get("result").Items()
+	ci.Test("one definition of helper", len(defs) == 1 && defs[0].Get("uri").Text() == uri)
+	if len(defs) == 1 {
+		ci.Same("helper is defined in the program", startOf(defs[0].Get("range")), at(PROGRAM, "helper", 0))
+	}
+	let hover = request(mut p, mut c, "textDocument/hover", "{{\"textDocument\":" + td + ",\"position\":" + pos(helperAt) + "}}").Get("result")
+	ci.Test("hover shows the signature", twine.Contains(hover.Get("contents").Get("value").Text(), "fn helper(a i64) i64"))
+	let methodAt = at(PROGRAM, "Dist()", 1)
+	let methodHover = request(mut p, mut c, "textDocument/hover", "{{\"textDocument\":" + td + ",\"position\":" + pos(methodAt) + "}}").Get("result")
+	ci.Test("hover shows the doc", twine.Contains(methodHover.Get("contents").Get("value").Text(), "Dist is the distance to the origin, squared."))
+	// a name in another package: the definition is in that package's file
+	let splitAt = at(PROGRAM, "Split", 0)
+	let other = request(mut p, mut c, "textDocument/definition", "{{\"textDocument\":" + td + ",\"position\":" + pos(splitAt) + "}}").Get("result").Items()
+	mut inTwine = false
+	for f in other {
+		if twine.HasSuffix(f.Get("uri").Text(), "/twine/twine.tin") {
+			inTwine = true
+		}
+	}
+	ci.Test("a package member is defined in its package", inTwine)
+	// nothing at a keyword or a blank
+	let nothing = request(mut p, mut c, "textDocument/definition", "{{\"textDocument\":" + td + ",\"position\":{{\"line\":0,\"character\":1}}}}").Get("result").Items()
+	ci.Test("nothing at a keyword", len(nothing) == 0)
+
+	// completion
+	let a1 = labels(request(mut p, mut c, "textDocument/completion", "{{\"textDocument\":" + td + ",\"position\":" + pos(splitAt) + "}}").Get("result").Get("items").Items())
+	ci.Test("after twine.: Split and Join, not main", has(a1, "Split") && has(a1, "Join") && !has(a1, "main"))
+	let lineAt = at(PROGRAM, "say.Line", 0)
+	let allItems = request(mut p, mut c, "textDocument/completion", "{{\"textDocument\":" + td + ",\"position\":" + pos(lineAt) + "}}").Get("result").Get("items").Items()
+	let a2 = labels(allItems)
+	ci.Test("plain completion", has(a2, "helper") && has(a2, "Point") && has(a2, "main") && has(a2, "twine") && has(a2, "say") && has(a2, "return"))
+	// after a local's dot: the members of its type, and only those
+	let a3 = labels(request(mut p, mut c, "textDocument/completion", "{{\"textDocument\":" + td + ",\"position\":" + pos(at(PROGRAM, "Dist()", 1)) + "}}").Get("result").Get("items").Items())
+	ci.Test("members of Point", sameSet(a3, []str{"Dist", "X", "Y"}))
+	let a4 = labels(request(mut p, mut c, "textDocument/completion", "{{\"textDocument\":" + td + ",\"position\":" + pos(at(PROGRAM, "Ping()", 1)) + "}}").Get("result").Get("items").Items())
+	ci.Test("members of Other", sameSet(a4, []str{"Ping", "Z"}))
+	// after a chain of fields: the members of the last field's type
+	let a5 = labels(request(mut p, mut c, "textDocument/completion", "{{\"textDocument\":" + td + ",\"position\":" + pos(at(PROGRAM, "X, ln.name", 0)) + "}}").Get("result").Get("items").Items())
+	ci.Test("members after a chain", sameSet(a5, []str{"Dist", "X", "Y"}))
+	let a6 = labels(request(mut p, mut c, "textDocument/completion", "{{\"textDocument\":" + td + ",\"position\":" + pos(at(PROGRAM, "name, ln.n", 0)) + "}}").Get("result").Get("items").Items())
+	ci.Test("members of Line", sameSet(a6, []str{"From", "n", "name"}))
+	// plain completion offers the locals of the function
+	mut pType = ""
+	mut oType = ""
+	mut partsType = ""
+	for i in allItems {
+		if i.Get("label").Text() == "p" {
+			pType = i.Get("detail").Text()
+		}
+		if i.Get("label").Text() == "o" {
+			oType = i.Get("detail").Text()
+		}
+		if i.Get("label").Text() == "parts" {
+			partsType = i.Get("detail").Text()
+		}
+	}
+	ci.Test("the locals' types", pType == "Point" && oType == "Other" && partsType == "[]str")
+	// go to the declaration of a local
+	let local = request(mut p, mut c, "textDocument/definition", "{{\"textDocument\":" + td + ",\"position\":" + pos(at(PROGRAM, "p.Dist", 0)) + "}}").Get("result").Items()
+	ci.Test("a local's declaration", len(local) > 0 && startOf(local[0].Get("range")) == at(PROGRAM, "p = Point", 0))
+
+	// workspace symbols and unknown requests
+	let symbols = request(mut p, mut c, "workspace/symbol", "{{\"query\":\"dist\"}}").Get("result").Items()
+	ci.Test("workspace symbols", len(symbols) == 1 && symbols[0].Get("name").Text() == "Dist")
+	let unknown = request(mut p, mut c, "textDocument/nothing", "{{}}")
+	ci.Test("an unknown request is an error", unknown.Get("error").Get("code").Int() == -32601)
+
+	// columns are UTF-16
+	let wide = twine.Replace(PROGRAM, "return a + 1", "say.Line(\"é日本 🙂\", missing)\n\treturn a + 1", 1)
+	let wideDiagnostics = change(mut p, mut c, path, wide)
+	ci.Test("one diagnostic in wide text", len(wideDiagnostics) == 1)
+	if len(wideDiagnostics) == 1 {
+		ci.Same("columns are UTF-16 code units", startOf(wideDiagnostics[0].Get("range")), at(wide, "missing", 0))
+	}
+
+	request(mut p, mut c, "shutdown", "null")
+	notify(mut p, "exit", "null")
+	p.CloseStdin() catch _ {
+	}
+	let code = within 30000000000 {
+		try p.Wait()
+	} catch _ {
+		-1
+	}
+	ci.Test("the server exits 0", code == 0)
+	tide.Sleep(1000000)
+	ci.Remove(work)
+	ci.Finish()
+}

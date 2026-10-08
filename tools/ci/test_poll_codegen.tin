@@ -1,0 +1,111 @@
+package main
+
+import "./ci"
+import "twine"
+
+// Both native backends retain safepoints, including continue edges and @nopoll.
+
+const SOURCE = "package main\n@nopoll fn kernel(n i64) i64 {{\n    mut total i64 = 0\n    for i in 0..n {{\n        total += i\n    }}\n    return total\n}}\nfn spin(n i64) i64 {{\n    mut total i64 = 0\n    for i in 0..n {{\n        if i == 3 {{\n            continue\n        }}\n        total += kernel(i)\n    }}\n    return total\n}}\nfn main() {{\n    spin(10)\n}}\n"
+
+fn listing(extra []str, arch str, dir str, source str, polls str) str {
+	mut argv = []str{ci.Tinc()}
+	for e in extra {
+		argv = append(argv, e)
+	}
+	argv = append(argv, "-edition")
+	argv = append(argv, "1")
+	argv = append(argv, "-target")
+	argv = append(argv, "linux-" + arch)
+	argv = append(argv, "-S")
+	argv = append(argv, "-o")
+	argv = append(argv, ci.Join(dir, arch))
+	argv = append(argv, source)
+	let o = ci.ExecEnv(argv, ci.Root(), 120, []str{"TIN_ROOT=" + ci.Root(), "TINC_POLLS=" + polls}, []str{})
+	ci.Must(o, "tinc -S")
+	return o.Stdout
+}
+
+// armBody is the code of a function in the arm64 listing.
+fn armBody(text str, name str) str {
+	let at = twine.Index(text, "_" + name + ":")
+	if at < 0 {
+		return ""
+	}
+	let rest = text[at + len(name) + 2:]
+	let end = twine.Index(rest, "\n\t.p2align")
+	if end < 0 {
+		return rest
+	}
+	return rest[0:end]
+}
+
+// labelOf finds the label of a function in the header of the amd64 listing ("# L12: name").
+fn labelOf(text str, name str) str {
+	for line in twine.Split(text, "\n") {
+		if twine.HasPrefix(line, "# L") && twine.HasSuffix(line, ": " + name) {
+			return line[2:twine.Index(line, ":")]
+		}
+	}
+	return ""
+}
+
+fn labels(text str) []str {
+	mut out = []str{}
+	for line in twine.Split(text, "\n") {
+		if twine.HasPrefix(line, "# L") {
+			let colon = twine.Index(line, ":")
+			if colon > 3 {
+				out = append(out, line[2:colon])
+			}
+		}
+	}
+	return out
+}
+
+// x64Body is the code of a function in the amd64 listing: from its label to the next label.
+fn x64Body(text str, name str) str {
+	let label = labelOf(text, name)
+	if len(label) == 0 {
+		return ""
+	}
+	let parts = twine.Split(text, "\n" + label + ":\n")
+	if len(parts) < 2 {
+		return ""
+	}
+	let section = parts[1]
+	mut end = -1
+	for l in labels(text) {
+		let at = twine.Index(section, "\n" + l + ":\n")
+		if at >= 0 && (end < 0 || at < end) {
+			end = at
+		}
+	}
+	if end >= 0 {
+		return section[0:end]
+	}
+	return section
+}
+
+fn main() {
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "poll-codegen-")
+	let source = ci.Join(dir, "poll.tin")
+	ci.Write(source, SOURCE)
+	for arch in []str{"arm64", "amd64"} {
+		let text = listing([]str{"-polls"}, arch, dir, source, "0")
+		let defaults = listing([]str{}, arch, dir, source, "0")
+		let enabled = listing([]str{}, arch, dir, source, "1")
+		ci.Test(arch + ": TINC_POLLS=1 is -polls", text == enabled)
+		ci.Test(arch + ": no polls by default", !twine.Contains(defaults, " # rt_bnd_poll") && !twine.Contains(defaults, "bl _rt_bnd_poll"))
+		if arch == "arm64" {
+			ci.Test("arm64: @nopoll kernel has no poll", !twine.Contains(armBody(text, "kernel"), "[x28, #96]"))
+			ci.Test("arm64: spin polls twice", twine.Count(armBody(text, "spin"), "[x28, #96]") >= 2)
+			ci.Test("arm64: spin calls the poll", twine.Contains(armBody(text, "spin"), "bl _rt_bnd_poll"))
+		} else {
+			ci.Test("amd64: kernel found", len(labelOf(text, "kernel")) > 0)
+			ci.Test("amd64: @nopoll kernel has no poll", !twine.Contains(x64Body(text, "kernel"), "[r15+0x60]"))
+			ci.Test("amd64: spin polls twice", twine.Count(x64Body(text, "spin"), "[r15+0x60]") >= 2)
+		}
+	}
+	ci.Remove(dir)
+	ci.Finish()
+}

@@ -1,0 +1,266 @@
+// Package a native Tin compiler and its source/library tree as a reproducible archive: a tar of normalized entries (no owners, no
+// times, names in order) compressed with `gzip -n`, and the SHA-256 file beside it.
+package distpack
+
+import "../../ci/ci"
+import "quarry"
+import "say"
+import "seal"
+import "sift"
+import "twine"
+
+const TREES_COUNT = 5
+
+fn Trees() []str {
+	return []str{"toolchain", "packages", "tools", "examples", "bench"}
+}
+
+fn Targets() []str {
+	return []str{"darwin-arm64", "linux-arm64", "linux-amd64"}
+}
+
+fn isDigit(c u8) bool {
+	return c >= '0' && c <= '9'
+}
+
+fn isAlnum(c u8) bool {
+	return isDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// VersionName is the version without a leading "v": MAJOR.MINOR.PATCH, optionally with a prerelease suffix. It fails with the reason
+// when the text is not one.
+fn VersionName(value str) !str {
+	let v = twine.TrimPrefix(value, "v")
+	let bad = say.Fault("%s", "Version must be MAJOR.MINOR.PATCH, optionally with a prerelease suffix")
+	mut dash = twine.IndexByte(v, '-')
+	mut core = v
+	mut pre = ""
+	if dash >= 0 {
+		core = v[0:dash]
+		pre = v[dash + 1:]
+		if len(pre) == 0 {
+			fail bad
+		}
+	}
+	let parts = twine.Split(core, ".")
+	if len(parts) != 3 {
+		fail bad
+	}
+	for p in parts {
+		if len(p) == 0 {
+			fail bad
+		}
+		for i in 0..len(p) {
+			if !isDigit(p[i]) {
+				fail bad
+			}
+		}
+	}
+	if len(pre) > 0 {
+		// alnum words joined by . or -
+		mut previousSeparator = true
+		for i in 0..len(pre) {
+			let c = pre[i]
+			if c == '.' || c == '-' {
+				if previousSeparator {
+					fail bad
+				}
+				previousSeparator = true
+			} else if isAlnum(c) {
+				previousSeparator = false
+			} else {
+				fail bad
+			}
+		}
+		if previousSeparator {
+			fail bad
+		}
+	}
+	return v
+}
+
+fn octal(v i64, width i64) str {
+	mut digits = ""
+	mut x = v
+	if x == 0 {
+		digits = "0"
+	}
+	for x > 0 {
+		digits = "01234567"[x % 8:x % 8 + 1] + digits
+		x = x / 8
+	}
+	for len(digits) < width - 1 {
+		digits = "0" + digits
+	}
+	return digits + "\x00"
+}
+
+fn pad(s str, width i64) str {
+	if len(s) >= width {
+		return s[0:width]
+	}
+	return s + twine.Repeat("\x00", width - len(s))
+}
+
+// header is a 512 byte ustar header.
+fn header(name str, prefix str, size i64, mode i64, kind str) str {
+	let head = pad(name, 100) + octal(mode, 8) + octal(0, 8) + octal(0, 8) + octal(size, 12) + octal(0, 12)
+	let rest = kind + pad("", 100) + "ustar\x0000" + pad("", 32) + pad("", 32) + octal(0, 8) + octal(0, 8) + pad(prefix, 155)
+	// the checksum counts the checksum field as spaces
+	let blank = head + "        " + rest
+	mut sum = 0
+	for i in 0..len(blank) {
+		sum += i64(blank[i])
+	}
+	let field = twine.Repeat("0", 6 - len(mint_itoa8(sum))) + mint_itoa8(sum) + "\x00 "
+	return pad(head + field + rest, 512)
+}
+
+fn mint_itoa8(v i64) str {
+	let s = octal(v, 1)
+	return s[0:len(s) - 1]
+}
+
+// entry is one file of the tar: a header (with a pax header before it for a name too long for ustar) and the data padded to 512.
+fn entry(name str, data str, mode i64) str {
+	mut head = ""
+	mut shortName = name
+	mut prefix = ""
+	if len(name) > 100 {
+		// split at a slash so the last part fits the name field and the first the prefix field
+		mut cut = -1
+		mut i = 0
+		for i < len(name) {
+			if name[i] == '/' && len(name) - i - 1 <= 100 && i <= 155 {
+				cut = i
+				break
+			}
+			i += 1
+		}
+		if cut >= 0 {
+			prefix = name[0:cut]
+			shortName = name[cut + 1:]
+		} else {
+			// a pax extended header holds the whole path
+			let record = " path=" + name + "\n"
+			mut length = len(record) + 1
+			for len(mintDigits(length)) + len(record) != length {
+				length = len(mintDigits(length)) + len(record)
+			}
+			let text = mintDigits(length) + record
+			head = header("PaxHeader", "", len(text), 420, "x") + text + twine.Repeat("\x00", (512 - len(text) % 512) % 512)
+			shortName = name[0:100]
+		}
+	}
+	mut body = data
+	if len(data) % 512 != 0 {
+		body = data + twine.Repeat("\x00", 512 - len(data) % 512)
+	}
+	return head + header(shortName, prefix, len(data), mode, "0") + body
+}
+
+fn mintDigits(v i64) str {
+	if v == 0 {
+		return "0"
+	}
+	mut s = ""
+	mut x = v
+	for x > 0 {
+		s = "0123456789"[x % 10:x % 10 + 1] + s
+		x = x / 10
+	}
+	return s
+}
+
+// Package writes OUTPUT/tin-VERSION-TARGET.tar.gz and its .gz.sha256 file and returns the archive's path.
+fn Package(version str, target str, compiler str, output str, root str) !str {
+	let v = try VersionName(version)
+	let name = "tin-" + v + "-" + target
+	mut known = false
+	for t in Targets() {
+		if t == target {
+			known = true
+		}
+	}
+	if !known {
+		fail say.Fault("%s", "Unsupported target: " + target)
+	}
+	if !quarry.Exists(compiler) || quarry.IsDir(compiler) {
+		fail say.Fault("%s", "Compiler does not exist: " + compiler)
+	}
+	try quarry.MkdirAll(output)
+	let archive = ci.Join(output, name + ".tar.gz")
+	// the files, by archive path: the trees (regular files, no symlinks), then the top-level files and the compiler
+	mut paths = []str{}
+	mut sources = []str{}
+	let found = ci.Sh("cd \"" + root + "\" && find toolchain packages tools examples bench -type f -not -path '*/__pycache__/*' 2>/dev/null", "", 120)
+	for line in ci.Lines(found.Stdout) {
+		paths = append(paths, line)
+		sources = append(sources, ci.Join(root, line))
+	}
+	for f in []str{"tin", "Makefile", "README.md", "go.mod", "install.sh"} {
+		paths = append(paths, f)
+		sources = append(sources, ci.Join(root, f))
+	}
+	paths = append(paths, "bin/tinc")
+	sources = append(sources, compiler)
+	paths = append(paths, "toolchain/seed/tinc-" + target)
+	sources = append(sources, compiler)
+	// the executables, as the file system says
+	let executable = ci.Sh("cd \"" + root + "\" && find toolchain packages tools examples bench -type f -perm -100 2>/dev/null; for f in tin Makefile README.md go.mod install.sh; do [ -x \"$f\" ] && echo \"$f\"; done", "", 120)
+	let compilerMode = ci.Sh("[ -x \"" + compiler + "\" ] && echo yes", "", 10)
+	mut executables = ci.Lines(executable.Stdout)
+	// a later entry of the same name replaces an earlier one, as in a dictionary; order by name
+	mut order = []str{}
+	for p in paths {
+		order = append(order, p)
+	}
+	sift.Sort(mut order)
+	mut tar = ""
+	mut last = ""
+	for p in order {
+		if p == last {
+			continue
+		}
+		last = p
+		// the last source registered for this path wins
+		mut source = ""
+		for i in 0..len(paths) {
+			if paths[i] == p {
+				source = sources[i]
+			}
+		}
+		let data = try quarry.ReadFile(source)
+		mut mode = 420
+		if p == "bin/tinc" || twine.HasPrefix(p, "toolchain/seed/tinc-") {
+			if len(twine.TrimSpace(compilerMode.Stdout)) > 0 {
+				mode = 493
+			}
+		} else if contains(executables, p) {
+			mode = 493
+		}
+		tar += entry(name + "/" + p, data, mode)
+	}
+	tar += entry(name + "/VERSION", v + "\n", 420)
+	tar += entry(name + "/TARGET", target + "\n", 420)
+	tar += twine.Repeat("\x00", 1024)
+	let staging = archive + ".tar"
+	try quarry.WriteFile(staging, tar)
+	let zipped = ci.Sh("gzip -n -9 -c \"" + staging + "\" > \"" + archive + "\" && rm -f \"" + staging + "\"", "", 600)
+	if zipped.Code != 0 {
+		fail say.Fault("%s", "gzip failed: " + zipped.Stderr)
+	}
+	let bytes = try quarry.ReadFile(archive)
+	let digest = seal.Sha256Hex(bytes)
+	try quarry.WriteFile(archive[0:len(archive) - 3] + ".gz.sha256", digest + "  " + name + ".tar.gz\n")
+	return archive
+}
+
+fn contains(xs []str, x str) bool {
+	for y in xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
