@@ -2158,11 +2158,14 @@ crucible.Done()
 
 Package iotest wraps the io shapes to misbehave in the ways tests need, as Go's testing/iotest does: TimeoutReader fails its second read, HalfReader returns half of what each read asks for, DataErrReader turns the end of its source into a fault, and TruncateWriter drops what a writer takes past a limit while it still reports every byte as written.
 
-```tin
+```tin body
 import "crucible/iotest"
+import "flume"
 
+let src = try flume.Open("/tmp/tin-test-iotest.txt")
+let out = try flume.Create("/tmp/tin-test-iotest-out.txt")
 let r = iotest.HalfReader(src)             // reads at most (len(buf)+1)/2 bytes at a time
-let w = iotest.TruncateWriter(sink, 7)     // the sink gets the first 7 bytes; Write says all
+let w = iotest.TruncateWriter(out, 7)      // the sink gets the first 7 bytes; Write says all
 ```
 
 Tin has no read that returns data and an error together (a stream ends with a read of 0, and a fault is an error on its own), so DataErrReader returns the data first and its fault on the read after the source's end; Go's version returns the last data with io.EOF in the same call.
@@ -2184,11 +2187,11 @@ Tin has no read that returns data and an error together (a stream ends with a re
 
 Package quick checks properties over generated values, as Go's testing/quick does. Go picks the generator from a function's parameter types at run time; Tin's generics are fully specialized, so each check takes a generator per parameter: Int64, Uint64, Float64, Bool, Str and Bytes are the ones in this package, and a test may pass its own.
 
-```tin
+```tin body
 import "crucible/quick"
 import "twine"
 
-quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
+try quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
 ```
 
 Values come from dice seeded by Config.Seed, so a run is the same every time. A failure reports the case number and the input, as Go's error does: "#3: failed on input 42".
@@ -2208,7 +2211,7 @@ Values come from dice seeded by Config.Seed, so a run is the same every time. A 
 
 Package fstest is an in-memory file system for tests, and a check that a file system is consistent, as Go's testing/fstest is. MapFS maps slash-separated names to files; the directories are the names' parents, plus any entry whose Mode has ModeDir. TestFS walks a file system with fs.WalkDir and checks what the walk shows against Open, Stat and ReadDir.
 
-```tin
+```tin body
 import "crucible/fstest"
 
 let fsys = fstest.MapFS{"a/b.txt": fstest.MapFile{Data: "hi"}}
@@ -2233,7 +2236,7 @@ Go's MapFS also has Glob and Sub; Tin's fs.Glob and fs.Sub work over it, since t
 
 Package slogtest checks a log handler against records, as Go's log/slog/slogtest does for slog handlers. Its handler is herald: Check runs each record through herald.Line under a fixed clock and reports every line that does not have herald's layout.
 
-```tin
+```tin body
 import "crucible/slogtest"
 import "crucible"
 import "herald"
@@ -2251,7 +2254,7 @@ A line is "TIMESTAMP LEVEL core=N MESSAGE KEY=VALUE..." with a newline at its en
 
 Package cryptotest makes the buffers that constant-time comparison tests need: filled and seeded byte slices, copies that differ in one byte, and Equal, which is seal.Equal over byte slices. Go's testing/cryptotest seeds crypto/rand for a test; Tin has no process-wide random source to seed, so each buffer carries its own seed and the same seed gives the same bytes on every run.
 
-```tin
+```tin body
 import "crucible/cryptotest"
 import "crucible"
 

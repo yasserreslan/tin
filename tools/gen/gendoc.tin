@@ -268,6 +268,18 @@ fn startsWord(line str, words []str) bool {
 	return false
 }
 
+// fenceIsDecl reports whether a package example is declarations rather than statements. An import is
+// a declaration line and a statement line at once (docs_check hoists it either way), so a block whose
+// only declaration words are imports is still a statement block: it compiles as the body of a function.
+fn fenceIsDecl(lines []str) bool {
+	for l in lines {
+		if startsWord(l, []str{"fn", "type", "const", "shape", "on", "package"}) {
+			return true
+		}
+	}
+	return false
+}
+
 // fence is a package comment's example as a code block: Tin declarations (```tin), statements (```tin body, which docs_check compiles
 // inside a function), or program output (```text).
 fn fence(code []str, out mut []str) {
@@ -278,12 +290,8 @@ fn fence(code []str, out mut []str) {
 	mut lang = "tin body"
 	if len(lines[0]) > 0 && (isDigit(lines[0][0]) || twine.HasPrefix(lines[0], "$ ")) {
 		lang = "text"
-	} else {
-		for c in lines {
-			if startsWord(c, []str{"fn", "type", "const", "shape", "on", "import", "package"}) {
-				lang = "tin"
-			}
-		}
+	} else if fenceIsDecl(lines) {
+		lang = "tin"
 	}
 	out = append(out, "```" + lang)
 	for l in lines {

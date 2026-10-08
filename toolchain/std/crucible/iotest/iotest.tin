@@ -4,9 +4,12 @@
 // takes past a limit while it still reports every byte as written.
 //
 //	import "crucible/iotest"
+//	import "flume"
 //
+//	let src = try flume.Open("/tmp/tin-test-iotest.txt")
+//	let out = try flume.Create("/tmp/tin-test-iotest-out.txt")
 //	let r = iotest.HalfReader(src)             // reads at most (len(buf)+1)/2 bytes at a time
-//	let w = iotest.TruncateWriter(sink, 7)     // the sink gets the first 7 bytes; Write says all
+//	let w = iotest.TruncateWriter(out, 7)      // the sink gets the first 7 bytes; Write says all
 //
 // Tin has no read that returns data and an error together (a stream ends with a read of 0, and a
 // fault is an error on its own), so DataErrReader returns the data first and its fault on the read

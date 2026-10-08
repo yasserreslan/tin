@@ -6,7 +6,7 @@
 //	import "crucible/quick"
 //	import "twine"
 //
-//	quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
+//	try quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
 //
 // Values come from dice seeded by Config.Seed, so a run is the same every time. A failure reports
 // the case number and the input, as Go's error does: "#3: failed on input 42".
