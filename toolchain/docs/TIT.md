@@ -191,7 +191,7 @@ With `tit clone --lazy`, a focus also limits what is fetched: files outside it a
 | command | |
 |---|---|
 | `tit adopt [git dir]` | bring a git repository in (the first time: start a tit repository in its working directory); again later: only what is new |
-| `tit mirror [git dir]` | write every branch and tag into a git directory as git objects (remembered as `mirror.url`) |
+| `tit mirror [git dir or URL]` | write every branch and tag into a git directory as git objects (remembered as `mirror.url`); given an `http(s)://` URL (`https://github.com/owner/repo.git`), write them into `.tit/mirror.git` and push them there over git's smart HTTP protocol, sending only what the server lacks; `TIT_MIRROR_TOKEN` is sent as the password (a GitHub token). One way: nothing is read from the server but its refs |
 
 ## Safety
 

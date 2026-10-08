@@ -41,7 +41,9 @@ takes only those. A shallow clone is refused (`git fetch --unshallow` first); a 
 
 Going the other way, `tit mirror <git dir>` writes every branch and tag into a git directory: adopted commits keep
 their original git ids, and a commit made in tit gets one fixed encoding (its message, then a `Change-Id:` line, no
-signature), so every machine mirroring it writes the same git id. `git push` from there carries it on.
+signature), so every machine mirroring it writes the same git id. `git push` from there carries it on, or tit pushes
+itself: `TIT_MIRROR_TOKEN=... tit mirror https://github.com/owner/repo.git` speaks git's smart HTTP protocol and sends
+only what the server lacks.
 
 ## Never losing work
 

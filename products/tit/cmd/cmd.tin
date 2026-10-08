@@ -216,7 +216,8 @@ commands:
                              the commits that changed one Tin declaration, following renames and moves
   overlap                    other branches (and fetched remote ones) changing the declarations this one changes
   repack                     every pack into one, its deltas found again on every core (adopt leaves many)
-  mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
+  mirror [git dir or URL]    write every branch and tag into a git directory, as git objects (mirror.url); an
+                             http(s) URL gets them pushed over git's smart HTTP (TIT_MIRROR_TOKEN)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   ship <version> [--remote name] [--no-push] [--dry-run]
                              tag HEAD as version with the changelog since the last tag (signed when you have
