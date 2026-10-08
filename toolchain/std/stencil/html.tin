@@ -471,7 +471,7 @@ fn urlEncode(s str, norm bool) str {
 			plain = true // a valid escape stays
 		}
 		if norm && (c == '!' || c == '#' || c == '$' || c == '&' || c == '*' || c == '+' || c == ',' || c == '/' || c == ':' ||
-			c == ';' || c == '=' || c == '?' || c == '@' || c == '[' || c == ']') {
+				c == ';' || c == '=' || c == '?' || c == '@' || c == '[' || c == ']') {
 			plain = true
 		}
 		if plain {
