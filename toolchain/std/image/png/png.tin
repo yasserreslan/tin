@@ -199,7 +199,8 @@ fn Decode(data str) !dyn image.Image {
 	return out
 }
 
-// Encode writes src as an 8-bit RGBA PNG, using filter None, a zlib stream, and CRC-32 chunks.
+// Encode writes Gray, Gray16, Paletted, RGBA, RGBA64, NRGBA and NRGBA64 images using their PNG color type and bit depth.
+// Other image types are refused, as by Go's image/png encoder.
 fn Encode(src dyn image.Image) str {
 	let r = src.Bounds()
 	let w = r.Dx()
@@ -207,12 +208,74 @@ fn Encode(src dyn image.Image) str {
 	if w <= 0 || h <= 0 || w*h > maxPixels {
 		panic("png: image dimensions exceed limit")
 	}
-	mut raw = make([]u8, 0, h*(1+4*w))
+	let layout = src.Layout()
+	mut typ = i64(6)
+	if layout.Kind == image.KindGray || layout.Kind == image.KindGray16 {
+		typ = 0
+	} else if layout.Kind == image.KindPaletted {
+		typ = 3
+	} else if layout.Kind != image.KindRGBA && layout.Kind != image.KindRGBA64 && layout.Kind != image.KindNRGBA && layout.Kind != image.KindNRGBA64 {
+		panic("png: unsupported image type")
+	}
+	if typ == 3 && (len(layout.Palette) == 0 || len(layout.Palette) > 256) {
+		panic("png: invalid palette size")
+	}
+	mut depth = match layout.Kind {
+		image.KindGray16, image.KindRGBA64, image.KindNRGBA64 => 16
+		_ => 8
+	}
+	if typ == 3 {
+		if len(layout.Palette) <= 2 {
+			depth = 1
+		} else if len(layout.Palette) <= 4 {
+			depth = 2
+		} else if len(layout.Palette) <= 16 {
+			depth = 4
+		}
+	}
+	let channels = match typ {
+		0, 3 => 1
+		_ => 4
+	}
+	let sampleBytes = depth / 8
+	mut raw = make([]u8, 0, h*(1+w*channels*sampleBytes))
 	for y in r.Min.Y..r.Max.Y {
 		raw = append(raw, 0)
 		for x in r.Min.X..r.Max.X {
-			let c = color.ToNRGBA(src.At(x, y))
-			raw = append(raw, c.R, c.G, c.B, c.A)
+			let i = (y-r.Min.Y)*layout.Stride + (x-r.Min.X)*match layout.Kind {
+				image.KindGray, image.KindPaletted, image.KindAlpha => 1
+				image.KindGray16, image.KindAlpha16 => 2
+				image.KindRGBA, image.KindNRGBA => 4
+				_ => 8
+			}
+			if typ == 0 {
+				if depth == 8 {
+					raw = append(raw, layout.Pix[i])
+				} else {
+					raw = append(raw, layout.Pix[i], layout.Pix[i+1])
+				}
+			} else if typ == 3 {
+				let perByte = 8 / depth
+				if (x-r.Min.X) % perByte == 0 {
+					raw = append(raw, 0)
+				}
+				let shift = 8 - depth * ((x-r.Min.X) % perByte + 1)
+				raw[len(raw)-1] = raw[len(raw)-1] | (layout.Pix[i] << shift)
+			} else if depth == 8 {
+				if layout.Kind == image.KindNRGBA {
+					raw = append(raw, layout.Pix[i], layout.Pix[i+1], layout.Pix[i+2], layout.Pix[i+3])
+				} else {
+					let c = color.ToNRGBA(src.At(x, y))
+					raw = append(raw, c.R, c.G, c.B, c.A)
+				}
+			} else {
+				if layout.Kind == image.KindNRGBA64 {
+					raw = append(raw, layout.Pix[i], layout.Pix[i+1], layout.Pix[i+2], layout.Pix[i+3], layout.Pix[i+4], layout.Pix[i+5], layout.Pix[i+6], layout.Pix[i+7])
+				} else {
+					let c = color.ToNRGBA64(src.At(x, y))
+					raw = append(raw, u8(c.R >> 8), u8(c.R), u8(c.G >> 8), u8(c.G), u8(c.B >> 8), u8(c.B), u8(c.A >> 8), u8(c.A))
+				}
+			}
 		}
 	}
 	mut out = []u8{}
@@ -220,8 +283,24 @@ fn Encode(src dyn image.Image) str {
 	mut ihdr = []u8{}
 	put32(mut ihdr, w)
 	put32(mut ihdr, h)
-	ihdr = append(ihdr, 8, 6, 0, 0, 0)
+	ihdr = append(ihdr, u8(depth), u8(typ), 0, 0, 0)
 	chunk(mut out, "IHDR", str(ihdr))
+	if typ == 3 {
+		mut plte = []u8{}
+		mut trans = []u8{}
+		for p in layout.Palette {
+			plte = append(plte, p.R, p.G, p.B)
+			trans = append(trans, p.A)
+		}
+		chunk(mut out, "PLTE", str(plte))
+		mut last = len(trans)
+		for last > 0 && trans[last-1] == 0xff {
+			last -= 1
+		}
+		if last > 0 {
+			chunk(mut out, "tRNS", str(trans[0:last]))
+		}
+	}
 	chunk(mut out, "IDAT", squash.Zlib(str(raw), squash.Default))
 	chunk(mut out, "IEND", "")
 	return str(out)

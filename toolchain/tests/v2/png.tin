@@ -2,6 +2,7 @@ package main
 
 import "image"
 import "image/color"
+import "image/draw"
 import "image/png"
 import "say"
 
@@ -26,5 +27,40 @@ fn main() {
 	if b.R != 0x0404 || b.G != 0x0505 || b.B != 0x0606 || b.A != 0x4d4d {
 		panic("PNG alpha pixel did not round trip")
 	}
+	mut gray = image.NewGray16(image.Rect(0, 0, 3, 1))
+	gray.SetGray16(0, 0, color.Gray16{Y: 0x1234})
+	gray.SetGray16(1, 0, color.Gray16{Y: 0xabcd})
+	gray.SetGray16(2, 0, color.Gray16{Y: 0xffff})
+	let grayDecoded = png.Decode(png.Encode(gray)) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	let g = image.AsNRGBA64(grayDecoded)
+	if g == nil || g.NRGBA64At(0, 0).R != 0x1234 || g.NRGBA64At(1, 0).R != 0xabcd || g.NRGBA64At(2, 0).R != 0xffff {
+		panic("PNG Gray16 round trip")
+	}
+	let palette color.Palette = []color.NRGBA{{R: 255, A: 255}, {G: 255, A: 128}, {B: 255, A: 0}}
+	mut indexed = image.NewPaletted(image.Rect(0, 0, 3, 1), palette)
+	indexed.SetColorIndex(0, 0, 0)
+	indexed.SetColorIndex(1, 0, 1)
+	indexed.SetColorIndex(2, 0, 2)
+	let indexedDecoded = png.Decode(png.Encode(indexed)) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	let p = image.AsNRGBA64(indexedDecoded)
+	if p == nil || p.NRGBA64At(0, 0).R != 0xffff || p.NRGBA64At(1, 0).G != 0xffff || p.NRGBA64At(1, 0).A != 0x8080 || p.NRGBA64At(2, 0).A != 0 {
+		panic("PNG Paletted round trip")
+	}
+	mut dst = image.NewRGBA(image.Rect(0, 0, 2, 1))
+	dst.SetRGBA(0, 0, color.RGBA{R: 20, G: 40, B: 60, A: 255})
+	dst.SetRGBA(1, 0, color.RGBA{R: 100, G: 80, B: 60, A: 255})
+	let src = image.NewUniform(color.NRGBA{R: 255, G: 0, B: 0, A: 128})
+	draw.Draw(mut dst, image.Rect(0, 0, 2, 1), src, image.Point{}, draw.Over)
+	let d = dst.RGBAAt(0, 0)
+	if d.R != 138 || d.G != 19 || d.B != 29 || d.A != 255 {
+		panic("image/draw Over mismatch")
+	}
 	say.Line("png round trip", len(encoded))
+	say.Line("png Gray16, Paletted, draw Over pass")
 }

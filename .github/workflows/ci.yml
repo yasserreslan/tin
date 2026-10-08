@@ -74,7 +74,7 @@ jobs:
         run: sh tools/ci/tin.sh servefile_check
       - name: Multipart bodies against Go's mime/multipart (4,000 generated bodies)
         run: sh tools/ci/tin.sh multipart_check
-      - name: PNG encode and decode round trip
+      - name: PNG and image/draw pixel interoperability against Go
         run: sh tools/ci/tin.sh png_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: sh tools/ci/tin.sh pack_check
