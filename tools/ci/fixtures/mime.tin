@@ -70,8 +70,10 @@ fn run(line str) {
 		let enc = quotedprintable.Encode(dec)
 		say.Line("Q", seal.Hex([]u8(dec)), seal.Hex([]u8(enc)))
 	} else if parts[0] == "M" {
-		let boundary = unhex(argOf(parts, 1))
-		let raw = unhex(argOf(parts, 2))
+		let boundaryArg = i64(1)
+		let bodyArg = i64(2)
+		let boundary = unhex(argOf(parts, boundaryArg))
+		let raw = unhex(argOf(parts, bodyArg))
 		mut r = multipart.NewReader(raw, boundary) catch _ {
 			say.Line("M fault")
 			return
