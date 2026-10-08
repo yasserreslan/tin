@@ -110,3 +110,26 @@ fn (t temp) Close() ! {
 		try quarry.Remove(t.path)
 	}
 }
+
+// Match is every loose object whose id starts with the hex prefix (at least two digits).
+fn (l Loose) Match(prefix str) ![]object.Id {
+	mut out = []object.Id{}
+	if len(prefix) < 2 {
+		return out
+	}
+	let sub = l.dir + "/" + prefix[0:2]
+	if !quarry.IsDir(sub) {
+		return out
+	}
+	let names = try quarry.ReadDir(sub)
+	for n in names {
+		let h = prefix[0:2] + n
+		if len(h) == 64 && h[0:len(prefix)] == prefix {
+			let id = object.ParseId(h) catch _ {
+				continue
+			}
+			out = append(out, id)
+		}
+	}
+	return out
+}

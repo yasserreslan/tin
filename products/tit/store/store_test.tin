@@ -133,3 +133,34 @@ fn TestLayeredAndCached(t mut crucible.T) {
 	t.NoFault("first get", e3)
 	crucible.Equal(mut t, "cached after a get", len(c.objs) > 0, true)
 }
+
+fn TestMatch(t mut crucible.T) {
+	let d = freshDir("match")
+	mut l = NewLoose(d)
+	mut m = NewMem()
+	mut ids = []object.Id{}
+	for i in 0..40 {
+		let id = l.PutRaw(object.Kind.Blob, "object {i}") catch _ {
+			object.NoId
+		}
+		_ = m.PutRaw(object.Kind.Blob, "object {i}") catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	let one = ids[7].Hex()
+	let a = l.Match(one[0:10]) catch _ {
+		[]object.Id{}
+	}
+	let b = m.Match(one[0:10]) catch _ {
+		[]object.Id{}
+	}
+	t.True("loose finds it by prefix", len(a) == 1 && a[0] == ids[7])
+	t.True("mem finds it by prefix", len(b) == 1 && b[0] == ids[7])
+	let wide = l.Match(one[0:1]) catch _ {
+		[]object.Id{}
+	}
+	crucible.Equal(mut t, "one digit is too short for the loose store", len(wide), 0)
+	quarry.RemoveAll(d) catch _ {
+	}
+}

@@ -1,7 +1,16 @@
 package revwalk
 
+import "../change"
 import "../object"
+import "../store"
+import "cairn"
 import "fault"
+import "flume"
+import "mint"
+import "pack"
+import "quarry"
+import "seal"
+import "twine"
 
 // Revisions, walks and merge-base (#781).
 
@@ -24,12 +33,449 @@ type Rev enum {
 	Symmetric(Rev, Rev)
 }
 
-// Parse reads a revision (#781).
-fn Parse(s str) !Rev {
-	fail fault.Wrap(ErrBadRev, "revwalk.Parse: not implemented yet (#781)")
+fn isHex(s str) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i in 0..len(s) {
+		let c = s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
-// MergeBase is the best common ancestor of two commits, or nil (#781).
-fn MergeBase(a object.Id, b object.Id) ?object.Id {
+fn isLetters(s str) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i in 0..len(s) {
+		if s[i] < 'k' || s[i] > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+// Parse reads a revision: HEAD, a branch or tag, a short or full id, a change id, git:<hex>, each followed by ~N, ~,
+// ^N or ^; or a range a..b or a...b.
+fn Parse(s str) !Rev {
+	if len(s) == 0 {
+		fail fault.Wrap(ErrBadRev, "an empty revision")
+	}
+	let three = twine.Index(s, "...")
+	if three >= 0 {
+		let a = try Parse(orHead(s[0:three]))
+		let b = try Parse(orHead(s[three + 3:]))
+		return Rev.Symmetric(a, b)
+	}
+	let two = twine.Index(s, "..")
+	if two >= 0 {
+		let a = try Parse(orHead(s[0:two]))
+		let b = try Parse(orHead(s[two + 2:]))
+		return Rev.Range(a, b)
+	}
+	// the base ends at the first ~ or ^
+	mut end = len(s)
+	for i in 0..len(s) {
+		if s[i] == '~' || s[i] == '^' {
+			end = i
+			break
+		}
+	}
+	mut rev = try parseBase(s[0:end])
+	mut i = end
+	for i < len(s) {
+		let op = s[i]
+		i += 1
+		mut j = i
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j += 1
+		}
+		mut n = 1
+		if j > i {
+			n = try mint.Atoi(s[i:j])
+		}
+		if op == '~' {
+			rev = Rev.Ancestor(rev, n)
+		} else {
+			rev = Rev.Parent(rev, n)
+		}
+		i = j
+	}
+	return rev
+}
+
+fn orHead(s str) str {
+	if len(s) == 0 {
+		return "HEAD"
+	}
+	return s
+}
+
+fn parseBase(s str) !Rev {
+	if len(s) == 0 {
+		fail fault.Wrap(ErrBadRev, "a revision needs a name before ~ or ^")
+	}
+	if s == "HEAD" || s == "@" {
+		return Rev.Head
+	}
+	if twine.HasPrefix(s, "git:") {
+		let h = s[4:]
+		if len(h) < 4 || !isHex(h) {
+			fail fault.Wrap(ErrBadRev, "{s}: git: takes at least four hex digits")
+		}
+		return Rev.Git(h)
+	}
+	if len(s) >= 4 && isHex(s) {
+		return Rev.Short(s)
+	}
+	if len(s) >= 4 && isLetters(s) {
+		return Rev.Change(s)
+	}
+	return Rev.Name(s)
+}
+
+// Repo is what resolving needs: the .tit directory, the workspace's state directory (for HEAD), the store and a way
+// to find ids by prefix.
+type Repo[S store.ObjectStore] struct {
+	Dir   str
+	WsDir str
+	Store S
+}
+
+fn commitOf[S store.ObjectStore](s mut S, id object.Id) !object.CommitData {
+	let o = try s.Get(id)
+	return match o {
+		Commit(c) => c
+		Blob(_) => try notCommit(id)
+		Tree(_) => try notCommit(id)
+		Tag(_) => try notCommit(id)
+	}
+}
+
+fn notCommit(id object.Id) !object.CommitData {
+	fail fault.Wrap(ErrBadRev, "{id.Hex()} is not a commit")
+}
+
+fn refCommit(dir str, t change.Target) !object.Id {
+	return match t {
+		Commit(id) => id
+		Change(c) => try newestCommit(dir, c)
+	}
+}
+
+fn newestCommit(dir str, c object.ChangeId) !object.Id {
+	let v = try change.Newest(dir, c)
+	if v == nil {
+		fail fault.Wrap(ErrBadRev, "change {c.Letters()} has no version")
+	}
+	return v.Commit()
+}
+
+// GitIds looks a git commit up in the git-ids table (design/tit.md section 7): every tit id whose git id starts with
+// the hex prefix.
+fn GitIds(dir str, prefix str) ![]object.Id {
+	mut out = []object.Id{}
+	let path = dir + "/git-ids"
+	if !quarry.Exists(path) {
+		return out
+	}
+	let t = try flume.ReadFile(path)
+	if len(t) < 20 || t[0:8] != "TITGIDS\x00" {
+		fail fault.Wrap(ErrBadRev, "{path}: not a git-ids table")
+	}
+	let count = i64(pack.LE.U64([]u8(t[12:20])))
+	if count < 0 || 20 + count * 52 > len(t) {
+		fail fault.Wrap(ErrBadRev, "{path}: cut off")
+	}
+	for i in 0..count {
+		let at = 20 + 52 * i
+		let gh = seal.Hex([]u8(t[at:at + 20]))
+		if twine.HasPrefix(gh, prefix) {
+			let id = try object.IdOf(t[at + 20:at + 52])
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// Resolve is the commit a revision names (a range does not name one commit: use Walk).
+fn Resolve[S store.ObjectStore, M store.Matcher](r mut Repo[S], m M, rev Rev) !object.Id {
+	match rev {
+		Head => {
+			let h = try change.ReadHead(r.WsDir)
+			match h {
+				Branch(name) => {
+					let refs = change.NewRefs(r.Dir)
+					let ref = try refs.Get(name)
+					if ref == nil {
+						fail fault.Wrap(ErrBadRev, "HEAD names {name}, which has no commit yet")
+					}
+					return try refCommit(r.Dir, ref.Target)
+				}
+				Detached(t) => {
+					return try refCommit(r.Dir, t)
+				}
+			}
+		}
+		Name(n) => {
+			let refs = change.NewRefs(r.Dir)
+			for full in []str{n, "refs/" + n, "refs/heads/" + n, "refs/tags/" + n, "refs/remotes/" + n} {
+				let ok = change.CheckName(full)
+				if ok != nil {
+					continue
+				}
+				let ref = try refs.Get(full)
+				if ref != nil {
+					return try refCommit(r.Dir, ref.Target)
+				}
+			}
+			fail fault.Wrap(ErrBadRev, "no branch, tag or commit named {n}")
+		}
+		Short(h) => {
+			let tit = try m.Match(h)
+			let git = try GitIds(r.Dir, h)
+			if len(tit) + len(git) == 1 {
+				if len(tit) == 1 {
+					return tit[0]
+				}
+				return git[0]
+			}
+			if len(tit) + len(git) == 0 {
+				fail fault.Wrap(ErrBadRev, "no object starts with {h}")
+			}
+			mut names = []str{}
+			for id in tit {
+				names = append(names, id.Hex()[0:12])
+			}
+			for id in git {
+				names = append(names, "git:" + h + " (tit " + id.Hex()[0:12] + ")")
+			}
+			fail fault.Wrap(ErrAmbiguous, "{h} matches " + twine.Join(names, ", "))
+		}
+		Change(letters) => {
+			let cs = try change.MatchChanges(r.Dir, letters)
+			if len(cs) == 0 {
+				fail fault.Wrap(ErrBadRev, "no change starts with {letters}")
+			}
+			if len(cs) > 1 {
+				fail fault.Wrap(ErrAmbiguous, "{letters} matches {len(cs)} changes")
+			}
+			return try newestCommit(r.Dir, cs[0])
+		}
+		Git(h) => {
+			let git = try GitIds(r.Dir, h)
+			if len(git) == 1 {
+				return git[0]
+			}
+			if len(git) == 0 {
+				fail fault.Wrap(ErrBadRev, "no adopted git commit starts with {h}")
+			}
+			fail fault.Wrap(ErrAmbiguous, "git:{h} matches {len(git)} commits")
+		}
+		Ancestor(base, n) => {
+			mut id = try Resolve(mut r, m, base)
+			for k in 0..n {
+				let c = try commitOf(mut r.Store, id)
+				if len(c.Parents) == 0 {
+					fail fault.Wrap(ErrBadRev, "{id.Hex()[0:12]} has no parent")
+				}
+				id = c.Parents[0]
+			}
+			return id
+		}
+		Parent(base, n) => {
+			let id = try Resolve(mut r, m, base)
+			if n == 0 {
+				return id
+			}
+			let c = try commitOf(mut r.Store, id)
+			if n > len(c.Parents) {
+				fail fault.Wrap(ErrBadRev, "{id.Hex()[0:12]} has no parent {n}")
+			}
+			return c.Parents[n - 1]
+		}
+		Range(_, _) => {
+			fail fault.Wrap(ErrBadRev, "a range names several commits")
+		}
+		Symmetric(_, _) => {
+			fail fault.Wrap(ErrBadRev, "a range names several commits")
+		}
+	}
+	// every arm above returns or fails
+	fail ErrBadRev
+}
+
+// Order is how a walk lists commits.
+type Order enum {
+	Date
+	Topo
+	FirstParent
+}
+
+type queued struct {
+	when i64
+	seq  i64
+	raw  str
+}
+
+// Walk lists the commits reachable from starts and not from hide, newest first: by commit time (Date), with every
+// commit after all its children (Topo), or following first parents only (FirstParent); at most most commits (0: all).
+fn Walk[S store.ObjectStore](s mut S, starts []object.Id, hide []object.Id, order Order, most i64) ![]object.Id {
+	mut hidden = map[str]bool{}
+	if len(hide) > 0 {
+		let hs = try Walk(mut s, hide, []object.Id{}, Order.Date, 0)
+		for h in hs {
+			hidden[h.Bytes()] = true
+		}
+	}
+	mut out = []object.Id{}
+	mut seen = map[str]bool{}
+	let first = match order {
+		FirstParent => true
+		Date, Topo => false
+	}
+	mut heap = cairn.NewHeap[queued](fn(a queued, b queued) bool {
+		return a.when > b.when || (a.when == b.when && a.seq < b.seq)
+	})
+	mut seq = 0
+	for id in starts {
+		if seen[id.Bytes()] {
+			continue
+		}
+		seen[id.Bytes()] = true
+		let c = try commitOf(mut s, id)
+		heap.Push(queued{when: c.Committer.When, seq: seq, raw: id.Bytes()})
+		seq += 1
+	}
+	for {
+		let q = heap.Pop()
+		if q == nil {
+			break
+		}
+		let id = try object.IdOf(q.raw)
+		let c = try commitOf(mut s, id)
+		if !hidden[q.raw] {
+			out = append(out, id)
+			if most > 0 && len(out) >= most && !isTopo(order) {
+				break
+			}
+		}
+		mut ps = c.Parents
+		if first && len(ps) > 1 {
+			ps = ps[0:1]
+		}
+		for p in ps {
+			if seen[p.Bytes()] {
+				continue
+			}
+			seen[p.Bytes()] = true
+			let pc = try commitOf(mut s, p)
+			heap.Push(queued{when: pc.Committer.When, seq: seq, raw: p.Bytes()})
+			seq += 1
+		}
+	}
+	if isTopo(order) {
+		out = try topo(mut s, out)
+		if most > 0 && len(out) > most {
+			out = out[0:most]
+		}
+	}
+	return out
+}
+
+fn isTopo(o Order) bool {
+	return match o {
+		Topo => true
+		Date, FirstParent => false
+	}
+}
+
+// topo reorders commits so that every commit comes after all of its children in the list, keeping date order where
+// it can (Kahn's algorithm, taking the next commit in date order whose children are all out).
+fn topo[S store.ObjectStore](s mut S, ids []object.Id) ![]object.Id {
+	mut inList = map[str]bool{}
+	for id in ids {
+		inList[id.Bytes()] = true
+	}
+	mut children = map[str]i64{}
+	for id in ids {
+		let c = try commitOf(mut s, id)
+		for p in c.Parents {
+			if inList[p.Bytes()] {
+				children[p.Bytes()] += 1
+			}
+		}
+	}
+	mut done = map[str]bool{}
+	mut out = []object.Id{}
+	for len(out) < len(ids) {
+		mut progressed = false
+		for id in ids {
+			let k = id.Bytes()
+			if done[k] || children[k] > 0 {
+				continue
+			}
+			done[k] = true
+			out = append(out, id)
+			let c = try commitOf(mut s, id)
+			for p in c.Parents {
+				if inList[p.Bytes()] {
+					children[p.Bytes()] -= 1
+				}
+			}
+			progressed = true
+			break
+		}
+		if !progressed {
+			fail fault.Wrap(ErrBadRev, "the history has a cycle")
+		}
+	}
+	return out
+}
+
+// IsAncestor reports whether a is b or one of b's ancestors.
+fn IsAncestor[S store.ObjectStore](s mut S, a object.Id, b object.Id) !bool {
+	let all = try Walk(mut s, []object.Id{b}, []object.Id{}, Order.Date, 0)
+	for x in all {
+		if x == a {
+			return true
+		}
+	}
+	return false
+}
+
+// MergeBase is the best common ancestor of a and b (the newest of the common ancestors that are not ancestors of
+// another common ancestor), or nil when they share none.
+fn MergeBase[S store.ObjectStore](s mut S, a object.Id, b object.Id) !?object.Id {
+	let fromA = try Walk(mut s, []object.Id{a}, []object.Id{}, Order.Date, 0)
+	mut inA = map[str]bool{}
+	for x in fromA {
+		inA[x.Bytes()] = true
+	}
+	let fromB = try Walk(mut s, []object.Id{b}, []object.Id{}, Order.Date, 0)
+	mut common = []object.Id{}
+	for x in fromB {
+		if inA[x.Bytes()] {
+			common = append(common, x)
+		}
+	}
+	for x in common {
+		mut best = true
+		for y in common {
+			if x != y {
+				let below = try IsAncestor(mut s, x, y)
+				if below {
+					best = false
+					break
+				}
+			}
+		}
+		if best {
+			return x
+		}
+	}
 	return nil
 }

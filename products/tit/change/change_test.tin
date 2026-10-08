@@ -133,7 +133,7 @@ fn TestVersions(t mut crucible.T) {
 	}
 	t.True("no version yet", none == nil)
 	for i in 1..4 {
-		t.NoFault("add", AddVersion(d, c, Version{Op: i, Commit: object.Hash(object.Kind.Blob, "v{i}"), Time: 1000 * i}))
+		t.NoFault("add", AddVersion(d, c, NewVersion(i, object.Hash(object.Kind.Blob, "v{i}"), 1000 * i)))
 	}
 	let vs = Versions(d, c) catch _ {
 		[]Version{}
@@ -142,7 +142,7 @@ fn TestVersions(t mut crucible.T) {
 	let n = Newest(d, c) catch _ {
 		nil
 	}
-	t.True("newest", n != nil && n.Op == 3 && n.Commit == object.Hash(object.Kind.Blob, "v3"))
+	t.True("newest", n != nil && n.Op == 3 && n.Commit() == object.Hash(object.Kind.Blob, "v3"))
 	let found = MatchChanges(d, c.Letters()[0:6]) catch _ {
 		[]object.ChangeId{}
 	}
