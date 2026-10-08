@@ -359,3 +359,38 @@ fn Num(s str) i64 {
 		0
 	}
 }
+
+// ExecIn is ExecEnv with text on the program's standard input (through a temporary file below bin/ci).
+fn ExecIn(argv []str, dir str, seconds i64, input str, set []str) Out {
+	let tmp = TempDir(Join(Root(), "bin/ci"), "stdin-")
+	let path = Join(tmp, "input")
+	Write(path, input)
+	mut full = []str{"env"}
+	for entry in set {
+		full = append(full, entry)
+	}
+	for a in argv {
+		full = append(full, a)
+	}
+	mut c = cmd(full, dir)
+	c.Stdin = spawn.Stdio.File(path)
+	let r = within seconds * 1000000000 {
+		try spawn.Run(c)
+	} catch err {
+		Remove(tmp)
+		if fault.Is(err, fault.DeadlineExceeded) {
+			return Out{Code: 124, Stdout: "", Stderr: "CI timeout\n"}
+		}
+		return Out{Code: -1, Stdout: "", Stderr: say.Str(err) + "\n"}
+	}
+	Remove(tmp)
+	return Out{Code: r.Code, Stdout: r.Stdout, Stderr: r.Stderr}
+}
+
+// Lines splits text into its lines (no empty last one).
+fn Lines(text str) []str {
+	if len(text) == 0 {
+		return []str{}
+	}
+	return twine.Split(twine.TrimSuffix(text, "\n"), "\n")
+}

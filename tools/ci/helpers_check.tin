@@ -1,0 +1,151 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "twine"
+
+// Exact UTC/calendar/error helpers, Linux symbols and inherited OS handles. The C library's answers come from fixtures/libc_oracle.c.
+
+fn firstDifference(label str, got str, want str) {
+	if got == want {
+		return
+	}
+	let g = ci.Lines(got)
+	let w = ci.Lines(want)
+	mut i = 0
+	for i < len(g) && i < len(w) {
+		ci.Check(g[i] == w[i], label + " line " + mint.Itoa(i + 1) + ": got " + g[i] + ", want " + w[i])
+		i += 1
+	}
+	ci.Fail(label + ": " + mint.Itoa(len(g)) + " lines against " + mint.Itoa(len(w)))
+}
+
+fn main() {
+	let root = ci.Root()
+	let out = ci.Join(root, "bin/ci/helpers")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "helpers-")
+	ci.CopyLib(root, ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/helperprobe")
+	ci.Mkdirs(probe)
+	ci.Write(ci.Join(probe, "probe.tin"), ci.Read(ci.Join(root, "tools/ci/fixtures/helpers_probe.tin")))
+	let linux = ci.Linux()
+	if linux {
+		ci.Write(ci.Join(probe, "symbols_linux.tin"), ci.Read(ci.Join(root, "tools/ci/fixtures/helpers_symbols_linux.tin")))
+	}
+	let exe = ci.Join(work, "helpers")
+	ci.BuildTin("tools/ci/fixtures/helpers.tin", exe, work, []str{})
+	let oracle = ci.Join(work, "libc_oracle")
+	ci.Must(ci.Exec([]str{"cc", "-o", oracle, ci.Join(root, "tools/ci/fixtures/libc_oracle.c")}, root, 120), "cc libc_oracle")
+
+	// every errno message
+	let errors = ci.Exec([]str{exe, "errors"}, "", 10)
+	ci.Must(errors, "helpers errors")
+	let wantErrors = ci.Exec([]str{oracle, "errors"}, "", 10)
+	ci.Must(wantErrors, "oracle errors")
+	firstDifference("errors", errors.Stdout, wantErrors.Stdout)
+
+	// UTC fields and Date headers against Go and the C library
+	mut times = []i64{0, -1, 1, -62167219200, -62135596800, 253402300799, 951782399, 951782400, 4107542400, -2208988800}
+	let rng = dice.New(12504)
+	for i in 0..2000 {
+		times = append(times, rng.I64n(2000000000000) - 1000000000000)
+	}
+	mut data = ""
+	for t in times {
+		data += mint.Itoa(t) + "\n"
+	}
+	let calendar = ci.ExecIn([]str{exe, "calendar"}, "", 20, data, []str{})
+	ci.Must(calendar, "helpers calendar")
+	mut width = "4"
+	if linux {
+		width = "1"
+	}
+	let reference = ci.ExecIn([]str{"go", "run", "./bench/ref/calendar", width}, root, 60, data, []str{})
+	ci.Must(reference, "go run calendar")
+	firstDifference("calendar against Go", calendar.Stdout, reference.Stdout)
+	// Also preserve the former C output exactly, including years before 0001.
+	let c = ci.ExecIn([]str{oracle, "calendar"}, "", 20, data, []str{})
+	ci.Must(c, "oracle calendar")
+	firstDifference("calendar against C", calendar.Stdout, c.Stdout)
+
+	let host = ci.Exec([]str{exe, "hostname"}, "", 10)
+	let wantHost = ci.Exec([]str{oracle, "hostname"}, "", 10)
+	ci.Must(host, "helpers hostname")
+	ci.Same("hostname", host.Stdout, wantHost.Stdout)
+
+	// inherited PTYs, pipes, files and an invalid descriptor
+	let tty = ci.Exec([]str{oracle, "tty-run", exe}, "", 10)
+	ci.Must(tty, "tty-run")
+	let wantTty = ci.Exec([]str{oracle, "tty"}, "", 10)
+	ci.Must(wantTty, "oracle tty")
+	ci.Same("isatty", tty.Stdout, wantTty.Stdout)
+
+	if linux {
+		let cpus = allowedCpus()
+		mut counts = []i64{1}
+		if len(cpus) > 1 {
+			counts = append(counts, 2)
+		}
+		for count in counts {
+			mut list = []str{}
+			for k in 0..count {
+				list = append(list, mint.Itoa(cpus[k]))
+			}
+			let o = ci.Exec([]str{"taskset", "-c", twine.Join(list, ","), exe, "cpus"}, "", 10)
+			ci.Must(o, "helpers cpus")
+			let words = twine.Fields(o.Stdout)
+			ci.Check(len(words) == 2, "cpus: " + o.Stdout)
+			let n = ci.Num(words[0])
+			ci.Check(n >= 1 && n <= count, "cpus: counted " + words[0] + " of " + mint.Itoa(count))
+			let page = ci.Exec([]str{"getconf", "PAGESIZE"}, "", 5)
+			ci.Check(ci.Num(words[1]) == ci.Num(twine.TrimSpace(page.Stdout)), "page size " + words[1])
+		}
+		ci.Write(ci.Join(work, "symbols.tin"), "package main\nimport \"helperprobe\"\nfn main() {{ helperprobe.Symbols() }}\n")
+		let exe2 = ci.Join(work, "symbols")
+		ci.BuildTin(ci.Join(work, "symbols.tin"), exe2, work, []str{})
+		let s = ci.Exec([]str{exe2}, "", 10)
+		ci.Must(s, "symbols")
+		ci.Same("symbols", s.Stdout, "symbols bounded\n")
+	}
+
+	// IANA zones (#573): In and DateIn against Go's time in every covered zone, at every transition from 1970 to 2040 and the wall
+	// times around each, and after the last TZif transition through the zone's TZ string.
+	let zones = ci.Join(work, "zones")
+	ci.Mkdirs(zones)
+	let zexe = ci.Join(work, "tidezones")
+	ci.BuildTin("tools/ci/fixtures/tide_zones.tin", zexe, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "run", "./bench/ref/tide/zonegen", zones}, root, 180), "zonegen")
+	let got = ci.Exec([]str{zexe, ci.Join(zones, "zones.in")}, zones, 180)
+	ci.Must(got, "tide zones")
+	let want = ci.Read(ci.Join(zones, "expected.txt"))
+	firstDifference("zone corpus", got.Stdout, want)
+	ci.Write(ci.Join(out, "helpers.log"), "calendar values matched Go and the C library; errno table exact; hostname/PTY/pipe/file/CPU/symbol checks passed; IANA zones matched Go\n")
+	ci.Remove(work)
+	ci.Pass("UTC fields and exact Date headers (" + mint.Itoa(len(times)) + " Go/C values), all errno messages, hostname, PTY/pipe/file handles, Linux affinity/page size and symbol boundaries, " + mint.Itoa(len(ci.Lines(want))) + " IANA zone lines")
+}
+
+// allowedCpus are the CPUs this process may run on (Cpus_allowed_list of /proc/self/status: numbers and ranges).
+fn allowedCpus() []i64 {
+	mut cpus = []i64{}
+	for line in ci.Lines(ci.Read("/proc/self/status")) {
+		if !twine.HasPrefix(line, "Cpus_allowed_list:") {
+			continue
+		}
+		let list = twine.TrimSpace(line[len("Cpus_allowed_list:"):])
+		for part in twine.Split(list, ",") {
+			let dash = twine.IndexByte(part, '-')
+			if dash < 0 {
+				cpus = append(cpus, ci.Num(part))
+			} else {
+				let lo = ci.Num(part[0:dash])
+				let hi = ci.Num(part[dash + 1:])
+				for n in lo..hi + 1 {
+					cpus = append(cpus, n)
+				}
+			}
+		}
+	}
+	return cpus
+}

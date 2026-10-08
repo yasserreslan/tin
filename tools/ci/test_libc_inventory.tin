@@ -1,0 +1,69 @@
+package main
+
+import "./ci"
+import "./libinv"
+import "say"
+import "twine"
+
+// Keep new and reintroduced Linux imports visible, including legacy compiler syntax.
+
+fn names(f libinv.Found) str {
+	mut sorted = []str{}
+	for n in f.Names {
+		sorted = append(sorted, n)
+	}
+	// insertion sort keeps the test free of imports
+	for i in 1..len(sorted) {
+		let x = sorted[i]
+		mut j = i - 1
+		for j >= 0 && sorted[j] > x {
+			sorted[j + 1] = sorted[j]
+			j -= 1
+		}
+		sorted[j + 1] = x
+	}
+	return twine.Join(sorted, ",")
+}
+
+fn audited(root str) str {
+	let errors = libinv.Audit(root) catch err {
+		return "ERR " + say.Str(err)
+	}
+	return twine.Join(errors, "|")
+}
+
+fn main() {
+	ci.Same("the repository inventory is complete", audited(ci.Root()), "")
+
+	let base = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "libinv-")
+	let root = base + "/one"
+	ci.Mkdirs(root + "/packages")
+	ci.Mkdirs(root + "/toolchain/compiler")
+	ci.Write(root + "/packages/common.tin", "\n// extern func commented() i64\n/* extern fn block_comment(); */\nvar text = `extern func string_literal() i64`\nextern func current() i64\nextern fn legacy();\n")
+	ci.Write(root + "/packages/x_darwin.tin", "extern func mac_only() i64")
+	ci.Write(root + "/packages/x_linux_arm64.tin", "extern fn arm_only();")
+	ci.Write(root + "/packages/x_linux_amd64.tin", "extern fn x64_only();")
+	ci.Write(root + "/packages/x_test.tin", "extern fn test_only();")
+	ci.Write(root + "/toolchain/compiler/elf.tin", "\n// el_import(\"commented_start\")\nel_import(\"startup\")\n")
+	ci.Same("arm64 symbols", names(libinv.Discover(root, "linux-arm64")), "arm_only,current,legacy,startup")
+	ci.Same("amd64 symbols", names(libinv.Discover(root, "linux-amd64")), "current,legacy,startup,x64_only")
+
+	let two = base + "/two"
+	ci.Mkdirs(two + "/design")
+	ci.Mkdirs(two + "/packages")
+	ci.Mkdirs(two + "/toolchain/compiler")
+	ci.Write(two + "/design/libc_inventory.md", "| `old` | `packages/x.tin` | 2 | removed | Tin allocator | OOM check |\n")
+	ci.Write(two + "/packages/x.tin", "extern fn old();\nextern func surprise() i64\n")
+	ci.Same("unassigned and removed symbols fail", audited(two), "unassigned Linux symbol: surprise|removed Linux symbol reappeared: old")
+
+	let three = base + "/three"
+	ci.Mkdirs(three + "/design")
+	ci.Mkdirs(three + "/packages")
+	ci.Write(three + "/packages/x.tin", "extern fn old();\n")
+	ci.Write(three + "/design/libc_inventory.md", "| `old` | `packages/stale.tin` | 2 | active | allocator | OOM |\n")
+	ci.Same("stale call-site files fail", audited(three), "update call-site files for old: packages/x.tin")
+	ci.Write(three + "/design/libc_inventory.md", "| `old` | `packages/x.tin` | ? | active | allocator | OOM |\n")
+	ci.Test("a missing phase is refused", twine.Contains(audited(three), "unassigned phase"))
+	ci.Remove(base)
+	ci.Finish()
+}

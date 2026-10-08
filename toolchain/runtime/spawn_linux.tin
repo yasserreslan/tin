@@ -80,8 +80,13 @@ fn rt_spawn_child(rec i64) {
 	// Every runtime descriptor is already close-on-exec; mark any other descriptor so too
 	// (Linux 5.9+; an older kernel returns EINVAL and the fds stay, as they were before #576).
 	rt_sys_close_range(3, -1, 4) // CLOSE_RANGE_CLOEXEC
+	// No vector of its own (spawn.Env.Inherit): the child gets this process's environment, as it does on macOS.
+	mut envp = rec[spawnEnvp]
+	if envp == 0 {
+		envp = rtEnviron
+	}
 	// The child's whole point: execve, raw, and never return.
-	let r = rt_sys_execve(rec[spawnPath], rec[spawnArgv], rec[spawnEnvp])
+	let r = rt_sys_execve(rec[spawnPath], rec[spawnArgv], envp)
 	rt_spawn_fail(rec, r)
 }
 

@@ -1,0 +1,22 @@
+package main
+
+import "./ci"
+import "./libinv"
+import "quarry"
+import "say"
+
+// Audit Linux foreign declarations and linker-added imports against the removal plan (design/libc_inventory.md).
+
+fn main() {
+	let errors = libinv.Audit(ci.Root()) catch err {
+		say.Line(say.Str(err))
+		quarry.Exit(1)
+		return
+	}
+	for e in errors {
+		say.Line(e)
+	}
+	if len(errors) > 0 {
+		quarry.Exit(1)
+	}
+}

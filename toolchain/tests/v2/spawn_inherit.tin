@@ -1,0 +1,22 @@
+package main
+
+// spawn_inherit: a child started with Env.Inherit sees this process's environment, including a variable the process set itself
+// (on Linux the child used to get an empty environment).
+
+import "quarry"
+import "say"
+import "spawn"
+
+fn main() {
+	quarry.Setenv("TIN_SPAWN_INHERIT", "seen") catch err {
+		say.Line("setenv failed", err)
+		return
+	}
+	let r = spawn.Run(spawn.Cmd{Argv: []str{"/bin/sh", "-c", "echo $TIN_SPAWN_INHERIT; test -n \"$PATH\" && echo path"}, Env: spawn.Env.Inherit, Dir: "",
+		Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
+		say.Line("run failed", err)
+		return
+	}
+	say.Line("exit", r.Code)
+	say.Line(r.Stdout)
+}

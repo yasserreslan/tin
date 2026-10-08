@@ -1,0 +1,89 @@
+package main
+
+import "./ci"
+import "./elf"
+import "./libinv"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// Native Linux syscall ABI, returning signals, independent errors and getdents64.
+//
+// Usage: syscall_check [--target TARGET] [--docker IMAGE]
+
+fn main() {
+	mut target = ""
+	mut docker = ""
+	let args = quarry.Args()
+	mut i = 1
+	for i < len(args) {
+		if args[i] == "--target" && i + 1 < len(args) {
+			target = args[i + 1]
+			i += 1
+		} else if args[i] == "--docker" && i + 1 < len(args) {
+			docker = args[i + 1]
+			i += 1
+		}
+		i += 1
+	}
+	let root = ci.Root()
+	let out = ci.Join(root, "bin/ci/syscall")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "syscall-")
+	ci.CopyLib(root, ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/syscallprobe")
+	ci.Mkdirs(probe)
+	ci.Write(ci.Join(probe, "probe.tin"), ci.Read(ci.Join(root, "tools/ci/fixtures/syscall_probe.tin")))
+	let directory = ci.Join(work, "entries")
+	ci.Mkdirs(ci.Join(directory, "directory"))
+	ci.Write(ci.Join(directory, "file"), "abc")
+	ci.Link("directory", ci.Join(directory, "symlink"))
+	ci.Link("missing", ci.Join(directory, "broken"))
+	let pad = twine.Repeat("x", 240)
+	for n in 0..5000 {
+		mut digits = mint.Itoa(n)
+		for len(digits) < 5 {
+			digits = "0" + digits
+		}
+		ci.Write(ci.Join(directory, digits + pad), "")
+	}
+	let exe = ci.Join(work, "syscall")
+	mut extra = []str{}
+	if len(target) > 0 {
+		extra = []str{"-target", target}
+	}
+	ci.BuildTin("tools/ci/fixtures/syscall.tin", exe, work, extra)
+	// The program may not import the libc functions of phase 3 or syscall itself.
+	let rows = libinv.ReadInventory(ci.Join(root, "design/libc_inventory.md")) catch err {
+		ci.Fail(say.Str(err))
+		return
+	}
+	let file = elf.Read(exe) catch err {
+		ci.Fail(say.Str(err))
+		return
+	}
+	mut bad = []str{}
+	for name in file.Undefined() {
+		if name == "syscall" {
+			bad = append(bad, name)
+		}
+		for row in rows {
+			if row.Phase == "3" && row.Name == name {
+				bad = append(bad, name)
+			}
+		}
+	}
+	ci.Check(len(bad) == 0, "syscall: forbidden imports " + twine.Join(bad, ", "))
+	mut command = []str{exe, directory}
+	if len(docker) > 0 {
+		command = []str{"docker", "run", "--rm", "-v", root + ":" + root, "-w", root, docker, exe, directory}
+	}
+	let result = ci.Exec(command, root, 30)
+	let reference = ci.Exec([]str{"go", "run", "./bench/ref/syscall", directory}, root, 60)
+	ci.Must(reference, "go run syscall")
+	ci.Write(ci.Join(out, "syscall.log"), result.Stdout + result.Stderr)
+	ci.Check(result.Code == 0 && result.Stdout == reference.Stdout, "syscall: exit " + mint.Itoa(result.Code) + "\n" + result.Stdout + result.Stderr + "\nreference:\n" + reference.Stdout)
+	ci.Remove(work)
+	ci.Pass("raw syscall ABI, returning signal on alternate stack, per-thread errors, 5004 long/linked directory entries and forced DT_UNKNOWN")
+}

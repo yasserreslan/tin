@@ -1,6 +1,6 @@
 // Command zonegen writes the IANA zone corpus (zones.in) and the Go expectations (expected.txt)
 // for tide's zone work (#573): sampled instants, every transition from 1970 to 2040 with its
-// neighbours, and wall times around each transition for DateIn. tools/ci/helpers_check.py runs
+// neighbours, and wall times around each transition for DateIn. tools/ci/helpers_check.tin runs
 // it next to tools/ci/fixtures/tide_zones.tin and compares the two outputs.
 package main
 

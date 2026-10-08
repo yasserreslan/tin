@@ -2,7 +2,7 @@ package main
 
 // The scroll twin, Go side: read an XML document on stdin and print its token stream with
 // encoding/xml's Decoder.Token, one token per line, in the format tools/ci/fixtures/scroll_twin.tin
-// prints. The check (tools/ci/scroll_check.py) feeds both the same corpus and compares the lines.
+// prints. The check (tools/ci/scroll_check.tin) feeds both the same corpus and compares the lines.
 
 import (
 	"encoding/xml"

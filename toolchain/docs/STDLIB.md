@@ -1823,7 +1823,7 @@ Value is a struct with constructor functions rather than the issue's enum: a com
 
 ## scroll
 
-Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding/xml without reflection: no DTD processing and no external entities, by design, so XXE and billion-laughs attacks cannot happen. Entities are the five predefined names and numeric references; anything else is an error. The tokenizer resolves namespaces into Name.Space and bounds nesting, the attribute count and the token size (fault.LimitExceeded). Writer writes tokens or direct calls with text and attribute escaping and optional indentation; the Go twin (bench/ref/scroll and tools/ci/scroll_check.py) compares the token streams with encoding/xml over an RSS, SOAP, S3 and SVG corpus.
+Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding/xml without reflection: no DTD processing and no external entities, by design, so XXE and billion-laughs attacks cannot happen. Entities are the five predefined names and numeric references; anything else is an error. The tokenizer resolves namespaces into Name.Space and bounds nesting, the attribute count and the token size (fault.LimitExceeded). Writer writes tokens or direct calls with text and attribute escaping and optional indentation; the Go twin (bench/ref/scroll and tools/ci/scroll_check.tin) compares the token streams with encoding/xml over an RSS, SOAP, S3 and SVG corpus.
 
 - `type Token enum`: Token is one piece of an XML document.
 - `type Name struct`: Name is a name with its namespace: space is the URI the prefix resolved to, empty when there is none; local is the part after the prefix.

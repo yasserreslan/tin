@@ -49,7 +49,7 @@ jobs:
       - name: Test the test harness
         run: |
           python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
-          for t in test_pyre test_harness test_next_version test_replay_save; do sh tools/ci/tin.sh $t; done
+          for t in tools/ci/test_*.tin; do sh tools/ci/tin.sh $t; done
       - name: Build from seed and verify self-hosting fixed point
         run: make bootstrap
       - name: Strict language and standard library suite
@@ -57,11 +57,11 @@ jobs:
       - name: Docs and examples are edition 1, and every docs code block compiles
         run: python3 tools/ci/docs_check.py bin/tinc
       - name: Exact number conversion (Go reference and hard parsing corpus)
-        run: python3 tools/ci/number_check.py
+        run: sh tools/ci/tin.sh number_check
       - name: Arbitrary-precision integers against Go's math/big (100,000 pairs)
         run: sh tools/ci/tin.sh abacus_check
       - name: XML token streams against Go's encoding/xml (RSS, SOAP, S3, SVG)
-        run: python3 tools/ci/scroll_check.py
+        run: sh tools/ci/tin.sh scroll_check
       - name: Regular expressions against Go's regexp (12,000 pairs and the ported tables)
         run: python3 tools/ci/lasso_check.py
       - name: Packed numbers and the small encodings against Go (10,000 cases)
@@ -90,7 +90,7 @@ jobs:
         run: python3 tools/ci/sched_check.py
       - name: Raw Linux syscall ABI, signals, errors and directory iteration
         if: runner.os == 'Linux'
-        run: python3 tools/ci/syscall_check.py
+        run: sh tools/ci/tin.sh syscall_check
       - name: Linux clone threads (returning cores, stack reaping, masks, child faults)
         if: runner.os == 'Linux'
         run: sh tools/ci/tin.sh thread_check
@@ -98,11 +98,11 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 tools/ci/static_check.py
       - name: Exact calendar, errno, hostname, TTY and Linux symbol helpers
-        run: python3 tools/ci/helpers_check.py
+        run: sh tools/ci/tin.sh helpers_check
       - name: Float map keys against Go (-0 and +0 one key, NaN never found)
         run: sh tools/ci/tin.sh float_keys_check
       - name: Compiler path discovery and canonicalization
-        run: python3 tools/ci/compiler_paths_check.py
+        run: sh tools/ci/tin.sh compiler_paths_check
       - name: Compile time of long expression chains (#713)
         run: sh tools/ci/tin.sh compile_time_check
       - name: Packages (tin vendor, offline builds from vendor/, tin.lock hashes)

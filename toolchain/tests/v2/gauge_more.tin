@@ -19,7 +19,7 @@ fn u32b(v u32) str {
 
 // r prints a transcendental result to 12 significant digits, so the last bit (which differs
 // between a fused multiply-add and a separate multiply and add, and between arm64 and x86-64)
-// does not matter; the bit-exact check is tools/ci/number_check.py against Go on this machine.
+// does not matter; the bit-exact check is tools/ci/number_check.tin against Go on this machine.
 fn r(x f64) str {
 	return say.Fmt("%.12g", x)
 }

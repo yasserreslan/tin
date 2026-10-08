@@ -1,5 +1,5 @@
 // Command tide_zones runs the zone corpus bench/ref/tide writes: for every case in zones.in it
-// prints tide's In and DateIn result in Go's format, and tools/ci/helpers_check.py compares the
+// prints tide's In and DateIn result in Go's format, and tools/ci/helpers_check.tin compares the
 // output with expected.txt line by line (#573).
 package main
 
