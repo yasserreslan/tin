@@ -8,7 +8,7 @@ import "say"
 import "tide"
 import "twine"
 
-// #350: streaming responses. Routes for stream_check.py:
+// #350: streaming responses. Routes for stream_check.tin:
 //   /sse?n=N&ms=M      N server-sent events, M ms apart
 //   /chunks?n=N&size=S N chunks of S bytes (byte i of the stream is i % 251)
 //   /length?n=N        a Content-Length body of N bytes, written in pieces

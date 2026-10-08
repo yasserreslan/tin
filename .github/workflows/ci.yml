@@ -162,7 +162,7 @@ jobs:
       - name: Server lifecycle (use, on, startup faults, drain then stop events)
         run: sh tools/ci/tin.sh lifecycle_check
       - name: Streaming responses (chunks, Content-Length, SendFile, server-sent events, flat memory)
-        run: python3 tools/ci/stream_check.py
+        run: sh tools/ci/tin.sh stream_check
       # h2spec is pinned to a commit of its default branch: its v2 tags cannot be installed with go install.
       - name: HTTP/2 (h2spec, Go's HTTP/2 client, a gRPC client, frames, flow control, drain)
         run: |
