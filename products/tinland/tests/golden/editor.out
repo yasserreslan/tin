@@ -209,3 +209,5 @@ xzthreez
 xone
 xztwo
 xzthreezq
+complete Line true true
+complete NoSuchWord false true
