@@ -284,9 +284,12 @@ fn Run(name str, f fn(mut T)) {
 		rt_flush()
 		takeOutput()
 		let t0 = rt_mono_ns()
+		rtOutHold = true // the test's lines stay in the buffer until they are taken (#747)
 		f(mut t)
 		let ms = (rt_mono_ns() - t0) / 1000000
-		outputEvents(name, takeOutput())
+		let printed = takeOutput()
+		rtOutHold = false
+		outputEvents(name, printed)
 		for _, l in t.logs {
 			event("output", name, ",\"message\":" + jsonText(l))
 		}

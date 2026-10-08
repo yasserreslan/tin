@@ -46,6 +46,7 @@ shared mut rtArgc i64
 shared mut rtArgv i64
 shared mut rtOut i64      // stdout buffer: [len, cap, data]
 shared mut rtOutTTY bool
+shared mut rtOutHold bool // crucible's -json capture keeps lines in the buffer to take them (#747)
 shared mut rtOutLock i64
 shared mut rtTLS i64      // number of per-core globals
 shared mut rtCoreInit fn()
@@ -1361,7 +1362,7 @@ fn rt_out(p i64, n i64) {
 	}
 	memcpy(rtOut[2]+rtOut[0], p, n)
 	rtOut[0] += n
-	if rtOutTTY || memchr(p, '\n', n) != 0 {
+	if !rtOutHold && (rtOutTTY || memchr(p, '\n', n) != 0) {
 		rt_flush()
 	}
 	rt_unlock(&rtOutLock)
