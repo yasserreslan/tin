@@ -424,7 +424,7 @@ Package dump writes HTTP requests and responses out as text, byte for byte as Go
 
 ```tin
 fn handle(q anvil.Req, w mut anvil.Out) {
-	herald.Info("request", "dump", dump.Request(q, false))
+	herald.Info(dump.Request(q, false))
 }
 ```
 

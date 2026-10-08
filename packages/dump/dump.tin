@@ -3,7 +3,7 @@
 // the wire.
 //
 //	fn handle(q anvil.Req, w mut anvil.Out) {
-//		herald.Info("request", "dump", dump.Request(q, false))
+//		herald.Info(dump.Request(q, false))
 //	}
 //
 // Dumping the response a client got:
