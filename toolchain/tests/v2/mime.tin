@@ -58,6 +58,36 @@ fn main() {
 	let encoded = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\ncaf=C3=A9\r\n--b--\r\n"
 	say.Line("multipart qp", partsOf(encoded, "b"))
 	say.Line("multipart bad", partErr("garbage without a boundary", "b"), partErr("--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ny", "b"))
+	mut sink = byteSink{data: []u8{}}
+	mut sw = multipart.NewWriterStream(mut sink, "bnd") catch err {
+		say.Line("stream writer failed", err)
+		return
+	}
+	sw.CreateFormField("name") catch _ {}
+	sw.Write([]u8("value")) catch _ {}
+	sw.Close() catch _ {}
+	mut expectedWriter = multipart.NewWriter("bnd") catch err {
+		say.Line("writer failed", err)
+		return
+	}
+	expectedWriter.CreateFormField("name") catch _ {}
+	expectedWriter.Write([]u8("value")) catch _ {}
+	let expected = expectedWriter.Close() catch err {
+		say.Line("close failed", err)
+		return
+	}
+	say.Line("multipart stream writer", str(sink.data) == expected)
+}
+
+// byteSink is a small in-memory io.Writer used to check streaming output.
+type byteSink struct {
+	data []u8
+}
+
+// Write appends bytes and reports them all written.
+fn (s mut byteSink) Write(data []u8) !i64 {
+	s.data = append(s.data, data...)
+	return len(data)
 }
 
 // parseType is the parsed media type, or the fault.

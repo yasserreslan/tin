@@ -11,11 +11,11 @@ package multipart
 //	}
 //
 // A part's body is decoded from its Content-Transfer-Encoding (quoted-printable or base64) by
-// Text and Read. The reader works on the whole body it is given; a streaming reader for very
-// large uploads over a file is the follow-up noted in #735.
+// Text and Read. NewReaderStream and NewWriterStream accept io-shaped streams for large bodies.
 
 import "mime"
 import "mime/quotedprintable"
+import "io"
 import "say"
 import "twine"
 
@@ -329,6 +329,7 @@ type Writer struct {
 	havePart bool
 	open     bool
 	closed   bool
+	stream   ?dyn io.Writer
 }
 
 // NewWriter builds a body with the given boundary (SetBoundary may change it before the first
@@ -340,7 +341,19 @@ fn NewWriter(boundary str) !Writer {
 	if len(boundary) > maxBoundary {
 		fail say.Fault("multipart: a boundary of %d bytes is over the maximum", len(boundary))
 	}
-	return Writer{out: []u8{}, boundary: boundary, havePart: false, open: false, closed: false}
+	return Writer{out: []u8{}, boundary: boundary, havePart: false, open: false, closed: false, stream: nil}
+}
+
+// NewWriterStream writes multipart bytes to dst as each part is written. It keeps only a small
+// amount of state and does not retain the body. Close finalizes the stream and returns an empty string.
+fn NewWriterStream(dst mut dyn io.Writer, boundary str) !Writer {
+	if len(boundary) == 0 {
+		boundary = "tin.multipart.boundary"
+	}
+	if len(boundary) > maxBoundary {
+		fail say.Fault("multipart: a boundary of %d bytes is over the maximum", len(boundary))
+	}
+	return Writer{out: []u8{}, boundary: boundary, havePart: false, open: false, closed: false, stream: dst}
 }
 
 // Boundary returns the boundary the parts are delimited with.
@@ -364,9 +377,9 @@ fn (w mut Writer) CreatePart(header map[str]str) ! {
 	try w.closePart()
 	// A boundary is CRLF + "--" + boundary; the first one has no leading CRLF.
 	if w.havePart {
-		w.out = append(w.out, '\r', '\n')
+		try w.emit("\r\n")
 	}
-	w.out = append(w.out, []u8("--" + w.boundary + "\r\n")...)
+	try w.emit("--" + w.boundary + "\r\n")
 	// Go sorts the header names; a map of str has no stable order, so sort them.
 	mut names = []str{}
 	for k, _ in header {
@@ -374,9 +387,9 @@ fn (w mut Writer) CreatePart(header map[str]str) ! {
 	}
 	names = sortStrings(names)
 	for _, k in names {
-		w.out = append(w.out, []u8(k + ": " + header[k] + "\r\n")...)
+		try w.emit(k + ": " + header[k] + "\r\n")
 	}
-	w.out = append(w.out, '\r', '\n')
+	try w.emit("\r\n")
 	w.havePart = true
 	w.open = true
 }
@@ -401,7 +414,15 @@ fn (w mut Writer) Write(data []u8) !i64 {
 	if !w.open {
 		fail say.Fault("multipart: no part is open")
 	}
-	w.out = append(w.out, data...)
+	if let dst0 = w.stream {
+		mut dst = dst0
+		let n = try dst.Write(data)
+		if n != i64(len(data)) {
+			fail say.Fault("multipart: short write: %d of %d bytes", n, len(data))
+		}
+	} else {
+		w.out = append(w.out, data...)
+	}
 	return i64(len(data))
 }
 
@@ -423,11 +444,28 @@ fn (w mut Writer) Close() !str {
 		fail say.Fault("multipart: the writer is closed")
 	}
 	if w.havePart {
-		w.out = append(w.out, '\r', '\n')
+		try w.emit("\r\n")
 	}
-	w.out = append(w.out, []u8("--" + w.boundary + "--\r\n")...)
+	try w.emit("--" + w.boundary + "--\r\n")
 	w.closed = true
+	if w.stream != nil {
+		return ""
+	}
 	return str(w.out)
+}
+
+// emit writes framing bytes immediately for a streaming writer, or appends them for a buffered writer.
+fn (w mut Writer) emit(s str) ! {
+	if let dst0 = w.stream {
+		mut dst = dst0
+		let data = []u8(s)
+		let n = try dst.Write(data)
+		if n != i64(len(data)) {
+			fail say.Fault("multipart: short write: %d of %d bytes", n, len(data))
+		}
+	} else {
+		w.out = append(w.out, []u8(s)...)
+	}
 }
 
 // ---- small helpers ----
