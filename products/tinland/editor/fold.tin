@@ -3,8 +3,8 @@ package editor
 import "textedit"
 
 // Code folding by indentation: a line followed by more indented lines can be folded, which hides those lines (the folded line
-// shows an ellipsis). The folds belong to the open text: an edit that changes the number of lines, or switching tabs, drops them,
-// and a fold that hides the caret opens.
+// shows an ellipsis). The folds belong to the open text: switching tabs drops them, an edit that changes the number of lines moves
+// them as if it was made at the caret, and a fold that hides the caret opens.
 
 // fold hides the lines Start+1 to End; Start stays visible.
 type fold struct {
@@ -160,13 +160,39 @@ fn (ed mut Editor) syncFolds() {
 		return
 	}
 	if ed.FoldLines != len(ed.Buf.Lines) {
-		ed.Folds = ed.Folds[0:0]
+		ed.shiftFolds()
+	}
+	if len(ed.Folds) == 0 {
 		return
 	}
 	let h = ed.hiddenBy(ed.Buf.Row)
 	if h >= 0 {
 		ed.removeFold(h)
 	}
+}
+
+// shiftFolds moves the folds for an edit that changed the number of lines by d. The edit is taken to be at the caret: with r its
+// line now, it began at line r-d, so a fold that starts below that moves by d, and one that holds it grows or shrinks by d. A fold
+// the edit left empty or outside the text goes. In place: see removeFold.
+fn (ed mut Editor) shiftFolds() {
+	let d = len(ed.Buf.Lines) - ed.FoldLines
+	let t = ed.Buf.Row - d
+	mut n = 0
+	for i in 0..len(ed.Folds) {
+		mut f = ed.Folds[i]
+		if f.Start > t {
+			f.Start += d
+			f.End += d
+		} else if f.End > t {
+			f.End += d
+		}
+		if f.Start >= 0 && f.End > f.Start && f.End < len(ed.Buf.Lines) {
+			ed.Folds[n] = f
+			n += 1
+		}
+	}
+	ed.Folds = ed.Folds[0:n]
+	ed.FoldLines = len(ed.Buf.Lines)
 }
 
 // removeFold takes fold i out in place (it is called while a frame is painted, which must not allocate for the editor).
