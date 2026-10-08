@@ -6626,6 +6626,10 @@ fn rt_core_step() {
 // nothing to run it sleeps no later than the deadline instead of reporting a deadlock.
 fn rt_core_step_until(deadline i64) {
 	mut t = rt_task_take_ready()
+	if t == 0 && plainN > 0 {
+		rt_plain_poll(0)
+		t = rt_task_take_ready()
+	}
 	if t == 0 {
 		let now = rt_mono_ns()
 		t = rt_timer_pop(now)
@@ -6633,6 +6637,15 @@ fn rt_core_step_until(deadline i64) {
 			mut next = rt_timer_next()
 			if deadline > 0 && (next < 0 || deadline < next) {
 				next = deadline
+			}
+			if plainN > 0 {
+				// Tasks wait on descriptors: sleep in poll until one is ready or the next timer is due.
+				mut ns = i64(-1)
+				if next >= 0 {
+					ns = next - now
+				}
+				rt_plain_poll(ns)
+				return
 			}
 			if next < 0 {
 				rt_panic("deadlock: main waits for tasks that are all waiting for it")
@@ -6642,6 +6655,107 @@ fn rt_core_step_until(deadline i64) {
 		}
 	}
 	rt_task_resume(t)
+}
+
+// ---- descriptor waits of tasks in a plain program (#812) ----
+//
+// A server's event loop watches the descriptors its tasks wait on. A plain program has none:
+// rt_plain_watch records [task, gen, fd, want] and rt_core_step_until polls the recorded ones,
+// so a task blocked on a pipe lets the others (the one feeding it) run. Entries of waits that
+// ended another way are dropped when they are next looked at.
+
+mut plainW i64 // per core: the entries, four words each
+mut plainN i64
+mut plainCap i64
+
+fn rt_plain_watch(fd i64, want i64) {
+	if plainN == plainCap {
+		let nc = plainCap*2 + 16
+		let nw = calloc(nc*4, 8)
+		if plainN > 0 {
+			memcpy(nw, plainW, plainN*32)
+			free(plainW)
+		}
+		plainW = nw
+		plainCap = nc
+	}
+	let t = curTask
+	let e = plainW + 32*plainN
+	e[0] = t
+	e[1] = t[tGen]
+	e[2] = fd
+	e[3] = want
+	plainN += 1
+}
+
+// rt_plain_unwatch has nothing to do: a stale entry is dropped by the next poll.
+fn rt_plain_unwatch(fd i64) {
+}
+
+// rt_plain_poll waits up to ns (negative: no limit) for a recorded descriptor, then wakes the
+// tasks whose descriptor is ready.
+fn rt_plain_poll(ns i64) {
+	mut k = 0
+	mut i = 0
+	for i < plainN {
+		let e = plainW + 32*i
+		let t = e[0]
+		if t[tWaiting] != 0 && t[tGen] == e[1] && t[tWaitFd] == e[2] {
+			if k != i {
+				let d = plainW + 32*k
+				d[0] = e[0]
+				d[1] = e[1]
+				d[2] = e[2]
+				d[3] = e[3]
+			}
+			k += 1
+		}
+		i += 1
+	}
+	plainN = k
+	if k == 0 {
+		return
+	}
+	let pfd = calloc(k, 8)
+	for j in 0..k {
+		let e = plainW + 32*j
+		__st(pfd+8*j, e[2], 2)
+		if e[3] == 1 {
+			__st(pfd+8*j+4, 1, 1)
+		} else {
+			__st(pfd+8*j+4, 4, 1)
+		}
+	}
+	mut ms = -1
+	if ns == 0 {
+		ms = 0
+	} else if ns > 0 {
+		ms = (ns + 999999) / 1000000
+	}
+	let r = i64(i32(rt_sys_poll(pfd, k, ms)))
+	if r <= 0 {
+		free(pfd)
+		return
+	}
+	mut left = 0
+	for j in 0..k {
+		let e = plainW + 32*j
+		let t = e[0]
+		// POLLERR, POLLHUP and POLLNVAL (anything but the idle state) end the wait too: the read or write reports it.
+		if __ld(pfd+8*j+6, 1) != 0 {
+			rt_task_ready(t)
+			rt_task_queue(t)
+		} else {
+			let d = plainW + 32*left
+			d[0] = e[0]
+			d[1] = e[1]
+			d[2] = e[2]
+			d[3] = e[3]
+			left += 1
+		}
+	}
+	free(pfd)
+	plainN = left
 }
 
 // rt_task_resume runs task t until it waits or ends; an ended child is finished here.
@@ -6908,6 +7022,11 @@ fn rt_wait_msg() str {
 // or waitDeadline.
 fn rt_task_wait(fd i64, want i64, timeout i64) i64 {
 	let t = curTask
+	if t != 0 && fd >= 0 && cast(i64, waitHook) == 0 {
+		// A plain program (no server loop): main's wait polls the descriptors tasks wait on (#812).
+		waitHook = rt_plain_watch
+		waitCancel = rt_plain_unwatch
+	}
 	if t == 0 || (fd >= 0 && cast(i64, waitHook) == 0) {
 		rt_bnd_check()
 		let cb = rt_bnd_current()

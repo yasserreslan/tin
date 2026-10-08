@@ -145,9 +145,12 @@ fn stdioOpen(s Stdio, input bool) !(i64, i64) {
 			let a = i64(i32(__ld(fds, 4)))
 			let b = i64(i32(__ld(fds+4, 4)))
 			free(fds)
+			// The parent's end never blocks the core (#812); the child's end stays blocking.
 			if input {
+				setNonblock(b)
 				return b, a // the parent writes, the child reads
 			}
+			setNonblock(a)
 			return a, b // the parent reads, the child writes
 		}
 		File(path) => {

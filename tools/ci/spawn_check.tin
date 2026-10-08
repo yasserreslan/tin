@@ -13,7 +13,7 @@ import "twine"
 // stdin pipe round trip, streaming reads, Run's separate stdout and stderr, and the maxOutput cap.
 
 fn expected() []str {
-	return []str{"cat true 0 1048576 true", "deadline result -1", "deadline true", "dir 0 true", "echo 0", "hello", "killed -1", "limit true", "lookpath true", "loop fds equal true", "missing spawn: /no/such/tin-program: no such file or directory", "run 4 true true", "run deadline result false", "run deadline true", "sh exit 3", "stream true 0"}
+	return []str{"cat true 0 1048576 true", "deadline result -1", "deadline true", "dir 0 true", "echo 0", "feed deadline true", "hello", "killed -1", "limit true", "lookpath true", "loop fds equal true", "missing spawn: /no/such/tin-program: no such file or directory", "pipe 16 MiB true true", "run 4 true true", "run deadline result false", "run deadline true", "run input 0 true true", "sh exit 3", "stream true 0"}
 }
 
 fn sortLines(xs []str) []str {
