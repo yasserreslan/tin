@@ -1,0 +1,206 @@
+package main
+
+// Compare math/cmplx with Go's math/cmplx.
+//
+// A corpus of calls is generated here (a fixed seed, so both sides see the same cases): the edge table of signed zeros,
+// ±1, ±2, ±0.5, denormals, the largest and smallest normals, the reduction thresholds, ±Inf, NaN, a signalling NaN and the
+// neighbours of 0 and ±1 (poles and both branch cuts) is taken in every pair, and so is a generated set of values of every
+// magnitude, of values near the branch cuts and of big arguments. Each line is fed to bench/ref/cmplx (Go's math/cmplx)
+// and to tools/ci/fixtures/cmplx.tin, and the check compares their output line by line: every real part and imaginary
+// part as bits (a NaN is compared as NaN), and the bool and real results.
+
+import "./ci"
+import "cmplx"
+import "dice"
+import "gauge"
+import "mint"
+import "say"
+import "twine"
+
+const SEED = 916
+
+// bitsHex is the hex of a float's bits, for the corpus: its payload is kept, so a NaN goes in exactly.
+fn bitsHex(x f64) str {
+	return digits(gauge.F64bits(x), 16)
+}
+
+// hex64 is the hex of a float's bits, or "nan" for any NaN: the NaN payload is not part of a result.
+fn hex64(x f64) str {
+	if gauge.IsNaN(x) {
+		return "nan"
+	}
+	return bitsHex(x)
+}
+
+// digits writes v in n lowercase hex digits.
+fn digits(v u64, n i64) str {
+	let alphabet = "0123456789abcdef"
+	mut out = []u8{}
+	for k in 0..n {
+		let shift = u64(4 * (n - 1 - k))
+		out = append(out, alphabet[(v>>shift)&15])
+	}
+	return str(out)
+}
+
+// edges is the edge table: signed zeros, units, the denormal and normal limits, reduction thresholds, infinities, NaNs and
+// the neighbours of 0, ±1 and ±2 that sit on the branch cuts.
+fn edges() []f64 {
+	let nz = gauge.Copysign(0, -1)
+	let inf = gauge.Inf(1)
+	let snan = gauge.F64frombits(0x7FF0000000000001)
+	return []f64{
+		0, nz, 1, -1, 2, -2, 0.5, -0.5, 4, -4, 0.25, -0.25, 3, -3, 1.5, -1.5, 10, -100,
+		0.1, 0.3, 0.7071067811865476, 1.4142135623730951, 3.141592653589793, 1.5707963267948966, -1.5707963267948966,
+		1e-300, -1e-300, 1e-9, -1e-9, 1e-17, 5e-324, -5e-324, 2.2250738585072014e-308, -2.2250738585072014e-308,
+		1e100, -1e100, 1e300, -1e300, 1.7976931348623157e308, -1.7976931348623157e308, 1e8, 1e16, 4.5e15,
+		1073741823.0, 1073741824.0, 1073741825.0, -1073741824.0, 1e20, 1e27, 6.5e30,
+		gauge.Nextafter(1, 2), gauge.Nextafter(1, 0), gauge.Nextafter(-1, -2), gauge.Nextafter(-1, 0),
+		gauge.Nextafter(0, 1), gauge.Nextafter(0, -1), gauge.Nextafter(0.5, 1), gauge.Nextafter(2, 3),
+		inf, -inf, gauge.NaN(), -gauge.NaN(), snan,
+	}
+}
+
+// poles are the complex arguments the Pow exponents are drawn from: the special values of Go's pow.go and the unit imaginary.
+fn poles() []cmplx.Complex {
+	let inf = gauge.Inf(1)
+	let nan = gauge.NaN()
+	let nz = gauge.Copysign(0, -1)
+	return []cmplx.Complex{
+		cmplx.New(1, 0), cmplx.New(-1, 0), cmplx.New(0, 0), cmplx.New(nz, 0), cmplx.New(2, 0), cmplx.New(0.5, 0),
+		cmplx.New(-0.5, 0), cmplx.New(0, 1), cmplx.New(0, -1), cmplx.New(1, 1), cmplx.New(-1, -1), cmplx.New(0.5, 2),
+		cmplx.New(3, -0.25), cmplx.New(nan, 0), cmplx.New(0, nan), cmplx.New(inf, 0), cmplx.New(0, inf),
+		cmplx.New(-inf, 1), cmplx.New(1e-3, 2), cmplx.New(2, 1e-3), cmplx.New(-2, 0.5), cmplx.New(0, nz),
+	}
+}
+
+// randFloat is a float of a random mantissa and an exponent in -40..40, with a random sign.
+fn randFloat(rng mut dice.Rand) f64 {
+	let mant = f64(rng.U64()>>11) / 9007199254740992.0
+	let v = gauge.Ldexp(mant, rng.I64n(81)-40)
+	if rng.I64n(2) == 0 {
+		return -v
+	}
+	return v
+}
+
+// bigFloat is a float of a random mantissa and an exponent in -1100..1100: the range Go's reductions and overflows work in.
+fn bigFloat(rng mut dice.Rand) f64 {
+	let mant = f64(rng.U64()>>11) / 9007199254740992.0
+	let v = gauge.Ldexp(mant, rng.I64n(2201)-1100)
+	if rng.I64n(2) == 0 {
+		return -v
+	}
+	return v
+}
+
+// corpus returns the lines fed to both sides: every function on every edge pair and a generated set, the Pow pairs and the
+// Rect and Complex64 cases.
+fn corpus() []str {
+	let e = edges()
+	mut rng = dice.New(SEED)
+	mut lines = []str{}
+	mut zs = []cmplx.Complex{}
+	for re in e {
+		for im in e {
+			zs = append(zs, cmplx.New(re, im))
+		}
+	}
+	for i in 0..2500 {
+		let z = cmplx.New(randFloat(mut rng), randFloat(mut rng))
+		zs = append(zs, z)
+	}
+	for i in 0..800 {
+		let z = cmplx.New(bigFloat(mut rng), randFloat(mut rng))
+		zs = append(zs, z)
+	}
+	// Points next to the branch cuts: the real axis beyond ±1 and the imaginary axis beyond ±i.
+	let axes = []f64{0, gauge.Copysign(0, -1), 1, -1, 2, -2, 0.5, -0.5}
+	for i in 0..800 {
+		let x = randFloat(mut rng)
+		let y = axes[rng.I64n(8)]
+		if rng.I64n(2) == 0 {
+			zs = append(zs, cmplx.New(x, gauge.Nextafter(y, gauge.Inf(-1))))
+		} else {
+			zs = append(zs, cmplx.New(y, x))
+		}
+	}
+	for z in zs {
+		let p = bitsHex(z.Re) + " " + bitsHex(z.Im)
+		for op in unaryOps() {
+			lines = append(lines, op + " " + p)
+		}
+		lines = append(lines, "C64 " + p)
+		lines = append(lines, "C64SQRT " + p)
+	}
+	lines = append(lines, "Inf")
+	lines = append(lines, "NaN")
+
+	// Pow: every edge base against the special exponents, and generated bases against generated exponents.
+	let ps = poles()
+	for z in zs {
+		let base = bitsHex(z.Re) + " " + bitsHex(z.Im)
+		for q in ps {
+			if rng.I64n(4) == 0 {
+				lines = append(lines, "Pow " + base + " " + bitsHex(q.Re) + " " + bitsHex(q.Im))
+			}
+		}
+	}
+
+	// Rect: every radius and phase of the edge table, and generated ones.
+	for r in e {
+		for theta in e {
+			lines = append(lines, "Rect " + bitsHex(r) + " " + bitsHex(theta))
+		}
+	}
+	for i in 0..1000 {
+		lines = append(lines, "Rect " + bitsHex(randFloat(mut rng)) + " " + bitsHex(bigFloat(mut rng)))
+	}
+	return lines
+}
+
+// unaryOps are the one-argument functions of math/cmplx (Pow and Rect are their own lines).
+fn unaryOps() []str {
+	return []str{"Sqrt", "Exp", "Log", "Log10", "Asin", "Acos", "Atan", "Asinh", "Acosh", "Atanh", "Sin", "Cos",
+		"Tan", "Cot", "Sinh", "Cosh", "Tanh", "Conj", "Abs", "Phase", "IsNaN", "IsInf", "Polar"}
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 900, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/cmplx")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "cmplx-")
+	let tin = ci.Join(work, "cmplx-tin")
+	ci.BuildTin("tools/ci/fixtures/cmplx.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "cmplx-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/cmplx"}, ci.Root(), 300), "go build cmplx")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "cmplx: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			if i < len(lines) {
+				say.Line("line " + mint.Itoa(i + 1) + " (corpus: " + lines[i] + "):")
+			} else {
+				say.Line("line " + mint.Itoa(i + 1) + ":")
+			}
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 6 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "cmplx: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("cmplx: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's math/cmplx")
+}

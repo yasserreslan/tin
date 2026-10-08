@@ -24,6 +24,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [glyph](#glyph) | UTF-8, UTF-16 and Unicode (unicode/utf8, unicode/utf16, unicode) |
 | [mint](#mint) | number and string conversion (strconv) |
 | [gauge](#gauge) | math (math) |
+| [cmplx](#cmplx) | complex numbers and the functions of math/cmplx |
 | [bits](#bits) | bit counting and manipulation (math/bits) |
 | [link](#link) | URLs and their escaping (net/url) |
 | [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
@@ -882,6 +883,43 @@ Package gauge is floating-point math and a few integer helpers (like Go's math);
 - `Cos(x f64) f64`: Cos returns the cosine of x (radians). Cos(±Inf) = Cos(NaN) = NaN.
 - `Tan(x f64) f64`: Tan returns the tangent of x (radians). Tan(±0) = ±0, Tan(±Inf) = Tan(NaN) = NaN.
 - `Sincos(x f64) (f64, f64)`: Sincos returns Sin(x), Cos(x) with one argument reduction, like Go's math.Sincos.
+
+## cmplx
+
+Package cmplx is complex arithmetic: the functions of Go's math/cmplx on Complex (a value struct of two f64 parts) and Complex64 (two f32 parts). The real functions come from package gauge; the branches, poles, signed zeros and infinities are Go's, and the expressions keep Go's shape so that arm64 fuses the same products (see the note on mul).
+
+- `type Complex value struct`: Complex is a complex number: Re is the real part and Im the imaginary part (Go's complex128).
+- `type Complex64 value struct`: Complex64 is a complex number with float32 parts (Go's complex64); From64 rounds each part to float32.
+- `New(re f64, im f64) Complex`: New returns the complex number re + im*i (Go's complex(re, im)).
+- `From64(z Complex) Complex64`: From64 rounds each part of z to float32, as Go's complex64(z) does.
+- `(c Complex64) To128() Complex`: To128 widens each part of c to float64 (exact).
+- `Inf() Complex`: Inf returns the complex infinity (+Inf, +Inf).
+- `NaN() Complex`: NaN returns the complex NaN (NaN, NaN).
+- `IsInf(z Complex) bool`: IsInf reports whether either part of z is an infinity.
+- `IsNaN(z Complex) bool`: IsNaN reports whether z is NaN: a part is NaN and neither part is an infinity.
+- `Abs(z Complex) f64`: Abs returns the absolute value (modulus) of z, computed with Hypot so it does not overflow.
+- `Phase(z Complex) f64`: Phase returns the phase (argument) of z, in [-Pi, Pi].
+- `Polar(z Complex) (f64, f64)`: Polar returns the absolute value and the phase of z (Abs and Phase).
+- `Rect(r f64, theta f64) Complex`: Rect returns the complex number with modulus r and phase theta.
+- `Conj(z Complex) Complex`: Conj returns the complex conjugate of z.
+- `Sqrt(z Complex) Complex`: Sqrt returns the principal square root of z, with the sign of the imaginary part chosen as Go does.
+- `Exp(z Complex) Complex`: Exp returns e**z, the complex exponential of z.
+- `Log(z Complex) Complex`: Log returns the natural logarithm of z: ln|z| + i*Phase(z), the principal branch (cut along the negative real axis).
+- `Log10(z Complex) Complex`: Log10 returns the base-10 logarithm of z.
+- `Pow(x Complex, y Complex) Complex`: Pow returns x**y for complex x and y, as exp(y*log(x)) with Go's special cases (x == 0 gives 0, 1, Inf or NaN by y). Go's version panics ("not reached") for x == 0 with a NaN real part and an infinite imaginary part of y; this returns NaN.
+- `Sin(z Complex) Complex`: Sin returns the sine of z.
+- `Sinh(z Complex) Complex`: Sinh returns the hyperbolic sine of z.
+- `Cos(z Complex) Complex`: Cos returns the cosine of z.
+- `Cosh(z Complex) Complex`: Cosh returns the hyperbolic cosine of z.
+- `Tan(z Complex) Complex`: Tan returns the tangent of z.
+- `Tanh(z Complex) Complex`: Tanh returns the hyperbolic tangent of z.
+- `Cot(z Complex) Complex`: Cot returns the cotangent of z.
+- `Asin(z Complex) Complex`: Asin returns the arcsine of z, on the principal branch (cuts on the real axis beyond ±1).
+- `Acos(z Complex) Complex`: Acos returns the arccosine of z.
+- `Asinh(z Complex) Complex`: Asinh returns the inverse hyperbolic sine of z.
+- `Acosh(z Complex) Complex`: Acosh returns the inverse hyperbolic cosine of z, with a real part that is never negative.
+- `Atan(z Complex) Complex`: Atan returns the arctangent of z, on the principal branch (cuts on the imaginary axis beyond ±i).
+- `Atanh(z Complex) Complex`: Atanh returns the inverse hyperbolic tangent of z.
 
 ## bits
 
