@@ -121,20 +121,38 @@ fn Unsetenv(key str) ! {
 	}
 }
 
-// readFd reads fd to its end into one str; hint is the expected size (0 when unknown).
-fn readFd(fd i64, hint i64, path str) !str {
+// readFd reads fd to its end into one str; hint is the expected size (0 when unknown). Past
+// cap bytes it fails with fault.LimitExceeded, before reading more (#745): a device or a pipe
+// that never ends is checked read by read. On a helper thread whose task has left it stops at
+// its next read.
+fn readFd(fd i64, hint i64, path str, cap i64) !str {
+	if hint > cap {
+		fail limitFault(path, cap)
+	}
 	mut room = hint + 1
 	if room < 512 {
 		room = 512
+	}
+	if room > cap+1 {
+		room = cap + 1
 	}
 	mut p = rt_str_new(room)
 	mut got = 0
 	for {
 		if got == room {
+			if got > cap {
+				fail limitFault(path, cap)
+			}
 			room *= 2
+			if room > cap+1 {
+				room = cap + 1
+			}
 			let q = rt_str_new(room)
 			memcpy(q+8, p+8, got)
 			p = q
+		}
+		if rt_helper_gone() {
+			fail cast(fault, rt_fault_deadline()) // nobody waits for the rest (#745)
 		}
 		let n = rt_sys_read(fd, p+8+got, room-got)
 		if n < 0 {
@@ -145,6 +163,9 @@ fn readFd(fd i64, hint i64, path str) !str {
 		}
 		got += n
 	}
+	if got > cap {
+		fail limitFault(path, cap)
+	}
 	if got == 0 {
 		return ""
 	}
@@ -152,22 +173,49 @@ fn readFd(fd i64, hint i64, path str) !str {
 	return cast(str, p)
 }
 
-// ReadFile returns the whole content of the file at path.
+// maxReadFile is ReadFile's bound: as much as anvil takes as a request body (#745).
+const maxReadFile = 67108864
+
+// limitFault is fault.LimitExceeded for a read of path past cap bytes.
+fn limitFault(path str, cap i64) ! {
+	fail cast(fault, rt_fault_wrap(rt_fault_limit(), "read " + path + ": more than " + say.Str(cap) + " bytes (quarry.ReadFileBound sets another bound)"))
+}
+
+// ReadFile returns the whole content of the file at path. A file larger than 64 MiB (anvil's
+// request limit) fails with fault.LimitExceeded before it is read, and so does a device or pipe
+// past it, read by read (#745); ReadFileBound sets another bound.
 fn ReadFile(path str) !str {
+	return try ReadFileBound(path, maxReadFile)
+}
+
+// ReadFileBound returns the whole content of the file at path when it is at most n bytes, and
+// otherwise fails with fault.LimitExceeded: a regular file by its size, before anything is read,
+// a device or pipe as soon as more than n bytes have come (#745).
+fn ReadFileBound(path str, n i64) !str {
 	let tp = rt_tape()
 	if tp != 0 {
 		tapedA = cast(i64, path)
-		return try rt_effect(tp, "quarry.read@1", path, readLive) // recorded for replay (#241)
+		tapedBound = n
+		let s = try rt_effect(tp, "quarry.read@1", path, readLive) // recorded for replay (#241)
+		if len(s) > n {
+			fail limitFault(path, n)
+		}
+		return s
 	}
+	return try readBounded(path, n)
+}
+
+// readBounded is ReadFileBound without the tape.
+fn readBounded(path str, n i64) !str {
 	if rt_task_current() == 0 {
-		return try readFileHere(path, -1)
+		return try readFileHere(path, -1, n)
 	}
 	// Inside a request task the read goes through the core's io_uring (Linux, #357), or runs
 	// on a helper thread; either way the core serves others meanwhile.
 	if useRing(path) {
-		return try readRing(path)
+		return try readRing(path, n)
 	}
-	return try readOnHelper(path, -1)
+	return try readOnHelper(path, -1, n)
 }
 
 // Mount points of file systems whose stat and close can wait for a user-space daemon or a
@@ -184,7 +232,7 @@ fn useRing(path str) bool {
 	}
 	if !slowMountsRead {
 		slowMountsRead = true
-		let (text, err) = readFileHere("/proc/self/mountinfo", -1)
+		let (text, err) = readFileHere("/proc/self/mountinfo", -1, maxReadFile)
 		if err == nil {
 			slowMounts = keep(slowMountsIn(text))
 		}
@@ -269,19 +317,27 @@ fn unescapeMount(s str) str {
 
 // readOnHelper reads path on a helper thread. held (>= 0) is a descriptor of the same FIFO,
 // open until the helper's own open returns, so a writer waiting for a reader never sees none.
-fn readOnHelper(path str, held i64) !str {
-	let job = calloc(6, 8)
+// A read past cap bytes fails there with fault.LimitExceeded, which the task fails with too
+// (job[7]); a helper whose task left stops at its next read (rt_helper_gone, #745).
+fn readOnHelper(path str, held i64, cap i64) !str {
+	let job = calloc(8, 8)
 	job[0] = rt_heap_str(path)
 	job[5] = held + 1
+	job[6] = cap
 	try rt_helper_run(readJob, job, readDrop)
+	if job[7] != 0 {
+		jobDrop(job)
+		fail limitFault(path, cap)
+	}
 	return try jobResult(job)
 }
 
 // readRing is ReadFile through the core's io_uring: the open and each read wait for their
 // completion (data in the page cache arrives during the submit). The buffer is heap memory,
 // which the ring frees if the task's deadline passes while the kernel still writes to it. A
-// FIFO goes to a helper thread, whose open waits for a writer (the ring's open does not).
-fn readRing(path str) !str {
+// FIFO goes to a helper thread, whose open waits for a writer (the ring's open does not). Past
+// cap bytes it fails with fault.LimitExceeded (#745).
+fn readRing(path str, cap i64) !str {
 	if badPath(path) {
 		fail invalidFault("open", path)
 	}
@@ -295,21 +351,36 @@ fn readRing(path str) !str {
 	mut size = 0
 	if c32(rt_sys_fstat(fd, stbuf)) == 0 {
 		if mode(stbuf)&0xf000 == 0x1000 {
-			return try readOnHelper(path, fd)
+			return try readOnHelper(path, fd, cap)
 		}
 		if !isDirMode(mode(stbuf)) {
 			size = rt_stat_size(stbuf)
 		}
 	}
+	if size > cap {
+		rt_sys_close(fd)
+		fail limitFault(path, cap)
+	}
 	mut room = size + 1
 	if room < 512 {
 		room = 512
+	}
+	if room > cap+1 {
+		room = cap + 1
 	}
 	mut buf = malloc(room)
 	mut got = 0
 	for {
 		if got == room {
+			if got > cap {
+				rt_sys_close(fd)
+				free(buf)
+				fail limitFault(path, cap)
+			}
 			room *= 2
+			if room > cap+1 {
+				room = cap + 1
+			}
 			let more = malloc(room)
 			memcpy(more, buf, got)
 			free(buf)
@@ -339,6 +410,10 @@ fn readRing(path str) !str {
 		got += n
 	}
 	rt_sys_close(fd)
+	if got > cap {
+		free(buf)
+		fail limitFault(path, cap)
+	}
 	if got == 0 {
 		free(buf)
 		return ""
@@ -463,8 +538,11 @@ fn openDrop(job i64) {
 fn readJob(job i64) {
 	let held = job[5] - 1
 	job[5] = 0
-	let (s, err) = readFileHere(cast(str, job[0]), held)
+	let (s, err) = readFileHere(cast(str, job[0]), held, job[6])
 	if err != nil {
+		if rt_fault_is(cast(i64, err), rt_fault_limit()) {
+			job[7] = 1 // the task fails with fault.LimitExceeded itself
+		}
 		jobFault(job, err)
 		return
 	}
@@ -519,8 +597,9 @@ fn jobResult(job i64) !str {
 	return s
 }
 
-// readFileHere reads path where it runs; held (>= 0) is closed once its open returns.
-fn readFileHere(path str, held i64) !str {
+// readFileHere reads path where it runs, at most cap bytes; held (>= 0) is closed once its
+// open returns.
+fn readFileHere(path str, held i64, cap i64) !str {
 	if badPath(path) {
 		if held >= 0 {
 			rt_sys_close(held)
@@ -538,7 +617,7 @@ fn readFileHere(path str, held i64) !str {
 	if c32(rt_sys_fstat(fd, stbuf)) == 0 && !isDirMode(mode(stbuf)) {
 		size = rt_stat_size(stbuf)
 	}
-	let (s, err) = readFd(fd, size, path)
+	let (s, err) = readFd(fd, size, path, cap)
 	rt_sys_close(fd)
 	if err != nil {
 		fail err
@@ -552,7 +631,7 @@ fn ReadStdin() !str {
 	if rt_task_current() != 0 && waitable(0) {
 		return try readFdWait(0, "/dev/stdin")
 	}
-	return try readFd(0, 0, "/dev/stdin")
+	return try readFd(0, 0, "/dev/stdin", 1 << 60) // standard input has no bound
 }
 
 // waitable reports whether fd is a pipe, socket or terminal, which a task can wait on.
@@ -1077,11 +1156,12 @@ fn Eprintln(s str) {
 
 // An effect's body runs at once, before it waits: these hand it its arguments.
 mut tapedA i64
+mut tapedBound i64
 mut tapedB i64
 mut tapedFlags i64
 
 fn readLive() !str {
-	return try ReadFile(cast(str, tapedA))
+	return try readBounded(cast(str, tapedA), tapedBound)
 }
 
 // writeTaped records or replays WriteFile or AppendFile as quarry.write@1.

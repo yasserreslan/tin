@@ -1,7 +1,9 @@
 package main
 
 import "anvil"
+import "fault"
 import "mint"
+import "quarry"
 import "say"
 import "tide"
 import "websocket"
@@ -72,6 +74,29 @@ fn send(q anvil.Req, w mut anvil.Out) {
 		w.Status(500)
 		w.Text("sendfile: {err}")
 	}
+}
+
+// readf reads the file named by ?path= with ReadFile, or with ReadFileBound when ?n= is given
+// (#745): its length, or the fault and whether it is fault.LimitExceeded.
+fn readf(q anvil.Req, w mut anvil.Out) {
+	let n = mint.Atoi(q.Param("n")) catch _ {
+		-1
+	}
+	mut data = ""
+	if n < 0 {
+		data = quarry.ReadFile(q.Param("path")) catch err {
+			w.Status(500)
+			w.Text("read: {err} limit={fault.Is(err, fault.LimitExceeded)}")
+			return
+		}
+	} else {
+		data = quarry.ReadFileBound(q.Param("path"), n) catch err {
+			w.Status(500)
+			w.Text("read: {err} limit={fault.Is(err, fault.LimitExceeded)}")
+			return
+		}
+	}
+	w.Text("read {len(data)}")
 }
 
 fn item(q anvil.Req, w mut anvil.Out) {
@@ -188,6 +213,7 @@ fn main() {
 	r.Get(`/files/{path...}`, file)
 	r.Get("/fast", fast)
 	r.Get("/send", send)
+	r.Get("/readf", readf)
 	r.Get("/boom", boom)
 	r.Get("/unwinds", unwinds)
 	r.Get("/double", double)

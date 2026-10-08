@@ -7351,6 +7351,16 @@ fn rt_helper_take() i64 {
 }
 
 // Helpers drain all queued jobs after a wakeup, then report completions to their core.
+// helperJob is the job this helper thread is running (0 between jobs, and on every other thread).
+mut helperJob i64
+
+// rt_helper_gone reports, in a job running on a helper thread, that the task that queued it has
+// left (its deadline or cancel ended the wait, #745): a job that loops (a read to the end of a
+// file or device) stops at its next step instead of running on for nobody. False elsewhere.
+fn rt_helper_gone() bool {
+	return helperJob != 0 && __atomic_load(helperJob + 8*jGone) != 0
+}
+
 fn rt_helper_main(id i64) {
 	let buf = calloc(1, 8)
 	for {
@@ -7360,7 +7370,9 @@ fn rt_helper_main(id i64) {
 		mut job = rt_helper_take()
 		for job != 0 {
 			let f = cast(fn(i64), job[jFn])
+			helperJob = job
 			f(job[jArg])
+			helperJob = 0
 			rt_pool_reset()
 			buf[0] = job
 			rt_write_all(job[jDoneFd], buf, 8)
