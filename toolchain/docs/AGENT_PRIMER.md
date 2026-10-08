@@ -107,7 +107,8 @@ the compiler: write a minimal repro as a test, open an issue and work around it.
   closes tx when the function returns.
 - In anvil each request runs in its own task: a call that waits (tide.Wait, wire, quarry files, redis,
   mysql, postgres, websocket Read) lets the core serve others. Requests have a deadline
-  (TIN_DEADLINE_MS, default 30 s); waits past it fail with "deadline exceeded".
+  (TIN_DEADLINE_MS, default 30 s); waits past it fail with "deadline exceeded". quarry.ReadFile
+  reads at most 64 MiB (fault.LimitExceeded past it); quarry.ReadFileBound(path, n) sets another bound.
 - Streaming a response (SSE, a download, a long job): set the status and headers, then
   `try w.Stream()`, and `try w.WriteString(s)` / `try w.Write(bytes)` / `try w.Flush()` as data is ready;
   `w.Length(n)` first for a body of known size (else chunked), `try w.SendFile(path, 0, -1)` for a file

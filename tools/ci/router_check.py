@@ -703,6 +703,101 @@ def sendfile_open(exe, failures):
     print('SendFile: a FIFO fails by the deadline (%.2f s, %r) while /fast answers in %.0f ms at most; a directory gets the handler\'s 500 (#744)' % (took, fifo_answer, slowest * 1000))
 
 
+def cpu_seconds(pid):
+    """The process's CPU time so far (user and system), from ps."""
+    t = subprocess.run(['ps', '-o', 'time=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+    days, _, t = t.rpartition('-')
+    parts = [float(x) for x in t.split(':')]
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + p
+    return secs + (float(days) * 86400 if days else 0)
+
+
+def rss_mb(pid):
+    return int(subprocess.run(['ps', '-o', 'rss=', '-p', str(pid)], capture_output=True, text=True).stdout.strip() or 0) / 1024
+
+
+def file_reads(exe, failures):
+    """#745: ReadFile is bounded (64 MiB by default, fault.LimitExceeded past it, before reading a
+    regular file and read by read from a device), ReadFileBound sets another bound, and a helper
+    read whose request left at its deadline stops at its next read instead of running on."""
+    import tempfile
+    import threading
+    port = ws.free_port()
+    server = subprocess.Popen([str(exe)], env=dict(os.environ, PORT=str(port), TIN_CORES='2',
+                                                   TIN_DEADLINE_MS='1000', TIN_GRACE='1'))
+    with tempfile.TemporaryDirectory(prefix='readfile-') as tmp:
+        big = os.path.join(tmp, 'big')
+        with open(big, 'wb') as f:
+            f.truncate(100 << 20)  # 100 MiB of zeros, sparse
+        fifo = os.path.join(tmp, 'feed')
+        os.mkfifo(fifo)
+        try:
+            for _ in range(100):
+                try:
+                    socket.create_connection(('127.0.0.1', port), timeout=0.1).close()
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            def get(path):
+                return raw(port, b'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' % path.encode())
+            # A device that never ends: refused at the bound, within the deadline, and the memory
+            # and the processor are free afterwards.
+            for _ in range(3):
+                begin = time.monotonic()
+                r = get('/readf?path=/dev/zero')
+                took = time.monotonic() - begin
+                if not r.startswith(b'HTTP/1.1 500 ') or b'limit=true' not in r or took > 1.5:
+                    failures.append('ReadFile of /dev/zero: %r after %.2f s' % (r[-160:], took))
+            time.sleep(0.1)
+            c0 = cpu_seconds(server.pid)
+            time.sleep(0.3)
+            busy = cpu_seconds(server.pid) - c0
+            rss = rss_mb(server.pid)
+            if busy > 0.1 or rss > 200:
+                failures.append('after reading /dev/zero three times: %.2f s of CPU in 0.3 s, %d MB resident' % (busy, rss))
+            # A 100 MiB file: refused by default, read with a bound of 128 MiB.
+            r = get('/readf?path=%s' % big)
+            if not r.startswith(b'HTTP/1.1 500 ') or b'limit=true' not in r or b'more than 67108864 bytes' not in r:
+                failures.append('ReadFile of a 100 MiB file: %r' % r[-200:])
+            r = get('/readf?path=%s&n=134217728' % big)
+            if not r.endswith(b'read 104857600'):
+                failures.append('ReadFileBound of a 100 MiB file with 128 MiB: %r' % r[-200:])
+            # A pipe that keeps coming: the request ends at its deadline, then the helper reading it
+            # stops at its next read and closes the pipe, so the writer is told nobody reads.
+            stop_writer = threading.Event()
+            writer = {}
+            def feed():
+                fd = os.open(fifo, os.O_WRONLY)
+                try:
+                    while not stop_writer.is_set():
+                        os.write(fd, b'x' * 1024)
+                        time.sleep(0.02)
+                except BrokenPipeError:
+                    writer['closed'] = time.monotonic()
+                finally:
+                    os.close(fd)
+            t = threading.Thread(target=feed)
+            t.start()
+            begin = time.monotonic()
+            r = get('/readf?path=%s' % fifo)
+            answered = time.monotonic()
+            if not r.startswith(b'HTTP/1.1 500 ') or b'deadline exceeded' not in r or answered - begin > 1.5:
+                failures.append('ReadFile of a pipe that never ends: %r after %.2f s' % (r[-160:], answered - begin))
+            t.join(2)
+            stop_writer.set()
+            t.join(2)
+            if 'closed' not in writer or writer['closed'] - answered > 1.0:
+                failures.append('the helper went on reading the pipe after its request left (%r)' % writer)
+            if server.poll() is not None:
+                failures.append('the server exited during the ReadFile checks')
+        finally:
+            stop(server)
+    print('ReadFile: /dev/zero and a 100 MiB file refused at 64 MiB (LimitExceeded), 128 MiB bound reads it; '
+          'a helper stops reading %.2f s after its request left (#745)' % (writer.get('closed', 0) - answered))
+
+
 def main():
     out = ROOT / 'bin/ci/router'
     out.mkdir(parents=True, exist_ok=True)
@@ -727,6 +822,8 @@ def main():
             stop(server)
     print('-- SendFile opens')
     sendfile_open(exe, failures)
+    print('-- ReadFile bounds')
+    file_reads(exe, failures)
     print('-- limits')
     limits(exe, failures)
     print('-- panics')

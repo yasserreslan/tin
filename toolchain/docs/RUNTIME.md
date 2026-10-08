@@ -537,7 +537,10 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   Inputs and results live outside request pools, so an expired request may return and
   reuse its task safely. A late completion calls `drop(job)` and never resumes the old
   task. Already-running system calls can still finish after the caller's deadline;
-  their results are discarded. Outside a task the helper runs synchronously.
+  their results are discarded. A job that loops checks `rt_helper_gone()` between steps
+  (the task marks the job `jGone` when it leaves): `quarry`'s read to the end of a file stops
+  at its next read, and its memory goes back with the helper's pool (#745). Outside a task
+  the helper runs synchronously.
 - File I/O through io_uring (Linux, #357, `toolchain/runtime/uring_linux.tin`): inside a server's
   task, `quarry.ReadFile`, `WriteFile` and `AppendFile` use the core's own ring, made the first
   time one of its tasks opens a file (256 submission and 4096 completion entries, no SQPOLL
