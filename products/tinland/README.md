@@ -45,7 +45,7 @@ For an application with its own Dock icon and name in the menu bar, `tools/dev/t
 Every key command is also in the menu bar. Errors are underlined while you type: after a pause the compiler checks the text (`tinc -check -json` with the
 unsaved buffer as an overlay), the line gets a red mark and its message shows in the status line.
 
-Double click selects a word, triple click a line; the wheel scrolls what is under the mouse; the divider beside the project panel drags; the title bar moves the window (a double click zooms it); a right click in the project panel opens a menu (new file, new folder, rename, delete). The folder and the open files come back at the next start when no path is given. Lines git sees as added, changed or removed have a mark in the gutter.
+Double click selects a word, triple click a line; the wheel scrolls what is under the mouse; the divider beside the project panel drags; the title bar moves the window (a double click zooms it); a right click in the project panel opens a menu (new file, new folder, rename, delete). The folder and the open files come back at the next start when no path is given. Files and folders dropped on the window open; a file changed by another program is read again (or flagged when it has unsaved changes); binary files are not opened. Syntax colors for Tin, Go, Rust, JavaScript and TypeScript, Python, C and C++, Java, Swift, shell, JSON, YAML and TOML, and Markdown, chosen by the file name. Lines git sees as added, changed or removed have a mark in the gutter.
 
 ## Without a window
 
