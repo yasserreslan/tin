@@ -2478,6 +2478,10 @@ Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel thr
 - `(p mut NRGBA64) SetNRGBA64(x i64, y i64, c color.NRGBA64)`: SetNRGBA64 stores c at (x, y) (nothing outside the bounds).
 - `(p NRGBA64) SubImage(r Rectangle) NRGBA64`: SubImage is the part of p inside r, sharing p's pixels.
 - `(p NRGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Huffman struct`
+- `type Component struct`
+- `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline sequential JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
+- `type Bits struct`
 
 ## textedit
 

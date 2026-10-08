@@ -169,6 +169,9 @@ fn packageFiles(name str) []str {
 			files = append(files, directory + "/" + f)
 		}
 	}
+	if name == "image" {
+		files = append(files, "toolchain/std/image/jpeg/jpeg.tin")
+	}
 	return files
 }
 
