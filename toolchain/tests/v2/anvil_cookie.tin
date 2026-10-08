@@ -1,0 +1,91 @@
+package main
+
+import "anvil"
+import "say"
+
+// Cookies as net/http has them: the write and read tables of Go's cookie_test.go (#823).
+
+fn write(c anvil.Cookie) {
+	say.Line("set", say.Fmt("%q", c.String()))
+}
+
+fn show(q anvil.Req, w mut anvil.Out) {
+	w.Text("sid={q.Cookie(`sid`)} theme={q.Cookie(`theme`)} n={len(q.Cookies())}")
+	w.SetCookie(anvil.Cookie{Name: "a", Value: "1 2", Path: "/", MaxAge: 3600, HttpOnly: true, Secure: true, SameSite: "Lax"})
+	w.SetCookie(anvil.Cookie{Name: "b", Value: "x", Domain: "example.com", Expires: 1700000000})
+	w.SetCookie(anvil.Cookie{Name: "bad name", Value: "x"})
+	w.SetCookie(anvil.Cookie{Name: "gone", Value: "", MaxAge: -1})
+}
+
+fn read(r anvil.Router, headers []str) {
+	let w = r.RunWith("GET", "/read", headers, "")
+	say.Line("read", str(w.Body))
+}
+
+fn names(q anvil.Req, w mut anvil.Out) {
+	let cs = q.Cookies()
+	w.Text("{cs[`Cookie-1`]}|{cs[`c2`]}|{len(cs)}")
+}
+
+fn main() {
+	write(anvil.Cookie{Name: "cookie-1", Value: "v$1"})
+	write(anvil.Cookie{Name: "cookie-2", Value: "two", MaxAge: 3600})
+	write(anvil.Cookie{Name: "cookie-3", Value: "three", Domain: ".example.com"})
+	write(anvil.Cookie{Name: "cookie-4", Value: "four", Path: "/restricted/"})
+	write(anvil.Cookie{Name: "cookie-5", Value: "five", Domain: "wrong;bad.abc"})
+	write(anvil.Cookie{Name: "cookie-6", Value: "six", Domain: "bad-.abc"})
+	write(anvil.Cookie{Name: "cookie-7", Value: "seven", Domain: "127.0.0.1"})
+	write(anvil.Cookie{Name: "cookie-8", Value: "eight", Domain: "::1"})
+	write(anvil.Cookie{Name: "cookie-9", Value: "expiring", Expires: 1257894000})
+	write(anvil.Cookie{Name: "cookie-10", Value: "expiring-1601", Expires: -11644469939})
+	write(anvil.Cookie{Name: "cookie-11", Value: "invalid-expiry", Expires: -11644473601 - 86400*365})
+	write(anvil.Cookie{Name: "cookie-12", Value: "samesite-default"})
+	write(anvil.Cookie{Name: "cookie-13", Value: "samesite-lax", SameSite: "Lax"})
+	write(anvil.Cookie{Name: "cookie-14", Value: "samesite-strict", SameSite: "Strict"})
+	write(anvil.Cookie{Name: "cookie-15", Value: "samesite-none", SameSite: "None"})
+	write(anvil.Cookie{Name: "cookie-16", Value: "partitioned", SameSite: "None", Secure: true, Path: "/", Partitioned: true})
+	write(anvil.Cookie{Name: "special-1", Value: "a z"})
+	write(anvil.Cookie{Name: "special-2", Value: " z"})
+	write(anvil.Cookie{Name: "special-3", Value: "a "})
+	write(anvil.Cookie{Name: "special-4", Value: " "})
+	write(anvil.Cookie{Name: "special-5", Value: "a,z"})
+	write(anvil.Cookie{Name: "special-6", Value: ",z"})
+	write(anvil.Cookie{Name: "special-7", Value: "a,"})
+	write(anvil.Cookie{Name: "special-8", Value: ","})
+	write(anvil.Cookie{Name: "empty-value", Value: ""})
+	write(anvil.Cookie{Name: "", Value: ""})
+	write(anvil.Cookie{Name: "\t", Value: ""})
+	write(anvil.Cookie{Name: "\r", Value: ""})
+	write(anvil.Cookie{Name: "a\nb", Value: "v"})
+	write(anvil.Cookie{Name: "a\rb", Value: "v"})
+	write(anvil.Cookie{Name: "cookie", Value: "quoted", Quoted: true})
+	write(anvil.Cookie{Name: "cookie", Value: "quoted with spaces", Quoted: true})
+	write(anvil.Cookie{Name: "cookie", Value: "quoted,with,commas", Quoted: true})
+	// sanitizeCookieValue and sanitizeCookiePath
+	write(anvil.Cookie{Name: "v", Value: "foo;bar"})
+	write(anvil.Cookie{Name: "v", Value: "foo\\bar"})
+	write(anvil.Cookie{Name: "v", Value: "foo\"bar"})
+	write(anvil.Cookie{Name: "v", Value: "\x00\x7e\x7f\x80"})
+	write(anvil.Cookie{Name: "v", Value: "\"withquotes\"", Quoted: true})
+	write(anvil.Cookie{Name: "p", Value: "x", Path: "/path with space/"})
+	write(anvil.Cookie{Name: "p", Value: "x", Path: "/just;no;semicolon\x00orstuff/"})
+	write(anvil.Cookie{Name: "all", Value: "v", Path: "/restricted/", Domain: ".example.com", Expires: 1257894000, MaxAge: 3600, HttpOnly: true, Secure: true, SameSite: "Strict"})
+
+	// Reading: the table of TestReadCookies, plus several fields and bad pairs.
+	let r = anvil.NewRouter()
+	r.Get("/read", names)
+	r.Get("/", show)
+	read(r, []str{"Cookie: Cookie-1=v$1", "Cookie: c2=v2"})
+	read(r, []str{"Cookie: Cookie-1=v$1; c2=v2"})
+	read(r, []str{"Cookie: Cookie-1=\"v$1\"; c2=\"v2\""})
+	read(r, []str{"Cookie: Cookie-1=\"v$1\"; c2=v2;"})
+	read(r, []str{"Cookie: "})
+	read(r, []str{})
+	read(r, []str{"Cookie: Cookie-1=v1; =novalue; bad name=x; c2=a\"b; c2=ok; Cookie-1=again"})
+	read(r, []str{"Cookie: Cookie-1 = v; c2"})
+	let w = r.RunWith("GET", "/", []str{"Cookie: sid=abc; theme=dark", "Cookie: x=\"q\"; sid=second"}, "")
+	say.Line(str(w.Body))
+	for c in w.Headers("Set-Cookie") {
+		say.Line(c)
+	}
+}

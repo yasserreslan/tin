@@ -1168,7 +1168,20 @@ fn x_gen_pair(lexp i64, rexp i64, d i64) {
 	let d2 = next_depth(l, d)
 	let rfp = e_fp(cast(Node, rexp))
 	mut r = 0
-	if is_real_call(rexp) != 0 {
+	if is_real_call(rexp) != 0 && e_fp(cast(Node, lexp)) == 0 && l == RAX && d >= t_count {
+		// l was computed past the temp pool, into the scratch rax: x_gen_call saves only the pool, and the
+		// call's result comes back in rax too. Park l on the stack across the call (#811).
+		x_push(l)
+		x_gen_call(rexp, d2)
+		if rfp != 0 {
+			x_mov(XFSCR, XMM)
+			r = XFSCR
+		} else {
+			x_mov(XSCR, RAX)
+			r = XSCR
+		}
+		x_pop(l)
+	} else if is_real_call(rexp) != 0 {
 		x_gen_call(rexp, d2)
 		if rfp != 0 {
 			r = XMM
@@ -1608,6 +1621,23 @@ fn x_gen_elem_addr(e ElemExpr, d i64) {
 		x_ld(lenr, x_mem1(h, 0), 3)
 		emit2(X_CMP, idx, lenr)
 		emit2(X_JCC, XC_AE, trap_at(idx, lenr, 0))
+	}
+	if e.str == 0 && d1 >= t_count && d1 == d {
+		// The header is a local's register (not the temp at depth d): the base must not be loaded into it, that would
+		// leave the local holding the slice's data pointer (#811). The element address goes into the first scratch
+		// whole, and the index scratch is free again.
+		x_ld(XSCR, x_mem1(h, 16), 3)
+		if size == 1 || size == 2 || size == 4 || size == 8 {
+			emit2(X_LEA, XSCR, x64_mem(XSCR, idx, size, 0))
+		} else {
+			emit3(X_IMUL_RRI, idx, idx, size)
+			emit2(X_ADD, XSCR, idx)
+		}
+		mm_base = XSCR
+		mm_index = -1
+		mm_scale = size
+		mm_off = first
+		return
 	}
 	if e.str != 0 {
 		mm_base = h

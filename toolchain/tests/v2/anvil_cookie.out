@@ -1,0 +1,53 @@
+set "cookie-1=v$1"
+set "cookie-2=two; Max-Age=3600"
+set "cookie-3=three; Domain=example.com"
+set "cookie-4=four; Path=/restricted/"
+set "cookie-5=five"
+set "cookie-6=six"
+set "cookie-7=seven; Domain=127.0.0.1"
+set "cookie-8=eight"
+set "cookie-9=expiring; Expires=Tue, 10 Nov 2009 23:00:00 GMT"
+set "cookie-10=expiring-1601; Expires=Mon, 01 Jan 1601 01:01:01 GMT"
+set "cookie-11=invalid-expiry"
+set "cookie-12=samesite-default"
+set "cookie-13=samesite-lax; SameSite=Lax"
+set "cookie-14=samesite-strict; SameSite=Strict"
+set "cookie-15=samesite-none; SameSite=None"
+set "cookie-16=partitioned; Path=/; Secure; SameSite=None; Partitioned"
+set "special-1=\"a z\""
+set "special-2=\" z\""
+set "special-3=\"a \""
+set "special-4=\" \""
+set "special-5=\"a,z\""
+set "special-6=\",z\""
+set "special-7=\"a,\""
+set "special-8=\",\""
+set "empty-value="
+set ""
+set ""
+set ""
+set ""
+set ""
+set "cookie=\"quoted\""
+set "cookie=\"quoted with spaces\""
+set "cookie=\"quoted,with,commas\""
+set "v=foobar"
+set "v=foobar"
+set "v=foobar"
+set "v=~"
+set "v=\"withquotes\""
+set "p=x; Path=/path with space/"
+set "p=x; Path=/justnosemicolonorstuff/"
+set "all=v; Path=/restricted/; Domain=example.com; Expires=Tue, 10 Nov 2009 23:00:00 GMT; Max-Age=3600; HttpOnly; Secure; SameSite=Strict"
+read v$1|v2|2
+read v$1|v2|2
+read v$1|v2|2
+read v$1|v2|2
+read ||0
+read ||0
+read v1|ok|2
+read  v||2
+sid=abc theme=dark n=3
+a="1 2"; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax
+b=x; Domain=example.com; Expires=Tue, 14 Nov 2023 22:13:20 GMT
+gone=; Max-Age=0
