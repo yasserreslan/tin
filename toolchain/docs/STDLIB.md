@@ -1810,13 +1810,16 @@ Package atomic has counters and flags that every core may change at once. Keep o
 
 ## lane
 
-Package lane is a bounded queue between the tasks of one core (Go's buffered channel): lane.New[T](n) makes one that holds n values, Send waits while it is full and Recv while it is empty, and both take the task's deadline and cancellation like any other wait. Close ends it: senders fail at once and receivers drain what is left, then fail with "lane closed". In main (outside a task) a wait runs the core's other tasks until it can go on. Ready, Watch and Unwatch are what select uses. A lane never crosses cores: relay does that.
+Package lane is a bounded queue between the tasks of one core (Go's buffered channel): lane.New[T](n) makes one that holds n values, Send waits while it is full and Recv while it is empty, and both take the task's deadline and cancellation like any other wait. Close ends it: senders fail at once and receivers drain what is left, then fail with ErrClosed. In main (outside a task) a wait runs the core's other tasks until it can go on. Ready, Watch and Unwatch are what select uses. A lane never crosses cores: relay does that.
+
+A worker ends its loop when the lane is closed and drained, and on nothing else: its loop is `let j = jobs.Recv() catch err { if fault.Is(err, lane.ErrClosed) { return }  fail err }`, or `let (j, ok) = try jobs.RecvOk()` and `if !ok { return }`. A deadline or a cancellation is still fault.DeadlineExceeded or fault.Canceled.
 
 - `type Lane[T constraints.Any] struct`: Lane is a bounded queue between tasks on one core (design_semantics §6, #232). Send waits while it is full and Recv while it is empty; Close wakes every waiter. Waits take the task's deadline and cancellation like any other wait. A lane never crosses cores (relay does).
 - `New[T constraints.Any](capacity i64) Lane[T]`: New makes a lane that holds at most capacity values (at least one).
-- `(l mut Lane[T]) Send(v T) !`: Send puts v at the back, waiting while the lane is full; it fails once the lane is closed.
+- `(l mut Lane[T]) Send(v T) !`: Send puts v at the back, waiting while the lane is full; it fails with ErrClosed once the lane is closed.
 - `(l mut Lane[T]) TrySend(v T) bool`: TrySend puts v at the back if there is room and reports whether it did.
-- `(l mut Lane[T]) Recv() !T`: Recv takes the value at the front, waiting while the lane is empty; it fails with "lane closed" once the lane is closed and empty.
+- `(l mut Lane[T]) Recv() !T`: Recv takes the value at the front, waiting while the lane is empty; it fails with ErrClosed once the lane is closed and empty.
+- `(l mut Lane[T]) RecvOk() !(T, bool)`: RecvOk is Recv with Go's v, ok := <-ch: ok is false (and v the zero value) once the lane is closed and empty, and only a deadline or a cancellation is a fault.
 - `(l mut Lane[T]) Close()`: Close ends the lane: senders fail, receivers drain what is left and then fail.
 - `(l Lane[T]) Ready() bool`: Ready reports whether Recv would not wait: a value is there or the lane is closed (select).
 - `(l mut Lane[T]) Watch()`: Watch makes the next value or Close wake the running task without taking a value (select).

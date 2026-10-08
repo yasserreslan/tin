@@ -1,0 +1,130 @@
+package main
+
+import "fault"
+import "lane"
+import "say"
+
+// A worker loop ends on ErrClosed and on nothing else.
+fn worker(jobs mut lane.Lane[i64], total mut lane.Lane[i64]) ! {
+	mut sum = 0
+	for {
+		let j = jobs.Recv() catch err {
+			if fault.Is(err, lane.ErrClosed) {
+				break
+			}
+			fail err
+		}
+		sum += j
+	}
+	try total.Send(sum)
+}
+
+// A worker with RecvOk ends when ok is false.
+fn worker2(jobs mut lane.Lane[i64], total mut lane.Lane[i64]) ! {
+	mut sum = 0
+	for {
+		let (j, ok) = try jobs.RecvOk()
+		if !ok {
+			break
+		}
+		sum += j * 2
+	}
+	try total.Send(sum)
+}
+
+fn run() ! {
+	mut jobs = lane.New[i64](4)
+	mut total = lane.New[i64](1)
+	scope s {
+		s.spawn(fn() ! {
+			try worker(mut jobs, mut total)
+		})
+		for i in 1..11 {
+			try jobs.Send(i)
+		}
+		jobs.Close()
+	}
+	let t = total.Recv() catch _ {
+		-1
+	}
+	say.Line("sum", t)
+
+	mut jobs2 = lane.New[i64](4)
+	mut total2 = lane.New[i64](1)
+	scope s2 {
+		s2.spawn(fn() ! {
+			try worker2(mut jobs2, mut total2)
+		})
+		for i in 1..11 {
+			try jobs2.Send(i)
+		}
+		jobs2.Close()
+	}
+	let t2 = total2.Recv() catch _ {
+		-1
+	}
+	say.Line("sum2", t2)
+
+	// Send on a closed lane, and Recv on a closed empty one.
+	mut closed = lane.New[i64](2)
+	closed.Close()
+	closed.Send(1) catch err {
+		say.Line("send closed", fault.Is(err, lane.ErrClosed), fault.Is(err, fault.DeadlineExceeded))
+	}
+	closed.Recv() catch err {
+		say.Line("recv closed", fault.Is(err, lane.ErrClosed), fault.Is(err, fault.DeadlineExceeded))
+	}
+	let (zero, ok) = closed.RecvOk() catch err {
+		say.Line("recvok failed", err)
+		return
+	}
+	say.Line("recvok closed", zero, ok)
+
+	// A lane that is closed with values left drains them first.
+	mut drain = lane.New[i64](3)
+	try drain.Send(7)
+	try drain.Send(8)
+	drain.Close()
+	let a = try drain.Recv()
+	let (b, bok) = try drain.RecvOk()
+	let (c, cok) = try drain.RecvOk()
+	say.Line("drain", a, b, bok, c, cok)
+
+	// A deadline is not ErrClosed.
+	mut empty = lane.New[i64](1)
+	let r = within 20ms {
+		try empty.Recv()
+	} catch err {
+		say.Line("deadline", fault.Is(err, lane.ErrClosed), fault.Is(err, fault.DeadlineExceeded))
+		-1
+	}
+	say.Line("after deadline", r)
+
+	// A cancelled wait is fault.Canceled, not ErrClosed.
+	mut idle = lane.New[i64](1)
+	cancelled(mut idle) catch err {
+		say.Line("scope", err)
+	}
+}
+
+fn cancelled(idle0 mut lane.Lane[i64]) ! {
+	mut idle = idle0
+	scope s {
+		s.spawn(fn() ! {
+			let v = idle.Recv() catch err {
+				say.Line("cancelled", fault.Is(err, lane.ErrClosed), fault.Is(err, fault.Canceled))
+				fail err
+			}
+			say.Line("unexpected", v)
+		})
+		s.spawn(fn() ! {
+			fail "boom"
+		})
+	}
+}
+
+fn main() {
+	run() catch err {
+		say.Line("failed", err)
+	}
+}
