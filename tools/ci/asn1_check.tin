@@ -1,0 +1,290 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "seal"
+import "twine"
+
+// Compare asn1 with Go's encoding/asn1 in both directions.
+//
+// A generated corpus of value specs (a fixed seed, so both sides see the same cases) is encoded by bench/ref/asn1 and
+// tools/ci/fixtures/asn1.tin: the DER bytes of every value, or the fault it gives (Marshal of the universal types, the
+// explicit and implicit tags, sets, long lengths and high tag numbers). Then both sides read the bytes of every encoding of
+// both sides and of mutated copies of them (truncated, flipped and extended, and random bytes): the element tree with each
+// value decoded, or the fault it gives.
+
+const SEED = 913
+const SPECS = 2400
+const MUTANTS = 5000
+const RANDOM = 500
+
+// two writes v with at least two digits.
+fn two(v i64) str {
+	if v < 10 {
+		return "0" + mint.Itoa(v)
+	}
+	return mint.Itoa(v)
+}
+
+// randomBytes is n bytes from the generator.
+fn randomBytes(rng dice.Rand, n i64) []u8 {
+	mut out = []u8{}
+	for i in 0..n {
+		out = append(out, u8(rng.U64()))
+	}
+	return out
+}
+
+// pick returns one of items.
+fn pick(rng dice.Rand, items []str) str {
+	return items[rng.I64n(i64(len(items)))]
+}
+
+// intTok is an INTEGER: edge values and random ones of 1 to 63 bits, either sign.
+fn intTok(rng dice.Rand) str {
+	let edges = []i64{0, 1, -1, 127, 128, -128, -129, 255, 256, 32767, -32768, 2147483647, -2147483648, 9223372036854775807, -9223372036854775807 - 1}
+	if rng.F64() < 0.3 {
+		return "i:" + mint.Itoa(edges[rng.I64n(i64(len(edges)))])
+	}
+	let k = rng.Range(1, 64)
+	mut v = i64(rng.U64() >> u64(64-k))
+	if rng.F64() < 0.5 {
+		v = -v
+	}
+	return "i:" + mint.Itoa(v)
+}
+
+// oidTok is an OBJECT IDENTIFIER: valid arcs, and a few invalid ones.
+fn oidTok(rng dice.Rand) str {
+	if rng.F64() < 0.05 {
+		return "o:" + pick(rng, []str{"1", "3.1", "1.40", "0.40", "2", "1.2.x"})
+	}
+	let first = rng.Range(0, 3)
+	mut second = rng.Range(0, 2000000)
+	if first < 2 {
+		second = rng.Range(0, 40)
+	}
+	mut s = mint.Itoa(first) + "." + mint.Itoa(second)
+	let extra = rng.Range(0, 4)
+	for k in 0..extra {
+		s += "." + mint.Itoa(i64(rng.U64() >> 33))
+	}
+	return "o:" + s
+}
+
+// hexOf is the hex text of n random bytes.
+fn hexOf(rng dice.Rand, n i64) str {
+	return seal.Hex(randomBytes(rng, n))
+}
+
+// textOf is a string of the pieces, joined in a random order and count.
+fn textOf(rng dice.Rand, pieces []str, n i64) str {
+	mut s = ""
+	for i in 0..n {
+		s += pick(rng, pieces)
+	}
+	return s
+}
+
+// leaf is a value that is not a container.
+fn leaf(rng dice.Rand) str {
+	let k = rng.I64n(13)
+	if k == 0 {
+		return intTok(rng)
+	}
+	if k == 1 {
+		return "b:" + pick(rng, []str{"0", "1"})
+	}
+	if k == 2 {
+		return "n"
+	}
+	if k == 3 {
+		return oidTok(rng)
+	}
+	if k == 4 {
+		return "x:" + hexOf(rng, rng.Range(0, 12))
+	}
+	if k == 5 {
+		// A bit string whose bytes are as many as its bits need; the padding bits are random.
+		let bits = rng.Range(0, 41)
+		return "k:" + mint.Itoa(bits) + ":" + hexOf(rng, (bits+7)/8)
+	}
+	if k == 6 {
+		let text = textOf(rng, []str{"a", "Z", "0", " ", "\xc3\xa9", "\xe4\xb8\xad", "\xf0\x9f\x98\x80", "\xff"}, rng.Range(0, 6))
+		return "u:" + seal.Hex([]u8(text))
+	}
+	if k == 7 {
+		let text = textOf(rng, []str{"A", "b", "7", " ", "'", "(", ")", "+", ",", "-", ".", "/", ":", "=", "?", "*", "&", "@", "!"}, rng.Range(0, 6))
+		return "p:" + seal.Hex([]u8(text))
+	}
+	if k == 8 {
+		let text = textOf(rng, []str{"a", "~", " ", "\x00", "\x7f", "\x80"}, rng.Range(0, 6))
+		return "a:" + seal.Hex([]u8(text))
+	}
+	if k == 9 {
+		let text = textOf(rng, []str{"1", "9", " ", "0", "x"}, rng.Range(0, 6))
+		return "m:" + seal.Hex([]u8(text))
+	}
+	if k == 10 {
+		let year = rng.Range(1900, 2101)
+		let month = rng.Range(1, 13)
+		let day = rng.Range(1, 29)
+		let hour = rng.Range(0, 24)
+		let minute = rng.Range(0, 60)
+		let second = rng.Range(0, 60)
+		return "t:" + mint.Itoa(year) + "-" + two(month) + "-" + two(day) + "T" + two(hour) + ":" + two(minute) + ":" + two(second)
+	}
+	if k == 11 {
+		return "r:" + hexOf(rng, rng.Range(0, 6))
+	}
+	return "P" + mint.Itoa(rng.Range(0, 41)) + ":" + hexOf(rng, rng.Range(0, 5))
+}
+
+// items is count values, some of them containers nested up to depth 3.
+fn items(rng dice.Rand, depth i64, count i64) str {
+	mut parts = []str{}
+	for i in 0..count {
+		parts = append(parts, item(rng, depth))
+	}
+	return twine.Join(parts, " ")
+}
+
+// item is one value: a leaf, or a container of items.
+fn item(rng dice.Rand, depth i64) str {
+	if depth < 3 && rng.F64() < 0.3 {
+		let kind = rng.I64n(4)
+		let inner = items(rng, depth+1, rng.Range(0, 4))
+		if kind == 0 {
+			return "( " + inner + " )"
+		}
+		if kind == 1 {
+			return "[ " + inner + " ]"
+		}
+		let tag = mint.Itoa(rng.Range(0, 41))
+		if kind == 2 {
+			return "E" + tag + "( " + inner + " )"
+		}
+		return "C" + tag + "( " + inner + " )"
+	}
+	return leaf(rng)
+}
+
+// hand is the edge cases written out: empty containers, bad tokens, the time boundaries and the empty strings.
+fn hand() []str {
+	return []str{
+		"( )", "[ ]", "E0( n )", "E31( i:5 )", "E40( ( ) )", "C40( )", "C3( i:7 )", "P0:", "P31:aa", "P40:00",
+		"i:9223372036854775807", "i:-9223372036854775808", "i:0", "i:-1", "i:128", "i:-129", "i:2147483648",
+		"o:", "o:1", "o:2.999.1.2", "o:0.39", "o:0.40", "o:1.40", "o:3.0", "o:1.2.2147483647",
+		"b:0", "b:1", "n", "x:", "x:00", "k:0:", "k:1:80", "k:8:ff", "k:3:e0", "k:9:ff80", "k:3:e1",
+		"u:", "u:ff", "u:c3a9", "p:", "p:2a26", "p:40", "a:", "a:80", "m:", "m:2039",
+		"t:1949-12-31T23:59:59", "t:1950-01-01T00:00:00", "t:2049-12-31T23:59:59", "t:2050-01-01T00:00:00",
+		"t:0999-06-01T00:00:00", "t:1900-02-28T12:00:00", "t:9999-12-31T23:59:59", "r:", "r:0500", "r:3000",
+	}
+}
+
+// specs is the corpus of value specs: the hand-written cases, then generated ones.
+fn specs(rng dice.Rand) []str {
+	mut out = []str{}
+	for h in hand() {
+		out = append(out, h)
+	}
+	for len(out) < SPECS {
+		out = append(out, items(rng, 0, rng.Range(1, 4)))
+	}
+	return out
+}
+
+// mutate returns a copy of hex text h that is cut, flipped or extended at a random place.
+fn mutate(rng dice.Rand, h str) str {
+	let b = seal.HexDecode(h) catch _ {
+		return h
+	}
+	mut out = []u8{}
+	let k = rng.I64n(3)
+	if k == 0 && len(b) > 0 {
+		out = b[0:rng.I64n(i64(len(b)))]
+	} else if k == 1 && len(b) > 0 {
+		for c in b {
+			out = append(out, c)
+		}
+		out[rng.I64n(i64(len(out)))] = u8(rng.U64())
+	} else {
+		for c in b {
+			out = append(out, c)
+		}
+		out = append(out, u8(rng.U64()))
+	}
+	return seal.Hex(out)
+}
+
+// run feeds the lines to exe and returns its output lines.
+fn run(exe str, lines []str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, twine.Join(lines, "\n") + "\n", []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+// compare fails with the first differing lines when the two sides disagree, and says what they were.
+fn compare(what str, cases []str, want []str, got []str) i64 {
+	ci.Check(len(got) == len(want), what + ": " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("case " + cases[i] + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, what + ": " + mint.Itoa(bad) + " lines differ")
+	return i64(len(want))
+}
+
+fn main() {
+	let rng = dice.New(SEED)
+	let directory = ci.Join(ci.Root(), "bin/ci/asn1")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "asn1-")
+	let tin = ci.Join(work, "asn1-tin")
+	ci.BuildTin("tools/ci/fixtures/asn1.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "asn1-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/asn1"}, ci.Root(), 300), "go build asn1")
+
+	// Encode: the DER bytes of every spec, or its fault.
+	mut encodeLines = []str{}
+	for s in specs(rng) {
+		encodeLines = append(encodeLines, "S " + s)
+	}
+	let encodeWant = run(goexe, encodeLines)
+	let encodeGot = run(tin, encodeLines)
+	let cases = compare("asn1 encode", encodeLines, encodeWant, encodeGot)
+
+	// Decode: every encoding both sides made (each one read by both), mutated copies and random bytes.
+	mut decodeLines = []str{}
+	mut encodings = []str{}
+	for i in 0..len(encodeWant) {
+		if twine.HasPrefix(encodeWant[i], "E ") {
+			encodings = append(encodings, twine.TrimPrefix(encodeWant[i], "E "))
+		}
+	}
+	for h in encodings {
+		decodeLines = append(decodeLines, "D " + h)
+	}
+	for i in 0..MUTANTS {
+		decodeLines = append(decodeLines, "D " + mutate(rng, encodings[i%len(encodings)]))
+	}
+	for i in 0..RANDOM {
+		decodeLines = append(decodeLines, "D " + seal.Hex(randomBytes(rng, rng.Range(0, 24))))
+	}
+	let decodeWant = run(goexe, decodeLines)
+	let decodeGot = run(tin, decodeLines)
+	let renderings = compare("asn1 decode", decodeLines, decodeWant, decodeGot)
+
+	ci.Remove(work)
+	ci.Pass("asn1: " + mint.Itoa(cases) + " encodings and " + mint.Itoa(renderings) + " decodes (" + mint.Itoa(len(encodings)) + " DER values, mutated and random bytes) match Go's encoding/asn1")
+}

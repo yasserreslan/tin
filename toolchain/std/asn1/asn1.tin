@@ -1,0 +1,785 @@
+package asn1
+
+// Package asn1 writes and reads DER, the canonical ASN.1 encoding of X.509 certificates and keys, as
+// Go's encoding/asn1 does for the universal types. Tin has no reflection, so a value is built with
+// the encoders (Int, OID, Seq, ...) and read with Unmarshal and the *Value functions; a RawValue
+// keeps an element's class, tag, contents and whole encoding.
+//
+//	let oid = try asn1.ParseOID("1.2.840.113549.1.1.1")
+//	let der = asn1.Seq(asn1.Concat([][]u8{asn1.Int(2), try asn1.OID(oid), asn1.Octets(sig)}))
+//	let (raw, rest) = try asn1.Unmarshal(der)
+//	let parts = try asn1.Elements(raw.Bytes)
+//	let version = try asn1.IntValue(parts[0])
+//
+// Lengths and integers are minimal. An indefinite length, a non-minimal length or tag, or a
+// non-minimal integer fails with Go's message. Sets are written in the order given: the caller
+// sorts them. BER decoding (indefinite lengths, constructed strings) is not supported.
+//
+// Known gaps: BER decoding, big integers (IntegerContent returns the bytes), fractional seconds and time zones other
+// than Z, T61 and BMP strings beyond Latin-1 reads, and struct tags (values are built by the encoders, not by reflection).
+// Encoders fail where Go would normalise: a time field out of range, a bit string whose bytes do not match its length.
+// Fault texts match Go's for structure and syntax faults; a time that does not parse gives "asn1: invalid UTCTime value"
+// where Go gives its time parser's message.
+
+import "glyph"
+import "mint"
+import "twine"
+
+// ClassUniversal is the class of the universal types.
+const ClassUniversal = 0
+// ClassApplication is the class of application-defined tags.
+const ClassApplication = 1
+// ClassContextSpecific is the class of the [n] tags of a type, such as EXPLICIT and IMPLICIT tags.
+const ClassContextSpecific = 2
+// ClassPrivate is the class of private tags.
+const ClassPrivate = 3
+
+// TagBoolean is the universal tag of BOOLEAN.
+const TagBoolean = 1
+// TagInteger is the universal tag of INTEGER.
+const TagInteger = 2
+// TagBitString is the universal tag of BIT STRING.
+const TagBitString = 3
+// TagOctetString is the universal tag of OCTET STRING.
+const TagOctetString = 4
+// TagNull is the universal tag of NULL.
+const TagNull = 5
+// TagOID is the universal tag of OBJECT IDENTIFIER.
+const TagOID = 6
+// TagEnum is the universal tag of ENUMERATED.
+const TagEnum = 10
+// TagUTF8String is the universal tag of UTF8String.
+const TagUTF8String = 12
+// TagSequence is the universal tag of SEQUENCE and SEQUENCE OF.
+const TagSequence = 16
+// TagSet is the universal tag of SET and SET OF.
+const TagSet = 17
+// TagNumericString is the universal tag of NumericString.
+const TagNumericString = 18
+// TagPrintableString is the universal tag of PrintableString.
+const TagPrintableString = 19
+// TagT61String is the universal tag of T61String.
+const TagT61String = 20
+// TagIA5String is the universal tag of IA5String.
+const TagIA5String = 22
+// TagUTCTime is the universal tag of UTCTime.
+const TagUTCTime = 23
+// TagGeneralizedTime is the universal tag of GeneralizedTime.
+const TagGeneralizedTime = 24
+
+// RawValue is one element: its class, its tag, whether its contents are constructed, the contents
+// and, for a parsed element, its whole encoding (Go's asn1.RawValue).
+type RawValue struct {
+	Class      i64
+	Tag        i64
+	IsCompound bool
+	Bytes      []u8
+	FullBytes  []u8
+}
+
+// ObjectIdentifier is a sequence of arcs, such as 1.2.840.113549.
+type ObjectIdentifier struct {
+	arcs []i64
+}
+
+// BitString is a bit string: its bytes, most significant bit first, and its length in bits. Its
+// bytes are ceil(BitLength / 8) long, and the unused bits of the last byte are zero.
+type BitString struct {
+	Bytes     []u8
+	BitLength i64
+}
+
+// DateTime is a UTCTime or GeneralizedTime in UTC: its year, month, day, hour, minute and second.
+type DateTime struct {
+	Year   i64
+	Month  i64
+	Day    i64
+	Hour   i64
+	Minute i64
+	Second i64
+}
+
+// maxArc is the largest arc the encoder accepts: the decoder reads arcs up to 2^31 - 1 (Go's limit).
+const maxArc = 2147483647
+
+// tlv is the header of an element: its class, tag, compound flag, the length of its contents, and
+// the offset where they start.
+type tlv struct {
+	class    i64
+	tag      i64
+	compound bool
+	length   i64
+	start    i64
+}
+
+// OIDFromArcs returns the object identifier with the given arcs: at least two, the first 0, 1 or 2, the second below 40 unless the first is 2.
+fn OIDFromArcs(arcs []i64) !ObjectIdentifier {
+	if len(arcs) < 2 || arcs[0] < 0 || arcs[0] > 2 || arcs[1] < 0 || (arcs[0] < 2 && arcs[1] >= 40) {
+		fail "asn1: structure error: invalid object identifier"
+	}
+	mut out = []i64{}
+	for i in 0..len(arcs) {
+		if arcs[i] < 0 || arcs[i] > maxArc {
+			fail "asn1: structure error: invalid object identifier"
+		}
+		out = append(out, arcs[i])
+	}
+	return ObjectIdentifier{arcs: out}
+}
+
+// ParseOID returns the object identifier written as dotted decimal arcs, such as "1.2.840.113549".
+fn ParseOID(s str) !ObjectIdentifier {
+	mut arcs = []i64{}
+	for part in twine.Split(s, ".") {
+		let v = mint.Atoi(part) catch _ {
+			fail "asn1: structure error: invalid object identifier"
+		}
+		arcs = append(arcs, v)
+	}
+	let o = try OIDFromArcs(arcs)
+	return o
+}
+
+// Arcs returns a copy of the arcs of o.
+fn (o ObjectIdentifier) Arcs() []i64 {
+	mut out = []i64{}
+	for a in o.arcs {
+		out = append(out, a)
+	}
+	return out
+}
+
+// Equal reports whether o and other have the same arcs.
+fn (o ObjectIdentifier) Equal(other ObjectIdentifier) bool {
+	if len(o.arcs) != len(other.arcs) {
+		return false
+	}
+	for i in 0..len(o.arcs) {
+		if o.arcs[i] != other.arcs[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// String returns the dotted decimal form of o, such as "1.2.840.113549"; the zero value is "".
+fn (o ObjectIdentifier) String() str {
+	mut parts = []str{}
+	for a in o.arcs {
+		parts = append(parts, mint.Itoa(a))
+	}
+	return twine.Join(parts, ".")
+}
+
+// At returns the bit at index i (0 for the first bit), or 0 outside the string.
+fn (b BitString) At(i i64) i64 {
+	if i < 0 || i >= b.BitLength {
+		return 0
+	}
+	return i64(b.Bytes[i/8]>>u8(7-i%8)) & 1
+}
+
+// RightAlign returns the bytes of b with the unused bits of the last byte shifted out, as Go's RightAlign does.
+fn (b BitString) RightAlign() []u8 {
+	let shift = u8(8 - b.BitLength%8)
+	mut out = []u8{}
+	if shift == 8 || len(b.Bytes) == 0 {
+		for c in b.Bytes {
+			out = append(out, c)
+		}
+		return out
+	}
+	out = append(out, b.Bytes[0]>>shift)
+	for i in 1..len(b.Bytes) {
+		out = append(out, b.Bytes[i-1]<<(8-shift)|b.Bytes[i]>>shift)
+	}
+	return out
+}
+
+// Marshal returns the encoding of r: its FullBytes when it has them, else its header and contents.
+fn Marshal(r RawValue) []u8 {
+	if len(r.FullBytes) > 0 {
+		return r.FullBytes
+	}
+	return Element(r.Class, r.Tag, r.IsCompound, r.Bytes)
+}
+
+// Element returns the encoding of an element with the given class, tag, compound flag and contents.
+fn Element(class i64, tag i64, compound bool, contents []u8) []u8 {
+	mut out = header(class, tag, compound, i64(len(contents)))
+	for c in contents {
+		out = append(out, c)
+	}
+	return out
+}
+
+// Concat returns the encodings in parts joined end to end.
+fn Concat(parts [][]u8) []u8 {
+	mut out = []u8{}
+	for p in parts {
+		for c in p {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Int returns the DER encoding of the INTEGER v, in the fewest two's complement octets.
+fn Int(v i64) []u8 {
+	mut n = 1
+	mut x = v
+	for x > 127 || x < -128 {
+		n += 1
+		x = x >> 8
+	}
+	mut body = []u8{}
+	for j in 0..n {
+		body = append(body, u8(v>>i64(8*(n-1-j))))
+	}
+	return Element(ClassUniversal, TagInteger, false, body)
+}
+
+// IntegerBytes returns the INTEGER whose contents are the two's complement bytes content, which must be minimal.
+fn IntegerBytes(content []u8) ![]u8 {
+	try checkInteger(content)
+	return Element(ClassUniversal, TagInteger, false, content)
+}
+
+// Bool returns the DER encoding of the BOOLEAN v: 0xff for true and 0x00 for false.
+fn Bool(v bool) []u8 {
+	if v {
+		return Element(ClassUniversal, TagBoolean, false, []u8{255})
+	}
+	return Element(ClassUniversal, TagBoolean, false, []u8{0})
+}
+
+// Null returns the DER encoding of NULL.
+fn Null() []u8 {
+	return Element(ClassUniversal, TagNull, false, []u8{})
+}
+
+// OID returns the DER encoding of the object identifier o, which fails when o is the zero value.
+fn OID(o ObjectIdentifier) ![]u8 {
+	if len(o.arcs) < 2 {
+		fail "asn1: structure error: invalid object identifier"
+	}
+	mut body = []u8{}
+	body = appendBase128(body, o.arcs[0]*40+o.arcs[1])
+	for i in 2..len(o.arcs) {
+		body = appendBase128(body, o.arcs[i])
+	}
+	return Element(ClassUniversal, TagOID, false, body)
+}
+
+// Octets returns the DER encoding of the OCTET STRING b.
+fn Octets(b []u8) []u8 {
+	return Element(ClassUniversal, TagOctetString, false, b)
+}
+
+// Bits returns the DER encoding of the BIT STRING b. Its bytes must be ceil(BitLength / 8) long.
+fn Bits(b BitString) ![]u8 {
+	if b.BitLength < 0 || i64(len(b.Bytes)) != (b.BitLength+7)/8 {
+		fail "asn1: structure error: bit string length does not match its bytes"
+	}
+	mut body = []u8{u8((8 - b.BitLength%8) % 8)}
+	for c in b.Bytes {
+		body = append(body, c)
+	}
+	return Element(ClassUniversal, TagBitString, false, body)
+}
+
+// UTF8 returns the DER encoding of the UTF8String s. As in Go, the bytes are written without a UTF-8 check.
+fn UTF8(s str) []u8 {
+	return Element(ClassUniversal, TagUTF8String, false, []u8(s))
+}
+
+// Printable returns the DER encoding of the PrintableString s.
+fn Printable(s str) ![]u8 {
+	for i in 0..len(s) {
+		if !printable(s[i], true, false) {
+			fail "asn1: structure error: PrintableString contains invalid character"
+		}
+	}
+	return Element(ClassUniversal, TagPrintableString, false, []u8(s))
+}
+
+// IA5 returns the DER encoding of the IA5String s, which must be ASCII.
+fn IA5(s str) ![]u8 {
+	for i in 0..len(s) {
+		if s[i] > 127 {
+			fail "asn1: structure error: IA5String contains invalid character"
+		}
+	}
+	return Element(ClassUniversal, TagIA5String, false, []u8(s))
+}
+
+// Numeric returns the DER encoding of the NumericString s: digits and spaces.
+fn Numeric(s str) ![]u8 {
+	for i in 0..len(s) {
+		if !(s[i] >= '0' && s[i] <= '9' || s[i] == ' ') {
+			fail "asn1: structure error: NumericString contains invalid character"
+		}
+	}
+	return Element(ClassUniversal, TagNumericString, false, []u8(s))
+}
+
+// UTCTime returns the DER encoding of t as a UTCTime, for the years 1950 to 2049.
+fn UTCTime(t DateTime) ![]u8 {
+	if t.Year < 1950 || t.Year >= 2050 {
+		fail "asn1: structure error: cannot represent time as UTCTime"
+	}
+	try checkDate(t)
+	let text = digits(t.Year%100, 2) + timeTail(t)
+	return Element(ClassUniversal, TagUTCTime, false, []u8(text))
+}
+
+// GeneralizedTime returns the DER encoding of t as a GeneralizedTime, for the years 0 to 9999.
+fn GeneralizedTime(t DateTime) ![]u8 {
+	if t.Year < 0 || t.Year > 9999 {
+		fail "asn1: structure error: cannot represent time as GeneralizedTime"
+	}
+	try checkDate(t)
+	let text = digits(t.Year, 4) + timeTail(t)
+	return Element(ClassUniversal, TagGeneralizedTime, false, []u8(text))
+}
+
+// Seq returns the DER encoding of a SEQUENCE whose contents are the encodings in contents.
+fn Seq(contents []u8) []u8 {
+	return Element(ClassUniversal, TagSequence, true, contents)
+}
+
+// Set returns the DER encoding of a SET whose contents are the encodings in contents, in the order given.
+fn Set(contents []u8) []u8 {
+	return Element(ClassUniversal, TagSet, true, contents)
+}
+
+// Explicit wraps the encoding inner in a context-specific constructed tag [tag] (an EXPLICIT tag).
+fn Explicit(tag i64, inner []u8) []u8 {
+	return Element(ClassContextSpecific, tag, true, inner)
+}
+
+// Implicit returns r with the context-specific tag [tag] in place of its own tag (an IMPLICIT tag).
+fn Implicit(tag i64, r RawValue) []u8 {
+	return Element(ClassContextSpecific, tag, r.IsCompound, r.Bytes)
+}
+
+// Unmarshal reads the element at the start of b and returns it with the bytes after it. Its Bytes and
+// FullBytes are views of b.
+fn Unmarshal(b []u8) !(RawValue, []u8) {
+	let h = try readHeader(b, 0)
+	let end = h.start + h.length
+	let raw = RawValue{Class: h.class, Tag: h.tag, IsCompound: h.compound, Bytes: b[h.start:end], FullBytes: b[0:end]}
+	return raw, b[end:]
+}
+
+// Elements returns the elements of b, which must hold whole elements only (the contents of a SEQUENCE or SET).
+fn Elements(b []u8) ![]RawValue {
+	mut out = []RawValue{}
+	mut rest = b
+	for len(rest) > 0 {
+		let (raw, next) = try Unmarshal(rest)
+		out = append(out, raw)
+		rest = next
+	}
+	return out
+}
+
+// Expect fails unless r has the class, tag and compound flag given.
+fn Expect(r RawValue, class i64, tag i64, compound bool) ! {
+	if r.Class != class || r.Tag != tag || r.IsCompound != compound {
+		fail "asn1: structure error: tags don't match (" + mint.Itoa(tag) + " vs " + mint.Itoa(r.Tag) + ")"
+	}
+	return
+}
+
+// IntValue reads an INTEGER that fits in an i64.
+fn IntValue(r RawValue) !i64 {
+	try Expect(r, ClassUniversal, TagInteger, false)
+	try checkInteger(r.Bytes)
+	if len(r.Bytes) > 8 {
+		fail "asn1: structure error: integer too large"
+	}
+	mut v = i64(0)
+	for c in r.Bytes {
+		v = v<<8 | i64(c)
+	}
+	let shift = i64(64 - 8*len(r.Bytes))
+	return (v << shift) >> shift
+}
+
+// IntegerContent returns the two's complement contents of an INTEGER, of any length.
+fn IntegerContent(r RawValue) ![]u8 {
+	try Expect(r, ClassUniversal, TagInteger, false)
+	try checkInteger(r.Bytes)
+	return r.Bytes
+}
+
+// BoolValue reads a BOOLEAN: 0x00 is false and 0xff is true.
+fn BoolValue(r RawValue) !bool {
+	try Expect(r, ClassUniversal, TagBoolean, false)
+	if len(r.Bytes) != 1 || (r.Bytes[0] != 0 && r.Bytes[0] != 255) {
+		fail "asn1: syntax error: invalid boolean"
+	}
+	return r.Bytes[0] == 255
+}
+
+// NullValue reads a NULL. Its contents are not checked, as in Go's encoding/asn1.
+fn NullValue(r RawValue) ! {
+	try Expect(r, ClassUniversal, TagNull, false)
+	return
+}
+
+// OIDValue reads an OBJECT IDENTIFIER.
+fn OIDValue(r RawValue) !ObjectIdentifier {
+	try Expect(r, ClassUniversal, TagOID, false)
+	let b = r.Bytes
+	if len(b) == 0 {
+		fail "asn1: syntax error: zero length OBJECT IDENTIFIER"
+	}
+	let (first, at) = try base128(b, 0)
+	mut arcs = []i64{}
+	if first < 80 {
+		arcs = append(arcs, first/40)
+		arcs = append(arcs, first%40)
+	} else {
+		arcs = append(arcs, 2)
+		arcs = append(arcs, first-80)
+	}
+	mut i = at
+	for i < len(b) {
+		let (v, next) = try base128(b, i)
+		arcs = append(arcs, v)
+		i = next
+	}
+	return ObjectIdentifier{arcs: arcs}
+}
+
+// BitsValue reads a BIT STRING.
+fn BitsValue(r RawValue) !BitString {
+	try Expect(r, ClassUniversal, TagBitString, false)
+	let b = r.Bytes
+	if len(b) == 0 {
+		fail "asn1: syntax error: zero length BIT STRING"
+	}
+	let padding = i64(b[0])
+	if padding > 7 || (len(b) == 1 && padding > 0) || b[len(b)-1]&((1<<u8(padding))-1) != 0 {
+		fail "asn1: syntax error: invalid padding bits in BIT STRING"
+	}
+	return BitString{Bytes: b[1:], BitLength: i64(len(b)-1)*8 - padding}
+}
+
+// OctetsValue reads an OCTET STRING.
+fn OctetsValue(r RawValue) ![]u8 {
+	try Expect(r, ClassUniversal, TagOctetString, false)
+	return r.Bytes
+}
+
+// StringValue reads a string of the UTF8, Numeric, Printable, T61 or IA5 tag as UTF-8 text (T61 as Latin-1, as Go does).
+fn StringValue(r RawValue) !str {
+	if r.Class != ClassUniversal || r.IsCompound {
+		fail "asn1: structure error: tags don't match (string)"
+	}
+	let b = r.Bytes
+	if r.Tag == TagUTF8String {
+		if !validUTF8(str(b)) {
+			fail "asn1: invalid UTF-8 string"
+		}
+		return str(b)
+	}
+	if r.Tag == TagIA5String {
+		for c in b {
+			if c >= 128 {
+				fail "asn1: syntax error: IA5String contains invalid character"
+			}
+		}
+		return str(b)
+	}
+	if r.Tag == TagPrintableString {
+		for c in b {
+			if !printable(c, true, true) {
+				fail "asn1: syntax error: PrintableString contains invalid character"
+			}
+		}
+		return str(b)
+	}
+	if r.Tag == TagNumericString {
+		for c in b {
+			if !(c >= '0' && c <= '9' || c == ' ') {
+				fail "asn1: syntax error: NumericString contains invalid character"
+			}
+		}
+		return str(b)
+	}
+	if r.Tag == TagT61String {
+		mut out = []u8{}
+		for c in b {
+			if c < 128 {
+				out = append(out, c)
+			} else {
+				out = append(out, 0xc0|c>>6)
+				out = append(out, 0x80|c&0x3f)
+			}
+		}
+		return str(out)
+	}
+	fail "asn1: structure error: tags don't match (string)"
+}
+
+// TimeValue reads a UTCTime (years 1950 to 2049) or a GeneralizedTime in UTC.
+fn TimeValue(r RawValue) !DateTime {
+	if r.Class != ClassUniversal || r.IsCompound {
+		fail "asn1: structure error: tags don't match (time)"
+	}
+	let b = r.Bytes
+	if r.Tag == TagUTCTime {
+		// YYMMDDhhmm[ss]Z: the years 50 to 99 are 19YY, the years 00 to 49 are 20YY.
+		if len(b) != 11 && len(b) != 13 {
+			fail "asn1: invalid UTCTime value"
+		}
+		let year = try number(b, 0, 2)
+		let t = try timeOf(b, 2, year, 1950)
+		return t
+	}
+	if r.Tag == TagGeneralizedTime {
+		if len(b) != 15 {
+			fail "asn1: invalid GeneralizedTime value"
+		}
+		let year = try number(b, 0, 4)
+		return try timeOf(b, 4, year, 0)
+	}
+	fail "asn1: structure error: tags don't match (time)"
+}
+
+// ExplicitValue reads the element inside an EXPLICIT tag [tag] that r is.
+fn ExplicitValue(r RawValue, tag i64) !RawValue {
+	try Expect(r, ClassContextSpecific, tag, true)
+	let kids = try Elements(r.Bytes)
+	if len(kids) == 0 {
+		fail "asn1: structure error: explicit tag has no child"
+	}
+	if len(kids) > 1 {
+		fail "asn1: structure error: explicit tag has more than one child"
+	}
+	return kids[0]
+}
+
+// readHeader reads the identifier and length octets at b[at:].
+fn readHeader(b []u8, at i64) !tlv {
+	if at >= len(b) {
+		fail "asn1: syntax error: sequence truncated"
+	}
+	let first = b[at]
+	mut h = tlv{class: i64(first>>6), compound: first&0x20 == 0x20, tag: i64(first & 0x1f)}
+	mut i = at + 1
+	if h.tag == 0x1f {
+		let (tag, next) = try base128(b, i)
+		if tag < 0x1f {
+			fail "asn1: syntax error: non-minimal tag"
+		}
+		h.tag = tag
+		i = next
+	}
+	if i >= len(b) {
+		fail "asn1: syntax error: truncated tag or length"
+	}
+	let lb = b[i]
+	i += 1
+	if lb&0x80 == 0 {
+		h.length = i64(lb & 0x7f)
+	} else {
+		let k = i64(lb & 0x7f)
+		if k == 0 {
+			fail "asn1: syntax error: indefinite length found (not DER)"
+		}
+		mut n = i64(0)
+		for j in 0..k {
+			if i >= len(b) {
+				fail "asn1: syntax error: truncated tag or length"
+			}
+			if n >= 1<<23 {
+				fail "asn1: structure error: length too large"
+			}
+			n = n<<8 | i64(b[i])
+			i += 1
+			if n == 0 {
+				fail "asn1: structure error: superfluous leading zeros in length"
+			}
+		}
+		if n < 0x80 {
+			fail "asn1: structure error: non-minimal length"
+		}
+		h.length = n
+	}
+	h.start = i
+	if h.length > i64(len(b))-i {
+		fail "asn1: syntax error: data truncated"
+	}
+	return h
+}
+
+// base128 reads a base-128 number at b[at:], as Go's parseBase128Int does.
+fn base128(b []u8, at i64) !(i64, i64) {
+	mut v = i64(0)
+	mut i = at
+	mut shifted = 0
+	for i < len(b) {
+		if shifted == 5 {
+			fail "asn1: structure error: base 128 integer too large"
+		}
+		if shifted == 0 && b[i] == 0x80 {
+			fail "asn1: syntax error: integer is not minimally encoded"
+		}
+		v = v<<7 | i64(b[i]&0x7f)
+		i += 1
+		if b[i-1]&0x80 == 0 {
+			if v > maxArc {
+				fail "asn1: structure error: base 128 integer too large"
+			}
+			return v, i
+		}
+		shifted += 1
+	}
+	fail "asn1: syntax error: truncated base 128 integer"
+}
+
+// appendBase128 appends v as a base-128 number, the high bit set on all but the last byte.
+fn appendBase128(out []u8, v i64) []u8 {
+	mut n = 1
+	mut x = v >> 7
+	for x > 0 {
+		n += 1
+		x = x >> 7
+	}
+	mut res = out
+	for i in 0..n {
+		mut o = u8((v >> i64(7*(n-1-i))) & 0x7f)
+		if i != n-1 {
+			o |= 0x80
+		}
+		res = append(res, o)
+	}
+	return res
+}
+
+// header is the identifier and length octets of an element with these class, tag, compound flag and length.
+fn header(class i64, tag i64, compound bool, n i64) []u8 {
+	mut out = []u8{}
+	mut first = u8(class << 6)
+	if compound {
+		first |= 0x20
+	}
+	if tag >= 31 {
+		out = append(out, first|0x1f)
+		out = appendBase128(out, tag)
+	} else {
+		out = append(out, first|u8(tag))
+	}
+	if n < 128 {
+		out = append(out, u8(n))
+		return out
+	}
+	mut k = i64(1)
+	mut m = n >> 8
+	for m > 0 {
+		k += 1
+		m = m >> 8
+	}
+	out = append(out, u8(0x80|k))
+	for i in 0..k {
+		out = append(out, u8(n>>i64(8*(k-1-i))))
+	}
+	return out
+}
+
+// checkInteger fails unless the contents of an INTEGER are non-empty and minimal.
+fn checkInteger(b []u8) ! {
+	if len(b) == 0 {
+		fail "asn1: structure error: empty integer"
+	}
+	if len(b) > 1 && ((b[0] == 0 && b[1]&0x80 == 0) || (b[0] == 0xff && b[1]&0x80 == 0x80)) {
+		fail "asn1: structure error: integer not minimally-encoded"
+	}
+	return
+}
+
+// printable reports whether c is in the PrintableString set (with * and & when allowed).
+fn printable(c u8, asterisk bool, ampersand bool) bool {
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	if c >= '\'' && c <= ')' || c >= '+' && c <= '/' || c == ' ' || c == ':' || c == '=' || c == '?' {
+		return true
+	}
+	return asterisk && c == '*' || ampersand && c == '&'
+}
+
+// validUTF8 reports whether s is entirely valid UTF-8.
+fn validUTF8(s str) bool {
+	return glyph.Valid(s)
+}
+
+// checkDate fails unless the fields of t are in range.
+fn checkDate(t DateTime) ! {
+	if t.Month < 1 || t.Month > 12 || t.Day < 1 || t.Day > 31 || t.Hour < 0 || t.Hour > 23 || t.Minute < 0 || t.Minute > 59 || t.Second < 0 || t.Second > 59 {
+		fail "asn1: time field out of range"
+	}
+	return
+}
+
+// timeTail is the month, day, hour, minute and second of t and the Z that ends a time.
+fn timeTail(t DateTime) str {
+	return digits(t.Month, 2) + digits(t.Day, 2) + digits(t.Hour, 2) + digits(t.Minute, 2) + digits(t.Second, 2) + "Z"
+}
+
+// digits writes v in decimal with at least w digits.
+fn digits(v i64, w i64) str {
+	mut s = mint.Itoa(v)
+	for i64(len(s)) < w {
+		s = "0" + s
+	}
+	return s
+}
+
+// number reads n decimal digits of b at at, failing on any other byte.
+fn number(b []u8, at i64, n i64) !i64 {
+	mut v = i64(0)
+	for i in 0..n {
+		let c = b[at+i]
+		if c < '0' || c > '9' {
+			fail "asn1: invalid time digits"
+		}
+		v = v*10 + i64(c-'0')
+	}
+	return v
+}
+
+// timeOf reads the month to the Z of a time at b[at:] with the given year; base 1950 marks a UTCTime, whose year is two digits.
+fn timeOf(b []u8, at i64, year i64, base i64) !DateTime {
+	mut t = DateTime{Year: year}
+	if base == 1950 {
+		t.Year = year + 1900
+		if year < 50 {
+			t.Year = year + 2000
+		}
+	}
+	t.Month = try number(b, at, 2)
+	t.Day = try number(b, at+2, 2)
+	t.Hour = try number(b, at+4, 2)
+	t.Minute = try number(b, at+6, 2)
+	mut end = at + 8
+	if i64(len(b)) == end+1 {
+		// No seconds: a UTCTime of YYMMDDhhmmZ.
+		if b[end] != 'Z' {
+			fail "asn1: invalid time value"
+		}
+		try checkDate(t)
+		return t
+	}
+	t.Second = try number(b, end, 2)
+	end += 2
+	if b[end] != 'Z' || end+1 != i64(len(b)) {
+		fail "asn1: invalid time value"
+	}
+	try checkDate(t)
+	return t
+}

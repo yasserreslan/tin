@@ -1,0 +1,320 @@
+package main
+
+// asn1: DER encoders, the tag and length rules, the typed readers and their faults. The output is the same on
+// every platform; Go's encoding/asn1 gives the same bytes and messages (tools/ci/asn1_check.tin).
+
+import "asn1"
+import "fault"
+import "say"
+import "seal"
+
+// show prints the name and the hex of an encoding.
+fn show(name str, b []u8) {
+	say.Line(name, seal.Hex(b))
+}
+
+// word is "true" or "false".
+fn word(v bool) str {
+	if v {
+		return "true"
+	}
+	return "false"
+}
+
+// readText reads the element at the start of b and describes it: its class, tag, compound flag and the bytes after it.
+fn readText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return say.Fmt("class %d tag %d compound %s contents %s rest %d", raw.Class, raw.Tag, word(raw.IsCompound), seal.Hex(raw.Bytes), len(rest))
+}
+
+// intText reads an INTEGER element.
+fn intText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	let v = asn1.IntValue(raw) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return say.Fmt("%d", v)
+}
+
+// boolText reads a BOOLEAN element.
+fn boolText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	let v = asn1.BoolValue(raw) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return word(v)
+}
+
+// oidText reads an OBJECT IDENTIFIER element.
+fn oidText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	let o = asn1.OIDValue(raw) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return o.String()
+}
+
+// bitsText reads a BIT STRING element: its length and bytes.
+fn bitsText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	let v = asn1.BitsValue(raw) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return say.Fmt("%d bits %s", v.BitLength, seal.Hex(v.Bytes))
+}
+
+// strText reads a string element of any of the string tags this package reads.
+fn strText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	let v = asn1.StringValue(raw) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return v
+}
+
+// timeText reads a UTCTime or GeneralizedTime element.
+fn timeText(b []u8) str {
+	let (raw, rest) = asn1.Unmarshal(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	let t = asn1.TimeValue(raw) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return say.Fmt("%04d-%02d-%02d %02d:%02d:%02d", t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second)
+}
+
+// tagText reads a sequence of elements and describes each one by its class and tag.
+fn elementsText(b []u8) str {
+	let kids = asn1.Elements(b) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	mut out = ""
+	for kid in kids {
+		out += say.Fmt(" %d/%d", kid.Class, kid.Tag)
+	}
+	return out
+}
+
+// oidText2 builds the object identifier of the arcs and describes it, or the fault it gives.
+fn arcsText(arcs []i64) str {
+	let o = asn1.OIDFromArcs(arcs) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return o.String()
+}
+
+// parseText describes the object identifier written as text, or the fault it gives.
+fn parseText(text str) str {
+	let o = asn1.ParseOID(text) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return o.String()
+}
+
+// encodeText encodes a printable string, an IA5 string or a numeric string (kind p, a or m), or describes its fault.
+fn encodeText(kind str, text str) str {
+	if kind == "p" {
+		let b = asn1.Printable(text) catch err {
+			return "fault: " + fault.Message(err)
+		}
+		return seal.Hex(b)
+	}
+	if kind == "a" {
+		let b = asn1.IA5(text) catch err {
+			return "fault: " + fault.Message(err)
+		}
+		return seal.Hex(b)
+	}
+	let b = asn1.Numeric(text) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return seal.Hex(b)
+}
+
+// timeEncText encodes a time as UTCTime or GeneralizedTime, or describes its fault.
+fn timeEncText(general bool, t asn1.DateTime) str {
+	if general {
+		let b = asn1.GeneralizedTime(t) catch err {
+			return "fault: " + fault.Message(err)
+		}
+		return seal.Hex(b)
+	}
+	let b = asn1.UTCTime(t) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return seal.Hex(b)
+}
+
+// explicitText reads the element inside an EXPLICIT tag, or describes the fault.
+fn explicitText(r asn1.RawValue) str {
+	let inner = asn1.ExplicitValue(r, 0) catch err {
+		return "fault: " + fault.Message(err)
+	}
+	return seal.Hex(asn1.Marshal(inner))
+}
+
+fn main() {
+	// Object identifiers: the dotted form and the DER bytes (the RSA encryption OID has the 2.840 first octet).
+	let rsa = asn1.ParseOID("1.2.840.113549.1.1.1") catch err {
+		say.Line("fault", err)
+		return
+	}
+	say.Line("oid", rsa.String(), rsa.Equal(rsa), len(rsa.Arcs()))
+	let rsaDER = asn1.OID(rsa) catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("oid der", rsaDER)
+	say.Line("oid read", oidText(rsaDER))
+	say.Line("oid text", oidText([]u8{6, 3, 85, 4, 3}))
+	say.Line("oid zero", oidText([]u8{6, 0}))
+	say.Line("oid high arc", oidText([]u8{6, 3, 0x88, 0x80, 0x00}))
+
+	// Invalid arcs: Go's message for each.
+	say.Line("arcs", arcsText([]i64{1}), arcsText([]i64{3, 0}), arcsText([]i64{0, 40}), arcsText([]i64{2, 40}), arcsText([]i64{1, -1}))
+	say.Line("parse", parseText("2.999.1"), parseText("1.40"), parseText("1.x"), parseText(""))
+
+	// Integers: the fewest two's complement octets, and the read back.
+	show("int 0", asn1.Int(0))
+	show("int 127", asn1.Int(127))
+	show("int 128", asn1.Int(128))
+	show("int -128", asn1.Int(-128))
+	show("int -129", asn1.Int(-129))
+	show("int max", asn1.Int(9223372036854775807))
+	show("int min", asn1.Int(-9223372036854775807 - 1))
+	say.Line("int read", intText([]u8{2, 1, 0x80}), intText([]u8{2, 2, 0x00, 0x80}), intText([]u8{2, 0}))
+	say.Line("int bad", intText([]u8{2, 2, 0x00, 0x01}), intText([]u8{2, 9, 1, 0, 0, 0, 0, 0, 0, 0, 0}))
+	let (wide, _) = asn1.Unmarshal(asn1.Element(0, 2, false, []u8{1, 0, 0, 0, 0, 0, 0, 0, 0})) catch err {
+		say.Line("fault", err)
+		return
+	}
+	let big = asn1.IntegerContent(wide) catch err {
+		say.Line("fault", err)
+		return
+	}
+	say.Line("integer content", seal.Hex(big))
+
+	// Booleans and NULL.
+	show("true", asn1.Bool(true))
+	show("false", asn1.Bool(false))
+	say.Line("bool read", boolText([]u8{1, 1, 0xff}), boolText([]u8{1, 1, 0}), boolText([]u8{1, 1, 1}))
+	show("null", asn1.Null())
+
+	// Strings: the bytes as written, and the checks Go makes on each type.
+	let utf = asn1.UTF8("h\xc3\xa9")
+	show("utf8", utf)
+	let pr = asn1.Printable("A b-9") catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("printable", pr)
+	let ia = asn1.IA5("a@b") catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("ia5", ia)
+	let nu = asn1.Numeric("12 3") catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("numeric", nu)
+	say.Line("string read", strText(utf), strText(pr), strText(nu))
+	say.Line("string faults", encodeText("p", "a&b"), encodeText("p", "a@"), encodeText("a", "\x80"), encodeText("m", "1x"))
+	say.Line("t61 read", strText([]u8{20, 2, 0xe9, 0x41}))
+	say.Line("utf8 bad", strText([]u8{12, 1, 0xff}))
+
+	// Bit strings: the unused bits of the last octet, and the bit accessors.
+	let bits3 = asn1.Bits(asn1.BitString{Bytes: []u8{0xa0}, BitLength: 3}) catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("bits", bits3)
+	say.Line("bits read", bitsText(bits3), bitsText([]u8{3, 3, 7, 0xff, 0x80}), bitsText([]u8{3, 1, 0}))
+	say.Line("bits bad", bitsText([]u8{3, 1, 1}), bitsText([]u8{3, 2, 8, 0}), bitsText([]u8{3, 0}))
+	let bs = asn1.BitString{Bytes: []u8{0xa0}, BitLength: 3}
+	say.Line("at", bs.At(0), bs.At(1), bs.At(2), bs.At(3), seal.Hex(bs.RightAlign()))
+	let bsx = asn1.BitString{Bytes: []u8{0xff, 0xf0}, BitLength: 12}
+	say.Line("at2", bsx.At(11), bsx.At(12), seal.Hex(bsx.RightAlign()))
+
+	// Octet strings and raw values.
+	show("octets", asn1.Octets([]u8{1, 2, 3}))
+	let (ov, _) = asn1.Unmarshal([]u8{4, 2, 0xde, 0xad}) catch err {
+		say.Line("fault", err)
+		return
+	}
+	let ovv = asn1.OctetsValue(ov) catch err {
+		say.Line("fault", err)
+		return
+	}
+	say.Line("octets read", seal.Hex(ovv))
+	show("element", asn1.Element(asn1.ClassApplication, 2, false, []u8{1}))
+	say.Line("raw marshal", seal.Hex(asn1.Marshal(ov)))
+	say.Line("raw full", seal.Hex(asn1.Marshal(asn1.RawValue{Class: 0, Tag: 4, IsCompound: false, Bytes: []u8{9}})))
+
+	// Times: UTCTime for 1950 to 2049, GeneralizedTime otherwise.
+	let utc = asn1.UTCTime(asn1.DateTime{Year: 2024, Month: 3, Day: 5, Hour: 10, Minute: 20, Second: 30}) catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("utctime", utc)
+	let gen = asn1.GeneralizedTime(asn1.DateTime{Year: 2051, Month: 1, Day: 2, Hour: 0, Minute: 0, Second: 0}) catch err {
+		say.Line("fault", err)
+		return
+	}
+	show("generalized", gen)
+	say.Line("time read", timeText(utc), timeText(gen), timeText([]u8{23, 13, 0x35, 0x30, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a}))
+	say.Line("time short", timeText([]u8{23, 11, 0x32, 0x34, 0x30, 0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x5a}))
+	say.Line("time bad", timeText([]u8{23, 3, 0x31, 0x32, 0x33}), timeText([]u8{24, 3, 0x31, 0x32, 0x33}))
+	say.Line("time encode", timeEncText(false, asn1.DateTime{Year: 2050, Month: 1, Day: 1, Hour: 0, Minute: 0, Second: 0}), timeEncText(true, asn1.DateTime{Year: 1900, Month: 2, Day: 28, Hour: 12, Minute: 0, Second: 0}))
+	say.Line("time range", timeEncText(false, asn1.DateTime{Year: 2024, Month: 13, Day: 1, Hour: 0, Minute: 0, Second: 0}))
+
+	// Sequences, sets and tags.
+	let seq = asn1.Seq(asn1.Concat([][]u8{asn1.Int(2), asn1.Bool(true), asn1.Octets([]u8{1, 2, 3})}))
+	show("seq", seq)
+	let set = asn1.Set(asn1.Concat([][]u8{asn1.Null(), asn1.Int(1)}))
+	show("set", set)
+	show("explicit", asn1.Explicit(0, asn1.Int(2)))
+	let imp = asn1.Implicit(3, asn1.RawValue{Class: 0, Tag: 2, IsCompound: false, Bytes: []u8{5}})
+	show("implicit", imp)
+	show("high tag", asn1.Element(asn1.ClassContextSpecific, 40, true, []u8{}))
+	show("tag 31", asn1.Element(asn1.ClassContextSpecific, 31, false, []u8{1}))
+	let long = asn1.Octets(make([]u8, 200))
+	say.Line("long", len(long), seal.Hex(long[0:3]))
+	say.Line("seq read", readText(seq), readText(set), readText(imp))
+	say.Line("high read", readText(asn1.Element(asn1.ClassContextSpecific, 40, true, []u8{})))
+	say.Line("elements", elementsText(seq[2:]), elementsText(asn1.Concat([][]u8{asn1.Int(1), asn1.Null()})))
+	let kids = asn1.Elements(seq[2:]) catch err {
+		say.Line("fault", err)
+		return
+	}
+	say.Line("kids", len(kids), intText(asn1.Marshal(kids[0])))
+	say.Line("explicit read", explicitText(asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: []u8{2, 1, 2}}))
+	say.Line("explicit faults", explicitText(asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: []u8{}}), explicitText(asn1.RawValue{Class: 2, Tag: 0, IsCompound: true, Bytes: []u8{5, 0, 5, 0}}), explicitText(asn1.RawValue{Class: 2, Tag: 1, IsCompound: true, Bytes: []u8{5, 0}}))
+
+	// Malformed input: the faults of Unmarshal and of the typed readers.
+	say.Line("empty", readText([]u8{}))
+	say.Line("indefinite", readText([]u8{0x30, 0x80}))
+	say.Line("non-minimal length", readText([]u8{4, 0x81, 5, 1, 2, 3, 4, 5}))
+	say.Line("leading zero length", readText([]u8{4, 0x82, 0, 5}))
+	say.Line("truncated", readText([]u8{4, 5, 1}))
+	say.Line("truncated length", readText([]u8{4, 0x82, 1}))
+	say.Line("non-minimal tag", readText([]u8{0x1f, 5, 0}))
+	say.Line("tag truncated", readText([]u8{0x1f, 0x81}))
+	say.Line("tag no length", readText([]u8{0x30}))
+	say.Line("elements bad", elementsText([]u8{4, 5, 1}))
+	say.Line("bool bad", boolText([]u8{1, 0}))
+	say.Line("null read", readText([]u8{5, 1, 0}))
+	say.Line("tags", readText(asn1.Octets([]u8{})), readText(asn1.Null()))
+}
