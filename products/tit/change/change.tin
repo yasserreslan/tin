@@ -40,11 +40,26 @@ shape RefStore {
 	mut Update(name str, old ?Target, next ?Target) !
 }
 
-// Version is one version of a change: the operation that made it, its commit and when.
+// Version is one version of a change: the operation that made it, its commit (as its 32 bytes, read with Commit())
+// and when. The id is kept as bytes because a field of another package's value struct is laid out wrongly in some
+// structs today (#847).
 type Version struct {
-	Op     i64
-	Commit object.Id
-	Time   i64
+	Op   i64
+	Hash str
+	Time i64
+}
+
+// NewVersion is the version made by operation op, at time, as commit.
+fn NewVersion(op i64, commit object.Id, time i64) Version {
+	return Version{Op: op, Hash: commit.Bytes(), Time: time}
+}
+
+// Commit is the version's commit.
+fn (v Version) Commit() object.Id {
+	let id = object.IdOf(v.Hash) catch _ {
+		object.NoId
+	}
+	return id
 }
 
 // TargetText is a target as a ref file holds it: hex digits, or "change " and the change id's letters.
