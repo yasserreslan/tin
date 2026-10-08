@@ -1,0 +1,70 @@
+// What the TLS checks share: an OpenSSL 3 command line and self-signed certificates for localhost and 127.0.0.1.
+package tlsutil
+
+import "../ci"
+import "twine"
+
+// Cert is a certificate and its key (PEM files).
+type Cert struct {
+	Kind str
+	Cert str
+	Key str
+}
+
+// Openssl3 is an OpenSSL 3 command line (s_server -tls1_3 with -ciphersuites and -groups), or "" when there is none.
+fn Openssl3() str {
+	for cand in []str{"openssl", "/opt/homebrew/opt/openssl@3/bin/openssl", "/usr/local/opt/openssl@3/bin/openssl"} {
+		let o = ci.Exec([]str{cand, "version"}, "", 10)
+		if o.Code == 0 && twine.HasPrefix(o.Stdout, "OpenSSL 3") {
+			return cand
+		}
+	}
+	return ""
+}
+
+fn argsOf(kind str) []str {
+	if kind == "rsa" {
+		return []str{"-newkey", "rsa:2048"}
+	}
+	if kind == "ecdsa" {
+		return []str{"-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"}
+	}
+	return []str{"-newkey", "ed25519"}
+}
+
+// MakeCerts makes self-signed certificates of the kinds ("rsa", "ecdsa", "ed25519") in work; a kind openssl cannot make is left out.
+// other-root.pem, next to them, is a root that signed none of them, under its own name: the trusted roots of the unknown-authority
+// case.
+fn MakeCerts(openssl str, work str, kinds []str) []Cert {
+	mut certs = []Cert{}
+	for kind in kinds {
+		let cert = ci.Join(work, kind + ".pem")
+		let key = ci.Join(work, kind + ".key")
+		mut argv = []str{openssl, "req", "-x509"}
+		for a in argsOf(kind) {
+			argv = append(argv, a)
+		}
+		for a in []str{"-keyout", key, "-out", cert, "-days", "30", "-nodes", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"} {
+			argv = append(argv, a)
+		}
+		let o = ci.Exec(argv, "", 60)
+		if o.Code == 0 {
+			certs = append(certs, Cert{Kind: kind, Cert: cert, Key: key})
+		}
+	}
+	ci.Check(len(certs) > 0, "openssl could not make test certificates")
+	let other = ci.Exec([]str{openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-keyout", ci.Join(work, "other-root.key"), "-out", ci.Join(work, "other-root.pem"), "-days", "30", "-nodes", "-subj", "/CN=tin unrelated root"}, "", 60)
+	ci.Must(other, "openssl req other-root")
+	return certs
+}
+
+// Of is the certificate of a kind (fails when there is none).
+fn Of(certs []Cert, kind str) Cert {
+	for c in certs {
+		if c.Kind == kind {
+			return c
+		}
+	}
+	ci.Fail("no " + kind + " certificate")
+	return certs[0]
+}
