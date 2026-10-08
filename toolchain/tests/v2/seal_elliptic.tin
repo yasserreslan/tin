@@ -1,0 +1,147 @@
+package main
+
+// seal's crypto/elliptic Curve shape, crypto/dsa verification and crypto/fips140 status (#927).
+// Every expected value below is checked by hand: group identities (n*G is the point at infinity,
+// (n-1)*G has G's x), the published 2G of P-256, the NIST generator constants, and a toy DSA key
+// whose DER is written out byte by byte.
+
+import "abacus"
+import "fault"
+import "say"
+import "seal"
+
+// pointText is "x y" in hex, without leading zeros, as the twin prints points.
+fn pointText(x abacus.Int, y abacus.Int) str {
+	return x.Text(16) + " " + y.Text(16)
+}
+
+// addPoint is the sum of two points on c, as text.
+fn addPoint(c dyn seal.Curve, x1 abacus.Int, y1 abacus.Int, x2 abacus.Int, y2 abacus.Int) !str {
+	let (x, y) = try c.Add(x1, y1, x2, y2)
+	return pointText(x, y)
+}
+
+// doublePoint is 2*(x, y) on c, as text.
+fn doublePoint(c dyn seal.Curve, x abacus.Int, y abacus.Int) !str {
+	let (rx, ry) = try c.Double(x, y)
+	return pointText(rx, ry)
+}
+
+// scalarPoint is k*(x, y) on c, as text.
+fn scalarPoint(c dyn seal.Curve, x abacus.Int, y abacus.Int, k []u8) !str {
+	let (rx, ry) = try c.ScalarMult(x, y, k)
+	return pointText(rx, ry)
+}
+
+// report prints a result, or "fault" for the error of an operation that failed.
+fn report(label str, s str, err fault) {
+	if err != nil {
+		say.Line(label, "fault")
+		return
+	}
+	say.Line(label, s)
+}
+
+// dsaReport prints the verdict of a DSA check: verified, bad parameters, or rejected.
+fn dsaReport(label str, err fault) {
+	if err == nil {
+		say.Line(label, "verified")
+		return
+	}
+	if fault.Is(err, seal.ErrDSAParameters) {
+		say.Line(label, "bad parameters")
+		return
+	}
+	say.Line(label, "rejected")
+}
+
+fn main() {
+	let one = abacus.FromI64(1)
+	let zero = abacus.FromI64(0)
+
+	// P-256: the generator, its identities, and the group law.
+	let p256 = seal.P256()
+	let (gx, gy) = p256.ScalarBaseMult([]u8{1})
+	say.Line("p256 G", pointText(gx, gy))
+	say.Line("p256 on curve G", p256.IsOnCurve(gx, gy))
+	say.Line("p256 on curve identity", p256.IsOnCurve(zero, zero))
+	say.Line("p256 on curve G+1 in y", p256.IsOnCurve(gx, gy.Add(one)))
+	say.Line("p256 on curve -x", p256.IsOnCurve(gx.Neg(), gy))
+
+	let (dbl, dblErr) = doublePoint(p256, gx, gy)
+	report("p256 2G", dbl, dblErr)
+
+	let (n256, nErr) = abacus.Parse("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", 16)
+	if nErr != nil {
+		say.Line("order", "fault")
+		return
+	}
+	let pPlus = one.Lsh(256).Sub(one.Lsh(224)).Add(one.Lsh(192)).Add(one.Lsh(96)).Sub(one)
+	let (ox, oy) = p256.ScalarBaseMult(n256.Bytes())
+	say.Line("p256 n*G", pointText(ox, oy))
+
+	let (mx, my) = p256.ScalarBaseMult(n256.Sub(one).Bytes())
+	say.Line("p256 (n-1)*G has G's x", mx.Cmp(gx) == 0)
+	let (sum, sumErr) = addPoint(p256, mx, my, gx, gy)
+	report("p256 (n-1)*G + G", sum, sumErr)
+
+	let (plusZero, plusZeroErr) = addPoint(p256, gx, gy, zero, zero)
+	report("p256 G + identity", plusZero, plusZeroErr)
+
+	let (negSum, negSumErr) = addPoint(p256, gx, gy, gx, pPlus.Sub(gy))
+	report("p256 G + (-G)", negSum, negSumErr)
+
+	let (zeroEmpty, zeroEmptyErr) = scalarPoint(p256, gx, gy, []u8{})
+	report("p256 0*G (empty scalar)", zeroEmpty, zeroEmptyErr)
+	let (zeroPad, zeroPadErr) = scalarPoint(p256, gx, gy, []u8{0, 0})
+	report("p256 0*G (two zero bytes)", zeroPad, zeroPadErr)
+	let (idMul, idMulErr) = scalarPoint(p256, zero, zero, []u8{7})
+	report("p256 7*identity", idMul, idMulErr)
+
+	// Invalid points: Go panics, Tin fails.
+	let (offCurve, offCurveErr) = addPoint(p256, gx, gy.Add(one), gx, gy)
+	report("p256 Add off-curve", offCurve, offCurveErr)
+	let (offDbl, offDblErr) = doublePoint(p256, gx, gy.Add(one))
+	report("p256 Double off-curve", offDbl, offDblErr)
+	let (offMul, offMulErr) = scalarPoint(p256, gx, gy.Add(one), []u8{3})
+	report("p256 3*off-curve", offMul, offMulErr)
+
+	// Other curves: their generators are on the curve.
+	let p224 = seal.P224()
+	let (g224x, g224y) = p224.ScalarBaseMult([]u8{1})
+	say.Line("p224 G", pointText(g224x, g224y))
+	say.Line("p224 on curve G", p224.IsOnCurve(g224x, g224y))
+	let p384 = seal.P384()
+	let (g384x, g384y) = p384.ScalarBaseMult([]u8{1})
+	say.Line("p384 on curve G", p384.IsOnCurve(g384x, g384y))
+	let p521 = seal.P521()
+	let (g521x, g521y) = p521.ScalarBaseMult([]u8{1})
+	say.Line("p521 on curve G", p521.IsOnCurve(g521x, g521y))
+	say.Line("p521 on curve G with x = 2^521", p521.IsOnCurve(one.Lsh(521), g521y))
+
+	// DSA: a toy key whose DER is written out: p = 23, q = 251 (eight bits, so whole bytes), g = 2, y = 3.
+	let spki = []u8{0x30, 0x1d, 0x30, 0x15, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x38, 0x04, 0x01,
+		0x30, 0x0a, 0x02, 0x01, 0x17, 0x02, 0x02, 0x00, 0xfb, 0x02, 0x01, 0x02,
+		0x03, 0x04, 0x00, 0x02, 0x01, 0x03}
+	let (key, keyErr) = seal.ParseDSAPublicKeyDER(spki)
+	if keyErr != nil {
+		say.Line("dsa key", "fault")
+		return
+	}
+	say.Line("dsa key p q g y", key.P.Text(16), key.Q.Text(16), key.G.Text(16), key.Y.Text(16))
+
+	let hash = []u8{0x61, 0x62, 0x63}
+	let twentyThree = abacus.FromI64(23)
+	let fbq = abacus.FromI64(251)
+	dsaReport("dsa r = 0", seal.DSAVerify(key, hash, zero, abacus.FromI64(5)))
+	dsaReport("dsa r = q", seal.DSAVerify(key, hash, fbq, abacus.FromI64(5)))
+	dsaReport("dsa s = 0", seal.DSAVerify(key, hash, abacus.FromI64(5), zero))
+	dsaReport("dsa DER r = 0", seal.DSAVerifyDER(key, hash, []u8{0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x05}))
+	dsaReport("dsa DER truncated", seal.DSAVerifyDER(key, hash, []u8{0x30, 0x00}))
+	dsaReport("dsa p = 0", seal.DSAVerify(seal.DSAPublicKey{P: zero, Q: fbq, G: abacus.FromI64(2), Y: abacus.FromI64(3)}, hash, abacus.FromI64(5), abacus.FromI64(7)))
+	dsaReport("dsa q = 1", seal.DSAVerify(seal.DSAPublicKey{P: twentyThree, Q: one, G: abacus.FromI64(2), Y: abacus.FromI64(3)}, hash, one, one))
+	dsaReport("dsa q of five bits", seal.DSAVerify(seal.DSAPublicKey{P: twentyThree, Q: twentyThree, G: abacus.FromI64(2), Y: abacus.FromI64(3)}, hash, abacus.FromI64(5), abacus.FromI64(7)))
+
+	// The FIPS 140-3 verdict is Tin's own: never enabled, never enforced, no module version.
+	say.Line("fips140", seal.FIPS140Enabled(), seal.FIPS140Enforced(), "[" + seal.FIPS140Version() + "]")
+}

@@ -1,0 +1,161 @@
+package main
+
+// The elliptic twin, Tin side: read the corpus of tools/ci/elliptic_check.tin on stdin and print the
+// same lines as bench/ref/elliptic (Go's crypto/elliptic, crypto/dsa and crypto/fips140), so the
+// check can compare them (#927). The line forms are in bench/ref/elliptic/main.go.
+
+import "abacus"
+import "fault"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		let f = twine.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		say.Line(f[0], run(f))
+	}
+}
+
+// run handles one case; a fault becomes "fault", as a Go panic does.
+fn run(f []str) str {
+	let r = dispatch(f) catch err {
+		return faulted(err)
+	}
+	return r
+}
+
+fn dispatch(f []str) !str {
+	let k = f[0]
+	if k == "IS" {
+		let c = curveOf(f[1])
+		let x = try num(f[2])
+		let y = try num(f[3])
+		return yesno(c.IsOnCurve(x, y))
+	}
+	if k == "ADD" {
+		let c = curveOf(f[1])
+		let x1 = try num(f[2])
+		let y1 = try num(f[3])
+		let x2 = try num(f[4])
+		let y2 = try num(f[5])
+		let (x, y) = try c.Add(x1, y1, x2, y2)
+		return point(x, y)
+	}
+	if k == "DBL" {
+		let c = curveOf(f[1])
+		let x = try num(f[2])
+		let y = try num(f[3])
+		let (rx, ry) = try c.Double(x, y)
+		return point(rx, ry)
+	}
+	if k == "MUL" {
+		let c = curveOf(f[1])
+		let x = try num(f[2])
+		let y = try num(f[3])
+		let s = try bytesOf(f[4])
+		let (rx, ry) = try c.ScalarMult(x, y, s)
+		return point(rx, ry)
+	}
+	if k == "BASE" {
+		let c = curveOf(f[1])
+		let s = try bytesOf(f[2])
+		let (rx, ry) = c.ScalarBaseMult(s)
+		return point(rx, ry)
+	}
+	if k == "DSA" {
+		let p = try num(f[1])
+		let q = try num(f[2])
+		let g = try num(f[3])
+		let y = try num(f[4])
+		let pub = seal.DSAPublicKey{P: p, Q: q, G: g, Y: y}
+		let hash = try bytesOf(f[5])
+		let r = try num(f[6])
+		let s = try num(f[7])
+		seal.DSAVerify(pub, hash, r, s) catch err {
+			return verdict(err)
+		}
+		return "verified"
+	}
+	if k == "SPKI" {
+		let der = try bytesOf(f[1])
+		let hash = try bytesOf(f[2])
+		let sig = try bytesOf(f[3])
+		let (pub, keyErr) = seal.ParseDSAPublicKeyDER(der)
+		if keyErr != nil {
+			return "bad key"
+		}
+		seal.DSAVerifyDER(pub, hash, sig) catch err {
+			return verdict(err)
+		}
+		return "verified"
+	}
+	if k == "FIPS" {
+		return "enabled=" + yesno(seal.FIPS140Enabled()) + " enforced=" + yesno(seal.FIPS140Enforced())
+	}
+	return "unknown case " + k
+}
+
+// curveOf is the named NIST curve.
+fn curveOf(name str) dyn seal.Curve {
+	if name == "P-224" {
+		return seal.P224()
+	}
+	if name == "P-256" {
+		return seal.P256()
+	}
+	if name == "P-384" {
+		return seal.P384()
+	}
+	return seal.P521()
+}
+
+// verdict is the class of a DSA fault: bad parameters, or a signature that does not verify.
+fn verdict(err fault) str {
+	if fault.Is(err, seal.ErrDSAParameters) {
+		return "bad parameters"
+	}
+	return "rejected"
+}
+
+// faulted is "fault" for any fault: a Go panic in the same case.
+fn faulted(err fault) str {
+	if err == nil {
+		return "ok"
+	}
+	return "fault"
+}
+
+// point is "x y" in hex, as the Go side prints.
+fn point(x abacus.Int, y abacus.Int) str {
+	return x.Text(16) + " " + y.Text(16)
+}
+
+// yesno is "true" or "false", as Go's fmt prints a bool.
+fn yesno(b bool) str {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// num reads a hex number, with an optional leading minus.
+fn num(s str) !abacus.Int {
+	return try abacus.Parse(s, 16)
+}
+
+// bytesOf reads a hex byte string; "-" is empty.
+fn bytesOf(s str) ![]u8 {
+	if s == "-" {
+		return []u8{}
+	}
+	return try seal.HexDecode(s)
+}
