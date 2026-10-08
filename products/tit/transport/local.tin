@@ -8,18 +8,18 @@ import "tide"
 // Local is a Transport to a Server in the same process: the requests are framed, signed and answered exactly as
 // over HTTP, with no socket. Tests use it, and so can tools that hold both repositories.
 
-// Local reaches server, signing as email with the key whose seed is given ("" email: unsigned).
+// Local reaches server, signing as email with sign ("" email: unsigned).
 type Local struct {
 	server Server
 	email  str
-	seed   secret []u8
+	sign   fn(str) ![]u8
 	nonce  str
 	path   str
 }
 
-// NewLocal is a Local to server, signing as email with seed.
-fn NewLocal(server Server, email str, seed secret []u8) Local {
-	return Local{server: server, email: email, seed: seed, nonce: "", path: ""}
+// NewLocal is a Local to server, signing as email with sign.
+fn NewLocal(server Server, email str, sign fn(str) ![]u8) Local {
+	return Local{server: server, email: email, sign: sign, nonce: "", path: ""}
 }
 
 fn (l mut Local) call(method str, path str, body str) !str {
@@ -36,7 +36,7 @@ fn (l mut Local) call(method str, path str, body str) !str {
 fn (l mut Local) send(method str, path str, body str) !Reply {
 	mut sig = ""
 	if len(l.email) > 0 && len(l.nonce) > 0 {
-		let s = try seal.SignEd25519(l.seed, []u8(SigningPayload(method, path, l.nonce, body)))
+		let s = try l.sign(SigningPayload(method, path, l.nonce, body))
 		sig = SignatureHeader(l.email, l.nonce, s)
 	}
 	return l.server.Handle(method, path, sig, body, tide.Wall() / 1000000000)

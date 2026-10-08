@@ -44,17 +44,18 @@ fn answer(status i64, body str) !str {
 	return ""
 }
 
-// Http reaches a repository at url (http:// or https://), signing as email with the key seed ("" email: unsigned).
+// Http reaches a repository at url (http:// or https://), signing as email with sign, which signs a payload with the
+// user's key (identity.Signer.Sign); "" email: unsigned.
 type Http struct {
 	url   str
 	path  str
 	email str
-	seed  secret []u8
+	sign  fn(str) ![]u8
 	nonce str
 }
 
 // NewHttp is a client of the repository at url.
-fn NewHttp(url str, email str, seed secret []u8) Http {
+fn NewHttp(url str, email str, sign fn(str) ![]u8) Http {
 	mut base = url
 	for twine.HasSuffix(base, "/") {
 		base = base[0:len(base) - 1]
@@ -68,13 +69,13 @@ fn NewHttp(url str, email str, seed secret []u8) Http {
 			path = base[scheme + 3 + slash:]
 		}
 	}
-	return Http{url: base, path: path, email: email, seed: seed, nonce: ""}
+	return Http{url: base, path: path, email: email, sign: sign, nonce: ""}
 }
 
 fn (h mut Http) send(method str, req str, body str) !wire.Resp {
 	mut headers = []str{"Content-Type", "application/x-tit"}
 	if len(h.email) > 0 && len(h.nonce) > 0 {
-		let s = try seal.SignEd25519(h.seed, []u8(SigningPayload(method, h.path + req, h.nonce, body)))
+		let s = try h.sign(SigningPayload(method, h.path + req, h.nonce, body))
 		headers = append(headers, "Tit-Signature", SignatureHeader(h.email, h.nonce, s))
 	}
 	return try wire.DoWith(method, h.url + req, headers, body, wire.Options{Timeout: 600 * 1000000000, MaxBody: 4 * 1024 * 1024 * 1024, MaxIdle: 0})

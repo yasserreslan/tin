@@ -115,11 +115,14 @@ fn keyPair() ([]u8, []u8) {
 fn TestPush(t mut crucible.T) {
 	let dir = repo("push")
 	let (seed, pub) = keyPair()
+	let sign = fn(payload str) ![]u8 {
+		return try seal.SignEd25519(seed, []u8(payload))
+	}
 	mut server = NewServer(dir, "secret", false)
 	server.Allow("ada@example.com", pub)
 	mut client = store.NewMem()
 	let c1 = commitIn(mut client, "a.txt", "one\n", []object.Id{}, object.NewChangeId(), 1700000000)
-	mut l = NewLocal(server, "ada@example.com", seed)
+	mut l = NewLocal(server, "ada@example.com", sign)
 	let a = l.Push(PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{RefUpdate{Name: "refs/heads/main", Old: "", New: c1.Hex()}}}, packOf(mut client, everything(mut client, c1))) catch e {
 		t.Error("push: {e}")
 		return
@@ -160,6 +163,9 @@ fn TestPush(t mut crucible.T) {
 fn TestChangeVersions(t mut crucible.T) {
 	let dir = repo("versions")
 	let (seed, pub) = keyPair()
+	let sign = fn(payload str) ![]u8 {
+		return try seal.SignEd25519(seed, []u8(payload))
+	}
 	mut server = NewServer(dir, "secret", false)
 	server.Allow("ada@example.com", pub)
 	mut client = store.NewMem()
@@ -167,7 +173,7 @@ fn TestChangeVersions(t mut crucible.T) {
 	let v1 = commitIn(mut client, "a.txt", "one\n", []object.Id{}, cid, 1700000000)
 	let v2 = commitIn(mut client, "a.txt", "one, better\n", []object.Id{}, cid, 1700000100)
 	let v3 = commitIn(mut client, "a.txt", "one, other\n", []object.Id{}, cid, 1700000200)
-	mut l = NewLocal(server, "ada@example.com", seed)
+	mut l = NewLocal(server, "ada@example.com", sign)
 	_ = l.Push(PushRequest{Changes: []ChangeUpdate{ChangeUpdate{Change: cid.Letters(), Replaces: "", Commit: v1.Hex()}}, Refs: []RefUpdate{}}, packOf(mut client, everything(mut client, v1))) catch e {
 		t.Error("v1: {e}")
 		PushAnswer{Refs: []str{}}
@@ -196,6 +202,9 @@ fn TestChangeVersions(t mut crucible.T) {
 fn TestAuthentication(t mut crucible.T) {
 	let dir = repo("auth")
 	let (seed, pub) = keyPair()
+	let sign = fn(payload str) ![]u8 {
+		return try seal.SignEd25519(seed, []u8(payload))
+	}
 	let (otherSeed, _) = keyPair()
 	mut server = NewServer(dir, "secret", false)
 	server.Allow("ada@example.com", pub)
@@ -261,6 +270,9 @@ fn signed(s mut store.Mem, signer identity.Signer, id object.Id) object.Id {
 fn TestSigners(t mut crucible.T) {
 	let dir = repo("signers")
 	let (seed, pub) = keyPair()
+	let sign = fn(payload str) ![]u8 {
+		return try seal.SignEd25519(seed, []u8(payload))
+	}
 	mut server = NewServer(dir, "secret", false)
 	server.Allow("ada@example.com", pub)
 	// Ada's commit key, and a first commit whose signers file trusts it
@@ -277,7 +289,7 @@ fn TestSigners(t mut crucible.T) {
 	let signers = "ada@example.com ed25519 " + commitPub + "\n"
 	// a root commit is checked against its own signers file, so it is signed too
 	let c1 = signed(mut client, signer, commitIn(mut client, ".tit-signers", signers, []object.Id{}, object.NewChangeId(), 1700000000))
-	mut l = NewLocal(server, "ada@example.com", seed)
+	mut l = NewLocal(server, "ada@example.com", sign)
 	_ = l.Push(PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{RefUpdate{Name: "refs/heads/main", Old: "", New: c1.Hex()}}}, packOf(mut client, everything(mut client, c1))) catch e {
 		t.Error("the first push: {e}")
 		PushAnswer{Refs: []str{}}
@@ -302,6 +314,9 @@ fn TestSigners(t mut crucible.T) {
 fn TestFetch(t mut crucible.T) {
 	let dir = repo("fetch")
 	let (seed, pub) = keyPair()
+	let sign = fn(payload str) ![]u8 {
+		return try seal.SignEd25519(seed, []u8(payload))
+	}
 	mut server = NewServer(dir, "secret", false)
 	server.Allow("ada@example.com", pub)
 	mut client = store.NewMem()
@@ -311,7 +326,7 @@ fn TestFetch(t mut crucible.T) {
 	for id in everything(mut client, c2) {
 		both = append(both, id)
 	}
-	mut l = NewLocal(server, "ada@example.com", seed)
+	mut l = NewLocal(server, "ada@example.com", sign)
 	_ = l.Push(PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{RefUpdate{Name: "refs/heads/main", Old: "", New: c2.Hex()}}}, packOf(mut client, both)) catch e {
 		t.Error("push: {e}")
 		PushAnswer{Refs: []str{}}
