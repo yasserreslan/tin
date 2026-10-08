@@ -92,6 +92,9 @@ the compiler: write a minimal repro as a test, open an issue and work around it.
   initializer, in `on core.start` or in `once` (examples/percore.tin).
   Clients a handler uses are package-level `use` resources (per core, opened at core start, closed at
   stop): `use cache = redis.Open(redis.Options{Addr: quarry.Getenv("REDIS_ADDR")})`.
+  A cache that handlers write (a global map, or `keep`) is per core too: two requests can read
+  different values; a cache every core sees goes in a `shared let` (atomics, reloaded) or is kept
+  on one core and reached through relay.
 - Tasks: `scope s { ... s.spawn(fn() ! { ... }) ... }` waits for every child (spawned in a loop,
   each spawn captures its own loop variables); the first child fault cancels the rest and is the
   scope's fault. `let t = s.spawn(fn() !T {...})`,

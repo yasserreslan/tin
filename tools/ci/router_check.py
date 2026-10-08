@@ -9,6 +9,7 @@ import random
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from suite import ROOT
@@ -260,6 +261,17 @@ def conformance(port, failures):
     got, _ = first(b'GET http://other.example/files/a/b?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
     if not got.endswith(b'file a/b'):
         failures.append('absolute-form target: %r' % got)
+    # #749: the authority of an absolute-form target replaces Host (RFC 9112 3.2.2); a bad one is 400.
+    got, _ = first(b'GET http://evil.example:8080/host HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+    if not got.endswith(b'host evil.example:8080'):
+        failures.append('absolute-form authority as Host: %r' % got)
+    got, _ = first(b'GET /host HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+    if not got.endswith(b'host x'):
+        failures.append('Host of an origin-form target: %r' % got)
+    for target in (b'http:///host', b'http://a<b/host', b'https://a"b/host'):
+        got, _ = first(b'GET ' + target + b' HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+        if not got.startswith(b'HTTP/1.1 400 '):
+            failures.append('absolute-form target %r with a bad authority: %r' % (target, got[:60]))
     got, closed = first(b'GET /fast HTTP/1.0\r\nConnection: keep-alive\r\n\r\n', wait=0.5)
     if b'\r\nConnection: keep-alive\r\n' not in got or closed:
         failures.append('HTTP/1.0 keep-alive: %r closed=%s' % (got, closed))
@@ -313,12 +325,15 @@ def websockets(port, failures):
 def limits(exe, failures):
     """#173/#174: header, read and idle timeouts close stalled connections, a body over
     TIN_MAX_BODY gets 413, partial requests past the per-core budget get 503, connections past
-    TIN_MAX_CONNS are closed at accept, and a waiting handler outlives the header timeout."""
+    TIN_MAX_CONNS get 503 (closed at accept past a margin), a waiting handler outlives the header
+    timeout, and the plain-program pool warning never fires in a server (#749)."""
     port = ws.free_port()
     env = dict(os.environ, PORT=str(port), TIN_CORES='1', TIN_DEADLINE_MS='5000', TIN_GRACE='1',
                TIN_HEADER_TIMEOUT_MS='1000', TIN_READ_TIMEOUT_MS='2000', TIN_IDLE_TIMEOUT_MS='1500',
-               TIN_MAX_BODY='1000000', TIN_MAX_BUFFERED='3000000', TIN_MAX_CONNS='40')
-    server = subprocess.Popen([str(exe)], env=env)
+               TIN_MAX_BODY='1000000', TIN_MAX_BUFFERED='3000000', TIN_MAX_CONNS='40',
+               TIN_POOL_WARN_MB='1')
+    errlog = tempfile.TemporaryFile()
+    server = subprocess.Popen([str(exe)], env=env, stderr=errlog)
     try:
         for _ in range(100):
             try:
@@ -404,22 +419,83 @@ def limits(exe, failures):
         print('partial 900 kB bodies past a 3 MB budget: %d of 4 refused' % refused)
         if refused != 1:
             failures.append('buffer budget: %d of 4 partial bodies refused, want 1' % refused)
+        # #749: past TIN_MAX_CONNS a connection is kept to answer its first request with 503,
+        # Retry-After and Connection: close (a reset reads as a dead backend); only past 64 more
+        # is it closed at accept.
         time.sleep(0.3)
         many = [conn() for _ in range(45)]
-        time.sleep(0.5)
-        shut = 0
+        time.sleep(0.3)
+        oks = refused = reset = 0
         for c in many:
-            c.settimeout(0.01)
             try:
-                if c.recv(10) == b'':
-                    shut += 1
-            except (socket.timeout, ConnectionResetError):
-                pass
+                c.sendall(b'GET /fast HTTP/1.1\r\nHost: x\r\n\r\n')
+                c.settimeout(2)
+                got = c.recv(300)
+            except OSError:
+                reset += 1
+                continue
+            if got.startswith(b'HTTP/1.1 200 '):
+                oks += 1
+            elif got.startswith(b'HTTP/1.1 503 ') and b'Retry-After: 1\r\n' in got and b'Connection: close\r\n' in got:
+                refused += 1
+            else:
+                reset += 1
         for c in many:
             c.close()
-        print('45 connections with TIN_MAX_CONNS=40: %d closed at accept' % shut)
-        if shut != 5:
-            failures.append('connection cap: %d of 45 closed at accept, want 5' % shut)
+        print('45 connections with TIN_MAX_CONNS=40: %d answered, %d got 503, %d reset' % (oks, refused, reset))
+        if (oks, refused, reset) != (40, 5, 0):
+            failures.append('connection cap: %d answered, %d 503, %d reset; want 40, 5, 0' % (oks, refused, reset))
+        time.sleep(1.5)  # the closed connections above are gone from the core's count
+        many = [conn() for _ in range(40 + 64 + 5)]
+        time.sleep(0.2)
+        oks = refused = shut = 0
+        for c in many:
+            try:
+                c.sendall(b'GET /fast HTTP/1.1\r\nHost: x\r\n\r\n')
+                c.settimeout(2)
+                got = c.recv(300)
+            except OSError:
+                shut += 1
+                continue
+            if got.startswith(b'HTTP/1.1 200 '):
+                oks += 1
+            elif got.startswith(b'HTTP/1.1 503 '):
+                refused += 1
+            else:
+                shut += 1
+        for c in many:
+            c.close()
+        print('109 connections with TIN_MAX_CONNS=40: %d answered, %d got 503, %d closed at accept' % (oks, refused, shut))
+        if (oks, refused, shut) != (40, 64, 5):
+            failures.append('connection cap: %d answered, %d 503, %d closed at accept; want 40, 64, 5' % (oks, refused, shut))
+        # #749: a chunked body past TIN_MAX_BODY (its length is not known up front) gets a 413 the
+        # client can read while it is still sending, as a Content-Length one does.
+        with conn() as s:
+            s.sendall(b'POST /users HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n')
+            chunk = b'%x\r\n' % 65536 + b'z' * 65536 + b'\r\n'
+            try:
+                for _ in range(40):
+                    s.sendall(chunk)
+            except OSError:
+                pass
+            try:
+                got = s.recv(100)
+            except OSError as e:
+                got = repr(e).encode()
+            if not got.startswith(b'HTTP/1.1 413 '):
+                failures.append('chunked body over TIN_MAX_BODY: %r' % got)
+        # #749: a server's file reads grow pools past TIN_POOL_WARN_MB=1, and the warning meant for
+        # a plain program's main loop does not fire (checked on stderr below).
+        big = tempfile.NamedTemporaryFile(prefix='tin-pool-', delete=False)
+        try:
+            big.write(b'p' * 20000000)
+            big.close()
+            for _ in range(3):
+                status, _, body = request(port, 'GET', '/readf?path=' + big.name)
+                if status != 200 or body != b'read 20000000':
+                    failures.append('a 20 MB ReadFile under the pool warning: %r %r' % (status, body[:200]))
+        finally:
+            os.unlink(big.name)
         time.sleep(0.3)
         status, _, body = request(port, 'GET', '/users/7?ms=1500')
         if status != 200 or not body.startswith(b'user 7'):
@@ -428,6 +504,10 @@ def limits(exe, failures):
             failures.append('the server exited during the limit checks')
     finally:
         stop(server)
+    errlog.seek(0)
+    err = errlog.read().decode(errors='replace')
+    if 'memory pool' in err:
+        failures.append('a server printed the plain-program pool warning: %r' % err[-600:])
 
 
 def overflow(exe, failures):

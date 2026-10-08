@@ -99,6 +99,11 @@ fn readf(q anvil.Req, w mut anvil.Out) {
 	w.Text("read {len(data)}")
 }
 
+// host answers with the request's Host (#749: an absolute-form target's authority wins).
+fn host(q anvil.Req, w mut anvil.Out) {
+	w.Text("host " + q.Header("Host"))
+}
+
 fn item(q anvil.Req, w mut anvil.Out) {
 	pause(q) catch err {
 		w.Status(504)
@@ -212,6 +217,7 @@ fn main() {
 	r.Post("/users", create)
 	r.Get(`/files/{path...}`, file)
 	r.Get("/fast", fast)
+	r.Get("/host", host)
 	r.Get("/send", send)
 	r.Get("/readf", readf)
 	r.Get("/boom", boom)

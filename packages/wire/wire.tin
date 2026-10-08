@@ -453,6 +453,10 @@ fn none_resp() Resp {
 // 30 s idle, and at most Options.MaxIdle are kept per host. One the server closed meanwhile is
 // replaced by a new connection without the caller seeing it, for a GET, HEAD, PUT, DELETE,
 // OPTIONS or TRACE; any other method (a POST) fails instead of being sent twice.
+//
+// Do does not follow redirects: a 3xx is returned as the response, with its Location header (Go
+// follows up to 10). Response lines must end in CRLF; a response with bare LF line ends fails
+// (Go accepts it).
 fn Do(method str, url str, headers []str, body str) !Resp {
 	return try DoWith(method, url, headers, body, Options{Timeout: 0, MaxBody: 0, MaxIdle: 0})
 }

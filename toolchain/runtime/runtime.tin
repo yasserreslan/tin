@@ -866,9 +866,11 @@ mut poolWarn i64 // TIN_POOL_WARN_MB in bytes; 0 until read, -1 when off or alre
 // TIN_POOL_WARN_MB (default 512; 0 turns it off). Nothing frees a plain program's pool before
 // it exits, so a loop that allocates on every step grows it until the kernel stops it, and
 // the fix is an arena per step (#629). It watches only the main thread outside any task and
-// arena: a server's requests are tasks, with budgets of their own.
+// arena: a server's requests are tasks, with budgets of their own. A program that runs cores
+// (hearth.Run, as every anvil server does) is not a plain program, and a helper thread's pool
+// goes back after each job, so neither is warned about (#749).
 fn rt_pool_warn(c i64) {
-	if poolWarn < 0 || curTask != 0 || c[ctxArena] != 0 {
+	if poolWarn < 0 || curTask != 0 || c[ctxArena] != 0 || lifeCores > 0 || helperThread {
 		return
 	}
 	if poolWarn == 0 {
@@ -7361,7 +7363,11 @@ fn rt_helper_gone() bool {
 	return helperJob != 0 && __atomic_load(helperJob + 8*jGone) != 0
 }
 
+// helperThread is true on the helper threads (rt_helper_main).
+mut helperThread bool
+
 fn rt_helper_main(id i64) {
+	helperThread = true
 	let buf = calloc(1, 8)
 	for {
 		if rt_sys_read(helperQ[0], buf, 1) != 1 {

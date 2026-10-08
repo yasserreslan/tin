@@ -2418,6 +2418,7 @@ OLD_SYNTAX, E091 ONE_PER_DECLARATION in [ERRORS.md](ERRORS.md)).
 | `time.Millisecond * 200` | `200ms` |
 | `goto`, `fallthrough` | not available |
 | integer arithmetic wraps; shift counts of any size; `int64(1e300)` is implementation-defined | `+ - *` panic on overflow, `+% -% *%` and `@wrap` wrap; shift counts below the width; float to integer panics out of range |
+| `http.Client` follows up to 10 redirects and accepts bare-LF responses | `wire.Do` returns a 3xx as the response and fails on bare-LF line ends |
 | untyped float constants are exact (`0.1 + 0.2` is 0.3) | float constant arithmetic rounds each operation to `f64`, as at run time (`0.1 + 0.2` is 0.30000000000000004) |
 
 <!-- docs-check: old-syntax end -->
