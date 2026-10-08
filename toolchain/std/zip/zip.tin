@@ -8,7 +8,8 @@
 //		say.Line(f.Header.Name, f.Header.Mode(), len(text))
 //	}
 //
-//	mut w = zip.NewWriter(try flume.Create("out.zip"))
+//	let out = try flume.Create("out.zip")
+//	mut w = zip.NewWriter(out)
 //	try w.Create("hello.txt")
 //	_ = try w.Write([]u8("hello, zip"))
 //	try w.Close()

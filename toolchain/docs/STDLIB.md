@@ -37,6 +37,8 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [cairn](#cairn) | containers (container/heap, sets, LRU) |
 | [stamp](#stamp) | hashes and checksums (hash/*) |
 | [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2) |
+| [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2) |
+| [zip](#zip) | ZIP archives (archive/zip) |
 | [ledger](#ledger) | CSV reading and writing (encoding/csv) |
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
@@ -1451,6 +1453,7 @@ Package stamp computes non-cryptographic hashes and checksums: FNV-1a, CRC-32 (I
 
 - `Crc32(s str) u32`: Crc32 is the IEEE CRC-32 of s (as in zip, gzip and PNG).
 - `Crc32Update(crc u32, s str) u32`: Crc32Update continues an IEEE CRC-32 over more data.
+- `Crc32UpdateBytes(crc u32, b []u8) u32`: Crc32UpdateBytes continues an IEEE CRC-32 over the bytes of b, read in place (no string is made).
 - `Crc32C(s str) u32`: Crc32C is the Castagnoli CRC-32 of s (as in iSCSI, ext4 and many databases).
 - `Fnv32a(s str) u32`: Fnv32a is the 32-bit FNV-1a hash of s.
 - `Fnv64a(s str) u64`: Fnv64a is the 64-bit FNV-1a hash of s.
@@ -1483,6 +1486,10 @@ let back = try squash.Gunzip(z, 64mb)
 - `Gunzip(data str, max i64) !str`: Gunzip decompresses gzip data (one member or several back to back), producing at most max bytes. It checks each member's CRC-32 and length, and the header's CRC-16 when there is one.
 - `Zlib(data str, level i64) str`: Zlib compresses data in the zlib format (RFC 1950) at level.
 - `Unzlib(data str, max i64) !str`: Unzlib decompresses zlib data, producing at most max bytes, and checks its Adler-32.
+- `type InflateReader struct`: InflateReader reads the decompressed bytes of a raw DEFLATE stream (RFC 1951) in memory. Read returns 0 once the final block has been read; bytes after it are left alone (Used says where the stream ended).
+- `NewInflateReader(data str, from i64, to i64) InflateReader`: NewInflateReader reads the DEFLATE stream in data[from:to]; to past the stream's end costs nothing, and a stream that needs more than data[from:to] fails with ErrUnexpectedEOF. The window and tables are made at the first Read.
+- `(z InflateReader) Used() i64`: Used is how many bytes of the input the stream has taken so far: after the end, the stream's length.
+- `(z mut InflateReader) Read(buf mut []u8) !i64`: Read fills buf with the next decompressed bytes and returns how many, 0 at the end of the stream. A damaged stream fails with ErrCorrupt or ErrUnexpectedEOF once the bytes before the damage have been read, and keeps failing.
 - `Lz4(data str) str`: Lz4 compresses data as one LZ4 frame: independent 64 KiB blocks, a stored block where compression does not help, and a content checksum.
 - `Lz4NoChecksum(data str) str`: Lz4NoChecksum is Lz4 without the content checksum (the frame Kafka's Java client writes).
 - `Unlz4(data str, max i64) !str`: Unlz4 decompresses LZ4 frames (one or several, and skippable frames), producing at most max bytes.
@@ -1504,6 +1511,124 @@ let back = try squash.Gunzip(z, 64mb)
 - `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
 - `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
+
+## squash
+
+Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4, Zstandard (RFC 8878), LZW (compress/lzw) and bzip2 decompression (compress/bzip2). Every decoder takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input cannot make a huge output.
+
+```tin body
+let z = squash.Gzip("hello, hello, hello", squash.Default)
+let back = try squash.Gunzip(z, 64mb)
+```
+
+- `Bunzip2(data str, max i64) !str`: Bunzip2 decompresses bzip2 data (one stream or several back to back, as Go's compress/bzip2 reads them), checking every block CRC and stream CRC and failing past max bytes of output.
+- `Deflate(data str, level i64) str`: Deflate compresses data as raw DEFLATE at level (Store to Best).
+- `const Store = 0`: Levels for Deflate, Gzip, Zlib and Zstd: Store writes the data uncompressed (in valid frames), Fastest and Best trade speed against size, Default is between.
+- `const Fastest = 1`
+- `const Default = 6`
+- `const Best = 9`
+- `Inflate(data str, max i64) !str`: Inflate decompresses raw DEFLATE data, producing at most max bytes.
+- `Gzip(data str, level i64) str`: Gzip compresses data as one gzip member (no name, no time, OS unknown) at level.
+- `Gunzip(data str, max i64) !str`: Gunzip decompresses gzip data (one member or several back to back), producing at most max bytes. It checks each member's CRC-32 and length, and the header's CRC-16 when there is one.
+- `Zlib(data str, level i64) str`: Zlib compresses data in the zlib format (RFC 1950) at level.
+- `Unzlib(data str, max i64) !str`: Unzlib decompresses zlib data, producing at most max bytes, and checks its Adler-32.
+- `type InflateReader struct`: InflateReader reads the decompressed bytes of a raw DEFLATE stream (RFC 1951) in memory. Read returns 0 once the final block has been read; bytes after it are left alone (Used says where the stream ended).
+- `NewInflateReader(data str, from i64, to i64) InflateReader`: NewInflateReader reads the DEFLATE stream in data[from:to]; to past the stream's end costs nothing, and a stream that needs more than data[from:to] fails with ErrUnexpectedEOF. The window and tables are made at the first Read.
+- `(z InflateReader) Used() i64`: Used is how many bytes of the input the stream has taken so far: after the end, the stream's length.
+- `(z mut InflateReader) Read(buf mut []u8) !i64`: Read fills buf with the next decompressed bytes and returns how many, 0 at the end of the stream. A damaged stream fails with ErrCorrupt or ErrUnexpectedEOF once the bytes before the damage have been read, and keeps failing.
+- `Lz4(data str) str`: Lz4 compresses data as one LZ4 frame: independent 64 KiB blocks, a stored block where compression does not help, and a content checksum.
+- `Lz4NoChecksum(data str) str`: Lz4NoChecksum is Lz4 without the content checksum (the frame Kafka's Java client writes).
+- `Unlz4(data str, max i64) !str`: Unlz4 decompresses LZ4 frames (one or several, and skippable frames), producing at most max bytes.
+- `Lz4BlockOf(data str) str`: Lz4BlockOf compresses data as one bare LZ4 block (no frame).
+- `UnLz4Block(b str, max i64) !str`: UnLz4Block decompresses one bare LZ4 block, producing at most max bytes.
+- `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
+- `const LSB = 1`
+- `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `Snappy(data str) str`: Snappy compresses data as one Snappy block.
+- `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
+- `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
+- `type DeflateWriter[W Writer] struct`: DeflateWriter compresses raw DEFLATE into another writer, a chunk of up to 256 KiB at a time; Close ends the stream. Each chunk is compressed on its own (matches do not reach into the chunk before), which costs a little ratio and bounds the memory.
+- `NewDeflateWriter[W Writer](out W, level i64) DeflateWriter[W]`: NewDeflateWriter is a raw DEFLATE writer into out at level.
+- `NewZlibWriter[W Writer](out W, level i64) !DeflateWriter[W]`: NewZlibWriter is a zlib (RFC 1950) writer into out at level; Close writes the Adler-32 trailer.
+- `(z mut DeflateWriter[W]) Write(data []u8) !i64`: Write takes data, compressing and writing each full chunk.
+- `(z mut DeflateWriter[W]) Close() !`: Close compresses what is buffered, ends the stream and writes the zlib trailer; it does not close the writer below.
+- `InflatePrefix(data str, max i64) !(str, i64)`: InflatePrefix decompresses the raw DEFLATE stream at the start of data (at most max bytes out) and says how many bytes of data the stream took; what follows is left alone.
+- `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
+- `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
+- `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
+
+## zip
+
+Package zip reads and writes ZIP archives like Go's archive/zip: the central directory (not just the local headers), names and comments, MS-DOS and extended times, Unix and MS-DOS modes, the Store and Deflate methods with their CRC-32, data descriptors, and ZIP64 (sizes, offsets and entry counts past 32 and 16 bits).
+
+```tin body
+let r = try zip.OpenReader("site.zip")
+for f in r.File {
+	let text = try f.ReadAll(16mb)          // fault.LimitExceeded past 16 MiB
+	say.Line(f.Header.Name, f.Header.Mode(), len(text))
+}
+
+let out = try flume.Create("out.zip")
+mut w = zip.NewWriter(out)
+try w.Create("hello.txt")
+_ = try w.Write([]u8("hello, zip"))
+try w.Close()
+```
+
+The reader works over the whole archive in memory (NewReader, or OpenReader for a file) and decompresses an entry as it is read (File.Open), so an entry of any size costs a 32 KiB window. An entry that inflates past its declared size fails with ErrFormat, a damaged one with ErrChecksum, a cut one with ErrUnexpectedEOF, as Go's reader does. Unlike Go, a header is a field of File (f.Header.Name) and the Writer itself takes the entry's bytes (w.Write after w.Create), since Tin has no embedding. Reading follows Go byte for byte; tools/ci/zip_check.tin compares the two.
+
+- `type Reader struct`: Reader is an archive's entries, in the central directory's order, and its comment.
+- `type File struct`: File is one entry: its header, and where its bytes are in the archive.
+- `NewReader(data str) !Reader`: NewReader reads the archive in data (all of it, as Go's NewReader(r, size) reads one of size bytes).
+- `OpenReader(path str) !Reader`: OpenReader reads the archive in the file at path (at most 64 MiB, as quarry.ReadFile; quarry.ReadFileBound and NewReader read a larger one).
+- `(r Reader) CheckPaths() !`: CheckPaths fails with ErrInsecurePath if an entry's name is absolute, climbs out with "..", or has a backslash (Go's NewReader with GODEBUG=zipinsecurepath=0); empty names are allowed. Check before extracting to disk.
+- `(f File) DataOffset() !i64`: DataOffset is where the entry's (possibly compressed) bytes start in the archive.
+- `type FileReader struct`: FileReader reads an entry's bytes: Read, then 0 at the end, where the size and the CRC-32 (and the data descriptor's) are checked.
+- `(f File) Open() !FileReader`: Open opens the entry's bytes for reading, decompressed as they are read. A directory reads nothing (or fails with ErrFormat when it claims a size); an unknown method fails with ErrAlgorithm.
+- `(f File) OpenRaw() !FileReader`: OpenRaw opens the entry's bytes as they are stored, with no decompression and no checks.
+- `(f File) ReadAll(most i64) !str`: ReadAll is the entry's whole content, at most most bytes: past that it fails with fault.LimitExceeded, having held no more than most bytes (an entry that inflates past its declared size fails sooner, with ErrFormat).
+- `(r mut FileReader) Read(buf mut []u8) !i64`: Read fills buf with the entry's next bytes and returns how many, 0 at the end. More bytes than the header's size fail with ErrFormat, fewer with ErrUnexpectedEOF, a CRC-32 that does not match with ErrChecksum; a fault repeats on every later Read.
+- `(r mut FileReader) Close() !i64`: Close ends reading; the archive stays in memory, so there is nothing to release.
+- `(s mut sink[W]) Write(data []u8) !i64`
+- `type Writer[W io.Writer] struct`: Writer writes a zip archive to out. Create or CreateHeader starts an entry, Write gives it its bytes, and Close writes the central directory (it does not close out).
+- `NewWriter[W io.Writer](out W) Writer[W]`: NewWriter writes an archive to out.
+- `(w mut Writer[W]) SetOffset(n i64)`: SetOffset says the archive starts n bytes into out (it follows other data, as in a self-extracting program); it must be called before anything is written.
+- `(w mut Writer[W]) SetComment(comment str) !`: SetComment sets the archive's comment, at most 65535 bytes.
+- `(w mut Writer[W]) Create(name str) !`: Create starts an entry named name, compressed with Deflate (a name ending in a slash is a directory).
+- `(w mut Writer[W]) CreateHeader(fh FileHeader) !`: CreateHeader starts an entry described by fh (the writer works on a copy). It sets the UTF-8 flag for a name or comment that needs it, the versions, the data descriptor flag, the MS-DOS time and an extended timestamp from Modified when that is set; a directory gets Store and no sizes.
+- `(w mut Writer[W]) CreateRaw(fh FileHeader) !`: CreateRaw starts an entry whose bytes Write takes as they are (already compressed, as fh's Method and sizes and CRC-32 say). Without the data descriptor flag in fh, the local header carries the sizes.
+- `(w mut Writer[W]) Copy(f File) !`: Copy copies the entry f of a Reader into the archive as it is stored, with no decompression or checks.
+- `(w mut Writer[W]) Write(data []u8) !i64`: Write gives the entry being written more bytes, compressing them as its method says (as they are for CreateRaw). A directory takes no bytes.
+- `(w mut Writer[W]) WriteString(s str) !i64`: WriteString is Write of the bytes of s.
+- `(w mut Writer[W]) Close() !`: Close ends the last entry and writes the central directory and the end records. It does not close out.
+- `const Store = 0`: Compression methods: Store keeps the bytes as they are, Deflate compresses them (RFC 1951).
+- `const Deflate = 8`
+- `const ModeDir = 0x80000000`: File modes, Go's fs.FileMode bits: Mode returns them and SetMode takes them.
+- `const ModeAppend = 0x40000000`
+- `const ModeExclusive = 0x20000000`
+- `const ModeTemporary = 0x10000000`
+- `const ModeSymlink = 0x8000000`
+- `const ModeDevice = 0x4000000`
+- `const ModeNamedPipe = 0x2000000`
+- `const ModeSocket = 0x1000000`
+- `const ModeSetuid = 0x800000`
+- `const ModeSetgid = 0x400000`
+- `const ModeCharDevice = 0x200000`
+- `const ModeSticky = 0x100000`
+- `const ModeIrregular = 0x80000`
+- `const ModeType = 0x8f280000`: ModeType is the type bits of a mode, ModePerm its permission bits.
+- `const ModePerm = 0o777`
+- `type FileHeader struct`: FileHeader describes an entry, with the fields of Go's zip.FileHeader. Modified is the modification time in Unix nanoseconds and ModifiedOffset the zone the MS-DOS fields are in (seconds east of UTC): reading, Go's estimate from the MS-DOS and extended times when both are there (else 0); writing, a Modified of 0 means "not set", and then the MS-DOS fields are written as they are, with no extended timestamp. The 32-bit sizes are 0xffffffff when either size needs ZIP64; the 64-bit ones are always right.
+- `(h FileHeader) IsDir() bool`: IsDir reports whether the entry is a directory: its name ends in a slash.
+- `(h FileHeader) Size() i64`: Size is the entry's uncompressed size (Go's FileInfo().Size()).
+- `(h FileHeader) Mode() u32`: Mode returns the permission and type bits, from the Unix or MS-DOS attributes the creator wrote.
+- `(h mut FileHeader) SetMode(mode u32)`: SetMode sets the permission and type bits, as Unix attributes and the matching MS-DOS ones.
+- `(h FileHeader) ModTime() i64`: ModTime is the time of the MS-DOS fields, in Unix nanoseconds read as UTC (Go's deprecated ModTime).
+- `(h mut FileHeader) SetModTime(ns i64)`: SetModTime sets Modified (in UTC) and the MS-DOS fields to the time ns.
+- `FileInfoHeader(name str, fi quarry.FileInfo) FileHeader`: FileInfoHeader is a header for the file that fi describes, named name (add a slash for a directory): its size, modification time and mode. Set Method to Deflate to compress it.
+- `IsLocal(name str) bool`: IsLocal is Go's filepath.IsLocal on Unix: name is not empty, not absolute, and does not climb out with "..".
+- `FaultKind(err fault) str`: FaultKind lets a caller tell the faults apart without their text: "format", "algorithm", "checksum", "eof", "flate", "limit", "insecure" or "other".
 
 ## ledger
 
