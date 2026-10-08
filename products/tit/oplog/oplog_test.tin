@@ -191,3 +191,52 @@ fn TestRestore(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+fn headOf(d str) str {
+	let h = change.ReadHead(d + "/workspaces/default") catch _ {
+		return ""
+	}
+	return HeadText(h)
+}
+
+// A workspace's HEAD moves with an operation, and goes back with an undo or after a crash, as refs do.
+fn TestHead(t mut crucible.T) {
+	let d = fresh("head")
+	change.WriteHead(d + "/workspaces/default", change.Head.Branch("refs/heads/main")) catch e {
+		t.Error("write head: {e}")
+		return
+	}
+	let head = HeadRef("default")
+	crucible.Equal(mut t, "the name", head, "workspaces/default/HEAD")
+	_ = Run(d, "default", "switch side", Op.Switch("side"), []RefChange{RefChange{Name: "refs/heads/side", Before: "", After: c("1")}, RefChange{Name: head, Before: "ref: refs/heads/main", After: "ref: refs/heads/side"}}) catch e {
+		t.Error("run: {e}")
+		0
+	}
+	crucible.Equal(mut t, "switched", headOf(d), "ref: refs/heads/side")
+	_ = Undo(d, "default", 0) catch e {
+		t.Error("undo: {e}")
+		0
+	}
+	crucible.Equal(mut t, "undone", headOf(d), "ref: refs/heads/main")
+	crucible.Equal(mut t, "the branch too", refText(d, "refs/heads/side"), "")
+	// a HEAD that is not what the operation expects refuses it
+	let (_, err) = Run(d, "default", "detach", Op.Switch(c("1")), []RefChange{RefChange{Name: head, Before: "ref: refs/heads/elsewhere", After: c("1")}})
+	t.True("compare and swap", err != nil && fault.Is(err, change.ErrConflict))
+	crucible.Equal(mut t, "unchanged", headOf(d), "ref: refs/heads/main")
+	// nor does a failed compare-and-swap on a ref put a value in it that it never held
+	let (_, err2) = Run(d, "default", "commit", Op.Commit("kz"), []RefChange{RefChange{Name: "refs/heads/main", Before: c("wrong"), After: c("2")}})
+	t.True("a ref's compare and swap", err2 != nil)
+	crucible.Equal(mut t, "the ref untouched", refText(d, "refs/heads/main"), "")
+	// a crash after HEAD moved, before the commit point
+	let tx = Begin(d, "default", "detach", Op.Switch(c("1")), []RefChange{RefChange{Name: head, Before: "ref: refs/heads/main", After: c("1")}}) catch e {
+		t.Error("begin: {e}")
+		return
+	}
+	t.NoFault("apply", tx.Apply())
+	crucible.Equal(mut t, "detached", headOf(d), c("1"))
+	let (was, rerr) = Recover(d)
+	t.True("recovered", was && rerr == nil)
+	crucible.Equal(mut t, "back on main", headOf(d), "ref: refs/heads/main")
+	quarry.RemoveAll(d) catch _ {
+	}
+}

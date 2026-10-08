@@ -1,0 +1,532 @@
+package transport
+
+import "../change"
+import "../identity"
+import "../object"
+import "../oplog"
+import "../packfile"
+import "../revwalk"
+import "../store"
+import "fault"
+import "flume"
+import "quarry"
+import "seal"
+import "twine"
+import "argo"
+import "constraints"
+
+// The server side of the protocol (#796), over one repository's .tit directory and with no HTTP in it: Handle takes
+// a request's method, path, Tit-Signature header and body and gives the status and body to answer with, so tit serve
+// puts it behind anvil and tests call it directly.
+
+// MaxObject is the largest object a push may hold: 1 GiB.
+const MaxObject = 1024 * 1024 * 1024
+
+// Reply is what to answer a request with.
+type Reply struct {
+	Status i64
+	Body   str
+}
+
+// Server serves one repository.
+type Server struct {
+	// Dir is the repository's .tit directory.
+	Dir    str
+	key    secret str
+	keys   map[str][]str
+	public bool
+	limits Limits
+	seen   map[str]i64
+}
+
+// NewServer serves the repository in dir; key signs its nonces. public lets heads and fetch go unsigned.
+fn NewServer(dir str, key secret str, public bool) Server {
+	return Server{Dir: dir, key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
+}
+
+// Allow lets the holder of an ed25519 public key sign requests as email.
+fn (s mut Server) Allow(email str, pub []u8) {
+	let (have, _) = s.keys[email]
+	mut ks = []str{}
+	for k in have {
+		ks = append(ks, k)
+	}
+	ks = append(ks, str(pub))
+	s.keys[email] = ks
+}
+
+// SetLimits changes the largest pack and the most refs a push may carry.
+fn (s mut Server) SetLimits(l Limits) {
+	s.limits = l
+}
+
+fn refuse(c Code, message str, ref str) Reply {
+	return Reply{Status: Status(c), Body: Frame(Kind.Error, Encode(ErrorAnswer{Code: CodeName(c), Message: message, Ref: ref, Nonce: ""}), "")}
+}
+
+// challenge refuses a request for want of a good signature, with a fresh nonce to sign with.
+fn (s Server) challenge(c Code, message str, now i64) Reply {
+	return Reply{Status: Status(c), Body: Frame(Kind.Error, Encode(ErrorAnswer{Code: CodeName(c), Message: message, Ref: "", Nonce: NewNonce(s.key, now)}), "")}
+}
+
+// codeOf is the code a fault from the checks below carries in its text ("Code: message"), Internal for any other.
+fn codeOf(err fault) (Code, str) {
+	mut m = fault.Message(err)
+	let tail = ": " + fault.Message(ErrRefused)
+	if twine.HasSuffix(m, tail) {
+		m = m[0:len(m) - len(tail)]
+	}
+	let colon = twine.Index(m, ": ")
+	if colon > 0 {
+		let name = m[0:colon]
+		let c = ParseCode(name)
+		if CodeName(c) == name {
+			return c, m[colon + 2:]
+		}
+	}
+	return Code.Internal, m
+}
+
+fn refusal(c Code, message str) ! {
+	fail fault.Wrap(ErrRefused, CodeName(c) + ": " + message)
+}
+
+// Handle answers one request at time now (unix seconds).
+fn (s mut Server) Handle(method str, path str, signature str, body str, now i64) Reply {
+	let (who, err) = s.authenticate(method, path, signature, body, now)
+	if err != nil {
+		let (c, m) = codeOf(err)
+		if c == Code.Unauthorized || c == Code.NonceExpired {
+			return s.challenge(c, m, now)
+		}
+		return refuse(c, m, "")
+	}
+	let push = twine.HasSuffix(path, "/tit/v1/push")
+	if len(who) == 0 && (push || !s.public) {
+		return s.challenge(Code.Unauthorized, "sign the request with your key (tit key makes one)", now)
+	}
+	if method == "GET" && twine.HasSuffix(path, "/tit/v1/heads") {
+		let (h, herr) = s.heads(now)
+		if herr != nil {
+			let (c, m) = codeOf(herr)
+			return refuse(c, m, "")
+		}
+		return Reply{Status: 200, Body: Frame(Kind.HeadsAnswer, Encode(h), "")}
+	}
+	if method == "POST" && twine.HasSuffix(path, "/tit/v1/fetch") {
+		let (answer, ferr) = s.fetch(body)
+		if ferr != nil {
+			let (c, m) = codeOf(ferr)
+			return refuse(c, m, "")
+		}
+		return Reply{Status: 200, Body: answer}
+	}
+	if method == "POST" && push {
+		let (answer, perr) = s.push(body, who, now)
+		if perr != nil {
+			let (c, m) = codeOf(perr)
+			mut ref = ""
+			if c == Code.RefChanged || c == Code.Moved || c == Code.Conflicted {
+				let sp = twine.IndexByte(m, ' ')
+				if sp > 0 {
+					ref = m[0:sp]
+				}
+			}
+			return refuse(c, m, ref)
+		}
+		return Reply{Status: 200, Body: answer}
+	}
+	return refuse(Code.NotFound, "no such request: {method} {path}", "")
+}
+
+// authenticate checks a request's signature: the email it was signed as, "" for an unsigned request. A push's nonce
+// is good once on this server.
+fn (s mut Server) authenticate(method str, path str, signature str, body str, now i64) !str {
+	if len(signature) == 0 {
+		return ""
+	}
+	let (email, nonce, sig) = try ParseSignatureHeader(signature)
+	try CheckNonce(s.key, nonce, now)
+	let (pubs, known) = s.keys[email]
+	if !known {
+		try refusal(Code.Unauthorized, "no key of {email} is allowed here")
+	}
+	let payload = SigningPayload(method, path, nonce, body)
+	mut ok = false
+	for p in pubs {
+		let verr = seal.VerifyEd25519([]u8(p), []u8(payload), sig)
+		if verr == nil {
+			ok = true
+		}
+	}
+	if !ok {
+		try refusal(Code.Unauthorized, "the signature is not {email}'s")
+	}
+	if twine.HasSuffix(path, "/tit/v1/push") {
+		// forget nonces too old to pass CheckNonce, then refuse one seen already
+		mut stale = []str{}
+		for n, at in s.seen {
+			if now - at >= NonceLife {
+				stale = append(stale, n)
+			}
+		}
+		for n in stale {
+			delete(s.seen, n)
+		}
+		let (_, used) = s.seen[nonce]
+		if used {
+			try refusal(Code.NonceExpired, "this nonce was used already")
+		}
+		// a server keeps this past the request: keep() copies it into long-lived memory
+		s.seen[keep(nonce)] = now
+	}
+	return email
+}
+
+// objects is the repository's store: its loose objects and every pack.
+fn objects(dir str) !store.Layered {
+	mut layers = []dyn store.ObjectStore{store.NewLoose(dir + "/objects")}
+	let pdir = dir + "/packs"
+	if quarry.IsDir(pdir) {
+		let names = try quarry.ReadDir(pdir)
+		for n in names {
+			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
+				let p = try packfile.Open(pdir + "/" + n)
+				layers = append(layers, p)
+			}
+		}
+	}
+	return store.NewLayered(layers)
+}
+
+fn (s Server) heads(now i64) !Heads {
+	let refs = change.NewRefs(s.Dir)
+	let all = try refs.List("refs/")
+	mut out = Heads{Refs: []RefHead{}, Changes: []ChangeHead{}, Nonce: NewNonce(s.key, now), Server: "tit 1", Limits: s.limits}
+	for r in all {
+		out.Refs = append(out.Refs, RefHead{Name: r.Name, Target: change.TargetText(r.Target)})
+		match r.Target {
+			Change(c) => {
+				let v = try change.Newest(s.Dir, c)
+				if v != nil {
+					let id = try object.IdOf(v.Hash)
+					out.Changes = append(out.Changes, ChangeHead{Change: c.Letters(), Version: v.Op, Commit: id.Hex()})
+				}
+			}
+			Commit(_) => {
+			}
+		}
+	}
+	return out
+}
+
+// reach adds a tree's objects to want, leaving out those in skip and those added already.
+fn reach[S store.ObjectStore](st mut S, tree object.Id, skip map[str]bool, want mut []object.Id, seen mut map[str]bool) ! {
+	let (_, done) = seen[tree.Bytes()]
+	let (_, skipped) = skip[tree.Bytes()]
+	if done || skipped {
+		return
+	}
+	seen[tree.Bytes()] = true
+	want = append(want, tree)
+	let o = try st.Get(tree)
+	match o {
+		Tree(es) => {
+			for e in es {
+				if e.Mode == object.Mode.Dir {
+					try reach(mut st, e.Id, skip, mut want, mut seen)
+				} else {
+					let (_, d) = seen[e.Id.Bytes()]
+					let (_, k) = skip[e.Id.Bytes()]
+					if !d && !k {
+						seen[e.Id.Bytes()] = true
+						want = append(want, e.Id)
+					}
+				}
+			}
+		}
+		Commit(_) => {
+		}
+		Tag(_) => {
+		}
+		Blob(_) => {
+		}
+	}
+}
+
+// treeObjects is every object of a tree, as a set.
+fn treeObjects[S store.ObjectStore](st mut S, tree object.Id, out mut map[str]bool) ! {
+	let (_, done) = out[tree.Bytes()]
+	if done {
+		return
+	}
+	out[tree.Bytes()] = true
+	let o = try st.Get(tree)
+	match o {
+		Tree(es) => {
+			for e in es {
+				if e.Mode == object.Mode.Dir {
+					try treeObjects(mut st, e.Id, mut out)
+				} else {
+					out[e.Id.Bytes()] = true
+				}
+			}
+		}
+		Commit(_) => {
+		}
+		Tag(_) => {
+		}
+		Blob(_) => {
+		}
+	}
+}
+
+fn commitOf[S store.ObjectStore](st mut S, id object.Id) !object.CommitData {
+	let o = try st.Get(id)
+	return match o {
+		Commit(c) => c
+		Tree(_) => try notCommit(id)
+		Tag(_) => try notCommit(id)
+		Blob(_) => try notCommit(id)
+	}
+}
+
+fn notCommit(id object.Id) !object.CommitData {
+	fail fault.Wrap(ErrRefused, "BadRequest: {id.Hex()} is not a commit")
+}
+
+fn (s Server) fetch(body str) !str {
+	let (k, header, _) = ReadFrame(body) catch e {
+		try refusal(Code.BadRequest, fault.Message(e))
+		return ""
+	}
+	if k != Kind.FetchRequest {
+		try refusal(Code.BadRequest, "a fetch takes a fetch request")
+	}
+	mut req = FetchRequest{Wants: []str{}, Haves: []str{}}
+	argoGet(header, mut req) catch e {
+		try refusal(Code.BadRequest, fault.Message(e))
+	}
+	mut st = try objects(s.Dir)
+	mut wants = []object.Id{}
+	for w in req.Wants {
+		let id = object.ParseId(w) catch _ {
+			try refusal(Code.BadRequest, "{w} is not an id")
+			object.NoId
+		}
+		if !st.Has(id) {
+			try refusal(Code.NotFound, "no commit {w} here")
+		}
+		wants = append(wants, id)
+	}
+	mut haves = []object.Id{}
+	for h in req.Haves {
+		let id = object.ParseId(h) catch _ {
+			continue
+		}
+		if st.Has(id) {
+			haves = append(haves, id)
+		}
+	}
+	let commits = try revwalk.Walk(mut st, wants, haves, revwalk.Order.Topo, 0)
+	// what the client has already: the objects of the trees of its tips
+	mut skip = map[str]bool{}
+	for h in haves {
+		let c = try commitOf(mut st, h)
+		try treeObjects(mut st, c.Tree, mut skip)
+	}
+	mut send = []object.Id{}
+	mut seen = map[str]bool{}
+	for id in commits {
+		send = append(send, id)
+		let c = try commitOf(mut st, id)
+		try reach(mut st, c.Tree, skip, mut send, mut seen)
+	}
+	let tmp = s.Dir + "/tmp-fetch-" + seal.Hex(seal.RandomBytes(8))
+	let p = try packfile.Write(mut st, send, tmp)
+	let data = try flume.ReadFile(p.Path)
+	try quarry.RemoveAll(tmp)
+	return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(send)}), data)
+}
+
+// complete checks that a pushed commit has its tree, its blobs and its parents, in the pack or here.
+fn complete[S store.ObjectStore](st mut S, id object.Id, checked mut map[str]bool) ! {
+	let (_, done) = checked[id.Bytes()]
+	if done {
+		return
+	}
+	checked[id.Bytes()] = true
+	if !st.Has(id) {
+		try refusal(Code.BadPack, "{id.Hex()} is missing")
+	}
+	let o = try st.Get(id)
+	match o {
+		Commit(c) => {
+			try complete(mut st, c.Tree, mut checked)
+			for p in c.Parents {
+				if !st.Has(p) {
+					try refusal(Code.BadPack, "{id.Hex()}'s parent {p.Hex()} is missing")
+				}
+			}
+		}
+		Tree(es) => {
+			for e in es {
+				try complete(mut st, e.Id, mut checked)
+			}
+		}
+		Tag(t) => {
+			try complete(mut st, t.Object, mut checked)
+		}
+		Blob(_) => {
+		}
+	}
+}
+
+fn (s mut Server) push(body str, who str, now i64) !str {
+	let (k, header, data) = ReadFrame(body) catch e {
+		try refusal(Code.BadRequest, fault.Message(e))
+		return ""
+	}
+	if k != Kind.PushRequest {
+		try refusal(Code.BadRequest, "a push takes a push request")
+	}
+	mut req = PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{}}
+	argoGet(header, mut req) catch e {
+		try refusal(Code.BadRequest, fault.Message(e))
+	}
+	if len(data) > s.limits.Pack {
+		try refusal(Code.TooLarge, "a pack of {len(data)} bytes; this server takes {s.limits.Pack}")
+	}
+	if len(req.Refs) + len(req.Changes) > s.limits.Refs {
+		try refusal(Code.TooLarge, "{len(req.Refs) + len(req.Changes)} refs and changes in one push")
+	}
+	// the pack, into memory, in front of the repository
+	mut mem = store.NewMem()
+	mut fresh = []object.Id{}
+	if len(data) > 0 {
+		fresh = packfile.Unpack(data, mut mem, MaxObject) catch e {
+			try refusal(Code.BadPack, fault.Message(e))
+			[]object.Id{}
+		}
+	}
+	let here = try objects(s.Dir)
+	mut layers = []dyn store.ObjectStore{mem, here}
+	mut st = store.NewLayered(layers)
+	use lock = change.Lock(s.Dir)
+	// changes: each replaces the version the server has now
+	for cu in req.Changes {
+		let cid = object.ParseChangeId(cu.Change) catch _ {
+			try refusal(Code.BadRequest, "{cu.Change} is not a change id")
+			object.NewChangeId()
+		}
+		let newest = try change.Newest(s.Dir, cid)
+		mut have = ""
+		if newest != nil {
+			let nid = try object.IdOf(newest.Hash)
+			have = nid.Hex()
+		}
+		if have != cu.Replaces {
+			mut what = "a new change"
+			if len(cu.Replaces) > 0 {
+				what = "version " + cu.Replaces[0:12]
+			}
+			mut there = "none"
+			if len(have) > 0 {
+				there = have[0:12]
+			}
+			try refusal(Code.Moved, "{cu.Change} has version {there} here; this push replaces {what}")
+		}
+		let cmt = object.ParseId(cu.Commit) catch _ {
+			try refusal(Code.BadRequest, "{cu.Commit} is not an id")
+			object.NoId
+		}
+		let c = try commitOf(mut st, cmt)
+		if c.Change.Letters() != cu.Change {
+			try refusal(Code.BadRequest, "{cu.Commit} is not a version of {cu.Change}")
+		}
+	}
+	// refs: each holds what the push says it holds
+	let refs = change.NewRefs(s.Dir)
+	mut moves = []oplog.RefChange{}
+	mut checked = map[str]bool{}
+	for ru in req.Refs {
+		try change.CheckName(ru.Name)
+		let cur = try refs.Get(ru.Name)
+		mut now2 = ""
+		if cur != nil {
+			now2 = change.TargetText(cur.Target)
+		}
+		if now2 != ru.Old {
+			try refusal(Code.RefChanged, "{ru.Name} moved: it holds {short(now2)} here, not {short(ru.Old)}")
+		}
+		if len(ru.New) > 0 && !twine.HasPrefix(ru.New, "change ") {
+			let id = object.ParseId(ru.New) catch _ {
+				try refusal(Code.BadRequest, "{ru.New} is not an id")
+				object.NoId
+			}
+			try complete(mut st, id, mut checked)
+		}
+		moves = append(moves, oplog.RefChange{Name: ru.Name, Before: ru.Old, After: ru.New})
+	}
+	for cu in req.Changes {
+		let id = try object.ParseId(cu.Commit)
+		try complete(mut st, id, mut checked)
+	}
+	// signatures, where the repository keeps a signers file
+	for idb, _ in checked {
+		let id = try object.IdOf(idb)
+		let (kind, _) = try st.GetRaw(id)
+		if kind != object.Kind.Commit || here.Has(id) {
+			continue
+		}
+		let c = try commitOf(mut st, id)
+		mut from = id
+		if len(c.Parents) > 0 {
+			from = c.Parents[0]
+		}
+		let keys = try identity.SignersAt(mut st, from)
+		if len(keys) > 0 {
+			identity.VerifyCommit(c, keys) catch e {
+				try refusal(Code.BadSignature, "{id.Hex()[0:12]}: {fault.Message(e)}")
+			}
+		}
+	}
+	// data first: the new objects as a pack of this repository's own, then the versions and refs in one operation
+	mut keepIds = []object.Id{}
+	for id in fresh {
+		if !here.Has(id) {
+			keepIds = append(keepIds, id)
+		}
+	}
+	if len(keepIds) > 0 {
+		mut p = try packfile.Write(mut mem, keepIds, s.Dir + "/packs")
+		try p.Verify()
+	}
+	use tx = oplog.Begin(s.Dir, "server", "push by " + who, oplog.Op.Push(who), moves)
+	try tx.Apply()
+	for cu in req.Changes {
+		let cid = try object.ParseChangeId(cu.Change)
+		let id = try object.ParseId(cu.Commit)
+		try change.AddVersion(s.Dir, cid, change.NewVersion(tx.Number(), id, now * 1000000000))
+	}
+	try tx.Commit()
+	mut names = []str{}
+	for ru in req.Refs {
+		names = append(names, ru.Name)
+	}
+	return Frame(Kind.PushAnswer, Encode(PushAnswer{Refs: names}), "")
+}
+
+fn short(text str) str {
+	if len(text) == 0 {
+		return "nothing"
+	}
+	if len(text) == 64 {
+		return text[0:12]
+	}
+	return text
+}
+
+fn argoGet[T constraints.Any](text str, v mut T) ! {
+	try argo.Get(text, mut v)
+}

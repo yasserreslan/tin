@@ -135,8 +135,69 @@ fn textOf(t ?change.Target) str {
 	return change.TargetText(t)
 }
 
+// A ref change named workspaces/<name>/HEAD is that workspace's HEAD rather than a ref: its texts are what the HEAD
+// file holds ("ref: <branch>", or a commit). So switching, undoing a switch and recovering from a crash move HEAD
+// the way they move refs.
+
+// HeadRef is the name of a workspace's HEAD in ref changes.
+fn HeadRef(workspace str) str {
+	return "workspaces/" + workspace + "/HEAD"
+}
+
+// HeadText is a HEAD as its file and ref changes write it.
+fn HeadText(h change.Head) str {
+	return match h {
+		Branch(name) => "ref: " + name
+		Detached(t) => change.TargetText(t)
+	}
+}
+
+fn isHead(name str) bool {
+	return twine.HasPrefix(name, "workspaces/") && twine.HasSuffix(name, "/HEAD")
+}
+
+fn headText(dir str, name str) !str {
+	let ws = dir + "/" + name[0:len(name) - 5]
+	if !quarry.Exists(ws + "/HEAD") {
+		return ""
+	}
+	let h = try change.ReadHead(ws)
+	return HeadText(h)
+}
+
+fn writeHead(dir str, name str, text str) ! {
+	let ws = dir + "/" + name[0:len(name) - 5]
+	if twine.HasPrefix(text, "ref: ") {
+		try change.WriteHead(ws, change.Head.Branch(text[5:]))
+		return
+	}
+	let t = try change.ParseTarget(text)
+	try change.WriteHead(ws, change.Head.Detached(t))
+}
+
+// current is what a ref (or a workspace's HEAD) holds now, as text.
+fn current(dir str, refs change.Refs, name str) !str {
+	if isHead(name) {
+		return try headText(dir, name)
+	}
+	let cur = try refs.Get(name)
+	if cur == nil {
+		return ""
+	}
+	return change.TargetText(cur.Target)
+}
+
 // setRef moves a ref from what it holds now to text ("" deletes it), for recovery and rollback.
-fn setRef(refs mut change.Refs, name str, text str) ! {
+fn setRef(dir str, refs mut change.Refs, name str, text str) ! {
+	if isHead(name) {
+		if len(text) > 0 {
+			let now = try headText(dir, name)
+			if now != text {
+				try writeHead(dir, name, text)
+			}
+		}
+		return
+	}
 	let cur = try refs.Get(name)
 	mut now ?change.Target = nil
 	if cur != nil {
@@ -178,6 +239,14 @@ fn (tx Tx) Number() i64 {
 fn (tx Tx) Apply() ! {
 	mut refs = change.NewRefs(tx.dir)
 	for rc in tx.rec.Refs {
+		if isHead(rc.Name) {
+			let now = try headText(tx.dir, rc.Name)
+			if now != rc.Before {
+				fail fault.Wrap(change.ErrConflict, "{rc.Name} holds {now}, not {rc.Before}")
+			}
+			try writeHead(tx.dir, rc.Name, rc.After)
+			continue
+		}
 		let before = try target(rc.Before)
 		let after = try target(rc.After)
 		try refs.Update(rc.Name, before, after)
@@ -195,8 +264,8 @@ fn (tx Tx) Close() ! {
 	_ = try Recover(tx.dir)
 }
 
-// Recover finishes what a crash left: an operation still pending did not reach its commit point, so each of its refs
-// is set back to Before and the pending record is removed. True when there was one.
+// Recover finishes what a crash left: an operation still pending did not reach its commit point, so each ref it moved
+// (each that holds its After) is set back to Before and the pending record is removed. True when there was one.
 fn Recover(dir str) !bool {
 	let p = pendingPath(dir)
 	if !quarry.Exists(p) {
@@ -211,7 +280,12 @@ fn Recover(dir str) !bool {
 	}
 	mut refs = change.NewRefs(dir)
 	for rc in r.Refs {
-		try setRef(mut refs, rc.Name, rc.Before)
+		// only a ref the operation moved goes back: one that still holds Before was not reached, and one that holds
+		// something else was never the operation's (its compare-and-swap failed), so it is left alone
+		let now = try current(dir, refs, rc.Name)
+		if now == rc.After && now != rc.Before {
+			try setRef(dir, mut refs, rc.Name, rc.Before)
+		}
 	}
 	try quarry.Remove(p)
 	return true
@@ -304,14 +378,10 @@ fn reversed(rs []RefChange) []RefChange {
 // checkUnmoved fails with ErrMoved when a ref no longer holds what op left in it, naming the later operation (and its
 // workspace) that moved it.
 fn checkUnmoved(dir str, rs []Record, rec Record, refsOf []RefChange) ! {
-	mut refs = change.NewRefs(dir)
+	let refs = change.NewRefs(dir)
 	for rc in refsOf {
-		let cur = try refs.Get(rc.Name)
-		mut now ?change.Target = nil
-		if cur != nil {
-			now = cur.Target
-		}
-		if textOf(now) != rc.Before {
+		let now = try current(dir, refs, rc.Name)
+		if now != rc.Before {
 			mut who = "something outside the oplog"
 			for later in rs {
 				if later.Number <= rec.Number {
@@ -328,9 +398,8 @@ fn checkUnmoved(dir str, rs []Record, rec Record, refsOf []RefChange) ! {
 	}
 }
 
-// Undo reverses operation n (0: the newest of the workspace that is not undone and is not itself an undo or redo). It
-// refuses when a later operation moved any of its refs.
-fn Undo(dir str, workspace str, n i64) !i64 {
+// UndoPlan is the operation Undo would reverse and the ref changes it would make, without making them.
+fn UndoPlan(dir str, workspace str, n i64) !(Record, []RefChange) {
 	let rs = try List(dir)
 	let gone = undone(rs)
 	mut pick = -1
@@ -353,11 +422,18 @@ fn Undo(dir str, workspace str, n i64) !i64 {
 	}
 	let back = reversed(rec.Refs)
 	try checkUnmoved(dir, rs, rec, back)
+	return rec, back
+}
+
+// Undo reverses operation n (0: the newest of the workspace that is not undone and is not itself an undo or redo). It
+// refuses when a later operation moved any of its refs.
+fn Undo(dir str, workspace str, n i64) !i64 {
+	let (rec, back) = try UndoPlan(dir, workspace, n)
 	return try Run(dir, workspace, "undo {rec.Number}", Op.Undo(rec.Number), back)
 }
 
-// Redo applies again the newest operation of the workspace that an undo reversed.
-fn Redo(dir str, workspace str) !i64 {
+// RedoPlan is the operation Redo would apply again and its ref changes, without making them.
+fn RedoPlan(dir str, workspace str) !(Record, []RefChange) {
 	let rs = try List(dir)
 	let gone = undone(rs)
 	mut pick = -1
@@ -372,7 +448,13 @@ fn Redo(dir str, workspace str) !i64 {
 	}
 	let rec = rs[pick]
 	try checkUnmoved(dir, rs, rec, rec.Refs)
-	return try Run(dir, workspace, "redo {rec.Number}", Op.Redo(rec.Number), rec.Refs)
+	return rec, rec.Refs
+}
+
+// Redo applies again the newest operation of the workspace that an undo reversed.
+fn Redo(dir str, workspace str) !i64 {
+	let (rec, refs) = try RedoPlan(dir, workspace)
+	return try Run(dir, workspace, "redo {rec.Number}", Op.Redo(rec.Number), refs)
 }
 
 // RestorePlan is the ref changes that put every ref back to its value right after operation n.
@@ -391,7 +473,7 @@ fn RestorePlan(dir str, n i64) ![]RefChange {
 			}
 		}
 	}
-	mut refs = change.NewRefs(dir)
+	let refs = change.NewRefs(dir)
 	mut plan = []RefChange{}
 	mut sorted = []str{}
 	for name, _ in names {
@@ -399,13 +481,10 @@ fn RestorePlan(dir str, n i64) ![]RefChange {
 	}
 	sift.Sort(mut sorted)
 	for name in sorted {
-		let cur = try refs.Get(name)
-		mut now ?change.Target = nil
-		if cur != nil {
-			now = cur.Target
-		}
-		if textOf(now) != at[name] {
-			plan = append(plan, RefChange{Name: name, Before: textOf(now), After: at[name]})
+		let now = try current(dir, refs, name)
+		// a HEAD is never removed: a workspace always has one
+		if now != at[name] && !(isHead(name) && len(at[name]) == 0) {
+			plan = append(plan, RefChange{Name: name, Before: now, After: at[name]})
 		}
 	}
 	return plan

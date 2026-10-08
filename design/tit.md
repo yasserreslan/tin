@@ -320,9 +320,13 @@ say how it is undone: `match` on `Op` has no `_` arm anywhere in tit.
 6. Release the lock.
 
 **Recovery**, when a command opens the repository and finds `pending.op`: the operation did not reach its
-commit point, so every ref in it is set back to `Before` (whether or not step 4 got to it), the workspace files
-are restored from the snapshot, and `pending.op` is removed. The repository is then exactly as before the
-operation.
+commit point, so every ref it moved (every ref holding its `After`) is set back to `Before`, the workspace files
+are restored from the snapshot, and `pending.op` is removed. A ref still at `Before` was not reached; a ref holding
+neither was never the operation's (its compare-and-swap failed) and is left alone. The repository is then exactly
+as before the operation.
+
+A ref change named `workspaces/<name>/HEAD` is that workspace's HEAD, written as its file holds it (`ref: <branch>`
+or a commit): a switch records it, so undo, redo, restore and recovery move HEAD the way they move refs.
 
 **Undo** of operation *n* is a new operation whose ref changes are *n*'s reversed. It applies only if every
 ref is still at *n*'s `After`; otherwise it fails with `oplog.ErrMoved`, naming the ref and the workspace whose
@@ -390,7 +394,7 @@ shape Clock {
 
 Hot paths take a store as a type parameter (`fn walk[S store.ObjectStore](s S, …)`, monomorphized); layers
 hold `dyn store.ObjectStore` (a memory store over a pack store over a lazy remote store). `Transport` is fixed
-by #794 in its own section of this file.
+by #794 in section 15.
 
 ## 14. Faults
 
@@ -411,6 +415,104 @@ Each package declares its sentinels as `let ErrX = fault("…")` and wraps them 
 | `ErrDirty` | worktree | a switch would overwrite uncommitted changes |
 | `ErrNoIdentity` | identity | no `user.name`, `user.email` or key |
 | `ErrBadSignature` | identity | a signature that does not verify against the signers file |
-| `ErrNotFastForward` | transport | the server's branch moved |
+| `ErrRefused` | transport | the server refused a request; the fault's text has its `Code` and message |
 
 A panic on bad input is a bug: every decoder is tested with damaged input inside `guard` (#806).
+
+## 15. The tit protocol, version 1
+
+Status: **proposed** by #794, for #795 (the client, `tit/transport`), #796 (`tit serve`) and tinhub later. The
+stub types are in `products/tit/transport`.
+
+### Requests
+
+Three requests over HTTP or HTTPS (`wire`), under a repository's URL (`remote.<name>.url`):
+
+| request | body | answer |
+|---|---|---|
+| `GET <url>/tit/v1/heads` | none | the refs, the newest version of each change a ref follows, a nonce |
+| `POST <url>/tit/v1/fetch` | wants and haves | a pack with what the wants reach and the haves do not |
+| `POST <url>/tit/v1/push` | change versions, ref updates, a pack | which refs moved, or why nothing did |
+
+### Message encoding
+
+A body is a frame: `"TITP"`, u8 protocol version (1), u8 kind, u32 little-endian length *n*, *n* bytes of
+header (JSON, `argo`), then for the kinds that carry objects a tit pack (section 6) to the end of the body.
+Kinds: 1 heads answer, 2 fetch request, 3 fetch answer (header and pack), 4 push request (header and pack),
+5 push answer, 6 error. A header is at most 16 MiB. A reader rejects any other magic, version or kind with
+`BadRequest`; a later version is a new path (`/tit/v2/`), never a changed frame.
+
+```text
+heads answer:   {"refs": [{"name": "refs/heads/main", "target": "<hex> | change <letters>"}],
+                 "changes": [{"change": "<letters>", "version": <op>, "commit": "<hex>"}],
+                 "nonce": "<base64>", "server": "tit 1", "limits": {"pack": <bytes>, "refs": <count>}}
+fetch request:  {"wants": ["<hex>"], "haves": ["<hex>"]}
+fetch answer:   {"objects": <count>}                                  then the pack
+push request:   {"changes": [{"change": "<letters>", "replaces": "<hex> | \"\"", "commit": "<hex>"}],
+                 "refs": [{"name": "refs/heads/main", "old": "<target text> | \"\"", "new": "<target text> | \"\""}]}
+                                                                       then the pack
+push answer:    {"refs": ["refs/heads/main"]}
+error:          {"code": "<Code>", "message": "<text for a person>", "ref": "<name, when one is to blame>",
+                 "nonce": "<base64, on Unauthorized and NonceExpired>"}
+```
+
+Fetch is one round: the client names as haves the tips it has (every local ref), the server ignores those it
+does not know and sends a self-contained pack (no delta against an object outside it) of everything reachable
+from the wants and from none of the known haves. Clone is heads, then fetch with no haves.
+
+### Push
+
+The server takes a push whole or not at all, under its repository lock, in one operation (`Op.Push`):
+
+1. The signature and its nonce check (below), or `Unauthorized` / `NonceExpired`.
+2. Every change's newest version on the server equals the version the push says it replaces (`""` for a new
+   change), or `Moved`, naming the change: someone pushed a newer version since this client fetched.
+3. Every ref holds the push's `old` value, or `RefChanged` naming the ref (compare-and-swap, as section 8).
+4. No pushed commit records a conflict (#786): `Conflicted`, naming the change.
+5. The pack verifies (section 6) and is complete: every pushed commit's tree, parents and blobs are in the pack
+   or already on the server, or `BadPack`.
+6. When the repository has a `.tit-signers` file, each pushed commit verifies against it as of its first parent
+   (section 11), or `BadSignature`.
+7. The pack is written, the change versions are added and the refs moved; the answer lists the refs.
+
+The version check is the main defence against a replayed or stale push: a push recorded and sent again names
+versions that have moved since.
+
+### Authentication
+
+The server keeps each user's ed25519 public keys (the same keys `tit key` makes). Every request may carry
+`Tit-Signature: <email> <nonce> <base64 of 64 bytes>`, an ed25519 signature over
+
+```text
+"tit v1 " + method + " " + path + "\n" + nonce + "\n" + hex(SHA-256(body)) + "\n"
+```
+
+where the nonce is the one the last heads answer gave. An `Unauthorized` or `NonceExpired` error carries a fresh
+nonce, so a client with no nonce yet (or an old one) signs with it and sends the request once more. Fetch and heads may go unsigned where the repository is
+public; push is always signed. The nonce is `base64(u64 big-endian unix seconds, 16 random bytes,
+HMAC-SHA256(server secret, the first 24 bytes))`: the server checks the HMAC and that the time is less than 60 s
+old, so any node of a service checks it with no shared store, and a signed request cannot be sent again after a
+minute (and within the minute, the version check above refuses it).
+
+### Errors and limits
+
+Errors answer with an HTTP status (400, 401, 403, 404, 409, 413 or 500) and an error frame whose code is one of
+`BadRequest`, `Unauthorized`, `NonceExpired`, `NotFound`, `Moved`, `RefChanged`, `Conflicted`, `BadPack`,
+`BadSignature`, `TooLarge`, `Internal` (`transport.Code`). The heads answer gives the server's limits: the
+largest pack it takes (default 2 GiB) and the most refs in one push (default 10 000). The client retries heads
+and fetch (`policy.Retry(3)`, each inside `within`); a push is retried only by running the command again, which
+fetches first.
+
+### In Tin
+
+```tin
+// package transport: the client (#795) and an in-process server for tests both satisfy it
+shape Transport {
+	mut Heads() !Heads
+	mut Fetch(req FetchRequest) !(FetchAnswer, str)       // the header and the pack
+	mut Push(req PushRequest, pack str) !PushAnswer        // fails with ErrRefused (its Code) on any refusal
+}
+```
+
+`Frame` and `ReadFrame` write and read the message encoding, `NewNonce` and `CheckNonce` make and check nonces,
+`SigningPayload` is the bytes a request signature covers.

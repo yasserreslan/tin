@@ -10,6 +10,7 @@ import "../store"
 import "../worktree"
 import "fault"
 import "quarry"
+import "trail"
 import "twine"
 
 // Opening a repository: the workspace around the current directory (or -C), its objects (loose files and every pack,
@@ -18,8 +19,9 @@ import "twine"
 // Repo is an open repository.
 type Repo struct {
 	Ws    worktree.Workspace
-	Store store.Layered
-	ids   objects
+	Store  store.Layered
+	ids    objects
+	layers []dyn store.ObjectStore
 }
 
 // objects finds ids by prefix in the loose store and the packs.
@@ -63,7 +65,39 @@ fn open(g Global) !Repo {
 			}
 		}
 	}
-	return Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}}
+	return Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}, layers: layers}
+}
+
+// scratch is the repository's store with an in-memory layer in front that takes the writes: for objects a command
+// needs only while it runs (the working directory's files for a diff, the index's tree), which never reach .tit.
+fn (r Repo) scratch() store.Layered {
+	mut layers = []dyn store.ObjectStore{store.NewMem()}
+	for l in r.layers {
+		layers = append(layers, l)
+	}
+	return store.NewLayered(layers)
+}
+
+// rel is a path the user gave (relative to the current directory, or -C) as a path relative to the working
+// directory's root, "" for the root itself.
+fn (r Repo) rel(g Global, path str) !str {
+	mut base = g.Dir
+	if len(base) == 0 {
+		base = try quarry.Getwd()
+	}
+	mut full = path
+	if len(path) == 0 || path[0] != '/' {
+		full = trail.Join2(base, path)
+	}
+	let root = trail.Clean(r.Ws.Root)
+	let rel = try trail.Rel(root, trail.Clean(full))
+	if rel == "." {
+		return ""
+	}
+	if rel == ".." || twine.HasPrefix(rel, "../") {
+		fail fault.Wrap(ErrUsage, "{path} is outside the working directory {root}")
+	}
+	return rel
 }
 
 // resolve is the commit a revision names.

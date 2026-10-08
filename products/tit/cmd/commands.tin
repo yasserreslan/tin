@@ -2,6 +2,7 @@ package cmd
 
 import "../change"
 import "../diff"
+import "../git"
 import "../identity"
 import "../ignore"
 import "../index"
@@ -11,6 +12,7 @@ import "argo"
 import "fault"
 import "quarry"
 import "seal"
+import "sift"
 import "tide"
 import "trail"
 
@@ -64,7 +66,162 @@ fn fpath(f index.FileStatus) str {
 	}
 }
 
-fn doStatus(g Global, o mut Out) ! {
+// collapse shows an untracked directory with no tracked files in it as "dir/", as git does, instead of each file.
+fn collapse(untracked []str, idx index.Index) []str {
+	mut tracked = map[str]bool{}
+	for e in idx.Entries {
+		for i in 0..len(e.Path) {
+			if e.Path[i] == '/' {
+				tracked[e.Path[0:i]] = true
+			}
+		}
+	}
+	mut out = []str{}
+	mut seen = map[str]bool{}
+	for p in untracked {
+		mut shown = p
+		for i in 0..len(p) {
+			if p[i] == '/' {
+				let (_, t) = tracked[p[0:i]]
+				if !t {
+					shown = p[0:i + 1]
+					break
+				}
+			}
+		}
+		let (_, dup) = seen[shown]
+		if !dup {
+			seen[shown] = true
+			out = append(out, shown)
+		}
+	}
+	return out
+}
+
+// stagedRenames finds, among the staged additions and deletions, the files that moved (as git's status does): new path
+// to old path.
+fn stagedRenames(r mut Repo, idx index.Index, head object.Id, rep index.Report) !map[str]str {
+	mut out = map[str]str{}
+	mut adds = 0
+	mut dels = 0
+	for f in rep.Staged {
+		if letter(f) == "A" {
+			adds += 1
+		} else if letter(f) == "D" {
+			dels += 1
+		}
+	}
+	if adds == 0 || dels == 0 {
+		return out
+	}
+	mut s = r.scratch()
+	let staged = try index.WriteTree(mut s, idx)
+	let changes = try diff.TreeDiff(mut s, head, staged, true)
+	for c in changes {
+		if c.Kind == diff.Kind.Renamed {
+			out[c.Path] = c.OldPath
+		}
+	}
+	return out
+}
+
+// stagedLines is each staged change as a letter and its path, a move as "R old -> new".
+fn stagedLines(rep index.Report, renames map[str]str) []str {
+	mut renamedFrom = map[str]bool{}
+	for _, old in renames {
+		renamedFrom[old] = true
+	}
+	mut out = []str{}
+	for f in rep.Staged {
+		let p = fpath(f)
+		let (_, gone) = renamedFrom[p]
+		let (old, moved) = renames[p]
+		if gone && letter(f) == "D" {
+			continue
+		}
+		if moved && letter(f) == "A" {
+			out = append(out, "R " + old + " -> " + p)
+		} else {
+			out = append(out, letter(f) + " " + p)
+		}
+	}
+	return out
+}
+
+// porcelain is status in git's short form: a staged and an unstaged letter per changed path, in path order, then
+// "??" for each untracked path.
+// conflictCode is git's two letters for a conflicted path, from the stages it has.
+fn conflictCode(idx index.Index, path str) str {
+	let (b, o, t) = idx.Stages(path)
+	if !b && o && t {
+		return "AA"
+	}
+	if b && !o && t {
+		return "DU"
+	}
+	if b && o && !t {
+		return "UD"
+	}
+	if !b && o && !t {
+		return "AU"
+	}
+	if !b && !o && t {
+		return "UA"
+	}
+	return "UU"
+}
+
+fn porcelain(rep index.Report, untracked []str, renames map[str]str, idx index.Index) []str {
+	mut codes = map[str][]str{}
+	mut paths = []str{}
+	mut renamedFrom = map[str]bool{}
+	for _, old in renames {
+		renamedFrom[old] = true
+	}
+	for f in rep.Staged {
+		let p = fpath(f)
+		let (_, gone) = renamedFrom[p]
+		if gone && letter(f) == "D" {
+			continue
+		}
+		let (cur, ok) = codes[p]
+		if !ok {
+			paths = append(paths, p)
+			codes[p] = []str{letter(f), " "}
+		} else {
+			codes[p] = []str{letter(f), cur[1]}
+		}
+	}
+	for f in rep.Unstaged {
+		let p = fpath(f)
+		let (cur, ok) = codes[p]
+		if !ok {
+			paths = append(paths, p)
+			codes[p] = []str{" ", letter(f)}
+		} else {
+			codes[p] = []str{cur[0], letter(f)}
+		}
+	}
+	sift.Sort(mut paths)
+	mut out = []str{}
+	for p in paths {
+		let (c, _) = codes[p]
+		let (old, moved) = renames[p]
+		if c[0] == "U" {
+			out = append(out, conflictCode(idx, p) + " " + p)
+		} else if moved && c[0] == "A" {
+			out = append(out, "R" + c[1] + " " + old + " -> " + p)
+		} else {
+			out = append(out, c[0] + c[1] + " " + p)
+		}
+	}
+	for p in untracked {
+		out = append(out, "?? " + p)
+	}
+	return out
+}
+
+fn doStatus(g Global, short bool, o mut Out) ! {
 	mut r = try open(g)
 	mut idx = try r.readIndex()
 	let head = try r.headCommit()
@@ -76,11 +233,17 @@ fn doStatus(g Global, o mut Out) ! {
 	let rep = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
 	// unchanged files' new stat goes back into the index, so the next status skips them
 	try idx.Write(r.Ws.IndexPath())
-	if g.Json {
-		mut j = statusJson{staged: []str{}, unstaged: []str{}, untracked: rep.Untracked}
-		for f in rep.Staged {
-			j.staged = append(j.staged, letter(f) + " " + fpath(f))
+	let untracked = collapse(rep.Untracked, idx)
+	let renames = try stagedRenames(mut r, idx, tree, rep)
+	if short && !g.Json {
+		for line in porcelain(rep, untracked, renames, idx) {
+			o.Line(line)
 		}
+		return
+	}
+	if g.Json {
+		mut j = statusJson{staged: []str{}, unstaged: []str{}, untracked: untracked}
+		j.staged = stagedLines(rep, renames)
 		for f in rep.Unstaged {
 			j.unstaged = append(j.unstaged, letter(f) + " " + fpath(f))
 		}
@@ -95,8 +258,8 @@ fn doStatus(g Global, o mut Out) ! {
 	}
 	if len(rep.Staged) > 0 {
 		o.Line("Staged for the next commit:")
-		for f in rep.Staged {
-			o.Line("  " + paint(g, "32", letter(f) + " " + fpath(f)))
+		for line in stagedLines(rep, renames) {
+			o.Line("  " + paint(g, "32", line))
 		}
 	}
 	if len(rep.Unstaged) > 0 {
@@ -105,9 +268,9 @@ fn doStatus(g Global, o mut Out) ! {
 			o.Line("  " + paint(g, "31", letter(f) + " " + fpath(f)))
 		}
 	}
-	if len(rep.Untracked) > 0 {
+	if len(untracked) > 0 {
 		o.Line("Untracked:")
-		for p in rep.Untracked {
+		for p in untracked {
 			o.Line("  " + paint(g, "31", p))
 		}
 	}
@@ -246,9 +409,39 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 		order = revwalk.Order.Topo
 	}
 	let ids = try revwalk.Walk(mut r.Store, starts, hide, order, la.Most)
+	// --format=git-id: the git id each adopted commit came from, "-" for one made in tit
+	mut gitOf = map[str]str{}
+	if la.Format == "git-id" {
+		let table = try git.ReadIds(r.Ws.Store + "/git-ids")
+		let (gs, ts) = table.Pairs()
+		for k in 0..len(gs) {
+			gitOf[ts[k]] = gs[k]
+		}
+	}
 	mut first = true
 	for id in ids {
+		if la.Format == "id" {
+			o.Line(id.Hex())
+			continue
+		}
+		if la.Format == "git-id" {
+			let (gid, adopted) = gitOf[id.Bytes()]
+			if adopted {
+				o.Line(git.Hex(gid))
+			} else {
+				o.Line("-")
+			}
+			continue
+		}
 		let c = try commitData(mut r, id)
+		if la.Format == "change" {
+			o.Line(c.Change.Letters())
+			continue
+		}
+		if la.Format == "subject" {
+			o.Line(firstLine(c.Message))
+			continue
+		}
 		if g.Json {
 			mut ps = []str{}
 			for p in c.Parents {
@@ -278,37 +471,16 @@ fn doShow(g Global, rev str, o mut Out) ! {
 	if len(c.Parents) > 0 {
 		before = try r.treeOf(c.Parents[0])
 	}
-	let changes = try diff.TreeDiff(mut r.Store, before, c.Tree, true)
+	mut sc = r.scratch()
+	let changes = try diff.TreeDiff(mut sc, before, c.Tree, true)
 	if len(changes) == 0 {
 		return
 	}
-	o.Line("")
-	let stats = try diff.Stats(mut r.Store, changes)
+	o.Line("---")
+	let stats = try diff.Stats(mut sc, changes)
 	o.Text(diff.FormatStat(stats))
-	for ch in changes {
-		mut a = ""
-		mut b = ""
-		if len(ch.OldHash) > 0 {
-			let aid = try object.IdOf(ch.OldHash)
-			let (_, ab) = try r.Store.GetRaw(aid)
-			a = ab
-		}
-		if len(ch.NewHash) > 0 {
-			let bid = try object.IdOf(ch.NewHash)
-			let (_, bb) = try r.Store.GetRaw(bid)
-			b = bb
-		}
-		mut oldName = "a/" + ch.OldPath
-		if len(ch.OldPath) == 0 {
-			oldName = "/dev/null"
-		}
-		mut newName = "b/" + ch.Path
-		if ch.Kind == diff.Kind.Deleted {
-			newName = "/dev/null"
-		}
-		o.Line("")
-		o.Text(diff.Unified(oldName, newName, a, b, 3))
-	}
+	o.Line("")
+	try writePatch(g, mut sc, changes, mut o)
 }
 
 fn doCat(g Global, rev str, o mut Out) ! {

@@ -11,3 +11,4 @@ tit 0 (design/tit.md, #769)
   uncommitted changes would be overwritten
   no identity
   bad signature
+  a shallow clone: run git fetch --unshallow first

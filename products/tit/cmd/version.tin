@@ -1,6 +1,7 @@
 package cmd
 
 import "../change"
+import "../git"
 import "../identity"
 import "../object"
 import "../oplog"
@@ -25,5 +26,6 @@ fn sentinels() []str {
 		fault.Message(worktree.ErrDirty),
 		fault.Message(identity.ErrNoIdentity),
 		fault.Message(identity.ErrBadSignature),
+		fault.Message(git.ErrShallow),
 	}
 }

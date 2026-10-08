@@ -137,6 +137,38 @@ fn (idx mut Index) Set(e Entry) {
 	idx.sortEntries()
 }
 
+// SetConflict records a conflicted path in place of any entry it had: the base's, our and their versions (blob ids
+// as bytes, "" for a side with no file there) as stages 1, 2 and 3.
+fn (idx mut Index) SetConflict(path str, mode object.Mode, base str, ours str, theirs str) {
+	idx.Remove(path)
+	let hashes = []str{base, ours, theirs}
+	for k in 0..3 {
+		if len(hashes[k]) > 0 {
+			idx.Entries = append(idx.Entries, Entry{Path: path, Hash: hashes[k], Mode: mode, Stage: k + 1, Size: 0, Mtime: 0, Ctime: 0, Inode: 0, Device: 0})
+		}
+	}
+	idx.sortEntries()
+}
+
+// Stages are which conflict stages path has: base, ours, theirs.
+fn (idx Index) Stages(path str) (bool, bool, bool) {
+	mut b = false
+	mut o = false
+	mut t = false
+	for e in idx.Entries {
+		if e.Path == path {
+			if e.Stage == 1 {
+				b = true
+			} else if e.Stage == 2 {
+				o = true
+			} else if e.Stage == 3 {
+				t = true
+			}
+		}
+	}
+	return b, o, t
+}
+
 // Remove drops every entry for path.
 fn (idx mut Index) Remove(path str) {
 	mut out = make([]Entry, 0, len(idx.Entries))
