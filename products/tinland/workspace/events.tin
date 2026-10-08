@@ -29,6 +29,9 @@ const CmdCloseSplit = 119
 const CmdOpenSettings = 120
 const CmdToggleWhitespace = 121
 const CmdOpenRecent = 122
+const CmdToggleOutline = 123
+const CmdToggleProblems = 124
+const CmdToggleGit = 125
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
@@ -207,6 +210,16 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 	} else if id >= idTabBase && id < idTabBase + maxPanes * tabsPerPane {
 		ws.SetActive((id - idTabBase) / tabsPerPane)
 		ws.Ed.Activate((id - idTabBase) % tabsPerPane)
+	} else if id == idStatusWrap {
+		ws.Ed.Perform(editor.CmdToggleWrap)
+	} else if id == idStatusCrlf {
+		ws.Ed.Buf.CRLF = !ws.Ed.Buf.CRLF
+		ws.Ed.Buf.Dirty = true
+		if ws.Ed.Buf.CRLF {
+			ws.Ed.Say("line endings: CRLF")
+		} else {
+			ws.Ed.Say("line endings: LF")
+		}
 	} else if id >= idPanelBase && id < idTabBase {
 		ws.togglePanel(id - idPanelBase)
 	} else if id >= idOutputLine && id < idPickerItem {
@@ -292,6 +305,12 @@ fn (ws mut Workspace) Perform(cmd i64) {
 	ws.Dirty = true
 	if cmd == CmdToggleProject {
 		ws.togglePanel(PanelProject)
+	} else if cmd == CmdToggleOutline {
+		ws.togglePanel(PanelOutline)
+	} else if cmd == CmdToggleProblems {
+		ws.togglePanel(PanelDiagnostics)
+	} else if cmd == CmdToggleGit {
+		ws.togglePanel(PanelGit)
 	} else if cmd == CmdOpenFolder {
 		let path = appkit.FolderPanel()
 		if len(path) > 0 {

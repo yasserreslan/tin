@@ -116,6 +116,8 @@ type Editor struct {
 	FoldLines i64
 	// mapDrag is true while the mouse drags in the minimap.
 	mapDrag bool
+	gutterDrag bool
+	gutterAnchor i64
 	clicks   i64
 	lastClick f64
 }
@@ -719,6 +721,8 @@ fn (ed mut Editor) command(k Key, shift bool) {
 		b.Indent()
 	} else if c == '[' {
 		b.Unindent()
+	} else if shift && (c == '\\' || k.Code == 42) {
+		ed.JumpBracket()
 	}
 }
 
@@ -1094,4 +1098,30 @@ fn (ed mut Editor) CheckDisk() bool {
 		ed.Redraw = true
 	}
 	return changed
+}
+
+// JumpBracket moves the caret to the matching partner of the bracket beside it.
+fn (ed mut Editor) JumpBracket() {
+	let (mr, mc, found) = ed.matchBracket()
+	if found {
+		ed.Buf.MoveTo(mr, mc, false)
+		ed.Follow = true
+		ed.Redraw = true
+	}
+}
+
+// Revert re-reads the active file from disk, discarding unsaved edits.
+fn (ed mut Editor) Revert() {
+	if len(ed.Buf.Path) == 0 {
+		ed.Say("no file on disk")
+		return
+	}
+	let text = quarry.ReadFile(ed.Buf.Path) catch _ {
+		ed.Say("cannot read " + ed.Buf.Path)
+		return
+	}
+	ed.Buf.SetText(text)
+	ed.Buf.Dirty = false
+	ed.Say("reverted " + ed.Name())
+	ed.Redraw = true
 }

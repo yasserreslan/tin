@@ -203,6 +203,19 @@ fn RunScript(ed mut Editor, script str) {
 				r = ed.nextVisible(r)
 			}
 			say.Line("shown:", len(ed.Folds), twine.Join(shown, "|"), "row", ed.Buf.Row)
+		} else if step == "bracket" {
+			ed.JumpBracket()
+		} else if step == "join" {
+			ed.Buf.JoinLines()
+		} else if step == "uppercase" {
+			ed.Buf.TransformCase(true)
+		} else if step == "lowercase" {
+			ed.Buf.TransformCase(false)
+		} else if twine.HasPrefix(step, "gutter:") {
+			let r = parseInt(step[7:])
+			ed.Buf.SelectLine(r)
+		} else if step == "revert" {
+			ed.Revert()
 		} else if step == "wrap" {
 			say.Line("wrap:", ed.ToggleWrapView())
 		} else if step == "rowof" {
