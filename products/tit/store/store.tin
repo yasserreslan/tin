@@ -67,3 +67,21 @@ fn (m mut Mem) Put(o object.Object) !object.Id {
 	let body = try object.Body(o)
 	return try m.PutRaw(object.KindOf(o), body)
 }
+
+// Matcher finds the objects whose ids start with a hex prefix, for short ids.
+shape Matcher {
+	Match(prefix str) ![]object.Id
+}
+
+// Match is every id in the store starting with the hex prefix.
+fn (m Mem) Match(prefix str) ![]object.Id {
+	mut out = []object.Id{}
+	for raw, _ in m.objs {
+		let id = try object.IdOf(raw)
+		let h = id.Hex()
+		if len(h) >= len(prefix) && h[0:len(prefix)] == prefix {
+			out = append(out, id)
+		}
+	}
+	return out
+}
