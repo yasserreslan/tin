@@ -217,11 +217,13 @@ fn fifoWrites(exe str, name str, env []str, out str, data str) {
 	let (s3, b3) = answer(server.Port, "/ok")
 	ci.Check(s3 == 200 && b3 == "ok" && seconds(t1) < 1.0, "the core did not serve after the waiting tasks ended")
 	let rd = reader(fifo, ci.Join(out, "fiforeader.log"))
-	nettest.Eventually(10.0, fn() bool {
-		let n = descriptors(server.Pid)
-		return n < 0 || n == base
-	})
-	let n = descriptors(server.Pid)
+	// The helpers work off the queued opens one after another, so the count may be a descriptor or two over the base while they do.
+	let settleEnd = tide.Now() + 10000000000
+	mut n = descriptors(server.Pid)
+	for tide.Now() < settleEnd && n >= 0 && n != base {
+		tide.Sleep(20000000)
+		n = descriptors(server.Pid)
+	}
 	ci.Check(n < 0 || n == base, name + ": descriptors of the late opens were not closed: " + mint.Itoa(base) + " then " + mint.Itoa(n))
 	let (s4, b4) = answer(server.Port, "/files?n=100&file=" + data)
 	ci.Check(s4 == 200 && b4 == "ok=100 bad=0 first=", name + ": reads after the late opens: " + b4)
