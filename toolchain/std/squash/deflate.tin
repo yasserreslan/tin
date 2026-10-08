@@ -496,9 +496,15 @@ fn tableSize(n i64, maxBits i64) i64 {
 }
 
 fn deflateTo(w mut bitWriter, s str, level0 i64) {
+	deflateBlocks(mut w, s, level0, true)
+}
+
+// deflateBlocks compresses s as DEFLATE blocks, the last one final when final is true (a streaming writer sends each
+// chunk as non-final blocks and ends with an empty final one).
+fn deflateBlocks(w mut bitWriter, s str, level0 i64, final bool) {
 	let level = min(max(level0, 0), 9)
 	if level == 0 || len(s) == 0 {
-		writeStored(mut w, s, 0, len(s), true)
+		writeStored(mut w, s, 0, len(s), final)
 		return
 	}
 	let chain = chainOf[level]
@@ -537,12 +543,12 @@ fn deflateTo(w mut bitWriter, s str, level0 i64) {
 			i += length
 		}
 		if len(tokens) >= blockTokens {
-			writeBlock(mut w, tokens, s, blockStart, i, i >= n)
+			writeBlock(mut w, tokens, s, blockStart, i, final && i >= n)
 			tokens = tokens[:0]
 			blockStart = i
 		}
 	}
 	if len(tokens) > 0 {
-		writeBlock(mut w, tokens, s, blockStart, n, true)
+		writeBlock(mut w, tokens, s, blockStart, n, final)
 	}
 }
