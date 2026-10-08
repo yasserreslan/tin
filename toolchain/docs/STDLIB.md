@@ -221,9 +221,9 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `(q Req) PathParam(name str) str`: PathParam returns path parameter name of the Router route that matched ({name}, {name...}, or "*" for a last *), %-decoded, or "".
 - `(q Req) Pattern() str`: Pattern returns the pattern of the Router route serving the request ("/users/{id}"), or "" (no Router, or a 404 or 405 answer).
 - `(w mut Out) Status(code i64)`: Status sets the response status code.
-- `(w mut Out) Type(t str)`: Type sets the Content-Type header. CR, LF and NUL in t become spaces, so a value taken from the request cannot add header lines.
-- `(w mut Out) Head(k str, v str)`: Head adds a response header. A name that is not an HTTP token is ignored, and so are Content-Length, Transfer-Encoding and Connection: anvil writes the framing itself. CR, LF and NUL in the value become spaces, so a value taken from the request cannot add header lines or a body (response splitting), as Go's net/http does.
-- `(w mut Out) Trailer(k str, v str)`: Trailer adds a trailer field, sent after the body: on HTTP/2 in a HEADERS frame that ends the stream (gRPC's grpc-status and grpc-message), on HTTP/1.1 after the last chunk of a chunked stream (w.Stream() without Length). A response with a Content-Length cannot carry trailers in HTTP/1.1: they are dropped there. Like Head, a name that is not a token and the framing fields are ignored, and CR, LF and NUL in the value become spaces.
+- `(w mut Out) Type(t str)`: Type sets the Content-Type header. Control bytes in t (CR, LF, NUL and the others but HTAB, and DEL) become spaces, so a value taken from the request cannot add header lines.
+- `(w mut Out) Head(k str, v str)`: Head adds a response header. A name that is not an HTTP token is ignored, and so are Content-Length, Transfer-Encoding and Connection: anvil writes the framing itself. Control bytes in the value (CR, LF, NUL and the others but HTAB, and DEL) become spaces, so a value taken from the request cannot add header lines or a body (response splitting), as Go's net/http does, nor hand a client a value RFC 9110 5.5 forbids (#748).
+- `(w mut Out) Trailer(k str, v str)`: Trailer adds a trailer field, sent after the body: on HTTP/2 in a HEADERS frame that ends the stream (gRPC's grpc-status and grpc-message), on HTTP/1.1 after the last chunk of a chunked stream (w.Stream() without Length). A response with a Content-Length cannot carry trailers in HTTP/1.1: they are dropped there. Like Head, a name that is not a token and the framing fields are ignored, and control bytes in the value become spaces.
 - `(w mut Out) Text(s str)`: Text appends s to the body.
 - `(w mut Out) Json()`: Json sets the JSON content type; the body is then written with argo.Put(mut w.Body, v).
 - `(w Out) Code() i64`: Code returns the response status set so far (200 unless Status changed it).
@@ -1216,6 +1216,11 @@ Package stamp computes non-cryptographic hashes and checksums: FNV-1a, CRC-32 (I
 - `Adler32(s str) u32`: Adler32 is the Adler-32 checksum of s (as in zlib).
 - `Xxh64(s str, seed u64) u64`: Xxh64 is the xxHash64 of s with seed.
 - `Hash(s str) u64`: Hash is a fast, well-mixed 64-bit hash for hash tables (not stable across versions).
+- `Crc64ECMA(s str) u64`: Crc64ECMA is the ECMA-182 CRC-64 of s (as in XZ and Go's crc64.ECMA).
+- `Crc64ECMAUpdate(crc u64, s str) u64`: Crc64ECMAUpdate continues an ECMA-182 CRC-64 over more data.
+- `Crc64ISO(s str) u64`: Crc64ISO is the ISO CRC-64 of s (Go's crc64.ISO).
+- `Crc64ISOUpdate(crc u64, s str) u64`: Crc64ISOUpdate continues an ISO CRC-64 over more data.
+- `MapHash(seed u64, s str) u64`: MapHash is a fast seeded 64-bit hash of s, for spreading keys of a table one builds oneself. It is not a cryptographic hash, and it is not Go's hash/maphash (whose algorithm is not specified and whose seed is random): two runs with the same seed and the same bytes agree, and different seeds give unrelated hashes.
 
 ## squash
 
@@ -1241,6 +1246,10 @@ let back = try squash.Gunzip(z, 64mb)
 - `Unlz4(data str, max i64) !str`: Unlz4 decompresses LZ4 frames (one or several, and skippable frames), producing at most max bytes.
 - `Lz4BlockOf(data str) str`: Lz4BlockOf compresses data as one bare LZ4 block (no frame).
 - `UnLz4Block(b str, max i64) !str`: UnLz4Block decompresses one bare LZ4 block, producing at most max bytes.
+- `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
+- `const LSB = 1`
+- `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.

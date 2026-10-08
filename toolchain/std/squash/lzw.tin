@@ -1,0 +1,245 @@
+package squash
+
+// LZW (Go's compress/lzw, as GIF and TIFF use): a dictionary that grows from the 256 literals to
+// 4096 codes, nine bits a code at first, a clear code that restarts it and an end code.
+//
+//	let gif = squash.Lzw(pixels, squash.MSB)      // most significant bits first, as GIF
+//	let back = try squash.Unlzw(gif, squash.MSB, 16*1024*1024)
+//
+// Codes are packed in the order asked for, so MSB is GIF's stream and LSB is TIFF's. The one-shot
+// form is what an image decoder needs; a streaming reader and writer are the follow-up noted in
+// #754.
+
+import "fault"
+import "say"
+
+// The code orders: MSB packs the bits of a code most significant first (GIF), LSB least
+// significant first (TIFF).
+const MSB = 0
+const LSB = 1
+
+// lzwBits packs codes of the current width into bytes.
+type lzwBits struct {
+	bits  u64
+	nbits i64
+	width i64
+	order i64
+	out   []u8
+}
+
+// emit appends one code.
+fn (b mut lzwBits) emit(c u64) {
+	if b.order == LSB {
+		b.bits |= c << u64(b.nbits)
+		b.nbits += b.width
+		for b.nbits >= 8 {
+			b.out = append(b.out, u8(b.bits))
+			b.bits >>= 8
+			b.nbits -= 8
+		}
+		return
+	}
+	b.bits |= c << u64(32-b.width-b.nbits)
+	b.bits &= 0xFFFFFFFF
+	b.nbits += b.width
+	for b.nbits >= 8 {
+		b.out = append(b.out, u8(b.bits >> 24))
+		b.bits = (b.bits << 8) & 0xFFFFFFFF
+		b.nbits -= 8
+	}
+}
+
+// flush writes the last partial byte.
+fn (b mut lzwBits) flush() {
+	if b.nbits <= 0 {
+		return
+	}
+	if b.order == LSB {
+		b.out = append(b.out, u8(b.bits))
+	} else {
+		b.out = append(b.out, u8(b.bits>>24))
+	}
+	b.bits = 0
+	b.nbits = 0
+}
+
+// Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts
+// the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the
+// stream ends with the end code.
+fn Lzw(data str, order i64) str {
+	let litWidth = 8
+	let clear = u64(1) << u64(litWidth)
+	let eof = clear + 1
+	// Go's writer counts 4095 as the last code: 4095 is where a clear code restarts the dictionary.
+	let maxCode = (u64(1) << 12) - 1
+	mut w = lzwBits{bits: 0, nbits: 0, width: litWidth + 1, order: order, out: []u8{}}
+	// The next code to define is the end code's: the first entry gets eof+1, as Go's writer has it.
+	mut hi = eof
+	mut overflow = u64(1) << u64(w.width)
+	mut table = map[u64]u64{}
+	w.emit(clear)
+	if len(data) == 0 {
+		w.emit(eof)
+		w.flush()
+		return str(w.out)
+	}
+	mut code = u64(data[0])
+	mut i = i64(1)
+	for i < len(data) {
+		let literal = u64(data[i])
+		let key = code<<8 | literal
+		let (next, found) = table[key]
+		if found {
+			code = next
+			i += 1
+			continue
+		}
+		w.emit(code)
+		code = literal
+		hi += 1
+		if hi == overflow {
+			w.width += 1
+			overflow <<= 1
+		}
+		if hi == maxCode {
+			// The dictionary is full: a clear code restarts it, and this key is not added.
+			w.emit(clear)
+			w.width = litWidth + 1
+			hi = clear + 1
+			overflow = clear << 1
+			table = map[u64]u64{}
+			i += 1
+			continue
+		}
+		table[key] = hi
+		i += 1
+	}
+	w.emit(code)
+	w.emit(eof)
+	w.flush()
+	return str(w.out)
+}
+
+// lzwRead reads codes of the running width off the packed stream.
+type lzwRead struct {
+	data  str
+	bits  u64
+	nbits i64
+	at    i64
+	order i64
+}
+
+// code reads one code of the given width, or -1 at the end of the stream.
+fn (r mut lzwRead) code(width i64) i64 {
+	if r.order == LSB {
+		for r.nbits < width {
+			if r.at >= i64(len(r.data)) {
+				return -1
+			}
+			r.bits |= u64(r.data[r.at]) << u64(r.nbits)
+			r.at += 1
+			r.nbits += 8
+		}
+		let c = i64(r.bits & ((u64(1) << u64(width)) - 1))
+		r.bits >>= u64(width)
+		r.nbits -= width
+		return c
+	}
+	for r.nbits < width {
+		if r.at >= i64(len(r.data)) {
+			return -1
+		}
+		r.bits = (r.bits | (u64(r.data[r.at]) << u64(24-r.nbits))) & 0xFFFFFFFF
+		r.at += 1
+		r.nbits += 8
+	}
+	let c = i64(r.bits >> u64(32-width))
+	r.bits = (r.bits << u64(width)) & 0xFFFFFFFF
+	r.nbits -= width
+	return c
+}
+
+// Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+fn Unlzw(data str, order i64, max i64) !str {
+	let litWidth = 8
+	let clear = i64(1) << litWidth
+	let eof = clear + 1
+	let maxWidth = 12
+	let maxCode = i64(1) << maxWidth
+	mut width = litWidth + 1
+	mut hi = eof
+	mut overflow = i64(1) << width
+	mut last = i64(-1)
+	mut prefix = make([]i64, maxCode)
+	mut suffix = make([]u8, maxCode)
+	mut victim = make([]u8, maxCode)
+	mut r = lzwRead{data: data, bits: 0, nbits: 0, at: 0, order: order}
+	mut out = []u8{}
+	for {
+		let code = r.code(width)
+		if code < 0 {
+			fail say.Fault("squash: lzw: unexpected end of stream")
+		}
+		if code < clear {
+			out = append(out, u8(code))
+			if last != -1 {
+				suffix[hi] = u8(code)
+				prefix[hi] = last
+			}
+		} else if code == clear {
+			width = litWidth + 1
+			hi = eof
+			overflow = i64(1) << width
+			last = -1
+			continue
+		} else if code == eof {
+			return str(out)
+		} else if code <= hi {
+			// The expansion is written backwards, as Go writes it.
+			mut j = len(victim) - 1
+			mut c = code
+			if code == hi && last != -1 {
+				// The code being defined: the last expansion plus its own first byte.
+				c = last
+				for c >= clear {
+					c = prefix[c]
+				}
+				victim[j] = u8(c)
+				j -= 1
+				c = last
+			}
+			for c >= clear {
+				victim[j] = suffix[c]
+				j -= 1
+				c = prefix[c]
+			}
+			victim[j] = u8(c)
+			for k in j..len(victim) {
+				out = append(out, victim[k])
+			}
+			if last != -1 {
+				suffix[hi] = u8(c)
+				prefix[hi] = last
+			}
+		} else {
+			fail say.Fault("squash: lzw: invalid code")
+		}
+		if i64(len(out)) > max {
+			fail fault.Wrap(fault.LimitExceeded, say.Fmt("squash: lzw over %d bytes", max))
+		}
+		last = code
+		hi += 1
+		if hi >= overflow {
+			if hi > overflow {
+				fail say.Fault("squash: lzw: bad code width")
+			}
+			if width == maxWidth {
+				last = -1
+				hi -= 1
+			} else {
+				width += 1
+				overflow = i64(1) << width
+			}
+		}
+	}
+}

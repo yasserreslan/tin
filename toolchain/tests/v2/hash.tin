@@ -1,0 +1,124 @@
+package main
+
+// stamp.Crc64ECMA/Crc64ISO and stamp.MapHash, and squash.Lzw/Unlzw: CRC-64 over the ECMA-182 and
+// ISO polynomials (chained updates agree with one-shot), a seeded 64-bit hash for map keys, and
+// LZW in both bit orders (GIF's MSB and TIFF's LSB) with its three faults.
+
+import "say"
+import "squash"
+import "stamp"
+
+fn main() {
+	// CRC-64: the check value of "123456789" and the two well-known polynomials.
+	say.Line("crc64 check", stamp.Crc64ECMA("123456789"), stamp.Crc64ISO("123456789"))
+	say.Line("crc64 empty", stamp.Crc64ECMA(""), stamp.Crc64ISO(""))
+	say.Line("crc64 hello", stamp.Crc64ECMA("hello world"), stamp.Crc64ISO("hello world"))
+
+	// A chained update over splits is the one-shot value.
+	let body = "the quick brown fox jumps over the lazy dog, again and again and again"
+	mut chain = u64(0)
+	for piece in []str{"the quick ", "brown fox jumps ", "over the lazy dog, again", " and again and again"} {
+		chain = stamp.Crc64ECMAUpdate(chain, piece)
+	}
+	mut chainIso = u64(0)
+	for piece in []str{"the quick", " brown fox jumps over the lazy", " dog, again and again and again"} {
+		chainIso = stamp.Crc64ISOUpdate(chainIso, piece)
+	}
+	say.Line("crc64 chained", chain == stamp.Crc64ECMA(body), chainIso == stamp.Crc64ISO(body))
+
+	// A long buffer, in one go and in eight-byte steps.
+	mut big = []u8{}
+	for i in 0..1000 {
+		big = append(big, u8(i))
+	}
+	let bigStr = str(big)
+	mut step = u64(0)
+	for i in 0..125 {
+		step = stamp.Crc64ECMAUpdate(step, bigStr[i*8:i*8+8])
+	}
+	say.Line("crc64 big", stamp.Crc64ECMA(bigStr), step == stamp.Crc64ECMA(bigStr))
+
+	// MapHash: the same seed and bytes agree, different seeds do not (for a few probes), and an
+	// empty string is still a hash.
+	say.Line("maphash stable", stamp.MapHash(7, "hello") == stamp.MapHash(7, "hello"),
+		stamp.MapHash(7, "hello") != stamp.MapHash(8, "hello"))
+	mut distinct = i64(0)
+	for i in 0..100 {
+		if stamp.MapHash(1, say.Fmt("%d", i)) != stamp.MapHash(1, say.Fmt("%d", i+1)) {
+			distinct += 1
+		}
+	}
+	say.Line("maphash spread", distinct, stamp.MapHash(0, "") != stamp.MapHash(1, ""))
+	say.Line("maphash zero", stamp.MapHash(42, ""))
+
+	// LZW round trips in both orders: empty, one byte, runs, the alphabet, text, and a body big
+	// enough to fill the 4096-code dictionary and restart it. Only the lengths are printed for
+	// the big one.
+	for data in []str{"", "a", "aaaa", "ababababab", "hello hello hello hello hello",
+		"the quick brown fox jumps over the lazy dog", str(makeBytes(256))} {
+		for order in []i64{squash.MSB, squash.LSB} {
+			let coded = squash.Lzw(data, order)
+			let back = squash.Unlzw(coded, order, 1024*1024) catch err {
+				say.Line("lzw failed", order, err)
+				return
+			}
+			say.Line("lzw", order, len(data), len(coded), back == data)
+		}
+	}
+	let long = str(makePattern(20000))
+	let longCoded = squash.Lzw(long, squash.MSB)
+	let longBack = squash.Unlzw(longCoded, squash.MSB, 1024*1024) catch err {
+		say.Line("lzw long failed", err)
+		return
+	}
+	say.Line("lzw long", len(long), len(longCoded), len(longBack), longBack == long)
+	let longLsb = squash.Lzw(long, squash.LSB)
+	let longLsbBack = squash.Unlzw(longLsb, squash.LSB, 1024*1024) catch err {
+		say.Line("lzw long lsb failed", err)
+		return
+	}
+	say.Line("lzw long lsb", len(longLsb), longLsbBack == long)
+
+	// The three faults: a stream that ends before the end code, a code above the running hi, and
+	// more output than the limit allows.
+	let cut = squash.Lzw("hello hello hello", squash.MSB)
+	mut short = i64(len(cut)) - 2
+	if short < 0 {
+		short = 0
+	}
+	squash.Unlzw(cut[0:short], squash.MSB, 1024) catch err {
+		say.Line("lzw short", err)
+	}
+	// A clear code then code 300, which no dictionary has yet: nine-bit codes most significant
+	// first are 100000000 100101100, then two zero bits.
+	squash.Unlzw("\x80\x4b\x00", squash.MSB, 1024) catch err {
+		say.Line("lzw bad code", err)
+	}
+	squash.Unlzw(cut, squash.MSB, 5) catch err {
+		say.Line("lzw limit", err)
+	}
+	// The limit is a limit, not an exact size.
+	squash.Unlzw(cut, squash.MSB, 17) catch err {
+		say.Line("lzw limit edge", err)
+	}
+}
+
+// makeBytes is the 256 bytes 0, 1, 2, ... as one string.
+fn makeBytes(n i64) []u8 {
+	mut out = []u8{}
+	for i in 0..n {
+		out = append(out, u8(i))
+	}
+	return out
+}
+
+// makePattern is a deterministic eight-letter body long enough to fill the dictionary a few times.
+fn makePattern(n i64) []u8 {
+	mut out = []u8{}
+	mut x = u64(99)
+	for i in 0..n {
+		x = x*%6364136223846793005 +% 1442695040888963407
+		out = append(out, u8('a' + i64(u8(x>>56)%8)))
+	}
+	return out
+}

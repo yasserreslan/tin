@@ -1,0 +1,151 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare crc64 and LZW with Go's hash/crc64 and compress/lzw.
+//
+// A generated corpus of byte strings (a fixed seed, so both sides see the same cases) is fed to bench/ref/hash and
+// tools/ci/fixtures/hash.tin; the check compares their lines: the ECMA and ISO CRC-64 of each string and the same chained over
+// two halves, and the LZW encoding and decoding of each string in both bit orders (GIF's MSB and TIFF's LSB), including inputs
+// big enough to fill and restart the dictionary.
+
+const SEED = 754
+
+fn hex(b []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// bytesOf turns a string's bytes into a byte slice.
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+fn repeat(b u8, n i64) []u8 {
+	mut out = []u8{}
+	for i in 0..n {
+		out = append(out, b)
+	}
+	return out
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	let fixed = []str{"", "a", "123456789", "aaaa", "ababababab", "the quick brown fox jumps over the lazy dog"}
+	for s in fixed {
+		for order in 0..2 {
+			lines = append(lines, "Z " + mint.Itoa(order) + " " + hex(bytesOf(s)))
+		}
+	}
+	mut seq = []u8{}
+	for i in 0..256 {
+		seq = append(seq, u8(i))
+	}
+	lines = append(lines, "P " + hex(seq))
+	for order in 0..2 {
+		lines = append(lines, "Z " + mint.Itoa(order) + " " + hex(seq))
+	}
+	lines = append(lines, "P " + hex(repeat(0, 100)))
+	lines = append(lines, "P " + hex(repeat(120, 1000)))
+
+	// Random byte strings of every size class, over alphabets that compress differently.
+	for i in 0..300 {
+		let sizes = []i64{1, 2, 3, 5, 8, 20, 100, 700, 5000}
+		let n = sizes[rng.Range(0, len(sizes))]
+		let letters = []str{"ab", "abc", "abcd", "\x00\x01\x02\x03\x04\x05\x06\x07", "", ""}
+		let alphabet = letters[rng.Range(0, len(letters))]
+		mut b = []u8{}
+		for k in 0..n {
+			if len(alphabet) == 0 {
+				b = append(b, u8(rng.I64n(256)))
+			} else {
+				b = append(b, alphabet[rng.I64n(len(alphabet))])
+			}
+		}
+		lines = append(lines, "P " + hex(b))
+	}
+
+	// Bigger bodies over eight letters, in both orders: these fill the dictionary and restart it.
+	let bigsizes = []i64{5000, 20000, 60000}
+	for i in 0..60 {
+		let n = bigsizes[rng.Range(0, len(bigsizes))]
+		mut b = []u8{}
+		for k in 0..n {
+			b = append(b, u8('a' + i64(u8(rng.U64() % 8))))
+		}
+		for order in 0..2 {
+			lines = append(lines, "Z " + mint.Itoa(order) + " " + hex(b))
+		}
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 900, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/hash")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "hash-")
+	let tin = ci.Join(work, "hash-tin")
+	ci.BuildTin("tools/ci/fixtures/hash.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "hash-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/hash"}, ci.Root(), 300), "go build hash")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "hash: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + " (corpus line " + corpusLine(lines, i) + "):")
+			say.Line("  Go:  " + short(want[i]))
+			say.Line("  Tin: " + short(got[i]))
+			bad += 1
+			if bad >= 6 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "hash: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("hash: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's hash/crc64 and compress/lzw")
+}
+
+// corpusLine is the corpus line an output line came from (every case prints one line).
+fn corpusLine(lines []str, outIndex i64) str {
+	if outIndex < len(lines) {
+		let line = lines[outIndex]
+		if len(line) > 60 {
+			return line[0:60] + "..."
+		}
+		return line
+	}
+	return "?"
+}
+
+// short keeps a diff line readable: the first and last part of the hex fields.
+fn short(line str) str {
+	if len(line) <= 120 {
+		return line
+	}
+	return line[0:60] + " ... " + line[len(line)-40:len(line)]
+}
