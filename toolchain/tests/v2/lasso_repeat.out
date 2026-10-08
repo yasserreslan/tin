@@ -1,0 +1,10 @@
+a{2}? [{0 2} {2 4}]
+a{0}?b [{1 2}]
+a{2}?b [{0 3}]
+a{2,3}? [{0 2} {2 4}]
+a+{2} ERR lasso: pattern: at byte 1: invalid nested repetition operator: +{2}
+a{2}{2} ERR lasso: pattern: at byte 1: invalid nested repetition operator: {2}{2}
+a** ERR lasso: pattern: at byte 1: invalid nested repetition operator: **
+a+?{1,2} ERR lasso: pattern: at byte 1: invalid nested repetition operator: +?{1,2}
+a{,2} [{0 5}]
+(a+)? [{0 2}]
