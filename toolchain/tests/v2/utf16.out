@@ -1,0 +1,40 @@
+encode "" 
+encode "A" 0041
+encode "é" 00e9
+encode "café" 00630061006600e9
+encode "日本語" 65e5672c8a9e
+encode "😀" d83dde00
+encode "a😀b" 0061d83dde000062
+encode "𐀀" d800dc00
+encode "\U0010ffff" dbffdfff
+encode bad utf8 0041fffd0042fffd0043
+decode  ""
+decode 0041 "A"
+decode d83dde00 "😀"
+decode d800 "�"
+decode dc00 "�"
+decode d8000041 "�A"
+decode 0041dbff "A�"
+decode d800dbff "��"
+decode dbffdfff "\U0010ffff"
+decode dc00d800 "��"
+decode d83dde000041 "😀A"
+rune 00000000 1 false 0000fffd 0000fffd
+rune 00000041 1 false 0000fffd 0000fffd
+rune 0000d7ff 1 false 0000fffd 0000fffd
+rune 0000d800 -1 true 0000fffd 0000fffd
+rune 0000dfff -1 true 0000fffd 0000fffd
+rune 0000e000 1 false 0000fffd 0000fffd
+rune 0000ffff 1 false 0000fffd 0000fffd
+rune 00010000 2 false 0000d800 0000dc00
+rune 0001f600 2 false 0000d83d 0000de00
+rune 0010ffff 2 false 0000dbff 0000dfff
+rune 00110000 -1 false 0000fffd 0000fffd
+rune ffffffff -1 false 0000fffd 0000fffd
+join true true true
+append 0041d83dde00fffdfffdfffdffff "A😀���\uffff"
+round trip 0 true
+round trip 1 true
+round trip 7 true
+round trip 2 true
+round trip 3 true

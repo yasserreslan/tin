@@ -1,0 +1,127 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare trail's path rules with Go's path package.
+//
+// A generated corpus (a fixed seed, so both sides see the same cases) of paths and part lists is fed to bench/ref/path and
+// tools/ci/fixtures/path.tin; the check compares their lines: Clean, Base, Dir, Ext, Split and IsAbs of each path, Join of the
+// part lists, and Match over shell patterns (stars, classes, escapes and bad patterns included).
+
+const SEED = 753
+
+fn hex(b []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// bytesOf turns a string's bytes into a byte slice.
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	let fixed = []str{"", ".", "..", "/", "//", "///", "a", "a/", "/a", "/a/", "a/b", "a/b/", "a//b", "./a", "../a", "a/.", "a/..", "a/../b", "a/./b", "...", "..a", "a..b", "/../a", "a/../../b", "a/b/c", "/a/b/../c/", "x/y/z.txt", ".hidden", "a/.hidden", "a/b.tex.txt", "dir/", "dir//sub//file", "/tmp/../etc/passwd", "a b/c d", "é/😀.txt", "[", "]", "a\\b", "\\", "a/b.txt/", "x.txt", "…", "a/./../."}
+	let elems = []str{"a", "b", "dir", ".", "..", "", "x y", "e.txt", ".h", "sub.dir", "é"}
+	let seps = []str{"/", "//", "/"}
+	for p in fixed {
+		for op in []str{"C", "B", "D", "E", "S", "A"} {
+			lines = append(lines, op + " " + hex(bytesOf(p)))
+		}
+	}
+	for i in 0..300 {
+		mut p = ""
+		if rng.Range(0, 2) == 0 {
+			p = "/"
+		}
+		for k in 0..rng.Range(1, 5) {
+			p = p + elems[rng.Range(0, len(elems))]
+			if k < 3 || rng.Range(0, 2) == 0 {
+				p = p + seps[rng.Range(0, len(seps))]
+			}
+		}
+		for op in []str{"C", "B", "D", "E", "S", "A"} {
+			lines = append(lines, op + " " + hex(bytesOf(p)))
+		}
+	}
+	for i in 0..200 {
+		mut parts = []str{}
+		for k in 0..rng.Range(1, 5) {
+			parts = append(parts, hex(bytesOf(elems[rng.Range(0, len(elems))])))
+		}
+		lines = append(lines, "J " + twine.Join(parts, " "))
+	}
+	let patterns = []str{"", "a", "*", "?", "a*", "*b", "a?", "[a-z]", "[^a]", "[", "[]", "[-]", "[a-]", "\\*", "\\", "a/b", "*/*", "[a-c]x", "**", "[!a]", "?é", "é*", "[^a-z]/?", "x*y*z", "[[:alpha:]]", "*.[ch]", "a[b-d]e", "*\\", "[^]", "*?"}
+	mut names = []str{}
+	for n in fixed {
+		names = append(names, n)
+	}
+	for i in 0..200 {
+		mut name = ""
+		for k in 0..rng.Range(0, 4) {
+			name = name + elems[rng.Range(0, len(elems))]
+			if rng.Range(0, 2) == 0 {
+				name = name + "/"
+			}
+		}
+		names = append(names, name)
+	}
+	for i in 0..len(patterns) {
+		for k in 0..12 {
+			let n = names[rng.Range(0, len(names))]
+			lines = append(lines, "M " + hex(bytesOf(patterns[i])) + " " + hex(bytesOf(n)))
+		}
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/path")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "path-")
+	let tin = ci.Join(work, "path-tin")
+	ci.BuildTin("tools/ci/fixtures/path.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "path-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/path"}, ci.Root(), 300), "go build path")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "path: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "path: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("path: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's path")
+}

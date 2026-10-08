@@ -1,0 +1,119 @@
+package main
+
+// The path twin, Tin side: read the hex corpus of bench/ref/path (Go's path) on stdin and print the same lines, so
+// tools/ci/path_check.tin can compare them (#753).
+//
+//	C <hex>              Clean
+//	B <hex>              Base
+//	D <hex>              Dir
+//	E <hex>              Ext
+//	S <hex>              Split: dir and file
+//	A <hex>              IsAbs
+//	J <h1> <h2> ...      Join of the parts
+//	M <pattern> <name>   Match: true, false or bad
+
+import "quarry"
+import "say"
+import "seal"
+import "trail"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(body)) {
+		if i < i64(len(body)) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		if len(line) == 0 {
+			continue
+		}
+		run(line)
+	}
+}
+
+// run handles one corpus line.
+fn run(line str) {
+	let parts = splitSpace(line)
+	if len(parts) == 0 {
+		return
+	}
+	if parts[0] == "C" {
+		say.Line("C", hex(trail.Clean(unhex(argOf(parts, 1)))))
+	} else if parts[0] == "B" {
+		say.Line("B", hex(trail.Base(unhex(argOf(parts, 1)))))
+	} else if parts[0] == "D" {
+		say.Line("D", hex(trail.Dir(unhex(argOf(parts, 1)))))
+	} else if parts[0] == "E" {
+		say.Line("E", hex(trail.Ext(unhex(argOf(parts, 1)))))
+	} else if parts[0] == "S" {
+		let (dir, file) = trail.Split(unhex(argOf(parts, 1)))
+		say.Line("S", hex(dir), hex(file))
+	} else if parts[0] == "A" {
+		say.Line("A", trail.IsAbs(unhex(argOf(parts, 1))))
+	} else if parts[0] == "J" {
+		mut all = []str{}
+		for k in 1..len(parts) {
+			all = append(all, unhex(parts[k]))
+		}
+		say.Line("J", hex(trail.JoinAll(all)))
+	} else if parts[0] == "M" {
+		mut result = "bad"
+		{
+			let ok = trail.Match(unhex(argOf(parts, 1)), unhex(argOf(parts, 2))) catch _ {
+				say.Line("M", result)
+				return
+			}
+			result = say.Fmt("%t", ok)
+		}
+		say.Line("M", result)
+	}
+}
+
+// unhex decodes a hex string into a string of those bytes.
+fn unhex(s str) str {
+	if len(s) == 0 {
+		return ""
+	}
+	let b = seal.HexDecode(s) catch _ {
+		return ""
+	}
+	return str(b)
+}
+
+// hex maps a string to its hex bytes.
+fn hex(s str) str {
+	return seal.Hex([]u8(s))
+}
+
+// argOf is the argument at i, or "" when the line has none.
+fn argOf(parts []str, i i64) str {
+	if i < i64(len(parts)) {
+		return parts[i]
+	}
+	return ""
+}
+
+// splitSpace splits a line on spaces.
+fn splitSpace(line str) []str {
+	mut out = []str{}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(line)) {
+		if i == i64(len(line)) || line[i] == ' ' {
+			if i > start {
+				out = append(out, line[start:i])
+			}
+			start = i + 1
+		}
+		i += 1
+	}
+	return out
+}
