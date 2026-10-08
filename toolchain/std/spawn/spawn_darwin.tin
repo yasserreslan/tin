@@ -148,9 +148,12 @@ fn stdioOpen(s Stdio, input bool) !(i64, i64) {
 			// them (the child of this spawn gets its end through the file actions).
 			rt_sys_fcntl(a, 2, 1) // F_SETFD, FD_CLOEXEC
 			rt_sys_fcntl(b, 2, 1)
+			// The parent's end never blocks the core (#812); the child's end stays blocking.
 			if input {
+				setNonblock(b)
 				return b, a // the parent writes, the child reads
 			}
+			setNonblock(a)
 			return a, b // the parent reads, the child writes
 		}
 		File(path) => {

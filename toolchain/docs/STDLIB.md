@@ -869,12 +869,12 @@ Package spawn starts child processes, like Go's os/exec: Run a program and colle
 - `const SIGTERM = 15`
 - `const DefaultMaxOutput = 64 * 1024 * 1024`: DefaultMaxOutput is Run's cap on the stdout and stderr it collects: 64 MiB.
 - `Start(c Cmd) !Process`: Start starts c and returns the running child. A start error names the program, like Go's exec.Error.
-- `Run(c Cmd) !Result`: Run starts c, collects its output and waits for it. Stdout and Stderr are captured unless they are File or Null; more than MaxOutput (DefaultMaxOutput when 0) bytes of the two together fail with fault.LimitExceeded and the child is killed. A non-zero exit is not a fault, and a task deadline (within) kills the child, reaps it and fails with fault.DeadlineExceeded.
+- `Run(c Cmd) !Result`: Run starts c, collects its output and waits for it. A non-empty Input is written to the child's standard input (which becomes a pipe) while the output is collected, so a child that answers while it reads does not deadlock; the pipe is closed after the last byte. Stdout and Stderr are captured unless they are File or Null; more than MaxOutput (DefaultMaxOutput when 0) bytes of the two together fail with fault.LimitExceeded and the child is killed. A non-zero exit is not a fault, and a task deadline (within) kills the child, reaps it and fails with fault.DeadlineExceeded.
 - `(p mut Process) Wait() !i64`: Wait waits for the child, reaps it and returns its exit code, or -1 when a signal killed it. A task deadline (within) interrupts the wait, kills the child and reaps it.
 - `(p Process) Pid() i64`: Pid is the child's process number.
 - `(p Process) Signal(sig i64) !`: Signal sends sig to the child.
 - `(p Process) Kill() !`: Kill sends SIGKILL to the child.
-- `(p mut Process) Write(data str) !i64`: Write writes data to the child's standard input (Stdio.Pipe on Cmd.Stdin) and returns how many bytes went out. A task deadline interrupts the write with fault.DeadlineExceeded.
+- `(p mut Process) Write(data str) !i64`: Write writes data to the child's standard input (Stdio.Pipe on Cmd.Stdin) and returns how many bytes went out. It never blocks the core: what the pipe cannot take yet waits for it to drain, so another task can read the child's output meanwhile. A task deadline interrupts the write with fault.DeadlineExceeded.
 - `(p mut Process) CloseStdin() !`: CloseStdin closes the child's standard input, so a reader sees EOF.
 - `(p Process) Read(buf mut []u8) !i64`: Read reads the child's standard output (Stdio.Pipe on Cmd.Stdout) into buf, up to its length, and returns how many bytes came; 0 is end of file.
 - `(p Process) ReadStderr(buf mut []u8) !i64`: ReadStderr is Read for the child's standard error.

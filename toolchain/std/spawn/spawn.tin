@@ -35,6 +35,7 @@ type Cmd struct {
 	Stdout    Stdio
 	Stderr    Stdio
 	MaxOutput i64 // Run only: the stdout and stderr cap, 0 for DefaultMaxOutput
+	Input     str // Run only: written to the child's standard input, then the pipe is closed
 }
 
 // Process is a running child. Wait reaps it; a Process that is never waited for leaves a zombie.
@@ -71,8 +72,10 @@ fn Start(c Cmd) !Process {
 	return try spawnStart(c)
 }
 
-// Run starts c, collects its output and waits for it. Stdout and Stderr are captured unless they
-// are File or Null; more than MaxOutput (DefaultMaxOutput when 0) bytes of the two together fail
+// Run starts c, collects its output and waits for it. A non-empty Input is written to the child's
+// standard input (which becomes a pipe) while the output is collected, so a child that answers
+// while it reads does not deadlock; the pipe is closed after the last byte. Stdout and Stderr are
+// captured unless they are File or Null; more than MaxOutput (DefaultMaxOutput when 0) bytes of the two together fail
 // with fault.LimitExceeded and the child is killed. A non-zero exit is not a fault, and a task
 // deadline (within) kills the child, reaps it and fails with fault.DeadlineExceeded.
 fn Run(c Cmd) !Result {
@@ -87,8 +90,11 @@ fn Run(c Cmd) !Result {
 	if max == 0 {
 		max = DefaultMaxOutput
 	}
+	if len(cc.Input) > 0 {
+		cc.Stdin = Stdio.Pipe
+	}
 	mut p = try Start(cc)
-	let (out, err) = p.collect(max) catch e {
+	let (out, err) = p.feedAndCollect(cc.Input, max) catch e {
 		p.reapKilled()
 		fail e
 	}
@@ -123,7 +129,9 @@ fn (p Process) Kill() ! {
 }
 
 // Write writes data to the child's standard input (Stdio.Pipe on Cmd.Stdin) and returns how many
-// bytes went out. A task deadline interrupts the write with fault.DeadlineExceeded.
+// bytes went out. It never blocks the core: what the pipe cannot take yet waits for it to drain,
+// so another task can read the child's output meanwhile. A task deadline interrupts the write with
+// fault.DeadlineExceeded.
 fn (p mut Process) Write(data str) !i64 {
 	if p.in < 0 {
 		fail say.Fault("spawn: stdin is not a pipe")
@@ -135,6 +143,9 @@ fn (p mut Process) Write(data str) !i64 {
 			fail cast(fault, rt_wait_fault())
 		}
 		let n = rt_sys_write(p.in, rt_cstr(data)+off, len(data)-off)
+		if n < 0 && rt_errno() == EAGAIN {
+			continue
+		}
 		if n < 0 {
 			fail say.Fault("spawn: write: %s", errnoText(rt_errno()))
 		}
@@ -157,7 +168,7 @@ fn (p Process) Read(buf mut []u8) !i64 {
 	if p.out < 0 {
 		fail say.Fault("spawn: stdout is not a pipe")
 	}
-	return try readSome(p.out, mut buf, 0)
+	return try readBlocking(p.out, mut buf)
 }
 
 // ReadStderr is Read for the child's standard error.
@@ -165,7 +176,51 @@ fn (p Process) ReadStderr(buf mut []u8) !i64 {
 	if p.err < 0 {
 		fail say.Fault("spawn: stderr is not a pipe")
 	}
-	return try readSome(p.err, mut buf, 0)
+	return try readBlocking(p.err, mut buf)
+}
+
+// readBlocking is readSome without a timeout, waiting again when the pipe turned out empty.
+fn readBlocking(fd i64, buf mut []u8) !i64 {
+	for {
+		let n = try readSome(fd, mut buf, 0)
+		if n >= 0 {
+			return n
+		}
+	}
+}
+
+// setNonblock makes fd non-blocking, for the parent's end of a pipe.
+fn setNonblock(fd i64) {
+	rt_sys_fcntl(fd, F_SETFL, O_NONBLOCK)
+}
+
+// feedAndCollect writes input to the child's standard input in one task while another collects
+// its output, then closes the pipe; a child that stops reading early is not an error (Go's
+// exec ignores the broken pipe too).
+fn (p mut Process) feedAndCollect(input str, max i64) !(str, str) {
+	if len(input) == 0 {
+		return try p.collect(max)
+	}
+	mut out = ""
+	mut err = ""
+	mut q = p
+	scope s {
+		s.spawn(fn() ! {
+			q.Write(input) catch e {
+				if fault.Is(e, fault.DeadlineExceeded) || fault.Is(e, fault.Canceled) {
+					fail e
+				}
+				0
+			}
+			try q.CloseStdin()
+		})
+		s.spawn(fn() ! {
+			let (o, e) = try q.collect(max)
+			out = o
+			err = e
+		})
+	}
+	return out, err
 }
 
 // collect reads both pipes until end of file, keeping the total under max.
@@ -225,6 +280,9 @@ fn readSome(fd i64, buf mut []u8, timeout i64) !i64 {
 		return -1
 	}
 	let n = rt_sys_read(fd, cast(i64, buf)[2], len(buf))
+	if n < 0 && rt_errno() == EAGAIN {
+		return -1
+	}
 	if n < 0 {
 		fail say.Fault("spawn: read: %s", errnoText(rt_errno()))
 	}

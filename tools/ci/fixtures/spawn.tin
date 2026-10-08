@@ -5,6 +5,8 @@ import "spawn"
 import "fault"
 import "quarry"
 import "ore"
+import "seal"
+import "twine"
 
 // The #576 Linux tests: start and wait, exit codes, a missing program, stdin from a file, a
 // separate stderr, a working directory, signals, and a task deadline killing the child. They run
@@ -24,6 +26,68 @@ fn runSleep() !bool {
 		Stdin: spawn.Stdio.Inherit, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit,
 		MaxOutput: 0})
 	return r.Code == 0
+}
+
+// bigInput is 16 MiB of a repeating pattern.
+fn bigInput() str {
+	let chunk = make([]u8, 65536)
+	for i in 0..len(chunk) {
+		chunk[i] = u8(65 + i % 26)
+	}
+	mut b = twine.Builder{}
+	for i in 0..256 {
+		b.Write(chunk)
+	}
+	return b.String()
+}
+
+// pipeThrough feeds data to cat with one task writing and another reading, so neither pipe fills up for good.
+fn pipeThrough(data str) !str {
+	mut p = try spawn.Start(spawn.Cmd{Argv: []str{"/bin/cat"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Pipe,
+		Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Inherit, MaxOutput: 0})
+	mut out = twine.Builder{}
+	scope s {
+		s.spawn(fn() ! {
+			mut off = 0
+			for off < len(data) {
+				let n = try p.Write(data[off:])
+				off += n
+			}
+			try p.CloseStdin()
+		})
+		s.spawn(fn() ! {
+			let buf = make([]u8, 65536)
+			for {
+				let n = try p.Read(mut buf)
+				if n == 0 {
+					return
+				}
+				out.Write(buf[0:n])
+			}
+		})
+	}
+	let code = try p.Wait()
+	if code != 0 {
+		fail say.Fault("cat exited with {code}")
+	}
+	return out.String()
+}
+
+// feedSleep writes 16 MiB to a child that never reads: the write blocks until the deadline.
+fn feedSleep(data str) !bool {
+	mut p = try spawn.Start(spawn.Cmd{Argv: []str{"/bin/sleep", "10"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Pipe,
+		Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0})
+	let r = within 300ms {
+		try p.Write(data)
+	} catch err {
+		p.Kill() catch _ {
+		}
+		p.Wait() catch _ {
+			i64(0)
+		}
+		return fault.Is(err, fault.DeadlineExceeded)
+	}
+	return r < 0
 }
 
 fn cmd(argv []str) spawn.Cmd {
@@ -202,6 +266,29 @@ fn main() {
 		false
 	}
 	say.Line("run deadline result", dr)
+
+	// 16 MiB through cat, written by one task and read by another, comes back unchanged.
+	let big = bigInput()
+	let back16 = pipeThrough(big) catch err {
+		say.Line("pipe 16 failed", err)
+		""
+	}
+	say.Line("pipe 16 MiB", len(back16) == len(big), ore.ToStr(seal.Sha1(back16)) == ore.ToStr(seal.Sha1(big)))
+
+	// Run feeds Input while it collects the output, so cat does not wedge on a full pipe.
+	let rin = spawn.Run(spawn.Cmd{Argv: []str{"/bin/cat"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Inherit,
+		Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0, Input: big}) catch err {
+		say.Line("run input failed", err)
+		spawn.Result{Code: -1, Stdout: "", Stderr: ""}
+	}
+	say.Line("run input", rin.Code, len(rin.Stdout) == len(big), ore.ToStr(seal.Sha1(rin.Stdout)) == ore.ToStr(seal.Sha1(big)))
+
+	// A write the child never drains stops at the scope's deadline, and the child is reaped.
+	let fs = feedSleep(big) catch err {
+		say.Line("feed sleep failed", err)
+		false
+	}
+	say.Line("feed deadline", fs)
 
 	// Signal: a sleeping child is killed and Wait reports -1.
 	mut s = spawn.Start(cmd([]str{"/bin/sleep", "10"})) catch err {
