@@ -22,6 +22,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | | |
 |---|---|
 | Cmd+O, Cmd+Shift+O | open a file, open a folder |
+| Cmd+Shift+E | open a recently opened file (File > Open Recent...; the list is kept in ~/.config/tinland/recent) |
 | Cmd+P, Cmd+Shift+P | go to file (fuzzy), command palette |
 | Cmd+B, Cmd+J, Ctrl+` | show or hide the project panel, the output panel, the terminal (a shell in the project folder: colors, history, arrows, Cmd+V pastes, drag selects and Cmd+C copies) |
 | Cmd+\ , Cmd+Shift+\ | split the editor (up to four panes side by side, each with its own tabs), close the active pane |

@@ -97,6 +97,9 @@ type Workspace struct {
 	// Focus is where typed text goes: the editor, the search box or the picker.
 	Focus i64
 	Picker Picker
+	// Recent are the files opened lately, newest first; RecentPath is the file they are kept in (empty: they are not kept).
+	Recent []str
+	RecentPath str
 	Search Search
 	// Git is the output of git status, one line per changed file.
 	Git []str
@@ -137,7 +140,7 @@ const FocusReplace = 5
 
 // New makes a workspace around an editor.
 fn New(th theme.Theme, ed editor.Editor) Workspace {
-	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}, Git: []str{}, Lsps: []lsp.Client{}, LspLangs: []str{}, Term: terminal.New(80, 10), Pty: appkit.Pty{}}
+	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Recent: []str{}, Search: Search{Matches: []project.Match{}}, Git: []str{}, Lsps: []lsp.Client{}, LspLangs: []str{}, Term: terminal.New(80, 10), Pty: appkit.Pty{}}
 	ws.LeftOpen = true
 	ws.LeftW = 260.0
 	ws.W = 1100.0
@@ -169,6 +172,7 @@ fn (ws mut Workspace) OpenFile(path str) {
 		if ws.HasProj {
 			ws.Proj.Reveal(path)
 		}
+		ws.NoteRecent(path)
 	}
 	ws.Dirty = true
 }

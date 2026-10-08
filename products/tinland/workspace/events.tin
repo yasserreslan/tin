@@ -28,6 +28,7 @@ const CmdSplit = 118
 const CmdCloseSplit = 119
 const CmdOpenSettings = 120
 const CmdToggleWhitespace = 121
+const CmdOpenRecent = 122
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
@@ -296,6 +297,8 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		if len(path) > 0 {
 			ws.OpenFolder(path)
 		}
+	} else if cmd == CmdOpenRecent {
+		ws.OpenPicker(PickRecent)
 	} else if cmd == CmdQuickOpen {
 		ws.OpenPicker(PickFile)
 	} else if cmd == CmdPalette {
