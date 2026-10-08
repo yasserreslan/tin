@@ -2,6 +2,7 @@ package user
 
 import "quarry"
 import "twine"
+import "mint"
 
 fn currentUID() !str {
 	let status = try quarry.ReadFile("/proc/self/status")
@@ -20,11 +21,11 @@ fn lookupId(uid str) !User {
 	let rows = try quarry.ReadFile("/etc/passwd")
 	for row in twine.Split(rows, "\n") {
 		let fields = twine.Split(row, ":")
-		if len(fields) >= 7 && fields[2] == uid {
-			return User{Username: fields[0], Uid: fields[2], Gid: fields[3], Name: fields[4], HomeDir: fields[5]}
+		if len(fields) >= 7 && normalizeID(fields[2]) == normalizeID(uid) {
+			return User{Username: fields[0], Uid: normalizeID(fields[2]), Gid: normalizeID(fields[3]), Name: gecosName(fields[4]), HomeDir: fields[5]}
 		}
 	}
-	fail "user: lookup userid {uid}: user: unknown user {uid}"
+	fail "user: unknown userid {uid}"
 }
 
 fn lookupName(name str) !User {
@@ -32,10 +33,10 @@ fn lookupName(name str) !User {
 	for row in twine.Split(rows, "\n") {
 		let fields = twine.Split(row, ":")
 		if len(fields) >= 7 && fields[0] == name {
-			return User{Username: fields[0], Uid: fields[2], Gid: fields[3], Name: fields[4], HomeDir: fields[5]}
+			return User{Username: fields[0], Uid: normalizeID(fields[2]), Gid: normalizeID(fields[3]), Name: gecosName(fields[4]), HomeDir: fields[5]}
 		}
 	}
-	fail "user: lookup {name}: user: unknown user {name}"
+	fail "user: unknown user {name}"
 }
 
 fn lookupGroupName(name str) !Group {
@@ -43,26 +44,59 @@ fn lookupGroupName(name str) !Group {
 	for row in twine.Split(rows, "\n") {
 		let fields = twine.Split(row, ":")
 		if len(fields) >= 4 && fields[0] == name {
-			return Group{Name: fields[0], Gid: fields[2]}
+			return Group{Name: fields[0], Gid: normalizeID(fields[2])}
 		}
 	}
-	fail "user: lookup groupname {name}: group: unknown group {name}"
+	fail "group: unknown group {name}"
 }
 
 fn lookupGroupIds(u User) ![]str {
 	let rows = try quarry.ReadFile("/etc/group")
-	mut out = []str{}
+	mut out = []str{normalizeID(u.Gid)}
 	for row in twine.Split(rows, "\n") {
 		let fields = twine.Split(row, ":")
 		if len(fields) < 4 {
 			continue
 		}
-		if contains(twine.Split(fields[3], ","), u.Username) && !contains(out, fields[2]) {
-			out = append(out, fields[2])
+		let gid = normalizeID(fields[2])
+		if contains(twine.Split(fields[3], ","), u.Username) && !contains(out, gid) {
+			out = append(out, gid)
 		}
 	}
-	if !contains(out, u.Gid) {
-		out = append(out, u.Gid)
-	}
 	return out
+}
+
+fn normalizeID(s str) str {
+	if len(s) == 0 {
+		return s
+	}
+	mut i = i64(0)
+	mut negative = false
+	if s[0] == '-' {
+		negative = true
+		i = 1
+	}
+	if i == len(s) {
+		return s
+	}
+	mut n = i64(0)
+	for i < len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return s
+		}
+		n = n*10 + i64(s[i]) - '0'
+		i += 1
+	}
+	if negative {
+		n = -n
+	}
+	return mint.Itoa(i64(u32(n)))
+}
+
+fn gecosName(s str) str {
+	let (name, _, found) = twine.Cut(s, ",")
+	if found {
+		return name
+	}
+	return s
 }

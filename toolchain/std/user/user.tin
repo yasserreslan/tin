@@ -2,17 +2,24 @@ package user
 
 // User is an account from the system user database.
 type User struct {
+	// Username is the account's login name.
 	Username str
+	// Uid is the account's numeric user ID in decimal.
 	Uid      str
+	// Gid is the account's primary numeric group ID in decimal.
 	Gid      str
+	// Name is the account's full name.
 	Name     str
+	// HomeDir is the account's home directory.
 	HomeDir  str
 }
 
 // Group is an account from the system group database.
 type Group struct {
+	// Name is the group's name.
 	Name str
-	Gid  str
+	// Gid is the group's numeric ID in decimal.
+	Gid str
 }
 
 // Current returns the user identified by the process's real user ID.
@@ -38,6 +45,9 @@ fn LookupGroup(name str) !Group {
 
 // GroupIds returns the IDs of the groups to which u belongs, including its primary group.
 fn (u User) GroupIds() ![]str {
+	if len(u.Username) == 0 {
+		fail "user: list groups: empty username"
+	}
 	return try lookupGroupIds(u)
 }
 

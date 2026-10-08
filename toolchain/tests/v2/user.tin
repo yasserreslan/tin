@@ -20,7 +20,7 @@ fn main() {
 		say.Line("groups fault", err)
 		return
 	}
-	say.Line("current", current.Username == byID.Username, current.Username == byName.Username, len(current.Uid) > 0, len(current.Gid) > 0, len(current.HomeDir) >= 0)
+	say.Line("current", current.Username == byID.Username, current.Username == byName.Username, len(current.Username) > 0, len(current.Uid) > 0, len(current.Gid) > 0)
 	say.Line("groups", len(groups) > 0, contains(groups, current.Gid))
 	let (_, nameErr) = user.Lookup("tin-no-such-user-911")
 	let (_, uidErr) = user.LookupId("987654321")
