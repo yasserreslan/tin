@@ -250,6 +250,14 @@ fn main() {
 	say.Line(x)
 }
 
+ruler: true 80
+ruler column: 80
+ruler column: 80
+wrap: true
+ruler column: 46
+ruler column: 7
+wrap: false
+ruler: false 80
 --- untitled row 4 col 11 dirty true
 	Delta    
 alpha

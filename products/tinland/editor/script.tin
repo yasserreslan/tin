@@ -229,6 +229,15 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
+		} else if twine.HasPrefix(step, "ruler:") {
+			// ruler:N puts the line at display column N
+			let n = parseInt(step[6:])
+			SetRulerColumn(n)
+			say.Line("ruler column:", n)
+		} else if step == "ruler" {
+			say.Line("ruler:", ToggleRuler(), RulerColumn())
+		} else if step == "rulercol" {
+			say.Line("ruler column:", ed.RulerCol())
 		} else if twine.HasPrefix(step, "snap:") {
 			ed.Snapshot(step[5:])
 		} else if twine.HasPrefix(step, "view:") {

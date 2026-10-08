@@ -43,6 +43,8 @@ bravo two
 charlie true
 trimmed the caret's line keep true the end   
 trimmed every line keep 	trailing the end
+ruler on true 100
+ruler off false 80
 written without hygiene keep
 	trailing
 the end 22 false
