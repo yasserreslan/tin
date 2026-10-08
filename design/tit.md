@@ -444,8 +444,7 @@ heads answer:   {"refs": [{"name": "refs/heads/main", "target": "<hex> | change 
                  "nonce": "<base64>", "server": "tit 1", "limits": {"pack": <bytes>, "refs": <count>}}
 fetch request:  {"wants": ["<hex>"], "haves": ["<hex>"]}
 fetch answer:   {"objects": <count>}                                  then the pack
-push request:   {"nonce": "<base64>",
-                 "changes": [{"change": "<letters>", "replaces": "<hex> | \"\"", "commit": "<hex>"}],
+push request:   {"changes": [{"change": "<letters>", "replaces": "<hex> | \"\"", "commit": "<hex>"}],
                  "refs": [{"name": "refs/heads/main", "old": "<target text> | \"\"", "new": "<target text> | \"\""}]}
                                                                        then the pack
 push answer:    {"refs": ["refs/heads/main"]}
@@ -460,7 +459,7 @@ from the wants and from none of the known haves. Clone is heads, then fetch with
 
 The server takes a push whole or not at all, under its repository lock, in one operation (`Op.Push`):
 
-1. The signature and the nonce check (below), or `Unauthorized` / `NonceExpired`.
+1. The signature and its nonce check (below), or `Unauthorized` / `NonceExpired`.
 2. Every change's newest version on the server equals the version the push says it replaces (`""` for a new
    change), or `Moved`, naming the change: someone pushed a newer version since this client fetched.
 3. Every ref holds the push's `old` value, or `RefChanged` naming the ref (compare-and-swap, as section 8).
@@ -477,13 +476,14 @@ versions that have moved since.
 ### Authentication
 
 The server keeps each user's ed25519 public keys (the same keys `tit key` makes). Every request may carry
-`Tit-Signature: <email> <base64 of 64 bytes>`, an ed25519 signature over
+`Tit-Signature: <email> <nonce> <base64 of 64 bytes>`, an ed25519 signature over
 
 ```text
 "tit v1 " + method + " " + path + "\n" + nonce + "\n" + hex(SHA-256(body)) + "\n"
 ```
 
-where the nonce is the one the last heads answer gave. Fetch and heads may go unsigned where the repository is
+where the nonce is the one the last heads answer gave (a client signs a heads request with the nonce of the one
+before, or not at all). Fetch and heads may go unsigned where the repository is
 public; push is always signed. The nonce is `base64(u64 big-endian unix seconds, 16 random bytes,
 HMAC-SHA256(server secret, the first 24 bytes))`: the server checks the HMAC and that the time is less than 60 s
 old, so any node of a service checks it with no shared store, and a signed request cannot be sent again after a

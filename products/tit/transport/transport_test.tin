@@ -9,13 +9,13 @@ import "twine"
 // Tests for the protocol's frames, nonces and signatures (#794).
 
 fn TestFrames(t mut crucible.T) {
-	let req = PushRequest{Nonce: "n", Changes: []ChangeUpdate{ChangeUpdate{Change: "kkzz", Replaces: "", Commit: "ab"}}, Refs: []RefUpdate{RefUpdate{Name: "refs/heads/main", Old: "", New: "ab"}}}
+	let req = PushRequest{Changes: []ChangeUpdate{ChangeUpdate{Change: "kkzz", Replaces: "", Commit: "ab"}}, Refs: []RefUpdate{RefUpdate{Name: "refs/heads/main", Old: "", New: "ab"}}}
 	let body = Frame(Kind.PushRequest, Encode(req), "TITPACK...")
 	let (k, header, rest, err) = ReadFrame(body)
 	t.NoFault("read", err)
 	t.True("kind", k == Kind.PushRequest)
 	crucible.Equal(mut t, "the pack follows", rest, "TITPACK...")
-	mut back = PushRequest{Nonce: "", Changes: []ChangeUpdate{}, Refs: []RefUpdate{}}
+	mut back = PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{}}
 	t.NoFault("decode", argo.Get(header, mut back))
 	crucible.Equal(mut t, "change", back.Changes[0].Change, "kkzz")
 	crucible.Equal(mut t, "ref", back.Refs[0].Name, "refs/heads/main")
@@ -67,4 +67,9 @@ fn TestSigningPayload(t mut crucible.T) {
 	t.NoFault("verifies", seal.VerifyEd25519(pub, []u8(p), sig))
 	let other = SigningPayload("POST", "/r/tit/v1/push", "OTHER", "body")
 	t.True("another nonce does not", seal.VerifyEd25519(pub, []u8(other), sig) != nil)
+	let (email, nonce, back, err) = ParseSignatureHeader(SignatureHeader("ada@example.com", "NONCE", sig))
+	t.NoFault("header", err)
+	t.True("header round trip", email == "ada@example.com" && nonce == "NONCE" && seal.Hex(back) == seal.Hex(sig))
+	let (_, _, _, herr) = ParseSignatureHeader("ada@example.com sig")
+	t.True("two fields", herr != nil)
 }

@@ -5,6 +5,7 @@ import "constraints"
 import "fault"
 import "pack"
 import "seal"
+import "twine"
 
 // The tit protocol, version 1 (design/tit.md section 15; #794): the messages, their frames, nonces and the bytes a
 // request signature covers. The client (#795) and tit serve (#796) build on these.
@@ -105,7 +106,6 @@ type RefUpdate struct {
 
 // PushRequest is the header of POST /tit/v1/push; the pack follows it.
 type PushRequest struct {
-	Nonce   str
 	Changes []ChangeUpdate
 	Refs    []RefUpdate
 }
@@ -287,6 +287,26 @@ fn CheckNonce(key secret str, nonce str, now i64) ! {
 	if now - at >= NonceLife || at > now + 5 {
 		fail fault.Wrap(ErrRefused, "NonceExpired: the nonce is {now - at} s old")
 	}
+}
+
+// SignatureHeader is the Tit-Signature header's value: the signer's email, the nonce and the signature.
+fn SignatureHeader(email str, nonce str, sig []u8) str {
+	return email + " " + nonce + " " + seal.B64(sig)
+}
+
+// ParseSignatureHeader splits a Tit-Signature header into the email, the nonce and the signature.
+fn ParseSignatureHeader(h str) !(str, str, []u8) {
+	let parts = twine.Split(h, " ")
+	if len(parts) != 3 {
+		fail fault.Wrap(ErrRefused, "Unauthorized: Tit-Signature has {len(parts)} fields, not 3")
+	}
+	let sig = seal.B64Decode(parts[2]) catch _ {
+		fail fault.Wrap(ErrRefused, "Unauthorized: the signature is not base64")
+	}
+	if len(sig) != 64 {
+		fail fault.Wrap(ErrRefused, "Unauthorized: a signature of {len(sig)} bytes")
+	}
+	return parts[0], parts[1], sig
 }
 
 // SigningPayload is the bytes a request's ed25519 signature covers.
