@@ -1,0 +1,17 @@
+valid true true false false
+mode drwxr-x--- ----------
+read alpha
+stat a.txt 5 false
+entry a.txt false
+entry deep true
+glob [alpha/a.txt alpha/deep]
+sub true alpha
+walk . true
+walk alpha true
+walk alpha/a.txt false
+walk alpha/deep true
+walk beta true
+walk end <nil>
+readall pipe bytes
+pipe pipe
+pipe error broken

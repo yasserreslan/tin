@@ -1,0 +1,125 @@
+package main
+
+import "fault"
+import "fs"
+import "io"
+import "quarry"
+import "say"
+
+let ErrBroken = fault("broken")
+
+fn main() {
+	let root = quarry.TempDir() + "/tin-v2-iofs-" + say.Str(quarry.Pid())
+	quarry.RemoveAll(root) catch _ {
+	}
+	quarry.MkdirAll(root + "/alpha/deep") catch err {
+		say.Line("mkdir", err)
+		return
+	}
+	quarry.MkdirAll(root + "/beta") catch err {
+		say.Line("mkdir", err)
+		return
+	}
+	quarry.WriteFile(root + "/alpha/a.txt", "alpha") catch err {
+		say.Line("write", err)
+		return
+	}
+	quarry.WriteFile(root + "/alpha/deep/z.bin", "z") catch err {
+		say.Line("write", err)
+		return
+	}
+	let d = fs.Dir(root)
+	say.Line("valid", fs.ValidPath("."), fs.ValidPath("alpha/a.txt"), fs.ValidPath("../a"), fs.ValidPath("a//b"))
+	say.Line("mode", fs.ModeString(fs.ModeDir|0o750), fs.ModeString(0))
+	let body = fs.ReadFile(d, "alpha/a.txt") catch err {
+		say.Line("read", err)
+		return
+	}
+	say.Line("read", body)
+	let info = fs.Stat(d, "alpha/a.txt") catch err {
+		say.Line("stat", err)
+		return
+	}
+	say.Line("stat", info.Name, info.Size, info.IsDir())
+	let entries = fs.ReadDir(d, "alpha") catch err {
+		say.Line("readdir", err)
+		return
+	}
+	for e in entries {
+		say.Line("entry", e.Name, e.IsDir())
+	}
+	let files = fs.Glob(d, "alpha/*") catch err {
+		say.Line("glob", err)
+		return
+	}
+	say.Line("glob", files)
+	let sub = fs.Sub(d, "alpha") catch err {
+		say.Line("sub", err)
+		return
+	}
+	let subBody = fs.ReadFile(sub, "a.txt") catch err {
+		say.Line("sub", err)
+		return
+	}
+	say.Line("sub", sub.Root() == root + "/alpha", subBody)
+	let walkErr = fs.WalkDir(d, ".", fn(path str, entry ?fs.DirEntry, err fault) ! {
+		if entry == nil {
+			say.Line("walk error", path, err)
+			return
+		}
+		say.Line("walk", path, entry.IsDir())
+		if path == "alpha/deep" {
+			fail fs.SkipDir
+		}
+	})
+	say.Line("walk end", walkErr)
+	mut reader = chunkReader{data: "pipe bytes", at: 0}
+	let all = io.ReadAll(reader) catch err {
+		say.Line("readall", err)
+		return
+	}
+	say.Line("readall", all)
+	mut (pr, pw) = io.Pipe() catch err {
+		say.Line("pipe", err)
+		return
+	}
+	pw.Write([]u8("pipe")) catch err {
+		say.Line("pipe write", err)
+		return
+	}
+	pw.Close() catch err {
+		say.Line("pipe close", err)
+		return
+	}
+	let pipeBytes = io.ReadAll(pr) catch err {
+		say.Line("pipe read", err)
+		return
+	}
+	say.Line("pipe", pipeBytes)
+	mut (pe, we) = io.Pipe() catch err {
+		say.Line("pipe error", err)
+		return
+	}
+	we.CloseWithError(ErrBroken) catch err {
+		say.Line("pipe error close", err)
+		return
+	}
+	let (_, re) = io.ReadAll(pe)
+	say.Line("pipe error", re)
+	quarry.RemoveAll(root) catch _ {
+	}
+}
+
+type chunkReader struct {
+	data str
+	at i64
+}
+
+fn (r mut chunkReader) Read(buf mut []u8) !i64 {
+	if r.at == len(r.data) {
+		return 0
+	}
+	buf[0] = r.data[r.at]
+	r.at += 1
+	return 1
+}
