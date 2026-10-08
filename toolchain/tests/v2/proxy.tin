@@ -1,0 +1,14 @@
+package main
+
+import "anvil"
+import "proxy"
+import "say"
+
+// ReverseProxy returns Go's default gateway response when the upstream cannot be reached (#739).
+fn main() {
+	let p = proxy.New("http://127.0.0.1:1")
+	let r = anvil.NewRouter()
+	r.Get("/", p.ServeHTTP)
+	let got = r.RunWith("GET", "/", []str{}, "")
+	say.Line(got.Code(), got.Header("Content-Type"), got.Header("X-Content-Type-Options"), str(got.Body))
+}

@@ -16,6 +16,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
+| [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
 | [assay](#assay) | HTTP test requests, recorders and local test servers (net/http/httptest) |
 | [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
 | [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
@@ -523,6 +524,28 @@ Not reproduced: an absolute-form request target ("GET http://host/x") is written
 
 - `Request(q anvil.Req, body bool) str`: Request returns the request q as text, as Go's httputil.DumpRequest(req, body): the request line, the Host field, a Transfer-Encoding: chunked field for a chunked request, the other fields (Cache-Control: no-cache added after a Pragma: no-cache, as Go's server does), an empty line and, when body is true, the body (chunked again when it came chunked). A request on a Router.Stream route has no body here: its body is read with BodyStream.
 - `Response(r wire.Resp, body bool) str`: Response returns the response r as text, as Go's httputil.DumpResponse(resp, body): the status line, a Connection: close field when the connection ends after it (HTTP/1.0 without keep-alive, a body read to the end of the connection), the framing (Content-Length, or Transfer-Encoding: chunked), the other fields, an empty line and, when body is true, the body.
+
+## proxy
+
+Package proxy forwards HTTP requests to an upstream server with bounded memory, like Go's net/http/httputil.ReverseProxy.
+
+A basic proxy:
+
+```tin body
+let p = proxy.New("http://127.0.0.1:8081")
+let r = anvil.NewRouter()
+r.Stream("POST", "/{path...}", p.ServeHTTP)
+r.Get("/{path...}", p.ServeHTTP)
+r.Serve(":8080") catch err { say.Line(err) }
+```
+
+Director rewrites a request to a complete upstream URL. ModifyResponse can edit the upstream status and fields before they are written; ErrorHandler replaces the default 502 response. The proxy removes hop-by-hop fields and appends the caller's address to X-Forwarded-For. Register request-body routes with Router.Stream.
+
+- `type Response struct`: Response is the upstream status and headers before they are copied to the client.
+- `type Proxy struct`: Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set, returns the complete upstream URL for each request. Use New to get default hooks.
+- `New(target str) Proxy`: New returns a proxy with default hook functions. Set hooks before registering ServeHTTP.
+- `DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault)`: DefaultErrorHandler writes Go ReverseProxy's default 502 body.
+- `(p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out)`: ServeHTTP handles a request and can be registered with anvil.Router.Stream. Requests and responses are copied in 32 KiB pieces; neither body is accumulated.
 
 ## assay
 

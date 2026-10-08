@@ -1,0 +1,21 @@
+package main
+
+import "./ci"
+import "mint"
+import "quarry"
+import "twine"
+
+// proxy_check compiles and runs the strict ReverseProxy test against its checked-in output.
+fn main() {
+	let root = ci.Root()
+	let out = ci.Join(root, "bin/ci/proxy")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "proxy")
+	ci.BuildTin("toolchain/tests/v2/proxy.tin", exe, "", []str{})
+	let got = ci.Exec([]str{exe}, root, 30)
+	ci.Must(got, "run strict proxy test")
+	let expected = ci.Read(ci.Join(root, "toolchain/tests/v2/proxy.out"))
+	let actual = twine.TrimSpace(got.Stdout)
+	ci.Check(actual == twine.TrimSpace(expected), "strict proxy output differs: " + actual)
+	ci.Pass("proxy: strict test passed (" + mint.Itoa(len(actual)) + " output bytes)")
+}

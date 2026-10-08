@@ -1,0 +1,300 @@
+// Package proxy forwards HTTP requests to an upstream server with bounded memory, like Go's
+// net/http/httputil.ReverseProxy.
+//
+// A basic proxy:
+//
+//	let p = proxy.New("http://127.0.0.1:8081")
+//	let r = anvil.NewRouter()
+//	r.Stream("POST", "/{path...}", p.ServeHTTP)
+//	r.Get("/{path...}", p.ServeHTTP)
+//	r.Serve(":8080") catch err { say.Line(err) }
+//
+// Director rewrites a request to a complete upstream URL. ModifyResponse can edit
+// the upstream status and fields before they are written; ErrorHandler replaces the
+// default 502 response. The proxy removes hop-by-hop fields and appends the caller's
+// address to X-Forwarded-For. Register request-body routes with Router.Stream.
+package proxy
+
+import "anvil"
+import "wire"
+
+// Response is the upstream status and headers before they are copied to the client.
+type Response struct {
+	Status i64
+	Fields []str
+}
+
+// Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set,
+// returns the complete upstream URL for each request. Use New to get default hooks.
+type Proxy struct {
+	Target        str
+	Director      fn(anvil.Req) str
+	ModifyResponse fn(mut Response) !bool
+	ErrorHandler  fn(anvil.Req, mut anvil.Out, fault)
+}
+
+// New returns a proxy with default hook functions. Set hooks before registering ServeHTTP.
+fn New(target str) Proxy {
+	return Proxy{Target: target, Director: noDirector, ModifyResponse: noModify, ErrorHandler: DefaultErrorHandler}
+}
+
+fn noDirector(q anvil.Req) str { return "" }
+fn noModify(r mut Response) !bool { return true }
+
+// DefaultErrorHandler writes Go ReverseProxy's default 502 body.
+fn DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault) {
+	w.Status(502)
+	w.Type("text/plain; charset=utf-8")
+	w.Head("X-Content-Type-Options", "nosniff")
+	w.Text("Bad Gateway\n")
+}
+
+// ServeHTTP handles a request and can be registered with anvil.Router.Stream.
+// Requests and responses are copied in 32 KiB pieces; neither body is accumulated.
+fn (p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out) {
+	mut target = p.Director(q)
+	if len(target) == 0 { target = p.Target + q.Path + query(q.Query) }
+	let result = forward(q, mut w, target, p.ModifyResponse) catch e { e }
+	if result != nil {
+		p.ErrorHandler(q, mut w, result)
+	}
+}
+
+fn query(q str) str {
+	if len(q) == 0 { return "" }
+	return "?" + q
+}
+
+fn forward(q anvil.Req, w mut anvil.Out, target str, modify fn(mut Response) !bool) !fault {
+	let (authority, path, ok) = parse_url(target)
+	if !ok { fail "proxy: unsupported upstream URL" }
+	let (c, err) = wire.DialTimeout(authority, 5_000_000_000)
+	if err != nil { fail err }
+	defer c.Close()
+	c.SetTimeout(30_000_000_000)
+	let fields = request_fields(q, authority)
+	mut head = q.Method + " " + path + " HTTP/1.1\r\nHost: " + authority + "\r\n"
+	for f in fields { head += f + "\r\n" }
+	head += "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+	let e = c.Write(head)
+	if e != nil { fail e }
+	let reader = q.BodyStream()
+	mut buf = make([]u8, 32768)
+	for {
+		let (n, re) = reader.Read(mut buf)
+		if re != nil { fail re }
+		if n == 0 { break }
+		let chunk = hex_size(n) + "\r\n"
+		let we = c.Write(chunk)
+		if we != nil { fail we }
+		let we2 = c.WriteBytes(buf[:n])
+		if we2 != nil { fail we2 }
+		let we3 = c.Write("\r\n")
+		if we3 != nil { fail we3 }
+	}
+	let end = c.Write("0\r\n\r\n")
+	if end != nil { fail end }
+	let statusLine = read_line(c) catch e { fail e }
+	let status = parse_status(statusLine)
+	if status < 100 { fail "proxy: malformed upstream status" }
+	mut response = Response{Status: status, Fields: []str{}}
+	for {
+		let line = read_line(c) catch e { fail e }
+		if len(line) == 0 { break }
+		response.Fields = append(response.Fields, line)
+	}
+	let allowed = try modify(mut response)
+	if !allowed { fail "proxy: response rejected" }
+	w.Status(response.Status)
+	let clean = strip_hop(response.Fields)
+	for f in clean {
+		let k = colon(f)
+		if k > 0 { w.Head(f[:k], trim(f[k+1:])) }
+	}
+	w.Stream() catch e { fail e }
+	let transfer = header_value(response.Fields, "transfer-encoding")
+	let length = parse_length(header_value(response.Fields, "content-length"))
+	if has_token(transfer, "chunked") {
+		try copy_chunked(c, mut w, mut buf)
+		return nil
+	}
+	if length >= 0 { try copy_length(c, mut w, mut buf, length)
+		return nil }
+	for {
+		let (n, re) = c.Read(mut buf, len(buf))
+		if re != nil {
+			if wire.IsEOF(re) { return nil }
+			w.Abort()
+			fail re
+		}
+		if n == 0 { return nil }
+		let we = w.Write(buf[:n])
+		if we != nil { fail we }
+	}
+}
+
+fn copy_length(c wire.Conn, w mut anvil.Out, buf mut []u8, remaining i64) ! {
+	mut left = remaining
+	for left > 0 {
+		let n = try c.Read(mut buf, min(left, len(buf)))
+		let e = w.Write(buf[:n])
+		if e != nil { fail e }
+		left -= n
+	}
+}
+
+fn copy_chunked(c wire.Conn, w mut anvil.Out, buf mut []u8) ! {
+	for {
+		let line = try read_line(c)
+		let size = parse_hex(line)
+		if size < 0 { fail "proxy: malformed chunk size" }
+		if size == 0 {
+			for {
+				let trailer = try read_line(c)
+				if len(trailer) == 0 { return }
+				let k = colon(trailer)
+				if k > 0 { w.Trailer(trailer[:k], trim(trailer[k+1:])) }
+			}
+		}
+		mut left = size
+		for left > 0 {
+			let n = try c.Read(mut buf, min(left, len(buf)))
+			try w.Write(buf[:n])
+			left -= n
+		}
+		_ = try c.ReadFull(2)
+	}
+}
+
+fn request_fields(q anvil.Req, authority str) []str {
+	let all = q.Fields()
+	mut removed = connection_tokens(all)
+	mut out = make([]str, 0, len(all)+3)
+	let existing = q.Header("X-Forwarded-For")
+	for f in all {
+		let k = colon(f)
+		if k <= 0 { continue }
+		let name = lower(f[:k])
+		if is_hop(name) || contains(removed, name) || name == "host" || name == "content-length" || name == "transfer-encoding" { continue }
+		if name == "x-forwarded-for" { continue }
+		out = append(out, f)
+	}
+	let peer = q.RemoteAddr()
+	mut ip = peer
+	if len(peer) > 0 && peer[0] == '[' {
+		mut end = 0
+		for i in 0..len(peer) { if peer[i] == ']' { end = i
+			break } }
+		ip = peer[1:end]
+	} else {
+		mut end = len(peer)
+		for i in 0..len(peer) { if peer[i] == ':' { end = i
+			break } }
+		ip = peer[:end]
+	}
+	if len(existing) > 0 && len(ip) > 0 { out = append(out, "X-Forwarded-For: " + existing + ", " + ip) } else if len(existing) > 0 { out = append(out, "X-Forwarded-For: " + existing) } else if len(ip) > 0 { out = append(out, "X-Forwarded-For: " + ip) }
+	return out
+}
+
+fn connection_tokens(fields []str) []str {
+	mut out = []str{}
+	for f in fields {
+		let k = colon(f)
+		if k > 0 && lower(f[:k]) == "connection" {
+			let v = f[k+1:]
+			mut a = 0
+			for i in 0..len(v) { if v[i] == ',' { let x = lower(trim(v[a:i]))
+				if len(x)>0 { out = append(out, x) }
+				a = i+1 } }
+			let x = lower(trim(v[a:]))
+			if len(x)>0 { out = append(out, x) }
+		}
+	}
+	return out
+}
+
+fn strip_hop(fields []str) []str {
+	let removed = connection_tokens(fields)
+	mut out = []str{}
+	for f in fields {
+		let k = colon(f)
+		if k <= 0 { continue }
+		let name = lower(f[:k])
+		if is_hop(name) || contains(removed, name) { continue }
+		out = append(out, f)
+	}
+	return out
+}
+
+fn is_hop(k str) bool {
+	return k == "connection" || k == "keep-alive" || starts(k, "proxy-") || k == "te" || k == "trailer" || k == "transfer-encoding" || k == "upgrade"
+}
+
+fn starts(s str, prefix str) bool { return len(s) >= len(prefix) && s[:len(prefix)] == prefix }
+
+fn contains(xs []str, s str) bool { for x in xs { if x == s { return true } }
+	return false }
+fn colon(s str) i64 { for i in 0..len(s) { if s[i] == ':' { return i } }
+	return -1 }
+fn trim(s str) str { mut a = 0
+	mut b = len(s)
+	for a<b && (s[a] == ' ' || s[a] == '	') { a += 1 }
+	for b>a && (s[b-1] == ' ' || s[b-1] == '	' || s[b-1] == '\r') { b -= 1 }
+	return s[a:b] }
+fn lower(s str) str { mut b = make([]u8, len(s))
+	for i in 0..len(s) { let c = s[i]
+		if c >= 'A' && c <= 'Z' { b[i] = c+32 } else { b[i] = c } }
+	return str(b) }
+fn header_value(fs []str, name str) str { for f in fs { let k = colon(f)
+	if k>0 && lower(f[:k]) == name { return trim(f[k+1:]) } }
+	return "" }
+fn has_token(s str, token str) bool { mut a = 0
+	for i in 0..len(s) { if s[i] == ',' { if lower(trim(s[a:i])) == token { return true }
+		a = i+1 } }
+	return lower(trim(s[a:])) == token }
+fn parse_length(s str) i64 { if len(s) == 0 { return -1 }
+	mut n = 0
+	for c in s { if c<'0' || c>'9' { return -1 }
+		n = n*10+i64(c-'0') }
+	return n }
+fn parse_hex(s str) i64 { mut n = 0
+	for c in s { if c == ';' || c == ' ' { break }
+		mut x = i64(c-'0')
+		if c >= 'a' && c <= 'f' { x = i64(c-'a')+10 } else if c >= 'A' && c <= 'F' { x = i64(c-'A')+10 }
+		if x<0 || x>15 { return -1 }
+		n = n*16+x }
+	return n }
+fn hex_size(n i64) str { return say_hex(n) }
+fn say_hex(n i64) str { if n == 0 { return "0" }
+	let digits = "0123456789abcdef"
+	mut v = n
+	mut b = make([]u8, 0, 16)
+	for v>0 { b = append(b, digits[v%16])
+		v /= 16 }
+	mut out = make([]u8, 0, len(b))
+	for i in 0..len(b) { out = append(out, b[len(b)-1-i]) }
+	return str(out) }
+
+fn read_line(c wire.Conn) !str { mut b = make([]u8, 0, 256)
+	for len(b)<65536 { let n = try c.Read(mut b, 1)
+		if n == 0 { break }
+		if b[len(b)-1] == '\n' { return trim(str(b)) } }
+	fail "proxy: invalid or oversized upstream header" }
+fn parse_status(s str) i64 { if len(s)<12 { return 0 }
+	return parse_length(s[9:12]) }
+
+fn parse_url(url str) (str, str, bool) {
+	if len(url)<7 || url[:7] != "http://" { return "", "", false }
+	let rest = url[7:]
+	mut slash = len(rest)
+	for i in 0..len(rest) { if rest[i] == '/' || rest[i] == '?' { slash = i
+		break } }
+	if slash == 0 { return "", "", false }
+	mut path = rest[slash:]
+	if slash == len(rest) { path = "/" } else if rest[slash] == '?' { path = "/"+rest[slash:] }
+	mut authority = rest[:slash]
+	mut hasport = false
+	for c in authority { if c == ':' { hasport = true } }
+	if !hasport { authority += ":80" }
+	return authority, path, true
+}
