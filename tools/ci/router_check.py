@@ -268,9 +268,10 @@ def conformance(port, failures):
     got, _ = first(b'GET /host HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
     if not got.endswith(b'host x'):
         failures.append('Host of an origin-form target: %r' % got)
-    got, _ = first(b'GET http://a b/host HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
-    if not got.startswith(b'HTTP/1.1 400 '):
-        failures.append('absolute-form target with a bad authority: %r' % got[:60])
+    for target in (b'http:///host', b'http://a<b/host', b'https://a"b/host'):
+        got, _ = first(b'GET ' + target + b' HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+        if not got.startswith(b'HTTP/1.1 400 '):
+            failures.append('absolute-form target %r with a bad authority: %r' % (target, got[:60]))
     got, closed = first(b'GET /fast HTTP/1.0\r\nConnection: keep-alive\r\n\r\n', wait=0.5)
     if b'\r\nConnection: keep-alive\r\n' not in got or closed:
         failures.append('HTTP/1.0 keep-alive: %r closed=%s' % (got, closed))
