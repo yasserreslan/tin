@@ -75,6 +75,7 @@ fn packages() []str {
 		"herald", "logging (log/slog)",
 		"expvar", "published variables and their JSON handler (expvar)",
 		"rpc", "Go's net/rpc: registered methods, a server and a client over a codec (net/rpc, net/rpc/jsonrpc)",
+		"syslog", "system log and collectors: Unix, TCP and UDP connections, priorities and facilities (log/syslog)",
 		"crucible", "testing helpers (testing)",
 		"crucible/iotest", "readers and writers that fail or cut short (testing/iotest)",
 		"crucible/quick", "properties checked over generated values (testing/quick)",

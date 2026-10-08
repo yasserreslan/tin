@@ -114,6 +114,8 @@ jobs:
         run: sh tools/ci/tin.sh jsontext_check
       - name: jsonv2 Marshal and Unmarshal against Go's encoding/json/v2 (a generated corpus)
         run: sh tools/ci/tin.sh jsonv2_check
+      - name: System log against Go's log/syslog (unixgram, unix, tcp and udp frames, one generated script)
+        run: sh tools/ci/tin.sh syslog_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
       - name: container/list and container/ring against Go (generated and exhaustive small cases)
