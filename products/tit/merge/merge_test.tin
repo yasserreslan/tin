@@ -195,3 +195,34 @@ fn TestMergeTin(t mut crucible.T) {
 	crucible.Equal(mut t, "named", len(names), 1)
 	crucible.Equal(mut t, "fn a", names[0], "fn a")
 }
+
+// Rename against edit (#786): a file one side renamed and the other edited merges at the new name, with the edit, on
+// either side.
+fn TestRenameAgainstEdit(t mut crucible.T) {
+	mut s = store.NewMem()
+	mut text = ""
+	for i in 0..20 {
+		text = text + "line {i} of the file\n"
+	}
+	let edited = text + "an edit at the end\n"
+	let base = treeOf(mut s, []object.Entry{file("old.txt", blobId(mut s, text)), file("keep.txt", blobId(mut s, "k\n"))})
+	let renamed = treeOf(mut s, []object.Entry{file("new.txt", blobId(mut s, text)), file("keep.txt", blobId(mut s, "k\n"))})
+	let edit = treeOf(mut s, []object.Entry{file("old.txt", blobId(mut s, edited)), file("keep.txt", blobId(mut s, "k\n"))})
+	let want = blobId(mut s, edited)
+	for k in 0..2 {
+		mut ours = renamed
+		mut theirs = edit
+		if k == 1 {
+			ours = edit
+			theirs = renamed
+		}
+		let r = MergeTrees(mut s, base, ours, theirs) catch e {
+			t.Error("merge: {e}")
+			return
+		}
+		crucible.Equal(mut t, "no conflict ({k})", len(r.Conflicts), 0)
+		let n = entryOf(mut s, r.Tree, "new.txt")
+		t.True("the edit at the new name ({k})", n != nil && n.Id == want)
+		t.True("nothing at the old name ({k})", entryOf(mut s, r.Tree, "old.txt") == nil)
+	}
+}

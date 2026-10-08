@@ -69,7 +69,10 @@ fn blob[S store.ObjectStore](s mut S, e ?object.Entry) !str {
 // writing the merged trees and blobs to s.
 fn MergeTrees[S store.ObjectStore](s mut S, base object.Id, ours object.Id, theirs object.Id) !Result {
 	mut conflicts = []Conflict{}
-	let id = try mergeDir(mut s, "", base, ours, theirs, mut conflicts)
+	// a file one side renamed and the other edited is merged at its new name (renames.tin)
+	let (b1, t1) = try followRenames(mut s, base, ours, theirs)
+	let (b2, o2) = try followRenames(mut s, b1, t1, ours)
+	let id = try mergeDir(mut s, "", b2, o2, t1, mut conflicts)
 	return Result{Tree: id, Conflicts: conflicts}
 }
 
