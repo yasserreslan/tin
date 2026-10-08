@@ -14,9 +14,16 @@ wire waits already observe cancellation and the earliest enclosing deadline.
 An explicit database timeout is an additional upper bound: use the earlier of
 the task deadline and the configured timeout, and return the task's cancellation
 fault when that boundary stops the operation. Closing a `DB` prevents new
-operations and waits for checked-out connections to be returned before closing
-them. Pool capacity is process-wide, following the existing clients' cap
-contract, while per-core idle connections remain local to their owning core.
+operations, closes idle connections and closes checked-out connections when
+they are returned. Pool capacity is process-wide, following the existing
+clients' cap contract, while per-core idle connections remain local to their
+owning core. The PostgreSQL adapter requires `SetMaxOpen` and `SetMaxIdle` before
+first use because its existing client fixes those limits when the per-core pool
+is first created.
 
-Driver names are process-wide and immutable after registration. Registering an
-empty or already registered name fails, matching Go's one-name-one-driver rule.
+Driver names are immutable after registration on each core. Registering an empty
+or already registered name fails with Go's registration fault text. Tin's
+mutable package globals are per-core, so the current registry is also per-core;
+a process-wide registry of mutable driver values needs a shared driver lifecycle
+contract that this patch does not provide. This remains an open requirement in
+issue #921.

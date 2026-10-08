@@ -89,7 +89,8 @@ const rTimeout = 9
 const rID = 10
 const rTls = 11 // the kept tls.Config for this client's sslmode, or 0 for plain TCP
 const rCap = 12 // the cap record of Options.MaxTotal (see cap_record), 0: no cap
-const recWords = 13
+const rClosed = 13
+const recWords = 14
 
 // A core's pool for one Client.
 const pIdle = 0 // a stack of idle connections
@@ -99,7 +100,8 @@ const pWait = 3 // waiters, in order
 const pWaitHead = 4
 const pWaitN = 5
 const pWaitCap = 6
-const poolWords = 7
+const pIdleCap = 7
+const poolWords = 8
 
 // A waiter: [task, connection handed over, gone, done].
 const wTask = 0
@@ -696,10 +698,61 @@ fn (c Client) pool() i64 {
 	mut p = pools[id]
 	if p == 0 {
 		p = calloc(poolWords, 8)
-		p[pIdle] = calloc(pool_cap(c.rec)+1, 8)
+		p[pIdleCap] = pool_cap(c.rec)
+		p[pIdle] = calloc(p[pIdleCap]+1, 8)
 		pools[id] = p
+	} else if p[pIdleCap] < pool_cap(c.rec) {
+		p[pIdleCap] = pool_cap(c.rec)
+		p[pIdle] = realloc(p[pIdle], (p[pIdleCap]+1)*8)
 	}
 	return p
+}
+
+// SetMaxOpen sets the process-wide connection cap for this client; configure it before first use.
+fn (c Client) SetMaxOpen(n i64) ! {
+	if !c.open { fail "postgres: the client is not open" }
+	let p = c.pool()
+	if p[pTotal] > 0 { fail "postgres: SetMaxOpen must be called before first use" }
+	if n <= 0 {
+		c.rec[rCap] = 0
+		return
+	}
+	let key = rec_str(c.rec, rAddr) + "\x00" + rec_str(c.rec, rUser) + "\x00" + rec_str(c.rec, rDB) + "\x00" + mint.Itoa(n)
+	c.rec[rCap] = cap_record(key, n)
+}
+
+// SetMaxIdle sets the per-core connection cap for this client; configure it before first use.
+fn (c Client) SetMaxIdle(n i64) ! {
+	if !c.open { fail "postgres: the client is not open" }
+	if n < 0 { n = 0 }
+	let p = c.pool()
+	if p[pTotal] > 0 { fail "postgres: SetMaxIdle must be called before first use" }
+	c.rec[rPool] = n
+}
+
+// Close prevents new use and closes this client's idle connections; checked-out connections close when returned.
+fn (c Client) Close() ! {
+	if !c.open { return }
+	c.rec[rClosed] = 1
+	let p = c.pool()
+	for p[pIdleN] > 0 {
+		p[pIdleN] -= 1
+		let conn = p[pIdle][p[pIdleN]]
+		if idle_claim(c.rec, conn) {
+			conn_free(conn)
+			p[pTotal] -= 1
+			unreserve(c.rec)
+		} else {
+			conn_free(conn)
+			p[pTotal] -= 1
+		}
+	}
+	for {
+		let w = next_waiter(p)
+		if w == 0 { break }
+		w[wDone] = 1
+		rt_task_wake(w[wTask])
+	}
 }
 
 // ---- the process-wide cap (Options.MaxTotal) ----
@@ -1008,6 +1061,7 @@ fn (c Client) acquire(until i64) !i64 {
 	}
 	let p = c.pool()
 	for {
+		if c.rec[rClosed] != 0 { fail "postgres: the client is closed" }
 		_ = try remaining(until)
 		for p[pIdleN] > 0 {
 			p[pIdleN] -= 1
@@ -1108,7 +1162,7 @@ fn next_waiter(p i64) i64 {
 // release returns a connection to the pool; a broken one (ok false) is closed.
 fn (c Client) release(conn i64, ok bool) {
 	let p = c.pool()
-	if !ok {
+	if !ok || c.rec[rClosed] != 0 {
 		conn_free(conn)
 		p[pTotal] -= 1
 		unreserve(c.rec)

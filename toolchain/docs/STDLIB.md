@@ -56,6 +56,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [redis](#redis) | Redis client (go-redis) |
 | [mysql](#mysql) | MySQL client (database/sql with go-sql-driver/mysql) |
 | [postgres](#postgres) | PostgreSQL client (database/sql with pgx) |
+| [database](#database) | generic SQL drivers, pooling and queries (database/sql) |
 | [kafka](#kafka) | Kafka client (franz-go, sarama) |
 | [websocket](#websocket) | WebSocket server and client (gorilla/websocket) |
 | [atomic](#atomic) | counters and flags every core may change (sync/atomic) |
@@ -2255,18 +2256,29 @@ for r in rows.Rows {
 
 ## postgres
 
-Package postgres is a PostgreSQL protocol 3.0 client over TCP. Query interpolation binds binary parameters as $1, $2, ...; a plain str cannot be used as SQL. Connections are pooled per core (Options.Pool, default max(2, 64/cores); Options.MaxTotal caps them for the process) and waiting request tasks park without blocking it. Authentication supports SCRAM-SHA-256, MD5 and cleartext. Options.SSLMode turns on TLS 1.3 (SSLRequest): "require" encrypts, "verify-full" (the default when Options.TLS is set) also checks the server's certificate and name.
+Package postgres implements a database/sql driver for the PostgreSQL client.
 
-Sizing: a Client opened in a global's initializer is opened on every core, so a 32-core pod with Pool 16 may open 512 connections to one server, and a fleet of pods multiplies that. Pool, when not set, is max(2, 64/cores) per core: about 64 for the process, at least 2 on each core. Options.MaxTotal caps the connections of the whole process, over all cores (Clients with the same address, user, database and MaxTotal share one cap): a core at the cap waits, within the request's deadline and Options.Timeout, until a connection is released or a core that has one idle gives up its slot. Set MaxTotal to at least the number of cores that serve database requests; below that, cores share connections by closing and dialing again.
-
-```tin body
-let pw = quarry.Getenv("POSTGRES_PASSWORD")
-let name = "ana"
-let db = postgres.Open(postgres.Options{Addr: "127.0.0.1:5432", User: "app", Password: pw, Database: "shop"})
-let rows = try db.Query("INSERT INTO users(name) VALUES ({name}) RETURNING id")
-let id = rows.Rows[0][0].Int()
-```
-
+- `type SQLDriver struct`: SQLDriver adapts the PostgreSQL client to database/sql.
+- `NewSQLDriver(options Options) SQLDriver`: NewSQLDriver creates a database/sql driver with these PostgreSQL connection options.
+- `(d SQLDriver) Open(name str) !dyn sql.Conn`: Open creates a PostgreSQL connection for a database/sql data source name.
+- `(c sqlConn) Prepare(query query) !dyn sql.Stmt`: Prepare compiles a parameterized PostgreSQL query for this connection.
+- `(c sqlConn) Begin() !dyn sql.Conn`: Begin pins a PostgreSQL connection for a database/sql transaction.
+- `(c sqlConn) Finish(commit bool) !bool { fail "postgres: no active transaction" }`: End refuses to finish a connection without an active transaction.
+- `(c sqlConn) SetMaxOpen(n i64) !bool`: SetMaxOpen updates the client's process-wide connection cap.
+- `(c sqlConn) SetMaxIdle(n i64) !bool`: SetMaxIdle updates the client's per-core connection cap.
+- `(c sqlConn) Close() ! { try c.client.Close() }`: Close closes the client pool owned by this generic database handle.
+- `(c sqlTxConn) Prepare(query query) !dyn sql.Stmt`: Prepare compiles a query for this PostgreSQL transaction.
+- `(c sqlTxConn) Begin() !dyn sql.Conn { fail "postgres: nested transaction" }`: Begin rejects nested transactions.
+- `(c sqlTxConn) SetMaxOpen(n i64) !bool { fail "sql: cannot set pool limits inside a transaction" }`: SetMaxOpen is invalid on a transaction connection.
+- `(c sqlTxConn) SetMaxIdle(n i64) !bool { fail "sql: cannot set pool limits inside a transaction" }`: SetMaxIdle is invalid on a transaction connection.
+- `(c sqlTxConn) Finish(commit bool) !bool`: Commit commits the PostgreSQL transaction.
+- `(c sqlTxConn) Close() !`: Close rolls back a transaction whose owner closes it.
+- `(s sqlStmt) Query() !sql.Rows`: Query runs the prepared query and converts the PostgreSQL result values.
+- `(s sqlTxStmt) Query() !sql.Rows`: Query runs the prepared query within its PostgreSQL transaction.
+- `(s sqlStmt) Exec() !sql.Result`: Exec runs the prepared query and returns its affected row count.
+- `(s sqlTxStmt) Exec() !sql.Result`: Exec runs the prepared statement within its PostgreSQL transaction.
+- `(s sqlStmt) Close() ! { }`: Close releases the statement wrapper without closing the shared client.
+- `(s sqlTxStmt) Close() ! { }`: Close releases a transaction statement wrapper.
 - `type Value enum`: Value is one column of a row.
 - `type Rows struct`: Rows is a query's result.
 - `type Result struct`: Result is what a statement without rows did.
@@ -2279,6 +2291,9 @@ let id = rows.Rows[0][0].Int()
 - `(v Value) Float() f64`: Float is v as a float.
 - `(v Value) Text() str`: Text is v as text ("" for NULL).
 - `(r Rows) Col(name str) i64`: Col is the index of the named column, or -1.
+- `(c Client) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide connection cap for this client; configure it before first use.
+- `(c Client) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core connection cap for this client; configure it before first use.
+- `(c Client) Close() !`: Close prevents new use and closes this client's idle connections; checked-out connections close when returned.
 - `(c Client) Query(q query) !Rows`: Query returns the first rowset. With no parameters, multiple statements are allowed and all replies are consumed before returning. Integers and booleans use Value.Int; float4/8 use Value.Float; other OIDs (including numeric and bytea) use Value.Text.
 - `(c Client) Exec(q query) !Result`: Exec returns the affected count of the last command. Use Query with RETURNING to obtain generated IDs (PostgreSQL has no connection-wide last insert ID).
 - `(c Client) Ping() !`: Ping checks that the server answers.
@@ -2287,6 +2302,48 @@ let id = rows.Rows[0][0].Int()
 - `(t mut Tx) Exec(q query) !Result`: Exec runs a statement in the transaction and returns its affected count.
 - `(t mut Tx) Commit() !`: Commit makes the transaction's changes permanent. An aborted transaction must be rolled back explicitly; PostgreSQL's implicit COMMIT-to-ROLLBACK is not success.
 - `(t mut Tx) Rollback() !`: Rollback undoes the transaction's changes and releases its connection.
+
+## database
+
+Package database groups database interfaces and drivers.
+
+- `type Value enum`: Value is one database value returned by a driver.
+- `type Result struct`: Result reports the affected row count and optional inserted ID.
+- `NewResult(affected i64, lastID ?i64) Result`: NewResult creates a result with the affected count and optional inserted ID.
+- `shape Driver { Open(name str) !dyn Conn }`: Driver opens a connection for a driver-specific data source name.
+- `shape Conn`: Conn prepares statements and closes a driver connection.
+- `shape Stmt`: Stmt executes queries and closes a prepared statement.
+- `type Rows struct`: Rows is a materialized result set with a deterministic cursor.
+- `NewRows(columns []str, values [][]Value) Rows`: NewRows creates a result set from column names and row values.
+- `type Row struct`: Row holds the first row of a query result, or its query fault.
+- `type DB struct`: DB is a database handle backed by the registered driver's connection pool.
+- `type Statement struct`: Stmt is a prepared statement tied to its database connection.
+- `type Tx struct`: Tx is a transaction that uses its connection until it finishes.
+- `Register(name str, driver dyn Driver) !`: Register adds a driver under a unique non-empty name.
+- `Drivers() []str`: Drivers returns the registered names in lexical order.
+- `Open(driverName str, dataSourceName str) !DB`: Open opens a database by its registered driver name and data source name.
+- `(db mut DB) Close() !`: Close closes the database and prevents later operations.
+- `(db DB) Prepare(query query) !Statement`: Prepare creates a reusable statement for query.
+- `(db DB) Query(query query) !Rows`: Query executes query and returns its rows.
+- `(db DB) QueryRow(query query) Row`: QueryRow executes query and returns its first row or deferred query fault.
+- `(db DB) Exec(query query) !Result`: Exec executes a statement and returns its result.
+- `(db DB) SetMaxOpen(n i64) !bool`: SetMaxOpen sets the process-wide cap on open connections.
+- `(db DB) SetMaxIdle(n i64) !bool`: SetMaxIdle sets the per-core cap on idle connections.
+- `(s mut Statement) Close() !`: Close closes a prepared statement.
+- `(s Statement) Query() !Rows`: Query executes the prepared query and returns rows.
+- `(s Statement) Exec() !Result`: Exec executes the prepared statement and returns its result.
+- `(r Rows) Columns() []str { return r.columns }`: Columns returns the result column names.
+- `(r mut Rows) Next() bool`: Next advances the cursor and reports whether a row is available.
+- `(r Rows) Values() []Value`: Values returns the current row's values, or an empty slice before Next or after exhaustion.
+- `(r mut Rows) Close() ! { r.closed = true }`: Close marks the rows exhausted.
+- `(r Row) Scan() ![]Value`: Scan returns the row values or its deferred query fault.
+- `(r Result) LastInsertId() !i64`: LastInsertId returns the inserted ID when the driver reports one.
+- `(r Result) RowsAffected() !i64 { return r.affected }`: RowsAffected returns the number of rows affected.
+- `(db DB) Begin() !Tx`: Begin starts a transaction on the database connection.
+- `(tx Tx) Query(query query) !Rows`: Query executes a query inside the transaction.
+- `(tx Tx) Exec(query query) !Result`: Exec executes a statement inside the transaction.
+- `(tx mut Tx) Commit() !`: Commit commits the transaction.
+- `(tx mut Tx) Rollback() !`: Rollback rolls back the transaction.
 
 ## kafka
 
