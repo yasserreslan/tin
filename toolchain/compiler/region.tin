@@ -2772,6 +2772,11 @@ fn lp_fresh_expr(e i64) i64 {
 	if k == EX_IDENT {
 		return slice_has(lp_fresh, cast(IdentExpr, e).ref)
 	}
+	if k == EX_MEM && cast(MemExpr, e).hdr != 0 && cast(MemExpr, e).off == 16 && cast(MemExpr, e).index == 0 && cast(Node, cast(MemExpr, e).base).kind == EX_IDENT {
+		// The data block of a slice the iteration made (a literal's elements are stored through
+		// it) is the iteration's memory too (#714).
+		return slice_has(lp_fresh, cast(IdentExpr, cast(MemExpr, e).base).ref)
+	}
 	if k != EX_CALL || cast(Call, e).callee != 0 {
 		return 0
 	}
@@ -3064,7 +3069,7 @@ fn lp_rt_allocates(name str) i64 {
 	if str_prefix(name, "rt_slice_make") != 0 || str_prefix(name, "rt_map_make") != 0 || str_prefix(name, "rt_append") != 0 || str_prefix(name, "rt_slice_appendn") != 0 || str_prefix(name, "rt_str_from") != 0 || str_prefix(name, "rt_map_set") != 0 || str_prefix(name, "rt_kb_") != 0 {
 		return 1
 	}
-	return i64(name == "rt_alloc" || name == "rt_vdup" || name == "rt_str_cat" || name == "rt_str_grow" || name == "rt_str_sub" || name == "rt_bytes_from_str" || name == "rt_fmt_end" || name == "rt_slice_sub" || name == "rt_map_order" || name == "rt_err_str" || name == "rt_utf8" || name == "rt_copy_str" || name == "rt_slice_copy" || name == "rt_slice_copy_rc" || name == "rt_slice_copy_dyn")
+	return i64(name == "rt_alloc" || name == "rt_vdup" || name == "rt_str_new" || name == "rt_str_cat" || name == "rt_str_grow" || name == "rt_str_sub" || name == "rt_bytes_from_str" || name == "rt_fmt_end" || name == "rt_slice_sub" || name == "rt_map_order" || name == "rt_err_str" || name == "rt_utf8" || name == "rt_copy_str" || name == "rt_slice_copy" || name == "rt_slice_copy_rc" || name == "rt_slice_copy_dyn")
 }
 
 // lp_rt_into_first reports whether runtime call name stores into, or grows, its first argument
@@ -3085,7 +3090,7 @@ fn lp_rt_keeps_nothing(name str) i64 {
 	if str_prefix(name, "rt_fmt_") != 0 || str_prefix(name, "rt_sys_") != 0 || str_prefix(name, "rt_kb_") != 0 || str_prefix(name, "rt_kd_") != 0 || str_prefix(name, "rt_keep") != 0 || str_prefix(name, "rt_bounds_fail") != 0 {
 		return 1
 	}
-	return i64(name == "rt_alloc" || name == "rt_vdup" || name == "rt_ingot_alloc" || name == "rt_slice_make" || name == "rt_slice_make_str" || name == "rt_slice_make_nest" || name == "rt_slice_make_grid" || name == "rt_map_make" || name == "rt_map_make_rc" || name == "rt_map_key" || name == "rt_map_slots" || name == "rt_map_live" || name == "rt_map_len" || name == "rt_map_val" || name == "rt_map_val_dyn" || name == "rt_map_get" || name == "rt_map_get_dyn" || name == "rt_map_found" || name == "rt_map_del" || name == "rt_map_order" || name == "rt_order_at" || name == "rt_str_eq" || name == "rt_str_cmp" || name == "rt_str_cat" || name == "rt_str_sub" || name == "rt_str_from_rune" || name == "rt_str_from_bytes" || name == "rt_bytes_from_str" || name == "rt_copy_str" || name == "rt_slice_sub" || name == "rt_utf8" || name == "rt_err_str" || name == "rt_panic" || name == "rt_overflow_fail" || name == "rt_div_fail" || name == "rt_bnd_poll" || name == "rt_rc_inc" || name == "rt_rc_dec" || name == "rt_rc_dec_dyn" || name == "rt_rc_drop_none" || name == "rt_rc_arr_n" || name == "rt_pool_used" || name == "rt_task_swap")
+	return i64(name == "rt_alloc" || name == "rt_vdup" || name == "rt_str_new" || name == "rt_ingot_alloc" || name == "rt_slice_make" || name == "rt_slice_make_str" || name == "rt_slice_make_nest" || name == "rt_slice_make_grid" || name == "rt_map_make" || name == "rt_map_make_rc" || name == "rt_map_key" || name == "rt_map_slots" || name == "rt_map_live" || name == "rt_map_len" || name == "rt_map_val" || name == "rt_map_val_dyn" || name == "rt_map_get" || name == "rt_map_get_dyn" || name == "rt_map_found" || name == "rt_map_del" || name == "rt_map_order" || name == "rt_order_at" || name == "rt_str_eq" || name == "rt_str_cmp" || name == "rt_str_cat" || name == "rt_str_sub" || name == "rt_str_from_rune" || name == "rt_str_from_bytes" || name == "rt_bytes_from_str" || name == "rt_copy_str" || name == "rt_slice_sub" || name == "rt_utf8" || name == "rt_err_str" || name == "rt_panic" || name == "rt_overflow_fail" || name == "rt_div_fail" || name == "rt_bnd_poll" || name == "rt_rc_inc" || name == "rt_rc_dec" || name == "rt_rc_dec_dyn" || name == "rt_rc_drop_none" || name == "rt_rc_arr_n" || name == "rt_pool_used" || name == "rt_task_swap")
 }
 
 fn lp_scan_exprs(v []i64) {
@@ -3154,9 +3159,10 @@ fn lp_scan_call(e i64) {
 				lp_ok = 0
 				return
 			}
-		} else if lp_rt_keeps_nothing(name) == 0 {
+		} else if lp_rt_keeps_nothing(name) == 0 && name != "rt_pool_release" {
 			// Spawns, scopes, defer, select, use, within, guard, arenas, faults and the rest may
-			// keep what they are given past the iteration.
+			// keep what they are given past the iteration. A nested loop's own release (#714)
+			// gives back only memory its iteration made, which is inside this one's.
 			lp_ok = 0
 			return
 		}

@@ -1,5 +1,6 @@
 package main
 
+import "mint"
 import "say"
 
 // #633 phase 2: a loop whose iterations keep nothing they allocate gives each iteration's memory
@@ -64,7 +65,28 @@ fn built(n i64) []str {
 	return out
 }
 
+// slices_and_inner are loops given back since #714: a str slice literal (its elements stored
+// through the new slice's data), an inlined allocating call, an inner loop that has its own
+// release. Each value is read after the next iterations reused the memory.
+fn slices_and_inner(n i64) str {
+	mut total = 0
+	mut last = ""
+	for i in 0..n {
+		let parts = []str{"p", mint.Itoa(i)}
+		total += len(parts[0]) + len(parts[1])
+		let s = mint.Itoa(i * 7)
+		for c in s {
+			total += i64(c - '0')
+		}
+		if i == n - 1 {
+			last = keep(parts[1] + s)
+		}
+	}
+	return say.Fmt("%d %s", total, last)
+}
+
 fn main() {
+	say.Line("slices and inner", slices_and_inner(1000))
 	// Contained: 10 blocks of 8 MB, one at a time, fit a 16 MB limit.
 	let fits = limit memory 16mb {
 		mut t = 0

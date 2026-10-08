@@ -1677,7 +1677,8 @@ Tin has no garbage collector. Each core has two kinds of memory:
   or object, a global, a result), and then the pool goes back to where it was when the
   iteration began, also before a `break`, `continue` or `return`. A loop that keeps what it makes (appends it to an outer slice,
   stores it in an outer object) grows the pool, and so does one the compiler cannot prove
-  (it calls a function value, a `dyn` method, spawns or opens a scope); **such a loop runs
+  (it calls a function value, a `dyn` method, spawns, opens a scope, or holds a `guard`,
+  `within` or `limit` block, whose body is a closure; #714); **such a loop runs
   each step in an `arena`** (below) or calls `hearth.Reset()` between batches, or it grows
   until the kernel stops the program. Past `TIN_POOL_WARN_MB` (512 MiB by default, 0 turns
   it off) the runtime says so once on stderr (#629). It is a run-time warning, not a compile

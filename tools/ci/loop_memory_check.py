@@ -2,7 +2,8 @@
 """Loop iterations give their memory back (#633): binary-trees (bench/v2/bintrees.tin), which
 builds and checks each depth's trees inside one loop iteration, peaks within 3x of its Go twin's
 resident size, and the plain-program loop of the issue (5 million steps of a struct and a
-string) under 16 MiB. Linux only: peak RSS is the child's ru_maxrss as /usr/bin/time reports it."""
+string) under 16 MiB, and the loop bodies of #714 (an inlined call that allocates, a slice literal,
+an inner loop) under 16 MiB each. Linux only: peak RSS is the child's ru_maxrss as /usr/bin/time reports it."""
 import os
 from pathlib import Path
 import shutil
@@ -33,6 +34,19 @@ fn main() {
 	say.Line(total)
 }
 '''
+
+# Loop bodies that keep nothing but were not given back before #714: 3 million steps each.
+BODIES = {
+    'inlined mint.Itoa': ('let s = mint.Itoa(i)\n\t\tif len(s) > 0 {\n\t\t\ttotal += 1\n\t\t}', '3000000'),
+    'str slice literal': ('let parts = []str{"a", mint.Itoa(i)}\n\t\ttotal += len(parts[1])', '19888890'),
+    'make and store': ('let parts = make([]str, 2)\n\t\tparts[1] = mint.Itoa(i)\n\t\ttotal += len(parts[1])', '19888890'),
+    'inner loop': ('let s = mint.Itoa(i)\n\t\tfor c in s {\n\t\t\ttotal += i64(c)\n\t\t}', '1038666720'),
+}
+
+
+def body_program(body):
+    return ('package main\n\nimport "mint"\nimport "say"\n\nfn main() {\n\tmut total = 0\n'
+            '\tfor i in 0..3000000 {\n\t\t' + body + '\n\t}\n\tsay.Line(total)\n}\n')
 
 
 def peak_kib(argv):
@@ -73,7 +87,15 @@ def main():
         assert code == 0 and loop_out == b'53888890\n', (code, loop_out)
         print(f'plain loop of 5M structs and strings: peak {loop} KiB')
         assert loop < 16 * 1024, f'the plain loop peaks at {loop} KiB'
-    print('PASS loop memory: binary-trees within 3x of Go, the plain loop under 16 MiB')
+        for name, (body, want) in BODIES.items():
+            (out / 'body.tin').write_text(body_program(body))
+            subprocess.run([str(ROOT / 'bin/tinc'), '-o', str(out / 'body'), str(out / 'body.tin')],
+                           check=True, cwd=ROOT, env=env, timeout=300)
+            code, body_out, peak = peak_kib([str(out / 'body')])
+            assert code == 0 and body_out == (want + '\n').encode(), (name, code, body_out)
+            print(f'loop body {name}: peak {peak} KiB')
+            assert peak < 16 * 1024, f'the loop body {name} peaks at {peak} KiB (#714)'
+    print('PASS loop memory: binary-trees within 3x of Go, the plain loop and the #714 bodies under 16 MiB')
 
 
 if __name__ == '__main__':
