@@ -113,6 +113,11 @@ fn main2() {}
 	say.Line("selected", ws.Proj.Entries[ws.Proj.Selected].Name)
 	ws.Key(36, 0, "")
 	say.Line("opened by Return", ws.Ed.Name(), ws.Focus)
+	// a binary file is not opened
+	put(root + "/blob.bin", "ab\x00cd")
+	let before = ws.Ed.Name()
+	ws.OpenFile(root + "/blob.bin")
+	say.Line("binary", ws.Ed.Name() == before, twine.HasPrefix(ws.Ed.Message, "binary file"))
 	// git: the marks in the gutter and the panel's list of changed files
 	appkit.RunCapture("git -C '" + root + "' init -q && git -C '" + root + "' add -A && git -C '" + root + "' -c user.email=t@t -c user.name=t commit -qm first")
 	put(root + "/main.tin", `package changed

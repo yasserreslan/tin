@@ -219,9 +219,27 @@ fn (ed mut Editor) Load(path str) bool {
 		}
 		i += 1
 	}
+	let size = quarry.Size(path) catch _ {
+		0
+	}
+	if size > 20000000 {
+		ed.Say("too large to open: " + path)
+		return false
+	}
 	let text = quarry.ReadFile(path) catch _ {
 		ed.Say("cannot read " + path)
 		return false
+	}
+	// a zero byte in the first few kilobytes means the file is not text
+	mut probe = len(text)
+	if probe > 8192 {
+		probe = 8192
+	}
+	for i in 0..probe {
+		if text[i] == 0 {
+			ed.Say("binary file, not opened: " + path)
+			return false
+		}
 	}
 	let buf = textedit.FromText(text)
 	buf.Path = path
