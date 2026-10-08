@@ -104,6 +104,8 @@ type Out struct {
 	ci    i64 // the next middleware of that chain
 	vals  i64 // SetValue's keys and values: a []str made on first use, or 0
 	tr    i64 // Trailer's field lines: a []u8 made on first use, or 0
+	meth  str // the request's method and path, for Redirect (#823)
+	rpath str
 }
 
 const scrSize = 262144
@@ -1630,6 +1632,8 @@ fn run_request(c i64) {
 	if gRoutes != 0 {
 		dispatch(cast(rtable, gRoutes), mut q, mut w)
 	} else {
+		w.meth = q.Method
+		w.rpath = q.Path
 		gHandler(q, mut w)
 	}
 	if c[cBody] != 0 && body_end(c) {
@@ -3821,6 +3825,8 @@ fn dispatch(t rtable, q mut Req, w mut Out) {
 	q.ep = ep
 	w.ep = ep
 	w.ci = 0
+	w.meth = q.Method
+	w.rpath = q.Path
 	chain_next(q, mut w)
 }
 
