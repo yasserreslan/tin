@@ -1313,5 +1313,5 @@ Host names follow RFC 6125: DNS SANs only (the common name is ignored), one left
 label over at least two more labels, IP literals against IP SANs. The parser is strict DER and
 rejects every certificate Go's `crypto/x509` rejects (`tools/ci/x509_check.tin` checks this on
 byte-flipped certificates).
-the instructions (for tests). Vectors: `tools/ci/crypto_check.py` runs the Wycheproof files in `toolchain/tests/wycheproof/`
+the instructions (for tests). Vectors: `tools/ci/crypto_check.tin` runs the Wycheproof files in `toolchain/tests/wycheproof/`
 (including the invalid inputs) and random inputs checked against Python's `hashlib`.

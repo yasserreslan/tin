@@ -1,4 +1,4 @@
-// Runs the seal primitives over test vectors, one per input line (tools/ci/crypto_check.py):
+// Runs the seal primitives over test vectors, one per input line (tools/ci/crypto_check.tin):
 // "OP ARG..." (seal/open take KIND KEY NONCE AAD DATA) with byte arguments in hex ("-" for empty), printing one line per input: the
 // result in hex, "fault" or "ok"/"bad".
 package main

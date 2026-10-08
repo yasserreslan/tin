@@ -1,0 +1,308 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "seal"
+import "tinjson"
+import "twine"
+
+// seal primitives against Wycheproof vectors and, on random inputs, against Go's standard library (tools/ci/fixtures/hash_oracle.go).
+
+const VECTORS = "toolchain/tests/wycheproof"
+
+// Case is one input line for the fixture and how its output is judged:
+//   eq        the output is Want
+//   hmac      the output starts with the Want tag (Bits / 4 hex digits) exactly when Valid
+//   ecdh      Want when valid, "fault" when invalid, either when acceptable (Result)
+//   random    the output is the oracle's (filled in from Go)
+type Case struct {
+	Line str
+	Mode str
+	Want str
+	Valid bool
+	Result str
+	Bits i64
+	Name str
+}
+
+fn hx(s str) str {
+	if len(s) == 0 {
+		return "-"
+	}
+	return s
+}
+
+fn readJson(name str) tinjson.J {
+	let (j, ok) = tinjson.Parse(ci.Read(ci.Join(VECTORS, name)))
+	ci.Check(ok, "cannot parse " + name)
+	return j
+}
+
+fn wycheproof(cases []Case) []Case {
+	mut all = cases
+	for name in []str{"sha256", "sha384", "sha512"} {
+		let hm = readJson("hmac_" + name + "_test.json")
+		for group in hm.Get("testGroups").Items() {
+			let bits = group.Get("tagSize").Int()
+			for t in group.Get("tests").Items() {
+				all = append(all, Case{Line: "hmac " + name + " " + hx(t.Get("key").Text()) + " " + hx(t.Get("msg").Text()), Mode: "hmac", Want: t.Get("tag").Text(), Valid: t.Get("result").Text() == "valid", Result: "", Bits: bits, Name: "hmac_" + name + " " + mint.Itoa(t.Get("tcId").Int())})
+			}
+		}
+		let hk = readJson("hkdf_" + name + "_test.json")
+		for group in hk.Get("testGroups").Items() {
+			for t in group.Get("tests").Items() {
+				mut want = "fault"
+				if t.Get("result").Text() == "valid" {
+					want = t.Get("okm").Text()
+				}
+				all = append(all, Case{Line: "hkdf " + name + " " + hx(t.Get("ikm").Text()) + " " + hx(t.Get("salt").Text()) + " " + hx(t.Get("info").Text()) + " " + mint.Itoa(t.Get("size").Int()), Mode: "eq", Want: want, Valid: true, Result: "", Bits: 0, Name: "hkdf_" + name + " " + mint.Itoa(t.Get("tcId").Int())})
+			}
+		}
+	}
+	return all
+}
+
+// ecdh: Wycheproof ECDH vectors: valid ones give the shared secret, invalid ones a fault, and acceptable ones (such as compressed
+// points) either.
+fn ecdh(cases []Case, file str, op str, size i64) []Case {
+	mut all = cases
+	let data = readJson(file)
+	for group in data.Get("testGroups").Items() {
+		for t in group.Get("tests").Items() {
+			mut priv = twine.TrimLeft(t.Get("private").Text(), "0")
+			for len(priv) < size * 2 {
+				priv = "0" + priv
+			}
+			if len(t.Get("private").Text()) == 0 {
+				priv = "-"
+			}
+			all = append(all, Case{Line: op + " " + priv + " " + hx(t.Get("public").Text()), Mode: "ecdh", Want: t.Get("shared").Text(), Valid: true, Result: t.Get("result").Text(), Bits: 0, Name: file + " " + mint.Itoa(t.Get("tcId").Int())})
+		}
+	}
+	return all
+}
+
+// x25519: valid and acceptable results must match, except an all-zero shared secret (a low-order point), which must fail as TLS 1.3
+// requires.
+fn x25519(cases []Case) []Case {
+	mut all = cases
+	let data = readJson("x25519_test.json")
+	for group in data.Get("testGroups").Items() {
+		for t in group.Get("tests").Items() {
+			mut want = t.Get("shared").Text()
+			if want == twine.Repeat("0", 64) {
+				want = "fault"
+			}
+			all = append(all, Case{Line: "x25519 " + t.Get("private").Text() + " " + t.Get("public").Text(), Mode: "eq", Want: want, Valid: true, Result: "", Bits: 0, Name: "x25519 " + mint.Itoa(t.Get("tcId").Int())})
+		}
+	}
+	return all
+}
+
+// aead: Seal gives ct||tag and Open the message for valid vectors; Open fails for invalid ones, and both fail for a bad nonce or key
+// length. seal.AEAD takes only 12-byte nonces (like Go's cipher.NewGCM), so valid vectors with other nonce sizes must fail too.
+fn aead(cases []Case, file str, kind str) []Case {
+	mut all = cases
+	let data = readJson(file)
+	for group in data.Get("testGroups").Items() {
+		for t in group.Get("tests").Items() {
+			mut valid = t.Get("result").Text() == "valid"
+			if valid && group.Get("ivSize").Int() != 96 {
+				valid = false
+			}
+			let args = kind + " " + hx(t.Get("key").Text()) + " " + hx(t.Get("iv").Text()) + " " + hx(t.Get("aad").Text())
+			let sealed = t.Get("ct").Text() + t.Get("tag").Text()
+			let name = file + " " + mint.Itoa(t.Get("tcId").Int())
+			if valid {
+				let msg = hx(t.Get("msg").Text())
+				all = append(all, Case{Line: "seal " + args + " " + msg, Mode: "eq", Want: sealed, Valid: true, Result: "", Bits: 0, Name: name + " seal"})
+				all = append(all, Case{Line: "sealto " + args + " " + msg, Mode: "eq", Want: sealed, Valid: true, Result: "", Bits: 0, Name: name + " sealto"})
+				all = append(all, Case{Line: "open " + args + " " + hx(sealed), Mode: "eq", Want: t.Get("msg").Text(), Valid: true, Result: "", Bits: 0, Name: name + " open"})
+			} else {
+				all = append(all, Case{Line: "open " + args + " " + hx(sealed), Mode: "eq", Want: "fault", Valid: true, Result: "", Bits: 0, Name: name + " open"})
+			}
+		}
+	}
+	return all
+}
+
+fn randBytes(n i64) str {
+	let b = make([]u8, n)
+	for i in 0..n {
+		b[i] = u8(dice.Range(0, 256))
+	}
+	return hx(seal.Hex(b))
+}
+
+fn random(name str, line str, label str) Case {
+	return Case{Line: line, Mode: "random", Want: "", Valid: true, Result: "", Bits: 0, Name: label}
+}
+
+fn randomCases(cases []Case) []Case {
+	mut all = cases
+	for name in []str{"sha256", "sha384", "sha512"} {
+		// Every length across the padding boundaries of one and two blocks, then longer inputs.
+		mut lengths = []i64{}
+		for n in 0..300 {
+			lengths = append(lengths, n)
+		}
+		for i in 0..20 {
+			lengths = append(lengths, dice.Range(300, 5000))
+		}
+		for n in lengths {
+			all = append(all, random(name, "sha " + name + " " + randBytes(n), "sha_" + name + " len " + mint.Itoa(n)))
+		}
+		for i in 0..100 {
+			all = append(all, random(name, "hmac " + name + " " + randBytes(dice.Range(0, 300)) + " " + randBytes(dice.Range(0, 600)), "hmac_" + name + " random"))
+		}
+		mut digest = 32
+		if name == "sha384" {
+			digest = 48
+		} else if name == "sha512" {
+			digest = 64
+		}
+		for i in 0..50 {
+			all = append(all, random(name, "hkdf " + name + " " + randBytes(dice.Range(0, 100)) + " " + randBytes(dice.Range(0, 100)) + " " + randBytes(dice.Range(0, 100)) + " " + mint.Itoa(dice.Range(0, 255 * digest + 1)), "hkdf_" + name + " random"))
+		}
+	}
+	return all
+}
+
+// sha3Cases: SHA3-256, SHA3-512, SHAKE128 and SHAKE256 (#479): every length across one and two blocks of each rate (72, 136, 168
+// bytes), longer inputs, and outputs of many blocks.
+fn sha3Cases(cases []Case) []Case {
+	mut all = cases
+	for name in []str{"sha3_256", "sha3_512"} {
+		mut lengths = []i64{}
+		for n in 0..340 {
+			lengths = append(lengths, n)
+		}
+		for i in 0..20 {
+			lengths = append(lengths, dice.Range(340, 5000))
+		}
+		for n in lengths {
+			all = append(all, random(name, "sha3 " + name + " " + randBytes(n), name + " len " + mint.Itoa(n)))
+		}
+	}
+	let sizes = []i64{1, 32, 64, 135, 136, 137, 167, 168, 169, 500, 1000}
+	for name in []str{"shake128", "shake256"} {
+		mut lengths = []i64{}
+		mut n = 0
+		for n < 340 {
+			lengths = append(lengths, n)
+			n += 7
+		}
+		for i in 0..10 {
+			lengths = append(lengths, dice.Range(340, 3000))
+		}
+		for n in lengths {
+			let size = sizes[dice.Range(0, len(sizes))]
+			all = append(all, random(name, "sha3 " + name + " " + randBytes(n) + " " + mint.Itoa(size), name + " len " + mint.Itoa(n) + " out " + mint.Itoa(size)))
+		}
+	}
+	return all
+}
+
+// judge is whether the output (with "-" for empty read as "") satisfies the case.
+fn judge(c Case, out str, oracle str) bool {
+	mut o = out
+	if o == "-" {
+		o = ""
+	}
+	if c.Mode == "eq" {
+		return o == c.Want
+	}
+	if c.Mode == "hmac" {
+		let n = c.Bits / 4
+		mut prefix = o
+		if len(prefix) > n {
+			prefix = prefix[0:n]
+		}
+		return (prefix == c.Want) == c.Valid
+	}
+	if c.Mode == "random" {
+		mut want = oracle
+		if want == "-" {
+			want = ""
+		}
+		return o == want
+	}
+	if c.Result == "valid" {
+		return o == c.Want
+	}
+	if c.Result == "invalid" {
+		return o == "fault"
+	}
+	return o == c.Want || o == "fault"
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/crypto")
+	ci.Mkdirs(out)
+	mut cases = []Case{}
+	cases = wycheproof(cases)
+	cases = ecdh(cases, "ecdh_secp256r1_ecpoint_test.json", "p256ecdh", 32)
+	cases = x25519(cases)
+	cases = aead(cases, "chacha20_poly1305_test.json", "chacha")
+	cases = aead(cases, "aes_gcm_test.json", "aes")
+	cases = randomCases(cases)
+	cases = sha3Cases(cases)
+	let work = ci.TempDir(out, "crypto-")
+	let exe = ci.Join(work, "crypto_vectors")
+	// A private lib with seal_to_probe.tin in toolchain/std/seal: the fixture checks AEAD.SealTo through it.
+	let root = ci.Join(work, "probe-root")
+	ci.CopyTree(ci.Root(), root)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/seal_to_probe.tin"), ci.Join(root, "toolchain/std/seal/probe_seal_to.tin"))
+	ci.BuildTin("tools/ci/fixtures/crypto_vectors.tin", exe, root, []str{})
+	mut lines = []str{}
+	mut oracleIn = []str{}
+	for c in cases {
+		lines = append(lines, c.Line)
+		if c.Mode == "random" {
+			oracleIn = append(oracleIn, c.Line)
+		}
+	}
+	let data = twine.Join(lines, "\n") + "\n"
+	let g = ci.ExecIn([]str{"go", "run", "tools/ci/fixtures/hash_oracle.go"}, ci.Root(), 600, twine.Join(oracleIn, "\n") + "\n", []str{})
+	ci.Must(g, "go run hash_oracle.go")
+	let oracle = ci.Lines(g.Stdout)
+	ci.Check(len(oracle) == len(oracleIn), "the Go oracle answered " + mint.Itoa(len(oracle)) + " of " + mint.Itoa(len(oracleIn)) + " cases")
+	// Once on the CPU's instructions where it has them, once on the software path.
+	for p in 0..2 {
+		mut path = "default"
+		mut set = []str{}
+		if p == 1 {
+			path = "software"
+			set = []str{"TIN_SEAL_SOFT=1"}
+		}
+		let got = ci.ExecIn([]str{exe}, ci.Root(), 600, data, set)
+		ci.Check(got.Code == 0, "crypto_vectors exited " + mint.Itoa(got.Code) + ": " + got.Stderr)
+		let results = ci.Lines(got.Stdout)
+		ci.Check(len(results) == len(cases), "crypto_vectors answered " + mint.Itoa(len(results)) + " of " + mint.Itoa(len(cases)) + " cases: " + got.Stderr)
+		mut failed = 0
+		mut next = 0
+		for i in 0..len(cases) {
+			mut want = ""
+			if cases[i].Mode == "random" {
+				want = oracle[next]
+				next += 1
+			}
+			if !judge(cases[i], results[i], want) {
+				failed += 1
+				if failed <= 20 {
+					mut line = cases[i].Line
+					if len(line) > 200 {
+						line = line[0:200]
+					}
+					say.Line("FAIL " + path + " " + cases[i].Name + " " + line + " -> " + results[i])
+				}
+			}
+		}
+		ci.Check(failed == 0, "crypto (" + path + " path): " + mint.Itoa(failed) + " of " + mint.Itoa(len(cases)) + " vectors failed")
+		say.Line("crypto (" + path + " path): " + mint.Itoa(len(cases)) + " vectors passed")
+	}
+	ci.Remove(work)
+	ci.Pass("crypto: Wycheproof vectors and random inputs against Go's standard library")
+}
