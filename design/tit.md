@@ -192,8 +192,8 @@ bound of the declared size plus the header, so a lying header is `fault.LimitExc
 blob's path holds zlib of `chunks <size>\0` followed, for each chunk in order, by the chunk's SHA-256 (32 bytes) and
 its length (8 bytes, little-endian). Each chunk is its own file, `objects/chunks/ab/cdef…` (named by the hex of its
 SHA-256), holding zlib of its bytes. Chunks are cut by content (FastCDC: a gear rolling hash over 256 values from
-splitmix64 seeded with `tit-cdc1`; no cut before 256 KiB, a 22-bit mask up to 1 MiB, an 18-bit mask after, a cut at
-4 MiB at the latest), so an edit changes the chunks it touches and the rest are stored once. Reading assembles the
+splitmix64 seeded with `tit-cdc1`; no cut before 128 KiB, a 21-bit mask up to 512 KiB, a 17-bit mask after, a cut at
+2 MiB at the latest), so an edit changes the chunks it touches and the rest are stored once. Reading assembles the
 chunks, checks each against its hash and the whole against the blob's id. Packs and the protocol carry the whole blob.
 
 ## 6. Packs (version 1)

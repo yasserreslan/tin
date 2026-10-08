@@ -19,11 +19,11 @@ import "squash"
 // ChunkAbove is the size above which a file is stored in chunks.
 const ChunkAbove = 8 << 20
 
-const chunkMin = 256 << 10
+const chunkMin = 128 << 10
 
-const chunkAvg = 1 << 20
+const chunkAvg = 512 << 10
 
-const chunkMax = 4 << 20
+const chunkMax = 2 << 20
 
 // gearTable is the gear hash's 256 values: splitmix64 from a fixed seed, so every machine cuts the same chunks.
 @wrap fn gearTable() []u64 {
@@ -53,8 +53,9 @@ const chunkMax = 4 << 20
 	if n < normal {
 		normal = n
 	}
-	let maskS = u64(0x3fffff) << 42
-	let maskL = u64(0x3ffff) << 46
+	// 21 bits before the average (log2 of it, plus 2), 17 after (minus 2)
+	let maskS = u64(0x1fffff) << 43
+	let maskL = u64(0x1ffff) << 47
 	mut fp = u64(0)
 	mut i = chunkMin
 	for i < normal {

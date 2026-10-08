@@ -23,8 +23,9 @@ const inCoded = 2
 
 const atEnd = 3
 
-// InflateReader decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src.
-type InflateReader[R Reader] struct {
+// InflateStream decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src. It reads
+// from another reader as it goes; InflateReader (inflate_reader.tin) reads DEFLATE data already in memory.
+type InflateStream[R Reader] struct {
 	src    R
 	in     []u8
 	inLen  i64
@@ -49,14 +50,14 @@ type InflateReader[R Reader] struct {
 	max     i64
 }
 
-// NewInflateReader reads raw DEFLATE from src, making at most max bytes.
-fn NewInflateReader[R Reader](src R, max i64) InflateReader[R] {
-	return InflateReader[R]{src: src, in: make([]u8, chunkIn), inLen: 0, inPos: 0, srcEnd: false, acc: 0, nbits: 0, hist: make([]u8, 5 * windowSize), histLen: 0, deliver: 0, state: atHeader, last: false, left: 0, fixed: false, z: newInflater(), zlib: false, adlerA: 1, adlerB: 0, made: 0, max: max}
+// NewInflateStream reads raw DEFLATE from src, making at most max bytes.
+fn NewInflateStream[R Reader](src R, max i64) InflateStream[R] {
+	return InflateStream[R]{src: src, in: make([]u8, chunkIn), inLen: 0, inPos: 0, srcEnd: false, acc: 0, nbits: 0, hist: make([]u8, 5 * windowSize), histLen: 0, deliver: 0, state: atHeader, last: false, left: 0, fixed: false, z: newInflater(), zlib: false, adlerA: 1, adlerB: 0, made: 0, max: max}
 }
 
 // NewZlibReader reads a zlib stream from src (its header now, its Adler-32 at the end), making at most max bytes.
-fn NewZlibReader[R Reader](src R, max i64) !InflateReader[R] {
-	mut r = NewInflateReader(src, max)
+fn NewZlibReader[R Reader](src R, max i64) !InflateStream[R] {
+	mut r = NewInflateStream(src, max)
 	r.zlib = true
 	let cmf = try r.bits(8)
 	let flg = try r.bits(8)
@@ -70,7 +71,7 @@ fn NewZlibReader[R Reader](src R, max i64) !InflateReader[R] {
 }
 
 // fill reads the next chunk of input; false at the end of src.
-fn (r mut InflateReader[R]) fill() !bool {
+fn (r mut InflateStream[R]) fill() !bool {
 	if r.srcEnd {
 		return false
 	}
@@ -86,7 +87,7 @@ fn (r mut InflateReader[R]) fill() !bool {
 }
 
 // need has at least k bits in the accumulator; false when the input ends first.
-fn (r mut InflateReader[R]) need(k i64) !bool {
+fn (r mut InflateStream[R]) need(k i64) !bool {
 	for r.nbits < k {
 		if r.inPos >= r.inLen {
 			let more = try r.fill()
@@ -101,7 +102,7 @@ fn (r mut InflateReader[R]) need(k i64) !bool {
 	return true
 }
 
-fn (r mut InflateReader[R]) bits(k i64) !i64 {
+fn (r mut InflateStream[R]) bits(k i64) !i64 {
 	if k == 0 {
 		return 0
 	}
@@ -115,7 +116,7 @@ fn (r mut InflateReader[R]) bits(k i64) !i64 {
 	return v
 }
 
-fn (r mut InflateReader[R]) decode(h huff) !i64 {
+fn (r mut InflateStream[R]) decode(h huff) !i64 {
 	// the table with the bits there are (near the end of the input there may be fewer)
 	_ = try r.need(fastBits)
 	if r.nbits == 0 {
@@ -149,7 +150,7 @@ fn (r mut InflateReader[R]) decode(h huff) !i64 {
 }
 
 // put appends a byte made.
-fn (r mut InflateReader[R]) put(b u8) ! {
+fn (r mut InflateStream[R]) put(b u8) ! {
 	if r.made >= r.max {
 		fail fault.Wrap(fault.LimitExceeded, "squash: output over {r.max} bytes")
 	}
@@ -159,7 +160,7 @@ fn (r mut InflateReader[R]) put(b u8) ! {
 }
 
 // header reads a block's header and, for a dynamic block, its codes.
-fn (r mut InflateReader[R]) header() ! {
+fn (r mut InflateStream[R]) header() ! {
 	let lastBit = try r.bits(1)
 	r.last = lastBit == 1
 	let kind = try r.bits(2)
@@ -244,7 +245,7 @@ fn (r mut InflateReader[R]) header() ! {
 }
 
 // produce makes output until want bytes wait to be delivered or the stream ends.
-fn (r mut InflateReader[R]) produce(want i64) ! {
+fn (r mut InflateStream[R]) produce(want i64) ! {
 	for r.histLen - r.deliver < want && r.state != atEnd {
 		if r.state == atHeader {
 			try r.header()
@@ -338,12 +339,12 @@ fn (r mut InflateReader[R]) produce(want i64) ! {
 }
 
 // end follows the final block: for zlib, the Adler-32 of everything made (checked once delivered, in Read).
-fn (r mut InflateReader[R]) end() ! {
+fn (r mut InflateStream[R]) end() ! {
 	r.state = atEnd
 }
 
 // adler adds hist[from:to] (delivered bytes) to the running Adler-32.
-fn (r mut InflateReader[R]) adler(from i64, to i64) {
+fn (r mut InflateStream[R]) adler(from i64, to i64) {
 	mut a = r.adlerA
 	mut b = r.adlerB
 	mut i = from
@@ -362,7 +363,7 @@ fn (r mut InflateReader[R]) adler(from i64, to i64) {
 }
 
 // trailer reads and checks a zlib stream's Adler-32, after the final block.
-fn (r mut InflateReader[R]) trailer() ! {
+fn (r mut InflateStream[R]) trailer() ! {
 	let drop = r.nbits % 8
 	r.acc = r.acc >> u64(drop)
 	r.nbits -= drop
@@ -377,7 +378,7 @@ fn (r mut InflateReader[R]) trailer() ! {
 }
 
 // Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
-fn (r mut InflateReader[R]) Read(buf mut []u8) !i64 {
+fn (r mut InflateStream[R]) Read(buf mut []u8) !i64 {
 	if len(buf) == 0 {
 		return 0
 	}

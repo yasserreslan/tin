@@ -1619,10 +1619,10 @@ let back = try squash.Gunzip(z, 64mb)
 - `InflatePrefix(data str, max i64) !(str, i64)`: InflatePrefix decompresses the raw DEFLATE stream at the start of data (at most max bytes out) and says how many bytes of data the stream took; what follows is left alone.
 - `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
 - `shape Reader`: Reader is what a streaming decompressor reads from: io.Reader's method.
-- `type InflateReader[R Reader] struct`: InflateReader decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src, in fixed memory (a 16 KiB input chunk, the 32 KiB window and at most 64 KiB made per Read), so a stream of any length goes through; input is pulled from src as the bit stream needs it, and output stops between two symbols when the caller's buffer is full.
-- `NewInflateReader[R Reader](src R, max i64) InflateReader[R]`: NewInflateReader reads raw DEFLATE from src, making at most max bytes.
-- `NewZlibReader[R Reader](src R, max i64) !InflateReader[R]`: NewZlibReader reads a zlib stream from src (its header now, its Adler-32 at the end), making at most max bytes.
-- `(r mut InflateReader[R]) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
+- `type InflateStream[R Reader] struct`: InflateStream decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src, in fixed memory (a 16 KiB input chunk, the 32 KiB window and at most 64 KiB made per Read), so a stream of any length goes through; input is pulled from src as the bit stream needs it, and output stops between two symbols when the caller's buffer is full.
+- `NewInflateStream[R Reader](src R, max i64) InflateStream[R]`: NewInflateStream reads raw DEFLATE from src, making at most max bytes.
+- `NewZlibReader[R Reader](src R, max i64) !InflateStream[R]`: NewZlibReader reads a zlib stream from src (its header now, its Adler-32 at the end), making at most max bytes.
+- `(r mut InflateStream[R]) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
 - `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
 
