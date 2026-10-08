@@ -264,7 +264,7 @@ fn (ws Workspace) statusBar(t mut ui.Tree) {
 		t.Leaf(ui.Box().Wide(10.0), 0)
 	}
 	let b = ws.Ed.Buf
-	let pos = "Ln " + mint.Itoa(b.Row + 1) + ", Col " + mint.Itoa(textedit.DisplayCol(b.Lines[b.Row], b.Col, 4) + 1)
+	let pos = "Ln " + mint.Itoa(b.Row + 1) + ", Col " + mint.Itoa(textedit.DisplayCol(b.Lines[b.Row], b.Col, 4) + 1) + ws.Ed.SelectionInfo()
 	t.Text(pos, render.FontUI, th.Muted, ui.Box())
 	t.Leaf(ui.Box().Wide(12.0), 0)
 	t.Text("Spaces: 4", render.FontUI, th.Muted, ui.Box())
