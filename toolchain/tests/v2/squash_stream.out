@@ -1,0 +1,7 @@
+streamed round trips that differ: 0
+64 MiB streamed within the budget: true
+first: first stream, with some text text text true true
+second: second true true junk
+raw: raw one true raw two true true
+a cut trailer fails: true
+a cut stream fails: true

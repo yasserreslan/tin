@@ -1,0 +1,125 @@
+package main
+
+import "dice"
+import "fault"
+import "say"
+import "squash"
+
+// Streaming DEFLATE and zlib (#772): the writers' output for inputs written in random pieces decodes to the input;
+// 64 MiB stream through a writer within a fixed memory budget; and InflatePrefix and UnzlibPrefix find where a stream
+// ends when another follows it.
+
+type Buffer struct {
+	data []u8
+}
+
+fn (b mut Buffer) Write(p []u8) !i64 {
+	b.data = append(b.data, p...)
+	return len(p)
+}
+
+type Counter struct {
+	n []i64
+}
+
+fn (c mut Counter) Write(p []u8) !i64 {
+	c.n[0] += len(p)
+	return len(p)
+}
+
+fn sample(r mut dice.Rand, n i64) str {
+	mut b = make([]u8, n)
+	for i in 0..n {
+		// text-like: compressible, with some noise
+		if r.Intn(8) == 0 {
+			b[i] = u8(r.Intn(256))
+		} else {
+			b[i] = u8('a' + (i / 7) % 13)
+		}
+	}
+	return str(b)
+}
+
+fn main() {
+	mut r = dice.New(3)
+	mut bad = 0
+	for n in []i64{0, 1, 100, 65536, 262143, 262144, 262145, 1000000} {
+		let data = sample(mut r, n)
+		for level in []i64{squash.Store, squash.Fastest, squash.Default, squash.Best} {
+			mut zb = Buffer{data: []u8{}}
+			mut zw = squash.NewZlibWriter(zb, level) catch err {
+				say.Line(err)
+				return
+			}
+			mut i = 0
+			for i < n {
+				let k = min(n - i, 1 + r.Intn(100000))
+				_ = zw.Write([]u8(data[i:i + k])) catch _ {
+					0
+				}
+				i += k
+			}
+			zw.Close() catch err {
+				say.Line(err)
+			}
+			let back = squash.Unzlib(str(zb.data), n + 1) catch err {
+				say.Line("zlib", n, level, err)
+				""
+			}
+			if back != data {
+				bad += 1
+			}
+			mut db = Buffer{data: []u8{}}
+			mut dw = squash.NewDeflateWriter(db, level)
+			_ = dw.Write([]u8(data)) catch _ {
+				0
+			}
+			dw.Close() catch _ {
+			}
+			let raw = squash.Inflate(str(db.data), n + 1) catch _ {
+				"?"
+			}
+			if raw != data {
+				bad += 1
+			}
+		}
+	}
+	say.Line("streamed round trips that differ:", bad)
+
+	// 64 MiB through a zlib writer into a counter, inside a 64 MiB pool budget: the writer holds a chunk, not the input
+	let total = limit memory 64mb {
+		mut c = Counter{n: []i64{0}}
+		mut w = try squash.NewZlibWriter(c, squash.Default)
+		mut chunk = make([]u8, 65536)
+		for i in 0..1024 {
+			for j in 0..len(chunk) {
+				chunk[j] = u8((i + j / 64) & 255)
+			}
+			_ = try w.Write(chunk)
+		}
+		try w.Close()
+		c.n[0]
+	} catch err {
+		say.Line("64 MiB:", fault.Is(err, fault.LimitExceeded), err)
+		-1
+	}
+	say.Line("64 MiB streamed within the budget:", total > 0)
+
+	// streams back to back
+	let first = squash.Zlib("first stream, with some text text text", squash.Default)
+	let second = squash.Zlib("second", squash.Default)
+	let (out1, used1, e1) = squash.UnzlibPrefix(first + second + "junk", 100)
+	say.Line("first:", out1, used1 == len(first), e1 == nil)
+	let rest = (first + second + "junk")[used1:]
+	let (out2, used2, e2) = squash.UnzlibPrefix(rest, 100)
+	say.Line("second:", out2, used2 == len(second), e2 == nil, rest[used2:])
+	let d1 = squash.Deflate("raw one", squash.Best)
+	let d2 = squash.Deflate("raw two", squash.Best)
+	let (r1, u1, e3) = squash.InflatePrefix(d1 + d2, 100)
+	let (r2, u2, e4) = squash.InflatePrefix((d1 + d2)[u1:], 100)
+	say.Line("raw:", r1, u1 == len(d1), r2, u2 == len(d2), e3 == nil && e4 == nil)
+	let (_, _, e5) = squash.UnzlibPrefix(first[0:len(first) - 2], 100)
+	say.Line("a cut trailer fails:", e5 != nil)
+	let (_, _, e6) = squash.InflatePrefix(d1[0:len(d1) / 2], 100)
+	say.Line("a cut stream fails:", e6 != nil)
+}

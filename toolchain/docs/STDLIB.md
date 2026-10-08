@@ -1273,6 +1273,14 @@ let back = try squash.Gunzip(z, 64mb)
 - `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
+- `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
+- `type DeflateWriter[W Writer] struct`: DeflateWriter compresses raw DEFLATE into another writer, a chunk of up to 256 KiB at a time; Close ends the stream. Each chunk is compressed on its own (matches do not reach into the chunk before), which costs a little ratio and bounds the memory.
+- `NewDeflateWriter[W Writer](out W, level i64) DeflateWriter[W]`: NewDeflateWriter is a raw DEFLATE writer into out at level.
+- `NewZlibWriter[W Writer](out W, level i64) !DeflateWriter[W]`: NewZlibWriter is a zlib (RFC 1950) writer into out at level; Close writes the Adler-32 trailer.
+- `(z mut DeflateWriter[W]) Write(data []u8) !i64`: Write takes data, compressing and writing each full chunk.
+- `(z mut DeflateWriter[W]) Close() !`: Close compresses what is buffered, ends the stream and writes the zlib trailer; it does not close the writer below.
+- `InflatePrefix(data str, max i64) !(str, i64)`: InflatePrefix decompresses the raw DEFLATE stream at the start of data (at most max bytes out) and says how many bytes of data the stream took; what follows is left alone.
+- `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
 - `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
 
