@@ -98,22 +98,9 @@ fn (f Fixture) Run(fake Fake, deadlineMs i64, cache bool, log str) nettest.Serve
 	return server
 }
 
-fn hexNibble(v i64) str {
-	return "0123456789ABCDEF"[v:v + 1]
-}
-
 // Quote is a URL query component, percent-encoded like urllib.parse.quote(safe="").
 fn Quote(s str) str {
-	mut out = ""
-	for i in 0..len(s) {
-		let c = s[i]
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' || c == '~' {
-			out += s[i:i + 1]
-		} else {
-			out += "%" + hexNibble(i64(c) / 16) + hexNibble(i64(c) % 16)
-		}
-	}
-	return out
+	return nettest.Quote(s)
 }
 
 // Lookup resolves a name through the fixture (timeout in milliseconds, 0 for the request's own deadline).
