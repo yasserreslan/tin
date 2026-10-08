@@ -120,6 +120,11 @@ type Editor struct {
 	gutterAnchor i64
 	clicks   i64
 	lastClick f64
+	// SaveTrim and SaveFinalNl are the write hygiene of the settings: the trailing spaces and tabs are
+	// removed from every line before the file is written, and a final newline is added when the last
+	// line is not empty. Both are off by default.
+	SaveTrim   bool
+	SaveFinalNl bool
 }
 
 fn New(buf textedit.Buffer) Editor {
@@ -313,6 +318,27 @@ fn (ed mut Editor) closeTab() {
 	ed.Redraw = true
 }
 
+// writeText is what the settings say a file's text is: the trailing spaces and tabs of every line removed
+// and a final newline added when both are on (they are off by default).
+fn (ed Editor) writeText(text str) str {
+	mut out = text
+	if ed.SaveTrim {
+		mut lines = []str{}
+		for line in twine.Split(out, "\r\n") {
+			lines = append(lines, twine.TrimRight(line, " \t"))
+		}
+		mut sep = "\n"
+		if ed.Buf.CRLF {
+			sep = "\r\n"
+		}
+		out = twine.Join(lines, sep)
+	}
+	if ed.SaveFinalNl && !twine.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out
+}
+
 // save writes the text to its file (asking for one when it has none).
 fn (ed mut Editor) save(asNew bool) bool {
 	mut path = ed.Buf.Path
@@ -326,7 +352,7 @@ fn (ed mut Editor) save(asNew bool) bool {
 			return false
 		}
 	}
-	quarry.WriteFile(path, ed.Buf.FileText()) catch _ {
+	quarry.WriteFile(path, ed.writeText(ed.Buf.FileText())) catch _ {
 		ed.Say("cannot write " + path)
 		return false
 	}
@@ -353,7 +379,7 @@ fn (ed mut Editor) SaveDirty() i64 {
 		if len(path) == 0 || !ed.Tabs[i].Buf.Dirty {
 			continue
 		}
-		quarry.WriteFile(path, ed.Tabs[i].Buf.FileText()) catch _ {
+		quarry.WriteFile(path, ed.writeText(ed.Tabs[i].Buf.FileText())) catch _ {
 			continue
 		}
 		ed.Tabs[i].Buf.Dirty = false

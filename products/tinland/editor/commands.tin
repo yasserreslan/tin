@@ -35,6 +35,8 @@ const CmdMoveLineDown = 35
 const CmdJoinLines = 36
 const CmdUppercase = 37
 const CmdLowercase = 38
+const CmdSortLines = 39
+const CmdTrimTrailing = 40
 
 // Perform does a menu command by pressing the key that does the same.
 fn (ed mut Editor) Perform(cmd i64) {
@@ -80,6 +82,18 @@ fn (ed mut Editor) Perform(cmd i64) {
 	}
 	if cmd == CmdLowercase {
 		ed.Buf.TransformCase(false)
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdSortLines {
+		ed.Buf.SortLines()
+		ed.Follow = true
+		ed.Redraw = true
+		return
+	}
+	if cmd == CmdTrimTrailing {
+		ed.Buf.TrimTrailingSpace()
 		ed.Follow = true
 		ed.Redraw = true
 		return

@@ -67,6 +67,8 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, edit, "Find Previous", "g", cmd | shift, editor.CmdFindPrev)
 	appkit.AddSeparator(edit)
 	item(m, edit, "Toggle Comment", "/", cmd, editor.CmdComment)
+	item(m, edit, "Sort Lines", "", 0, editor.CmdSortLines)
+	item(m, edit, "Trim Trailing Whitespace", "", 0, editor.CmdTrimTrailing)
 	item(m, edit, "Format Document", "i", cmd | shift, editor.CmdFormat)
 	item(m, edit, "Join Lines", "", 0, editor.CmdJoinLines)
 	item(m, edit, "Transform to Uppercase", "", 0, editor.CmdUppercase)

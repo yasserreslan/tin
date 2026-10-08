@@ -45,6 +45,8 @@ fn commands() []command {
 		command{name: "Edit: Toggle Comment", cmd: 17},
 		command{name: "Edit: Format Document", cmd: 23},
 		command{name: "Edit: Join Lines", cmd: 36},
+		command{name: "Edit: Sort Lines", cmd: 39},
+		command{name: "Edit: Trim Trailing Whitespace", cmd: 40},
 		command{name: "Edit: Transform to Uppercase", cmd: 37},
 		command{name: "Edit: Transform to Lowercase", cmd: 38},
 		command{name: "Selection: Select All", cmd: 12},

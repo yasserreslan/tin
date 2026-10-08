@@ -19,6 +19,7 @@ fn Run(paths []str) bool {
 	// the workspace is a local of this function: an arena may use a local but not a mut parameter
 	let cfg = LoadSettings()
 	mut ws = workspace.New(theme.ByName(cfg.Theme), editor.New(textedit.New()))
+	ws.SaveHygiene(cfg.TrimTrailing, cfg.FinalNewline)
 	ws.CodeSize = cfg.FontSize
 	render.UseFonts(cfg.UIFont, cfg.CodeFont)
 	ws.LoadRecent(quarry.Getenv("HOME") + "/.config/tinland/recent")

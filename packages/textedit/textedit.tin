@@ -3,6 +3,7 @@
 // tested) on every platform; the editor program supplies the keys, the pixels and the files.
 package textedit
 
+import "sift"
 import "twine"
 
 // Pos is a place in the text: a line and a byte offset in it (always on a rune boundary).
@@ -1093,11 +1094,63 @@ fn (b mut Buffer) JoinLines() {
 	b.Version += 1
 }
 
+// SortLines sorts the touched lines (the cursor's line when nothing is selected) by their text in bytewise
+// order, one undo step; the cursor stays on its line. sift wants a slice it may move, so the lines are
+// copied, sorted and written back.
+fn (b mut Buffer) SortLines() {
+	let first = b.firstRow()
+	let last = b.lastRow()
+	if last <= first {
+		return
+	}
+	mut part = []str{}
+	for r in first..last + 1 {
+		part = append(part, b.Lines[r])
+	}
+	let before = twine.Join(part, "\n")
+	sift.Strs(mut part)
+	if twine.Join(part, "\n") == before {
+		return
+	}
+	b.record(kindOther)
+	for r in first..last + 1 {
+		b.Lines[r] = part[r - first]
+	}
+	b.HasSel = false
+	b.want = -1
+	b.Dirty = true
+	b.Version += 1
+}
+
+// TrimTrailingSpace removes the spaces and tabs at the end of every touched line (the cursor's line when
+// nothing is selected), one undo step for the whole thing.
+fn (b mut Buffer) TrimTrailingSpace() {
+	let first = b.firstRow()
+	let last = b.lastRow()
+	mut changed = 0
+	for r in first..last + 1 {
+		let line = b.Lines[r]
+		let cut = twine.TrimRight(line, " \t")
+		if len(cut) != len(line) {
+			if changed == 0 {
+				b.record(kindOther)
+			}
+			changed += 1
+			b.Lines[r] = cut
+			if r == b.Row && b.Col > len(cut) {
+				b.Col = len(cut)
+			}
+		}
+	}
+	if changed == 0 {
+		return
+	}
+	b.Dirty = true
+	b.Version += 1
+}
+
 // TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
 fn (b mut Buffer) TransformCase(upper bool) {
-	if !b.HasSel {
-		b.SelectWordAt(b.Row, b.Col)
-	}
 	if !b.HasSel {
 		return
 	}
