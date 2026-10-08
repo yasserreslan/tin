@@ -59,8 +59,7 @@ fn makeGIF(which i64) gif.GIF {
 	let p color.Palette = []color.NRGBA{{R: 90, G: 130, B: 250, A: 255}, {R: 30, B: 80, A: 255}, {A: 0}}
 	mut a = image.NewPaletted(image.Rect(0, 0, 5, 3), p)
 	for y in 0..3 { for x in 0..5 { a.SetColorIndex(x, y, u8((x*3+y*5+which)%3)) } }
-	mut b = image.NewPaletted(image.Rect(1, 1, 4, 3), p)
-	for y in 1..3 { for x in 1..4 { b.SetColorIndex(x, y, u8((x*3+y*5+1)%3)) } }
+	let b = image.Paletted{Pix: []u8{0, 1, 2, 99, 2, 0, 1, 99}, Stride: 4, Rect: image.Rect(1, 1, 4, 3), Palette: p}
 	if which == 0 {
 		return gif.GIF{Image: []image.Paletted{a}, Delay: []i64{0}, Disposal: []u8{0}, LoopCount: -1}
 	}

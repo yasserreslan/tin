@@ -194,7 +194,14 @@ fn EncodeAll(g GIF) str {
 		let palette = normalizedPalette(frame.Palette)
 		if len(palette) == 0 || len(palette) > 256 { panic("gif: invalid palette size") }
 		for c in palette { if c.A != 0 && c.A != 255 { panic("gif: palette alpha must be zero or opaque") } }
-		for _, index in frame.Pix { if i64(index) >= len(palette) { panic("gif: palette index out of range") } }
+		mut indices = []u8{}
+		for y in r.Min.Y..r.Max.Y {
+			for x in r.Min.X..r.Max.X {
+				let index = frame.Pix[frame.PixOffset(x, y)]
+				if i64(index) >= len(palette) { panic("gif: palette index out of range") }
+				indices = append(indices, index)
+			}
+		}
 		let bits = tableBits(len(palette))
 		mut d = i64(0)
 		mut disp = u8(0)
@@ -218,7 +225,7 @@ fn EncodeAll(g GIF) str {
 		writeTable(mut out, palette, 1<<bits)
 		let codeSize = max(2, bits)
 		out = append(out, u8(codeSize))
-		let compressed = squash.LzwWidth(str(frame.Pix), squash.LSB, codeSize)
+		let compressed = squash.LzwWidth(str(indices), squash.LSB, codeSize)
 		appendBlocks(mut out, compressed)
 	}
 	out = append(out, 0x3b)
