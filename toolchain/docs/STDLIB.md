@@ -802,6 +802,8 @@ Package flume reads and writes file descriptors through 64 KiB buffers: lines, w
 - `NewWriter(fd i64) Writer`: NewWriter writes to fd.
 - `Stdout() Writer`: Stdout writes to standard output (flush it before mixing with say output).
 - `Create(path str) !Writer`: Create truncates or creates the file at path for writing.
+- `CreateExcl(path str) !Writer`: CreateExcl creates the file at path for writing (mode 0644) only if nothing exists there yet; two processes that race for one path never both succeed, which makes it the basis of lock files.
+- `(w mut Writer) Sync() !`: Sync flushes the writer and waits until the file is on stable storage (fsync; on macOS F_FULLFSYNC).
 - `(w mut Writer) Str(s str)`: Str appends s.
 - `(w mut Writer) Byte(c u8)`: Byte appends c.
 - `(w mut Writer) Int(v i64)`: Int appends v in decimal.
@@ -813,6 +815,16 @@ Package flume reads and writes file descriptors through 64 KiB buffers: lines, w
 
 Package quarry is the operating system interface (like Go's os): arguments, environment, files and directories.
 
+- `type FileType enum`: FileType is what a path is.
+- `type FileInfo struct`: FileInfo is what stat and lstat report about a path. Times are unix nanoseconds.
+- `type DirEntry struct`: DirEntry is a name in a directory with its type.
+- `Stat(path str) !FileInfo`: Stat describes the file at path, following symlinks.
+- `Lstat(path str) !FileInfo`: Lstat describes the file at path; a symlink is described itself, not followed.
+- `Chmod(path str, perm i64) !`: Chmod sets the permission bits (the low 12 bits of perm) of the file at path, following symlinks.
+- `Symlink(target str, link str) !`: Symlink makes link a symlink to target.
+- `Readlink(path str) !str`: Readlink is the target of the symlink at path.
+- `Sync(path str) !`: Sync waits until the file or directory at path is on stable storage (fsync; on macOS F_FULLFSYNC, which also flushes the drive's cache). Sync a directory after creating or renaming in it.
+- `ReadDirEntries(path str) ![]DirEntry`: ReadDirEntries lists the directory at path, sorted by name, with each entry's type. The type comes from the directory itself where the file system records it, and from lstat where it does not.
 - `Args() []str`: Args returns the command line, program name first.
 - `Getenv(key str) str`: Getenv returns the value of environment variable key, or "" when it is unset.
 - `LookupEnv(key str) (str, bool)`: LookupEnv returns the value of key and whether it is set (an empty value is still set).

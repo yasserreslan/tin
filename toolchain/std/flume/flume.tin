@@ -226,6 +226,27 @@ fn Create(path str) !Writer {
 	return NewWriter(fd)
 }
 
+// CreateExcl creates the file at path for writing (mode 0644) only if nothing exists there yet; two processes
+// that race for one path never both succeed, which makes it the basis of lock files.
+fn CreateExcl(path str) !Writer {
+	let fd = i64(i32(rt_sys_open(cast(i64, path)+8, O_WRITE_EXCL, 420)))
+	if fd < 0 {
+		fail errno_fault(path)
+	}
+	return NewWriter(fd)
+}
+
+// Sync flushes the writer and waits until the file is on stable storage (fsync; on macOS F_FULLFSYNC).
+fn (w mut Writer) Sync() ! {
+	try w.Flush()
+	if !w.open {
+		fail "flume: sync: writer is closed"
+	}
+	if i64(i32(sysFsync(w.fd))) != 0 {
+		fail errno_fault("fsync")
+	}
+}
+
 // Str appends s.
 fn (w mut Writer) Str(s str) {
 	if len(w.buf)+len(s) > bufSize && w.Flush() != nil {

@@ -1,0 +1,11 @@
+package quarry
+
+// System call numbers (asm-generic) and struct stat's st_nlink on arm64 Linux.
+
+const sysFchmodat = 53
+const sysSymlinkat = 36
+const sysFsyncNr = 82
+
+fn statLinks(st i64) i64 {
+	return __ld(st + 20, 2) & 0xffffffff
+}

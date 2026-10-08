@@ -1,0 +1,119 @@
+package main
+
+import "flume"
+import "quarry"
+import "say"
+
+// quarry's file details (#771): Stat, Lstat, Chmod, Symlink, Readlink, Sync, ReadDirEntries, and flume's
+// CreateExcl and Writer.Sync. The Go twin (bench/ref/quarry_fs) prints the same lines.
+
+fn show(label str, path str, follow bool) {
+	mut info = quarry.FileInfo{Type: quarry.FileType.Regular, Perm: 0, Size: 0, Mtime: 0, Ctime: 0, Inode: 0, Device: 0, Links: 0}
+	if follow {
+		info = quarry.Stat(path) catch err {
+			say.Line(label, "error:", err)
+			return
+		}
+	} else {
+		info = quarry.Lstat(path) catch err {
+			say.Line(label, "error:", err)
+			return
+		}
+	}
+	// A directory's size and link count, and a symlink's permission bits, differ between systems.
+	let times = info.Mtime > 0 && info.Ctime > 0 && info.Inode > 0
+	match info.Type {
+		Dir => say.Line(label, info.Type, say.Fmt("%o", info.Perm), times)
+		Symlink => say.Line(label, info.Type, info.Size, info.Links, times)
+		Regular, Fifo, Socket, Device => say.Line(label, info.Type, say.Fmt("%o", info.Perm), info.Size, info.Links, times)
+	}
+}
+
+fn main() {
+	let d = "/tmp/tin-test-quarry-fs"
+	quarry.RemoveAll(d) catch _ {
+	}
+	quarry.MkdirAll(d + "/sub/deeper") catch err {
+		say.Line(err)
+	}
+	quarry.WriteFile(d + "/a.txt", "hello, tin") catch err {
+		say.Line(err)
+	}
+	quarry.WriteFile(d + "/sub/b", "") catch err {
+		say.Line(err)
+	}
+	quarry.Symlink("a.txt", d + "/link") catch err {
+		say.Line(err)
+	}
+	quarry.Symlink("nowhere", d + "/dangling") catch err {
+		say.Line(err)
+	}
+	quarry.Chmod(d + "/a.txt", 493) catch err {
+		say.Line(err)
+	}
+	quarry.Chmod(d + "/sub/b", 0) catch err {
+		say.Line(err)
+	}
+	show("file", d + "/a.txt", false)
+	show("no-perm file", d + "/sub/b", false)
+	show("dir", d + "/sub", false)
+	show("link lstat", d + "/link", false)
+	show("link stat", d + "/link", true)
+	show("dangling lstat", d + "/dangling", false)
+	show("dangling stat", d + "/dangling", true)
+	show("missing", d + "/missing", false)
+	let a = quarry.Lstat(d + "/a.txt") catch _ {
+		return
+	}
+	let viaLink = quarry.Stat(d + "/link") catch _ {
+		return
+	}
+	say.Line("same inode through the link:", a.Inode == viaLink.Inode && a.Device == viaLink.Device)
+	let t1 = quarry.Readlink(d + "/link") catch _ {
+		"?"
+	}
+	say.Line("readlink:", t1)
+	let (_, e1) = quarry.Readlink(d + "/a.txt")
+	say.Line("readlink of a file:", e1)
+	let e2 = quarry.Symlink("x", d + "/link")
+	say.Line("symlink over a name:", e2 != nil)
+	let es = quarry.ReadDirEntries(d) catch err {
+		say.Line(err)
+		return
+	}
+	for e in es {
+		say.Line("entry", e.Name, e.Type)
+	}
+	let (_, e3) = quarry.ReadDirEntries(d + "/a.txt")
+	say.Line("entries of a file:", e3 != nil)
+	quarry.Sync(d + "/a.txt") catch err {
+		say.Line(err)
+	}
+	quarry.Sync(d) catch err {
+		say.Line(err)
+	}
+	let e4 = quarry.Sync(d + "/missing")
+	say.Line("sync missing:", e4)
+	mut w = flume.CreateExcl(d + "/lock") catch err {
+		say.Line(err)
+		return
+	}
+	w.Str("4242\n")
+	w.Sync() catch err {
+		say.Line(err)
+	}
+	w.Close() catch err {
+		say.Line(err)
+	}
+	let (_, e5) = flume.CreateExcl(d + "/lock")
+	say.Line("second exclusive create fails:", e5 != nil)
+	let lock = quarry.ReadFile(d + "/lock") catch _ {
+		""
+	}
+	say.Line("lock holds:", len(lock))
+	quarry.Chmod(d + "/sub/b", 420) catch _ {
+	}
+	quarry.RemoveAll(d) catch err {
+		say.Line(err)
+	}
+}

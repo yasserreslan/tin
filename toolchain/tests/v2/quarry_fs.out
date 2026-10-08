@@ -1,0 +1,20 @@
+file Regular 755 10 1 true
+no-perm file Regular 0 0 1 true
+dir Dir 755 true
+link lstat Symlink 5 1 true
+link stat Regular 755 10 1 true
+dangling lstat Symlink 7 1 true
+dangling stat error: stat /tmp/tin-test-quarry-fs/dangling: no such file or directory
+missing error: lstat /tmp/tin-test-quarry-fs/missing: no such file or directory
+same inode through the link: true
+readlink: a.txt
+readlink of a file: readlink /tmp/tin-test-quarry-fs/a.txt: invalid argument
+symlink over a name: true
+entry a.txt Regular
+entry dangling Symlink
+entry link Symlink
+entry sub Dir
+entries of a file: true
+sync missing: open /tmp/tin-test-quarry-fs/missing: no such file or directory
+second exclusive create fails: true
+lock holds: 5
