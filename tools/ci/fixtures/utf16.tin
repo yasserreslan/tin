@@ -1,0 +1,129 @@
+package main
+
+// The utf16 twin, Tin side: read the hex corpus of bench/ref/utf16 (Go's unicode/utf16) on stdin and print the same lines, so
+// tools/ci/utf16_check.tin can compare them (#753).
+//
+//	S <hex utf8>    the UTF-16 code units of the string's runes
+//	D <hex u16>     the string those code units decode to
+//	R <hex runes>   per rune: RuneLen, IsSurrogate and EncodeRune
+//	A <hex runes>   AppendRune over the runes
+
+import "glyph"
+import "quarry"
+import "say"
+import "seal"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(body)) {
+		if i < i64(len(body)) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		if len(line) == 0 {
+			continue
+		}
+		run(line)
+	}
+}
+
+// run handles one corpus line.
+fn run(line str) {
+	let parts = splitSpace(line)
+	if len(parts) == 0 {
+		return
+	}
+	let raw = hexBytes(argOf(parts, 1))
+	if parts[0] == "S" {
+		say.Line("S", hex16(glyph.Utf16Encode(str(raw))))
+	} else if parts[0] == "D" {
+		say.Line("D", seal.Hex([]u8(glyph.Utf16Decode(unitsOf(raw)))))
+	} else if parts[0] == "R" {
+		mut out = "R"
+		for r in runesOf(raw) {
+			let (r1, r2) = glyph.Utf16EncodeRune(r)
+			out = out + say.Fmt(" %08x:%d:%t:%08x-%08x", u32(r), glyph.Utf16RuneLen(r), glyph.Utf16IsSurrogate(r), u32(r1), u32(r2))
+		}
+		say.Line(out)
+	} else if parts[0] == "A" {
+		mut units = []u16{}
+		for r in runesOf(raw) {
+			units = glyph.Utf16AppendRune(mut units, r)
+		}
+		say.Line("A", hex16(units))
+	}
+}
+
+// hex16 prints each code unit as four hex digits.
+fn hex16(u []u16) str {
+	mut out = ""
+	for x in u {
+		out = out + say.Fmt("%04x", x)
+	}
+	return out
+}
+
+// unitsOf reads four-hex-digit code units.
+fn unitsOf(b []u8) []u16 {
+	mut out = []u16{}
+	mut i = i64(0)
+	for i+1 < i64(len(b)) {
+		out = append(out, u16(b[i])<<8|u16(b[i+1]))
+		i += 2
+	}
+	return out
+}
+
+// runesOf reads eight-hex-digit runes.
+fn runesOf(b []u8) []i32 {
+	mut out = []i32{}
+	mut i = i64(0)
+	for i+3 < i64(len(b)) {
+		out = append(out, i32(u32(b[i])<<24|u32(b[i+1])<<16|u32(b[i+2])<<8|u32(b[i+3])))
+		i += 4
+	}
+	return out
+}
+
+// hexBytes decodes a lowercase hex string.
+fn hexBytes(s str) []u8 {
+	if len(s) == 0 {
+		return []u8{}
+	}
+	return seal.HexDecode(s) catch _ {
+		return []u8{}
+	}
+}
+
+// argOf is the argument at i, or "" when the line has none.
+fn argOf(parts []str, i i64) str {
+	if i < i64(len(parts)) {
+		return parts[i]
+	}
+	return ""
+}
+
+// splitSpace splits a line on spaces.
+fn splitSpace(line str) []str {
+	mut out = []str{}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(line)) {
+		if i == i64(len(line)) || line[i] == ' ' {
+			if i > start {
+				out = append(out, line[start:i])
+			}
+			start = i + 1
+		}
+		i += 1
+	}
+	return out
+}

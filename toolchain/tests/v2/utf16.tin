@@ -1,0 +1,50 @@
+package main
+
+// glyph's UTF-16: Utf16Encode and Utf16Decode (surrogate pairs, lone surrogates, invalid UTF-8 as
+// RuneError), Utf16RuneLen, Utf16IsSurrogate, Utf16EncodeRune and Utf16DecodeRune, and
+// Utf16AppendRune.
+
+import "glyph"
+import "say"
+
+fn main() {
+	// Encoding a string: one code unit per BMP rune, a pair above, and RuneError for invalid UTF-8.
+	for s in []str{"", "A", "é", "café", "日本語", "😀", "a😀b", glyph.RuneStr(0x10000), glyph.RuneStr(0x10ffff)} {
+		say.Line("encode", say.Fmt("%q", s), hex16(glyph.Utf16Encode(s)))
+	}
+	let bad = str([]u8{0x41, 0xff, 0x42, 0x80, 0x43})
+	say.Line("encode bad utf8", hex16(glyph.Utf16Encode(bad)))
+
+	// Decoding: a pair is one rune, a lone surrogate is RuneError, and a stray low then high is two.
+	for u in [][]u16{{}, {0x41}, {0xd83d, 0xde00}, {0xd800}, {0xdc00}, {0xd800, 0x41}, {0x41, 0xdbff}, {0xd800, 0xdbff}, {0xdbff, 0xdfff}, {0xdc00, 0xd800}, {0xd83d, 0xde00, 0x41}} {
+		say.Line("decode", hex16(u), say.Fmt("%q", glyph.Utf16Decode(u)))
+	}
+
+	// The rune classification and the pair arithmetic.
+	for r in []i32{0, 0x41, 0xd7ff, 0xd800, 0xdfff, 0xe000, 0xffff, 0x10000, 0x1f600, 0x10ffff, 0x110000, -1} {
+		let (r1, r2) = glyph.Utf16EncodeRune(r)
+		say.Line("rune", say.Fmt("%08x", u32(r)), glyph.Utf16RuneLen(r), glyph.Utf16IsSurrogate(r), say.Fmt("%08x %08x", u32(r1), u32(r2)))
+	}
+	say.Line("join", glyph.Utf16DecodeRune(0xd83d, 0xde00) == 0x1f600, glyph.Utf16DecodeRune(0x41, 0x42) == glyph.RuneError,
+		glyph.Utf16DecodeRune(0xdc00, 0xd800) == glyph.RuneError)
+
+	// AppendRune over a list, and the round trip through both directions.
+	mut acc = []u16{}
+	for r in []i32{0x41, 0x1f600, 0xd800, 0x110000, -1, 0xffff} {
+		acc = glyph.Utf16AppendRune(mut acc, r)
+	}
+	say.Line("append", hex16(acc), say.Fmt("%q", glyph.Utf16Decode(acc)))
+	for s in []str{"", "A", "café 😀", glyph.RuneStr(0x10ffff), "xÿz"} {
+		let units = glyph.Utf16Encode(s)
+		say.Line("round trip", len(units), glyph.Utf16Decode(units) == s)
+	}
+}
+
+// hex16 prints each code unit as four hex digits.
+fn hex16(u []u16) str {
+	mut out = ""
+	for x in u {
+		out = out + say.Fmt("%04x", x)
+	}
+	return out
+}

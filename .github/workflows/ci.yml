@@ -70,6 +70,10 @@ jobs:
         run: sh tools/ci/tin.sh io_check
       - name: CRC-64 and LZW against Go's hash/crc64 and compress/lzw (a generated corpus)
         run: sh tools/ci/tin.sh hash_check
+      - name: UTF-16 against Go's unicode/utf16 (a generated rune corpus)
+        run: sh tools/ci/tin.sh utf16_check
+      - name: Path rules against Go's path (Clean, Split, Join and Match)
+        run: sh tools/ci/tin.sh path_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)

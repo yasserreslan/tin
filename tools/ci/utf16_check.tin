@@ -1,0 +1,150 @@
+package main
+
+import "./ci"
+import "dice"
+import "glyph"
+import "mint"
+import "say"
+import "twine"
+
+// Compare glyph's UTF-16 with Go's unicode/utf16.
+//
+// A generated corpus (a fixed seed, so both sides see the same cases) of strings (valid and invalid UTF-8), UTF-16 code unit
+// sequences and rune lists is fed to bench/ref/utf16 and tools/ci/fixtures/utf16.tin; the check compares their lines: the code
+// units of each string's runes, the string each code unit sequence decodes to (lone surrogates become RuneError), and per rune
+// RuneLen, IsSurrogate and EncodeRune, and AppendRune over a rune list.
+
+const SEED = 753
+
+fn hex(b []u8) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// bytesOf turns a string's bytes into a byte slice.
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+// unitBytes is the big-endian bytes of each code unit, as the Go side reads them.
+fn unitBytes(u []u16) []u8 {
+	mut out = []u8{}
+	for x in u {
+		out = append(out, u8(x>>8))
+		out = append(out, u8(x))
+	}
+	return out
+}
+
+// runeBytes is the big-endian bytes of each rune, as the Go side reads them.
+fn runeBytes(r []i32) []u8 {
+	mut out = []u8{}
+	for x in r {
+		out = append(out, u8(u32(x)>>24))
+		out = append(out, u8(u32(x)>>16))
+		out = append(out, u8(u32(x)>>8))
+		out = append(out, u8(u32(x)))
+	}
+	return out
+}
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	// Strings: the hand-written edges first, then generated rune strings and arbitrary bytes.
+	for s in []str{"", "A", "é", "café", "a😀b", "día", "ΑΒΓ", "日本語",
+		glyph.RuneStr(0x1f600), glyph.RuneStr(0x10000), glyph.RuneStr(0x10ffff), glyph.RuneStr(0xd7ff), glyph.RuneStr(0xe000)} {
+		lines = append(lines, "S " + hex(bytesOf(s)))
+	}
+	for b in [][]u8{{0xff}, {0x80}, {0xc0, 0x80}, {0xe2, 0x82}, {0xed, 0xa0, 0x80}, {0xf0, 0x9f, 0x98}, {0xfe, 0xff}, {0xf4, 0x90, 0x80, 0x80}} {
+		lines = append(lines, "S " + hex(b))
+	}
+	let runes = []i32{0, 1, 0x41, 0x7e, 0x7f, 0x80, 0xe9, 0x7ff, 0x800, 0x20ac, 0xd7ff, 0xe000, 0xffff, 0x10000, 0x1f600, 0x10ffff}
+	for i in 0..150 {
+		mut s = ""
+		for k in 0..rng.Range(0, 12) {
+			s = s + glyph.RuneStr(runes[rng.Range(0, len(runes))])
+		}
+		lines = append(lines, "S " + hex(bytesOf(s)))
+	}
+	for i in 0..100 {
+		mut b = []u8{}
+		for k in 0..rng.Range(0, 20) {
+			b = append(b, u8(rng.I64n(256)))
+		}
+		lines = append(lines, "S " + hex(b))
+	}
+	// Code unit sequences: pairs, lone surrogates and stray orders.
+	let units = []u16{0, 0x41, 0xd7ff, 0xd800, 0xdbff, 0xdc00, 0xdfff, 0xe000, 0xffff, 0xfffd, 0x20ac}
+	for u in [][]u16{{}, {0x41}, {0xd83d, 0xde00}, {0xd800}, {0xdc00}, {0xd800, 0x41}, {0x41, 0xd800}, {0xd800, 0xdc00, 0x41}, {0xdbff, 0xdfff}, {0xdc00, 0xd800}, {0xd800, 0xd800}} {
+		lines = append(lines, "D " + hex(unitBytes(u)))
+	}
+	for i in 0..200 {
+		mut u = []u16{}
+		for k in 0..rng.Range(0, 8) {
+			u = append(u, units[rng.Range(0, len(units))])
+		}
+		lines = append(lines, "D " + hex(unitBytes(u)))
+	}
+	// Rune lists for RuneLen, IsSurrogate, EncodeRune and AppendRune: valid, surrogate, out of range
+	// and negative.
+	let runePool = []i32{0, 1, 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xd800, 0xdfff, 0xe000, 0xffff, 0x10000, 0x1f600, 0xfffff, 0x10ffff, 0x110000, -1}
+	for r in [][]i32{{}, {0}, {0x41}, {0xd800}, {-1}, {0x110000}, {0x10ffff}, {0x1f600}, {0xd800, 0xdc00}} {
+		lines = append(lines, "R " + hex(runeBytes(r)))
+		lines = append(lines, "A " + hex(runeBytes(r)))
+	}
+	for i in 0..200 {
+		mut r = []i32{}
+		for k in 0..rng.Range(0, 6) {
+			r = append(r, runePool[rng.Range(0, len(runePool))])
+		}
+		lines = append(lines, "R " + hex(runeBytes(r)))
+		lines = append(lines, "A " + hex(runeBytes(r)))
+	}
+	return lines
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/utf16")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "utf16-")
+	let tin = ci.Join(work, "utf16-tin")
+	ci.BuildTin("tools/ci/fixtures/utf16.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "utf16-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/utf16"}, ci.Root(), 300), "go build utf16")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "utf16: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "utf16: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("utf16: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's unicode/utf16")
+}

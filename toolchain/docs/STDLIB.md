@@ -16,7 +16,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
 | [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
 | [twine](#twine) | strings (strings) |
-| [glyph](#glyph) | UTF-8 and Unicode (unicode/utf8, unicode) |
+| [glyph](#glyph) | UTF-8, UTF-16 and Unicode (unicode/utf8, unicode/utf16, unicode) |
 | [mint](#mint) | number and string conversion (strconv) |
 | [gauge](#gauge) | math (math) |
 | [bits](#bits) | bit counting and manipulation (math/bits) |
@@ -25,7 +25,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
 | [spawn](#spawn) | starting child processes (os/exec) |
-| [trail](#trail) | paths (path/filepath) |
+| [trail](#trail) | paths (path, path/filepath on Unix) |
 | [lever](#lever) | command-line flags (flag) |
 | [tide](#tide) | time (time) |
 | [dice](#dice) | random numbers (math/rand) |
@@ -545,6 +545,13 @@ Package glyph is UTF-8 (like Go's unicode/utf8) and Unicode: general categories,
 - `ToLower(r i32) i32`: ToLower maps r to lower case.
 - `ToTitle(r i32) i32`: ToTitle maps r to title case.
 - `SimpleFold(r i32) i32`: SimpleFold iterates over the code points that are equivalent under simple case folding: it returns the smallest rune greater than r in r's orbit, or the smallest one when there is none ('K' gives 'k', 'k' gives U+212A, U+212A gives 'K').
+- `Utf16IsSurrogate(r i32) bool`: Utf16IsSurrogate reports whether r is a surrogate code point, which no string may contain.
+- `Utf16DecodeRune(r1 i32, r2 i32) i32`: Utf16DecodeRune joins a surrogate pair into one rune, or returns RuneError when r1 and r2 are not a valid pair (as Go's utf16.DecodeRune).
+- `Utf16EncodeRune(r i32) (i32, i32)`: Utf16EncodeRune splits r into a surrogate pair. A rune that is not above 0xFFFF (which needs no pair) or not a valid code point gives RuneError twice, as Go's utf16.EncodeRune.
+- `Utf16RuneLen(r i32) i64`: Utf16RuneLen returns the number of UTF-16 code units r needs, or -1 when r is not a valid rune (a surrogate or above MaxRune), as Go's utf16.RuneLen.
+- `Utf16AppendRune(a mut []u16, r i32) []u16`: Utf16AppendRune appends the UTF-16 code units of r to a: one for a rune up to 0xFFFF that is not a surrogate, two for one above, and RuneError for anything else, as Go's utf16.AppendRune.
+- `Utf16Encode(s str) []u16`: Utf16Encode returns the UTF-16 code units of s: one or two per rune, as Go's utf16.Encode over the string's runes. Invalid UTF-8 decodes to RuneError, as in Go.
+- `Utf16Decode(u []u16) str`: Utf16Decode returns the string of the code units, as Go's utf16.Decode: a high surrogate followed by a low one is one rune, and a lone surrogate is RuneError.
 
 ## mint
 
