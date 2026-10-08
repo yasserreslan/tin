@@ -141,17 +141,34 @@ fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from
 			writes = append(writes, c)
 		}
 	}
-	mut bodies = make([]str, len(writes))
-	for i in 0..len(writes) {
-		let id = try object.IdOf(writes[i].NewHash)
+	// a large file kept in chunks is written a chunk at a time (store.WriteChunked); the rest are read whole and
+	// written in parallel
+	mut whole = []diff.FileChange{}
+	for c in writes {
+		if c.NewMode == object.Mode.Link {
+			whole = append(whole, c)
+			continue
+		}
+		let id = try object.IdOf(c.NewHash)
+		try prepare(w.Root, c.Path)
+		let streamed = try store.WriteChunked(w.Store + "/objects", id, w.Root + "/" + c.Path)
+		if !streamed {
+			whole = append(whole, c)
+		} else if c.NewMode == object.Mode.Exec {
+			try quarry.Chmod(w.Root + "/" + c.Path, 493)
+		}
+	}
+	mut bodies = make([]str, len(whole))
+	for i in 0..len(whole) {
+		let id = try object.IdOf(whole[i].NewHash)
 		let (_, body) = try s.GetRaw(id)
 		bodies[i] = body
 	}
-	mut paths = make([]str, 0, len(writes))
-	mut modes = make([]object.Mode, 0, len(writes))
-	for i in 0..len(writes) {
-		paths = append(paths, writes[i].Path)
-		modes = append(modes, writes[i].NewMode)
+	mut paths = make([]str, 0, len(whole))
+	mut modes = make([]object.Mode, 0, len(whole))
+	for i in 0..len(whole) {
+		paths = append(paths, whole[i].Path)
+		modes = append(modes, whole[i].NewMode)
 	}
 	try writeAll(w.Root, paths, modes, bodies)
 	for i in 0..len(writes) {
@@ -225,6 +242,28 @@ fn writeAll(root str, paths []str, modes []object.Mode, bodies []str) ! {
 			sc.spawn(fn() ! {
 				try writeFile(root, paths[k], modes[k], bodies[k])
 			})
+		}
+	}
+}
+
+// prepare makes the directory of path and clears what stands at path (a file, a link or a directory).
+fn prepare(root str, path str) ! {
+	let full = root + "/" + path
+	let d = dirOf(path)
+	if len(d) > 0 {
+		let dir = root + "/" + d
+		let (info, err) = quarry.Lstat(dir)
+		if err == nil && info.Type != quarry.FileType.Dir {
+			try quarry.Remove(dir)
+		}
+		try quarry.MkdirAll(dir)
+	}
+	let (old, oerr) = quarry.Lstat(full)
+	if oerr == nil {
+		if old.Type == quarry.FileType.Dir {
+			try quarry.RemoveAll(full)
+		} else {
+			try quarry.Remove(full)
 		}
 	}
 }

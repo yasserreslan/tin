@@ -263,3 +263,76 @@ fn parseSize(s str) !i64 {
 	}
 	return v
 }
+
+// appendChunk appends one chunk, checked against its hash, to the file at path (in an arena of the caller's).
+fn appendChunk(dir str, hash str, n i64, path str) !i64 {
+	let p = chunkPath(dir, hash)
+	if !quarry.Exists(p) {
+		fail fault.Wrap(ErrNotFound, "chunk " + seal.Hex([]u8(hash)))
+	}
+	let z = try quarry.ReadFile(p)
+	let b = squash.Unzlib(z, n + 1) catch err {
+		fail fault.Wrap(object.ErrCorrupt, "chunk " + seal.Hex([]u8(hash)) + ": " + fault.Message(err))
+	}
+	if len(b) != n || str(seal.Sha256(b)) != hash {
+		fail fault.Wrap(object.ErrCorrupt, "chunk " + seal.Hex([]u8(hash)) + " does not match its hash")
+	}
+	try quarry.AppendFile(path, b)
+	return n
+}
+
+// WriteChunked writes the blob id to the file at path a chunk at a time, when the loose store in dir keeps it in
+// chunks, and says whether it did (false: the blob is kept whole, or elsewhere; read it as usual). The file is
+// written beside path and renamed into place once its content hashes to id, so a large file checks out in the
+// memory of one chunk.
+fn WriteChunked(dir str, id object.Id, path str) !bool {
+	let l = NewLoose(dir)
+	let p = l.path(id)
+	let (info, err) = quarry.Lstat(p)
+	// a manifest is 40 bytes a chunk: a larger loose file is a whole object
+	if err != nil || info.Size > 4 << 20 {
+		return false
+	}
+	let z = try quarry.ReadFile(p)
+	let enc = squash.Unzlib(z, 64 << 20) catch _ {
+		return false
+	}
+	if !isManifest(enc) {
+		return false
+	}
+	let nul = indexNul(enc)
+	if nul < 0 || (len(enc) - nul - 1) % 40 != 0 {
+		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: a damaged chunk manifest")
+	}
+	let list = enc[nul + 1:]
+	let tmp = path + ".tit-" + seal.Hex(seal.RandomBytes(4))
+	try quarry.WriteFile(tmp, "")
+	mut i = 0
+	for i < len(list) {
+		let hash = list[i:i + 32]
+		let n = le64At(list, i + 32)
+		if n <= 0 || n > chunkMax {
+			try quarry.Remove(tmp)
+			fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: a chunk of {n} bytes")
+		}
+		let (_, aerr) = arena {
+			try appendChunk(dir, hash, n, tmp)
+		}
+		if aerr != nil {
+			try quarry.Remove(tmp)
+			fail aerr
+		}
+		i += 40
+	}
+	// the whole file, streamed, against the blob's id
+	let st = try quarry.Lstat(tmp)
+	mut r = try flume.Open(tmp)
+	let (got, herr) = object.HashBlob(mut r, st.Size)
+	r.Close()
+	if herr != nil || got != id {
+		try quarry.Remove(tmp)
+		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: its chunks do not make the blob")
+	}
+	try quarry.Rename(tmp, path)
+	return true
+}
