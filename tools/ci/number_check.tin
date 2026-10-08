@@ -169,22 +169,22 @@ fn gaugeAll(work str) {
 			ci.Check(len(got) == len(want) && len(got) > GAUGE_INPUTS, "gauge " + name + ": " + mint.Itoa(len(got)) + " tin and " + mint.Itoa(len(want)) + " go lines, want more than " + mint.Itoa(GAUGE_INPUTS))
 			count = len(got)
 			for i in 0..len(got) {
-			let a = want[i]
-			let b = got[i]
-			sameInputs(name, i, a, b, results)
-			for k in 0..results {
-				let ha = a[len(a) - results + k]
-				let hb = b[len(b) - results + k]
-				let d = ulps(bits(ha), bits(hb))
-				if d < 0 || d > allowed {
-					bad += 1
-					if bad < 4 {
-						say.Line("  gauge " + name + " case " + mint.Itoa(i) + ": Go " + ha + ", Tin " + hb)
+				let a = want[i]
+				let b = got[i]
+				sameInputs(name, i, a, b, results)
+				for k in 0..results {
+					let ha = a[len(a) - results + k]
+					let hb = b[len(b) - results + k]
+					let d = ulps(bits(ha), bits(hb))
+					if d < 0 || d > allowed {
+						bad += 1
+						if bad < 4 {
+							say.Line("  gauge " + name + " case " + mint.Itoa(i) + ": Go " + ha + ", Tin " + hb)
+						}
+					} else if d > 0 {
+						near += 1
 					}
-				} else if d > 0 {
-					near += 1
 				}
-			}
 			}
 		}
 		ci.Check(bad == 0, "gauge " + name + ": " + mint.Itoa(bad) + " of " + mint.Itoa(count) + " results beyond " + mint.Itoa(allowed) + " ulp of Go")
