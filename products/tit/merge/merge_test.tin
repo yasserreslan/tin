@@ -196,6 +196,20 @@ fn TestMergeTin(t mut crucible.T) {
 	crucible.Equal(mut t, "fn a", names[0], "fn a")
 }
 
+// A declaration merge keeps everything between declarations as it was: free comments, one-line declarations grouped
+// without blank lines, and a doc comment one side changed (#799).
+fn TestMergeTinKeepsText(t mut crucible.T) {
+	let base = "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f.\nfn f() i64 {{\n\treturn A\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n"
+	let ours = "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f.\nfn f() i64 {{\n\treturn A\n}}\n\nfn h() i64 {{\n\treturn 0\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n"
+	let theirs = "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f, documented better.\nfn f() i64 {{\n\treturn A\n}}\n\nfn k() i64 {{\n\treturn 1\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n"
+	let (text, ok, _) = MergeTin(base, ours, theirs)
+	t.True("it merges", ok)
+	crucible.Equal(mut t, "the text between declarations kept", text, "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f, documented better.\nfn f() i64 {{\n\treturn A\n}}\n\nfn h() i64 {{\n\treturn 0\n}}\n\nfn k() i64 {{\n\treturn 1\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n")
+	let (same, ok2, _) = MergeTin(base, base, base)
+	t.True("unchanged merges", ok2)
+	crucible.Equal(mut t, "byte for byte", same, base)
+}
+
 // Rename against edit (#786): a file one side renamed and the other edited merges at the new name, with the edit, on
 // either side.
 fn TestRenameAgainstEdit(t mut crucible.T) {

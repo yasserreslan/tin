@@ -10,7 +10,9 @@ import "twine"
 
 // MergeTin merges three versions of a Tin file by declaration; ok is false when they do not merge that way (a file
 // not laid out as tin fmt lays it out, a declaration both sides changed differently, one side's change against the
-// other's removal), and conflicted names the declarations that stood in the way.
+// other's removal), and conflicted names the declarations that stood in the way. Each declaration carries the exact
+// text from the end of the one before it (blank lines and free comments included), so the merge of a file is its
+// declarations put back together, byte for byte where neither side changed anything.
 fn MergeTin(base str, ours str, theirs str) (str, bool, []str) {
 	let (bd, bok) = semantic.Decls(base)
 	let (od, ook) = semantic.Decls(ours)
@@ -19,16 +21,20 @@ fn MergeTin(base str, ours str, theirs str) (str, bool, []str) {
 	if !bok || !ook || !tok {
 		return "", false, conflicted
 	}
-	let bm = byKey(bd)
-	let om = byKey(od)
-	let tm = byKey(td)
+	let bc = chunksOf(base, bd)
+	let oc = chunksOf(ours, od)
+	let tc = chunksOf(theirs, td)
+	let bm = byKey(bd, bc)
+	let om = byKey(od, oc)
+	let tm = byKey(td, tc)
 	if len(bm) != len(bd) || len(om) != len(od) || len(tm) != len(td) {
 		// the same key twice in one file (use, on): too ambiguous to merge by key
 		return "", false, conflicted
 	}
-	// the text before the first declaration (package, imports) merges by lines
-	let (pre, preClean) = MergeText(preamble(base, bd), preamble(ours, od), preamble(theirs, td), "ours", "theirs")
-	if !preClean {
+	// the text before the first declaration (package, imports) and after the last merge by lines
+	let (pre, preClean) = MergeText(bc[0], oc[0], tc[0], "ours", "theirs")
+	let (post, postClean) = MergeText(bc[len(bc) - 1], oc[len(oc) - 1], tc[len(tc) - 1], "ours", "theirs")
+	if !preClean || !postClean {
 		return "", false, conflicted
 	}
 	// the order: ours, with what theirs adds placed after the declaration it follows in theirs
@@ -75,68 +81,94 @@ fn MergeTin(base str, ours str, theirs str) (str, bool, []str) {
 		}
 		order = next
 	}
-	mut parts = []str{}
+	mut out = pre
 	for k in order {
 		let (b, inB) = bm[k]
 		let (o, inO) = om[k]
 		let (t, inT) = tm[k]
 		if inO && inT {
-			if o.Norm == t.Norm || (inB && t.Norm == b.Norm) {
-				parts = append(parts, o.Text)
-			} else if inB && o.Norm == b.Norm {
-				parts = append(parts, t.Text)
+			if o == t || (inB && t == b) {
+				out = out + o
+			} else if inB && o == b {
+				out = out + t
 			} else if inB {
-				let (text, clean) = MergeText(b.Text, o.Text, t.Text, "ours", "theirs")
+				let (text, clean) = MergeText(b, o, t, "ours", "theirs")
 				if !clean {
 					conflicted = append(conflicted, k)
 					continue
 				}
-				parts = append(parts, text)
+				out = out + text
 			} else {
 				conflicted = append(conflicted, k)
 			}
 		} else if inO {
 			// theirs removed it (or never had it): gone if ours left it as it was, a conflict if ours changed it
 			if inB {
-				if o.Norm != b.Norm {
+				if o != b {
 					conflicted = append(conflicted, k)
 				}
 				continue
 			}
-			parts = append(parts, o.Text)
+			out = out + o
 		} else if inT {
 			if inB {
-				if t.Norm != b.Norm {
+				if t != b {
 					conflicted = append(conflicted, k)
 				}
 				continue
 			}
-			parts = append(parts, t.Text)
+			out = out + t
 		}
 	}
 	if len(conflicted) > 0 {
 		return "", false, conflicted
 	}
-	mut out = twine.TrimRight(pre, "\n")
-	for p in parts {
-		out = out + "\n\n" + twine.TrimRight(p, "\n")
-	}
-	return out + "\n", true, conflicted
+	return out + post, true, conflicted
 }
 
-fn byKey(ds []semantic.Decl) map[str]semantic.Decl {
-	mut m = map[str]semantic.Decl{}
+// chunksOf cuts a file at its declarations: the text before the first, then each declaration's text from the end of
+// the one before it, then the text after the last; put together they are the file.
+fn chunksOf(text str, ds []semantic.Decl) []str {
+	// the lines, each with its newline
+	mut lines = []str{}
+	mut from = 0
+	for i in 0..len(text) {
+		if text[i] == '\n' {
+			lines = append(lines, text[from:i + 1])
+			from = i + 1
+		}
+	}
+	if from < len(text) {
+		lines = append(lines, text[from:])
+	}
+	mut out = []str{}
+	mut at = ds[0].Line - 1
+	out = append(out, join(lines[0:at]))
 	for d in ds {
-		m[d.Key] = d
+		mut end = d.Line - 1 + len(twine.Split(d.Text, "\n"))
+		if end > len(lines) {
+			end = len(lines)
+		}
+		out = append(out, join(lines[at:end]))
+		at = end
+	}
+	out = append(out, join(lines[at:]))
+	return out
+}
+
+fn join(ls []str) str {
+	mut b = []u8{}
+	for l in ls {
+		b = append(b, []u8(l)...)
+	}
+	return str(b)
+}
+
+// byKey maps each declaration's key to its text (chunks from chunksOf: the first is the preamble).
+fn byKey(ds []semantic.Decl, chunks []str) map[str]str {
+	mut m = map[str]str{}
+	for i in 0..len(ds) {
+		m[ds[i].Key] = chunks[i + 1]
 	}
 	return m
-}
-
-// preamble is the text before a file's first declaration (its doc comment counted with it).
-fn preamble(text str, ds []semantic.Decl) str {
-	let lines = twine.Split(text, "\n")
-	if len(ds) == 0 {
-		return text
-	}
-	return twine.Join(lines[0:ds[0].Line - 1], "\n")
 }
