@@ -105,7 +105,19 @@ fn dirty(root str, e index.Entry) !bool {
 // Checkout moves the working directory of w from the tree from to the tree to, updating idx, and fails with ErrDirty
 // (writing nothing) when it would lose changes; force writes anyway.
 fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from object.Id, to object.Id, force bool) ! {
-	let changes = try diff.TreeDiff(mut s, from, to, false)
+	let all = try diff.TreeDiff(mut s, from, to, false)
+	// a file outside the focus (focus.tin) is not written: its index entry follows the tree, with no stat
+	let focus = FocusOf(w)
+	mut changes = []diff.FileChange{}
+	for c in all {
+		if InFocus(focus, c.Path) {
+			changes = append(changes, c)
+		} else if c.Kind == diff.Kind.Deleted {
+			idx.Remove(c.Path)
+		} else {
+			idx.Set(index.Entry{Path: c.Path, Hash: c.NewHash, Mode: c.NewMode, Stage: 0, Size: 0, Mtime: 0, Ctime: 0, Inode: 0, Device: 0})
+		}
+	}
 	// first every check, so a refused checkout changes nothing
 	if !force {
 		try check(w, idx, changes)

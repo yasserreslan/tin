@@ -9,6 +9,7 @@ import "../index"
 import "../object"
 import "../oplog"
 import "../store"
+import "../worktree"
 import "fault"
 import "flume"
 import "quarry"
@@ -92,7 +93,7 @@ fn doAdd(g Global, paths []str, o mut Out) ! {
 		if info.Type == quarry.FileType.Dir {
 			try enterAll(mut rules, rel)
 			try addDir(r.Ws.Root, rel, mut idx, mut loose, mut rules)
-			removeMissing(r.Ws.Root, rel, mut idx)
+			removeMissing(r.Ws.Root, rel, mut idx, worktree.FocusOf(r.Ws))
 			continue
 		}
 		if idx.Find(rel) == nil {
@@ -144,11 +145,12 @@ fn removeUnder(idx mut index.Index, dir str) i64 {
 	return len(gone)
 }
 
-// removeMissing takes out of the index the files below dir that are no longer on the disk.
-fn removeMissing(root str, dir str, idx mut index.Index) {
+// removeMissing takes out of the index the files below dir that are no longer on the disk (a file outside the focus
+// is not on the disk and stays).
+fn removeMissing(root str, dir str, idx mut index.Index, focus []str) {
 	mut gone = []str{}
 	for e in idx.Entries {
-		if under(e.Path, dir) {
+		if under(e.Path, dir) && worktree.InFocus(focus, e.Path) {
 			let (_, err) = quarry.Lstat(root + "/" + e.Path)
 			if err != nil {
 				gone = append(gone, e.Path)
@@ -350,9 +352,10 @@ fn editMessage(r Repo, start str) !str {
 
 // stageTracked is commit -a: every tracked file's current content, and the tracked files that are gone, staged.
 fn stageTracked(r Repo, idx mut index.Index, s mut store.Loose) ! {
+	let focus = worktree.FocusOf(r.Ws)
 	mut paths = []str{}
 	for e in idx.Entries {
-		if e.Stage == 0 {
+		if e.Stage == 0 && worktree.InFocus(focus, e.Path) {
 			paths = append(paths, e.Path)
 		}
 	}
@@ -555,9 +558,13 @@ fn worktreeChanges(r Repo, s mut store.Layered) ![]diff.FileChange {
 	mut idx = try r.readIndex()
 	mut rules = ignore.New(r.Ws.Root)
 	let rep = try index.Status(mut s, r.Ws.Root, object.NoId, mut idx, mut rules)
+	let focus = worktree.FocusOf(r.Ws)
 	mut out = []diff.FileChange{}
 	for f in rep.Unstaged {
 		let p = fpath(f)
+		if !worktree.InFocus(focus, p) {
+			continue
+		}
 		let e = idx.Find(p)
 		if e == nil {
 			continue

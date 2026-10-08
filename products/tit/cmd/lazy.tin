@@ -5,6 +5,7 @@ import "../identity"
 import "../object"
 import "../packfile"
 import "../store"
+import "../worktree"
 import "../transport"
 import "fault"
 import "quarry"
@@ -110,9 +111,10 @@ fn prefetch(r mut Repo, from object.Id, to object.Id) ! {
 		return
 	}
 	let changes = try diff.TreeDiff(mut r.Store, from, to, false)
+	let focus = worktree.FocusOf(r.Ws)
 	mut missing = []object.Id{}
 	for c in changes {
-		if c.Kind == diff.Kind.Deleted || len(c.NewHash) == 0 {
+		if c.Kind == diff.Kind.Deleted || len(c.NewHash) == 0 || !worktree.InFocus(focus, c.Path) {
 			continue
 		}
 		let id = try object.IdOf(c.NewHash)

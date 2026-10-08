@@ -122,6 +122,14 @@ their blobs), a file `tit guard` flags is never kept, and neither is a file over
 A file over 8 MiB is stored in content-defined chunks (design/tit.md section 5): an edit stores the chunks it
 touches, not the whole file again. Nothing changes in how the file is used; commits and git mirrors see one blob.
 
+| command | |
+|---|---|
+| `tit focus <dir>...` | check out only these directories (and the files at the root); the others stay in every commit as they are, and status, diff, `add` and `commit -a` leave them alone; refuses, changing nothing, when a file leaving the focus has changes |
+| `tit focus` | the directories in focus |
+| `tit focus --all` | check out everything again |
+
+With `tit clone --lazy`, a focus also limits what is fetched: files outside it are never read.
+
 ## Sharing
 
 | command | |

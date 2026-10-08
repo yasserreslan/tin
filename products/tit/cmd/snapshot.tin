@@ -42,6 +42,7 @@ fn changesWorkdir(c Command) bool {
 		Stack(sa) => sa.Action != "stack"
 		Rewrite(_) => true
 		Park(_) => true
+		Focus(_, _) => true
 		Unpark(_) => true
 		Rm(_) => true
 		Mv(_, _) => true
@@ -64,7 +65,8 @@ fn workChanges(r mut Repo) !([]str, object.Id) {
 	mut idx = try r.readIndex()
 	let tree = try headTree(mut r)
 	mut rules = try ignore.Load(r.Ws.Root)
-	let rep = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
+	let full = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
+	let rep = focused(r, full)
 	try idx.Write(r.Ws.IndexPath())
 	mut seen = map[str]bool{}
 	mut paths = []str{}
@@ -365,7 +367,7 @@ fn doPark(g Global, name str, o mut Out) ! {
 	mut rules = try ignore.Load(r.Ws.Root)
 	mut loose = store.NewLoose(r.Ws.Store + "/objects")
 	try addDir(r.Ws.Root, "", mut work, mut loose, mut rules)
-	removeMissing(r.Ws.Root, "", mut work)
+	removeMissing(r.Ws.Root, "", mut work, worktree.FocusOf(r.Ws))
 	let parkTree = try index.WriteTree(mut loose, work)
 	let branch = try currentBranch(r)
 	let head = try r.headCommit()
