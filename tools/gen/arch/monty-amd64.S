@@ -1,5 +1,5 @@
 // Montgomery multiplication leaves for seal (#488), x86-64, and their CPUID checks.
-// tools/gen/gen_aes_hw.py turns them into toolchain/compiler/aes_hw.tin. Relocation-free; they
+// tools/gen/aes_hw.tin turns them into toolchain/compiler/aes_hw.tin. Relocation-free; they
 // use rax rcx rdx rsi rdi r8-r11 and the callee-saved rbx rbp r12-r14 (pushed and popped here),
 // and never touch r15 (the core context). Constant-time: every loop runs for a count that is a
 // function of n alone, and no branch or address depends on the operands.

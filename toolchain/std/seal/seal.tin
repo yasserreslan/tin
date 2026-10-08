@@ -135,7 +135,7 @@ fn m4_mont(z i64, x i64, y i64, m i64, minv i64) {
 }
 
 // fe_mul_hw and fe_sq_hw are fe_mul and fe_sq (fe25519.tin) in assembly, on the addresses of the five
-// limbs (generated, tools/gen/gen_fe25519_asm.py); the compiler replaces these bodies.
+// limbs (generated, tools/gen/fe25519_asm.tin); the compiler replaces these bodies.
 fn fe_mul_hw(h i64, f i64, g i64) {
 	rt_panic("seal: the assembly field multiplication is not available for this target")
 }

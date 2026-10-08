@@ -648,7 +648,7 @@ function, selected at run time (`TIN_SEAL_SOFT=1` keeps the portable code, and t
 - `p256_pick`: one call reads a digit's row of the k·G table (every entry touched) instead of
   three `monty.sel` calls per entry;
 - `fe_mul_hw`, `fe_sq_hw`: X25519's multiplication and squaring in radix 2^51
-  (`tools/gen/gen_fe25519_asm.py` writes both architectures from one product table, and checks it on
+  (`tools/gen/fe25519_asm.tin` writes both architectures from one product table, and checks it on
   a model against Python integers).
 
 [bench-linux run 37646094544](https://github.com/yasserreslan/tin/actions/runs/37646094544) on

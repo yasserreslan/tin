@@ -1,4 +1,4 @@
-// Montgomery multiplication leaves for seal (#488), AArch64. tools/gen/gen_aes_hw.py turns them
+// Montgomery multiplication leaves for seal (#488), AArch64. tools/gen/aes_hw.tin turns them
 // into toolchain/compiler/aes_hw.tin. Relocation-free; they use x0-x17 and the callee-saved
 // x19-x24 (saved and restored here) and keep x28 (the core context). Constant-time: the loops
 // run for n limbs, and no branch or address depends on the operands.

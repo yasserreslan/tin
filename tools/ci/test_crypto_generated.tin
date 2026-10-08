@@ -1,0 +1,27 @@
+package main
+
+import "./ci"
+
+// Generated crypto code matches its generators: the AES S-box circuit, the AES/GHASH leaves and the 2^255-19 field.
+
+// generator runs a generator in its --check mode (it compares the text it makes with the file in the tree).
+fn generator(name str, label str) {
+	let o = ci.Exec([]str{"sh", "tools/ci/tin.sh", "tools/gen/" + name + ".tin", "--check"}, ci.Root(), 600)
+	ci.Test(label, o.Code == 0)
+	if o.Code != 0 {
+		ci.Fail(label + ":\n" + o.Stdout + o.Stderr)
+	}
+}
+
+fn main() {
+	generator("aes_sbox", "the AES S-box circuit is current")
+	generator("fe25519", "the 2^255-19 field is current")
+	// The product tables are checked on a model against big integers, then the text is compared.
+	generator("fe25519_asm", "the field assembly is current and its model agrees")
+	// Runs the instruction list on a model of the SHA extensions against seal.Sha256, then compares the text.
+	generator("sha256_amd64", "the SHA-256 assembly is current and its model agrees")
+	if ci.Linux() && ci.Exec([]str{"sh", "-c", "command -v clang"}, "", 5).Code == 0 {
+		generator("aes_hw", "the AES and GHASH leaves are current")
+	}
+	ci.Finish()
+}

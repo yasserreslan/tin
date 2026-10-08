@@ -1,0 +1,112 @@
+// What the generators of machine-code leaves share: assemble a source with clang for a Linux target, read the functions out of the
+// object file (it must have no relocations), and write them as the Tin text that holds the code in hex.
+package leaves
+
+import "../../ci/ci"
+import "../../ci/elf"
+import "mint"
+import "say"
+import "twine"
+
+fn Archs() []str {
+	return []str{"arm64", "amd64"}
+}
+
+fn Target(arch str) str {
+	if arch == "arm64" {
+		return "aarch64-linux-gnu"
+	}
+	return "x86_64-linux-gnu"
+}
+
+// Assemble builds the source for the target (with -D defines) into obj and returns the object file.
+fn Assemble(arch str, source str, obj str, defines []str) elf.File {
+	mut argv = []str{"clang", "-target", Target(arch)}
+	for d in defines {
+		argv = append(argv, d)
+	}
+	argv = append(argv, "-c")
+	argv = append(argv, source)
+	argv = append(argv, "-o")
+	argv = append(argv, obj)
+	ci.Must(ci.Exec(argv, "", 120), "clang " + source)
+	let f = elf.Read(obj) catch err {
+		ci.Fail(say.Str(err))
+		panic("unreachable")
+	}
+	ci.Check(!f.HasRelocations(), "the leaves must have no relocations: " + source)
+	return f
+}
+
+fn hexDigits(code str) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for i in 0..len(code) {
+		out = append(out, digits[code[i] >> 4])
+		out = append(out, digits[code[i] & 15])
+	}
+	return str(out)
+}
+
+// Hex is the code as the text the generated function holds: arm64 as 32-bit instruction words (each printed as it reads as a
+// number, so little-endian bytes come out reversed), amd64 as bytes.
+fn Hex(arch str, code str) str {
+	if arch != "arm64" {
+		return hexDigits(code)
+	}
+	mut out = ""
+	mut i = 0
+	for i + 3 < len(code) {
+		out += hexDigits(code[i + 3:i + 4]) + hexDigits(code[i + 2:i + 3]) + hexDigits(code[i + 1:i + 2]) + hexDigits(code[i:i + 1])
+		i += 4
+	}
+	return out
+}
+
+// Function is one leaf: the name it is looked up by and its code (hex text).
+type Leaf struct {
+	Name str
+	Hex str
+}
+
+// Emit is the Tin function fn NAME(name str) i64 that returns the code of the leaf asked for. early is the text of the check that
+// returns 0 when no leaf matched (two lines of Tin), or "" for none.
+fn Emit(arch str, fnName str, prefix str, leaves []Leaf, early []str) []str {
+	mut text = []str{"", "fn " + fnName + "(name str) i64 {{", "\tmut hex = \"\""}
+	for l in leaves {
+		text = append(text, "\tif name == \"" + prefix + l.Name + "\" {{")
+		text = append(text, "\t\thex = \"" + l.Hex + "\"")
+		text = append(text, "\t}}")
+	}
+	for g in early {
+		text = append(text, g)
+	}
+	text = append(text, "\tmut v = []i64{{}}")
+	text = append(text, "\tmut i = 0")
+	text = append(text, "\tfor i < len(hex) {{")
+	if arch == "arm64" {
+		text = append(text, "\t\traw(cast([]i64, v), hex_word(hex, i))")
+		text = append(text, "\t\ti = i + 8")
+	} else {
+		text = append(text, "\t\tv = append(v, num_digit(i64(hex[i])) * 16 + num_digit(i64(hex[i + 1])))")
+		text = append(text, "\t\ti = i + 2")
+	}
+	text = append(text, "\t}}")
+	text = append(text, "\treturn cast(i64, v)")
+	text = append(text, "}}")
+	return text
+}
+
+// Check compares the generated text with the file (or writes it when write is true).
+fn Finish(path str, text str, write bool, stale str) {
+	if write {
+		ci.Write(path, text)
+		return
+	}
+	ci.Check(ci.Read(path) == text, stale)
+	say.Line(twine.TrimPrefix(path, ci.Root() + "/") + " is current")
+}
+
+fn Itoa(i i64) str {
+	return mint.Itoa(i)
+}

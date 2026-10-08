@@ -1,0 +1,476 @@
+package main
+
+import "../ci/ci"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+// Regenerate tools/gen/arch/sha256-amd64.S: seal's SHA-256 compression on the x86-64 SHA extensions (SHA256RNDS2, SHA256MSG1,
+// SHA256MSG2; #488), and its CPUID check. The instruction list is written once here; the program runs it on a model of the
+// instructions against seal.Sha256 before it writes the assembly, so a slip in the message schedule or the register shuffles is
+// caught without a CPU that has the extensions. Then tools/gen/aes_hw.tin puts the assembled bytes in toolchain/compiler/aes_hw.tin.
+// Usage: sha256_amd64 [--check]
+
+fn constants() []u64 {
+	return []u64{0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2}
+}
+
+// Ins is an instruction: mnemonic, operands (registers or memory) and an optional immediate.
+type Ins struct {
+	Op str
+	A []str
+	Imm i64
+	HasImm bool
+}
+
+fn ins(op str, a []str) Ins {
+	return Ins{Op: op, A: a, Imm: 0, HasImm: false}
+}
+
+fn insImm(op str, a []str, imm i64) Ins {
+	return Ins{Op: op, A: a, Imm: imm, HasImm: true}
+}
+
+// Registers: xmm1 = ABEF, xmm2 = CDGH, xmm0 = the message plus constants (rnds2's implicit operand), xmm3 = scratch, xmm4..xmm7 = the four
+// message vectors W[4g..4g+3], xmm8 and xmm9 = the state at the start of a block, xmm10 = the byte-swap mask.
+fn msg() []str {
+	return []str{"xmm4", "xmm5", "xmm6", "xmm7"}
+}
+
+fn cat(a []Ins, b []Ins) []Ins {
+	mut out = []Ins{}
+	for x in a {
+		out = append(out, x)
+	}
+	for x in b {
+		out = append(out, x)
+	}
+	return out
+}
+
+// block is the instructions that compress one block at [rsi] with the constants at [rcx].
+fn block() []Ins {
+	mut out = []Ins{ins("movdqa", []str{"xmm8", "xmm1"}), ins("movdqa", []str{"xmm9", "xmm2"})}
+	let m = msg()
+	for g in 0..16 {
+		let x = m[g % 4]
+		let p = m[(g + 3) % 4]
+		let nx = m[(g + 1) % 4]
+		if g < 4 {
+			out = append(out, ins("movdqu", []str{x, "[rsi+" + mint.Itoa(16 * g) + "]"}))
+			out = append(out, ins("pshufb", []str{x, "xmm10"}))
+		}
+		out = append(out, ins("movdqu", []str{"xmm0", "[rcx+" + mint.Itoa(16 * g) + "]"}))
+		out = append(out, ins("paddd", []str{"xmm0", x}))
+		out = append(out, ins("sha256rnds2", []str{"xmm2", "xmm1"}))
+		if g >= 3 && g <= 14 {
+			out = append(out, ins("movdqa", []str{"xmm3", x}))
+			out = append(out, insImm("palignr", []str{"xmm3", p}, 4))
+			out = append(out, ins("paddd", []str{nx, "xmm3"}))
+			out = append(out, ins("sha256msg2", []str{nx, x}))
+		}
+		out = append(out, insImm("pshufd", []str{"xmm0", "xmm0"}, 14))
+		out = append(out, ins("sha256rnds2", []str{"xmm1", "xmm2"}))
+		if g >= 1 && g <= 12 {
+			out = append(out, ins("sha256msg1", []str{p, x}))
+		}
+	}
+	out = append(out, ins("paddd", []str{"xmm1", "xmm8"}))
+	out = append(out, ins("paddd", []str{"xmm2", "xmm9"}))
+	return out
+}
+
+fn prologue() []Ins {
+	return []Ins{ins("movdqu", []str{"xmm3", "[rdi]"}), ins("movdqu", []str{"xmm2", "[rdi+16]"}), insImm("pshufd", []str{"xmm3", "xmm3"}, 0xb1), insImm("pshufd", []str{"xmm2", "xmm2"}, 0x1b), ins("movdqa", []str{"xmm1", "xmm3"}), insImm("palignr", []str{"xmm1", "xmm2"}, 8), insImm("pblendw", []str{"xmm2", "xmm3"}, 0xf0)}
+}
+
+fn epilogue() []Ins {
+	return []Ins{insImm("pshufd", []str{"xmm3", "xmm1"}, 0x1b), insImm("pshufd", []str{"xmm2", "xmm2"}, 0xb1), ins("movdqa", []str{"xmm1", "xmm3"}), insImm("pblendw", []str{"xmm1", "xmm2"}, 0xf0), insImm("palignr", []str{"xmm2", "xmm3"}, 8), ins("movdqu", []str{"[rdi]", "xmm1"}), ins("movdqu", []str{"[rdi+16]", "xmm2"})}
+}
+
+// ---- a model of the instructions, to check the list above against seal.Sha256 ----
+
+const M = 0xffffffff
+
+fn rotr(x u64, k u64) u64 {
+	return ((x >> k) | (x << (32 - k))) & M
+}
+
+fn small0(x u64) u64 {
+	return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3)
+}
+
+fn small1(x u64) u64 {
+	return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10)
+}
+
+// Model holds the xmm registers (16 bytes each) and memory buffers named by their base register.
+type Model struct {
+	Regs [][]u8
+	Rdi []u8
+	Rsi []u8
+	Rcx []u8
+	At i64
+}
+
+fn dword(b []u8, i i64) u64 {
+	return u64(b[4 * i]) | (u64(b[4 * i + 1]) << 8) | (u64(b[4 * i + 2]) << 16) | (u64(b[4 * i + 3]) << 24)
+}
+
+fn setDword(b mut []u8, i i64, v u64) {
+	b[4 * i] = u8(v & 255)
+	b[4 * i + 1] = u8((v >> 8) & 255)
+	b[4 * i + 2] = u8((v >> 16) & 255)
+	b[4 * i + 3] = u8((v >> 24) & 255)
+}
+
+fn regIndex(name str) i64 {
+	return ci.Num(name[3:])
+}
+
+fn isMem(s str) bool {
+	return len(s) > 0 && s[0] == '['
+}
+
+// memRef splits "[base+off]" into the base register and the offset.
+fn memRef(ref str) (str, i64) {
+	let inner = ref[1:len(ref) - 1]
+	let plus = twine.IndexByte(inner, '+')
+	if plus < 0 {
+		return inner, 0
+	}
+	return inner[0:plus], ci.Num(inner[plus + 1:])
+}
+
+fn (m Model) load(ref str) []u8 {
+	let (base, off) = memRef(ref)
+	mut buf = m.Rdi
+	mut at = off
+	if base == "rsi" {
+		buf = m.Rsi
+		at = off + m.At
+	} else if base == "rcx" {
+		buf = m.Rcx
+	}
+	mut out = []u8{}
+	for i in 0..16 {
+		out = append(out, buf[at + i])
+	}
+	return out
+}
+
+fn (m Model) get(name str) []u8 {
+	if isMem(name) {
+		return m.load(name)
+	}
+	mut out = []u8{}
+	for b in m.Regs[regIndex(name)] {
+		out = append(out, b)
+	}
+	return out
+}
+
+fn (m mut Model) put(name str, v []u8) {
+	m.Regs[regIndex(name)] = v
+}
+
+fn (m mut Model) run(list []Ins) {
+	for i in list {
+		m.step(i)
+	}
+}
+
+fn (m mut Model) step(i Ins) {
+	if i.Op == "movdqa" || i.Op == "movdqu" {
+		let d = i.A[0]
+		if isMem(d) {
+			let (base, off) = memRef(d)
+			let v = m.get(i.A[1])
+			if base == "rdi" {
+				for k in 0..16 {
+					m.Rdi[off + k] = v[k]
+				}
+			}
+		} else {
+			m.put(d, m.get(i.A[1]))
+		}
+	} else if i.Op == "paddd" {
+		let a = m.get(i.A[0])
+		let b = m.get(i.A[1])
+		mut out = make([]u8, 16)
+		for k in 0..4 {
+			setDword(mut out, k, (dword(a, k) + dword(b, k)) & M)
+		}
+		m.put(i.A[0], out)
+	} else if i.Op == "pshufb" {
+		let b = m.get(i.A[0])
+		let mask = m.get(i.A[1])
+		mut out = make([]u8, 16)
+		for k in 0..16 {
+			if (mask[k] & 0x80) != 0 {
+				out[k] = 0
+			} else {
+				out[k] = b[i64(mask[k] & 15)]
+			}
+		}
+		m.put(i.A[0], out)
+	} else if i.Op == "pshufd" {
+		let v = m.get(i.A[1])
+		mut out = make([]u8, 16)
+		for k in 0..4 {
+			setDword(mut out, k, dword(v, (i.Imm >> (2 * k)) & 3))
+		}
+		m.put(i.A[0], out)
+	} else if i.Op == "palignr" {
+		let d = m.get(i.A[0])
+		let s = m.get(i.A[1])
+		mut both = []u8{}
+		for b in s {
+			both = append(both, b)
+		}
+		for b in d {
+			both = append(both, b)
+		}
+		mut out = []u8{}
+		for k in 0..16 {
+			out = append(out, both[i.Imm + k])
+		}
+		m.put(i.A[0], out)
+	} else if i.Op == "pblendw" {
+		let d = m.get(i.A[0])
+		let s = m.get(i.A[1])
+		mut out = make([]u8, 16)
+		for w in 0..8 {
+			for b in 0..2 {
+				if ((i.Imm >> w) & 1) == 1 {
+					out[2 * w + b] = s[2 * w + b]
+				} else {
+					out[2 * w + b] = d[2 * w + b]
+				}
+			}
+		}
+		m.put(i.A[0], out)
+	} else if i.Op == "sha256msg1" {
+		let w = m.get(i.A[0])
+		let w4 = dword(m.get(i.A[1]), 0)
+		mut out = make([]u8, 16)
+		setDword(mut out, 0, (dword(w, 0) + small0(dword(w, 1))) & M)
+		setDword(mut out, 1, (dword(w, 1) + small0(dword(w, 2))) & M)
+		setDword(mut out, 2, (dword(w, 2) + small0(dword(w, 3))) & M)
+		setDword(mut out, 3, (dword(w, 3) + small0(w4)) & M)
+		m.put(i.A[0], out)
+	} else if i.Op == "sha256msg2" {
+		let w = m.get(i.A[0])
+		let s = m.get(i.A[1])
+		let w14 = dword(s, 2)
+		let w15 = dword(s, 3)
+		let w16 = (dword(w, 0) + small1(w14)) & M
+		let w17 = (dword(w, 1) + small1(w15)) & M
+		let w18 = (dword(w, 2) + small1(w16)) & M
+		let w19 = (dword(w, 3) + small1(w17)) & M
+		mut out = make([]u8, 16)
+		setDword(mut out, 0, w16)
+		setDword(mut out, 1, w17)
+		setDword(mut out, 2, w18)
+		setDword(mut out, 3, w19)
+		m.put(i.A[0], out)
+	} else if i.Op == "sha256rnds2" {
+		// d = CDGH, s = ABEF, xmm0 = the two message+constant dwords; the result (ABEF) goes in d.
+		let cdgh = m.get(i.A[0])
+		let abef = m.get(i.A[1])
+		let wk = m.Regs[0]
+		mut a = dword(abef, 3)
+		mut b = dword(abef, 2)
+		mut e = dword(abef, 1)
+		mut f = dword(abef, 0)
+		mut c = dword(cdgh, 3)
+		mut dd = dword(cdgh, 2)
+		mut g = dword(cdgh, 1)
+		mut h = dword(cdgh, 0)
+		for k in 0..2 {
+			let ch = (e & f) ^ (((e ^ M) & M) & g)
+			let maj = (a & b) ^ (a & c) ^ (b & c)
+			let t1 = (h + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ch + dword(wk, k)) & M
+			let t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + maj) & M
+			let nh = g
+			let ng = f
+			let nf = e
+			let ne = (dd + t1) & M
+			let ndd = c
+			let nc = b
+			let nb = a
+			let na = (t1 + t2) & M
+			h = nh
+			g = ng
+			f = nf
+			e = ne
+			dd = ndd
+			c = nc
+			b = nb
+			a = na
+		}
+		mut out = make([]u8, 16)
+		setDword(mut out, 0, f)
+		setDword(mut out, 1, e)
+		setDword(mut out, 2, b)
+		setDword(mut out, 3, a)
+		m.put(i.A[0], out)
+	} else {
+		ci.Fail("model: unknown instruction " + i.Op)
+	}
+}
+
+fn leBytes(words []u64) []u8 {
+	mut out = make([]u8, 4 * len(words))
+	for i in 0..len(words) {
+		setDword(mut out, i, words[i])
+	}
+	return out
+}
+
+fn selftest() {
+	let iv = []u64{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}
+	let kb = leBytes(constants())
+	for blocks in []i64{1, 2, 5} {
+		let text = str(seal.RandomBytes(64 * blocks - 9))
+		mut padded = []u8{}
+		for i in 0..len(text) {
+			padded = append(padded, text[i])
+		}
+		padded = append(padded, 0x80)
+		for (len(padded) + 8) % 64 != 0 {
+			padded = append(padded, 0)
+		}
+		let bits = u64(len(text)) * 8
+		for i in 0..8 {
+			padded = append(padded, u8(bits >> u64(8 * (7 - i))))
+		}
+		ci.Check(len(padded) % 64 == 0, "model: the padding is not a multiple of 64")
+		mut regs = [][]u8{}
+		for i in 0..16 {
+			regs = append(regs, make([]u8, 16))
+		}
+		mut m = Model{Regs: regs, Rdi: leBytes(iv), Rsi: padded, Rcx: kb, At: 0}
+		m.Regs[10] = []u8{3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12}
+		m.run(prologue())
+		for k in 0..len(padded) / 64 {
+			m.run(block())
+			m.At += 64
+		}
+		m.run(epilogue())
+		let want = seal.Sha256(text)
+		mut got = []u8{}
+		for i in 0..8 {
+			let w = dword(m.Rdi, i)
+			got = append(got, u8(w >> 24))
+			got = append(got, u8(w >> 16))
+			got = append(got, u8(w >> 8))
+			got = append(got, u8(w))
+		}
+		ci.Check(str(got) == str(want), "model: the instruction list hashes " + seal.Hex(got) + ", want " + seal.Hex(want))
+	}
+}
+
+fn hexImm(x i64) str {
+	if x > 9 {
+		return "0x" + mint.FormatInt(x, 16)
+	}
+	return mint.Itoa(x)
+}
+
+fn fmtIns(i Ins) str {
+	mut parts = []str{}
+	for a in i.A {
+		parts = append(parts, a)
+	}
+	if i.HasImm {
+		parts = append(parts, hexImm(i.Imm))
+	}
+	return "\t" + i.Op + " " + twine.Join(parts, ", ")
+}
+
+const HEAD = `// SHA-256 on the x86-64 SHA extensions, and its CPUID check (#488). Generated by
+// tools/gen/gen_sha256_amd64.py (which checks the instruction list on a model against hashlib);
+// tools/gen/gen_aes_hw.py turns it into toolchain/compiler/aes_hw.tin. Relocation-free, caller-saved
+// registers only (rbx is saved by sha_hw_cpu), never r15 (the core context). Constant-time: no
+// branch or address depends on the data or the hash state.
+.intel_syntax noprefix
+.text
+
+// sha_hw_cpu() -> 1 when the CPU has SHA, SSSE3 and SSE4.1 (CPUID leaf 7 EBX bit 29, leaf 1 ECX
+// bits 9 and 19), else 0.
+.global sha_hw_cpu
+.type sha_hw_cpu, @function
+sha_hw_cpu:
+	push rbx
+	xor eax, eax
+	cpuid
+	cmp eax, 7
+	jb 8f
+	mov eax, 1
+	cpuid
+	mov r8d, ecx
+	mov eax, 7
+	xor ecx, ecx
+	cpuid
+	and r8d, 0x00080200
+	cmp r8d, 0x00080200
+	jne 8f
+	bt ebx, 29
+	jnc 8f
+	mov eax, 1
+	pop rbx
+	ret
+8:	xor eax, eax
+	pop rbx
+	ret
+.size sha_hw_cpu, .-sha_hw_cpu
+
+// hw_blocks(state rdi, data rsi, nblocks rdx, k rcx): compress nblocks >= 1 64-byte blocks at data
+// into the eight 32-bit state words at state; k points at the 64 round constants.
+.global hw_blocks
+.type hw_blocks, @function
+hw_blocks:
+	test rdx, rdx
+	jz 9f
+	mov rax, 0x0405060700010203
+	movq xmm10, rax
+	mov rax, 0x0c0d0e0f08090a0b
+	movq xmm3, rax
+	punpcklqdq xmm10, xmm3`
+
+fn generate() str {
+	selftest()
+	mut out = []str{HEAD}
+	for i in prologue() {
+		out = append(out, fmtIns(i))
+	}
+	out = append(out, "1:")
+	for i in block() {
+		out = append(out, fmtIns(i))
+	}
+	for l in []str{"\tadd rsi, 64", "\tdec rdx", "\tjnz 1b"} {
+		out = append(out, l)
+	}
+	for i in epilogue() {
+		out = append(out, fmtIns(i))
+	}
+	for l in []str{"9:\tret", ".size hw_blocks, .-hw_blocks", ""} {
+		out = append(out, l)
+	}
+	return twine.Join(out, "\n")
+}
+
+fn main() {
+	let args = quarry.Args()
+	let path = ci.Join(ci.Root(), "tools/gen/arch/sha256-amd64.S")
+	let result = generate()
+	if len(args) > 1 && args[1] == "--check" {
+		ci.Check(ci.Read(path) == result, "sha256-amd64.S is stale")
+		say.Line("sha256-amd64.S is current")
+	} else {
+		ci.Write(path, result)
+	}
+}

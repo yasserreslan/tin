@@ -832,7 +832,7 @@ Strict hot syscall leaves
 -------------------------
 Read/write/close/fcntl/accept/recvfrom/epoll_ctl/epoll_pwait/timerfd_settime and
 clock_gettime use direct whole-function leaves in strict Linux programs. Their
-numbers come from syscalls_linux_{arm64,amd64}.tin; gen_syscall_fast.py rejects
+numbers come from syscalls_linux_{arm64,amd64}.tin; syscall_fast.tin rejects
 relocations and emits syscall_fast.tin. Error -4095..-1 stores its positive value
 in context word 10 and returns -1; success preserves the previous error. The clock
 leaf receives the shared vDSO pointer in x2/rdx from a normal linker relocation,
