@@ -54,7 +54,7 @@ fn rg_analyzable(f Fn) i64 {
 
 fn is_keep_fn(f Fn) i64 {
 	let n = f.qname
-	return i64(len(n) != 0 && i64(byte_at(n, 0)) == 'k' && i64(n[1]) == 'e' && i64(n[2]) == 'e' && i64(n[3]) == 'p' && i64(n[4]) == '$')
+	return i64(len(n) >= 5 && i64(byte_at(n, 0)) == 'k' && i64(n[1]) == 'e' && i64(n[2]) == 'e' && i64(n[3]) == 'p' && i64(n[4]) == '$')
 }
 
 fn region_check() {
