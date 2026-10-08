@@ -83,18 +83,15 @@ fn doUndo(g Global, op i64, yes bool, o mut Out) ! {
 	mut r = try open(g)
 	use lock = change.Lock(r.Ws.Store)
 	let (rec, plan) = try oplog.UndoPlan(r.Ws.Store, r.Ws.Name, op)
-	match rec.Op {
-		Push(remote) => {
-			// the server's branch goes back first, by the same compare-and-swap as any push; then the local copy
-			if !yes {
-				fail "operation {rec.Number} pushed to {remote}: undoing it puts the branch back there too; tit undo --yes to do so"
-			}
-			for rc in rec.Refs {
-				try undoPush(mut r, remote, rc)
-				o.Line("Put " + rc.Name[len("refs/remotes/" + remote + "/"):] + " back to " + short(rc.Before) + " on " + remote + ".")
-			}
+	let remote = pushedTo(rec.Op)
+	if len(remote) > 0 {
+		// the server's branch goes back first, by the same compare-and-swap as any push; then the local copy
+		if !yes {
+			fail "operation {rec.Number} pushed to {remote}: undoing it puts the branch back there too; tit undo --yes to do so"
 		}
-		_ => {
+		for rc in rec.Refs {
+			try undoPush(mut r, remote, rc)
+			o.Line("Put " + rc.Name[len("refs/remotes/" + remote + "/"):] + " back to " + short(rc.Before) + " on " + remote + ".")
 		}
 	}
 	let store = r.Ws.Store
@@ -103,6 +100,30 @@ fn doUndo(g Global, op i64, yes bool, o mut Out) ! {
 		return try oplog.Undo(store, ws, rec.Number)
 	})
 	o.Line("Undid operation {rec.Number}: {rec.Command}.")
+}
+
+// pushedTo is the remote an operation pushed to, "" for any other operation.
+fn pushedTo(op oplog.Op) str {
+	return match op {
+		Push(remote) => remote
+		Init => ""
+		Adopt(_) => ""
+		Commit(_) => ""
+		Amend(_) => ""
+		Rebase(_) => ""
+		Merge(_) => ""
+		Switch(_) => ""
+		Branch(_) => ""
+		Tag(_) => ""
+		Fetch(_) => ""
+		Undo(_) => ""
+		Redo(_) => ""
+		Restore(_) => ""
+		Absorb => ""
+		Split(_) => ""
+		Move(_) => ""
+		Rewrite(_) => ""
+	}
 }
 
 // undoPush moves the server's copy of a branch from what a push left (rc.After) back to what it held (rc.Before);

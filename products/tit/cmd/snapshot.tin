@@ -29,24 +29,60 @@ fn snapDir(r Repo) str {
 	return r.Ws.State() + "/snapshots"
 }
 
-// changesWorkdir reports whether a command may change or remove working files (it snapshots them first).
+// changesWorkdir reports whether a command may change or remove working files (it snapshots them first). Every
+// command is listed, so a new one has to say.
 fn changesWorkdir(c Command) bool {
 	return match c {
+		Help(_) => false
+		Version(_) => false
+		Init(_) => false
+		Status(_) => false
+		Add(_) => false
+		AddPatch(_) => false
+		Rm(_) => true
+		Mv(_, _) => true
+		Commit(_) => false
+		Diff(_) => false
+		Adopt(_) => false
+		Branch(_) => false
 		Switch(_) => true
 		Merge(_) => true
+		Tag(_) => false
 		Undo(_, _) => true
 		Redo => true
 		Oplog(_) => true
+		Remote(_) => false
+		Clone(_) => false
+		Fetch(_) => false
+		Push(_) => false
 		Pull(_) => true
-		Sync(_) => true
+		Serve(_) => false
+		Mirror(_) => false
+		Guard(_) => false
+		Verify(_) => false
+		Bisect(_) => false
+		Workspace(_) => false
+		Who(_) => false
 		Stack(sa) => sa.Action != "stack"
+		Sync(_) => true
 		Rewrite(_) => true
+		Bench(_) => false
+		History(_) => false
+		Overlap => false
+		Timeline(_) => false
+		Ship(_) => false
+		Watch(_) => false
 		Park(_) => true
 		Focus(_, _) => true
+		Repack => false
 		Unpark(_) => true
-		Rm(_) => true
-		Mv(_, _) => true
-		_ => false
+		Log(_) => false
+		Show(_) => false
+		Cat(_) => false
+		ConfigGet(_) => false
+		ConfigSet(_, _, _) => false
+		ConfigList => false
+		Key(_) => false
 	}
 }
 
