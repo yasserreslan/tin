@@ -271,6 +271,12 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 			render.Fill(mut scene, cx, y + ed.rowTop(cn), 1.5, lh, th.Cursor)
 		}
 	}
+	// the bracket next to the caret and its partner
+	let (mr, mc, found) = ed.matchBracket()
+	if found {
+		ed.markCell(th, textX, y, b.Row, caretBracketCol(ed), mut scene)
+		ed.markCell(th, textX, y, mr, mc, mut scene)
+	}
 	ed.scrollbar(th, x, y, w, h, mut scene)
 	ed.popups(th, x, y, w, h, mut scene)
 	render.Unclip(mut scene)
@@ -402,4 +408,114 @@ fn (ed Editor) markAt(row i64) i64 {
 		}
 	}
 	return 0
+}
+
+// markCell outlines the character at byte col of line row.
+fn (ed Editor) markCell(th theme.Theme, textX f64, y f64, row i64, col i64, scene mut metal.Scene) {
+	let n = row - ed.Scroll
+	if n < 0 || n > ed.rows() {
+		return
+	}
+	let line = ed.Buf.Lines[row]
+	let c0 = textedit.DisplayCol(line, col, 4)
+	render.Stroke(mut scene, textX + f64(c0 - ed.HScroll) * ed.CharW, y + ed.rowTop(n), ed.CharW, ed.LineH, 2.0, 1.0, th.Muted)
+}
+
+fn opener(c u8) bool {
+	return c == '(' || c == '[' || c == '{'
+}
+
+fn closer(c u8) bool {
+	return c == ')' || c == ']' || c == '}'
+}
+
+fn partner(c u8) u8 {
+	if c == '(' {
+		return ')'
+	}
+	if c == '[' {
+		return ']'
+	}
+	if c == '{' {
+		return '}'
+	}
+	if c == ')' {
+		return '('
+	}
+	if c == ']' {
+		return '['
+	}
+	return '{'
+}
+
+// caretBracketCol is the column of the bracket matchBracket looked at: the one after the caret, else the one before it.
+fn caretBracketCol(ed Editor) i64 {
+	let b = ed.Buf
+	let line = b.Lines[b.Row]
+	if b.Col < len(line) && (opener(line[b.Col]) || closer(line[b.Col])) {
+		return b.Col
+	}
+	return b.Col - 1
+}
+
+// matchBracket finds the partner of the bracket beside the caret (the one right after it, or else right before it), looking at
+// most 20000 characters away; it reports where and whether it found one.
+fn (ed Editor) matchBracket() (i64, i64, bool) {
+	let b = ed.Buf
+	let line = b.Lines[b.Row]
+	mut col = -1
+	if b.Col < len(line) && (opener(line[b.Col]) || closer(line[b.Col])) {
+		col = b.Col
+	} else if b.Col > 0 && b.Col <= len(line) && (opener(line[b.Col - 1]) || closer(line[b.Col - 1])) {
+		col = b.Col - 1
+	}
+	if col < 0 {
+		return 0, 0, false
+	}
+	let c = line[col]
+	let want = partner(c)
+	mut depth = 0
+	mut row = b.Row
+	mut at = col
+	mut budget = 20000
+	if opener(c) {
+		for row < len(b.Lines) && budget > 0 {
+			let l = b.Lines[row]
+			for at < len(l) {
+				budget -= 1
+				if l[at] == c {
+					depth += 1
+				} else if l[at] == want {
+					depth -= 1
+					if depth == 0 {
+						return row, at, true
+					}
+				}
+				at += 1
+			}
+			row += 1
+			at = 0
+		}
+	} else {
+		for row >= 0 && budget > 0 {
+			let l = b.Lines[row]
+			if row != b.Row {
+				at = len(l) - 1
+			}
+			for at >= 0 {
+				budget -= 1
+				if l[at] == c {
+					depth += 1
+				} else if l[at] == want {
+					depth -= 1
+					if depth == 0 {
+						return row, at, true
+					}
+				}
+				at -= 1
+			}
+			row -= 1
+		}
+	}
+	return 0, 0, false
 }
