@@ -1,0 +1,517 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "tide"
+import "tinjson"
+import "twine"
+import "wire"
+
+// PostgreSQL protocol 3.0: authentication, typed binary bindings, transaction and pool recovery, request/operation deadlines, cache
+// eviction and 1000 concurrent inserts. With POSTGRES_ADDR/USER/PASSWORD/DATABASE, run the shared checks against a real server. The
+// fake peer (tools/ci/fixtures/pgfake) deliberately fragments, coalesces and sends malformed protocol frames.
+
+mut failures = []str{}
+
+fn flag(message str) {
+	failures = append(failures, message)
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn text(v f64, places i64) str {
+	mut scale = 1
+	for i in 0..places {
+		scale = scale * 10
+	}
+	let n = i64(v * f64(scale) + 0.5)
+	mut frac = mint.Itoa(n % scale)
+	for len(frac) < places {
+		frac = "0" + frac
+	}
+	return mint.Itoa(n / scale) + "." + frac
+}
+
+// Fake is a fake server made by the control server.
+type Fake struct {
+	Control i64
+	Port i64
+}
+
+fn newFake(control i64, tls bool) Fake {
+	mut t = "0"
+	if tls {
+		t = "1"
+	}
+	return Fake{Control: control, Port: ci.Num(nettest.Get(control, "/new?tls=" + t))}
+}
+
+// Stats are the fake's counters.
+type Stats struct {
+	Auths i64
+	Parses i64
+	Closes i64
+	MaxStatements i64
+	Open i64
+	Peak i64
+	Errors i64
+}
+
+fn (f Fake) Stats() Stats {
+	mut s = Stats{Auths: 0, Parses: 0, Closes: 0, MaxStatements: 0, Open: 0, Peak: 0, Errors: 0}
+	for w in twine.Fields(nettest.Get(f.Control, "/stats?port=" + mint.Itoa(f.Port))) {
+		let kv = twine.Split(w, "=")
+		let v = ci.Num(kv[1])
+		if kv[0] == "auths" {
+			s.Auths = v
+		} else if kv[0] == "parses" {
+			s.Parses = v
+		} else if kv[0] == "closes" {
+			s.Closes = v
+		} else if kv[0] == "maxstatements" {
+			s.MaxStatements = v
+		} else if kv[0] == "open" {
+			s.Open = v
+		} else if kv[0] == "peak" {
+			s.Peak = v
+		} else if kv[0] == "errors" {
+			s.Errors = v
+		}
+	}
+	return s
+}
+
+fn (f Fake) ResetPeak() {
+	nettest.Get(f.Control, "/resetpeak?port=" + mint.Itoa(f.Port))
+}
+
+fn (f Fake) Drop() {
+	nettest.Get(f.Control, "/drop?port=" + mint.Itoa(f.Port))
+}
+
+// NoErrors checks the fake never saw a protocol violation by a client.
+fn (f Fake) NoErrors(what str) {
+	if f.Stats().Errors > 0 {
+		flag(what + ": the fake saw protocol violations: " + nettest.Get(f.Control, "/errors?port=" + mint.Itoa(f.Port)))
+	}
+}
+
+// Result is one request through the service.
+type Result struct {
+	Code i64
+	Body str
+	Took f64
+}
+
+fn fetch(port i64, path str) Result {
+	let t0 = tide.Now()
+	let r = nettest.Parse(nettest.Raw(port, nettest.GetRequest(path), 20))
+	return Result{Code: r.Status, Body: r.Body, Took: seconds(t0)}
+}
+
+// burst sends the requests all at once (one connection each) and returns their results (Took counts from the first send).
+fn burst(port i64, paths []str) []Result {
+	let t0 = tide.Now()
+	mut conns = []wire.Conn{}
+	for p in paths {
+		conns = append(conns, nettest.Send(port, nettest.GetRequest(p)))
+	}
+	mut out = []Result{}
+	for i in 0..len(paths) {
+		mut c = conns[i]
+		let r = nettest.Finish(mut c, 30)
+		out = append(out, Result{Code: r.Status, Body: r.Body, Took: seconds(t0)})
+	}
+	return out
+}
+
+fn repeat(path str, n i64) []str {
+	mut out = []str{}
+	for i in 0..n {
+		out = append(out, path)
+	}
+	return out
+}
+
+fn withEnv(env []str, extra []str) []str {
+	mut out = []str{}
+	for e in env {
+		out = append(out, e)
+	}
+	for e in extra {
+		out = append(out, e)
+	}
+	return out
+}
+
+mut serverCount = 0
+
+fn startService(exe str, out str, env []str, cores i64) nettest.Server {
+	serverCount += 1
+	let set = withEnv([]str{"TIN_CORES=" + mint.Itoa(cores), "POSTGRES_POOL=4", "TIN_DEADLINE_MS=1500"}, env)
+	let server = nettest.Start(exe, []str{}, set, ci.Join(out, "server" + mint.Itoa(serverCount) + ".log"), nettest.Port())
+	server.Ready(10)
+	return server
+}
+
+// expect checks a response: the status, an exact body when exact is set, a part of it when contains is set.
+fn expect(port i64, path str, code i64, exact str, hasExact bool, contains str) Result {
+	let r = fetch(port, path)
+	if r.Code != code {
+		flag(path + ": status " + mint.Itoa(r.Code) + ", want " + mint.Itoa(code) + ": " + r.Body)
+	} else if hasExact && r.Body != exact {
+		flag(path + ": body " + r.Body + ", want " + exact)
+	} else if len(contains) > 0 && !twine.Contains(r.Body, contains) {
+		flag(path + ": body " + r.Body + " lacks " + contains)
+	}
+	return r
+}
+
+fn ok(port i64, path str) Result {
+	return expect(port, path, 200, "", false, "")
+}
+
+fn body(port i64, path str, want str) Result {
+	return expect(port, path, 200, want, true, "")
+}
+
+fn has(port i64, path str, code i64, contains str) Result {
+	return expect(port, path, code, "", false, contains)
+}
+
+fn sameText(got str, want str, what str) {
+	if got != want {
+		flag(what + ": " + got + ", want " + want)
+	}
+}
+
+// jsonStrings are the strings of a JSON array.
+fn jsonStrings(s str) []str {
+	let (j, good) = tinjson.Parse(s)
+	mut out = []str{}
+	if !good {
+		return out
+	}
+	for item in j.Items() {
+		out = append(out, item.Text())
+	}
+	return out
+}
+
+fn sharedChecks(exe str, out str, env []str, fake Fake, useFake bool) {
+	mut srv = startService(exe, out, env, 1)
+	let port = srv.Port
+	body(port, "/setup", "ok")
+	let hostile = "o'brien \"x\"; DROP TABLE users"
+	let uid = ok(port, "/add?name=" + nettest.Quote(hostile)).Body
+	let (user, good) = tinjson.Parse(ok(port, "/user?id=" + uid).Body)
+	if !good || user.Get("id").Int() != ci.Num(uid) || user.Get("name").Text() != hostile {
+		flag("user json")
+	}
+	expect(port, "/user?id=999999999", 404, "", false, "")
+	let echoed = jsonStrings(ok(port, "/echo?name=" + nettest.Quote(hostile)).Body)
+	sameText(twine.Join(echoed, "|"), "-9223372036854775808|1.25|" + hostile + "|1|\\x00ff80", "echo")
+	let echoed2 = jsonStrings(ok(port, "/echo?bool=false&bytes=empty").Body)
+	sameText(twine.Join(echoed2, "|"), "-9223372036854775808|1.25||0|\\x", "echo of empty values")
+	let values = jsonStrings(ok(port, "/values").Body)
+	sameText(twine.Join(values, "|"), "-123|-123456|9223372036854775807|1.5|-2.25|1|0||12.345|x|2000-01-02|2000-01-02 03:04:05|2000-01-02 03:04:05+00|00000000-0000-0000-0000-000000000001|{{\"x\":1}}|{{\"x\": 1}}|true|13|-1", "values")
+	body(port, "/multi", "first 1 1")
+	body(port, "/special", "+Inf")
+	body(port, "/affected", "0")
+	body(port, "/signature", "123 hello")
+	mut auths = 0
+	if useFake {
+		auths = fake.Stats().Auths
+	}
+	has(port, "/error", 502, "postgres: ERROR 42P01: relation \"nope\" does not exist")
+	ok(port, "/count")
+	has(port, "/prepare-error", 502, "42P01")
+	has(port, "/execute-error?n=0", 502, "22012")
+	body(port, "/execute-error?n=1", "1")
+	has(port, "/add?name=bad%00name", 502, "22021")
+	ok(port, "/add?name=after-bind-error")
+	if useFake && fake.Stats().Auths != auths {
+		flag("SQL errors must reuse the synchronized connection")
+	}
+	let before = ok(port, "/count").Body
+	body(port, "/copy", "true")
+	for i in 0..8 {
+		body(port, "/abandon", "ok")
+	}
+	sameText(ok(port, "/count").Body, before, "count after abandoned transactions")
+	body(port, "/tx?mode=rollback&name=rolled-back", "ok")
+	sameText(ok(port, "/count").Body, before, "count after a rollback")
+	body(port, "/tx?mode=abort&name=aborted", "true true true true")
+	sameText(ok(port, "/count").Body, before, "count after an aborted transaction")
+	body(port, "/tx?mode=commit&name=committed", "ok")
+	sameText(ok(port, "/count").Body, mint.Itoa(ci.Num(before) + 1), "count after a commit")
+	body(port, "/cache", "ok")
+	if useFake {
+		let st = fake.Stats()
+		if st.Closes < 256 || st.MaxStatements != 256 {
+			flag("statement cache: closes " + mint.Itoa(st.Closes) + ", max statements " + mint.Itoa(st.MaxStatements))
+		}
+	}
+	say.Line("bindings, OIDs, RETURNING, SQL error recovery, transactions and cache: passed")
+	let t0 = tide.Now()
+	let results = burst(port, repeat("/sleep?ms=350", 8))
+	let elapsed = seconds(t0)
+	if countCode(results, 200) != 8 || elapsed <= 0.60 || elapsed >= 1.35 {
+		flag("pool of four on one core: " + text(elapsed, 2) + " s, " + mint.Itoa(countCode(results, 200)) + " of 8 answered")
+	}
+	say.Line("8 x 350ms with four pooled connections, one core: " + text(elapsed, 2) + "s")
+	let slept = expect(port, "/sleep?ms=3000", 502, "deadline exceeded", true, "")
+	if slept.Took <= 1.2 || slept.Took >= 2.1 {
+		flag("deadline took " + text(slept.Took, 2) + " s")
+	}
+	ok(port, "/count")
+	if useFake {
+		fake.Drop()
+		tide.Sleep(100000000)
+		for i in 0..3 {
+			ok(port, "/count")
+		}
+	}
+	say.Line("request deadline, dropped connection, idle reconnect: passed")
+	srv.Stop()
+	srv = startService(exe, out, withEnv(env, []str{"POSTGRES_TIMEOUT_MS=120", "TIN_DEADLINE_MS=2000"}), 1)
+	let timed = expect(srv.Port, "/sleep?ms=1000", 502, "postgres: timed out", true, "")
+	if timed.Took >= 0.6 {
+		flag("operation timeout took " + text(timed.Took, 2) + " s")
+	}
+	ok(srv.Port, "/count")
+	// A queued request must also honor Options.Timeout.
+	for r in burst(srv.Port, repeat("/sleep?ms=1000", 8)) {
+		if r.Code != 502 || r.Took >= 0.6 {
+			flag("queued request: " + mint.Itoa(r.Code) + " in " + text(r.Took, 2) + " s")
+		}
+	}
+	srv.Stop()
+	srv = startService(exe, out, env, 2)
+	let countBefore = ci.Num(ok(srv.Port, "/count").Body)
+	mut bad = 0
+	for wave in 0..50 {
+		mut paths = []str{}
+		for k in 0..20 {
+			paths = append(paths, "/add?name=u" + mint.Itoa(wave * 20 + k))
+		}
+		for r in burst(srv.Port, paths) {
+			if r.Code != 200 {
+				bad += 1
+			}
+		}
+	}
+	let countAfter = ci.Num(ok(srv.Port, "/count").Body)
+	if bad > 0 || countAfter - countBefore != 1000 {
+		flag("inserts: " + mint.Itoa(bad) + " failed, " + mint.Itoa(countBefore) + " -> " + mint.Itoa(countAfter))
+	}
+	say.Line("1000 inserts from 20 clients, two cores: passed")
+	srv.Stop()
+}
+
+fn countCode(results []Result, code i64) i64 {
+	mut n = 0
+	for r in results {
+		if r.Code == code {
+			n += 1
+		}
+	}
+	return n
+}
+
+// poolRun is the most connections at once while `requests` statements of `ms` ms run, `workers` at a time (all together by default).
+fn poolRun(exe str, out str, env []str, fake Fake, cores i64, extra []str, requests i64, ms i64, workers i64) (i64, f64) {
+	// Earlier servers' sessions may still be running a statement (a 3 s pg_sleep): not ours.
+	for i in 0..200 {
+		if fake.Stats().Open == 0 {
+			break
+		}
+		tide.Sleep(50000000)
+	}
+	let srv = startService(exe, out, withEnv(withEnv(env, []str{"TIN_DEADLINE_MS=20000"}), extra), cores)
+	fake.ResetPeak()
+	mut results = []Result{}
+	mut slowest = 0.0
+	if workers == 1 {
+		for i in 0..requests {
+			let r = fetch(srv.Port, "/sleep?ms=" + mint.Itoa(ms))
+			results = append(results, r)
+			if r.Took > slowest {
+				slowest = r.Took
+			}
+		}
+	} else {
+		results = burst(srv.Port, repeat("/sleep?ms=" + mint.Itoa(ms), requests))
+		for r in results {
+			if r.Took > slowest {
+				slowest = r.Took
+			}
+		}
+	}
+	srv.Stop()
+	if countCode(results, 200) != requests {
+		flag("pool cap: " + mint.Itoa(requests - countCode(results, 200)) + " of " + mint.Itoa(requests) + " statements failed")
+	}
+	return fake.Stats().Peak, slowest
+}
+
+// poolCap (#359): Options.MaxTotal caps the connections of the whole process, whatever the core count, and Pool defaults to max(2,
+// 64/cores) per core. fixtures/pool_cap_postgres.tin holds statements open; the fake counts the connections it has at once.
+fn poolCap(out str, env []str, fake Fake) {
+	let exe = ci.Join(out, "pool_cap")
+	ci.BuildTin("tools/ci/fixtures/pool_cap_postgres.tin", exe, "", []str{})
+	// A core that takes the slot of another's idle connection shuts that socket down and dials its own; the server notices the close a
+	// moment after the new connection arrives, so its count may run one or two over the cap while that happens (the process never
+	// holds more).
+	let slack = 2
+	// Eight cores, four per core, six for the process: the cap holds, and every request is served even though two cores can hold none
+	// of them at a time.
+	let (p1, _) = poolRun(exe, out, env, fake, 8, []str{"POSTGRES_POOL=4", "POSTGRES_MAX_TOTAL=6"}, 48, 150, 0)
+	if p1 < 5 || p1 > 6 + slack {
+		flag("MaxTotal 6 on 8 cores: " + mint.Itoa(p1))
+	}
+	say.Line("8 cores, Pool 4, MaxTotal 6: 48 statements, at most " + mint.Itoa(p1) + " connections: passed")
+	// One request at a time, spread over eight cores by new connections, with four connections for the process: a core that has none
+	// finds them idle on the others and takes the slot of one, at once (it would otherwise wait for a release on cores that serve
+	// nothing else).
+	let (p2, slowest) = poolRun(exe, out, env, fake, 8, []str{"POSTGRES_POOL=4", "POSTGRES_MAX_TOTAL=4"}, 32, 5, 1)
+	if p2 > 4 + slack || slowest >= 1.5 {
+		flag("quiet cores at the cap: " + mint.Itoa(p2) + " connections, slowest " + text(slowest, 2) + " s")
+	}
+	say.Line("8 cores, MaxTotal 4: 32 statements one after the other, at most " + mint.Itoa(p2) + " connections, slowest " + text(slowest, 2) + " s: passed")
+	// The cap alone (Pool unset): 64/8 = 8 per core would allow 64.
+	let (p3, _) = poolRun(exe, out, env, fake, 8, []str{"POSTGRES_POOL=", "POSTGRES_MAX_TOTAL=10"}, 48, 150, 0)
+	if p3 < 8 || p3 > 10 + slack {
+		flag("MaxTotal 10 on 8 cores: " + mint.Itoa(p3))
+	}
+	// No cap: Pool is max(2, 64/cores) per core: 32 on two cores, 64 for the process.
+	let (p4, _) = poolRun(exe, out, env, fake, 2, []str{"POSTGRES_POOL=", "POSTGRES_MAX_TOTAL="}, 100, 700, 0)
+	if p4 < 58 || p4 > 66 {
+		flag("default Pool on 2 cores: " + mint.Itoa(p4))
+	}
+	say.Line("2 cores, default Pool: 100 statements, " + mint.Itoa(p4) + " connections (2 x 32): passed")
+	// 64 or more cores: at least 2 each, so 1 core gets 64 and 32 cores get 2 (checked on 32).
+	let (p5, _) = poolRun(exe, out, env, fake, 32, []str{"POSTGRES_POOL=", "POSTGRES_MAX_TOTAL="}, 100, 700, 0)
+	if p5 < 58 || p5 > 66 {
+		flag("default Pool on 32 cores: " + mint.Itoa(p5))
+	}
+	say.Line("32 cores, default Pool: 100 statements, " + mint.Itoa(p5) + " connections (32 x 2): passed")
+}
+
+// authCases: the user names the fake knows, with the passwords the client is given.
+fn authCases(exe str, out str, env []str, fake Fake) {
+	let users = []str{"md5", "clear", "tin", "unicode", "prohibited", "unknown", "tls", "badnonce", "badverifier", "duplicate", "badcount", "malformed", "truncated", "oversized", "badrow", "badstatus", "premature"}
+	// the unicode password is the decomposed form of "IX é 각" with a soft hyphen; prohibited has a control byte
+	let unicode = "I\xc2\xadX e\xcc\x81 \xe1\x84\x80\xe1\x85\xa1\xe1\x86\xa8"
+	let passwords = []str{"tinpass", "tinpass", "wrong", unicode, "\x07\xc2\xaa", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass", "tinpass"}
+	let codes = []i64{200, 200, 502, 200, 200, 502, 502, 502, 502, 502, 502, 502, 502, 502, 502, 502, 502}
+	let contains = []str{"", "", "28P01", "", "", "authentication method 7", "set Options.SSLMode", "server nonce", "server verifier", "duplicate SCRAM", "iteration count", "message length", "unterminated string", "message length", "truncated message", "transaction status", "before authentication"}
+	for i in 0..len(users) {
+		let srv = startService(exe, out, withEnv(env, []str{"POSTGRES_USER=" + users[i], "POSTGRES_PASSWORD=" + passwords[i]}), 1)
+		has(srv.Port, "/count", codes[i], contains[i])
+		srv.Stop()
+	}
+	mut srv = startService(exe, out, withEnv(env, []str{"POSTGRES_PASSWORD=wrong", "POSTGRES_POOL=1"}), 1)
+	for r in burst(srv.Port, repeat("/count", 8)) {
+		if r.Code != 502 || !twine.Contains(r.Body, "28P01") {
+			flag("wrong password with a pool of one: " + mint.Itoa(r.Code) + " " + r.Body)
+		}
+	}
+	srv.Stop()
+	let timeouts = []str{"30", "2000"}
+	let deadlines = []str{"2000", "30"}
+	let bodies = []str{"postgres: timed out", "deadline exceeded"}
+	for i in 0..2 {
+		srv = startService(exe, out, withEnv(env, []str{"POSTGRES_USER=slowauth", "POSTGRES_TIMEOUT_MS=" + timeouts[i], "TIN_DEADLINE_MS=" + deadlines[i]}), 1)
+		let r = expect(srv.Port, "/count", 502, bodies[i], true, "")
+		if r.Took >= 0.6 {
+			flag("slow authentication took " + text(r.Took, 2) + " s")
+		}
+		srv.Stop()
+	}
+	srv = startService(exe, out, withEnv(env, []str{"POSTGRES_USER=trickle", "POSTGRES_TIMEOUT_MS=220", "TIN_DEADLINE_MS=2000"}), 1)
+	let trickle = expect(srv.Port, "/count", 502, "postgres: timed out", true, "")
+	// notices must not restart the operation timeout
+	if trickle.Took <= 0.15 || trickle.Took >= 0.6 {
+		flag("trickled notices: " + text(trickle.Took, 2) + " s")
+	}
+	srv.Stop()
+	fake.NoErrors("authentication cases")
+	say.Line("SCRAM, MD5, cleartext, Unicode, hostile auth/frames, absolute timeout: passed")
+	// sslmode against a server without TLS: refused, never plain.
+	let modes = []str{"require", "verify-full", "bogus"}
+	let wants = []str{"does not support TLS", "does not support TLS", "unknown sslmode"}
+	for i in 0..3 {
+		srv = startService(exe, out, withEnv(env, []str{"POSTGRES_SSLMODE=" + modes[i]}), 1)
+		has(srv.Port, "/count", 502, wants[i])
+		srv.Stop()
+	}
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/postgres")
+	ci.Mkdirs(out)
+	mut source = ci.Read(ci.Join(ci.Root(), "examples/postgres.tin"))
+	source = twine.Replace(source, "\tw.Status(404)\n\tw.Text(\"no route", "\tif extra(q, mut w) {{ return }}\n\tw.Status(404)\n\tw.Text(\"no route", 1)
+	let svcSource = ci.Join(out, "service.tin")
+	ci.Write(svcSource, source)
+	let exe = ci.Join(out, "service")
+	let built = ci.ExecEnv([]str{ci.Tinc(), "-o", exe, svcSource, "toolchain/tests/fixtures/postgres_routes.tin"}, ci.Root(), 300, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+	ci.Must(built, "compile the postgres test service")
+	let real = ci.Env("POSTGRES_ADDR")
+	let useFake = len(real) == 0
+	let fakeExe = ci.Join(out, "pgfake")
+	mut control = 0
+	if useFake {
+		ci.Must(ci.Exec([]str{"go", "build", "-o", fakeExe, "./tools/ci/fixtures/pgfake"}, ci.Root(), 300), "go build pgfake")
+		mut openssl = tlsutil.Openssl3()
+		if len(openssl) == 0 {
+			openssl = "openssl"
+		}
+		let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+		let cert = tlsutil.Of(certs, "ecdsa")
+		control = nettest.Port()
+		let fakes = nettest.Start(fakeExe, []str{cert.Cert, cert.Key}, []str{}, ci.Join(out, "fake.log"), control)
+		fakes.Ready(10)
+	}
+	mut fake = Fake{Control: control, Port: 0}
+	mut env = []str{}
+	if useFake {
+		fake = newFake(control, false)
+		env = []str{"POSTGRES_ADDR=127.0.0.1:" + mint.Itoa(fake.Port), "POSTGRES_USER=tin", "POSTGRES_PASSWORD=tinpass", "POSTGRES_DATABASE=tin"}
+	}
+	sharedChecks(exe, out, env, fake, useFake)
+	if useFake {
+		poolCap(out, env, fake)
+		authCases(exe, out, env, fake)
+	}
+	// Once more over TLS 1.3 (sslmode=require): the fake behind TLS, or the real server (Ubuntu's PostgreSQL has ssl = on with its own
+	// certificate).
+	mut tfake = Fake{Control: control, Port: 0}
+	mut tenv = withEnv(env, []str{"POSTGRES_SSLMODE=require"})
+	if useFake {
+		tfake = newFake(control, true)
+		tenv = withEnv(tenv, []str{"POSTGRES_ADDR=127.0.0.1:" + mint.Itoa(tfake.Port)})
+	}
+	say.Line("-- over TLS 1.3 (sslmode=require)")
+	sharedChecks(exe, out, tenv, tfake, useFake)
+	if useFake {
+		// verify-full checks the certificate: the test PKI's is not among the system's roots.
+		mut srv = startService(exe, out, withEnv(tenv, []str{"POSTGRES_SSLMODE=verify-full"}), 1)
+		has(srv.Port, "/count", 502, "x509: certificate signed by unknown authority")
+		srv.Stop()
+		// A client without TLS against a TLS-only server gets the hint.
+		srv = startService(exe, out, withEnv(tenv, []str{"POSTGRES_SSLMODE=disable"}), 1)
+		has(srv.Port, "/count", 502, "set Options.SSLMode")
+		srv.Stop()
+		tfake.NoErrors("TLS")
+		say.Line("sslmode: require over TLS, verify-full checks certificates, disable gets the hint: passed")
+	}
+	ci.Check(len(failures) == 0, twine.Join(failures, "\n"))
+	ci.Pass("postgres: authentication, bindings, transactions, pool, deadlines, hostile frames and TLS")
+}

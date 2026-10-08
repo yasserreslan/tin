@@ -7,7 +7,7 @@ import "postgres"
 import "mint"
 
 // Extra routes compiled alongside a temporary copy of examples/postgres.tin by
-// postgres_check.py. Keep the public example focused on the users service.
+// postgres_check.tin. Keep the public example focused on the users service.
 fn extra(q anvil.Req, w mut anvil.Out) bool {
 	if q.Path == "/error" {
 		_ = db.Query("SELECT * FROM nope") catch err { fail_with(mut w, err)

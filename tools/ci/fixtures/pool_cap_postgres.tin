@@ -6,7 +6,7 @@ import "postgres"
 import "quarry"
 import "say"
 
-// #359: a service for postgres_check.py that holds statements open and counts the connections
+// #359: a service for postgres_check.tin that holds statements open and counts the connections
 // its user has on the server. POSTGRES_POOL and POSTGRES_MAX_TOTAL are Options.Pool and
 // Options.MaxTotal (unset: the defaults).
 let db = postgres.Open(postgres.Options{
