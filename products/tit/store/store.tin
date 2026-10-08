@@ -62,12 +62,6 @@ fn (m mut Mem) PutRaw(kind object.Kind, body str) !object.Id {
 
 // Put stores an object and returns its id.
 fn (m mut Mem) Put(o object.Object) !object.Id {
-	let enc = try object.Encode(o)
-	let kind = match o {
-		Blob(_) => object.Kind.Blob
-		Tree(_) => object.Kind.Tree
-		Commit(_) => object.Kind.Commit
-		Tag(_) => object.Kind.Tag
-	}
-	return try m.PutRaw(kind, enc)
+	let body = try object.Body(o)
+	return try m.PutRaw(object.KindOf(o), body)
 }

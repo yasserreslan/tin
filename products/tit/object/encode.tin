@@ -1,0 +1,560 @@
+package object
+
+import "fault"
+import "seal"
+
+// The canonical encoding (design/tit.md section 3): Body writes it, Decode reads it back and rejects every other
+// form, so equal content always has one encoding and one id.
+
+// KindOf is the object's kind.
+fn KindOf(o Object) Kind {
+	return match o {
+		Blob(_) => Kind.Blob
+		Tree(_) => Kind.Tree
+		Commit(_) => Kind.Commit
+		Tag(_) => Kind.Tag
+	}
+}
+
+// Body is the object's canonical body, or a fault when the object cannot be encoded canonically.
+fn Body(o Object) !str {
+	return match o {
+		Blob(b) => b
+		Tree(es) => try treeBody(es)
+		Commit(c) => try commitBody(c)
+		Tag(t) => try tagBody(t)
+	}
+}
+
+// Encode is the object's full encoding, `<kind> <size>\0<body>`, whose SHA-256 is its id.
+fn Encode(o Object) !str {
+	let body = try Body(o)
+	return "{KindName(KindOf(o))} {len(body)}\x00{body}"
+}
+
+// IdOfObject is the object's id.
+fn IdOfObject(o Object) !Id {
+	let body = try Body(o)
+	return Hash(KindOf(o), body)
+}
+
+// Split reads a full encoding into its kind and body, checking the declared size.
+fn Split(enc str) !(Kind, str) {
+	let sp = indexFrom(enc, 0, ' ')
+	if sp < 0 {
+		fail fault.Wrap(ErrCorrupt, "no space after the kind")
+	}
+	let kind = try ParseKind(enc[0:sp])
+	let nul = indexFrom(enc, sp + 1, 0)
+	if nul < 0 {
+		fail fault.Wrap(ErrCorrupt, "no NUL after the size")
+	}
+	let size = try parseDecimal(enc[sp + 1:nul], "size")
+	if size != len(enc) - nul - 1 {
+		fail fault.Wrap(ErrCorrupt, "size {size} but {len(enc) - nul - 1} bytes follow")
+	}
+	return kind, enc[nul + 1:]
+}
+
+// Decode reads an object of this kind from its body, rejecting every non-canonical form.
+fn Decode(kind Kind, body str) !Object {
+	match kind {
+		Blob => {
+			return Object.Blob(body)
+		}
+		Tree => {
+			let es = try decodeTree(body)
+			return Object.Tree(es)
+		}
+		Commit => {
+			let c = try decodeCommit(body)
+			return Object.Commit(c)
+		}
+		Tag => {
+			let t = try decodeTag(body)
+			return Object.Tag(t)
+		}
+	}
+}
+
+// ---- trees ----
+
+// sortKey is the name a tree entry sorts by: a directory sorts as if its name ended in "/".
+fn sortKey(e Entry) str {
+	return match e.Mode {
+		Dir => e.Name + "/"
+		File, Exec, Link => e.Name
+	}
+}
+
+fn checkName(name str) ! {
+	if len(name) == 0 {
+		fail fault.Wrap(ErrCorrupt, "tree: empty name")
+	}
+	if name == "." || name == ".." || name == ".tit" {
+		fail fault.Wrap(ErrCorrupt, "tree: name {name} is not allowed")
+	}
+	for i in 0..len(name) {
+		if name[i] == '/' || name[i] == 0 {
+			fail fault.Wrap(ErrCorrupt, "tree: name {name} contains / or NUL")
+		}
+	}
+}
+
+fn checkEntries(es []Entry) ! {
+	mut seen = map[str]bool{}
+	for i in 0..len(es) {
+		let e = es[i]
+		try checkName(e.Name)
+		if len(e.Id.raw) != 32 {
+			fail fault.Wrap(ErrCorrupt, "tree: entry {e.Name} has no id")
+		}
+		if seen[e.Name] {
+			fail fault.Wrap(ErrCorrupt, "tree: duplicate name {e.Name}")
+		}
+		seen[e.Name] = true
+		if i > 0 && !(sortKey(es[i - 1]) < sortKey(e)) {
+			fail fault.Wrap(ErrCorrupt, "tree: {e.Name} is out of order")
+		}
+	}
+}
+
+fn treeBody(es []Entry) !str {
+	try checkEntries(es)
+	mut out = make([]u8, 0, 48 * len(es))
+	for e in es {
+		appendStr(mut out, "{ModeText(e.Mode)} {e.Name}\x00")
+		appendStr(mut out, e.Id.raw)
+	}
+	return str(out)
+}
+
+fn parseMode(s str) !Mode {
+	if s == "100644" {
+		return Mode.File
+	}
+	if s == "100755" {
+		return Mode.Exec
+	}
+	if s == "120000" {
+		return Mode.Link
+	}
+	if s == "40000" {
+		return Mode.Dir
+	}
+	fail fault.Wrap(ErrCorrupt, "tree: unknown mode {s}")
+}
+
+fn decodeTree(body str) ![]Entry {
+	mut es = []Entry{}
+	mut i = 0
+	for i < len(body) {
+		let sp = indexFrom(body, i, ' ')
+		if sp < 0 {
+			fail fault.Wrap(ErrCorrupt, "tree: entry without a mode")
+		}
+		let mode = try parseMode(body[i:sp])
+		let nul = indexFrom(body, sp + 1, 0)
+		if nul < 0 || nul + 33 > len(body) {
+			fail fault.Wrap(ErrCorrupt, "tree: truncated entry")
+		}
+		es = append(es, Entry{Mode: mode, Name: body[sp + 1:nul], Id: Id{raw: body[nul + 1:nul + 33]}})
+		i = nul + 33
+	}
+	try checkEntries(es)
+	return es
+}
+
+// ---- people ----
+
+fn zoneText(z i64) str {
+	mut sign = "+"
+	mut m = z
+	if z < 0 {
+		sign = "-"
+		m = 0 - z
+	}
+	return sign + two(m / 60) + two(m % 60)
+}
+
+fn two(n i64) str {
+	if n < 10 {
+		return "0{n}"
+	}
+	return "{n}"
+}
+
+fn checkPerson(p Person, what str) ! {
+	for i in 0..len(p.Name) {
+		let c = p.Name[i]
+		if c == '<' || c == '>' || c == '\n' || c == 0 {
+			fail fault.Wrap(ErrCorrupt, "{what}: name contains <, >, newline or NUL")
+		}
+	}
+	for i in 0..len(p.Email) {
+		let c = p.Email[i]
+		if c == '<' || c == '>' || c == '\n' || c == 0 {
+			fail fault.Wrap(ErrCorrupt, "{what}: email contains <, >, newline or NUL")
+		}
+	}
+	if p.When < 0 {
+		fail fault.Wrap(ErrCorrupt, "{what}: time before 1970")
+	}
+	if p.Zone <= -6000 || p.Zone >= 6000 || p.Zone % 60 >= 60 || p.Zone % 60 <= -60 {
+		fail fault.Wrap(ErrCorrupt, "{what}: zone out of range")
+	}
+}
+
+fn personText(p Person) str {
+	return "{p.Name} <{p.Email}> {p.When} {zoneText(p.Zone)}"
+}
+
+fn parsePerson(s str, what str) !Person {
+	let lt = indexFrom(s, 0, '<')
+	let gt = indexFrom(s, 0, '>')
+	if lt < 1 || gt < lt || s[lt - 1] != ' ' || gt + 1 >= len(s) || s[gt + 1] != ' ' {
+		fail fault.Wrap(ErrCorrupt, "{what}: not 'name <email> seconds zone'")
+	}
+	let rest = s[gt + 2:]
+	let sp = indexFrom(rest, 0, ' ')
+	if sp < 0 {
+		fail fault.Wrap(ErrCorrupt, "{what}: no zone")
+	}
+	let when = try parseDecimal(rest[0:sp], what + " time")
+	let z = rest[sp + 1:]
+	if len(z) != 5 || (z[0] != '+' && z[0] != '-') {
+		fail fault.Wrap(ErrCorrupt, "{what}: zone {z} is not +hhmm or -hhmm")
+	}
+	for i in 1..5 {
+		if z[i] < '0' || z[i] > '9' {
+			fail fault.Wrap(ErrCorrupt, "{what}: zone {z} is not +hhmm or -hhmm")
+		}
+	}
+	let hh = i64(z[1] - '0') * 10 + i64(z[2] - '0')
+	let mm = i64(z[3] - '0') * 10 + i64(z[4] - '0')
+	if mm >= 60 {
+		fail fault.Wrap(ErrCorrupt, "{what}: zone minutes {mm}")
+	}
+	mut zone = hh * 60 + mm
+	if z[0] == '-' {
+		if zone == 0 {
+			fail fault.Wrap(ErrCorrupt, "{what}: zone -0000 is written +0000")
+		}
+		zone = 0 - zone
+	}
+	let p = Person{Name: s[0:lt - 1], Email: s[lt + 1:gt], When: when, Zone: zone}
+	try checkPerson(p, what)
+	return p
+}
+
+// ---- commits ----
+
+fn checkGitHeader(h str) !(str, str) {
+	let sp = indexFrom(h, 0, ' ')
+	if sp < 1 {
+		fail fault.Wrap(ErrCorrupt, "commit: git header {h} has no name")
+	}
+	let name = h[0:sp]
+	for i in 0..len(name) {
+		let c = name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			fail fault.Wrap(ErrCorrupt, "commit: git header name {name}")
+		}
+	}
+	let value = h[sp + 1:]
+	if indexFrom(value, 0, 0) >= 0 {
+		fail fault.Wrap(ErrCorrupt, "commit: git header {name} contains NUL")
+	}
+	return name, value
+}
+
+fn signatureLine(sig str) !str {
+	if len(sig) == 0 {
+		return ""
+	}
+	if len(sig) != 64 {
+		fail fault.Wrap(ErrCorrupt, "signature has {len(sig)} bytes, not 64")
+	}
+	return "signature {seal.B64([]u8(sig))}\n"
+}
+
+fn commitHeaders(c CommitData) !str {
+	if len(c.Tree.raw) != 32 {
+		fail fault.Wrap(ErrCorrupt, "commit: no tree")
+	}
+	if len(c.Change.raw) != 16 {
+		fail fault.Wrap(ErrCorrupt, "commit: no change id")
+	}
+	try checkPerson(c.Author, "author")
+	try checkPerson(c.Committer, "committer")
+	mut out = make([]u8, 0, 256)
+	appendStr(mut out, "tree {c.Tree.Hex()}\n")
+	mut seen = map[Id]bool{}
+	for p in c.Parents {
+		if len(p.raw) != 32 {
+			fail fault.Wrap(ErrCorrupt, "commit: a parent has no id")
+		}
+		if seen[p] {
+			fail fault.Wrap(ErrCorrupt, "commit: parent {p.Hex()} twice")
+		}
+		seen[p] = true
+		appendStr(mut out, "parent {p.Hex()}\n")
+	}
+	appendStr(mut out, "change {c.Change.Letters()}\n")
+	appendStr(mut out, "author {personText(c.Author)}\n")
+	appendStr(mut out, "committer {personText(c.Committer)}\n")
+	for h in c.GitHeaders {
+		let (name, value) = try checkGitHeader(h)
+		appendStr(mut out, "git-{name} ")
+		for i in 0..len(value) {
+			out = append(out, value[i])
+			if value[i] == '\n' {
+				out = append(out, ' ')
+			}
+		}
+		out = append(out, '\n')
+	}
+	return str(out)
+}
+
+fn commitBody(c CommitData) !str {
+	let head = try commitHeaders(c)
+	let sig = try signatureLine(c.Signature)
+	return head + sig + "\n" + c.Message
+}
+
+// SigningPayload is the bytes a commit's signature covers: its encoding without the signature line.
+fn SigningPayload(c CommitData) !str {
+	let head = try commitHeaders(c)
+	let body = head + "\n" + c.Message
+	return "commit {len(body)}\x00{body}"
+}
+
+// lines is the header part of a body as lines, and the message after the empty line.
+type headerLines struct {
+	lines []str
+	message str
+}
+
+fn splitHeaders(body str, what str) !headerLines {
+	mut lines = []str{}
+	mut i = 0
+	for {
+		if i >= len(body) {
+			fail fault.Wrap(ErrCorrupt, "{what}: no empty line before the message")
+		}
+		let nl = indexFrom(body, i, '\n')
+		if nl < 0 {
+			fail fault.Wrap(ErrCorrupt, "{what}: no empty line before the message")
+		}
+		if nl == i {
+			return headerLines{lines: lines, message: body[nl + 1:]}
+		}
+		lines = append(lines, body[i:nl])
+		i = nl + 1
+	}
+}
+
+fn field(line str, name str) ?str {
+	let n = len(name)
+	if len(line) > n && line[0:n] == name && line[n] == ' ' {
+		return line[n + 1:]
+	}
+	return nil
+}
+
+fn parseHexId(s str, what str) !Id {
+	let id = ParseId(s) catch err {
+		fail fault.Wrap(ErrCorrupt, "{what}: {fault.Message(err)}")
+	}
+	if id.Hex() != s {
+		fail fault.Wrap(ErrCorrupt, "{what}: hex digits are lower-case")
+	}
+	return id
+}
+
+fn parseSignature(s str) !str {
+	let b = seal.B64Decode(s) catch _ {
+		fail fault.Wrap(ErrCorrupt, "signature is not base64")
+	}
+	if len(b) != 64 || seal.B64(b) != s {
+		fail fault.Wrap(ErrCorrupt, "signature is not 64 bytes in canonical base64")
+	}
+	return str(b)
+}
+
+fn decodeCommit(body str) !CommitData {
+	let h = try splitHeaders(body, "commit")
+	let ls = h.lines
+	mut k = 0
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no tree")
+	}
+	let treeHex = field(ls[k], "tree")
+	if treeHex == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: the first line is not tree")
+	}
+	let tree = try parseHexId(treeHex, "commit tree")
+	let none = Person{Name: "", Email: "", When: 0, Zone: 0}
+	mut c = CommitData{Tree: tree, Parents: []Id{}, Change: ChangeId{raw: ""}, Author: none, Committer: none, GitHeaders: []str{}, Signature: "", Message: h.message}
+	k += 1
+	for k < len(ls) {
+		let p = field(ls[k], "parent")
+		if p == nil {
+			break
+		}
+		let pid = try parseHexId(p, "commit parent")
+		c.Parents = append(c.Parents, pid)
+		k += 1
+	}
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no change")
+	}
+	let ch = field(ls[k], "change")
+	if ch == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: change expected")
+	}
+	c.Change = try ParseChangeId(ch)
+	k += 1
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no author")
+	}
+	let au = field(ls[k], "author")
+	if au == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: author expected")
+	}
+	c.Author = try parsePerson(au, "author")
+	k += 1
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no committer")
+	}
+	let co = field(ls[k], "committer")
+	if co == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: committer expected")
+	}
+	c.Committer = try parsePerson(co, "committer")
+	k += 1
+	for k < len(ls) && len(ls[k]) > 4 && ls[k][0:4] == "git-" {
+		mut value = ls[k][4:]
+		k += 1
+		for k < len(ls) && len(ls[k]) > 0 && ls[k][0] == ' ' {
+			value = value + "\n" + ls[k][1:]
+			k += 1
+		}
+		c.GitHeaders = append(c.GitHeaders, value)
+	}
+	if k < len(ls) {
+		let sig = field(ls[k], "signature")
+		if sig == nil {
+			fail fault.Wrap(ErrCorrupt, "commit: unexpected header {ls[k]}")
+		}
+		c.Signature = try parseSignature(sig)
+		k += 1
+	}
+	if k != len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: header after the signature")
+	}
+	let again = try commitBody(c)
+	if again != body {
+		fail fault.Wrap(ErrCorrupt, "commit: not in canonical form")
+	}
+	return c
+}
+
+// ---- tags ----
+
+fn checkTagName(name str) ! {
+	if len(name) == 0 {
+		fail fault.Wrap(ErrCorrupt, "tag: empty name")
+	}
+	for i in 0..len(name) {
+		let c = name[i]
+		if c == ' ' || c == '\n' || c == 0 {
+			fail fault.Wrap(ErrCorrupt, "tag: name contains a space, newline or NUL")
+		}
+	}
+}
+
+fn tagBody(t TagData) !str {
+	if len(t.Object.raw) != 32 {
+		fail fault.Wrap(ErrCorrupt, "tag: no object")
+	}
+	try checkTagName(t.Name)
+	try checkPerson(t.Tagger, "tagger")
+	let sig = try signatureLine(t.Signature)
+	return "object {t.Object.Hex()}\ntype {KindName(t.Kind)}\ntag {t.Name}\ntagger {personText(t.Tagger)}\n{sig}\n{t.Message}"
+}
+
+// TagSigningPayload is the bytes a tag's signature covers: its encoding without the signature line.
+fn TagSigningPayload(t TagData) !str {
+	mut u = t
+	u.Signature = ""
+	let body = try tagBody(u)
+	return "tag {len(body)}\x00{body}"
+}
+
+fn decodeTag(body str) !TagData {
+	let h = try splitHeaders(body, "tag")
+	let ls = h.lines
+	if len(ls) < 4 {
+		fail fault.Wrap(ErrCorrupt, "tag: missing headers")
+	}
+	let obj = field(ls[0], "object")
+	let ty = field(ls[1], "type")
+	let name = field(ls[2], "tag")
+	let tagger = field(ls[3], "tagger")
+	if obj == nil || ty == nil || name == nil || tagger == nil {
+		fail fault.Wrap(ErrCorrupt, "tag: headers are object, type, tag, tagger")
+	}
+	let oid = try parseHexId(obj, "tag object")
+	let kind = try ParseKind(ty)
+	let who = try parsePerson(tagger, "tagger")
+	mut t = TagData{Object: oid, Kind: kind, Name: name, Tagger: who, Signature: "", Message: h.message}
+	if len(ls) == 5 {
+		let sig = field(ls[4], "signature")
+		if sig == nil {
+			fail fault.Wrap(ErrCorrupt, "tag: unexpected header {ls[4]}")
+		}
+		t.Signature = try parseSignature(sig)
+	} else if len(ls) > 5 {
+		fail fault.Wrap(ErrCorrupt, "tag: too many headers")
+	}
+	let again = try tagBody(t)
+	if again != body {
+		fail fault.Wrap(ErrCorrupt, "tag: not in canonical form")
+	}
+	return t
+}
+
+// ---- helpers ----
+
+fn indexFrom(s str, from i64, c u8) i64 {
+	for i in from..len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+fn appendStr(out mut []u8, s str) {
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+}
+
+// parseDecimal reads a non-negative decimal with no sign and no leading zero.
+fn parseDecimal(s str, what str) !i64 {
+	if len(s) == 0 || len(s) > 18 || (len(s) > 1 && s[0] == '0') {
+		fail fault.Wrap(ErrCorrupt, "{what}: {s} is not a canonical decimal")
+	}
+	mut n i64 = 0
+	for i in 0..len(s) {
+		let c = s[i]
+		if c < '0' || c > '9' {
+			fail fault.Wrap(ErrCorrupt, "{what}: {s} is not a canonical decimal")
+		}
+		n = n * 10 + i64(c - '0')
+	}
+	return n
+}

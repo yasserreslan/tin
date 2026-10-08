@@ -12,6 +12,11 @@ for src in products/tit/tests/programs/*.tin; do
 	cmp "$tmp/$name.out" "products/tit/tests/golden/$name.out" || { echo "FAIL tit $name"; exit 1; }
 	echo "PASS tit $name"
 done
+for dir in products/tit/*/; do
+	ls "$dir"*_test.tin >/dev/null 2>&1 || continue
+	sh ./tin test "$dir" > "$tmp/test.out" 2>&1 || { cat "$tmp/test.out"; echo "FAIL tit tests $dir"; exit 1; }
+	echo "PASS tit tests $dir"
+done
 "$compiler" -o "$tmp/tit" products/tit/main.tin
 "$tmp/tit" version -v > "$tmp/version.out"
 cmp "$tmp/version.out" products/tit/tests/golden/version.out || { echo "FAIL tit version"; exit 1; }

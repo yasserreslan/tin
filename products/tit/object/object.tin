@@ -194,13 +194,3 @@ fn AdoptedChangeId(gitHex str) ChangeId {
 	let h = seal.Sha256("tit change {gitHex}")
 	return ChangeId{raw: str(h[0:16])}
 }
-
-// Encode is the object's canonical encoding (#776).
-fn Encode(o Object) !str {
-	fail "object.Encode: not implemented yet (#776)"
-}
-
-// Decode reads an object of this kind from its body, rejecting every non-canonical form (#776).
-fn Decode(kind Kind, body str) !Object {
-	fail "object.Decode: not implemented yet (#776)"
-}

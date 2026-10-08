@@ -1,0 +1,282 @@
+package object
+
+import "crucible"
+import "dice"
+import "fault"
+import "sift"
+import "twine"
+
+// Tests for ids and the canonical encoding (#776): round trips of generated objects, rejection of every
+// non-canonical form, and a corpus of damaged bodies that must give faults, never panics.
+
+fn person(r mut dice.Rand) Person {
+	let zones = []i64{0, 330, -480, 60, -150, 840}
+	return Person{Name: r.Str(r.Intn(12), "abcdef XYZ.-é"), Email: r.Str(1 + r.Intn(10), "abc@.x9"), When: r.I64n(2000000000), Zone: zones[r.Intn(len(zones))]}
+}
+
+fn someId(r mut dice.Rand) Id {
+	return Id{raw: str(r.Bytes(32))}
+}
+
+fn tree(r mut dice.Rand) []Entry {
+	let modes = []Mode{Mode.File, Mode.Exec, Mode.Link, Mode.Dir}
+	mut es = []Entry{}
+	mut names = map[str]bool{}
+	let n = r.Intn(8)
+	for i in 0..n {
+		let name = r.Str(1 + r.Intn(6), "ab.-_x")
+		if names[name] || name == "." || name == ".." {
+			continue
+		}
+		names[name] = true
+		es = append(es, Entry{Mode: modes[r.Intn(4)], Name: name, Id: someId(mut r)})
+	}
+	sift.SortFunc(mut es, fn(a Entry, b Entry) i64 {
+		let ka = sortKey(a)
+		let kb = sortKey(b)
+		if ka < kb {
+			return -1
+		}
+		if ka > kb {
+			return 1
+		}
+		return 0
+	})
+	return es
+}
+
+fn commit(r mut dice.Rand) CommitData {
+	mut parents = []Id{}
+	for i in 0..r.Intn(3) {
+		parents = append(parents, someId(mut r))
+	}
+	mut hs = []str{}
+	if r.Intn(3) == 0 {
+		hs = append(hs, "gpgsig -----BEGIN PGP SIGNATURE-----\n\nabc\n-----END PGP SIGNATURE-----")
+	}
+	if r.Intn(4) == 0 {
+		hs = append(hs, "encoding ISO-8859-1")
+	}
+	mut sig = ""
+	if r.Intn(2) == 0 {
+		sig = str(r.Bytes(64))
+	}
+	return CommitData{Tree: someId(mut r), Parents: parents, Change: NewChangeId(), Author: person(mut r), Committer: person(mut r), GitHeaders: hs, Signature: sig, Message: r.Str(r.Intn(40), "ab \n:")}
+}
+
+fn tag(r mut dice.Rand) TagData {
+	mut sig = ""
+	if r.Intn(2) == 0 {
+		sig = str(r.Bytes(64))
+	}
+	return TagData{Object: someId(mut r), Kind: Kind.Commit, Name: "v{r.Intn(100)}.{r.Intn(10)}", Tagger: person(mut r), Signature: sig, Message: r.Str(r.Intn(30), "xy \n")}
+}
+
+fn samples() []Object {
+	mut r = dice.New(7)
+	mut out = []Object{}
+	for i in 0..40 {
+		out = append(out, Object.Blob(str(r.Bytes(r.Intn(50)))))
+		out = append(out, Object.Tree(tree(mut r)))
+		out = append(out, Object.Commit(commit(mut r)))
+		out = append(out, Object.Tag(tag(mut r)))
+	}
+	return out
+}
+
+fn TestWorkedExample(t mut crucible.T) {
+	crucible.Equal(mut t, "hello blob id", Hash(Kind.Blob, "hello, tin!\n").Hex(), "ebc9953649c58cea3a38091425f91d38386dfcc68628332dd79cc6c84b3556e6")
+	let (enc, err) = Encode(Object.Blob("hello, tin!\n"))
+	t.NoFault("encode", err)
+	crucible.Equal(mut t, "encoding", enc, "blob 12\x00hello, tin!\n")
+	let (kind, body, err2) = Split(enc)
+	t.NoFault("split", err2)
+	t.True("kind", kind == Kind.Blob)
+	crucible.Equal(mut t, "body", body, "hello, tin!\n")
+}
+
+fn TestRoundTrip(t mut crucible.T) {
+	for o in samples() {
+		let (body, err) = Body(o)
+		t.NoFault("body", err)
+		let (back, err2) = Decode(KindOf(o), body)
+		t.NoFault("decode {KindName(KindOf(o))}", err2)
+		if err2 != nil {
+			continue
+		}
+		let (again, err3) = Body(back)
+		t.NoFault("body again", err3)
+		crucible.Equal(mut t, "{KindName(KindOf(o))} round trip", again, body)
+	}
+}
+
+// TestDamaged flips every bit position's byte and truncates at every length: each result is a fault, or an object
+// whose canonical body is exactly the damaged bytes. A panic fails the test.
+fn TestDamaged(t mut crucible.T) {
+	mut panics = 0
+	mut accepted = 0
+	mut rejected = 0
+	for o in samples() {
+		if KindOf(o) == Kind.Blob {
+			continue
+		}
+		let body = Body(o) catch _ {
+			""
+		}
+		let kind = KindOf(o)
+		for i in 0..len(body) {
+			for d in 0..2 {
+				mut b = []u8(body)
+				if d == 0 {
+					b[i] = b[i] ^ 1
+				} else {
+					b[i] = b[i] ^ 0x20
+				}
+				let damaged = str(b)
+				let ok = guard {
+					checkDamaged(kind, damaged)
+				} catch err {
+					if fault.Is(err, fault.Panic) {
+						panics += 1
+					}
+					false
+				}
+				if ok {
+					accepted += 1
+				} else {
+					rejected += 1
+				}
+			}
+		}
+		for n in 0..len(body) {
+			let ok = guard {
+				checkDamaged(kind, body[0:n])
+			} catch err {
+				if fault.Is(err, fault.Panic) {
+					panics += 1
+				}
+				false
+			}
+			if ok {
+				accepted += 1
+			} else {
+				rejected += 1
+			}
+		}
+	}
+	crucible.Equal(mut t, "panics on damaged input", panics, 0)
+	t.True("damage is rejected", rejected > 0)
+	t.Log("damaged bodies: {rejected} rejected, {accepted} still canonical (bytes inside messages, names and ids)")
+}
+
+// checkDamaged is true when the damaged body decodes to an object whose canonical body is exactly it, false when
+// it is rejected; it panics (through a failed check) when an accepted body is not canonical.
+fn checkDamaged(kind Kind, damaged str) bool {
+	let (o, err) = Decode(kind, damaged)
+	if err != nil {
+		return false
+	}
+	let again = Body(o) catch _ {
+		panic("accepted a body it cannot encode")
+	}
+	if again != damaged {
+		panic("accepted a non-canonical body")
+	}
+	return true
+}
+
+fn rejects(t mut crucible.T, label str, kind Kind, body str) {
+	let (_, err) = Decode(kind, body)
+	t.HasFault(label, err)
+	if err != nil {
+		t.True(label + " is ErrCorrupt", fault.Is(err, ErrCorrupt))
+	}
+}
+
+fn TestRejects(t mut crucible.T) {
+	let id = Hash(Kind.Blob, "x")
+	let raw = id.Bytes()
+	rejects(mut t, "tree out of order", Kind.Tree, "100644 b\x00{raw}100644 a\x00{raw}")
+	rejects(mut t, "tree duplicate", Kind.Tree, "100644 a\x00{raw}100644 a\x00{raw}")
+	rejects(mut t, "tree duplicate file and dir", Kind.Tree, "100644 a\x00{raw}40000 a\x00{raw}")
+	rejects(mut t, "tree mode 100664", Kind.Tree, "100664 a\x00{raw}")
+	rejects(mut t, "tree mode 040000", Kind.Tree, "040000 a\x00{raw}")
+	rejects(mut t, "tree name .tit", Kind.Tree, "40000 .tit\x00{raw}")
+	rejects(mut t, "tree name with slash", Kind.Tree, "100644 a/b\x00{raw}")
+	rejects(mut t, "tree truncated id", Kind.Tree, "100644 a\x00{raw[0:31]}")
+	let ch = AdoptedChangeId("08ed4b78").Letters()
+	let base = "tree {id.Hex()}\nchange {ch}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n\nmsg"
+	let (_, okErr) = Decode(Kind.Commit, base)
+	t.NoFault("the base commit decodes", okErr)
+	rejects(mut t, "upper-case hex", Kind.Commit, twine.Replace(base, id.Hex(), upper(id.Hex()), 1))
+	rejects(mut t, "zone -0000", Kind.Commit, "tree {id.Hex()}\nchange {ch}\nauthor A <a@x> 1 -0000\ncommitter A <a@x> 1 +0000\n\nmsg")
+	rejects(mut t, "leading zero time", Kind.Commit, "tree {id.Hex()}\nchange {ch}\nauthor A <a@x> 01 +0000\ncommitter A <a@x> 1 +0000\n\nmsg")
+	rejects(mut t, "no change", Kind.Commit, "tree {id.Hex()}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n\nmsg")
+	rejects(mut t, "unknown header", Kind.Commit, "tree {id.Hex()}\nchange {ch}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\nfoo bar\n\nmsg")
+	rejects(mut t, "no empty line", Kind.Commit, "tree {id.Hex()}\nchange {ch}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n")
+	rejects(mut t, "hex in a change id", Kind.Commit, "tree {id.Hex()}\nchange 0123456789abcdef0123456789abcdef\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n\nmsg")
+	rejects(mut t, "duplicate parent", Kind.Commit, "tree {id.Hex()}\nparent {id.Hex()}\nparent {id.Hex()}\nchange {ch}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n\nmsg")
+	rejects(mut t, "short signature", Kind.Commit, "tree {id.Hex()}\nchange {ch}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\nsignature AAAA\n\nmsg")
+	rejects(mut t, "tag with a space in its name", Kind.Tag, "object {id.Hex()}\ntype commit\ntag v 1\ntagger A <a@x> 1 +0000\n\nm")
+	let (_, _, e1) = Split("blob 3\x00ab")
+	t.HasFault("split: wrong size", e1)
+	let (_, _, e2) = Split("blob 03\x00abc")
+	t.HasFault("split: leading zero", e2)
+	let (_, _, e3) = Split("blob 3abc")
+	t.HasFault("split: no NUL", e3)
+}
+
+fn upper(s str) str {
+	mut b = []u8(s)
+	for i in 0..len(b) {
+		if b[i] >= 'a' && b[i] <= 'f' {
+			b[i] = b[i] - 32
+		}
+	}
+	return str(b)
+}
+
+fn TestPeople(t mut crucible.T) {
+	crucible.Equal(mut t, "+0530", zoneText(330), "+0530")
+	crucible.Equal(mut t, "-0800", zoneText(-480), "-0800")
+	crucible.Equal(mut t, "+0000", zoneText(0), "+0000")
+	let (p, err) = parsePerson("Ana Lu <ana@x.io> 1700000000 -0230", "author")
+	t.NoFault("parse", err)
+	crucible.Equal(mut t, "zone", p.Zone, -150)
+	crucible.Equal(mut t, "name", p.Name, "Ana Lu")
+	crucible.Equal(mut t, "email", p.Email, "ana@x.io")
+}
+
+fn TestChangeIds(t mut crucible.T) {
+	let a = AdoptedChangeId("08ed4b78")
+	t.True("adopted change ids are deterministic", a == AdoptedChangeId("08ed4b78"))
+	t.True("and differ by git id", a != AdoptedChangeId("08ed4b79"))
+	let letters = a.Letters()
+	crucible.Equal(mut t, "32 letters", len(letters), 32)
+	mut ok = true
+	for i in 0..len(letters) {
+		if letters[i] < 'k' || letters[i] > 'z' {
+			ok = false
+		}
+	}
+	t.True("only k to z", ok)
+	let (back, err) = ParseChangeId(letters)
+	t.NoFault("parse", err)
+	t.True("round trip", back == a)
+}
+
+fn TestSigningPayload(t mut crucible.T) {
+	mut r = dice.New(3)
+	mut c = commit(mut r)
+	c.Signature = str(r.Bytes(64))
+	let (signed, err) = Body(Object.Commit(c))
+	t.NoFault("body", err)
+	let (payload, err2) = SigningPayload(c)
+	t.NoFault("payload", err2)
+	mut u = c
+	u.Signature = ""
+	let (unsigned, err3) = Encode(Object.Commit(u))
+	t.NoFault("unsigned", err3)
+	crucible.Equal(mut t, "payload is the unsigned encoding", payload, unsigned)
+	t.True("the signed body differs", signed != payload)
+}
