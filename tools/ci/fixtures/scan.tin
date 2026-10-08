@@ -1,0 +1,157 @@
+package main
+
+// The scan twin, Tin side: read the corpus of bench/ref/scan (Go's text/scanner) on stdin and print the same lines, so
+// tools/ci/scan_check.tin can compare them (#753).
+//
+//	C <mode> <whitespace> <flags> <ops> <hex source>
+//
+// flags bit 0 sets an identifier predicate, bit 1 the file name "src.tin", bit 2 scans another text first and calls Init
+// again; ops (S Scan, N Next, P Peek, M flips modes, W flips '\n' in Whitespace) repeats until Scan or Next returns EOF,
+// then S, N and P run once more. Each step is followed by its errors, and each case ends with X <ErrorCount>.
+
+import "glyph"
+import "mint"
+import "quarry"
+import "say"
+import "scan"
+import "seal"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(body)) {
+		if i < i64(len(body)) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		if len(line) == 0 {
+			continue
+		}
+		runLine(line)
+	}
+}
+
+// runLine handles one corpus line.
+fn runLine(line str) {
+	let f = splitSpace(line)
+	if len(f) < 5 || f[0] != "C" {
+		return
+	}
+	mut src = ""
+	if len(f) > 5 {
+		src = str(hexBytes(f[5]))
+	}
+	run(num(f[1]), num(f[2]), num(f[3]), f[4], src)
+}
+
+// num reads a decimal u64.
+fn num(s str) u64 {
+	return mint.ParseUint(s, 10) catch _ {
+		return 0
+	}
+}
+
+// identRune is the corpus's identifier predicate: '$' anywhere, '-' after the first rune, letters, digits and '_'.
+fn identRune(ch i32, i i64) bool {
+	return ch == '$' || ch == '-' && i > 0 || ch == '_' || glyph.IsLetter(ch) || glyph.IsDigit(ch)
+}
+
+// run scans src as the case says and prints every step.
+fn run(mode u64, ws u64, flags u64, ops str, src str) {
+	say.Line("#", mode, ws, flags, ops, len(src))
+	mut s = scan.New("")
+	if flags & 2 != 0 {
+		s.Filename = "src.tin"
+	}
+	if flags & 1 != 0 {
+		s.SetIdentRune(identRune)
+	}
+	if flags & 4 != 0 {
+		s.Init("first \"text\" 12\n")
+		s.Scan()
+		s.Scan()
+	}
+	s.Init(src)
+	s.Mode = mode
+	s.Whitespace = ws
+	mut seen = i64(0)
+	mut done = false
+	mut n = i64(0)
+	for n < 100000 && !done {
+		let op = ops[n % len(ops)]
+		if step(mut s, op, seen) == scan.EOF && (op == 'S' || op == 'N') {
+			done = true
+		}
+		seen = s.ErrorCount
+		n += 1
+	}
+	step(mut s, 'S', seen)
+	seen = s.ErrorCount
+	step(mut s, 'N', seen)
+	seen = s.ErrorCount
+	step(mut s, 'P', seen)
+	say.Line("X", s.ErrorCount)
+}
+
+// step runs one operation, prints it and the errors it met after the first seen, and returns its rune.
+fn step(s mut scan.Scanner, op u8, seen i64) i32 {
+	mut r = i32(0)
+	if op == 'S' {
+		r = s.Scan()
+		let p = s.Pos()
+		let at = s.Position()
+		say.Line("S", scan.TokenString(r), seal.Hex([]u8(s.TokenText())), at.String(), at.Offset, p.String(), p.Offset)
+	} else if op == 'N' {
+		r = s.Next()
+		let p = s.Pos()
+		say.Line("N", scan.TokenString(r), s.Position().String(), mint.Quote(s.TokenText()), p.String(), p.Offset)
+	} else if op == 'P' {
+		say.Line("P", scan.TokenString(s.Peek()))
+	} else if op == 'M' {
+		s.Mode = s.Mode ^ (scan.ScanStrings | scan.ScanComments | scan.SkipComments)
+	} else if op == 'W' {
+		s.Whitespace = s.Whitespace ^ (u64(1) << 10)
+	}
+	let errs = s.Errors()
+	mut i = seen
+	for i < len(errs) {
+		let e = errs[i]
+		say.Line("E", e.Pos.String(), e.Pos.Offset, e.Msg)
+		i += 1
+	}
+	return r
+}
+
+// hexBytes decodes a lowercase hex string.
+fn hexBytes(s str) []u8 {
+	if len(s) == 0 {
+		return []u8{}
+	}
+	return seal.HexDecode(s) catch _ {
+		return []u8{}
+	}
+}
+
+// splitSpace splits a line on spaces.
+fn splitSpace(line str) []str {
+	mut out = []str{}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(line)) {
+		if i == i64(len(line)) || line[i] == ' ' {
+			if i > start {
+				out = append(out, line[start:i])
+			}
+			start = i + 1
+		}
+		i += 1
+	}
+	return out
+}
