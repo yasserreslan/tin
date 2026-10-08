@@ -1,0 +1,73 @@
+package oplog
+
+import "../change"
+import "../object"
+import "fault"
+
+// The operation log (design/tit.md section 9; #780).
+
+// ErrMoved is the fault of an undo whose refs a later operation moved.
+let ErrMoved = fault("moved by a later operation")
+
+// OpNumber is an operation's number, from 1.
+type OpNumber i64
+
+// RefChange is one ref an operation changed.
+type RefChange struct {
+	Name   str
+	Before ?change.Target
+	After  ?change.Target
+}
+
+// Op is what an operation did.
+type Op enum {
+	Init
+	Adopt(str)
+	Commit(object.ChangeId)
+	Amend(object.ChangeId)
+	Rebase([]object.ChangeId)
+	Merge(object.Id)
+	Switch(str)
+	Branch(str)
+	Tag(str)
+	Fetch(str)
+	Push(str)
+	Undo(OpNumber)
+	Redo(OpNumber)
+	Restore(OpNumber)
+	Absorb
+	Split(object.ChangeId)
+	Move(object.ChangeId)
+	Rewrite(str)
+}
+
+// Record is one operation as stored.
+type Record struct {
+	Number    OpNumber
+	Time      i64
+	Workspace str
+	Command   str
+	Op        Op
+	Refs      []RefChange
+	Snapshot  object.Id
+}
+
+// Tx is an operation being written; Close rolls it back unless Commit ran.
+type Tx struct {
+	dir       str
+	committed bool
+}
+
+// Begin starts writing an operation in the .tit directory dir (#780).
+fn Begin(dir str, rec Record) !Tx {
+	fail "oplog.Begin: not implemented yet (#780)"
+}
+
+// Commit makes the operation current: its commit point (#780).
+fn (t mut Tx) Commit() ! {
+	fail "oplog.Commit: not implemented yet (#780)"
+}
+
+// Close rolls the operation back if it was not committed.
+fn (t Tx) Close() ! {
+}

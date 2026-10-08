@@ -1,0 +1,39 @@
+package index
+
+import "../object"
+
+// The staging area and status (design/tit.md section 10; #783).
+
+// Entry is one staged file.
+type Entry struct {
+	Path   str
+	Mode   object.Mode
+	Stage  i64
+	Id     object.Id
+	Size   i64
+	Mtime  i64
+	Ctime  i64
+	Inode  i64
+	Device i64
+}
+
+// Index is a workspace's staging area.
+type Index struct {
+	Entries []Entry
+}
+
+// FileStatus is how a path differs.
+type FileStatus enum {
+	Added(str)
+	Modified(str)
+	Deleted(str)
+	Renamed(str, str)
+	TypeChanged(str)
+	Untracked(str)
+	Conflicted(str)
+}
+
+// Read reads an index file (#783).
+fn Read(path str) !Index {
+	fail "index.Read: not implemented yet (#783)"
+}

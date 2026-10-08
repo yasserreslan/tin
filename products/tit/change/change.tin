@@ -1,0 +1,55 @@
+package change
+
+import "../object"
+import "fault"
+
+// Refs, HEAD, the repository lock and change versions (design/tit.md sections 8 and 12; #779).
+
+// ErrLocked is the fault of a repository lock held by another process.
+let ErrLocked = fault("repository is locked")
+
+// ErrConflict is the fault of a compare-and-swap that found another value.
+let ErrConflict = fault("ref changed")
+
+// ErrNoRef is the fault of a lookup of a ref that does not exist.
+let ErrNoRef = fault("no such ref")
+
+// Target is what a ref names: a commit, or a change whose newest version it follows.
+type Target enum {
+	Commit(object.Id)
+	Change(object.ChangeId)
+}
+
+// Ref is a named target.
+type Ref struct {
+	Name   str
+	Target Target
+}
+
+// RefStore holds refs and updates them by compare-and-swap.
+shape RefStore {
+	Get(name str) !?Ref
+	List(prefix str) ![]Ref
+	mut Update(name str, old ?Target, next ?Target) !
+}
+
+// Version is one version of a change.
+type Version struct {
+	Op     i64
+	Commit object.Id
+	Time   i64
+}
+
+// RepoLock is the held repository lock; Close releases it.
+type RepoLock struct {
+	path str
+}
+
+// Lock takes the repository lock of the .tit directory dir (#779).
+fn Lock(dir str) !RepoLock {
+	fail fault.Wrap(ErrLocked, "change.Lock: not implemented yet (#779)")
+}
+
+// Close releases the lock.
+fn (l RepoLock) Close() ! {
+}

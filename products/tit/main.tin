@@ -1,0 +1,65 @@
+package main
+
+import "change"
+import "diff"
+import "fault"
+import "identity"
+import "ignore"
+import "index"
+import "merge"
+import "object"
+import "oplog"
+import "packfile"
+import "quarry"
+import "revwalk"
+import "say"
+import "store"
+import "worktree"
+
+// tit: version control written in Tin (#769). The commands arrive with #788; until then this prints where things stand.
+fn main() {
+	let args = quarry.Args()
+	if len(args) > 1 && args[1] == "version" {
+		say.Line("tit 0 (design/tit.md, #770)")
+		if len(args) > 2 && args[2] == "-v" {
+			for s in sentinels() {
+				say.Line(" ", s)
+			}
+			say.Line("  packages linked:", linked() == 0)
+		}
+		return
+	}
+	quarry.Eprintln("tit: the commands are not written yet; see design/tit.md and #769")
+	quarry.Exit(2)
+}
+
+// sentinels are the faults the engine packages declare (design/tit.md section 14), printed by `tit version -v`.
+fn sentinels() []str {
+	return []str{
+		fault.Message(object.ErrCorrupt),
+		fault.Message(store.ErrNotFound),
+		fault.Message(packfile.ErrBadPack),
+		fault.Message(change.ErrLocked),
+		fault.Message(change.ErrConflict),
+		fault.Message(change.ErrNoRef),
+		fault.Message(oplog.ErrMoved),
+		fault.Message(revwalk.ErrAmbiguous),
+		fault.Message(revwalk.ErrBadRev),
+		fault.Message(worktree.ErrDirty),
+		fault.Message(identity.ErrNoIdentity),
+		fault.Message(identity.ErrBadSignature),
+	}
+}
+
+// linked keeps the packages without sentinels in the build, so the command checks against all of them.
+fn linked() i64 {
+	let edits = diff.Diff[i64]([]i64{}, []i64{})
+	let rules = ignore.Rules{}
+	let idx = index.Index{}
+	let m = merge.Conflict{}
+	mut n = len(edits) + len(idx.Entries) + len(m.Path)
+	if rules.Ignored("x", false) {
+		n += 1
+	}
+	return n
+}

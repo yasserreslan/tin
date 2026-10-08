@@ -1,0 +1,73 @@
+package store
+
+import "../object"
+import "fault"
+
+// The ObjectStore shape and the stores behind it (design/tit.md sections 5 and 13; #777).
+
+// ErrNotFound is the fault of a lookup of an id the store does not hold.
+let ErrNotFound = fault("object not found")
+
+// ObjectStore is where objects are kept: in memory, loose files, packs, or a remote.
+shape ObjectStore {
+	Has(id object.Id) bool
+	Get(id object.Id) !object.Object
+	GetRaw(id object.Id) !(object.Kind, str)
+	mut Put(o object.Object) !object.Id
+	mut PutRaw(kind object.Kind, body str) !object.Id
+}
+
+type raw struct {
+	kind object.Kind
+	body str
+}
+
+// Mem is an ObjectStore in memory, for tests and for objects not yet written.
+type Mem struct {
+	objs map[object.Id]raw
+}
+
+// NewMem is an empty memory store.
+fn NewMem() Mem {
+	return Mem{objs: map[object.Id]raw{}}
+}
+
+// Has reports whether the store holds the object.
+fn (m Mem) Has(id object.Id) bool {
+	let (_, ok) = m.objs[id]
+	return ok
+}
+
+// GetRaw is the object's kind and body.
+fn (m Mem) GetRaw(id object.Id) !(object.Kind, str) {
+	let (r, ok) = m.objs[id]
+	if !ok {
+		fail fault.Wrap(ErrNotFound, id.Hex())
+	}
+	return r.kind, r.body
+}
+
+// Get is the decoded object.
+fn (m Mem) Get(id object.Id) !object.Object {
+	let (kind, body) = try m.GetRaw(id)
+	return try object.Decode(kind, body)
+}
+
+// PutRaw stores a body of this kind and returns its id.
+fn (m mut Mem) PutRaw(kind object.Kind, body str) !object.Id {
+	let id = object.Hash(kind, body)
+	m.objs[id] = raw{kind: kind, body: body}
+	return id
+}
+
+// Put stores an object and returns its id.
+fn (m mut Mem) Put(o object.Object) !object.Id {
+	let enc = try object.Encode(o)
+	let kind = match o {
+		Blob(_) => object.Kind.Blob
+		Tree(_) => object.Kind.Tree
+		Commit(_) => object.Kind.Commit
+		Tag(_) => object.Kind.Tag
+	}
+	return try m.PutRaw(kind, enc)
+}

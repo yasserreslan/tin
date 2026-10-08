@@ -8,4 +8,6 @@ sh tools/ci/tin.sh diagnostics_check "$compiler" || exit $?
 toolchain/tests/darwin.sh "$compiler" || exit $?
 # Tinland: the portable parts (ui layout, project, terminal screen) everywhere, the editor and window on macOS
 sh products/tinland/tests/run.sh "$compiler" || exit $?
+# tit: version control written in Tin (#769)
+sh products/tit/tests/run.sh "$compiler" || exit $?
 exec toolchain/tests/edition1.sh "$compiler"

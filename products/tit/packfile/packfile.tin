@@ -1,0 +1,28 @@
+package packfile
+
+import "../object"
+import "fault"
+
+// Packs and their indexes (design/tit.md section 6; #778).
+
+// ErrBadPack is the fault of a pack or index that breaks the format.
+let ErrBadPack = fault("bad pack")
+
+// MaxDeltaDepth is the longest delta chain a pack may hold.
+const MaxDeltaDepth = 50
+
+// Pack is an open pack with its index.
+type Pack struct {
+	Path  str
+	Count i64
+}
+
+// Open opens the pack at path and its index (#778).
+fn Open(path str) !Pack {
+	fail fault.Wrap(ErrBadPack, "packfile.Open: not implemented yet (#778)")
+}
+
+// Find is the offset of the object in the pack, or nil (#778).
+fn (p Pack) Find(id object.Id) ?i64 {
+	return nil
+}

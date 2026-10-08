@@ -1,0 +1,14 @@
+tit 0 (design/tit.md, #770)
+  corrupt object
+  object not found
+  bad pack
+  repository is locked
+  ref changed
+  no such ref
+  moved by a later operation
+  ambiguous revision
+  bad revision
+  uncommitted changes would be overwritten
+  no identity
+  bad signature
+  packages linked: true
