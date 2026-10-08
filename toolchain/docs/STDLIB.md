@@ -27,6 +27,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
 | [spawn](#spawn) | starting child processes (os/exec) |
+| [signal](#signal) | operating-system signals (os/signal) |
 | [trail](#trail) | paths (path, path/filepath on Unix) |
 | [lever](#lever) | command-line flags (flag) |
 | [tty](#tty) | terminals: size, raw mode, colour (golang.org/x/term) |
@@ -1084,6 +1085,29 @@ Package spawn starts child processes, like Go's os/exec: Run a program and colle
 - `(p Process) Read(buf mut []u8) !i64`: Read reads the child's standard output (Stdio.Pipe on Cmd.Stdout) into buf, up to its length, and returns how many bytes came; 0 is end of file.
 - `(p Process) ReadStderr(buf mut []u8) !i64`: ReadStderr is Read for the child's standard error.
 - `LookPath(name str) !str`: LookPath finds name like Go's exec.LookPath: a name with a slash is used as it is, otherwise each PATH entry is tried in order and the first executable file wins.
+
+## signal
+
+Package signal lets a program handle operating-system signals, like Go's os/signal: Notify sends the chosen signals to a Chan, and a task takes them with Recv (#737). The handler the runtime installs only marks the signal and wakes the Chan (a byte on the Chan's pipe); the signal is taken by the task waiting in Recv, on that task's core, never in the handler. A signal no Chan listens for keeps its default action: Stop and Reset give a signal its first disposition back (usually the default, so the exit status shows the signal) and Ignore discards it. SIGSEGV and SIGBUS stay the runtime's, and SIGKILL and SIGSTOP cannot be caught.
+
+In an anvil server, SIGTERM and SIGINT start the graceful drain as before; a Chan that listens for them gets them as well (anvil hands them on from its event loop), so an application can log or flush while the drain runs. Ignoring them there stops the drain too.
+
+- `type Signal i64`: Signal is an operating-system signal number (Go's os.Signal / syscall.Signal).
+- `const Interrupt Signal = 2`: Interrupt is SIGINT (Go's os.Interrupt), the same on every platform.
+- `const Kill Signal = 9`: Kill is SIGKILL (Go's os.Kill): it cannot be caught or ignored.
+- `type Chan struct`: Chan receives the signals Notify sends it (Go's chan os.Signal); a task takes them with Recv. Its signals wait in a pipe, so none is lost while no task waits (up to the pipe's 64 KiB).
+- `New() !Chan`: New makes a Chan that listens for nothing yet; Notify adds signals. It fails when the process has no descriptor left, or 64 Chans are open at once.
+- `Notify(c Chan, sigs ...Signal) !`: Notify sends sigs to c from now on (Go's signal.Notify); with no sigs, every signal it can catch. Any core may call it. It fails for SIGKILL, SIGSTOP, the fault signals the runtime owns or must not return into (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), a number out of range or a closed Chan.
+- `Stop(c Chan)`: Stop ends every Notify of c (Go's signal.Stop): once it returns, no further signal reaches c. A signal no other Chan listens for gets its first disposition back. Signals already in c stay.
+- `Reset(sigs ...Signal) !`: Reset undoes every Notify and Ignore of sigs (Go's signal.Reset), giving each the disposition it had when the program started (usually the default action); with no sigs, every signal.
+- `Ignore(sigs ...Signal) !`: Ignore makes sigs ignored (Go's signal.Ignore): no Chan gets them and they do nothing; with no sigs, every signal Notify could catch. Reset or a later Notify undoes it.
+- `Ignored(sig Signal) bool`: Ignored reports whether sig is ignored now (Go's signal.Ignored): by Ignore, or inherited ignored from the parent (nohup ignores SIGHUP).
+- `Notified(sig Signal) bool`: Notified reports whether some Chan listens for sig now.
+- `Raise(sig Signal) !`: Raise sends sig to this process (kill(getpid(), sig)): a handled signal reaches the Chans listening for it, an unhandled one takes its default action, which may end the process (its buffered output is lost then: flush first).
+- `(c Chan) Recv() !Signal`: Recv waits for the next signal sent to c and returns it. The wait takes the task's deadline and cancellation like any other (inside `within 5s` it fails with fault.DeadlineExceeded); the core runs its other tasks meanwhile, and in main (outside a task) it blocks.
+- `(c Chan) TryRecv() (Signal, bool)`: TryRecv takes a signal waiting in c without waiting; ok is false when there is none.
+- `(c mut Chan) Close()`: Close stops c and frees its descriptors and slot; signals still in it are dropped. Using c afterwards fails (Notify, Recv) or does nothing (Stop, TryRecv).
+- `(s Signal) String() str`: String is the signal's description, as Go's syscall.Signal prints it ("interrupt", "terminated"), or "signal N" for a number without one.
 
 ## trail
 

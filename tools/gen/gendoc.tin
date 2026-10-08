@@ -44,6 +44,7 @@ fn packages() []str {
 		"flume", "buffered I/O (bufio)",
 		"quarry", "files, environment, process (os)",
 		"spawn", "starting child processes (os/exec)",
+		"signal", "operating-system signals (os/signal)",
 		"trail", "paths (path, path/filepath on Unix)",
 		"lever", "command-line flags (flag)",
 		"tty", "terminals: size, raw mode, colour (golang.org/x/term)",

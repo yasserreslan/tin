@@ -78,8 +78,15 @@ fn ev_signal(i i64) bool {
 }
 
 // ev_signal_ack reads the 128-byte signalfd_siginfo so the signalfd stops being readable.
+// The signal (its first u32) goes to the signal package's listeners too (#737).
 fn ev_signal_ack() {
-	rt_sys_read(sigfd, word+128, 128)
+	if rt_sys_read(sigfd, word+128, 128) == 128 {
+		rt_sig_deliver(__ld(word+128, 2))
+	}
+}
+
+// ev_signal_forward does nothing on Linux: ev_signal_ack forwards, once the read gives the number.
+fn ev_signal_forward(i i64) {
 }
 
 // ev_wait waits for events, at most ms milliseconds (-1: no limit).

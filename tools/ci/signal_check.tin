@@ -1,0 +1,16 @@
+package main
+
+import "./ci"
+import "mint"
+
+// The strict signal test exercises process dispositions, task waits and per-core listeners.
+fn main() {
+	let exe = ci.Join(ci.Root(), "bin/ci/tools/signal_program")
+	ci.BuildTin("toolchain/tests/v2/signal.tin", exe, "", []str{})
+	let got = ci.Exec([]str{exe}, ci.Root(), 30)
+	if got.Code != 0 {
+		ci.Fail("signal program exited " + mint.Itoa(got.Code) + ":\n" + got.Stdout + got.Stderr)
+	}
+	ci.Same("signal strict output", got.Stdout, ci.Read("toolchain/tests/v2/signal.out"))
+	ci.Pass("signal: dispositions, task delivery, deadlines and per-core listeners")
+}
