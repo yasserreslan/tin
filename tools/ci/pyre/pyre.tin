@@ -1,0 +1,743 @@
+// A backtracking regular expression engine with the parts of Python's `re` that the CHECK files and some checks use and RE2 does
+// not have: backreferences (\1, (?P=name)), lookahead ((?=...), (?!...)), named groups, lazy quantifiers, the (?ms) flags. It
+// matches bytes, leftmost first, trying alternatives in order, as Python does. It is slow next to RE2 and for CI checks only; a
+// step budget turns a runaway pattern into "no match" instead of a hang.
+package pyre
+
+import "mint"
+import "say"
+
+// The instructions the pattern compiles to.
+const opChar = 0
+const opAny = 1
+const opClass = 2
+const opSplit = 3
+const opJmp = 4
+const opSave = 5
+const opBackref = 6
+const opBol = 7
+const opEol = 8
+const opWordB = 9
+const opLook = 10
+const opMatch = 11
+
+// Inst is one instruction; A, B and C mean what the op says.
+type Inst value struct {
+	Op i64
+	A i64
+	B i64
+}
+
+// Class is a set of bytes, as a table of 256 flags.
+type Class struct {
+	Table []bool
+}
+
+// Regex is a compiled pattern.
+type Regex struct {
+	Prog []Inst
+	Classes []Class
+	// Groups is the number of capturing groups.
+	Groups i64
+}
+
+// The nodes of the parsed pattern.
+const nChar = 0
+const nAny = 1
+const nClass = 2
+const nCat = 3
+const nAlt = 4
+const nRepeat = 5
+const nGroup = 6
+const nBackref = 7
+const nBol = 8
+const nEol = 9
+const nWordB = 10
+const nLook = 11
+const nEmpty = 12
+
+type Node struct {
+	Kind i64
+	// A is the byte, class number, group number or the minimum of a repeat; B the maximum of a repeat (-1 for none) or 1 for a
+	// negative lookahead or a negated word boundary; Lazy a lazy repeat; Capture says a group captures.
+	A i64
+	B i64
+	Lazy bool
+	Capture bool
+	Kids []Node
+}
+
+// parser holds the pattern while it is read.
+type parser struct {
+	src str
+	at i64
+	groups i64
+	names map[str]i64
+	classes []Class
+	dotall bool
+	multiline bool
+	icase bool
+}
+
+fn (p parser) more() bool {
+	return p.at < len(p.src)
+}
+
+fn (p parser) peek() u8 {
+	return p.src[p.at]
+}
+
+// Compile reads a pattern (flags such as (?ms) come first in the pattern itself) into a Regex.
+fn Compile(pattern str) !Regex {
+	mut p = parser{src: pattern, at: 0, groups: 0, names: map[str]i64{}, classes: []Class{}}
+	// global inline flags: (?ims) at the very start
+	if len(pattern) > 3 && pattern[0] == '(' && pattern[1] == '?' {
+		mut i = 2
+		mut flags = true
+		for i < len(pattern) && pattern[i] != ')' {
+			let c = pattern[i]
+			if c == 'm' {
+				p.multiline = true
+			} else if c == 's' {
+				p.dotall = true
+			} else if c == 'i' {
+				p.icase = true
+			} else if c == 'x' || c == 'u' || c == 'a' {
+				// accepted and ignored
+			} else {
+				flags = false
+				break
+			}
+			i += 1
+		}
+		if flags && i < len(pattern) && pattern[i] == ')' {
+			p.at = i + 1
+		} else {
+			p.multiline = false
+			p.dotall = false
+			p.icase = false
+		}
+	}
+	let tree = try p.alt()
+	if p.more() {
+		fail say.Fault("unbalanced parenthesis at %d in %s", p.at, pattern)
+	}
+	mut prog = []Inst{}
+	prog = append(prog, Inst{Op: opSave, A: 0})
+	emit(tree, mut prog, p)
+	prog = append(prog, Inst{Op: opSave, A: 1})
+	prog = append(prog, Inst{Op: opMatch})
+	return Regex{Prog: prog, Classes: p.classes, Groups: p.groups}
+}
+
+fn (p mut parser) alt() !Node {
+	mut branches = []Node{}
+	let first = try p.cat()
+	branches = append(branches, first)
+	for p.more() && p.peek() == '|' {
+		p.at += 1
+		let next = try p.cat()
+		branches = append(branches, next)
+	}
+	if len(branches) == 1 {
+		return branches[0]
+	}
+	return Node{Kind: nAlt, Kids: branches}
+}
+
+fn (p mut parser) cat() !Node {
+	mut items = []Node{}
+	for p.more() && p.peek() != '|' && p.peek() != ')' {
+		let atom = try p.atom()
+		let q = try p.quantified(atom)
+		items = append(items, q)
+	}
+	if len(items) == 0 {
+		return Node{Kind: nEmpty}
+	}
+	if len(items) == 1 {
+		return items[0]
+	}
+	return Node{Kind: nCat, Kids: items}
+}
+
+// number reads decimal digits (-1 when there are none).
+fn (p mut parser) number() i64 {
+	mut n = -1
+	for p.more() && p.peek() >= '0' && p.peek() <= '9' {
+		if n < 0 {
+			n = 0
+		}
+		n = n * 10 + i64(p.peek() - '0')
+		p.at += 1
+	}
+	return n
+}
+
+fn (p mut parser) quantified(atom Node) !Node {
+	mut node = atom
+	for p.more() {
+		let c = p.peek()
+		mut lo = 0
+		mut hi = -1
+		if c == '*' {
+			p.at += 1
+		} else if c == '+' {
+			lo = 1
+			p.at += 1
+		} else if c == '?' {
+			hi = 1
+			p.at += 1
+		} else if c == '{' {
+			let save = p.at
+			p.at += 1
+			let a = p.number()
+			if a < 0 {
+				// not a repeat: a literal brace
+				p.at = save
+				return node
+			}
+			lo = a
+			hi = a
+			if p.more() && p.peek() == ',' {
+				p.at += 1
+				hi = p.number()
+			}
+			if !p.more() || p.peek() != '}' {
+				p.at = save
+				return node
+			}
+			p.at += 1
+		} else {
+			return node
+		}
+		mut lazy = false
+		if p.more() && p.peek() == '?' {
+			lazy = true
+			p.at += 1
+		}
+		node = Node{Kind: nRepeat, A: lo, B: hi, Lazy: lazy, Kids: []Node{node}}
+	}
+	return node
+}
+
+fn (p mut parser) classNode(table []bool) Node {
+	p.classes = append(p.classes, Class{Table: table})
+	return Node{Kind: nClass, A: len(p.classes) - 1}
+}
+
+// shorthand is the table of \d, \s or \w (upper case: its complement).
+fn shorthand(c u8) []bool {
+	mut t = make([]bool, 256)
+	let lower = c | 32
+	for b in 0..256 {
+		mut in = false
+		if lower == 'd' {
+			in = b >= '0' && b <= '9'
+		} else if lower == 's' {
+			in = b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == 12 || b == 11
+		} else {
+			in = (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' || b >= 128
+		}
+		if c < 'a' {
+			in = !in
+		}
+		t[b] = in
+	}
+	return t
+}
+
+// escapeByte is the byte a simple escape (\n, \t, \., ...) stands for.
+fn escapeByte(c u8) u8 {
+	if c == 'n' {
+		return '\n'
+	}
+	if c == 't' {
+		return '\t'
+	}
+	if c == 'r' {
+		return '\r'
+	}
+	if c == 'f' {
+		return 12
+	}
+	if c == 'v' {
+		return 11
+	}
+	if c == '0' {
+		return 0
+	}
+	return c
+}
+
+fn (p mut parser) atom() !Node {
+	let c = p.peek()
+	p.at += 1
+	if c == '.' {
+		return Node{Kind: nAny, A: i64(p.dotall)}
+	}
+	if c == '^' {
+		return Node{Kind: nBol, A: i64(p.multiline)}
+	}
+	if c == '$' {
+		return Node{Kind: nEol, A: i64(p.multiline)}
+	}
+	if c == '[' {
+		return try p.class()
+	}
+	if c == '(' {
+		return try p.group()
+	}
+	if c == '\\' {
+		if !p.more() {
+			fail say.Fault("a pattern cannot end with a backslash")
+		}
+		let e = p.peek()
+		p.at += 1
+		if e == 'd' || e == 'D' || e == 's' || e == 'S' || e == 'w' || e == 'W' {
+			return p.classNode(shorthand(e))
+		}
+		if e == 'b' {
+			return Node{Kind: nWordB}
+		}
+		if e == 'B' {
+			return Node{Kind: nWordB, B: 1}
+		}
+		if e >= '1' && e <= '9' {
+			mut n = i64(e - '0')
+			for p.more() && p.peek() >= '0' && p.peek() <= '9' && n * 10 + i64(p.peek() - '0') <= p.groups {
+				n = n * 10 + i64(p.peek() - '0')
+				p.at += 1
+			}
+			return Node{Kind: nBackref, A: n}
+		}
+		return Node{Kind: nChar, A: i64(escapeByte(e))}
+	}
+	return Node{Kind: nChar, A: i64(c)}
+}
+
+fn (p mut parser) group() !Node {
+	if p.more() && p.peek() == '?' {
+		p.at += 1
+		if !p.more() {
+			fail say.Fault("bad group")
+		}
+		let k = p.peek()
+		p.at += 1
+		if k == ':' {
+			let inner = try p.alt()
+			try p.close()
+			return Node{Kind: nGroup, Capture: false, Kids: []Node{inner}}
+		}
+		if k == '=' || k == '!' {
+			let inner = try p.alt()
+			try p.close()
+			mut neg = 0
+			if k == '!' {
+				neg = 1
+			}
+			return Node{Kind: nLook, B: neg, Kids: []Node{inner}}
+		}
+		if k == 'P' && p.more() && p.peek() == '<' {
+			p.at += 1
+			let start = p.at
+			for p.more() && p.peek() != '>' {
+				p.at += 1
+			}
+			let name = p.src[start:p.at]
+			p.at += 1
+			p.groups += 1
+			let number = p.groups
+			p.names[name] = number
+			let inner = try p.alt()
+			try p.close()
+			return Node{Kind: nGroup, A: number, Capture: true, Kids: []Node{inner}}
+		}
+		if k == 'P' && p.more() && p.peek() == '=' {
+			p.at += 1
+			let start = p.at
+			for p.more() && p.peek() != ')' {
+				p.at += 1
+			}
+			let name = p.src[start:p.at]
+			try p.close()
+			let (number, found) = p.names[name]
+			if !found {
+				fail say.Fault("unknown group name %s", name)
+			}
+			return Node{Kind: nBackref, A: number}
+		}
+		fail say.Fault("unsupported group syntax (?%s", p.src[p.at - 1:p.at])
+	}
+	p.groups += 1
+	let number = p.groups
+	let inner = try p.alt()
+	try p.close()
+	return Node{Kind: nGroup, A: number, Capture: true, Kids: []Node{inner}}
+}
+
+fn (p mut parser) close() ! {
+	if !p.more() || p.peek() != ')' {
+		fail say.Fault("missing ) in %s", p.src)
+	}
+	p.at += 1
+}
+
+fn (p mut parser) class() !Node {
+	mut neg = false
+	if p.more() && p.peek() == '^' {
+		neg = true
+		p.at += 1
+	}
+	mut t = make([]bool, 256)
+	mut first = true
+	for p.more() && (p.peek() != ']' || first) {
+		first = false
+		mut c = p.peek()
+		p.at += 1
+		mut single = true
+		if c == '\\' && p.more() {
+			let e = p.peek()
+			p.at += 1
+			if e == 'd' || e == 'D' || e == 's' || e == 'S' || e == 'w' || e == 'W' {
+				let sh = shorthand(e)
+				for b in 0..256 {
+					if sh[b] {
+						t[b] = true
+					}
+				}
+				single = false
+			} else {
+				c = escapeByte(e)
+			}
+		}
+		if !single {
+			continue
+		}
+		// a range a-z
+		if p.at + 1 < len(p.src) && p.peek() == '-' && p.src[p.at + 1] != ']' {
+			p.at += 1
+			mut hi = p.peek()
+			p.at += 1
+			if hi == '\\' && p.more() {
+				hi = escapeByte(p.peek())
+				p.at += 1
+			}
+			for b in i64(c)..i64(hi) + 1 {
+				t[b] = true
+			}
+		} else {
+			t[i64(c)] = true
+		}
+	}
+	if !p.more() {
+		fail say.Fault("missing ] in %s", p.src)
+	}
+	p.at += 1
+	if neg {
+		for b in 0..256 {
+			t[b] = !t[b]
+		}
+	}
+	return p.classNode(t)
+}
+
+// emit appends the instructions of a node.
+fn emit(n Node, prog mut []Inst, p parser) {
+	if n.Kind == nChar {
+		prog = append(prog, Inst{Op: opChar, A: n.A})
+		return
+	}
+	if n.Kind == nAny {
+		prog = append(prog, Inst{Op: opAny, A: n.A})
+		return
+	}
+	if n.Kind == nClass {
+		prog = append(prog, Inst{Op: opClass, A: n.A})
+		return
+	}
+	if n.Kind == nBol {
+		prog = append(prog, Inst{Op: opBol, A: n.A})
+		return
+	}
+	if n.Kind == nEol {
+		prog = append(prog, Inst{Op: opEol, A: n.A})
+		return
+	}
+	if n.Kind == nWordB {
+		prog = append(prog, Inst{Op: opWordB, A: n.B})
+		return
+	}
+	if n.Kind == nBackref {
+		prog = append(prog, Inst{Op: opBackref, A: n.A})
+		return
+	}
+	if n.Kind == nEmpty {
+		return
+	}
+	if n.Kind == nCat {
+		for k in n.Kids {
+			emit(k, mut prog, p)
+		}
+		return
+	}
+	if n.Kind == nGroup {
+		if n.Capture {
+			prog = append(prog, Inst{Op: opSave, A: 2 * n.A})
+		}
+		emit(n.Kids[0], mut prog, p)
+		if n.Capture {
+			prog = append(prog, Inst{Op: opSave, A: 2 * n.A + 1})
+		}
+		return
+	}
+	if n.Kind == nLook {
+		let at = len(prog)
+		prog = append(prog, Inst{Op: opLook, A: 0, B: n.B})
+		emit(n.Kids[0], mut prog, p)
+		prog = append(prog, Inst{Op: opMatch})
+		prog[at].A = len(prog)
+		return
+	}
+	if n.Kind == nAlt {
+		// SPLIT L1, L2; L1: a; JMP end; L2: SPLIT ...
+		mut jumps = []i64{}
+		for i in 0..len(n.Kids) {
+			if i + 1 < len(n.Kids) {
+				let split = len(prog)
+				prog = append(prog, Inst{Op: opSplit, A: split + 1, B: 0})
+				emit(n.Kids[i], mut prog, p)
+				jumps = append(jumps, len(prog))
+				prog = append(prog, Inst{Op: opJmp, A: 0})
+				prog[split].B = len(prog)
+			} else {
+				emit(n.Kids[i], mut prog, p)
+			}
+		}
+		for j in jumps {
+			prog[j].A = len(prog)
+		}
+		return
+	}
+	// a repeat
+	let body = n.Kids[0]
+	for i in 0..n.A {
+		emit(body, mut prog, p)
+	}
+	if n.B < 0 {
+		// body*: L: SPLIT body, end; body; JMP L
+		let split = len(prog)
+		prog = append(prog, Inst{Op: opSplit, A: 0, B: 0})
+		emit(body, mut prog, p)
+		prog = append(prog, Inst{Op: opJmp, A: split})
+		let end = len(prog)
+		if n.Lazy {
+			prog[split].A = end
+			prog[split].B = split + 1
+		} else {
+			prog[split].A = split + 1
+			prog[split].B = end
+		}
+		return
+	}
+	// up to B - A more copies, each optional and nested
+	mut splits = []i64{}
+	for i in 0..n.B - n.A {
+		splits = append(splits, len(prog))
+		prog = append(prog, Inst{Op: opSplit, A: 0, B: 0})
+		emit(body, mut prog, p)
+	}
+	let end = len(prog)
+	for s in splits {
+		if n.Lazy {
+			prog[s].A = end
+			prog[s].B = s + 1
+		} else {
+			prog[s].A = s + 1
+			prog[s].B = end
+		}
+	}
+	return
+}
+
+// The matcher's backtrack stack holds entries of three numbers: kind (0 resume at a place, 1 put back a capture), and two more.
+const resume = 0
+const restore = 1
+
+fn isWord(c u8) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 128
+}
+
+// machine is one match attempt.
+type machine struct {
+	re Regex
+	text str
+	caps []i64
+	steps i64
+}
+
+const budget = 400000000
+
+// run executes from pc at pos with the captures in m.caps and reports where the match ended (-1 for none); it returns at an
+// opMatch. Captures changed on the way are left changed when it succeeds.
+fn (m mut machine) run(start i64, from i64) i64 {
+	mut stack = []i64{}
+	mut pc = start
+	mut pos = from
+	let n = len(m.text)
+	for {
+		m.steps += 1
+		if m.steps > budget {
+			return -1
+		}
+		let in = m.re.Prog[pc]
+		mut ok = true
+		if in.Op == opChar {
+			if pos < n && i64(m.text[pos]) == in.A {
+				pos += 1
+				pc += 1
+			} else {
+				ok = false
+			}
+		} else if in.Op == opAny {
+			if pos < n && (in.A != 0 || m.text[pos] != '\n') {
+				pos += 1
+				pc += 1
+			} else {
+				ok = false
+			}
+		} else if in.Op == opClass {
+			if pos < n && m.re.Classes[in.A].Table[i64(m.text[pos])] {
+				pos += 1
+				pc += 1
+			} else {
+				ok = false
+			}
+		} else if in.Op == opSplit {
+			stack = append(stack, resume, in.B, pos)
+			pc = in.A
+		} else if in.Op == opJmp {
+			pc = in.A
+		} else if in.Op == opSave {
+			stack = append(stack, restore, in.A, m.caps[in.A])
+			m.caps[in.A] = pos
+			pc += 1
+		} else if in.Op == opBackref {
+			let s = m.caps[2 * in.A]
+			let e = m.caps[2 * in.A + 1]
+			if s < 0 || e < 0 || pos + (e - s) > n || m.text[s:e] != m.text[pos:pos + (e - s)] {
+				ok = false
+			} else {
+				pos += e - s
+				pc += 1
+			}
+		} else if in.Op == opBol {
+			if pos == 0 || (in.A != 0 && m.text[pos - 1] == '\n') {
+				pc += 1
+			} else {
+				ok = false
+			}
+		} else if in.Op == opEol {
+			if pos == n || (in.A != 0 && m.text[pos] == '\n') || (in.A == 0 && pos == n - 1 && m.text[pos] == '\n') {
+				pc += 1
+			} else {
+				ok = false
+			}
+		} else if in.Op == opWordB {
+			mut before = false
+			mut after = false
+			if pos > 0 {
+				before = isWord(m.text[pos - 1])
+			}
+			if pos < n {
+				after = isWord(m.text[pos])
+			}
+			let at = before != after
+			if at != (in.B != 0) {
+				pc += 1
+			} else {
+				ok = false
+			}
+		} else if in.Op == opLook {
+			let saved = copyInts(m.caps)
+			let r = m.run(pc + 1, pos)
+			if in.B == 0 {
+				if r >= 0 {
+					// keep the captures it made, put back on failure later
+					for k in 0..len(saved) {
+						if saved[k] != m.caps[k] {
+							stack = append(stack, restore, k, saved[k])
+						}
+					}
+					pc = in.A
+				} else {
+					m.caps = saved
+					ok = false
+				}
+			} else {
+				m.caps = saved
+				if r >= 0 {
+					ok = false
+				} else {
+					pc = in.A
+				}
+			}
+		} else {
+			// opMatch
+			return pos
+		}
+		if !ok {
+			mut resumed = false
+			for len(stack) > 0 && !resumed {
+				let a = stack[len(stack) - 3]
+				let b = stack[len(stack) - 2]
+				let c = stack[len(stack) - 1]
+				stack = stack[0:len(stack) - 3]
+				if a == restore {
+					m.caps[b] = c
+				} else {
+					pc = b
+					pos = c
+					resumed = true
+				}
+			}
+			if !resumed {
+				return -1
+			}
+		}
+	}
+	return -1
+}
+
+fn copyInts(xs []i64) []i64 {
+	mut out = make([]i64, len(xs))
+	for i in 0..len(xs) {
+		out[i] = xs[i]
+	}
+	return out
+}
+
+// Search finds the leftmost match at or after from: where it starts and ends, and whether there is one.
+fn (r Regex) Search(text str, from i64) (i64, i64, bool) {
+	mut start = from
+	mut m = machine{re: r, text: text, caps: make([]i64, 2 * (r.Groups + 1))}
+	for start <= len(text) {
+		for k in 0..len(m.caps) {
+			m.caps[k] = -1
+		}
+		let end = m.run(0, start)
+		if end >= 0 {
+			return start, end, true
+		}
+		if m.steps > budget {
+			break
+		}
+		start += 1
+	}
+	return -1, -1, false
+}
+
+// Describe is a short text for a failed compile or match, for messages.
+fn Describe(r Regex) str {
+	return mint.Itoa(len(r.Prog)) + " instructions, " + mint.Itoa(r.Groups) + " groups"
+}

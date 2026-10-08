@@ -1,0 +1,69 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Long-lived blocks above 4 KiB (#345): size classes reach 256 KiB (about 25% apart) and are served from slabs, blocks up to
+// 4 MiB above that keep their mappings for reuse, so churn neither fragments the address space (/proc/self/maps, the default
+// vm.max_map_count is 65530) nor wastes a page-rounded mapping per value. Fixture blocks.tin prints what hearth.HeapStats and
+// the process report; the /proc figures are Linux only.
+
+const MiB = 1048576
+
+fn run(exe str, mode str, size i64, count i64) []map[str]str {
+	let o = ci.Exec([]str{exe, mode, mint.Itoa(size), mint.Itoa(count)}, "", 600)
+	ci.Must(o, "blocks " + mode)
+	mut rows = []map[str]str{}
+	for line in twine.Split(twine.TrimSpace(o.Stdout), "\n") {
+		rows = append(rows, ci.Words(line))
+	}
+	return rows
+}
+
+fn n(row map[str]str, key str) i64 {
+	return ci.Num(row[key])
+}
+
+fn main() {
+	let work = ci.Join(ci.Root(), "bin/ci/heap")
+	ci.Mkdirs(work)
+	let exe = ci.Join(work, "blocks")
+	ci.BuildTin("tools/ci/fixtures/blocks.tin", exe, "", []str{})
+	let linux = ci.Linux()
+
+	// 5 KB values kept and overwritten: served from a slab, no mapping per value.
+	let churn = run(exe, "churn", 5000, 100000)[0]
+	say.Line("100000 x 5000 B kept and overwritten: " + churn["ms"] + " ms, " + churn["slabs"] + " slab bytes, " + churn["heapmaps"] + " mappings in all, " + churn["maps"] + " in /proc")
+	ci.Check(n(churn, "heapmaps") < 20, "heap churn: " + churn["heapmaps"] + " mappings")
+	ci.Check(n(churn, "slabs") <= 2 * MiB, "heap churn: " + churn["slabs"] + " slab bytes")
+
+	// 60000 distinct 5 KB values: a class of 5120 bytes each (not 8192), the address space stays unfragmented when half of them are
+	// deleted.
+	let rows = run(exe, "fill", 5000, 60000)
+	ci.Check(len(rows) == 3, "heap fill: want 3 rows")
+	let fill = rows[0]
+	let deleted = rows[1]
+	let refill = rows[2]
+	say.Line("60000 x 5000 B kept: rss " + mint.Itoa(n(fill, "rss") / MiB) + " MiB, " + fill["maps"] + " mappings; half deleted: " + deleted["maps"] + " mappings; kept again: rss " + mint.Itoa(n(refill, "rss") / MiB) + " MiB")
+	ci.Check(n(fill, "slabs") >= 60000 * 5120, "heap fill: slabs " + fill["slabs"])
+	ci.Check(n(fill, "slabs") * 10 <= 60000 * 5120 * 11, "heap fill: slabs " + fill["slabs"])
+	ci.Check(n(refill, "slabs") * 100 <= n(fill, "slabs") * 105, "heap: memory freed by the deletes is not reused: " + fill["slabs"] + " then " + refill["slabs"])
+	if linux {
+		ci.Check(n(fill, "rss") * 10 < 60000 * 5120 * 13, "heap fill: rss " + fill["rss"])
+		ci.Check(n(deleted, "maps") < 1000 && n(refill, "maps") < 1000, "heap: mappings " + deleted["maps"] + " and " + refill["maps"])
+	}
+
+	// Blocks above 256 KiB reuse their mappings.
+	let big = run(exe, "large", 300000, 20000)[0]
+	say.Line("20000 x 300000 B made and dropped: " + big["ms"] + " ms, " + big["heapmaps"] + " mappings in all (" + big["maps"] + " in /proc)")
+	ci.Check(n(big, "heapmaps") < 20, "heap large: " + big["heapmaps"] + " mappings")
+	let huge = run(exe, "large", 8000000, 50)[0]
+	say.Line("50 x 8000000 B made and dropped: " + huge["heapmaps"] + " mappings in all (above 4 MiB each is unmapped when dropped)")
+	ci.Check(n(huge, "heapmaps") < 20, "heap huge: " + huge["heapmaps"] + " mappings")
+	if linux {
+		ci.Check(n(big, "maps") < 1000 && n(huge, "maps") < 1000, "heap: /proc mappings " + big["maps"] + " and " + huge["maps"])
+	}
+	ci.Pass("heap: size classes, slab reuse and mapping reuse")
+}

@@ -1,0 +1,30 @@
+package main
+
+import "./ci"
+import "twine"
+
+// A guard runs resource-cleanup callbacks on a panic (#142, design_semantics section 3).
+//
+// A probe appended to a temporary copy of toolchain/std/tide registers rt_task_cleanup callbacks. Inside a spawned task, the
+// guard's callee registers one and panics: the guard runs the callee's defer and that callback before its value is the
+// fault.Panic fault; a callback the task registered before the guard stays until the task ends.
+
+const WANT = "defer;fault true;cleaned 2;after 0; task end cleaned 21\n"
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/guard")
+	ci.Mkdirs(out)
+	let dir = ci.TempDir(out, "guard-")
+	ci.CopyTree(ci.Root(), dir)
+	let fixtures = ci.Join(ci.Root(), "tools/ci/fixtures")
+	let tide = ci.Join(dir, "toolchain/std/tide/tide.tin")
+	ci.Write(tide, ci.Read(tide) + "\n" + ci.Read(ci.Join(fixtures, "guard_probe.tin")))
+	let exe = ci.Join(dir, "guard")
+	ci.BuildTin(ci.Join(fixtures, "guard_cleanup.tin"), exe, dir, []str{"-edition", "1"})
+	let run = ci.Exec([]str{exe}, "", 20)
+	ci.Remove(dir)
+	ci.Must(run, "guard")
+	ci.Check(run.Stdout == WANT, "guard: got " + run.Stdout)
+	ci.Check(twine.Count(run.Stderr, "panic: index out of range [5] with length 3") == 1, "guard: stderr " + run.Stderr)
+	ci.Pass("guard: defers and cleanup callbacks run before the fault; outer callbacks wait for the task end")
+}

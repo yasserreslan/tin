@@ -54,7 +54,7 @@ Process:
 ```
 make bootstrap                       # the compiler rebuilds itself to an identical binary (compiler or runtime changes)
 tools/dev/v2test.sh                      # the strict suite: every line must PASS
-python3 tools/ci/regressions.py      # regression cases
+sh tools/ci/tin.sh regressions       # regression cases
 python3 tools/ci/test_tooling.py     # harness tests
 python3 tools/gen/gendoc.py              # when package docs or exports changed
 bin/tinc -target linux-arm64 -o /tmp/x FILE.tin ; bin/tinc -target linux-amd64 -o /tmp/x FILE.tin   # cross-build what you touched

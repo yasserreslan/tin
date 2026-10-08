@@ -1,0 +1,47 @@
+package main
+
+import "./ci"
+import "./pyre"
+import "say"
+
+// found is "start-end" of the first match of the pattern in the text, "none", or "ERR" for a pattern that does not compile.
+fn found(pattern str, text str) str {
+	let re = pyre.Compile(pattern) catch _ {
+		return "ERR"
+	}
+	let (a, b, ok) = re.Search(text, 0)
+	if !ok {
+		return "none"
+	}
+	return say.Str(a) + "-" + say.Str(b)
+}
+
+fn main() {
+	ci.Same("literal", found("abc", "xxabcxx"), "2-5")
+	ci.Same("alternation takes the first alternative that works", found("a|ab", "ab"), "0-1")
+	ci.Same("greedy star", found("a.*b", "xaxxbxb"), "1-7")
+	ci.Same("lazy star", found("a.*?b", "xaxxbxb"), "1-5")
+	ci.Same("class and range", found("[a-c]+[^a-c]", "xxabcdx"), "2-6")
+	ci.Same("counted repeat", found("a{{2,3}}", "aaaa"), "0-3")
+	ci.Same("lazy counted repeat", found("a{{2,3}}?", "aaaa"), "0-2")
+	ci.Same("group and backreference", found("(a+)b\\1", "aabaa"), "0-5")
+	ci.Same("a backreference that fails", found("(a+)b\\1", "aaba"), "1-4")
+	ci.Same("named group and (?P=name)", found("(?P<x>[0-9]+)-(?P=x)", "7 12-12 3"), "2-7")
+	ci.Same("positive lookahead does not consume", found("a(?=b)", "ac ab"), "3-4")
+	ci.Same("negative lookahead", found("a(?!b)", "ab ac"), "3-4")
+	ci.Same("tempered dot, as the CHECK files use", found("L:\n(?:(?!\nM:)[\\s\\S])*?X", "L:\nq\nX\nM:\nX"), "0-6")
+	ci.Same("tempered dot stops at the boundary", found("L:\n(?:(?!\nM:)[\\s\\S])*?X", "L:\nq\nM:\nX"), "none")
+	ci.Same("^ and $ in multiline mode", found("(?m)^b$", "a\nb\nc"), "2-3")
+	ci.Same("^ without multiline", found("^b", "a\nb"), "none")
+	ci.Same("dot does not match a newline, with s it does", found("a.b", "a\nb"), "none")
+	ci.Same("dotall", found("(?s)a.b", "a\nb"), "0-3")
+	ci.Same("word boundary", found("\\bcat\\b", "concat cat"), "7-10")
+	ci.Same("shorthands", found("\\d+\\s\\w+", "ab 12 xy_1"), "3-10")
+	ci.Same("escapes", found("a\\.b\\(c\\)", "a.b(c)"), "0-6")
+	ci.Same("a bad pattern", found("(a", "a"), "ERR")
+	ci.Same("a lookahead holding a group used inside it", found("(?=[\\s\\S]*?# L(\\d+): f\n[\\s\\S]*?\nL\\1:\n)", "# L3: f\nx\nL3:\n"), "0-0")
+	ci.Same("empty pattern", found("", "abc"), "0-0")
+	ci.Same("optional", found("colou?r", "color"), "0-5")
+	say.Line()
+	ci.Finish()
+}

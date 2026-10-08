@@ -98,8 +98,8 @@ python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
 tools/dev/v2test.sh bin/tinc
 python3 tools/ci/docs_check.py bin/tinc   # docs and examples in edition 1; docs code blocks compile
 python3 tools/ci/number_check.py          # exact number bits/text against Go and hard cases
-python3 tools/ci/regressions.py
-python3 tools/ci/regressions.py --audit   # network; GH_TOKEN optional for public issues
+sh tools/ci/tin.sh regressions
+sh tools/ci/tin.sh regressions --audit   # network; GH_TOKEN optional for public issues
 python3 tools/ci/http_check.py            # Linux HTTP/RSS/shutdown
 python3 tools/ci/thread_check.py          # Linux clone threads and stack reaping
 python3 tools/ci/static_check.py          # static Linux ELF and an empty-root run

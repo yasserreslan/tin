@@ -1,0 +1,122 @@
+// Strict issue-linked regression contracts: PASS, known XFAIL, or blocking failure.
+//
+//	tools/ci/tin.sh regressions [--compiler bin/tinc] [--audit] [--target T] [--docker IMAGE]
+package main
+
+import "./ci"
+import "./regress"
+import "mint"
+import "quarry"
+import "say"
+import "tinjson"
+import "twine"
+
+// jsonOf writes what a case did as a JSON object body.
+fn actualJSON(a regress.Actual) str {
+	return "{{\n      \"phase\": " + tinjson.Quote(a.Phase) + ",\n      \"exit\": " + mint.Itoa(a.Exit) + ",\n      \"stdout\": " + tinjson.Quote(a.Stdout) + ",\n      \"stderr\": " + tinjson.Quote(a.Stderr) + "\n    }}"
+}
+
+fn main() {
+	let args = quarry.Args()
+	mut compiler = "bin/tinc"
+	mut audit = false
+	mut target = ""
+	mut docker = ""
+	mut i = 1
+	for i < len(args) {
+		if args[i] == "--compiler" && i + 1 < len(args) {
+			compiler = args[i + 1]
+			i += 2
+		} else if args[i] == "--audit" {
+			audit = true
+			i += 1
+		} else if args[i] == "--target" && i + 1 < len(args) {
+			target = args[i + 1]
+			i += 2
+		} else if args[i] == "--docker" && i + 1 < len(args) {
+			docker = args[i + 1]
+			i += 2
+		} else {
+			quarry.Eprintln("unknown argument " + args[i])
+			quarry.Exit(2)
+		}
+	}
+	if len(docker) > 0 && len(target) == 0 {
+		quarry.Eprintln("--docker requires --target")
+		quarry.Exit(2)
+	}
+	let root = ci.Root()
+	mut platform = ci.OS()
+	if len(docker) > 0 {
+		platform = "linux"
+	}
+	let dir = ci.Join(root, "toolchain/tests/regressions")
+	let cases = regress.LoadCases(dir) catch err {
+		quarry.Eprintln(say.Str(err))
+		quarry.Exit(1)
+		[]regress.Case{}
+	}
+	if audit {
+		regress.Audit(cases) catch err {
+			quarry.Eprintln(say.Str(err))
+			quarry.Exit(1)
+		}
+		return
+	}
+	mut exe = compiler
+	if len(exe) > 0 && exe[0] != '/' {
+		exe = ci.Join(root, compiler)
+	}
+	let out = ci.Join(root, "bin/ci")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "regressions-")
+	mut json = "[\n"
+	mut summary = ""
+	mut blocking = false
+	mut count = 0
+	for c in cases {
+		if len(c.Platform) > 0 && c.Platform != platform {
+			say.Line("SKIP " + c.Source + ": runs on " + c.Platform)
+			continue
+		}
+		mut cross = target
+		mut image = docker
+		if len(c.Target) > 0 {
+			cross = ""
+			image = ""
+		}
+		let actual = regress.RunCase(c, exe, work, root, cross, image)
+		let status = regress.Classify(c, actual)
+		say.Line(status + " " + c.Source + " (#" + mint.Itoa(c.Issue) + ")")
+		if status == "FAIL" || status == "XPASS" {
+			say.Line(actualJSON(actual))
+			if status == "XPASS" {
+				say.Line("Fix detected: keep this test and remove known_failure from its manifest entry.")
+			}
+		}
+		if status != "PASS" && status != "XFAIL" {
+			blocking = true
+		}
+		if count > 0 {
+			json = json + ",\n"
+		}
+		json = json + "  {{\n    \"source\": " + tinjson.Quote(c.Source) + ",\n    \"issue\": " + mint.Itoa(c.Issue) + ",\n    \"status\": " + tinjson.Quote(status) + ",\n    \"actual\": " + actualJSON(actual) + "\n  }}"
+		summary = summary + "- " + status + ": `" + c.Source + "` ([#" + mint.Itoa(c.Issue) + "](https://github.com/yasserreslan/tin/issues/" + mint.Itoa(c.Issue) + "))\n"
+		count += 1
+	}
+	json = json + "\n]\n"
+	mut name = "regressions.json"
+	if len(target) > 0 {
+		name = "regressions-" + target + ".json"
+	}
+	ci.Write(ci.Join(out, name), json)
+	let stepSummary = ci.Env("GITHUB_STEP_SUMMARY")
+	if len(stepSummary) > 0 {
+		quarry.AppendFile(stepSummary, "### Issue-linked regressions\n\n" + summary + "\n") catch _ {
+		}
+	}
+	ci.Remove(work)
+	if blocking {
+		quarry.Exit(1)
+	}
+}

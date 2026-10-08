@@ -21,4 +21,4 @@ jobs:
       - name: Check issue lifecycle against regression exemptions
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/ci/regressions.py --audit
+        run: sh tools/ci/tin.sh regressions --audit

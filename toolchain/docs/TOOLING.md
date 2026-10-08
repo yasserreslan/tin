@@ -491,7 +491,7 @@ TIN_REPLAY_KEY=<64 hex digits> tin replay spool/00001700000000000000-000-1.tcap 
   it exits 0, it turns the capsule into a regression case: `toolchain/tests/regressions/NAME.tin` (a copy
   of `FILE.tin`), `toolchain/tests/regressions/NAME.tcap` (the capsule sealed again under a public test
   key), and an entry in `cases.json` (`"replay": {"capsule", "key"}`; the expected output is this
-  replay's report and body). `tools/ci/regressions.py` runs the program with the replay switches
+  replay's report and body). `tools/ci/regressions.tin` runs the program with the replay switches
   and checks the exit status and output, so CI replays the request on every change. Fix the bug
   first, then save the replay against the fixed build: the case then fails if the old behaviour
   comes back. The saved capsule can be read by anyone. Secret headers are already handles, but

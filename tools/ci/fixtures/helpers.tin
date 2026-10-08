@@ -5,26 +5,26 @@ import "twine"
 import "mint"
 import "say"
 fn main() {
-    let args = quarry.Args()
-    if args[1] == "calendar" {
-        let text = quarry.ReadStdin() catch err { panic(err) }
-        for _, s in twine.Fields(text) {
-            let n = mint.Atoi(s) catch err { panic(err) }
-            helperprobe.Calendar(n)
-        }
-    }
-    if args[1] == "errors" {
-        for n in -2..140 { helperprobe.Error(n) }
-    }
-    if args[1] == "tty" {
-        for _, arg in args[2:] {
-            let n = mint.Atoi(arg) catch err { panic(err) }
-            helperprobe.TTY(n)
-        }
-    }
-    if args[1] == "hostname" {
-        let host = quarry.Hostname() catch err { panic(err) }
-        say.Out("%q\n",host)
-    }
-    if args[1] == "cpus" { helperprobe.CPUs() }
+	let args = quarry.Args()
+	if args[1] == "calendar" {
+		let text = quarry.ReadStdin() catch err { panic(err) }
+		for _, s in twine.Fields(text) {
+			let n = mint.Atoi(s) catch err { panic(err) }
+			helperprobe.Calendar(n)
+		}
+	}
+	if args[1] == "errors" {
+		for n in -2..140 { helperprobe.Error(n) }
+	}
+	if args[1] == "tty" {
+		for _, arg in args[2:] {
+			let n = mint.Atoi(arg) catch err { panic(err) }
+			helperprobe.TTY(n)
+		}
+	}
+	if args[1] == "hostname" {
+		let host = quarry.Hostname() catch err { panic(err) }
+		say.Out("%q\n", host)
+	}
+	if args[1] == "cpus" { helperprobe.CPUs() }
 }

@@ -1,0 +1,259 @@
+// Strict issue-linked regression contracts: each case in toolchain/tests/regressions/cases.json names a program, an issue and the
+// contract the program must meet (the phase it ends in, its exit code, text in its output). A case that meets it passes; a case
+// with a known_failure contract may fail exactly that way (XFAIL); anything else fails the run.
+package regress
+
+import "../ci"
+import "mint"
+import "quarry"
+import "say"
+import "tinjson"
+import "twine"
+
+// Case is one entry of the manifest.
+type Case struct {
+	Source str
+	Issue i64
+	Expected tinjson.J
+	Known tinjson.J
+	HasKnown bool
+	Platform str
+	Target str
+	// Env are the case's own environment entries (NAME=value).
+	Env []str
+	HasReplay bool
+	Capsule str
+	ReplayKey str
+}
+
+// Actual is what a case did.
+type Actual struct {
+	Phase str
+	Exit i64
+	Stdout str
+	Stderr str
+}
+
+// LoadCases reads and checks the manifest: every source occurs once and every program in the folder is in it.
+fn LoadCases(dir str) ![]Case {
+	let text = ci.Read(ci.Join(dir, "cases.json"))
+	let (j, ok) = tinjson.Parse(text)
+	if !ok {
+		fail say.Fault("cases.json is not valid JSON")
+	}
+	mut cases = []Case{}
+	mut sources = []str{}
+	for item in j.Items() {
+		let c = Case{Source: item.Get("source").Text(), Issue: item.Get("issue").Int(), Expected: item.Get("expected"), Known: item.Get("known_failure"), Platform: item.Get("platform").Text(), Target: item.Get("target").Text(), Env: []str{}}
+		c.HasKnown = item.Get("known_failure").IsObject()
+		if !c.Expected.IsObject() || !item.Get("issue").IsNumber() {
+			fail say.Fault("Each case needs an expected contract and issue number")
+		}
+		mut contracts = []tinjson.J{c.Expected}
+		if c.HasKnown {
+			contracts = append(contracts, c.Known)
+		}
+		for contract in contracts {
+			let phase = contract.Get("phase").Text()
+			if (phase != "compile" && phase != "run") || !contract.Get("exit").IsNumber() {
+				fail say.Fault("Contracts require phase and exit")
+			}
+		}
+		let env = item.Get("env")
+		for k in env.Keys() {
+			c.Env = append(c.Env, k + "=" + env.Get(k).Text())
+		}
+		let replay = item.Get("replay")
+		if replay.IsObject() {
+			c.HasReplay = true
+			c.Capsule = replay.Get("capsule").Text()
+			c.ReplayKey = replay.Get("key").Text()
+			if len(replay.Keys()) != 2 || !quarry.Exists(ci.Join(dir, c.Capsule)) {
+				fail say.Fault("%s: a replay case needs its capsule file and key (tin replay --save-test, #242)", c.Source)
+			}
+		}
+		for s in sources {
+			if s == c.Source {
+				fail say.Fault("Every regression source must occur exactly once in cases.json")
+			}
+		}
+		sources = append(sources, c.Source)
+		cases = append(cases, c)
+	}
+	for name in ci.Names(dir, ".tin") {
+		mut found = false
+		for s in sources {
+			if s == name {
+				found = true
+			}
+		}
+		if !found {
+			fail say.Fault("Every regression source must occur exactly once in cases.json")
+		}
+	}
+	return cases
+}
+
+// Matches reports whether what happened meets a contract: every key of it equal, except stderr_contains, which is a substring.
+fn Matches(contract tinjson.J, a Actual) bool {
+	for key in contract.Keys() {
+		let want = contract.Get(key)
+		if key == "stderr_contains" {
+			if !twine.Contains(a.Stderr, want.Text()) {
+				return false
+			}
+		} else if key == "phase" {
+			if a.Phase != want.Text() {
+				return false
+			}
+		} else if key == "exit" {
+			if a.Exit != want.Int() {
+				return false
+			}
+		} else if key == "stdout" {
+			if a.Stdout != want.Text() {
+				return false
+			}
+		} else if key == "stderr" {
+			if a.Stderr != want.Text() {
+				return false
+			}
+		} else {
+			// a key the run does not report is never met
+			return false
+		}
+	}
+	return true
+}
+
+// Classify is PASS, XPASS (a known failure that now passes), XFAIL (a known failure) or FAIL.
+fn Classify(c Case, a Actual) str {
+	if Matches(c.Expected, a) {
+		if c.HasKnown {
+			return "XPASS"
+		}
+		return "PASS"
+	}
+	if c.HasKnown && Matches(c.Known, a) {
+		return "XFAIL"
+	}
+	return "FAIL"
+}
+
+// unsetReplay are the TIN_REPLAY_* variables of this process (a replay case sets its own, the others must not see any).
+fn unsetReplay() []str {
+	mut names = []str{}
+	let o = ci.Exec([]str{"env"}, "", 10)
+	for line in twine.Split(o.Stdout, "\n") {
+		if twine.HasPrefix(line, "TIN_REPLAY_") {
+			names = append(names, twine.Split(line, "=")[0])
+		}
+	}
+	return names
+}
+
+// RunCase compiles and runs one case: the compiler, the work directory, the repository root, and for a cross build the target and
+// the Linux image to run it in.
+fn RunCase(c Case, compiler str, work str, root str, cross str, docker str) Actual {
+	mut target = c.Target
+	if len(target) == 0 {
+		target = cross
+	}
+	let stem = twine.TrimSuffix(c.Source, ".tin")
+	let exe = ci.Join(work, stem)
+	mut command = []str{compiler}
+	if len(target) > 0 {
+		command = append(command, "-target")
+		command = append(command, target)
+	}
+	command = append(command, "-o")
+	command = append(command, exe)
+	command = append(command, "toolchain/tests/regressions/" + c.Source)
+	let comp = ci.ExecEnv(command, root, 60, []str{"TIN_ROOT=" + root}, []str{})
+	if comp.Code != 0 || c.Expected.Get("phase").Text() == "compile" {
+		return Actual{Phase: "compile", Exit: comp.Code, Stdout: comp.Stdout, Stderr: comp.Stderr}
+	}
+	mut set = []str{}
+	mut unset = []str{}
+	mut dockerEnv = []str{}
+	if c.HasReplay {
+		// a saved replay (#242): the program runs the capsule's request instead of serving
+		ci.Copy(ci.Join(ci.Join(root, "toolchain/tests/regressions"), c.Capsule), ci.Join(work, c.Capsule))
+		unset = unsetReplay()
+		set = append(set, "TIN_REPLAY_CAPSULE=" + ci.Join(work, c.Capsule))
+		set = append(set, "TIN_REPLAY_KEY=" + c.ReplayKey)
+		dockerEnv = append(dockerEnv, "-e")
+		dockerEnv = append(dockerEnv, "TIN_REPLAY_CAPSULE=/work/" + c.Capsule)
+		dockerEnv = append(dockerEnv, "-e")
+		dockerEnv = append(dockerEnv, "TIN_REPLAY_KEY=" + c.ReplayKey)
+	}
+	// the case's own environment (a TIN_* setting the run needs, #629)
+	for e in c.Env {
+		set = append(set, e)
+		dockerEnv = append(dockerEnv, "-e")
+		dockerEnv = append(dockerEnv, e)
+	}
+	if len(docker) > 0 {
+		// cross-built cases run in a container of the target with the same limits
+		mut run = []str{"docker", "run", "--rm", "--platform", twine.ReplaceAll(target, "-", "/"), "-v", work + ":/work", "-w", "/work"}
+		for e in dockerEnv {
+			run = append(run, e)
+		}
+		run = append(run, docker)
+		run = append(run, "sh")
+		run = append(run, "-c")
+		run = append(run, "ulimit -c 0; ulimit -v 524288; exec timeout 20 /work/" + stem)
+		let r = ci.Exec(run, "", 60)
+		return Actual{Phase: "run", Exit: r.Code, Stdout: r.Stdout, Stderr: r.Stderr}
+	}
+	// no core dump; on Linux the address space is bounded for the negative allocator probes (Darwin does not implement it usefully)
+	mut script = "ulimit -c 0; exec \"$0\""
+	if ci.OS() == "linux" {
+		script = "ulimit -c 0; ulimit -v 524288; exec \"$0\""
+	}
+	let r = ci.ExecEnv([]str{"/bin/sh", "-c", script, exe}, root, 20, set, unset)
+	return Actual{Phase: "run", Exit: r.Code, Stdout: r.Stdout, Stderr: r.Stderr}
+}
+
+// Audit checks that no issue with a known-failure exemption has been closed: an issue cannot stay closed while its exemption is
+// still in the tree.
+fn Audit(cases []Case) ! {
+	mut numbers = []i64{}
+	for c in cases {
+		if !c.HasKnown {
+			continue
+		}
+		mut have = false
+		for n in numbers {
+			if n == c.Issue {
+				have = true
+			}
+		}
+		if !have {
+			numbers = append(numbers, c.Issue)
+		}
+	}
+	mut closed = []i64{}
+	for n in numbers {
+		mut args = []str{"curl", "-s", "-H", "Accept: application/vnd.github+json", "-H", "User-Agent: tin-ci", "--max-time", "30"}
+		let token = ci.Env("GH_TOKEN")
+		if len(token) > 0 {
+			args = append(args, "-H")
+			args = append(args, "Authorization: Bearer " + token)
+		}
+		args = append(args, "https://api.github.com/repos/yasserreslan/tin/issues/" + mint.Itoa(n))
+		let o = ci.Exec(args, "", 60)
+		let (j, ok) = tinjson.Parse(o.Stdout)
+		if !ok || !j.Get("state").IsString() {
+			fail say.Fault("cannot read issue #%d from GitHub", n)
+		}
+		let state = j.Get("state").Text()
+		say.Line("Issue #" + mint.Itoa(n) + ": " + state)
+		if state != "open" {
+			closed = append(closed, n)
+		}
+	}
+	if len(closed) > 0 {
+		fail say.Fault("Closed issues still have known-failure exemptions: %s. Keep the test, remove known_failure, and require PASS.", say.Str(closed))
+	}
+}

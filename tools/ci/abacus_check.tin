@@ -1,0 +1,70 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Compare abacus with Go's math/big over 100,000 random operand pairs (sizes 0 to 4096 bits, mixed signs, the edge values 0, ±1,
+// ±2^63, ±2^64 and powers of two ±1). Both sides generate the operands from the same seed and print a hash per operation; on a
+// mismatch the check reruns both in dump mode and reports the first differing case.
+
+const PAIRS = 100000
+// One process per batch: a whole 100,000-pair run in one process is OOM-killed on the Linux runners, so the corpus generates any
+// range of pairs alone (ABACUS_START and ABACUS_N).
+const BATCH = 10000
+
+fn lines(exe str, start i64, n i64, dump bool) []str {
+	mut argv = []str{exe}
+	if dump {
+		argv = append(argv, "dump")
+	}
+	let set = []str{"TIN_ROOT=" + ci.Root(), "ABACUS_START=" + mint.Itoa(start), "ABACUS_N=" + mint.Itoa(n)}
+	let o = ci.ExecEnv(argv, ci.Root(), 600, set, []str{})
+	ci.Must(o, exe)
+	return twine.Split(twine.TrimSuffix(o.Stdout, "\n"), "\n")
+}
+
+fn firstDifference(goexe str, tin str, start i64) str {
+	let want = lines(goexe, start, BATCH, true)
+	let got = lines(tin, start, BATCH, true)
+	mut i = 0
+	for i < len(want) && i < len(got) {
+		if want[i] != got[i] {
+			return "line " + mint.Itoa(i + 1) + ": Go " + want[i] + ", Tin " + got[i]
+		}
+		i += 1
+	}
+	return mint.Itoa(len(got)) + " tin lines against " + mint.Itoa(len(want)) + " go lines"
+}
+
+fn main() {
+	let dir = ci.Join(ci.Root(), "bin/ci/abacus")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "abacus-")
+	let tin = ci.Join(work, "abacus-tin")
+	ci.BuildTin("tools/ci/fixtures/abacus.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "abacus-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/abacus"}, ci.Root(), 300), "go build")
+	mut ops = []str{}
+	mut start = 0
+	for start < PAIRS {
+		let want = lines(goexe, start, BATCH, false)
+		let got = lines(tin, start, BATCH, false)
+		if twine.Join(got, "\n") != twine.Join(want, "\n") {
+			ci.Remove(work)
+			ci.Fail("abacus: results differ from math/big: " + firstDifference(goexe, tin, start))
+		}
+		mut names = []str{}
+		for line in got {
+			names = append(names, twine.Fields(line)[0])
+		}
+		if len(ops) == 0 {
+			ops = names
+		}
+		ci.Check(twine.Join(names, ",") == twine.Join(ops, ","), "abacus: the operation set changed between batches")
+		start += BATCH
+	}
+	ci.Remove(work)
+	ci.Check(len(ops) == 25, "abacus: " + mint.Itoa(len(ops)) + " operations, want 25")
+	ci.Pass("abacus: " + mint.Itoa(len(ops)) + " operations on " + mint.Itoa(PAIRS) + " operand pairs in " + mint.Itoa(PAIRS / BATCH) + " batches match Go's math/big (" + twine.Join(ops, ", ") + ")")
+}

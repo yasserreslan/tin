@@ -1,0 +1,43 @@
+// Release versions for merges into main.
+//
+// VERSION holds the base version. Every merge whose CI passes is released: the first one at VERSION itself, later ones as the next
+// patch of VERSION's major.minor (0.5.0, 0.5.1, ...). Bumping VERSION's major or minor starts a new series. A prerelease VERSION
+// (0.6.0-rc.1) is released once; bump it for the next one.
+//
+//	tools/ci/tin.sh next_version next VERSION_FILE [TAG...]   the tag to release, or nothing
+//	tools/ci/tin.sh next_version check VERSION_FILE TAG       whether TAG is a valid release of VERSION
+package main
+
+import "./ci"
+import "./release"
+import "quarry"
+import "say"
+import "twine"
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) < 3 || (args[1] != "next" && args[1] != "check") {
+		quarry.Eprintln("usage: next_version next VERSION_FILE [TAG...] | check VERSION_FILE TAG")
+		quarry.Exit(2)
+	}
+	let base = ci.Read(args[2])
+	if args[1] == "next" {
+		let tag = release.NextTag(base, args[3:]) catch err {
+			quarry.Eprintln(say.Str(err))
+			quarry.Exit(1)
+			return
+		}
+		if len(tag) > 0 {
+			say.Line(tag)
+		}
+		return
+	}
+	if len(args) != 4 || !release.ValidRelease(base, args[3]) {
+		mut got = "?"
+		if len(args) > 3 {
+			got = args[3]
+		}
+		quarry.Eprintln(got + " is not a release of VERSION " + twine.TrimSpace(base))
+		quarry.Exit(1)
+	}
+}

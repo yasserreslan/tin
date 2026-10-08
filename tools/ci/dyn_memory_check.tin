@@ -1,0 +1,32 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// A dyn value replaced in long-lived memory is released (#618): a global, a struct field, a ?dyn field, a slice element (stored
+// or copied) and a map value, each replaced a million times, keep the peak RSS of a few thousand replacements.
+
+fn main() {
+	if !ci.Linux() {
+		say.Line("SKIP dyn memory: peak RSS is measured on Linux")
+		return
+	}
+	let out = ci.Join(ci.Root(), "bin/ci/dyn")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "dyn_memory")
+	ci.BuildTin("tools/ci/fixtures/dyn_memory.tin", exe, "", []str{})
+	mut report = []str{}
+	for what in []str{"field", "opt", "global", "slice", "copy", "map"} {
+		let (c1, small, e1) = ci.Peak(exe, []str{what, "10000"}, 120)
+		ci.Check(c1 == 0, "dyn memory " + what + " 10k: exit " + mint.Itoa(c1) + " " + e1)
+		let (c2, big, e2) = ci.Peak(exe, []str{what, "1000000"}, 120)
+		ci.Check(c2 == 0, "dyn memory " + what + " 1M: exit " + mint.Itoa(c2) + " " + e2)
+		say.Line(what + ": peak " + mint.Itoa(small) + " KiB at 10k, " + mint.Itoa(big) + " KiB at 1M")
+		// Before #618 every replaced object stayed: about 30 MB more at a million. The margin only absorbs measurement noise.
+		ci.Check(big <= small + 4096, "dyn memory " + what + ": " + mint.Itoa(small) + " then " + mint.Itoa(big) + " KiB")
+		report = append(report, what + " " + mint.Itoa(big) + " KiB")
+	}
+	ci.Pass("dyn memory: a million replacements each, " + twine.Join(report, ", "))
+}

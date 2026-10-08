@@ -1,0 +1,35 @@
+package main
+
+import "./ci"
+import "./release"
+import "say"
+
+// next(base, tags) is the tag NextTag gives, "ERROR" for a fault.
+fn next(base str, tags []str) str {
+	let t = release.NextTag(base, tags) catch _ {
+		return "ERROR"
+	}
+	return t
+}
+
+fn main() {
+	ci.Same("first release of a series is VERSION itself", next("0.5.0\n", []str{"v0.4.0", "v0.4.3"}), "v0.5.0")
+	ci.Same("later merges take the next patch", next("0.4.0", []str{"v0.4.0"}), "v0.4.1")
+	ci.Same("the highest patch counts", next("0.4.0", []str{"v0.4.0", "v0.4.1", "v0.4.7", "v0.3.9"}), "v0.4.8")
+	ci.Same("a higher patch in VERSION is respected", next("0.4.5", []str{"v0.4.0", "v0.4.1"}), "v0.4.5")
+	ci.Same("a prerelease is released once", next("0.6.0-rc.1", []str{"v0.5.2"}), "v0.6.0-rc.1")
+	ci.Same("and not again", next("0.6.0-rc.1", []str{"v0.5.2", "v0.6.0-rc.1"}), "")
+	ci.Same("prerelease tags do not count as patches", next("0.6.0", []str{"v0.6.0-rc.1"}), "v0.6.0")
+	ci.Same("other tags are ignored", next("0.4.0", []str{"v0.4.0", "nightly", "v1.x"}), "v0.4.1")
+	ci.Same("VERSION behind the latest release is an error", next("0.4.0", []str{"v0.5.0"}), "ERROR")
+	ci.Test("valid: the base", release.ValidRelease("0.4.0", "v0.4.0"))
+	ci.Test("valid: a later patch", release.ValidRelease("0.4.0", "v0.4.9"))
+	ci.Test("invalid: an earlier patch", !release.ValidRelease("0.4.2", "v0.4.1"))
+	ci.Test("invalid: another minor", !release.ValidRelease("0.4.0", "v0.5.0"))
+	ci.Test("invalid: no v", !release.ValidRelease("0.4.0", "0.4.1"))
+	ci.Test("valid: the same prerelease", release.ValidRelease("0.6.0-rc.1", "v0.6.0-rc.1"))
+	ci.Test("invalid: another prerelease", !release.ValidRelease("0.6.0-rc.1", "v0.6.0-rc.2"))
+	ci.Test("invalid: a prerelease of a stable VERSION", !release.ValidRelease("0.4.0", "v0.4.1-rc.1"))
+	say.Line()
+	ci.Finish()
+}

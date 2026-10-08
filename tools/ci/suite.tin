@@ -1,0 +1,43 @@
+// Runs the strict tests: tools/ci/tin.sh suite [COMPILER] [--target T] [--docker IMAGE] [--asm-only]. Exits 1 unless every case passed.
+// --asm-only compiles and checks only the _asm programs (for a target the machine cannot run).
+package main
+
+import "./ci"
+import "./strict"
+import "quarry"
+
+fn main() {
+	let args = quarry.Args()
+	mut compiler = "bin/tinc"
+	mut target = ""
+	mut docker = ""
+	mut asmOnly = false
+	mut i = 1
+	for i < len(args) {
+		if args[i] == "--target" && i + 1 < len(args) {
+			target = args[i + 1]
+			i += 2
+		} else if args[i] == "--asm-only" {
+			asmOnly = true
+			i += 1
+		} else if args[i] == "--docker" && i + 1 < len(args) {
+			docker = args[i + 1]
+			i += 2
+		} else {
+			compiler = args[i]
+			i += 1
+		}
+	}
+	if len(docker) > 0 && len(target) == 0 {
+		quarry.Eprintln("--docker requires --target")
+		quarry.Exit(2)
+	}
+	let root = ci.Root()
+	mut exe = compiler
+	if len(exe) > 0 && exe[0] != '/' {
+		exe = ci.Join(root, compiler)
+	}
+	if !strict.Run(exe, target, docker, root, strict.RealExec, asmOnly) {
+		quarry.Exit(1)
+	}
+}
