@@ -76,6 +76,7 @@ fn packages() []str {
 		"pack", "numbers as bytes: byte order and varints (encoding/binary)",
 		"mime", "media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart)",
 		"scan", "a scanner and tokenizer for UTF-8 text (text/scanner)",
+		"image", "images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png)",
 		"appkit", "macOS frameworks for the Tinland editor (Cocoa, WebKit)",
 		"metal", "Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor",
 		"gpuwin", "a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU",

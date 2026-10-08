@@ -1,0 +1,30 @@
+package main
+
+import "image"
+import "image/color"
+import "image/png"
+import "say"
+
+fn main() {
+	mut m = image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	m.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 20, B: 3, A: 255})
+	m.SetNRGBA(1, 0, color.NRGBA{R: 4, G: 5, B: 6, A: 77})
+	let encoded = png.Encode(m)
+	let got = png.Decode(encoded) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	let a = got.At(0, 0)
+	let n = image.AsNRGBA64(got)
+	if n == nil {
+		panic("PNG decoder did not return NRGBA")
+	}
+	let b = n.NRGBA64At(1, 0)
+	if a.R != 0xffff || a.G != 0x1414 || a.B != 0x0303 || a.A != 0xffff {
+		panic("PNG opaque pixel did not round trip")
+	}
+	if b.R != 0x0404 || b.G != 0x0505 || b.B != 0x0606 || b.A != 0x4d4d {
+		panic("PNG alpha pixel did not round trip")
+	}
+	say.Line("png round trip", len(encoded))
+}

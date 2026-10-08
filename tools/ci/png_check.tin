@@ -1,0 +1,14 @@
+package main
+
+import "./ci"
+
+fn main() {
+	let root = ci.Root()
+	let exe = ci.Join(root, "bin/ci/png-test")
+	ci.BuildTin("toolchain/tests/v2/png.tin", exe, root, []str{})
+	let run = ci.Exec([]str{exe}, root, 20)
+	ci.Must(run, "PNG strict test")
+	let want = ci.Read(ci.Join(root, "toolchain/tests/v2/png.out"))
+	ci.Check(run.Stdout == want, "PNG strict output differs from png.out\nwant: " + want + "got: " + run.Stdout)
+	ci.Pass("PNG RGBA encode/decode round trip")
+}
