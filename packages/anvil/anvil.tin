@@ -3831,6 +3831,23 @@ fn (r Router) RunWith(method str, target str, headers []str, body str) Out {
 	return w
 }
 
+// NewRequest builds an in-process request for test helpers; headers are "Name: value" lines and body is the decoded body.
+fn NewRequest(method str, target str, headers []str, body str) Req {
+	mut block = ""
+	for h in headers {
+		block += h + "\r\n"
+	}
+	mut q = Req{Method: method, Path: target, Query: "", hp: cast(i64, block) + 8, hn: len(block), bp: cast(i64, body) + 8, bn: len(body)}
+	for i in 0..len(target) {
+		if target[i] == '?' {
+			q.Path = target[:i]
+			q.Query = target[i+1:]
+			break
+		}
+	}
+	return q
+}
+
 // Match returns the pattern of the route that would serve method and path ("/users/{id}"),
 // or "" when the request would get 404 or 405. Like Run, it panics if r has an error (see Check).
 fn (r Router) Match(method str, path str) str {

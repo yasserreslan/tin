@@ -1,0 +1,127 @@
+// Package assay provides small HTTP test helpers for anvil handlers, like net/http/httptest (#739).
+package assay
+
+import "anvil"
+import "atomic"
+import "wire"
+
+// Server is a local HTTP/1.1 test server. Close stops its listener and waits for the accept loop.
+type Server struct {
+	URL  str // the server's base URL
+	ln   wire.Listener
+	state serverState
+}
+
+// serverState is shared by the detached accept loop and Server.Close.
+type serverState struct {
+	done atomic.Int
+}
+
+// NewRecorder returns an empty anvil response recorder.
+fn NewRecorder() anvil.Out {
+	mut r = anvil.NewRouter()
+	r.Get("/", recorderOK)
+	return r.RunWith("GET", "/", []str{}, "")
+}
+
+// recorderOK leaves the response at its default status and body.
+fn recorderOK(q anvil.Req, w mut anvil.Out) {}
+
+// NewRequest builds a request for a handler test; headers are "Name: value" lines.
+fn NewRequest(method str, target str, headers []str, body str) anvil.Req {
+	return anvil.NewRequest(method, target, headers, body)
+}
+
+// NewServer starts an HTTP/1.1 server for router on a random loopback port.
+fn NewServer(router anvil.Router) !Server {
+	let ln = try wire.Listen("127.0.0.1:0")
+	let state = serverState{done: atomic.NewInt(0)}
+	detach {
+		serve(ln, router, state)
+	}
+	return Server{URL: "http://127.0.0.1:{ln.Port()}", ln: ln, state: state}
+}
+
+// Close stops accepting requests. The accept loop observes the close state on its next timeout.
+fn (s Server) Close() {
+	s.state.done.Store(1)
+	mut ln = s.ln
+	ln.Close()
+}
+
+// serve accepts one-request connections until the listener closes.
+fn serve(ln wire.Listener, router anvil.Router, state serverState) {
+	for {
+		if state.done.Load() != 0 { break }
+		mut c = ln.AcceptTimeout(100000000) catch _ {
+			continue
+		}
+		serveConn(mut c, router)
+		c.Close()
+	}
+	state.done.Store(2)
+}
+
+// serveConn reads one bounded HTTP request and writes the router's response.
+fn serveConn(c mut wire.Conn, router anvil.Router) {
+	mut raw = []u8{}
+	for len(raw) < 1048576 {
+		let (_, err) = c.Read(mut raw, 4096)
+		if err != nil { return }
+		if indexBytes(str(raw), "\r\n\r\n") >= 0 { break }
+	}
+	let text = str(raw)
+	let end = indexBytes(text, "\r\n\r\n")
+	if end < 0 { return }
+	let lineEnd = indexBytes(text, "\r\n")
+	if lineEnd < 0 { return }
+	let line = text[:lineEnd]
+	let a = indexByte(line, ' ')
+	if a < 0 { return }
+	let b = indexByte(line[a+1:], ' ')
+	if b < 0 { return }
+	let method = line[:a]
+	let target = line[a+1:a+1+b]
+	mut headers = []str{}
+	let headerText = text[lineEnd+2:end]
+	for h in splitLines(headerText) { if len(h) > 0 { headers = append(headers, h) } }
+	let out = router.RunWith(method, target, headers, "")
+	let code = out.Code()
+	let body = str(out.Body)
+	mut response = "HTTP/1.1 {code} OK\r\n"
+	for h in out.Fields() { response += h + "\r\n" }
+	response += "Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+	c.Write(response) catch _ {}
+}
+
+// indexByte returns the first byte position of c, or -1.
+fn indexByte(s str, c u8) i64 {
+	for i in 0..len(s) { if s[i] == c { return i } }
+	return -1
+}
+
+// indexBytes returns the first substring position, or -1.
+fn indexBytes(s str, part str) i64 {
+	if len(part) == 0 { return 0 }
+	if len(part) > len(s) { return -1 }
+	for i in 0..len(s)-len(part)+1 {
+		if s[i:i+len(part)] == part { return i }
+	}
+	return -1
+}
+
+// splitLines splits HTTP field lines while retaining no terminators.
+fn splitLines(s str) []str {
+	mut out = []str{}
+	mut from = 0
+	for i in 0..len(s) {
+		if s[i] == '\n' {
+			mut end = i
+			if i > from && s[i-1] == '\r' { end = i-1 }
+			out = append(out, s[from:end])
+			from = i+1
+		}
+	}
+	if from < len(s) { out = append(out, s[from:]) }
+	return out
+}

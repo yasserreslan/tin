@@ -1,0 +1,66 @@
+package main
+
+// HTTP helpers: a jar carries cookies over real wire requests and applies expiry, domain,
+// path and Secure rules; assay constructs requests and records handler responses.
+
+import "anvil"
+import "assay"
+import "jar"
+import "say"
+
+fn set(q anvil.Req, w mut anvil.Out) {
+	w.SetCookie(anvil.Cookie{Name: "sid", Value: "abc", Path: "/", HttpOnly: true})
+	w.SetCookie(anvil.Cookie{Name: "wrong-domain", Value: "x", Domain: "wrong.example", Path: "/"})
+	w.SetCookie(anvil.Cookie{Name: "wrong-path", Value: "x", Path: "/other"})
+	w.SetCookie(anvil.Cookie{Name: "secure", Value: "yes", Path: "/", Secure: true})
+	w.Text("set")
+}
+
+fn check(q anvil.Req, w mut anvil.Out) {
+	w.Text(q.Cookie("sid") + ":" + q.Cookie("wrong-domain") + ":" + q.Cookie("wrong-path") + ":" + q.Cookie("secure"))
+}
+
+fn expire(q anvil.Req, w mut anvil.Out) {
+	w.SetCookie(anvil.Cookie{Name: "sid", Value: "", Path: "/", MaxAge: -1})
+	w.Text("expired")
+}
+
+fn run() ! {
+	mut r = anvil.NewRouter()
+	r.Get("/set", set)
+	r.Get("/check", check)
+	r.Get("/expire", expire)
+	mut s = assay.NewServer(r) catch err {
+		say.Line("server failed", err)
+		return
+	}
+	mut j = jar.New()
+	let first = try j.Do("GET", s.URL + "/set", []str{}, "")
+	say.Line("set", first.Status, first.Body)
+	let second = try j.Do("GET", s.URL + "/check", []str{}, "")
+	say.Line("http cookies", second.Body)
+	let secureCookies = j.Cookies("https" + s.URL[4:] + "/check")
+	say.Line("https secure", len(secureCookies))
+	let deleted = try j.Do("GET", s.URL + "/expire", []str{}, "")
+	let after = j.Cookies(s.URL + "/check")
+	say.Line("expire", deleted.Body, len(after))
+	let q = assay.NewRequest("POST", "/item?q=1", []str{"X-Test: yes"}, "body")
+	say.Line("request", q.Method, q.Path, q.Query, q.Header("x-test"), q.Body())
+	let rec = assay.NewRecorder()
+	say.Line("recorder", rec.Code())
+	s.Close()
+}
+
+fn runAll() ! {
+	scope s {
+		s.spawn(fn() ! {
+			run() catch err { say.Line("test failed", err) }
+		})
+	}
+}
+
+fn main() {
+	runAll() catch err {
+		say.Line("scope failed", err)
+	}
+}

@@ -1,0 +1,6 @@
+set 200 set
+http cookies abc:::
+https secure 2
+expire expired 0
+request POST /item q=1 yes body
+recorder 200
