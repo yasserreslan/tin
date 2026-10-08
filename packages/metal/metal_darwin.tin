@@ -27,16 +27,6 @@ extern fn msg3(recv i64, sel i64, a i64, b i64, c i64) i64
 @symbol("objc_msgSend")
 extern fn msg4(recv i64, sel i64, a i64, b i64, c i64, d i64) i64
 
-// two doubles (a CGSize)
-@framework("/usr/lib/libobjc.A.dylib")
-@symbol("objc_msgSend")
-extern fn msgD2(recv i64, sel i64, a f64, b f64) i64
-
-// four doubles (an MTLClearColor)
-@framework("/usr/lib/libobjc.A.dylib")
-@symbol("objc_msgSend")
-extern fn msgD4(recv i64, sel i64, a f64, b f64, c f64, d f64) i64
-
 const pixelBGRA = 80
 const loadClear = 2
 const storeStore = 1
@@ -148,12 +138,33 @@ fn NewTarget(g Gpu, w i64, h i64) Target {
 // Draw clears the texture to the color and draws the batch over it, then waits for the GPU.
 fn Draw(g Gpu, texture i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) {
 	let pool = appkit.PoolPush()
+	let cmd = encode(g, texture, w, h, quads, r, gr, b, a)
+	appkit.Send(cmd, "commit")
+	appkit.Send(cmd, "waitUntilCompleted")
+	appkit.PoolPop(pool)
+}
+
+// DrawLayer draws a frame into the next drawable of a CAMetalLayer of w by h pixels and shows it; it does not wait.
+fn DrawLayer(g Gpu, layer i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) {
+	let pool = appkit.PoolPush()
+	appkit.SendD2(layer, "setDrawableSize:", f64(w), f64(h))
+	let drawable = appkit.Send(layer, "nextDrawable")
+	if drawable != 0 {
+		let cmd = encode(g, appkit.Send(drawable, "texture"), w, h, quads, r, gr, b, a)
+		appkit.Send1(cmd, "presentDrawable:", drawable)
+		appkit.Send(cmd, "commit")
+	}
+	appkit.PoolPop(pool)
+}
+
+// encode records the clear and the quads into a command buffer for the texture and returns it uncommitted.
+fn encode(g Gpu, texture i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f64) i64 {
 	let pass = appkit.Send(appkit.Class("MTLRenderPassDescriptor"), "renderPassDescriptor")
 	let att = appkit.Send1(appkit.Send(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0)
 	appkit.Send1(att, "setTexture:", texture)
 	appkit.Send1(att, "setLoadAction:", loadClear)
 	appkit.Send1(att, "setStoreAction:", storeStore)
-	msgD4(att, appkit.Sel("setClearColor:"), r, gr, b, a)
+	appkit.SendD4(att, "setClearColor:", r, gr, b, a)
 	let cmd = appkit.Send(g.Queue, "commandBuffer")
 	let enc = appkit.Send1(cmd, "renderCommandEncoderWithDescriptor:", pass)
 	if quads.N > 0 {
@@ -167,9 +178,7 @@ fn Draw(g Gpu, texture i64, w i64, h i64, quads Quads, r f64, gr f64, b f64, a f
 		appkit.Send4(enc, "drawPrimitives:vertexStart:vertexCount:instanceCount:", triangleStrip, 0, 4, quads.N)
 	}
 	appkit.Send(enc, "endEncoding")
-	appkit.Send(cmd, "commit")
-	appkit.Send(cmd, "waitUntilCompleted")
-	appkit.PoolPop(pool)
+	return cmd
 }
 
 // Pixels reads the target back as w * h * 4 bytes (blue, green, red, alpha); the result is the address of the bytes.
