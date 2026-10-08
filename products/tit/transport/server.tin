@@ -254,6 +254,32 @@ fn reach[S store.ObjectStore](st mut S, tree object.Id, skip map[str]bool, want 
 	}
 }
 
+// reachTrees adds a tree and the trees below it to want, once each, and no blob: what a lazy clone takes.
+fn reachTrees[S store.ObjectStore](st mut S, tree object.Id, want mut []object.Id, seen mut map[str]bool) ! {
+	let (_, done) = seen[tree.Bytes()]
+	if done {
+		return
+	}
+	seen[tree.Bytes()] = true
+	want = append(want, tree)
+	let o = try st.Get(tree)
+	match o {
+		Tree(es) => {
+			for e in es {
+				if e.Mode == object.Mode.Dir {
+					try reachTrees(mut st, e.Id, mut want, mut seen)
+				}
+			}
+		}
+		Commit(_) => {
+		}
+		Tag(_) => {
+		}
+		Blob(_) => {
+		}
+	}
+}
+
 // treeObjects is every object of a tree, as a set.
 fn treeObjects[S store.ObjectStore](st mut S, tree object.Id, out mut map[str]bool) ! {
 	let (_, done) = out[tree.Bytes()]
@@ -303,11 +329,33 @@ fn (s Server) fetch(body str) !str {
 	if k != Kind.FetchRequest {
 		try refusal(Code.BadRequest, "a fetch takes a fetch request")
 	}
-	mut req = FetchRequest{Wants: []str{}, Haves: []str{}}
+	mut req = FetchRequest{Wants: []str{}, Haves: []str{}, NoBlobs: false, Objects: []str{}}
 	argoGet(header, mut req) catch e {
 		try refusal(Code.BadRequest, fault.Message(e))
 	}
 	mut st = try objects(s.Dir)
+	if len(req.Objects) > 0 {
+		// a lazy clone reading what it left out: these objects, and nothing else
+		if len(req.Objects) > s.limits.Refs * 100 {
+			try refusal(Code.TooLarge, "{len(req.Objects)} objects in one fetch")
+		}
+		mut ids = []object.Id{}
+		for o in req.Objects {
+			let id = object.ParseId(o) catch _ {
+				try refusal(Code.BadRequest, "{o} is not an id")
+				object.NoId
+			}
+			if !st.Has(id) {
+				try refusal(Code.NotFound, "no object {o} here")
+			}
+			ids = append(ids, id)
+		}
+		let otmp = s.Dir + "/tmp-fetch-" + seal.Hex(seal.RandomBytes(8))
+		let op = try packfile.Write(mut st, ids, otmp)
+		let odata = try flume.ReadFile(op.Path)
+		try quarry.RemoveAll(otmp)
+		return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(ids)}), odata)
+	}
 	mut wants = []object.Id{}
 	for w in req.Wants {
 		let id = object.ParseId(w) catch _ {
@@ -340,7 +388,11 @@ fn (s Server) fetch(body str) !str {
 	for id in commits {
 		send = append(send, id)
 		let c = try commitOf(mut st, id)
-		try reach(mut st, c.Tree, skip, mut send, mut seen)
+		if req.NoBlobs {
+			try reachTrees(mut st, c.Tree, mut send, mut seen)
+		} else {
+			try reach(mut st, c.Tree, skip, mut send, mut seen)
+		}
 	}
 	let tmp = s.Dir + "/tmp-fetch-" + seal.Hex(seal.RandomBytes(8))
 	let p = try packfile.Write(mut st, send, tmp)

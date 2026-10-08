@@ -25,6 +25,8 @@ type ShareArgs struct {
 	// Lease lets push replace the server's branch with history that does not contain it (a rebased stack), when the
 	// server's branch is still what this repository last fetched of it
 	Lease bool
+	// Lazy (clone --lazy) takes the history without file contents, which come on first read (#803)
+	Lazy bool
 }
 
 // ServeArgs are tit serve's arguments.
@@ -126,7 +128,10 @@ fn fetchFrom(r mut Repo, remote str, url str, remoteName str) !(transport.Heads,
 	mut got = 0
 	if len(wants) > 0 {
 		let haves = try localTips(r)
-		let (_, data) = try c.Fetch(transport.FetchRequest{Wants: wants, Haves: haves})
+		let cfg = try r.config()
+		let lazyRemote = cfg.Get("lazy.remote")
+		let lazy = lazyRemote != nil && lazyRemote == remote
+		let (_, data) = try c.Fetch(transport.FetchRequest{Wants: wants, Haves: haves, NoBlobs: lazy, Objects: []str{}})
 		got = try storePack(mut r, data)
 	}
 	// the refs: branches under refs/remotes/<name>/, tags as they are when this repository has none of that name
@@ -222,6 +227,9 @@ fn doClone(g Global, a ShareArgs, o mut Out) ! {
 	mut quiet = Out{buf: []u8{}}
 	try doInit(Global{Json: false, Trace: false, Dir: "", Color: false}, dir, mut quiet)
 	try identity.Set(dir + "/.tit/config", "remote.origin.url", a.Remote)
+	if a.Lazy {
+		try identity.Set(dir + "/.tit/config", "lazy.remote", "origin")
+	}
 	let at = Global{Json: g.Json, Trace: g.Trace, Dir: dir, Color: g.Color}
 	mut r = try open(at)
 	use lock = change.Lock(r.Ws.Store)
@@ -248,7 +256,11 @@ fn doClone(g Global, a ShareArgs, o mut Out) ! {
 	let id = try object.ParseId(target)
 	let tree = try fresh.treeOf(id)
 	try moveTo(mut fresh, object.NoId, tree, true)
-	o.Line("Cloned " + a.Remote + " into " + dir + " ({got} objects); on " + shortBranch(branch) + ".")
+	mut lazyNote = ""
+	if a.Lazy {
+		lazyNote = ", file contents as they are read"
+	}
+	o.Line("Cloned " + a.Remote + " into " + dir + " ({got} objects{lazyNote}); on " + shortBranch(branch) + ".")
 }
 
 // sendObjects is what tip reaches that none of the commits in hide (and their trees) has.
@@ -380,7 +392,11 @@ fn doPush(g Global, a ShareArgs, o mut Out) ! {
 			continue
 		}
 		if ref.Name != branch && r.Store.Has(id) {
-			hide = append(hide, id)
+			// an annotated tag counts as the commit it tags
+			let cid = r.resolve(id.Hex()) catch _ {
+				continue
+			}
+			hide = append(hide, cid)
 		}
 	}
 	let ids = try sendObjects(mut r, tip, hide)
@@ -455,12 +471,23 @@ fn syncRebase(g Global, a ShareArgs) !i64 {
 	if remoteTrunk != nil {
 		let upstream = try r.resolve("refs/remotes/" + a.Remote + "/" + trunk)
 		let localTrunk = try r.resolve(trunk)
-		if upstream != localTrunk {
-			let behind = try revwalk.IsAncestor(mut r.Store, localTrunk, upstream)
-			if !behind {
-				fail "{trunk} has commits {a.Remote}/{trunk} lacks: push or reconcile {trunk} first"
+		// the stack's base: the parent of its first change (the trunk itself when there is none)
+		mut base = localTrunk
+		if len(st.Commits) > 0 {
+			let first = try commitData(mut r, st.Commits[0])
+			if len(first.Parents) > 0 {
+				base = first.Parents[0]
 			}
-			mut extra = []oplog.RefChange{oplog.RefChange{Name: "refs/heads/" + trunk, Before: commitText(localTrunk), After: commitText(upstream)}}
+		}
+		if upstream != localTrunk || base != upstream {
+			mut extra = []oplog.RefChange{}
+			if upstream != localTrunk {
+				let behind = try revwalk.IsAncestor(mut r.Store, localTrunk, upstream)
+				if !behind {
+					fail "{trunk} has commits {a.Remote}/{trunk} lacks: push or reconcile {trunk} first"
+				}
+				extra = append(extra, oplog.RefChange{Name: "refs/heads/" + trunk, Before: commitText(localTrunk), After: commitText(upstream)})
+			}
 			if len(st.Commits) == 0 {
 				// nothing of ours above the trunk: the branch follows the trunk
 				if st.Branch != "refs/heads/" + trunk {
@@ -501,6 +528,6 @@ fn syncPush(g Global, a ShareArgs, rebased i64, o mut Out) ! {
 		return
 	}
 	mut pushOut = Out{buf: []u8{}}
-	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(st2.Branch), Dir: "", Lease: true}, mut pushOut)
+	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(st2.Branch), Dir: "", Lease: true, Lazy: false}, mut pushOut)
 	o.Line("Synced: rebased " + count(rebased, "change", "changes") + " onto {a.Remote}/{trunk}; " + twine.TrimSpace(str(pushOut.buf)))
 }

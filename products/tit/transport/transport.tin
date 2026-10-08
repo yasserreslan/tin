@@ -82,6 +82,9 @@ type Heads struct {
 type FetchRequest struct {
 	Wants []str
 	Haves []str
+	// NoBlobs leaves file contents out (a lazy clone, #803); Objects asks for exactly these objects instead of a walk
+	NoBlobs bool
+	Objects []str
 }
 
 // FetchAnswer is the header of a fetch answer; the pack follows it.

@@ -87,6 +87,32 @@ t push > /dev/null
 [ "$(t -C "$d/server" log --format=subject -n 1)" = "Merge commit 'origin/main'" ] || fail "the push again"
 echo "ok undoing a push puts the server's branch back, after asking"
 
+# ship: a tag with the changelog since the last tag, signed, then the branch and the tag pushed
+cd "$d/c"
+printf 'three\n' >> a.txt
+t commit -am "Add three" > /dev/null
+printf 'four\n' >> a.txt
+t commit -am "Add four" > /dev/null
+t ship v1.0 --dry-run > "$d/out.txt"
+t tag | grep -q v1.0 && fail "a dry run made the tag"
+grep -q "^- Add four (" "$d/out.txt" || fail "the changelog: $(cat "$d/out.txt")"
+printf 'dirty\n' >> a.txt
+t ship v1.0 > "$d/out.txt" 2>&1 && fail "ship with uncommitted changes"
+t commit -am "Add dirty" > /dev/null
+t ship v1.0 > "$d/out.txt"
+grep -q "^Pushed the tag v1.0 to origin\.$" "$d/out.txt" || fail "ship said: $(cat "$d/out.txt")"
+[ "$(t -C "$d/server" tag)" = "v1.0" ] || fail "the server's tags: $(t -C "$d/server" tag)"
+[ "$(t -C "$d/server" log --format=subject -n 1)" = "Add dirty" ] || fail "ship did not push the branch"
+[ "$(t -C "$d/server" log --format=id -n 1 v1.0)" = "$(t log --format=id -n 1)" ] || fail "the server's v1.0 is not the shipped commit"
+printf 'five\n' >> a.txt
+t commit -am "Add five" > /dev/null
+t ship v1.1 > "$d/out.txt"
+grep -q "^Changes since v1.0 (1):$" "$d/out.txt" || fail "the second changelog: $(cat "$d/out.txt")"
+grep -q "^- Add five (" "$d/out.txt" || fail "the second changelog: $(cat "$d/out.txt")"
+[ "$(t -C "$d/server" tag | tr '\n' ' ')" = "v1.0 v1.1 " ] || fail "the server's tags: $(t -C "$d/server" tag)"
+t ship v1.1 > "$d/out.txt" 2>&1 && fail "a tag shipped twice"
+echo "ok ship"
+
 # a client with no key is refused
 mkdir "$d/stranger"
 if HOME="$d/stranger" XDG_CONFIG_HOME="$d/stranger" t clone "$url" "$d/s" > "$d/out.txt" 2>&1; then

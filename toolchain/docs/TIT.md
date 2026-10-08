@@ -48,10 +48,11 @@ Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.ur
 |---|---|
 | `tit status [-s]` | staged, unstaged and untracked files; `-s` is git's short form |
 | `tit add <paths>` | stage files; a directory stages what is below it (not what `.gitignore` ignores); `.` stages everything, deletions too |
+| `tit add -p [paths]` | stage the changes of tracked files hunk by hunk, answering each question with a line: `y` stage it, `n` leave it, `a` it and the rest of the file, `d` none of the rest of the file, `q` stop |
 | `tit rm [-r] [-f] [--cached] <paths>` | stop tracking files and remove them; `--cached` keeps them on the disk; `-f` removes one with unstaged changes |
 | `tit mv <from> <to>` | move or rename a tracked file or directory |
 | `tit commit [-m msg]... [-a] [--amend]` | record the staged files; each `-m` is a paragraph; `-a` stages every tracked change first; without `-m`, `$TIT_EDITOR` or `$EDITOR` asks; `--amend` makes a new version of the last change (same change id) |
-| `tit diff [--staged] [--stat] [A B] [paths]` | unstaged changes, staged ones, or between two revisions, in git's patch format |
+| `tit diff [--staged] [--stat] [--word] [--semantic] [A B] [paths]` | unstaged changes, staged ones, or between two revisions, in git's patch format (each hunk header with the function line above it, as git's); `--word` as git's `--word-diff=plain`; `--semantic` by Tin declaration |
 | `tit log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id\|change\|subject\|git-id]` | the history |
 | `tit show [rev]` | a commit, its `--stat` and its diff |
 | `tit cat <rev or id>` | an object's content |
@@ -73,6 +74,7 @@ Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.ur
 | `tit tag <name> [rev]` | a lightweight tag |
 | `tit tag -a <name> -m <msg> [rev]` | an annotated tag, signed when you have a key |
 | `tit tag -d <name>` | delete a tag |
+| `tit ship <version> [--remote name] [--no-push] [--dry-run]` | a release: an annotated tag on HEAD whose message is the changelog (the first line of every change since the last tag, oldest first), signed when you have a key, then the branch and the tag pushed (`origin` by default); refuses uncommitted changes; `--dry-run` prints the changelog |
 
 ## Workspaces
 
@@ -115,16 +117,21 @@ the new version records it, `tit stack` shows it, and `tit edit` puts git's mark
 Kept versions stay in `.tit/workspaces/<ws>/snapshots` for 14 days. They never leave the machine (no commit names
 their blobs), a file `tit guard` flags is never kept, and neither is a file over 16 MiB.
 
+## Large files
+
+A file over 8 MiB is stored in content-defined chunks (design/tit.md section 5): an edit stores the chunks it
+touches, not the whole file again. Nothing changes in how the file is used; commits and git mirrors see one blob.
+
 ## Sharing
 
 | command | |
 |---|---|
 | `tit remote` / `tit remote add <name> <url>` | the remotes, or add one |
-| `tit clone <url> [dir]` | copy a repository and check out `main` (or the first branch) |
+| `tit clone [--lazy] <url> [dir]` | copy a repository and check out `main` (or the first branch); `--lazy` takes every commit and tree but only the files it checks out: any other file comes from the server the first time something reads it (`lazy.remote` in the config), so `tit log` needs nothing more |
 | `tit fetch [remote]` | bring a remote's new commits in, as `refs/remotes/<remote>/*` |
 | `tit push [remote] [branch]` | send a branch (origin and the current branch by default); refuses when the server's branch has moved on (`tit pull` first) |
 | `tit pull [remote]` | fetch, then merge `<remote>/<current branch>` |
-| `tit serve [--addr host:port] [--public] [--allow file]` | serve this repository; `.tit/allowed-keys` (or `--allow`) lists the keys that may sign, one `<email> ed25519 <base64>` a line; `--public` lets clone and fetch go unsigned |
+| `tit serve [--addr host:port] [--public] [--allow file]` | serve this repository (anvil's recording applies: a request kept with `TIN_REPLAY_DIR` replays with `tin replay`); `.tit/allowed-keys` (or `--allow`) lists the keys that may sign, one `<email> ed25519 <base64>` a line; `--public` lets clone and fetch go unsigned |
 
 ## git
 

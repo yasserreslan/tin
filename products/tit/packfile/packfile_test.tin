@@ -10,6 +10,7 @@ import "seal"
 import "sift"
 import "squash"
 import "stamp"
+import "tide"
 
 // Tests for packs (#778): deltas, a write and read round trip with deltas, and hand-built hostile packs.
 
@@ -254,6 +255,49 @@ fn TestHostile(t mut crucible.T) {
 	}
 	let (_, _, e4) = p4.GetRaw(last)
 	t.True("a chain past the depth bound", e4 != nil && fault.Is(e4, ErrBadPack))
+	// two deltas, each against the other: a cycle
+	let b4 = object.Hash(object.Kind.Blob, "bbbb")
+	mut p5 = build(d + "/5", []str{refDelta(4, b4, "\x04\x04\x00\x04aaaa"), refDelta(4, a, "\x04\x04\x00\x04bbbb")}, []object.Id{a, b4}) catch err {
+		t.Error("build 5: {fault.Message(err)}")
+		return
+	}
+	let (_, _, e5) = p5.GetRaw(a)
+	t.HasFault("a delta cycle", e5)
+	let (_, _, e5b) = p5.GetRaw(b4)
+	t.HasFault("a delta cycle from the other end", e5b)
+	// a delta whose result is larger than its entry declares
+	let x4 = object.Hash(object.Kind.Blob, "xxxx")
+	let a5 = object.Hash(object.Kind.Blob, "aaaaa")
+	mut p6 = build(d + "/6", []str{whole(typeBlob, "xxxx"), refDelta(4, x4, "\x04\x05\x00\x05aaaaa")}, []object.Id{x4, a5}) catch err {
+		t.Error("build 6: {fault.Message(err)}")
+		return
+	}
+	let (_, _, e6) = p6.GetRaw(a5)
+	t.HasFault("a result larger than declared", e6)
+	// a chain of 10,000 deltas: refused at the depth bound, quickly and without deep recursion
+	mut long = []str{whole(typeBlob, "xxxx")}
+	for i in 0..10000 {
+		long = append(long, ofsDelta(4, len(long[len(long) - 1]), "\x04\x04\x01\x00\x04"))
+	}
+	mut longIds = []object.Id{}
+	for i in 0..len(long) {
+		longIds = append(longIds, object.Hash(object.Kind.Blob, "long {i}"))
+	}
+	longIds[len(longIds) - 1] = last
+	mut p7 = build(d + "/7", long, longIds) catch err {
+		t.Error("build 7: {fault.Message(err)}")
+		return
+	}
+	let t0 = tide.Now()
+	let (_, _, e7) = p7.GetRaw(last)
+	t.True("a chain of 10,000 deltas is refused", e7 != nil && fault.Is(e7, ErrBadPack))
+	t.True("within a second", tide.Now() - t0 < 1000000000)
+	mut m7 = store.NewMem()
+	let data7 = quarry.ReadFile(p7.Path) catch _ {
+		""
+	}
+	let (_, u7) = Unpack(data7, mut m7, 1 << 20)
+	t.HasFault("unpacking the chain of 10,000", u7)
 	// every byte of a small pack's entries damaged (with the hashes fixed up): faults, never panics
 	let good = []str{whole(typeBlob, "some content here"), refDelta(18, object.Hash(object.Kind.Blob, "some content here"), "\x11\x12\x01\x00\x11\x00\x01!")}
 	let goodIds = []object.Id{object.Hash(object.Kind.Blob, "some content here"), object.Hash(object.Kind.Blob, "some content here!")}

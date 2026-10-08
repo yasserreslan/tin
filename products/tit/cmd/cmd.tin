@@ -21,6 +21,7 @@ type Command enum {
 	Init(str)
 	Status(bool)
 	Add([]str)
+	AddPatch([]str)
 	Rm(RmArgs)
 	Mv(str, str)
 	Commit(CommitArgs)
@@ -52,6 +53,7 @@ type Command enum {
 	History(HistoryArgs)
 	Overlap
 	Timeline(TimelineArgs)
+	Ship(ShipArgs)
 	Watch(WatchArgs)
 	Park(str)
 	Unpark(str)
@@ -151,7 +153,8 @@ const usageText = `usage: tit [-C dir] [--json] [--trace] <command> [arguments]
 commands:
   init [dir]                 start a repository in dir (the current directory by default)
   status [-s]                what changed, what is staged, what is untracked (-s: two letters a file, as git's)
-  add <paths>                stage files (a directory stages what is below it; . everything)
+  add [-p] <paths>           stage files (a directory stages what is below it; . everything); -p asks hunk
+                             by hunk which changes of the tracked files to stage
   rm [-r] [-f] [--cached] <paths>
                              stop tracking files and remove them (--cached keeps them on the disk)
   mv <from> <to>             move or rename a tracked file or directory
@@ -180,7 +183,8 @@ commands:
   oplog [show N | restore N [--yes]]
                              the operations, newest first; one in full; every ref as it was after one
   remote [add <name> <url>]  the remotes, or add one
-  clone <url> [dir]          copy a repository from a tit server
+  clone [--lazy] <url> [dir] copy a repository from a tit server (--lazy: every commit, but file contents only
+                             when something reads them)
   fetch [remote]             bring a remote's new commits in (refs/remotes/<remote>/...)
   push [remote] [branch]     send a branch to a remote (origin and the current branch by default)
   pull [remote]              fetch, then merge the remote's copy of the current branch
@@ -211,6 +215,9 @@ commands:
   overlap                    other branches (and fetched remote ones) changing the declarations this one changes
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
+  ship <version> [--remote name] [--no-push] [--dry-run]
+                             tag HEAD as version with the changelog since the last tag (signed when you have
+                             a key), then push the branch and the tag (origin by default)
   timeline <file> [N]        the versions of a file kept before commands that change files (and by watch); N
                              puts version N back
   watch [--every ms] [--for s]
@@ -292,8 +299,16 @@ fn Parse(args []str) !(Global, Command) {
 	}
 	if name == "add" {
 		mut paths = []str{}
+		mut patch = false
 		for a in rest {
-			paths = append(paths, a)
+			if a == "-p" || a == "--patch" {
+				patch = true
+			} else {
+				paths = append(paths, a)
+			}
+		}
+		if patch {
+			return g, Command.AddPatch(paths)
 		}
 		return g, Command.Add(paths)
 	}
@@ -569,17 +584,26 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Remote(ra)
 	}
 	if name == "clone" {
-		if len(rest) == 0 || len(rest) > 2 {
-			fail fault.Wrap(ErrUsage, "clone takes a URL and, if you like, a directory")
+		mut pos = []str{}
+		mut lazy = false
+		for a in rest {
+			if a == "--lazy" {
+				lazy = true
+			} else {
+				pos = append(pos, a)
+			}
+		}
+		if len(pos) == 0 || len(pos) > 2 {
+			fail fault.Wrap(ErrUsage, "clone [--lazy] takes a URL and, if you like, a directory")
 		}
 		mut dir = ""
-		if len(rest) == 2 {
-			dir = rest[1]
+		if len(pos) == 2 {
+			dir = pos[1]
 		}
-		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir, Lease: false})
+		return g, Command.Clone(ShareArgs{Remote: pos[0], Branch: "", Dir: dir, Lease: false, Lazy: lazy})
 	}
 	if name == "sync" {
-		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: true}
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: true, Lazy: false}
 		if len(rest) == 1 {
 			sa.Remote = rest[0]
 		} else if len(rest) > 1 {
@@ -588,7 +612,7 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Sync(sa)
 	}
 	if name == "fetch" || name == "pull" || name == "push" {
-		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: false}
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: false, Lazy: false}
 		if len(rest) > 0 {
 			sa.Remote = rest[0]
 		}
@@ -810,6 +834,29 @@ fn Parse(args []str) !(Global, Command) {
 			fail fault.Wrap(ErrUsage, "bench record <name> <value> [--unit u] | bench log <name> | bench compare <name> <A> <B>")
 		}
 		return g, Command.Bench(ba)
+	}
+	if name == "ship" {
+		mut sa = ShipArgs{Version: "", Remote: "origin", Push: true, DryRun: false}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--remote" && k + 1 < len(rest) {
+				sa.Remote = rest[k + 1]
+				k += 1
+			} else if rest[k] == "--no-push" {
+				sa.Push = false
+			} else if rest[k] == "--dry-run" {
+				sa.DryRun = true
+			} else if len(sa.Version) == 0 && !twine.HasPrefix(rest[k], "-") {
+				sa.Version = rest[k]
+			} else {
+				fail fault.Wrap(ErrUsage, "ship <version> [--remote name] [--no-push] [--dry-run]")
+			}
+			k += 1
+		}
+		if len(sa.Version) == 0 {
+			fail fault.Wrap(ErrUsage, "ship <version> [--remote name] [--no-push] [--dry-run]")
+		}
+		return g, Command.Ship(sa)
 	}
 	if name == "timeline" {
 		mut ta = TimelineArgs{Path: "", Pick: 0}
@@ -1061,6 +1108,7 @@ fn commandName(c Command) str {
 		Init(_) => "init"
 		Status(_) => "status"
 		Add(_) => "add"
+		AddPatch(_) => "add"
 		Rm(_) => "rm"
 		Mv(_, _) => "mv"
 		Commit(_) => "commit"
@@ -1092,6 +1140,7 @@ fn commandName(c Command) str {
 		History(_) => "history"
 		Overlap => "overlap"
 		Timeline(_) => "timeline"
+		Ship(_) => "ship"
 		Watch(_) => "watch"
 		Park(_) => "park"
 		Unpark(_) => "unpark"
@@ -1132,6 +1181,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Add(paths) => {
 			try doAdd(g, paths, mut o)
+		}
+		AddPatch(paths) => {
+			try doAddPatch(g, paths, mut o)
 		}
 		Rm(ra) => {
 			try doRm(g, ra, mut o)
@@ -1225,6 +1277,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Timeline(ta) => {
 			try doTimeline(g, ta, mut o)
+		}
+		Ship(sa) => {
+			try doShip(g, sa, mut o)
 		}
 		Watch(wa) => {
 			try doWatch(g, wa, mut o)

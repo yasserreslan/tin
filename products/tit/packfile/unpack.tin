@@ -41,6 +41,9 @@ fn Unpack[S store.ObjectStore](data str, s mut S, maxObject i64) ![]object.Id {
 	let end = len(data) - 32
 	mut bodies = map[i64]str{}
 	mut kinds = map[i64]object.Kind{}
+	// each entry's delta depth, by offset and by id, so a chain is bounded as the reader bounds it
+	mut depths = map[i64]i64{}
+	mut depthOf = map[str]i64{}
 	mut ids = []object.Id{}
 	mut at = 20
 	for n in 0..count {
@@ -57,6 +60,7 @@ fn Unpack[S store.ObjectStore](data str, s mut S, maxObject i64) ![]object.Id {
 		mut baseKind = object.Kind.Blob
 		mut base = ""
 		mut delta = false
+		mut depth = 0
 		if t == typeOfsDelta {
 			let (dist, b) = try uvarintIn(data, at)
 			at = b
@@ -67,6 +71,7 @@ fn Unpack[S store.ObjectStore](data str, s mut S, maxObject i64) ![]object.Id {
 			base = bb
 			baseKind = kinds[off - dist]
 			delta = true
+			depth = depths[off - dist] + 1
 		} else if t == typeRefDelta {
 			if at + 32 > end {
 				fail fault.Wrap(ErrBadPack, "an entry runs past the end")
@@ -79,6 +84,15 @@ fn Unpack[S store.ObjectStore](data str, s mut S, maxObject i64) ![]object.Id {
 			base = bb
 			baseKind = bk
 			delta = true
+			let (bd, inPack) = depthOf[bid.Bytes()]
+			if inPack {
+				depth = bd + 1
+			} else {
+				depth = 1
+			}
+		}
+		if depth > MaxDeltaDepth {
+			fail fault.Wrap(ErrBadPack, "a delta chain deeper than {MaxDeltaDepth} at {off}")
 		}
 		let (clen, c) = try uvarintIn(data, at)
 		if clen < 0 || c + clen > end {
@@ -104,7 +118,9 @@ fn Unpack[S store.ObjectStore](data str, s mut S, maxObject i64) ![]object.Id {
 		}
 		bodies[off] = body
 		kinds[off] = kind
+		depths[off] = depth
 		let id = try s.PutRaw(kind, body)
+		depthOf[id.Bytes()] = depth
 		ids = append(ids, id)
 	}
 	if at != end {

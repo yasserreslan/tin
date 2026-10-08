@@ -48,6 +48,14 @@ fn (l Loose) GetRaw(id object.Id) !(object.Kind, str) {
 	} catch err {
 		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: {fault.Message(err)}")
 	}
+	if isManifest(enc) {
+		// a large blob kept in chunks (chunks.tin)
+		let whole = try assemble(l.dir, enc)
+		if object.Hash(object.Kind.Blob, whole) != id {
+			fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: its chunks do not match its id")
+		}
+		return object.Kind.Blob, whole
+	}
 	let (kind, body) = try object.Split(enc)
 	if object.Hash(kind, body) != id {
 		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: content does not match its id")

@@ -46,7 +46,7 @@ fn UnifiedLines(oldName str, newName str, la []str, lb []str, es []Edit, context
 		if len(out) == 0 {
 			appendText(mut out, "--- {oldName}\n+++ {newName}\n")
 		}
-		appendText(mut out, hunkHeader(ops, first, end))
+		appendText(mut out, hunkHeader(la, ops, first, end))
 		for k in first..end {
 			let o = ops[k]
 			if o.kind == kindKeep {
@@ -117,7 +117,37 @@ fn hunkAt(ops []op, x i64, context i64) (i64, i64) {
 	return first, min(len(ops), last + 1 + context)
 }
 
-fn hunkHeader(ops []op, first i64, end i64) str {
+// funcName is git's text after a hunk's range: the nearest line above the hunk that starts with a letter, _ or $
+// (git's default function line), cut to 80 bytes, without its trailing white space; "" when there is none.
+fn funcName(la []str, start i64) str {
+	mut l = start - 1
+	for l >= 0 {
+		let rec = la[l]
+		if len(rec) > 0 && (isAlpha(rec[0]) || rec[0] == '_' || rec[0] == '$') {
+			mut n = len(rec)
+			if n > 80 {
+				n = 80
+			}
+			for n > 0 && isCSpace(rec[n - 1]) {
+				n -= 1
+			}
+			return rec[0:n]
+		}
+		l -= 1
+	}
+	return ""
+}
+
+fn isAlpha(c u8) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// isCSpace is C's isspace.
+fn isCSpace(c u8) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0x0b || c == 0x0c
+}
+
+fn hunkHeader(la []str, ops []op, first i64, end i64) str {
 	mut acount = 0
 	mut bcount = 0
 	for k in first..end {
@@ -127,6 +157,10 @@ fn hunkHeader(ops []op, first i64, end i64) str {
 		if ops[k].kind != kindDelete {
 			bcount += 1
 		}
+	}
+	let fname = funcName(la, ops[first].ai)
+	if len(fname) > 0 {
+		return "@@ -{span(ops[first].ai, acount)} +{span(ops[first].bi, bcount)} @@ " + fname + "\n"
 	}
 	return "@@ -{span(ops[first].ai, acount)} +{span(ops[first].bi, bcount)} @@\n"
 }

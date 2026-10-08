@@ -397,6 +397,19 @@ fn Add[S store.ObjectStore](idx mut Index, s mut S, root str, path str) ! {
 	idx.Set(Entry{Path: path, Hash: id.Bytes(), Mode: ModeOf(info), Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device})
 }
 
+// AddFile is Add into the loose store, which keeps a file larger than store.ChunkAbove in chunks (#803), reading
+// it once and in pieces.
+fn AddFile(idx mut Index, s mut store.Loose, root str, path str) ! {
+	let full = root + "/" + path
+	let info = try quarry.Lstat(full)
+	if info.Type == quarry.FileType.Symlink || info.Size <= store.ChunkAbove {
+		try Add(mut idx, mut s, root, path)
+		return
+	}
+	let id = try s.PutFile(full)
+	idx.Set(Entry{Path: path, Hash: id.Bytes(), Mode: ModeOf(info), Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device})
+}
+
 // AddStat stages a file whose blob is already stored (as bytes, hash), reading only its stat: for checkout, which has
 // just written it.
 fn AddStat(idx mut Index, root str, path str, hash str, mode object.Mode) ! {

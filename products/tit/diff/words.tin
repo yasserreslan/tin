@@ -123,7 +123,7 @@ fn WordDiff(oldName str, newName str, a str, b str, context i64) str {
 		if len(out) == 0 {
 			appendText(mut out, "--- {oldName}\n+++ {newName}\n")
 		}
-		appendText(mut out, hunkHeader(ops, first, end))
+		appendText(mut out, hunkHeader(la, ops, first, end))
 		mut k = first
 		for k < end {
 			if ops[k].kind == kindKeep {
