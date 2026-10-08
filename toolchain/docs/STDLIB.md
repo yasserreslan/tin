@@ -64,6 +64,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
+| [suffixarray](#suffixarray) | byte substring indexing with suffix arrays (index/suffixarray) |
 | [scan](#scan) | a scanner and tokenizer for UTF-8 text (text/scanner) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
 | [metal](#metal) | Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor |
@@ -2495,6 +2496,17 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `(d WordDecoder) DecodeHeader(v str) !str`: DecodeHeader decodes every encoded word in a header value, like Go's DecodeHeader: the plain text around the words is kept, the whitespace between two encoded words is dropped, and a word that cannot be decoded is kept as it was.
 - `type WordEncoder struct{}`: WordEncoder encodes header text as encoded words when it needs to be, like Go's WordEncoder.
 - `(e WordEncoder) EncodeWord(charset str, s str) str`: EncodeWord returns the text as an RFC 2047 encoded word when it has bytes that are not printable ASCII, and the text itself when it does not.
+
+## suffixarray
+
+Package suffixarray indexes byte substrings. An Index keeps its owned text and one i64 per suffix (~9N steady state, ~25N during construction).
+
+- `type Index struct`: Index stores an owned copy of the indexed bytes and one i64 offset per suffix.
+- `New(data []u8) Index`: New copies data and builds a suffix array using prefix doubling.
+- `(x Index) Bytes() []u8`: Bytes returns the indexed bytes; callers must treat them as read-only.
+- `(x Index) Lookup(s []u8, n i64) []i64`: Lookup returns up to n matching offsets in suffix-array order; n < 0 returns all, and empty s or n == 0 returns none.
+- `(x Index) FindAllIndex(s []u8) []i64`: FindAllIndex returns all matching offsets in ascending text order.
+- `Read[S io.Reader](x mut Index, r mut S) !`: Read loads a Go index/suffixarray binary stream and validates every decoded suffix offset.
 
 ## scan
 

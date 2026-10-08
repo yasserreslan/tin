@@ -81,6 +81,7 @@ fn packages() []str {
 		"lasso", "regular expressions with linear-time matching (regexp)",
 		"pack", "numbers as bytes: byte order and varints (encoding/binary)",
 		"mime", "media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart)",
+		"suffixarray", "byte substring indexing with suffix arrays (index/suffixarray)",
 		"scan", "a scanner and tokenizer for UTF-8 text (text/scanner)",
 		"appkit", "macOS frameworks for the Tinland editor (Cocoa, WebKit)",
 		"metal", "Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor",

@@ -1,0 +1,53 @@
+package main
+
+import "say"
+import "suffixarray"
+
+type memoryReader struct {
+	data []u8
+	pos i64
+}
+
+fn (r mut memoryReader) Read(buf mut []u8) !i64 {
+	if r.pos >= len(r.data) { return 0 }
+	let n = min(len(buf), len(r.data)-r.pos)
+	copy(buf, r.data[r.pos:r.pos+n])
+	r.pos += n
+	return n
+}
+
+fn offsets(xs []i64) {
+	for x in xs { say.Line(x) }
+	say.Line("end")
+}
+
+fn main() {
+	let x = suffixarray.New([]u8("banana"))
+	say.Line("all banana")
+	offsets(x.Lookup([]u8("ana"), -1))
+	say.Line("limited ana")
+	offsets(x.Lookup([]u8("ana"), 1))
+	say.Line("sorted ana")
+	offsets(x.FindAllIndex([]u8("ana")))
+	say.Line("empty")
+	offsets(x.Lookup([]u8(""), -1))
+	say.Line("whole")
+	offsets(x.FindAllIndex([]u8("banana")))
+	say.Line("missing")
+	offsets(x.Lookup([]u8("xyz"), -1))
+	let repeated = suffixarray.New([]u8("aaaaa"))
+	say.Line("overlap")
+	offsets(repeated.FindAllIndex([]u8("aa")))
+	mut encoded = make([]u8, 10)
+	encoded[0] = 12
+	for b in []u8("banana") { encoded = append(encoded, b) }
+	mut header = make([]u8, 10)
+	header[0] = 32
+	for b in header { encoded = append(encoded, b) }
+	encoded = append(encoded, u8(5), u8(3), u8(1), u8(0), u8(4), u8(2))
+	mut reader = memoryReader{data: encoded}
+	mut restored = suffixarray.New([]u8{})
+	suffixarray.Read(mut restored, mut reader) catch err { say.Line("read fault", err) }
+	say.Line("read")
+	offsets(restored.Lookup([]u8("ana"), -1))
+}
