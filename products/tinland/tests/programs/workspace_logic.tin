@@ -115,6 +115,13 @@ added
 	say.Line("marks", ws.Ed.Marks)
 	ws.RefreshGit()
 	say.Line("git", ws.Git)
+	// the session: the folder and open files come back in a new workspace
+	quarry.Setenv("HOME", root) catch _ {
+	}
+	ws.OpenFile(root + "/notes.md")
+	ws.SaveSession()
+	mut again = workspace.New(theme.Dark(), editor.New(textedit.New()))
+	say.Line("restored", again.RestoreSession(), again.HasProj, again.Ed.Name(), len(again.Panes[0].Tabs))
 	// the terminal: a shell on a pseudo terminal, its output in the screen
 	quarry.Setenv("SHELL", "/bin/sh") catch _ {
 	}

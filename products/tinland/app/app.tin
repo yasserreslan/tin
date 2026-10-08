@@ -18,6 +18,9 @@ import "../workspace"
 fn Run(paths []str) bool {
 	// the workspace is a local of this function: an arena may use a local but not a mut parameter
 	mut ws = workspace.New(theme.Dark(), editor.New(textedit.New()))
+	if len(paths) == 0 {
+		ws.RestoreSession()
+	}
 	for p in paths {
 		if quarry.IsDir(p) {
 			ws.OpenFolder(p)
@@ -80,6 +83,7 @@ fn Run(paths []str) bool {
 		}
 		appkit.PoolPop(pool)
 	}
+	ws.SaveSession()
 	ws.StopTerminal()
 	ws.Ed.Cleanup()
 	return true
