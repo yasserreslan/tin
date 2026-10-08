@@ -22,6 +22,9 @@ type ShareArgs struct {
 	Remote str
 	Branch str
 	Dir    str
+	// Lease lets push replace the server's branch with history that does not contain it (a rebased stack), when the
+	// server's branch is still what this repository last fetched of it
+	Lease bool
 }
 
 // ServeArgs are tit serve's arguments.
@@ -170,7 +173,9 @@ fn doRemote(g Global, args []str, o mut Out) ! {
 		sift.Sort(mut names)
 		for k in names {
 			let url = cfg.Get(k)
-			if url != nil {
+			if url != nil && g.Json {
+				o.Line(jsonObject([]str{"name", jsonStr(k[7:len(k) - 4]), "url", jsonStr(url)}))
+			} else if url != nil {
 				o.Line(k[7:len(k) - 4] + "\t" + url)
 			}
 		}
@@ -359,7 +364,12 @@ fn doPush(g Global, a ShareArgs, o mut Out) ! {
 			fail "the server's {shortBranch(branch)} has commits this repository lacks: tit pull first"
 		}
 		let ff = try revwalk.IsAncestor(mut r.Store, remoteTip, tip)
-		if !ff {
+		mut leased = false
+		if !ff && a.Lease {
+			let tracking = try change.NewRefs(r.Ws.Store).Get("refs/remotes/" + a.Remote + "/" + shortBranch(branch))
+			leased = tracking != nil && change.TargetText(tracking.Target) == old
+		}
+		if !ff && !leased {
 			fail "the server's {shortBranch(branch)} has moved on from yours: tit pull, then push again"
 		}
 		hide = append(hide, remoteTip)
@@ -422,4 +432,75 @@ fn doServe(g Global, a ServeArgs, o mut Out) ! {
 	let keys = try transport.AllowedKeys(allowPath)
 	quarry.Eprintln("tit: serving " + r.Ws.Root + " on http://" + a.Addr + "/ ({len(keys)} keys allowed; " + allowPath + " lists them)")
 	try transport.Serve(a.Addr, r.Ws.Store, allowPath, a.Public)
+}
+
+// doSync is tit sync (#797): fetch, rebase the stack onto the remote's trunk (moving the local trunk with it), and push
+// the branch, in that order; the rebase is one operation, and the push replaces the server's branch only if it is
+// still what the fetch saw.
+fn doSync(g Global, a ShareArgs, o mut Out) ! {
+	try fetchLocked(g, a.Remote)
+	let rebased = try syncRebase(g, a)
+	try syncPush(g, a, rebased, mut o)
+}
+
+// syncRebase rebases the stack onto the remote's trunk under the repository lock, and gives how many changes moved.
+fn syncRebase(g Global, a ShareArgs) !i64 {
+	mut r = try open(g)
+	use lock = change.Lock(r.Ws.Store)
+	mut rebased = 0
+	let st = try stackOf(mut r)
+	let trunk = try trunkOf(r)
+	let refs = change.NewRefs(r.Ws.Store)
+	let remoteTrunk = try refs.Get("refs/remotes/" + a.Remote + "/" + trunk)
+	if remoteTrunk != nil {
+		let upstream = try r.resolve("refs/remotes/" + a.Remote + "/" + trunk)
+		let localTrunk = try r.resolve(trunk)
+		if upstream != localTrunk {
+			let behind = try revwalk.IsAncestor(mut r.Store, localTrunk, upstream)
+			if !behind {
+				fail "{trunk} has commits {a.Remote}/{trunk} lacks: push or reconcile {trunk} first"
+			}
+			mut extra = []oplog.RefChange{oplog.RefChange{Name: "refs/heads/" + trunk, Before: commitText(localTrunk), After: commitText(upstream)}}
+			if len(st.Commits) == 0 {
+				// nothing of ours above the trunk: the branch follows the trunk
+				if st.Branch != "refs/heads/" + trunk {
+					extra = append(extra, oplog.RefChange{Name: st.Branch, Before: commitText(localTrunk), After: commitText(upstream)})
+				}
+				let from = try r.treeOf(localTrunk)
+				let to = try r.treeOf(upstream)
+				try checkMove(mut r, from, to)
+				try recordRefs(r, "tit sync", oplog.Op.Rebase([]str{}), extra)
+				mut fresh = try open(g)
+				try moveTo(mut fresh, from, to, true)
+			} else {
+				let tip = st.Commits[len(st.Commits) - 1]
+				mut versions = []Version{}
+				let fresh = try replay(mut r, st.Commits, upstream, mut versions)
+				let names = try changeNames(mut r, fresh)
+				try restack(mut r, "tit sync", oplog.Op.Rebase(names), st.Branch, tip, fresh[len(fresh) - 1], versions, extra, true)
+				rebased = len(fresh)
+			}
+		}
+	}
+	return rebased
+}
+
+fn syncPush(g Global, a ShareArgs, rebased i64, o mut Out) ! {
+	// nothing that records a conflict goes to the server
+	mut r2 = try open(g)
+	let trunk = try trunkOf(r2)
+	let st2 = try stackOf(mut r2)
+	for id in st2.Commits {
+		let c = try commitData(mut r2, id)
+		if len(c.Conflicts) > 0 {
+			fail "{c.Change.Letters()[0:12]} records conflicts after the rebase: tit edit it, resolve, tit commit --amend, then tit sync"
+		}
+	}
+	if st2.Branch == "refs/heads/" + trunk && len(st2.Commits) == 0 {
+		o.Line("Synced: {trunk} is {a.Remote}'s.")
+		return
+	}
+	mut pushOut = Out{buf: []u8{}}
+	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(st2.Branch), Dir: "", Lease: true}, mut pushOut)
+	o.Line("Synced: rebased " + count(rebased, "change", "changes") + " onto {a.Remote}/{trunk}; " + twine.TrimSpace(str(pushOut.buf)))
 }

@@ -32,7 +32,7 @@ fn commit(g mut graph, name str, parents []str, when i64) {
 	let tree = g.s.Put(object.Object.Tree([]object.Entry{})) catch _ {
 		object.NoId
 	}
-	let c = object.CommitData{Tree: tree, Parents: ps, Change: object.AdoptedChangeId(name), Author: person(when), Committer: person(when), GitHeaders: []str{}, Signature: "", Message: name + "\n"}
+	let c = object.CommitData{Tree: tree, Parents: ps, Change: object.AdoptedChangeId(name), Author: person(when), Committer: person(when), GitHeaders: []str{}, Signature: "", Message: name + "\n", Conflicts: []str{}}
 	let id = g.s.Put(object.Object.Commit(c)) catch _ {
 		object.NoId
 	}
@@ -58,6 +58,11 @@ fn build() graph {
 	refs.Update("refs/tags/v1", nil, change.Target.Commit(g.ids["c2"])) catch _ {
 	}
 	change.WriteHead(dir + "/workspaces/default", change.Head.Branch("refs/heads/main")) catch _ {
+	}
+	// a version counts once its operation is recorded
+	quarry.MkdirAll(dir + "/oplog") catch _ {
+	}
+	quarry.WriteFile(dir + "/oplog/0000000000000001.op", "{{}}") catch _ {
 	}
 	change.AddVersion(dir, object.AdoptedChangeId("b2"), change.NewVersion(1, g.ids["b2"], 5)) catch _ {
 	}

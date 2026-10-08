@@ -63,6 +63,9 @@ type CommitData struct {
 	GitHeaders []str
 	Signature  str
 	Message    str
+	// Conflicts a rebase left in this commit (#786): "path\tbase\tours\ttheirs", each id in hex or "-" for no
+	// file; the tree holds our version at each path. Empty for a commit without conflicts.
+	Conflicts []str
 }
 
 // TagData is the content of a tag.

@@ -303,6 +303,12 @@ fn commitHeaders(c CommitData) !str {
 	appendStr(mut out, "change {c.Change.Letters()}\n")
 	appendStr(mut out, "author {personText(c.Author)}\n")
 	appendStr(mut out, "committer {personText(c.Committer)}\n")
+	for k in c.Conflicts {
+		if len(k) == 0 || indexFrom(k, 0, '\n') >= 0 || indexFrom(k, 0, 0) >= 0 {
+			fail fault.Wrap(ErrCorrupt, "commit: a conflict line with a newline or NUL")
+		}
+		appendStr(mut out, "conflict {k}\n")
+	}
 	for h in c.GitHeaders {
 		let (name, value) = try checkGitHeader(h)
 		appendStr(mut out, "git-{name} ")
@@ -396,7 +402,7 @@ fn decodeCommit(body str) !CommitData {
 	}
 	let tree = try parseHexId(treeHex, "commit tree")
 	let none = Person{Name: "", Email: "", When: 0, Zone: 0}
-	mut c = CommitData{Tree: tree, Parents: []Id{}, Change: ChangeId{raw: ""}, Author: none, Committer: none, GitHeaders: []str{}, Signature: "", Message: h.message}
+	mut c = CommitData{Tree: tree, Parents: []Id{}, Change: ChangeId{raw: ""}, Author: none, Committer: none, GitHeaders: []str{}, Signature: "", Message: h.message, Conflicts: []str{}}
 	k += 1
 	for k < len(ls) {
 		let p = field(ls[k], "parent")
@@ -434,6 +440,14 @@ fn decodeCommit(body str) !CommitData {
 	}
 	c.Committer = try parsePerson(co, "committer")
 	k += 1
+	for k < len(ls) {
+		let cf = field(ls[k], "conflict")
+		if cf == nil {
+			break
+		}
+		c.Conflicts = append(c.Conflicts, cf)
+		k += 1
+	}
 	for k < len(ls) && len(ls[k]) > 4 && ls[k][0:4] == "git-" {
 		mut value = ls[k][4:]
 		k += 1

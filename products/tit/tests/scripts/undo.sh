@@ -117,3 +117,21 @@ t undo --op "$k" > /dev/null
 t branch | grep -q ' x$' && fail "undo --op left the branch"
 [ "$(t tag | grep -c '^y$')" = 1 ] || fail "undo --op took the later tag"
 echo "ok undo --op"
+
+# the stack's operations: absorb, split, move, rewrite
+t switch main > /dev/null
+t switch -c stacked > /dev/null
+printf 'p1\np2\np3\n' > p.txt
+printf 'q1\nq2\nq3\n' > q.txt
+t add p.txt q.txt
+t commit -m "p and q" > /dev/null
+pq=$(t log --format=change -n 1)
+printf 'r1\n' > r.txt
+t add r.txt
+t commit -m "r" > /dev/null
+rc=$(t log --format=change -n 1)
+printf 'p1\np2 fixed\np3\n' > p.txt
+check "absorb" t absorb
+check "split" t split "$pq" q.txt -m "q alone"
+check "move" t move "$rc" --before "$pq"
+check "rewrite" t rewrite --stack "perl -pi -e 's/r1/r one/' r.txt 2> /dev/null || true"

@@ -30,7 +30,7 @@ type Command enum {
 	Switch(SwitchArgs)
 	Merge(MergeArgs)
 	Tag(TagArgs)
-	Undo(i64)
+	Undo(i64, bool)
 	Redo
 	Oplog(OplogArgs)
 	Remote([]str)
@@ -45,6 +45,16 @@ type Command enum {
 	Bisect(BisectArgs)
 	Workspace(WorkspaceArgs)
 	Who(WhoArgs)
+	Stack(StackArgs)
+	Sync(ShareArgs)
+	Rewrite(RewriteArgs)
+	Bench(BenchArgs)
+	History(HistoryArgs)
+	Overlap
+	Timeline(TimelineArgs)
+	Watch(WatchArgs)
+	Park(str)
+	Unpark(str)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -148,7 +158,7 @@ commands:
   commit [-m msg]... [-a] [--amend]
                              record the staged files (-a stages every tracked change first; without -m,
                              $EDITOR asks for the message; --amend makes a new version of the last change)
-  diff [--staged] [--stat] [A B] [paths]
+  diff [--staged] [--stat] [--word] [--semantic] [A B] [paths]
                              changes not staged yet, the staged ones, or between two revisions
   log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id|change|subject|git-id]
                              the history from rev (HEAD by default)
@@ -164,7 +174,8 @@ commands:
                              merge a branch in: fast-forward, or a merge commit; conflicts get git's markers
   tag [-a] [-m msg] [-d] [name [rev]]
                              list tags, make one (annotated with -a or -m, signed when you have a key), delete one
-  undo [--op N]              reverse the last operation of this workspace (or operation N)
+  undo [--op N] [--yes]      reverse the last operation of this workspace (or operation N); undoing a push
+                             puts the server's branch back, and asks for --yes first
   redo                       apply again what the last undo reversed
   oplog [show N | restore N [--yes]]
                              the operations, newest first; one in full; every ref as it was after one
@@ -173,6 +184,7 @@ commands:
   fetch [remote]             bring a remote's new commits in (refs/remotes/<remote>/...)
   push [remote] [branch]     send a branch to a remote (origin and the current branch by default)
   pull [remote]              fetch, then merge the remote's copy of the current branch
+  sync [remote]              fetch, rebase the stack onto the remote's trunk, push the branch
   serve [--addr host:port] [--public] [--allow file]
                              serve this repository over the tit protocol (keys: .tit/allowed-keys)
   guard [paths]              search the tracked files (or these) for private keys and tokens; commit runs it too
@@ -182,8 +194,29 @@ commands:
   workspace new <name> [dir] [--from rev] | workspace rm <name> | workspaces
                              another working directory on this store, with its own branch, HEAD and undo
   who <path> [-n N]          who changed this file or directory in the last N commits (500), most changes first
+  stack                      the changes of this branch above the trunk (stack.trunk, main), oldest first
+  edit <change>              go to a change of the stack to amend it; tit commit --amend rebases what is above
+  move <change> --before|--after <change>
+                             reorder the stack (what is above the move is rebased; conflicts are recorded)
+  split <change> <paths> [-m msg]
+                             make a new change, just below, of what the change did to these paths
+  absorb                     put each uncommitted hunk into the change of the stack that wrote those lines
+  rewrite [--stack|--all] <cmd>
+                             run cmd on every change of the stack (or of every branch); what it leaves is each
+                             change's new version, the changes above follow; one undo reverses it all
+  bench record <name> <value> [--unit u] | bench log <name> | bench compare <name> <A> <B>
+                             benchmark results kept with the change and the machine (macOS never against Linux)
+  history <[package.]Name or Type.Method> [-n N]
+                             the commits that changed one Tin declaration, following renames and moves
+  overlap                    other branches (and fetched remote ones) changing the declarations this one changes
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
+  timeline <file> [N]        the versions of a file kept before commands that change files (and by watch); N
+                             puts version N back
+  watch [--every ms] [--for s]
+                             keep each saved version of the changed files for timeline, until interrupted
+  park [name] | unpark <name>
+                             put the uncommitted changes aside under a name (the branch remembered), and back
   version [-v]               the version
   help [command]             this text
 
@@ -222,7 +255,19 @@ fn Parse(args []str) !(Global, Command) {
 		if len(rest) > 0 {
 			topic = rest[0]
 		}
+		if topic == "--help" || topic == "-h" {
+			topic = "help"
+		}
+		if len(topic) > 0 && len(helpOf(topic)) == 0 {
+			fail fault.Wrap(ErrUsage, "there is no command {topic} (tit help lists them)")
+		}
 		return g, Command.Help(topic)
+	}
+	// tit <command> --help (or -h) is tit help <command>
+	for a in rest {
+		if (a == "--help" || a == "-h") && len(helpOf(name)) > 0 {
+			return g, Command.Help(name)
+		}
 	}
 	if name == "version" {
 		return g, Command.Version(len(rest) > 0 && rest[0] == "-v")
@@ -302,7 +347,7 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Commit(ca)
 	}
 	if name == "diff" {
-		mut da = DiffArgs{Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
+		mut da = DiffArgs{Word: false, Semantic: false, Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
 		mut paths = false
 		for a in rest {
 			if paths {
@@ -313,6 +358,10 @@ fn Parse(args []str) !(Global, Command) {
 				da.Staged = true
 			} else if a == "--stat" {
 				da.Stat = true
+			} else if a == "--semantic" {
+				da.Semantic = true
+			} else if a == "--word" || a == "--word-diff" || a == "--word-diff=plain" {
+				da.Word = true
 			} else if len(a) > 1 && a[0] == '-' {
 				fail fault.Wrap(ErrUsage, "diff: unknown option {a}")
 			} else if isPath(g, a) {
@@ -474,12 +523,20 @@ fn Parse(args []str) !(Global, Command) {
 	}
 	if name == "undo" {
 		mut n = 0
-		if len(rest) == 2 && rest[0] == "--op" {
-			n = try parseOp(rest[1])
-		} else if len(rest) != 0 {
-			fail fault.Wrap(ErrUsage, "undo takes nothing, or --op N")
+		mut yes = false
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--op" && k + 1 < len(rest) {
+				n = try parseOp(rest[k + 1])
+				k += 2
+			} else if rest[k] == "--yes" {
+				yes = true
+				k += 1
+			} else {
+				fail fault.Wrap(ErrUsage, "undo takes nothing, --op N, or --yes (to undo a push on the server)")
+			}
 		}
-		return g, Command.Undo(n)
+		return g, Command.Undo(n, yes)
 	}
 	if name == "redo" {
 		try noMore(rest, 0, "redo")
@@ -519,10 +576,19 @@ fn Parse(args []str) !(Global, Command) {
 		if len(rest) == 2 {
 			dir = rest[1]
 		}
-		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir})
+		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir, Lease: false})
+	}
+	if name == "sync" {
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: true}
+		if len(rest) == 1 {
+			sa.Remote = rest[0]
+		} else if len(rest) > 1 {
+			fail fault.Wrap(ErrUsage, "sync takes a remote")
+		}
+		return g, Command.Sync(sa)
 	}
 	if name == "fetch" || name == "pull" || name == "push" {
-		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: ""}
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: false}
 		if len(rest) > 0 {
 			sa.Remote = rest[0]
 		}
@@ -658,6 +724,173 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Who(wh)
 	}
+	if name == "stack" {
+		try noMore(rest, 0, "stack")
+		return g, Command.Stack(StackArgs{Action: "list", Change: "", Other: "", Before: false, Paths: []str{}, Message: ""})
+	}
+	if name == "absorb" {
+		try noMore(rest, 0, "absorb")
+		return g, Command.Stack(StackArgs{Action: "absorb", Change: "", Other: "", Before: false, Paths: []str{}, Message: ""})
+	}
+	if name == "edit" {
+		if len(rest) != 1 {
+			fail fault.Wrap(ErrUsage, "edit takes a change of the stack")
+		}
+		return g, Command.Stack(StackArgs{Action: "edit", Change: rest[0], Other: "", Before: false, Paths: []str{}, Message: ""})
+	}
+	if name == "move" {
+		if len(rest) != 3 || (rest[1] != "--before" && rest[1] != "--after") {
+			fail fault.Wrap(ErrUsage, "move <change> --before|--after <change>")
+		}
+		return g, Command.Stack(StackArgs{Action: "move", Change: rest[0], Other: rest[2], Before: rest[1] == "--before", Paths: []str{}, Message: ""})
+	}
+	if name == "split" {
+		mut sa = StackArgs{Action: "split", Change: "", Other: "", Before: false, Paths: []str{}, Message: ""}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "-m" && k + 1 < len(rest) {
+				k += 1
+				sa.Message = rest[k]
+			} else if len(sa.Change) == 0 {
+				sa.Change = rest[k]
+			} else {
+				sa.Paths = append(sa.Paths, rest[k])
+			}
+			k += 1
+		}
+		if len(sa.Change) == 0 || len(sa.Paths) == 0 {
+			fail fault.Wrap(ErrUsage, "split <change> <paths> [-m msg]")
+		}
+		return g, Command.Stack(sa)
+	}
+	if name == "rewrite" {
+		mut ra = RewriteArgs{Command: "", Branches: false}
+		for a in rest {
+			if a == "--all" || a == "--branches" {
+				ra.Branches = true
+			} else if a == "--stack" {
+				ra.Branches = false
+			} else if len(ra.Command) == 0 {
+				ra.Command = a
+			} else {
+				fail fault.Wrap(ErrUsage, "rewrite takes one command (quote it)")
+			}
+		}
+		if len(ra.Command) == 0 {
+			fail fault.Wrap(ErrUsage, "rewrite [--stack|--all] <command>")
+		}
+		return g, Command.Rewrite(ra)
+	}
+	if name == "bench" {
+		mut ba = BenchArgs{Action: "", Name: "", Value: "", Unit: "", A: "", B: ""}
+		mut pos = []str{}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--unit" && k + 1 < len(rest) {
+				k += 1
+				ba.Unit = rest[k]
+			} else {
+				pos = append(pos, rest[k])
+			}
+			k += 1
+		}
+		if len(pos) == 3 && pos[0] == "record" {
+			ba.Action = "record"
+			ba.Name = pos[1]
+			ba.Value = pos[2]
+		} else if len(pos) == 2 && pos[0] == "log" {
+			ba.Action = "log"
+			ba.Name = pos[1]
+		} else if len(pos) == 4 && pos[0] == "compare" {
+			ba.Action = "compare"
+			ba.Name = pos[1]
+			ba.A = pos[2]
+			ba.B = pos[3]
+		} else {
+			fail fault.Wrap(ErrUsage, "bench record <name> <value> [--unit u] | bench log <name> | bench compare <name> <A> <B>")
+		}
+		return g, Command.Bench(ba)
+	}
+	if name == "timeline" {
+		mut ta = TimelineArgs{Path: "", Pick: 0}
+		if len(rest) < 1 || len(rest) > 2 {
+			fail fault.Wrap(ErrUsage, "timeline <file> [N]")
+		}
+		ta.Path = rest[0]
+		if len(rest) == 2 {
+			ta.Pick = parseCount(rest[1]) catch _ {
+				-1
+			}
+			if ta.Pick <= 0 {
+				fail fault.Wrap(ErrUsage, "timeline: N is a version's number in the list")
+			}
+		}
+		return g, Command.Timeline(ta)
+	}
+	if name == "watch" {
+		mut wa = WatchArgs{Every: 1000, For: 0}
+		mut k = 0
+		for k < len(rest) {
+			if (rest[k] == "--every" || rest[k] == "--for") && k + 1 < len(rest) {
+				let n = parseCount(rest[k + 1]) catch _ {
+					-1
+				}
+				if n <= 0 {
+					fail fault.Wrap(ErrUsage, "watch: {rest[k]} takes a number")
+				}
+				if rest[k] == "--every" {
+					wa.Every = n
+				} else {
+					wa.For = n
+				}
+				k += 2
+				continue
+			}
+			fail fault.Wrap(ErrUsage, "watch [--every ms] [--for seconds]")
+		}
+		return g, Command.Watch(wa)
+	}
+	if name == "park" || name == "unpark" {
+		if len(rest) > 1 || (name == "unpark" && len(rest) == 0) {
+			fail fault.Wrap(ErrUsage, "park [name] | unpark <name>")
+		}
+		mut n = ""
+		if len(rest) == 1 {
+			n = rest[0]
+		}
+		if name == "park" {
+			return g, Command.Park(n)
+		}
+		return g, Command.Unpark(n)
+	}
+	if name == "history" {
+		mut ha = HistoryArgs{Name: "", Most: 0}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "-n" && k + 1 < len(rest) {
+				k += 1
+				ha.Most = parseCount(rest[k]) catch _ {
+					-1
+				}
+				if ha.Most <= 0 {
+					fail fault.Wrap(ErrUsage, "history: -n takes a number")
+				}
+			} else if len(ha.Name) == 0 {
+				ha.Name = rest[k]
+			} else {
+				fail fault.Wrap(ErrUsage, "history takes one declaration")
+			}
+			k += 1
+		}
+		if len(ha.Name) == 0 {
+			fail fault.Wrap(ErrUsage, "history takes a declaration: Name, Type.Method or package.Name")
+		}
+		return g, Command.History(ha)
+	}
+	if name == "overlap" {
+		try noMore(rest, 0, "overlap")
+		return g, Command.Overlap
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -718,6 +951,34 @@ fn parseCount(s str) !i64 {
 	return n
 }
 
+// helpOf is one command's part of the usage text: its line or lines (a line that names it first, or after a |), with
+// the lines that continue them; "" when no command has that name.
+fn helpOf(name str) str {
+	mut out = ""
+	mut taking = false
+	for line in twine.Split(usageText, "\n") {
+		if twine.HasPrefix(line, "   ") && taking {
+			out = out + line + "\n"
+			continue
+		}
+		taking = false
+		if !twine.HasPrefix(line, "  ") || twine.HasPrefix(line, "   ") {
+			continue
+		}
+		let head = twine.TrimSpace(twine.SplitN(line[2:], "  ", 2)[0])
+		for part in twine.Split(head, "|") {
+			let words = twine.Split(twine.TrimSpace(part), " ")
+			if len(words) > 0 && words[0] == name {
+				taking = true
+			}
+		}
+		if taking {
+			out = out + "usage: tit " + twine.TrimSpace(line) + "\n"
+		}
+	}
+	return out
+}
+
 // Main runs the command line and returns the exit status: 0, 1 for a failure, 2 for a usage error.
 fn Main(args []str) i64 {
 	let (g, c, perr) = Parse(args)
@@ -739,6 +1000,43 @@ fn Main(args []str) i64 {
 }
 
 fn run(g Global, c Command, o mut Out) ! {
+	// files a command may change are kept first, for tit timeline (snapshot.tin)
+	try snapshotFor(g, c)
+	if !g.Json {
+		try runTraced(g, c, mut o)
+		return
+	}
+	// --json: what a command writes is JSON lines; a command that writes text gets it as one object's lines
+	mut b = Out{buf: []u8{}}
+	let err = runTraced(g, c, mut b)
+	o.Text(asJson(commandName(c), str(b.buf)))
+	if err != nil {
+		fail err
+	}
+}
+
+// asJson is a command's output under --json: as it is when every line is a JSON object, otherwise
+// {"command": name, "lines": [...]}.
+fn asJson(name str, text str) str {
+	let lines = twine.Split(twine.TrimRight(text, "\n"), "\n")
+	mut json = true
+	mut kept = []str{}
+	for l in lines {
+		if len(l) == 0 {
+			continue
+		}
+		kept = append(kept, l)
+		if l[0] != '{' {
+			json = false
+		}
+	}
+	if json {
+		return text
+	}
+	return jsonObject([]str{"command", jsonStr(name), "lines", jsonList(kept)}) + "\n"
+}
+
+fn runTraced(g Global, c Command, o mut Out) ! {
 	if g.Trace {
 		let name = commandName(c)
 		// the traced block writes to its own buffer: a function literal cannot hold the mut parameter
@@ -772,7 +1070,7 @@ fn commandName(c Command) str {
 		Switch(_) => "switch"
 		Merge(_) => "merge"
 		Tag(_) => "tag"
-		Undo(_) => "undo"
+		Undo(_, _) => "undo"
 		Redo => "redo"
 		Oplog(_) => "oplog"
 		Remote(_) => "remote"
@@ -787,6 +1085,16 @@ fn commandName(c Command) str {
 		Bisect(_) => "bisect"
 		Workspace(_) => "workspace"
 		Who(_) => "who"
+		Stack(sa) => sa.Action
+		Sync(_) => "sync"
+		Rewrite(_) => "rewrite"
+		Bench(_) => "bench"
+		History(_) => "history"
+		Overlap => "overlap"
+		Timeline(_) => "timeline"
+		Watch(_) => "watch"
+		Park(_) => "park"
+		Unpark(_) => "unpark"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -800,10 +1108,12 @@ fn commandName(c Command) str {
 fn dispatch(g Global, c Command, o mut Out) ! {
 	match c {
 		Help(topic) => {
-			o.Line(usageText)
-			if len(topic) > 0 {
+			if len(topic) == 0 {
+				o.Line(usageText)
+			} else {
+				o.Text(helpOf(topic))
 				o.Line("")
-				o.Line("(tit {topic}: see the line above)")
+				o.Line("Every command also takes the global flags: -C dir, --json, --trace. The manual: toolchain/docs/TIT.md.")
 			}
 		}
 		Version(verbose) => {
@@ -850,8 +1160,8 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		Tag(ta) => {
 			try doTag(g, ta, mut o)
 		}
-		Undo(n) => {
-			try doUndo(g, n, mut o)
+		Undo(n, yes) => {
+			try doUndo(g, n, yes, mut o)
 		}
 		Redo => {
 			try doRedo(g, mut o)
@@ -894,6 +1204,36 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Who(wh) => {
 			try doWho(g, wh, mut o)
+		}
+		Stack(sa) => {
+			try doStack(g, sa, mut o)
+		}
+		Sync(sa) => {
+			try doSync(g, sa, mut o)
+		}
+		Rewrite(ra) => {
+			try doRewrite(g, ra, mut o)
+		}
+		Bench(ba) => {
+			try doBench(g, ba, mut o)
+		}
+		History(ha) => {
+			try doHistory(g, ha, mut o)
+		}
+		Overlap => {
+			try doOverlap(g, mut o)
+		}
+		Timeline(ta) => {
+			try doTimeline(g, ta, mut o)
+		}
+		Watch(wa) => {
+			try doWatch(g, wa, mut o)
+		}
+		Park(name) => {
+			try doPark(g, name, mut o)
+		}
+		Unpark(name) => {
+			try doUnpark(g, name, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

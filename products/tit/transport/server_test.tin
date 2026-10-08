@@ -37,7 +37,7 @@ fn commitIn[S store.ObjectStore](s mut S, name str, body str, parents []object.I
 	let tree = s.Put(object.Object.Tree([]object.Entry{object.Entry{Mode: object.Mode.File, Name: name, Id: blob}})) catch _ {
 		object.NoId
 	}
-	let c = object.CommitData{Tree: tree, Parents: parents, Change: cid, Author: person(when), Committer: person(when), GitHeaders: []str{}, Signature: "", Message: "{name}\n"}
+	let c = object.CommitData{Tree: tree, Parents: parents, Change: cid, Author: person(when), Committer: person(when), GitHeaders: []str{}, Signature: "", Message: "{name}\n", Conflicts: []str{}}
 	return s.Put(object.Object.Commit(c)) catch _ {
 		object.NoId
 	}

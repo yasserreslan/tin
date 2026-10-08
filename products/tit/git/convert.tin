@@ -483,7 +483,7 @@ fn convertCommit(mem mut store.Mem, known Ids, local mut Ids, id str, c Commit) 
 	let committer = ParsePerson(c.Committer) catch e {
 		fail fault.Wrap(ErrBadObject, "commit {Hex(id)}: {fault.Message(e)}")
 	}
-	let data = object.CommitData{Tree: tree, Parents: parents, Change: object.AdoptedChangeId(Hex(id)), Author: author, Committer: committer, GitHeaders: c.Headers, Signature: "", Message: c.Message}
+	let data = object.CommitData{Tree: tree, Parents: parents, Change: object.AdoptedChangeId(Hex(id)), Author: author, Committer: committer, GitHeaders: c.Headers, Signature: "", Message: c.Message, Conflicts: []str{}}
 	let t = mem.Put(object.Object.Commit(data)) catch e {
 		fail fault.Wrap(ErrBadObject, "commit {Hex(id)}: {fault.Message(e)}")
 	}

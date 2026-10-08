@@ -14,12 +14,14 @@ if [ "$vcs" = git ]; then
 	git config diff.renames true
 	v() { git "$@"; }
 	commit() { git commit -q "$@"; }
+	words() { git diff --word-diff=plain; }
 else
 	"$vcs" init . > /dev/null
 	"$vcs" config set user.name Ada
 	"$vcs" config set user.email ada@example.com
 	v() { TIT_NO_PAGER=1 "$vcs" "$@"; }
 	commit() { v commit "$@" > /dev/null; }
+	words() { v diff --word; }
 fi
 show() {
 	echo "== $1"
@@ -30,6 +32,8 @@ show() {
 	v diff --staged | sed '/^index /d'
 	echo "-- stat"
 	v diff --staged --stat
+	echo "-- words"
+	words | sed '/^index /d' 
 }
 
 printf 'one\ntwo\nthree\n' > a.txt

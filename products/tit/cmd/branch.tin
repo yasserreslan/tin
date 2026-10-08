@@ -93,7 +93,10 @@ fn doBranch(g Global, a BranchArgs, o mut Out) ! {
 		}
 		sift.Sort(mut names)
 		for n in names {
-			if n == current {
+			if g.Json {
+				let tip = try r.resolve(n)
+				o.Line(jsonObject([]str{"name", jsonStr(shortBranch(n)), "commit", jsonStr(tip.Hex()), "current", "{n == current}"}))
+			} else if n == current {
 				o.Line("* " + paint(g, "32", shortBranch(n)))
 			} else {
 				o.Line("  " + shortBranch(n))
@@ -278,7 +281,7 @@ fn mergeMessage(r Repo, rev str) str {
 fn newCommit(r Repo, tree object.Id, parents []object.Id, message str, when i64) !object.CommitData {
 	let cfg = try r.config()
 	let who = try identity.Who(cfg, identity.FixedClock{At: when})
-	mut c = object.CommitData{Tree: tree, Parents: parents, Change: object.NewChangeId(), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: message}
+	mut c = object.CommitData{Tree: tree, Parents: parents, Change: object.NewChangeId(), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: message, Conflicts: []str{}}
 	let keyPath = identity.DefaultKeyPath(cfg)
 	if quarry.Exists(keyPath) {
 		let signer = try identity.LoadKey(keyPath)
@@ -373,8 +376,19 @@ fn doMerge(g Global, a MergeArgs, o mut Out) ! {
 	try idx.Write(r.Ws.IndexPath())
 	try quarry.WriteFile(state + "/MERGE_HEAD", theirs.Hex() + "\n")
 	try quarry.WriteFile(state + "/MERGE_MSG", message)
-	for p in paths {
-		o.Line("CONFLICT: " + p)
+	for c in res.Conflicts {
+		mut named = ""
+		if isTin(c.Path) && c.Base() != object.NoId && c.Ours() != object.NoId && c.Theirs() != object.NoId {
+			// a Tin file names the declarations both sides changed (#799)
+			let (_, bt) = try r.Store.GetRaw(c.Base())
+			let (_, ot) = try r.Store.GetRaw(c.Ours())
+			let (_, tt) = try r.Store.GetRaw(c.Theirs())
+			let (_, _, names) = merge.MergeTin(bt, ot, tt)
+			if len(names) > 0 {
+				named = " (" + twine.Join(names, ", ") + ")"
+			}
+		}
+		o.Line("CONFLICT: " + c.Path + named)
 	}
 	fail "the merge has conflicts: edit them, tit add each file, then tit commit (or tit merge --abort)"
 }
@@ -481,7 +495,12 @@ fn doTag(g Global, a TagArgs, o mut Out) ! {
 		}
 		sift.Sort(mut names)
 		for n in names {
-			o.Line(n)
+			if g.Json {
+				let tip = try r.resolve("refs/tags/" + n)
+				o.Line(jsonObject([]str{"name", jsonStr(n), "commit", jsonStr(tip.Hex())}))
+			} else {
+				o.Line(n)
+			}
 		}
 		return
 	}

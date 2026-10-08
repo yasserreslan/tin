@@ -41,3 +41,7 @@ for s in products/tit/tests/scripts/*.sh; do
 	sh "$s" "$tmp/tit" "$tmp/script_$name" > "$tmp/script_$name.out" 2>&1 || { cat "$tmp/script_$name.out"; echo "FAIL tit script $name"; exit 1; }
 	echo "PASS tit script $name"
 done
+# every capability each package reaches is reviewed: a new one (net, spawn, files) fails here until caps.txt lists it
+sh ./tin caps products/tit/main.tin > "$tmp/caps.txt" 2>&1
+cmp "$tmp/caps.txt" products/tit/tests/caps.txt || { diff products/tit/tests/caps.txt "$tmp/caps.txt"; echo "FAIL tit caps: review the change, then update products/tit/tests/caps.txt"; exit 1; }
+echo "PASS tit caps"

@@ -173,7 +173,7 @@ fn commitBody(c object.CommitData, tree str, parents []str) str {
 	if object.AdoptedChangeId(Hex(IdOf(object.Kind.Commit, asIs))) == c.Change {
 		return asIs
 	}
-	let plain = object.CommitData{Tree: c.Tree, Parents: c.Parents, Change: c.Change, Author: c.Author, Committer: c.Committer, GitHeaders: []str{}, Signature: "", Message: MirrorMessage(c.Message, c.Change.Letters())}
+	let plain = object.CommitData{Tree: c.Tree, Parents: c.Parents, Change: c.Change, Author: c.Author, Committer: c.Committer, GitHeaders: []str{}, Signature: "", Message: MirrorMessage(c.Message, c.Change.Letters()), Conflicts: []str{}}
 	return GitCommitBody(plain, tree, parents)
 }
 
@@ -181,6 +181,9 @@ fn mirrorOne(s mut store.Layered, target Repo, known Back, local mut Back, id ob
 	let o = try s.Get(id)
 	match o {
 		Commit(c) => {
+			if len(c.Conflicts) > 0 {
+				fail fault.Wrap(ErrBadObject, "{id.Hex()[0:12]} records conflicts: resolve them (tit edit) before mirroring")
+			}
 			let (tree, n) = try mirrorTree(mut s, target, known, mut local, c.Tree)
 			mut parents = []str{}
 			for p in c.Parents {

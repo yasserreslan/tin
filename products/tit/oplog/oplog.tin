@@ -1,5 +1,6 @@
 package oplog
 
+import "../crash"
 import "../change"
 import "argo"
 import "fault"
@@ -226,6 +227,7 @@ fn Begin(dir str, workspace str, command str, op Op, refs []RefChange) !Tx {
 	let rec = Record{Number: n + 1, Time: tide.Wall(), Workspace: workspace, Command: command, Op: op, Refs: refs, Snapshot: ""}
 	mut b = make([]u8, 0, 256)
 	argo.Put(mut b, rec)
+	crash.Point()
 	try writeSynced(pendingPath(dir), str(b))
 	return Tx{dir: dir, rec: rec}
 }
@@ -255,6 +257,7 @@ fn (tx Tx) Apply() ! {
 
 // Commit makes the operation current: the pending record is renamed to its number and the directory synced.
 fn (tx Tx) Commit() ! {
+	crash.Point()
 	try quarry.Rename(pendingPath(tx.dir), opPath(tx.dir, tx.rec.Number))
 	try quarry.Sync(tx.dir + "/oplog")
 }
@@ -278,6 +281,10 @@ fn Recover(dir str) !bool {
 		try quarry.Remove(p)
 		return true
 	}
+	// the operation's half-written files: ref locks and temporary refs and HEADs a crash left (refs move only
+	// under the repository lock, which recovery holds, so none of them is anyone's now)
+	try sweep(dir + "/refs")
+	try sweep(dir + "/workspaces")
 	mut refs = change.NewRefs(dir)
 	for rc in r.Refs {
 		// only a ref the operation moved goes back: one that still holds Before was not reached, and one that holds
@@ -289,6 +296,21 @@ fn Recover(dir str) !bool {
 	}
 	try quarry.Remove(p)
 	return true
+}
+
+fn sweep(dir str) ! {
+	if !quarry.IsDir(dir) {
+		return
+	}
+	let names = try quarry.ReadDir(dir)
+	for n in names {
+		let p = dir + "/" + n
+		if quarry.IsDir(p) {
+			try sweep(p)
+		} else if twine.HasSuffix(n, ".lock") || twine.HasSuffix(n, ".tmp") {
+			try quarry.Remove(p)
+		}
+	}
 }
 
 // Run records and applies an operation in one step: Begin, Apply, Commit, rolling back on any fault.

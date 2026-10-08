@@ -52,7 +52,7 @@ fn TestAmendKeepsTheChange(t mut crucible.T) {
 		object.NoId
 	}
 	let d1 = commitData(mut r, c1) catch _ {
-		object.CommitData{Tree: object.NoId, Parents: []object.Id{}, Change: object.NewChangeId(), Author: object.Person{Name: "", Email: "", When: 0, Zone: 0}, Committer: object.Person{Name: "", Email: "", When: 0, Zone: 0}, GitHeaders: []str{}, Signature: "", Message: ""}
+		object.CommitData{Tree: object.NoId, Parents: []object.Id{}, Change: object.NewChangeId(), Author: object.Person{Name: "", Email: "", When: 0, Zone: 0}, Committer: object.Person{Name: "", Email: "", When: 0, Zone: 0}, GitHeaders: []str{}, Signature: "", Message: "", Conflicts: []str{}}
 	}
 	quarry.WriteFile(d + "/a.txt", "one, better\n") catch _ {
 	}

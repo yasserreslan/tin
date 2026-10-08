@@ -176,3 +176,67 @@ fn TestNoBase(t mut crucible.T) {
 	let tree = treeIdOf(r)
 	t.True("both new names kept", entryOf(mut s, tree, "mine") != nil && entryOf(mut s, tree, "yours") != nil)
 }
+
+// Two functions added at the same place merge by declaration, where the line merge conflicts; one function changed
+// differently on both sides still conflicts and is named (#799).
+fn TestMergeTin(t mut crucible.T) {
+	let base = "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let ours = "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn c() i64 {{\n\treturn 3\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let theirs = "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn d() i64 {{\n\treturn 4\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let (_, lineClean) = MergeText(base, ours, theirs, "ours", "theirs")
+	t.False("the line merge conflicts", lineClean)
+	let (text, ok, _) = MergeTin(base, ours, theirs)
+	t.True("by declaration it merges", ok)
+	crucible.Equal(mut t, "both functions", text, "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn c() i64 {{\n\treturn 3\n}}\n\nfn d() i64 {{\n\treturn 4\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n")
+	let o2 = "package p\n\nfn a() i64 {{\n\treturn 10\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let t2 = "package p\n\nfn a() i64 {{\n\treturn 11\n}}\n\nfn b() i64 {{\n\treturn 20\n}}\n"
+	let (_, ok2, names) = MergeTin(base, o2, t2)
+	t.False("one function changed on both sides", ok2)
+	crucible.Equal(mut t, "named", len(names), 1)
+	crucible.Equal(mut t, "fn a", names[0], "fn a")
+}
+
+// A declaration merge keeps everything between declarations as it was: free comments, one-line declarations grouped
+// without blank lines, and a doc comment one side changed (#799).
+fn TestMergeTinKeepsText(t mut crucible.T) {
+	let base = "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f.\nfn f() i64 {{\n\treturn A\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n"
+	let ours = "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f.\nfn f() i64 {{\n\treturn A\n}}\n\nfn h() i64 {{\n\treturn 0\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n"
+	let theirs = "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f, documented better.\nfn f() i64 {{\n\treturn A\n}}\n\nfn k() i64 {{\n\treturn 1\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n"
+	let (text, ok, _) = MergeTin(base, ours, theirs)
+	t.True("it merges", ok)
+	crucible.Equal(mut t, "the text between declarations kept", text, "package p\n\n// Limits.\n\nconst A = 1\nconst B = 2\n\n// f does f, documented better.\nfn f() i64 {{\n\treturn A\n}}\n\nfn h() i64 {{\n\treturn 0\n}}\n\nfn k() i64 {{\n\treturn 1\n}}\n\nfn g() i64 {{\n\treturn B\n}}\n// the end\n")
+	let (same, ok2, _) = MergeTin(base, base, base)
+	t.True("unchanged merges", ok2)
+	crucible.Equal(mut t, "byte for byte", same, base)
+}
+
+// Rename against edit (#786): a file one side renamed and the other edited merges at the new name, with the edit, on
+// either side.
+fn TestRenameAgainstEdit(t mut crucible.T) {
+	mut s = store.NewMem()
+	mut text = ""
+	for i in 0..20 {
+		text = text + "line {i} of the file\n"
+	}
+	let edited = text + "an edit at the end\n"
+	let base = treeOf(mut s, []object.Entry{file("old.txt", blobId(mut s, text)), file("keep.txt", blobId(mut s, "k\n"))})
+	let renamed = treeOf(mut s, []object.Entry{file("new.txt", blobId(mut s, text)), file("keep.txt", blobId(mut s, "k\n"))})
+	let edit = treeOf(mut s, []object.Entry{file("old.txt", blobId(mut s, edited)), file("keep.txt", blobId(mut s, "k\n"))})
+	let want = blobId(mut s, edited)
+	for k in 0..2 {
+		mut ours = renamed
+		mut theirs = edit
+		if k == 1 {
+			ours = edit
+			theirs = renamed
+		}
+		let r = MergeTrees(mut s, base, ours, theirs) catch e {
+			t.Error("merge: {e}")
+			return
+		}
+		crucible.Equal(mut t, "no conflict ({k})", len(r.Conflicts), 0)
+		let n = entryOf(mut s, r.Tree, "new.txt")
+		t.True("the edit at the new name ({k})", n != nil && n.Id == want)
+		t.True("nothing at the old name ({k})", entryOf(mut s, r.Tree, "old.txt") == nil)
+	}
+}

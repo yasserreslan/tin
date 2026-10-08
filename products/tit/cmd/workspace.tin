@@ -64,7 +64,11 @@ fn doWorkspace(g Global, a WorkspaceArgs, o mut Out) ! {
 					on = change.TargetText(t)
 				}
 			}
-			o.Line(mark + n + "\t" + on + "\t" + root)
+			if g.Json {
+				o.Line(jsonObject([]str{"name", jsonStr(n), "on", jsonStr(on), "root", jsonStr(root), "this", jsonBool(mark == "* ")}))
+			} else {
+				o.Line(mark + n + "\t" + on + "\t" + root)
+			}
 		}
 		return
 	}
@@ -238,6 +242,10 @@ fn doWho(g Global, a WhoArgs, o mut Out) ! {
 	})
 	for k in order {
 		let (au, _) = by[k]
+		if g.Json {
+			o.Line(jsonObject([]str{"name", jsonStr(au.name), "email", jsonStr(au.email), "changes", "{au.changes}", "last", "{au.last}"}))
+			continue
+		}
 		o.Line(au.name + " <" + au.email + ">  " + count(au.changes, "change", "changes") + ", the last " + dateText(object.Person{Name: "", Email: "", When: au.last, Zone: 0}))
 	}
 }

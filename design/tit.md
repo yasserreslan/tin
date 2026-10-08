@@ -117,6 +117,8 @@ parent <hex id>                      zero or more, in order
 change <change id in letters>
 author <name> <<email>> <unix seconds> <+hhmm|-hhmm>
 committer <name> <<email>> <unix seconds> <+hhmm|-hhmm>
+conflict <path>\t<base>\t<ours>\t<theirs>   zero or more: conflicts a rebase recorded (#786); ids in hex, - for no
+                                     file; the tree holds our version at the path; push and mirror refuse them
 git-<name> <value>                   zero or more: headers kept from an adopted git commit (gpgsig, encoding,
                                      mergetag), in their original order; continuation lines start with a space
 signature <base64 of 64 bytes>       optional, last: ed25519 over the encoding of this commit without this line

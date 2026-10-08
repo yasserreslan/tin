@@ -466,13 +466,28 @@ fn doShow(g Global, rev str, o mut Out) ! {
 	mut r = try open(g)
 	let id = try r.resolve(rev)
 	let c = try commitData(mut r, id)
-	writeCommit(g, mut r, id, c, mut o)
 	mut before = object.NoId
 	if len(c.Parents) > 0 {
 		before = try r.treeOf(c.Parents[0])
 	}
 	mut sc = r.scratch()
 	let changes = try diff.TreeDiff(mut sc, before, c.Tree, true)
+	if g.Json {
+		mut ps = []str{}
+		for p in c.Parents {
+			ps = append(ps, p.Hex())
+		}
+		mut files = "["
+		for i in 0..len(changes) {
+			if i > 0 {
+				files = files + ","
+			}
+			files = files + jsonObject([]str{"status", jsonStr(diff.KindLetter(changes[i].Kind)), "path", jsonStr(changes[i].Path), "old_path", jsonStr(changes[i].OldPath)})
+		}
+		o.Line(jsonObject([]str{"commit", jsonStr(id.Hex()), "change", jsonStr(c.Change.Letters()), "parents", jsonList(ps), "author", jsonStr(c.Author.Name), "email", jsonStr(c.Author.Email), "time", "{c.Author.When}", "message", jsonStr(c.Message), "conflicts", jsonList(c.Conflicts), "files", files + "]"}))
+		return
+	}
+	writeCommit(g, mut r, id, c, mut o)
 	if len(changes) == 0 {
 		return
 	}
@@ -500,6 +515,48 @@ fn doCat(g Global, rev str, o mut Out) ! {
 		}
 	}
 	let (kind, body) = try r.Store.GetRaw(id)
+	if g.Json {
+		mut kname = "blob"
+		mut entries = "[]"
+		match kind {
+			Tree => {
+				kname = "tree"
+				let obj = try object.Decode(kind, body)
+				entries = "["
+				match obj {
+					Tree(es) => {
+						for i in 0..len(es) {
+							if i > 0 {
+								entries = entries + ","
+							}
+							entries = entries + jsonObject([]str{"mode", jsonStr(object.ModeText(es[i].Mode)), "id", jsonStr(es[i].Id.Hex()), "name", jsonStr(es[i].Name)})
+						}
+					}
+					Blob(_) => {
+					}
+					Commit(_) => {
+					}
+					Tag(_) => {
+					}
+				}
+				entries = entries + "]"
+			}
+			Blob => {
+			}
+			Commit => {
+				kname = "commit"
+			}
+			Tag => {
+				kname = "tag"
+			}
+		}
+		if kname == "tree" {
+			o.Line(jsonObject([]str{"id", jsonStr(id.Hex()), "kind", jsonStr(kname), "entries", entries}))
+		} else {
+			o.Line(jsonObject([]str{"id", jsonStr(id.Hex()), "kind", jsonStr(kname), "size", "{len(body)}", "content", jsonStr(body)}))
+		}
+		return
+	}
 	match kind {
 		Tree => {
 			let obj = try object.Decode(kind, body)
@@ -534,6 +591,10 @@ fn doConfigGet(g Global, key str, o mut Out) ! {
 	if v == nil {
 		fail "{key} is not set"
 	}
+	if g.Json {
+		o.Line(jsonObject([]str{"key", jsonStr(key), "value", jsonStr(v)}))
+		return
+	}
 	o.Line(v)
 }
 
@@ -552,7 +613,11 @@ fn doConfigList(g Global, o mut Out) ! {
 	for k in c.Keys() {
 		let v = c.Get(k)
 		if v != nil {
-			o.Line(k + "=" + v)
+			if g.Json {
+				o.Line(jsonObject([]str{"key", jsonStr(k), "value", jsonStr(v)}))
+			} else {
+				o.Line(k + "=" + v)
+			}
 		}
 	}
 }

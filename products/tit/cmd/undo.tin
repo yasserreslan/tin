@@ -3,6 +3,7 @@ package cmd
 import "../change"
 import "../object"
 import "../oplog"
+import "../transport"
 import "argo"
 import "fault"
 import "tide"
@@ -78,16 +79,42 @@ fn applyPlan(r mut Repo, plan []oplog.RefChange, run fn() !i64) !i64 {
 	return n
 }
 
-fn doUndo(g Global, op i64, o mut Out) ! {
+fn doUndo(g Global, op i64, yes bool, o mut Out) ! {
 	mut r = try open(g)
 	use lock = change.Lock(r.Ws.Store)
 	let (rec, plan) = try oplog.UndoPlan(r.Ws.Store, r.Ws.Name, op)
+	match rec.Op {
+		Push(remote) => {
+			// the server's branch goes back first, by the same compare-and-swap as any push; then the local copy
+			if !yes {
+				fail "operation {rec.Number} pushed to {remote}: undoing it puts the branch back there too; tit undo --yes to do so"
+			}
+			for rc in rec.Refs {
+				try undoPush(mut r, remote, rc)
+				o.Line("Put " + rc.Name[len("refs/remotes/" + remote + "/"):] + " back to " + short(rc.Before) + " on " + remote + ".")
+			}
+		}
+		_ => {
+		}
+	}
 	let store = r.Ws.Store
 	let ws = r.Ws.Name
 	_ = try applyPlan(mut r, plan, fn() !i64 {
 		return try oplog.Undo(store, ws, rec.Number)
 	})
 	o.Line("Undid operation {rec.Number}: {rec.Command}.")
+}
+
+// undoPush moves the server's copy of a branch from what a push left (rc.After) back to what it held (rc.Before);
+// the server refuses when another push moved it since.
+fn undoPush(r mut Repo, remote str, rc oplog.RefChange) ! {
+	let prefix = "refs/remotes/" + remote + "/"
+	if !twine.HasPrefix(rc.Name, prefix) {
+		return
+	}
+	let url = try remoteURL(r, remote)
+	mut c = try client(r, url)
+	_ = try c.Push(transport.PushRequest{Changes: []transport.ChangeUpdate{}, Refs: []transport.RefUpdate{transport.RefUpdate{Name: "refs/heads/" + rc.Name[len(prefix):], Old: rc.After, New: rc.Before}}}, "")
 }
 
 fn doRedo(g Global, o mut Out) ! {

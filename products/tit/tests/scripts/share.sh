@@ -73,6 +73,20 @@ t fetch > /dev/null
 [ "$(t log --format=subject -n 1 origin/main)" = "Merge commit 'origin/main'" ] || fail "fetch did not move origin/main"
 echo "ok fetch"
 
+# undoing c's push asks first, then puts the server's main back where it was
+cd "$d/c"
+if t undo > "$d/out.txt" 2>&1; then
+	fail "an undo of a push went through without --yes"
+fi
+grep -q "tit undo --yes" "$d/out.txt" || fail "the undo of a push: $(cat "$d/out.txt")"
+[ "$(t -C "$d/server" log --format=subject -n 1)" = "Merge commit 'origin/main'" ] || fail "a refused undo moved the server"
+t undo --yes > /dev/null
+[ "$(t -C "$d/server" log --format=subject -n 1)" = "from b" ] || fail "the server's main after undoing the push: $(t -C "$d/server" log --format=subject -n 1)"
+[ "$(t log --format=subject -n 1 origin/main)" = "from b" ] || fail "c's origin/main after undoing the push"
+t push > /dev/null
+[ "$(t -C "$d/server" log --format=subject -n 1)" = "Merge commit 'origin/main'" ] || fail "the push again"
+echo "ok undoing a push puts the server's branch back, after asking"
+
 # a client with no key is refused
 mkdir "$d/stranger"
 if HOME="$d/stranger" XDG_CONFIG_HOME="$d/stranger" t clone "$url" "$d/s" > "$d/out.txt" 2>&1; then
