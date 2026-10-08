@@ -7108,6 +7108,16 @@ fn rt_task_park(timeout i64) i64 {
 	return rt_task_wait(-1, 0, timeout)
 }
 
+// rt_task_wake_now ends a parked task's wait for a caller that resumes it at once (a helper job's
+// result): false, changing nothing, when the task no longer waits (a cancel woke it already).
+fn rt_task_wake_now(t i64) bool {
+	if t[tWaiting] == 0 || t[tWaitFd] >= 0 {
+		return false
+	}
+	rt_task_ready(t)
+	return true
+}
+
 // rt_task_wake ends a parked task's wait; the event loop resumes it on its next turn.
 fn rt_task_wake(t i64) {
 	if t[tWaiting] == 0 || t[tWaitFd] >= 0 {
@@ -7432,7 +7442,15 @@ fn rt_helper_run(f fn(i64), arg i64, drop fn(i64)) ! {
 	free(b)
 	let r = rt_task_park(0)
 	if r == waitDeadline {
-		job[jGone] = 1
+		if job[jGone] == 2 {
+			// The job finished in the same turn as the cancel: its result is ready but unclaimed,
+			// so its inputs are released here rather than by the core.
+			let drop = cast(fn(i64), job[jDrop])
+			drop(job[jArg])
+			free(job)
+		} else {
+			job[jGone] = 1
+		}
 		fail cast(fault, rt_wait_fault())
 	}
 	free(job)
@@ -7466,6 +7484,9 @@ fn rt_helper_done(job i64) i64 {
 		free(job)
 		return 0
 	}
+	// Done: the task resumes with waitReady and frees the job, or, if a cancel interrupted its wait
+	// in this same turn, with waitDeadline, and then it frees the job itself (gone 2).
+	job[jGone] = 2
 	return job[jTask]
 }
 

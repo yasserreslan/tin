@@ -1747,8 +1747,9 @@ fn take_jobs() {
 		}
 		let job = buf[0]
 		let task = rt_helper_done(job)
-		if task != 0 {
-			rt_task_ready(task)
+		// A task a cancel already woke (it waits in the ready queue, to resume with the cancel)
+		// is not resumed a second time: rt_task_wake does nothing for a task that is not waiting.
+		if task != 0 && rt_task_wake_now(task) {
 			resume_task(task)
 		}
 	}

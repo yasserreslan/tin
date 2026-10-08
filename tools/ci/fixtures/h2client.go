@@ -191,6 +191,23 @@ func main() {
 	sr.Body.Close()
 	fmt.Println("PASS ServeFile over h2: validators, 304, a byte range and a stale If-Range")
 
+	// A file response the client cancels half way, again and again (#823): a helper read that finishes in the
+	// same turn as the cancel once resumed the stream's task twice and corrupted the heap; the connection must
+	// stay up for the next request each time.
+	for i := 0; i < 40; i++ {
+		creq, _ := http.NewRequest("GET", base+"/file?name=big", nil)
+		cr, cerr := client.Do(creq)
+		if cerr != nil {
+			fail("cancelled file %d: %v", i, cerr)
+		}
+		cr.Body.Close()
+		resp, _ := get("/")
+		if resp.StatusCode != 200 {
+			fail("after cancelled file %d: %d", i, resp.StatusCode)
+		}
+	}
+	fmt.Println("PASS 40 file responses cancelled half way, the connection still serving")
+
 	resp, body := get("/trailers?n=1000")
 	var s int
 	for _, c := range body {
