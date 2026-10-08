@@ -16,6 +16,16 @@ fn work(id i64) {
 }
 
 fn main() {
+	mut pcg = dice.NewPCG(1, 2)
+	say.Line("v2 pcg", pcg.Uint64(), pcg.Uint64())
+	mut v2 = dice.NewV2(dice.NewPCG(1, 2))
+	say.Line("v2 api", v2.Int32N(100), v2.Int64N(1000), v2.Float64() < 1.0)
+	let seed = [32]u8{}
+	mut chacha = dice.NewChaCha8(seed)
+	say.Line("v2 chacha", chacha.Uint64())
+	mut chrand = dice.NewV2(dice.NewChaCha8(seed))
+	let permv2 = chrand.Perm(5)
+	say.Line("v2 perm", len(permv2), permv2)
 	let v = dice.FromState(1, 2, 3, 4)
 	for i in 0..10 {
 		say.Line("vector", i, v.U64())

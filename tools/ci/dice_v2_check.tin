@@ -1,0 +1,30 @@
+package main
+
+import "./ci"
+import "say"
+
+fn main() {
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "dice-v2-")
+	let goexe = ci.Join(dir, "go")
+	let tinexe = ci.Join(dir, "tin")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/dice_v2"}, ci.Root(), 120), "build Go dice v2 reference")
+	ci.BuildTin("tools/ci/fixtures/dice_v2.tin", tinexe, "", []str{})
+	let goResult = ci.Exec([]str{goexe}, ci.Root(), 60)
+	let tinResult = ci.Exec([]str{tinexe}, ci.Root(), 60)
+	ci.Must(goResult, "run Go dice v2 reference")
+	ci.Must(tinResult, "run Tin dice v2 fixture")
+	let want = ci.Lines(goResult.Stdout)
+	let got = ci.Lines(tinResult.Stdout)
+	ci.Check(len(got) == len(want), "dice v2 corpus line count")
+	mut bad = 0
+	for i in 0..min(len(got), len(want)) {
+		if got[i] != want[i] {
+			say.Line("line", i+1, "Go:", want[i], "Tin:", got[i])
+			bad += 1
+			if bad == 5 { break }
+		}
+	}
+	ci.Check(bad == 0, "dice v2 output matches Go")
+	ci.Remove(dir)
+	ci.Pass("dice v2: 64 PCG seeds, ChaCha8, range API and permutation match Go")
+}

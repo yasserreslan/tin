@@ -1,0 +1,253 @@
+package dice
+
+// SourceV2 provides the 64-bit stream consumed by a v2 Rand.
+shape SourceV2 {
+	mut Uint64() u64
+}
+
+// PCG is Go math/rand/v2's 128-bit PCG-DXSM generator.
+type PCG struct {
+	hi u64
+	lo u64
+}
+
+// NewPCG returns a PCG stream initialized with the two seed words.
+fn NewPCG(d1 u64, d2 u64) PCG {
+	return PCG{hi: d1, lo: d2}
+}
+
+// Uint64 returns the next Go-compatible PCG-DXSM value.
+@wrap fn (p mut PCG) Uint64() u64 {
+	let (hi0, lo0) = mul64(p.lo, 4865540595714422341)
+	mut hi = hi0 +% p.hi*4865540595714422341 +% p.lo*2549297995355413924
+	let lo = lo0 +% 1442695040888963407
+	if lo < lo0 {
+		hi = hi +% 1
+	}
+	hi = hi +% 6364136223846793005
+	p.hi = hi
+	p.lo = lo
+	hi ^= hi >> 32
+	hi *%= 0xda942042e4dd58b5
+	hi ^= hi >> 48
+	hi *%= lo | 1
+	return hi
+}
+
+// ChaCha8 is Go math/rand/v2's ChaCha8 stream generator.
+type ChaCha8 struct {
+	key [8]u32
+	counter u32
+	buf [32]u64
+	index i64
+}
+
+// NewChaCha8 returns a ChaCha8 stream initialized from 32 seed bytes.
+fn NewChaCha8(seed [32]u8) ChaCha8 {
+	mut c = ChaCha8{index: 16}
+	for i in 0..8 {
+		let j = i*4
+		c.key[i] = u32(seed[j]) | (u32(seed[j+1]) << 8) | (u32(seed[j+2]) << 16) | (u32(seed[j+3]) << 24)
+	}
+	return c
+}
+
+// rotl32 rotates a word left by k bits.
+@wrap fn rotl32(x u32, k i64) u32 {
+	return (x << k) | (x >> (32-k))
+}
+
+// quarter applies one ChaCha quarter round.
+@wrap fn quarter(x mut [16]u32, a i64, b i64, c i64, d i64) {
+	x[a] = x[a] +% x[b]
+	x[d] = rotl32(x[d]^x[a], 16)
+	x[c] = x[c] +% x[d]
+	x[b] = rotl32(x[b]^x[c], 12)
+	x[a] = x[a] +% x[b]
+	x[d] = rotl32(x[d]^x[a], 8)
+	x[c] = x[c] +% x[d]
+	x[b] = rotl32(x[b]^x[c], 7)
+}
+
+// refill produces Go's four-way interleaved ChaCha8 output block.
+@wrap fn (c mut ChaCha8) refill() {
+	mut blocks = [4][16]u32{}
+	for lane in 0..4 {
+		let initial = [16]u32{0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
+			c.key[0], c.key[1], c.key[2], c.key[3], c.key[4], c.key[5], c.key[6], c.key[7], c.counter+%u32(lane), 0, 0, 0}
+		mut x = initial
+		for round in 0..4 {
+			quarter(mut x, 0, 4, 8, 12)
+			quarter(mut x, 1, 5, 9, 13)
+			quarter(mut x, 2, 6, 10, 14)
+			quarter(mut x, 3, 7, 11, 15)
+			quarter(mut x, 0, 5, 10, 15)
+			quarter(mut x, 1, 6, 11, 12)
+			quarter(mut x, 2, 7, 8, 13)
+			quarter(mut x, 3, 4, 9, 14)
+		}
+		for word in 0..16 {
+			if word >= 4 && word <= 11 {
+				x[word] = x[word] +% initial[word]
+			}
+			blocks[lane][word] = x[word]
+		}
+	}
+	for word in 0..16 {
+		c.buf[word*2] = u64(blocks[0][word]) | (u64(blocks[1][word]) << 32)
+		c.buf[word*2+1] = u64(blocks[2][word]) | (u64(blocks[3][word]) << 32)
+	}
+	c.counter = c.counter +% 4
+	c.index = 0
+}
+
+// Uint64 returns the next little-endian word pair from ChaCha8.
+@wrap fn (c mut ChaCha8) Uint64() u64 {
+	if c.index >= 16 {
+		c.refill()
+	}
+	let value = c.buf[c.index]
+	c.index += 1
+	return value
+}
+
+// RandV2 draws Go math/rand/v2-style values from a source.
+type RandV2 struct {
+	source dyn SourceV2
+}
+
+// NewV2 wraps a PCG or ChaCha8 source in the v2 distribution API.
+fn NewV2(source dyn SourceV2) RandV2 {
+	return RandV2{source: source}
+}
+
+// Uint64 returns the next source value.
+fn (r mut RandV2) Uint64() u64 {
+	return r.source.Uint64()
+}
+
+// Int32N returns a uniform value in [0,n) and panics for n <= 0.
+fn (r mut RandV2) Int32N(n i32) i32 {
+	if n <= 0 {
+		panic("invalid argument to Int32N")
+	}
+	return i32(r.uint64n(u64(n)))
+}
+
+// Int64N returns a uniform value in [0,n) and panics for n <= 0.
+fn (r mut RandV2) Int64N(n i64) i64 {
+	if n <= 0 {
+		panic("invalid argument to Int64N")
+	}
+	return i64(r.uint64n(u64(n)))
+}
+
+// N returns a uniform value in [0,n) for Tin's signed machine integer type.
+fn (r mut RandV2) N(n i64) i64 {
+	return r.Int64N(n)
+}
+
+// uint64n performs Go v2's unbiased multiply-and-reject range reduction.
+@wrap fn (r mut RandV2) uint64n(n u64) u64 {
+	if n&(n-%1) == 0 {
+		return r.Uint64() & (n-%1)
+	}
+	mut (hi, lo) = mul64(r.Uint64(), n)
+	if lo < n {
+		let threshold = (0-%n) % n
+		for lo < threshold {
+			let (nextHi, nextLo) = mul64(r.Uint64(), n)
+			hi = nextHi
+			lo = nextLo
+		}
+	}
+	return hi
+}
+
+// Float64 returns a uniform float in [0,1).
+fn (r mut RandV2) Float64() f64 {
+	return f64(r.Uint64()>>11) * (1.0 / 9007199254740992.0)
+}
+
+// Shuffle permutes integer values in place using Go v2's Fisher-Yates order.
+fn (r mut RandV2) Shuffle(xs mut []i64) {
+	mut i = len(xs)
+	for i > 1 {
+		i -= 1
+		let j = i64(r.uint64n(u64(i+1)))
+		let t = xs[i]
+		xs[i] = xs[j]
+		xs[j] = t
+	}
+}
+
+// Perm returns a uniform permutation of 0 through n-1.
+fn (r mut RandV2) Perm(n i64) []i64 {
+	if n < 0 {
+		panic("invalid argument to Perm")
+	}
+	mut out = make([]i64, n)
+	for i in 0..n {
+		out[i] = i
+	}
+	r.Shuffle(mut out)
+	return out
+}
+
+// v2Global is seeded lazily from the per-core runtime-seeded legacy stream.
+mut v2Global = NewV2(NewPCG(0, 0))
+mut v2GlobalSeeded bool
+
+// seedV2 initializes this core's v2 global source from runtime entropy.
+fn seedV2() {
+	if !gSeeded {
+		seedCore()
+	}
+	v2Global = NewV2(NewPCG(g.U64(), g.U64()))
+	v2GlobalSeeded = true
+}
+
+// Int32N returns a uniform value in [0,n) from this core's v2 global stream.
+fn Int32N(n i32) i32 {
+	if !v2GlobalSeeded {
+		seedV2()
+	}
+	return v2Global.Int32N(n)
+}
+
+// Int64N returns a uniform value in [0,n) from this core's v2 global stream.
+fn Int64N(n i64) i64 {
+	if !v2GlobalSeeded {
+		seedV2()
+	}
+	return v2Global.Int64N(n)
+}
+
+// N returns a uniform value in [0,n) from this core's v2 global stream.
+fn N(n i64) i64 {
+	return Int64N(n)
+}
+
+// Float64 returns a uniform value in [0,1) from this core's v2 global stream.
+fn Float64() f64 {
+	if !v2GlobalSeeded {
+		seedV2()
+	}
+	return v2Global.Float64()
+}
+
+// PermV2 returns a v2 global permutation of 0 through n-1.
+fn PermV2(n i64) []i64 {
+	if !v2GlobalSeeded {
+		seedV2()
+	}
+	return v2Global.Perm(n)
+}
+
+// ShuffleV2 applies a v2 global permutation to integer values in place.
+fn ShuffleV2(xs mut []i64) {
+	if !v2GlobalSeeded {
+		seedV2()
+	}
+	v2Global.Shuffle(mut xs)
+}

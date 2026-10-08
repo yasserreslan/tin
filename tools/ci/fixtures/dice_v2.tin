@@ -1,0 +1,20 @@
+package main
+
+import "dice"
+import "say"
+
+fn main() {
+	for seed in 0..64 {
+		mut p = dice.NewPCG(u64(seed), u64(seed) ^ 0x9e3779b97f4a7c15)
+		for i in 0..8 { say.Line("P", seed, i, p.Uint64()) }
+	}
+	mut seed = [32]u8{}
+	for i in 0..32 { seed[i] = u8(i) }
+	mut c = dice.NewChaCha8(seed)
+	for i in 0..16 { say.Line("C", i, c.Uint64()) }
+	mut r = dice.NewV2(dice.NewPCG(1, 2))
+	say.Line("I", r.Int32N(100), r.Int64N(1000000007))
+	say.Line("F", say.Fmt("%.17g", r.Float64()))
+	let p = r.Perm(12)
+	for i, x in p { say.Line("M", i, x) }
+}
