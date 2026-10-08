@@ -45,6 +45,13 @@ fn Run(paths []str) bool {
 			got = gpuwin.Pump(win, 0.0)
 		}
 		take(mut ws, win)
+		// the window moved to a screen with another scale (Retina and not): the glyphs are drawn again for it
+		let scale = appkit.Scale(win.Win)
+		if scale != render.Scale() {
+			render.Init(gpu, scale, ws.CodeSize)
+			ws.Ed.UseFont()
+			ws.Dirty = true
+		}
 		let (cw, ch) = appkit.ContentSize(win.Win)
 		let resized = ws.Resize(cw, ch)
 		if resized || ws.NeedsFrame() {
