@@ -3082,18 +3082,20 @@ The Scanner reads a whole str (a stream is read with io.ReadAll first), so a tok
 - `(s Scanner) TokenText() str`: TokenText is the text of the token Scan last returned ("" after Next).
 - `TokenString(tok i32) str`: TokenString is a printable form of a token kind ("EOF", "Ident", ...) or character (Go-quoted).
 The reader and writer handle bounded ustar archives and stream entry payloads through caller buffers. The writer supports regular files, directories, symlinks, hard links, FIFOs, character devices and block devices, and splits paths across the 155-byte prefix and 100-byte name fields. PAX and GNU extension entries are exposed as raw headers; their metadata is not applied to the following entry, and the writer does not create extension records. Sparse formats are unsupported. `NewReader` receives the whole bounded archive byte slice, and `Writer` buffers up to 64 MiB.
+Package tar reads and writes bounded ustar archives with PAX and GNU long-name extensions. Reader applies PAX records (x) to the next entry, global PAX records (g) to every later entry until a record with the same keyword replaces or empties them, and GNU long name and link entries (L, K) to the next entry; those extension entries are consumed by Next and never returned. Writer stores a name up to 100 bytes directly or splits a path at a slash into the 155-byte prefix and 100-byte name fields; otherwise, and for a link name, user or group name, uid or gid past 7 octal digits, or an mtime with a fraction or past the octal field, it writes a PAX entry before the header and truncates the ustar field. It never writes GNU records. Reader uses the supplied archive bytes; Writer buffers at most MaxArchiveSize bytes, and extension payloads are limited to MaxExtensionSize. Sparse formats are not supported.
 
 - `const BlockSize = 512`: BlockSize is the size of a tar header and data-alignment block.
 - `const MaxArchiveSize = 67108864`: MaxArchiveSize bounds archives built by Writer and accepted by the default examples.
+- `const MaxExtensionSize = 1048576`: MaxExtensionSize bounds the payload of one PAX or GNU extension entry, read or written.
 - `type TypeFlag enum`: TypeFlag identifies the kind of an archive entry.
-- `type Header struct`: Header describes one tar archive entry.
+- `type Header struct`: Header describes one tar archive entry; MtimeNsec is the fraction of Mtime, in nanoseconds.
 - `type Reader struct`: Reader reads entries from a bounded archive in order.
 - `NewReader(data []u8, maxBytes i64) !Reader`: NewReader creates a reader over an archive, rejecting inputs above limit bytes.
 - `(r mut Reader) Next() !?Header`: Next advances to the next header, returning nil at the end of the archive.
 - `(r mut Reader) Read(buf mut []u8) !i64`: Read returns the current entry's next bytes, or zero at its end.
-- `type Writer struct`: Writer constructs a ustar archive in bounded memory.
+- `type Writer struct`: Writer constructs a ustar archive in bounded memory, with a PAX entry before a header whose fields do not fit ustar.
 - `NewWriter() Writer`: NewWriter creates an empty archive writer.
-- `(w mut Writer) WriteHeader(h Header) !`: WriteHeader appends a ustar header; the following Write calls must provide Size bytes.
+- `(w mut Writer) WriteHeader(h Header) !`: WriteHeader appends a header, preceded by a PAX entry when a field needs one; the following Write calls must provide Size bytes.
 - `(w mut Writer) Write(data []u8) !i64`: Write appends file content and returns its byte count.
 - `(w mut Writer) Close() !`: Close pads the final entry and writes the two zero blocks ending the archive.
 - `(w Writer) Bytes() ![]u8`: Bytes returns the archive bytes after Close.

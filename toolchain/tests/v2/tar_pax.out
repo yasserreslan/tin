@@ -1,0 +1,33 @@
+written 0 "aaaaaaaaaaaa+150" Regular size=3 uid=1 gid=2 uname="" gname="" mtime=1700000000 nsec=0 link=""
+written 1 "d/bbbbbbbbbb+122" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=0 nsec=0 link=""
+written 2 "eeeeeeeeeeee+104" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=0 nsec=0 link=""
+written 3 "link" Symlink size=0 uid=0 gid=0 uname="" gname="" mtime=0 nsec=0 link="llllllllllll+130"
+written 4 "owner" Regular size=0 uid=2097152 gid=2097153 uname="uuuuuuuuuuuu+40" gname="gggggggggggg+33" mtime=0 nsec=0 link=""
+written 5 "t1" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=1700000001 nsec=500000000 link=""
+written 6 "t2" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=1700000002 nsec=123456789 link=""
+written 7 "t3" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=1700000003 nsec=5000000 link=""
+written 8 "big" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=8589934592 nsec=0 link=""
+written count 9
+raw "one" Regular size=0 uid=0 gid=0 uname="" gname="g1" mtime=0 nsec=0 link=""
+raw "pax-path" Regular size=4 uid=77 gid=0 uname="" gname="g1" mtime=1700000005 nsec=1 link=""
+raw data 4 abcd
+raw "three" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=0 nsec=0 link=""
+raw "nnnnnnnnnnnn+125" Regular size=0 uid=0 gid=0 uname="" gname="" mtime=0 nsec=0 link=""
+raw "sl" Symlink size=0 uid=0 gid=0 uname="" gname="" mtime=0 nsec=0 link="target-long"
+fault 1 tar: malformed pax record length
+fault 2 tar: malformed pax record
+fault 3 tar: invalid pax uid record
+fault 4 tar: invalid pax mtime record
+fault 5 tar: invalid pax mtime record
+fault 6 tar: malformed pax record
+fault 7 tar: extension entry is not followed by a file
+fault 8 limit: tar: file size exceeds limit: limit exceeded
+fault 9 tar: invalid pax size record
+fault 10 limit: tar: extension entry exceeds limit: limit exceeded
+fault 11 limit: tar: extension entry exceeds limit: limit exceeded
+fault 12 tar: extension entry is not followed by a file
+global only no fault
+write name too large limit: tar: extension records exceed limit: limit exceeded
+write nul name tar: header string contains NUL
+write negative uid tar: header field is outside ustar limits
+write nanos tar: header field is outside ustar limits

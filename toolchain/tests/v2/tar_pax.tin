@@ -1,0 +1,210 @@
+package main
+
+import "say"
+import "tar"
+import "fault"
+
+fn main() ! {
+	let archive = try paxArchive()
+	mut r = try tar.NewReader(archive, tar.MaxArchiveSize)
+	mut count = i64(0)
+	for {
+		let h = try r.Next()
+		if h == nil { break }
+		say.Line("written", count, show(h))
+		count += 1
+	}
+	say.Line("written count", count)
+
+	let raw = try rawArchive()
+	mut rr = try tar.NewReader(raw, tar.MaxArchiveSize)
+	for {
+		let h = try rr.Next()
+		if h == nil { break }
+		say.Line("raw", show(h))
+		if h.Size > 0 {
+			mut buf = make([]u8, 16)
+			let n = try rr.Read(mut buf)
+			say.Line("raw data", n, str(buf[0:n]))
+		}
+	}
+
+	say.Line("fault 1", fileFault(ext("PaxHeaders", 'x', []u8("12 path=x\n"))))
+	say.Line("fault 2", fileFault(ext("PaxHeaders", 'x', []u8("8 pathx\n"))))
+	say.Line("fault 3", fileFault(ext("PaxHeaders", 'x', []u8(rec("uid=x")))))
+	say.Line("fault 4", fileFault(ext("PaxHeaders", 'x', []u8(rec("mtime=1.x")))))
+	say.Line("fault 5", fileFault(ext("PaxHeaders", 'x', []u8(rec("mtime=-1")))))
+	say.Line("fault 6", fileFault(ext("g", 'g', []u8(rec("comment")))))
+	say.Line("fault 7", firstFault(append(ext("PaxHeaders", 'x', []u8("")), zeroBlocks(1024)...)))
+	say.Line("fault 8", fileFault(ext("PaxHeaders", 'x', []u8(rec("size=99999999")))))
+	say.Line("fault 9", fileFault(ext("PaxHeaders", 'x', []u8(rec("size=abc")))))
+	say.Line("fault 10", firstFault(extensionEntry(repeat("p", 2097152))))
+	say.Line("fault 11", firstFault(ext("PaxHeaders", 'x', []u8(rec("path=" + repeat("q", 1048576))))))
+	say.Line("fault 12", firstFault(extensionOnly()))
+	say.Line("global only", firstFault(append(ext("g", 'g', []u8(rec("comment=note"))), zeroBlocks(1024)...)))
+
+	say.Line("write name too large", writeErr(tar.Header{Name: repeat("a", 1048600), Mode: 0o600, Size: 0, Type: tar.TypeFlag.Regular, Linkname: ""}))
+	say.Line("write nul name", writeErr(tar.Header{Name: "bad" + str(u8(0)) + "name", Mode: 0o600, Size: 0, Type: tar.TypeFlag.Regular, Linkname: ""}))
+	say.Line("write negative uid", writeErr(tar.Header{Name: "x", Mode: 0o600, Uid: -1, Size: 0, Type: tar.TypeFlag.Regular, Linkname: ""}))
+	say.Line("write nanos", writeErr(tar.Header{Name: "x", Mode: 0o600, Mtime: 1, MtimeNsec: 1000000000, Size: 0, Type: tar.TypeFlag.Regular, Linkname: ""}))
+}
+
+// show is one header's fields, with long strings cut to their first 12 bytes and their length.
+fn show(h tar.Header) str {
+	return say.Fmt("%q %v size=%d uid=%d gid=%d uname=%q gname=%q mtime=%d nsec=%d link=%q", head(h.Name), h.Type, h.Size, h.Uid, h.Gid, head(h.Uname), head(h.Gname), h.Mtime, h.MtimeNsec, head(h.Linkname))
+}
+
+fn head(s str) str {
+	if len(s) <= 12 { return s }
+	return s[0:12] + "+" + say.Fmt("%d", len(s))
+}
+
+fn repeat(c str, n i64) str {
+	mut b = make([]u8, n)
+	for i in 0..n { b[i] = u8(c[0]) }
+	return str(b)
+}
+
+// paxArchive writes entries whose fields need PAX records and reads them back.
+fn paxArchive() ![]u8 {
+	mut w = tar.NewWriter()
+	try w.WriteHeader(tar.Header{Name: repeat("a", 150), Mode: 0o600, Uid: 1, Gid: 2, Size: 3, Mtime: 1700000000, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.Write([]u8("abc"))
+	try w.WriteHeader(tar.Header{Name: "d/" + repeat("b", 120), Mode: 0o644, Size: 0, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: repeat("e", 100) + "/fff", Mode: 0o644, Size: 0, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "link", Mode: 0o777, Size: 0, Type: tar.TypeFlag.Symlink, Linkname: repeat("l", 130)})
+	try w.WriteHeader(tar.Header{Name: "owner", Mode: 0o600, Uid: 2097152, Gid: 2097153, Size: 0, Uname: repeat("u", 40), Gname: repeat("g", 33), Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "t1", Mode: 0o600, Size: 0, Mtime: 1700000001, MtimeNsec: 500000000, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "t2", Mode: 0o600, Size: 0, Mtime: 1700000002, MtimeNsec: 123456789, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "t3", Mode: 0o600, Size: 0, Mtime: 1700000003, MtimeNsec: 5000000, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "big", Mode: 0o600, Size: 0, Mtime: 0o77777777777 + 1, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.Close()
+	return try w.Bytes()
+}
+
+// rawArchive holds a global record, per-file records, GNU names and a PAX size, built by hand.
+fn rawArchive() ![]u8 {
+	let g1 = []u8(rec("comment=note") + rec("gname=g1"))
+	let x1 = []u8(rec("path=pax-path") + rec("uid=77") + rec("mtime=1700000005.000000001") + rec("size=4"))
+	let g2 = []u8(rec("gname="))
+	let longName = repeat("n", 120) + "/tail"
+	let kName = []u8(longName + str(u8(0)))
+	let kLink = []u8("target-long" + str(u8(0)))
+	mut out = []u8{}
+	out = append(out, ext("g", 'g', g1)...)
+	out = append(out, entry("one", '0', 0, []u8{})...)
+	out = append(out, ext("PaxHeaders", 'x', x1)...)
+	out = append(out, entry("two", '0', 0, []u8("abcd"))...)
+	out = append(out, ext("g", 'g', g2)...)
+	out = append(out, entry("three", '0', 0, []u8{})...)
+	out = append(out, ext("././@LongLink", 'L', kName)...)
+	out = append(out, entry("short", '0', 0, []u8{})...)
+	out = append(out, ext("././@LongLink", 'K', kLink)...)
+	out = append(out, entry("sl", '2', 0, []u8{})...)
+	out = append(out, zeroBlocks(1024)...)
+	return out
+}
+
+// extensionOnly is an x entry with no file after it.
+fn extensionOnly() []u8 {
+	return append(ext("PaxHeaders", 'x', []u8(rec("path=lost"))), zeroBlocks(1024)...)
+}
+
+// extensionEntry is an x entry whose one record is longer than the extension limit.
+fn extensionEntry(value str) []u8 {
+	return ext("PaxHeaders", 'x', []u8(rec("path=" + value)))
+}
+
+// ext is an extension entry whose ustar size is its payload length.
+fn ext(name str, kind u8, payload []u8) []u8 {
+	return entry(name, kind, i64(len(payload)), payload)
+}
+
+// rec is one PAX record for kv (key=value): its decimal length, a space, kv and a newline.
+fn rec(kv str) str {
+	let body = " " + kv + "\n"
+	mut n = len(body)
+	mut next = len(body) + len(say.Fmt("%d", n))
+	for next != n {
+		n = next
+		next = len(body) + len(say.Fmt("%d", n))
+	}
+	return say.Fmt("%d", n) + body
+}
+
+// entry is a header block with the ustar size sizeField, then payload padded to whole blocks.
+fn entry(name str, kind u8, sizeField i64, payload []u8) []u8 {
+	mut b = make([]u8, 512)
+	put(mut b, 0, name)
+	put(mut b, 100, octalText(0o644, 7))
+	put(mut b, 108, octalText(0, 7))
+	put(mut b, 116, octalText(0, 7))
+	put(mut b, 124, octalText(sizeField, 11))
+	put(mut b, 136, octalText(0, 11))
+	for i in 148..156 { b[i] = u8(' ') }
+	b[156] = kind
+	put(mut b, 257, "ustar")
+	put(mut b, 263, "00")
+	mut sum = i64(0)
+	for x in b { sum += i64(x) }
+	put(mut b, 148, octalText(sum, 6))
+	b[154] = 0
+	mut out = b
+	out = append(out, payload...)
+	let rem = len(payload) % 512
+	if rem > 0 {
+		for i in 0..(512 - rem) { out = append(out, 0) }
+	}
+	return out
+}
+
+fn put(b mut []u8, at i64, s str) {
+	for i in 0..len(s) { b[at+i] = s[i] }
+}
+
+fn octalText(v i64, width i64) str {
+	mut out = make([]u8, width)
+	mut x = v
+	mut i = width - 1
+	for i >= 0 {
+		out[i] = u8('0' + x % 8)
+		x /= 8
+		i -= 1
+	}
+	return str(out)
+}
+
+fn zeroBlocks(n i64) []u8 {
+	return make([]u8, n)
+}
+
+// fileFault is the first fault reading archive ext when a regular file follows it.
+fn fileFault(ext []u8) str {
+	mut archive = []u8{}
+	archive = append(archive, ext...)
+	archive = append(archive, entry("f", '0', 0, []u8{})...)
+	archive = append(archive, zeroBlocks(1024)...)
+	return firstFault(archive)
+}
+
+// firstFault is the fault of the first Next over archive, or "no fault".
+fn firstFault(archive []u8) str {
+	mut r = tar.NewReader(archive, tar.MaxArchiveSize) catch err {
+		return "reader: " + say.Str(err)
+	}
+	let _ = r.Next() catch err {
+		if fault.Is(err, fault.LimitExceeded) { return "limit: " + say.Str(err) }
+		return say.Str(err)
+	}
+	return "no fault"
+}
+
+// writeErr is the fault of writing one header, or "no fault".
+fn writeErr(h tar.Header) str {
+	mut w = tar.NewWriter()
+	w.WriteHeader(h) catch err {
+		if fault.Is(err, fault.LimitExceeded) { return "limit: " + say.Str(err) }
+		return say.Str(err)
+	}
+	return "no fault"
+}
