@@ -1,4 +1,4 @@
-// Package jpeg decodes baseline sequential JPEG images. Progressive scans and encoding are not implemented yet.
+// Package jpeg decodes 8-bit JPEG images and writes quality-parameterized baseline JPEG images. EXIF orientation is left to the caller.
 package jpeg
 
 import "image"
