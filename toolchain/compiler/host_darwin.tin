@@ -12,6 +12,11 @@ fn host_dirent_name(ent i64) i64 {
 	return ent + 21
 }
 
+// host_dirent_type is the d_type of a struct dirent from readdir (DT_REG 8, DT_DIR 4, DT_LNK 10, DT_UNKNOWN 0; #928).
+fn host_dirent_type(ent i64) i64 {
+	return i64(load8(ent + 20))
+}
+
 extern fn getenv(name i64) i64
 
 fn host_start(argc i64, argv i64) {
