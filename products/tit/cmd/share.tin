@@ -173,7 +173,9 @@ fn doRemote(g Global, args []str, o mut Out) ! {
 		sift.Sort(mut names)
 		for k in names {
 			let url = cfg.Get(k)
-			if url != nil {
+			if url != nil && g.Json {
+				o.Line(jsonObject([]str{"name", jsonStr(k[7:len(k) - 4]), "url", jsonStr(url)}))
+			} else if url != nil {
 				o.Line(k[7:len(k) - 4] + "\t" + url)
 			}
 		}

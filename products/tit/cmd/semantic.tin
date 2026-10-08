@@ -98,7 +98,10 @@ fn declMatches(key str, path str, pkg str, name str) bool {
 	}
 	// the package is the directory's name, or, for a package of one file (lib/quarry.tin in older history), the file's
 	let dir = trailDir(path)
-	let base = path[len(dir) + 1:]
+	mut base = path
+	if len(dir) > 0 {
+		base = path[len(dir) + 1:]
+	}
 	return dir == pkg || twine.HasSuffix(dir, "/" + pkg) || base == pkg + ".tin"
 }
 
@@ -146,7 +149,11 @@ fn doHistory(g Global, a HistoryArgs, o mut Out) ! {
 				continue
 			}
 			found += 1
-			o.Line(paint(g, "33", id.Hex()[0:12]) + " " + dateText(c.Author)[4:16] + "  " + changeLine(k) + " in " + k.Path + "  " + firstLine(c.Message))
+			if g.Json {
+				o.Line(jsonObject([]str{"commit", jsonStr(id.Hex()), "time", "{c.Author.When}", "kind", jsonStr(semantic.KindText(k.Kind)), "key", jsonStr(k.Key), "old_key", jsonStr(k.OldKey), "path", jsonStr(k.Path), "old_path", jsonStr(k.OldPath), "subject", jsonStr(firstLine(c.Message))}))
+			} else {
+				o.Line(paint(g, "33", id.Hex()[0:12]) + " " + dateText(c.Author)[4:16] + "  " + changeLine(k) + " in " + k.Path + "  " + firstLine(c.Message))
+			}
 			match k.Kind {
 				Renamed => {
 					// older commits know it by its old name
@@ -168,7 +175,7 @@ fn doHistory(g Global, a HistoryArgs, o mut Out) ! {
 			break
 		}
 	}
-	if found == 0 {
+	if found == 0 && !g.Json {
 		o.Line("No commit among the last {len(ids)} changed " + a.Name + ".")
 	}
 }

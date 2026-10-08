@@ -255,7 +255,19 @@ fn Parse(args []str) !(Global, Command) {
 		if len(rest) > 0 {
 			topic = rest[0]
 		}
+		if topic == "--help" || topic == "-h" {
+			topic = "help"
+		}
+		if len(topic) > 0 && len(helpOf(topic)) == 0 {
+			fail fault.Wrap(ErrUsage, "there is no command {topic} (tit help lists them)")
+		}
 		return g, Command.Help(topic)
+	}
+	// tit <command> --help (or -h) is tit help <command>
+	for a in rest {
+		if (a == "--help" || a == "-h") && len(helpOf(name)) > 0 {
+			return g, Command.Help(name)
+		}
 	}
 	if name == "version" {
 		return g, Command.Version(len(rest) > 0 && rest[0] == "-v")
@@ -939,6 +951,34 @@ fn parseCount(s str) !i64 {
 	return n
 }
 
+// helpOf is one command's part of the usage text: its line or lines (a line that names it first, or after a |), with
+// the lines that continue them; "" when no command has that name.
+fn helpOf(name str) str {
+	mut out = ""
+	mut taking = false
+	for line in twine.Split(usageText, "\n") {
+		if twine.HasPrefix(line, "   ") && taking {
+			out = out + line + "\n"
+			continue
+		}
+		taking = false
+		if !twine.HasPrefix(line, "  ") || twine.HasPrefix(line, "   ") {
+			continue
+		}
+		let head = twine.TrimSpace(twine.SplitN(line[2:], "  ", 2)[0])
+		for part in twine.Split(head, "|") {
+			let words = twine.Split(twine.TrimSpace(part), " ")
+			if len(words) > 0 && words[0] == name {
+				taking = true
+			}
+		}
+		if taking {
+			out = out + "usage: tit " + twine.TrimSpace(line) + "\n"
+		}
+	}
+	return out
+}
+
 // Main runs the command line and returns the exit status: 0, 1 for a failure, 2 for a usage error.
 fn Main(args []str) i64 {
 	let (g, c, perr) = Parse(args)
@@ -962,6 +1002,41 @@ fn Main(args []str) i64 {
 fn run(g Global, c Command, o mut Out) ! {
 	// files a command may change are kept first, for tit timeline (snapshot.tin)
 	try snapshotFor(g, c)
+	if !g.Json {
+		try runTraced(g, c, mut o)
+		return
+	}
+	// --json: what a command writes is JSON lines; a command that writes text gets it as one object's lines
+	mut b = Out{buf: []u8{}}
+	let err = runTraced(g, c, mut b)
+	o.Text(asJson(commandName(c), str(b.buf)))
+	if err != nil {
+		fail err
+	}
+}
+
+// asJson is a command's output under --json: as it is when every line is a JSON object, otherwise
+// {"command": name, "lines": [...]}.
+fn asJson(name str, text str) str {
+	let lines = twine.Split(twine.TrimRight(text, "\n"), "\n")
+	mut json = true
+	mut kept = []str{}
+	for l in lines {
+		if len(l) == 0 {
+			continue
+		}
+		kept = append(kept, l)
+		if l[0] != '{' {
+			json = false
+		}
+	}
+	if json {
+		return text
+	}
+	return jsonObject([]str{"command", jsonStr(name), "lines", jsonList(kept)}) + "\n"
+}
+
+fn runTraced(g Global, c Command, o mut Out) ! {
 	if g.Trace {
 		let name = commandName(c)
 		// the traced block writes to its own buffer: a function literal cannot hold the mut parameter
@@ -1033,10 +1108,12 @@ fn commandName(c Command) str {
 fn dispatch(g Global, c Command, o mut Out) ! {
 	match c {
 		Help(topic) => {
-			o.Line(usageText)
-			if len(topic) > 0 {
+			if len(topic) == 0 {
+				o.Line(usageText)
+			} else {
+				o.Text(helpOf(topic))
 				o.Line("")
-				o.Line("(tit {topic}: see the line above)")
+				o.Line("Every command also takes the global flags: -C dir, --json, --trace. The manual: toolchain/docs/TIT.md.")
 			}
 		}
 		Version(verbose) => {

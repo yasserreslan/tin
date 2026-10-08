@@ -169,6 +169,12 @@ fn doBench(g Global, a BenchArgs, o mut Out) ! {
 	let results = try readResults(path)
 	if a.Action == "log" {
 		for res in results {
+			if g.Json {
+				mut b = make([]u8, 0, 256)
+				argo.Put(mut b, res)
+				o.Line(str(b))
+				continue
+			}
 			o.Line(res.Change[0:12] + " " + res.Commit[0:12] + "  " + res.Value + " " + res.Unit + "  " + machineText(res.Machine))
 		}
 		return

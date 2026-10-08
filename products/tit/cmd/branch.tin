@@ -93,7 +93,10 @@ fn doBranch(g Global, a BranchArgs, o mut Out) ! {
 		}
 		sift.Sort(mut names)
 		for n in names {
-			if n == current {
+			if g.Json {
+				let tip = try r.resolve(n)
+				o.Line(jsonObject([]str{"name", jsonStr(shortBranch(n)), "commit", jsonStr(tip.Hex()), "current", "{n == current}"}))
+			} else if n == current {
 				o.Line("* " + paint(g, "32", shortBranch(n)))
 			} else {
 				o.Line("  " + shortBranch(n))
@@ -492,7 +495,12 @@ fn doTag(g Global, a TagArgs, o mut Out) ! {
 		}
 		sift.Sort(mut names)
 		for n in names {
-			o.Line(n)
+			if g.Json {
+				let tip = try r.resolve("refs/tags/" + n)
+				o.Line(jsonObject([]str{"name", jsonStr(n), "commit", jsonStr(tip.Hex())}))
+			} else {
+				o.Line(n)
+			}
 		}
 		return
 	}

@@ -13,12 +13,13 @@ tit [-C dir] [--json] [--trace] [--no-color] <command> [arguments]
 | option | meaning |
 |---|---|
 | `-C dir` | run as if started in `dir` |
-| `--json` | print data as JSON: `status`, `log` (one object per commit), `diff` (one per file), `adopt`, `oplog` |
+| `--json` | print JSON lines: one object a record for the commands that print data (`status`, `log`, `show`, `cat`, `diff`, `config`, `branch`, `tag`, `remote`, `oplog`, `stack`, `who`, `workspaces`, `timeline`, `park`, `history`, `bench log`, `adopt`); any other command's report as `{"command": ..., "lines": [...]}` |
 | `--trace` | report the command's duration (through `policy.Trace`) |
 | `--no-color` | no colour even on a terminal |
 
 Output longer than the terminal goes through `$PAGER` (`less -FRX`); `TIT_NO_PAGER=1` turns that off. The exit
-status is 0, 1 for a failure, 2 for a usage error.
+status is 0, 1 for a failure, 2 for a usage error, 130 after Ctrl-C. `tit help <command>` (or `tit <command> --help`)
+prints one command's usage.
 
 ## Revisions
 
@@ -101,11 +102,18 @@ the new version records it, `tit stack` shows it, and `tit edit` puts git's mark
 
 | command | |
 |---|---|
-| `tit undo [--op N]` | reverse the last operation of this workspace (or operation N); refuses when a later operation moved the same refs, naming it |
+| `tit undo [--op N] [--yes]` | reverse the last operation of this workspace (or operation N); refuses when a later operation moved the same refs, naming it. Undoing a push puts the server's branch back (by the same compare-and-swap as a push) and asks for `--yes` first |
 | `tit redo` | apply again what the last undo reversed |
 | `tit oplog` | the operations, newest first (undone ones marked) |
 | `tit oplog show N` | one operation and its ref changes |
 | `tit oplog restore N [--yes]` | every ref as it was after operation N; `--yes` when that also reverses other workspaces' operations |
+| `tit timeline <file> [N]` | the versions of a file kept before each command that changes files (and by `watch`), newest first; with N, puts version N back (keeping the file it replaces as a new version) |
+| `tit watch [--every ms] [--for s]` | keep each saved version of the changed files, polling every `ms` (1000), until Ctrl-C (or for `s` seconds) |
+| `tit park [name]` | put every uncommitted change aside under `name` (untracked files too) and go back to the last commit; without a name, list what is parked |
+| `tit unpark <name>` | bring parked changes back, unstaged, on the branch they were parked on; merged onto it when it moved since |
+
+Kept versions stay in `.tit/workspaces/<ws>/snapshots` for 14 days. They never leave the machine (no commit names
+their blobs), a file `tit guard` flags is never kept, and neither is a file over 16 MiB.
 
 ## Sharing
 

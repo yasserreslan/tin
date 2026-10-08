@@ -240,13 +240,17 @@ fn doTimeline(g Global, a TimelineArgs, o mut Out) ! {
 	let rel = try r.rel(g, a.Path)
 	let vs = try versionsOf(r, rel)
 	if a.Pick == 0 {
-		if len(vs) == 0 {
+		if len(vs) == 0 && !g.Json {
 			o.Line("No kept version of " + rel + " (versions are kept before commands that change files, and by tit watch).")
 			return
 		}
 		for i in 0..len(vs) {
 			let id = try object.ParseId(vs[i].blob)
 			let (_, body) = try r.Store.GetRaw(id)
+			if g.Json {
+				o.Line(jsonObject([]str{"n", "{i + 1}", "time", "{vs[i].at}", "blob", jsonStr(vs[i].blob), "size", "{len(body)}", "before", jsonStr(vs[i].command)}))
+				continue
+			}
 			o.Line("{i + 1}  " + whenText(vs[i].at) + "  " + vs[i].blob[0:12] + "  {len(body)} bytes  before " + vs[i].command)
 		}
 		return
@@ -337,6 +341,10 @@ fn doPark(g Global, name str, o mut Out) ! {
 		for n in names {
 			let text = try flume.ReadFile(dir + "/" + n)
 			let lines = twine.Split(text, "\n")
+			if g.Json {
+				o.Line(jsonObject([]str{"name", jsonStr(n), "branch", jsonStr(shortBranch(lines[0])), "commit", jsonStr(lines[1])}))
+				continue
+			}
 			o.Line(n + "  on " + shortBranch(lines[0]) + " at " + lines[1][0:12])
 		}
 		return

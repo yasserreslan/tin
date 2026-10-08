@@ -174,3 +174,23 @@ fn TestKey(t mut crucible.T) {
 	t.True("a public key", len(first) > 40)
 	crucible.Equal(mut t, "the same key", again, first)
 }
+
+// Every command has help (#788): tit help <command> and tit <command> --help print its part of the usage text.
+fn TestHelpForEveryCommand(t mut crucible.T) {
+	let names = []str{"init", "status", "add", "rm", "mv", "commit", "diff", "log", "show", "cat", "config", "key", "branch", "switch", "merge", "tag", "undo", "redo", "oplog", "remote", "clone", "fetch", "push", "pull", "sync", "serve", "guard", "verify", "bisect", "workspace", "workspaces", "who", "stack", "edit", "move", "split", "absorb", "rewrite", "bench", "history", "overlap", "timeline", "watch", "park", "unpark", "mirror", "adopt", "version", "help"}
+	for n in names {
+		let h = helpOf(n)
+		t.True("help for " + n, twine.HasPrefix(h, "usage: tit "))
+		let (_, c, err) = Parse([]str{n, "--help"})
+		t.True(n + " --help parses", err == nil)
+		t.True(n + " --help is help", commandName(c) == "help")
+	}
+	crucible.Equal(mut t, "no such command", helpOf("nope"), "")
+}
+
+// --json output is JSON lines whatever the command writes (#788).
+fn TestJsonWraps(t mut crucible.T) {
+	crucible.Equal(mut t, "objects stay", asJson("log", "{{\"a\":1}}\n{{\"b\":2}}\n"), "{{\"a\":1}}\n{{\"b\":2}}\n")
+	crucible.Equal(mut t, "text is wrapped", asJson("switch", "Switched to branch \"x\".\n"), "{{\"command\":\"switch\",\"lines\":[\"Switched to branch \\\"x\\\".\"]}}\n")
+	crucible.Equal(mut t, "nothing", asJson("add", ""), "")
+}
