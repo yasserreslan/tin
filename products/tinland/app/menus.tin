@@ -77,6 +77,7 @@ fn BuildMenus(win gpuwin.Window) appkit.Menu {
 	appkit.AddSeparator(view)
 	item(m, view, "Toggle Project Panel", "b", cmd, workspace.CmdToggleProject)
 	item(m, view, "Toggle Output Panel", "j", cmd, workspace.CmdToggleOutput)
+	item(m, view, "Toggle Terminal", "`", ctrl, workspace.CmdToggleTerminal)
 	item(m, view, "Reveal in Project Panel", "r", cmd | shift, workspace.CmdRevealInProject)
 	appkit.AddSeparator(view)
 	appkit.AddSystemItem(view, "Enter Full Screen", "toggleFullScreen:", "f", cmd | ctrl)

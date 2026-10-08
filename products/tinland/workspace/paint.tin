@@ -22,6 +22,12 @@ fn (ws mut Workspace) Resize(w f64, h f64) bool {
 // Prepare does the part of a frame that stores new memory in the state (the editor's per-line highlighting state); call it before
 // the frame's arena starts.
 fn (ws mut Workspace) Prepare() {
+	// the output of a run opens the dock on its Output tab
+	if ws.Ed.OutputOpen {
+		ws.Ed.OutputOpen = false
+		ws.Bottom = BottomOutput
+	}
+	ws.termFit()
 	ws.Ed.Prepare()
 }
 
@@ -35,21 +41,21 @@ fn (ws mut Workspace) Paint(scene mut metal.Scene) {
 	t.Layout(ws.W, ws.H, mut ws.Scrolls)
 	t.Record(mut ws.Hits)
 	let cmds = t.Paint()
-	// the editor paints its own area: draw what comes before it, then the text, then what comes after
-	mut at = -1
+	// the editor and the terminal paint their own areas: draw what comes before each, then it, then the rest
+	mut from = 0
 	for i in 0..len(cmds) {
-		if cmds[i].Kind == ui.CmdCustom && cmds[i].Arg == idEditor {
-			at = i
+		if cmds[i].Kind == ui.CmdCustom && (cmds[i].Arg == idEditor || cmds[i].Arg == idTerminal) {
+			render.Draw(cmds[from:i], t.Texts, mut scene, noCustom)
+			let c = cmds[i]
+			if c.Arg == idEditor {
+				ws.Ed.Paint(th, c.X, c.Y, c.W, c.H, mut scene)
+			} else {
+				ws.paintTerminal(c.X, c.Y, c.W, c.H, mut scene)
+			}
+			from = i + 1
 		}
 	}
-	if at < 0 {
-		render.Draw(cmds, t.Texts, mut scene, noCustom)
-	} else {
-		render.Draw(cmds[0:at], t.Texts, mut scene, noCustom)
-		let c = cmds[at]
-		ws.Ed.Paint(th, c.X, c.Y, c.W, c.H, mut scene)
-		render.Draw(cmds[at + 1:len(cmds)], t.Texts, mut scene, noCustom)
-	}
+	render.Draw(cmds[from:len(cmds)], t.Texts, mut scene, noCustom)
 	ws.Dirty = false
 	ws.Ed.Redraw = false
 	ws.Frames += 1

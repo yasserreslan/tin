@@ -23,6 +23,7 @@ const CmdCollapseAll = 113
 const CmdZoomIn = 114
 const CmdZoomOut = 115
 const CmdZoomReset = 116
+const CmdToggleTerminal = 117
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
@@ -90,6 +91,10 @@ fn (ws mut Workspace) key(code i64, flags i64, chars str) {
 		ws.pickerKey(code, flags, chars)
 		return
 	}
+	if ws.Focus == FocusTerminal && (flags & appkit.ModCmd) == 0 {
+		ws.termKey(code, flags, chars)
+		return
+	}
 	if ws.Focus == FocusSearch && (flags & appkit.ModCmd) == 0 {
 		ws.searchKey(code, flags, chars)
 		return
@@ -107,6 +112,8 @@ fn (ws mut Workspace) scroll(dx f64, dy f64) {
 	let id = ws.Hits.ScrollAt(ws.MouseX, ws.MouseY)
 	if id == idLeftScroll || id == idOutputScroll || id == idSearchScroll || id == idPanelScroll {
 		ws.Scrolls.Scroll(id, 0.0 - dy)
+	} else if ws.Hits.At(ws.MouseX, ws.MouseY) == idTerminal {
+		ws.TermScroll = max(0, min(ws.TermScroll + i64(dy / ws.Ed.LineH), ws.Term.HistoryLines()))
 	} else {
 		ws.Ed.Wheel(dx, dy)
 	}
@@ -167,7 +174,15 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 	} else if id >= idOutputLine && id < idPickerItem {
 		ws.Ed.JumpTo(ws.Ed.Output[id - idOutputLine])
 	} else if id == idOutputClose {
-		ws.Ed.OutputOpen = false
+		ws.Bottom = BottomNone
+		ws.Focus = FocusEditor
+	} else if id == idBottomOutput {
+		ws.Bottom = BottomOutput
+	} else if id == idBottomTerminal {
+		ws.Bottom = BottomNone
+		ws.ToggleTerminal()
+	} else if id == idTerminal {
+		ws.Focus = FocusTerminal
 	} else if id == idNewFile {
 		ws.Perform(CmdNewFile)
 	} else if id == idRefresh {
@@ -212,6 +227,8 @@ fn (ws mut Workspace) clickRow(r i64) {
 fn (ws mut Workspace) togglePanel(k i64) {
 	if ws.LeftOpen && ws.Panel == k {
 		ws.LeftOpen = false
+	} else if k == PanelTerminal {
+		ws.ToggleTerminal()
 	} else {
 		ws.LeftOpen = true
 		ws.Panel = k
@@ -246,7 +263,13 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		ws.Panel = PanelSearch
 		ws.Focus = FocusSearch
 	} else if cmd == CmdToggleOutput {
-		ws.Ed.OutputOpen = !ws.Ed.OutputOpen
+		if ws.Bottom == BottomOutput {
+			ws.Bottom = BottomNone
+		} else {
+			ws.Bottom = BottomOutput
+		}
+	} else if cmd == CmdToggleTerminal {
+		ws.ToggleTerminal()
 	} else if cmd == CmdRefresh {
 		if ws.HasProj {
 			ws.Proj.Refresh()
@@ -274,6 +297,8 @@ fn (ws mut Workspace) Perform(cmd i64) {
 			ws.LeftOpen = true
 			ws.Panel = PanelProject
 		}
+	} else if cmd == editor.CmdPaste && ws.Focus == FocusTerminal {
+		ws.Pty.Type(appkit.ClipboardText())
 	} else if cmd == editor.CmdOpen {
 		let path = appkit.OpenPanel()
 		if len(path) > 0 {

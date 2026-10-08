@@ -81,12 +81,19 @@ fn Width(font i64, text str) f64 {
 
 // LineHeight is the height of a line of the font, in points.
 fn LineHeight(font i64) f64 {
+	if font >= len(cv.Atlas.Fonts) {
+		// no GPU was opened (a test): a plausible line
+		return 16.0
+	}
 	let f = cv.Atlas.Fonts[font]
 	return f.Line / cv.Scale
 }
 
 // CodeCell is the width of one character of the code font, in points.
 fn CodeCell() f64 {
+	if len(cv.Atlas.Fonts) <= FontCode {
+		return 7.8
+	}
 	return cv.Atlas.Fonts[FontCode].Advance / cv.Scale
 }
 

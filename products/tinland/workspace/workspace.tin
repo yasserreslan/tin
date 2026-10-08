@@ -4,10 +4,12 @@
 package workspace
 
 import "../editor"
+import "../terminal"
 import "../project"
 import "textedit"
 import "../theme"
 import "../ui"
+import "appkit"
 
 // Ids of the elements the mouse can reach.
 const idTitle = 1
@@ -92,6 +94,12 @@ type Workspace struct {
 	Menu i64
 	// CodeSize is the size of the code font in points.
 	CodeSize f64
+	// The bottom dock: which panel shows, and the terminal: its screen, its shell, whether the shell runs, how far it is scrolled back.
+	Bottom i64
+	Term terminal.Screen
+	Pty appkit.Pty
+	TermUp bool
+	TermScroll i64
 }
 
 const MenuNone = 0
@@ -101,10 +109,11 @@ const MenuTree = 1
 const FocusEditor = 0
 const FocusSearch = 1
 const FocusPicker = 2
+const FocusTerminal = 3
 
 // New makes a workspace around an editor.
 fn New(th theme.Theme, ed editor.Editor) Workspace {
-	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}, Git: []str{}}
+	let ws = Workspace{Th: th, Ed: ed, Proj: project.Project{Selected: -1}, Scrolls: ui.NewScrolls(64), Hits: ui.NewHitList(6000), Picker: Picker{Items: []str{}}, Search: Search{Matches: []project.Match{}}, Git: []str{}, Term: terminal.New(80, 10), Pty: appkit.Pty{}}
 	ws.LeftOpen = true
 	ws.LeftW = 260.0
 	ws.W = 1100.0

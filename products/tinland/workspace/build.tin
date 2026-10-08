@@ -36,8 +36,8 @@ fn (ws Workspace) Build(t mut ui.Tree) {
 	t.Open(ui.VBox().Flex(1.0).Fill(th.Editor), 0)
 	ws.tabBar(mut t)
 	t.Custom(ui.Box().Flex(1.0), idEditor)
-	if ws.Ed.OutputOpen {
-		ws.outputPanel(mut t)
+	if ws.Bottom != BottomNone {
+		ws.bottomPanel(mut t)
 	}
 	t.Close()
 	t.Close()
@@ -225,23 +225,6 @@ fn (ws Workspace) tabBar(t mut ui.Tree) {
 	}
 	t.Close()
 	t.Leaf(ui.Box().High(1.0).Fill(th.Border), 0)
-}
-
-// outputPanel is what the last Run printed: a click on a compiler message opens its place.
-fn (ws Workspace) outputPanel(t mut ui.Tree) {
-	let th = ws.Th
-	t.Leaf(ui.Box().High(1.0).Fill(th.Border), 0)
-	t.Open(ui.VBox().High(outputH).Fill(th.Panel), 0)
-	t.Open(ui.HBox().High(28.0).Items(ui.Center).PadXY(12.0, 0.0), 0)
-	t.Text("Output", render.FontUIBold, th.Text, ui.Box().Flex(1.0))
-	ws.iconButton(mut t, render.IconClose, idOutputClose)
-	t.Close()
-	t.Open(ui.VBox().Flex(1.0).Scrolls().PadXY(12.0, 4.0), idOutputScroll)
-	for i in 0..len(ws.Ed.Output) {
-		t.Text(ws.Ed.Output[i], render.FontCode, th.Text, ui.Box().Hover(th.Hover))
-	}
-	t.Close()
-	t.Close()
 }
 
 // statusBar is the strip along the bottom: the panel buttons, the editor's message, the problems and the cursor position.

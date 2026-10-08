@@ -5,7 +5,9 @@ import "../../project"
 import "../../theme"
 import "../../workspace"
 import "quarry"
+import "appkit"
 import "say"
+import "twine"
 import "textedit"
 import "trail"
 
@@ -23,6 +25,16 @@ fn typeText(ws mut workspace.Workspace, text str) {
 	for i in 0..len(text) {
 		key(mut ws, -1, text[i:i + 1])
 	}
+}
+
+// screenHas reports whether any row of the terminal screen holds the text.
+fn screenHas(ws workspace.Workspace, text str) bool {
+	for y in 0..ws.Term.Rows {
+		if twine.Contains(ws.Term.Text(y), text) {
+			return true
+		}
+	}
+	return false
 }
 
 // The workspace without a window: the picker, the project search and the file operations.
@@ -82,6 +94,25 @@ fn main2() {}
 	ws.OpenPicker(workspace.PickRename)
 	say.Line("rename starts with", ws.Picker.Query)
 	key(mut ws, 53, "")
+	// the terminal: a shell on a pseudo terminal, its output in the screen
+	quarry.Setenv("SHELL", "/bin/sh") catch _ {
+	}
+	ws.ToggleTerminal()
+	say.Line("shell running", ws.TermUp, ws.Bottom, ws.Focus)
+	appkit.RunCapture("sleep 0.5")
+	ws.PollTerminal()
+	ws.Pty.Type("echo pty-ok-$((20+22))\n")
+	mut found = false
+	for i in 0..60 {
+		if !found {
+			appkit.RunCapture("sleep 0.05")
+			ws.PollTerminal()
+			found = screenHas(ws, "pty-ok-42")
+		}
+	}
+	say.Line("terminal output seen", found)
+	ws.StopTerminal()
+	say.Line("shell stopped", ws.TermUp)
 	quarry.RemoveAll(root) catch _ {
 	}
 }
