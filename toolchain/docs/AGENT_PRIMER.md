@@ -144,6 +144,9 @@ the compiler: write a minimal repro as a test, open an issue and work around it.
 - Static files: `try w.ServeFile(q, path)` answers like Go's http.ServeContent (Last-Modified, ETag, If-None-Match, If-Modified-Since,
   If-Match, If-Unmodified-Since, one Range, If-Range: 304, 412, 206, 416); a missing file or a directory fails before anything is sent.
   `w.SendFile(path, off, n)` is the plain call (no validators).
+- Uploads: `let mr = try q.Multipart()`, then `let p = try mr.NextPart()` until it is nil: `p.FormName()`, `p.FileName()` (no directories),
+  `p.Header("content-type")`, and `p.Read(mut buf)` (0 at the end of the part), read as the body arrives on a `Router.Stream` route.
+  `try q.MultipartForm(maxBytes)` reads the whole form into memory (`.Values`, `.Files`). `mr.SetLimit(n)` bounds the bytes read.
 - Memory: no GC. Allocations during a request go to the core's request pool (wiped per request);
   globals live in the long-lived ingot heap. Storing request memory into a global (or anything a global
   holds) without `keep(x)` is a compile error. keep() deep-copies into the ingot heap.

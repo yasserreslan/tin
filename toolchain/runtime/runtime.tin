@@ -7432,7 +7432,14 @@ fn rt_helper_run(f fn(i64), arg i64, drop fn(i64)) ! {
 	free(b)
 	let r = rt_task_park(0)
 	if r == waitDeadline {
-		job[jGone] = 1
+		if job[jGone] == 2 {
+			// The helper finished before this cancelled task ran again: nobody else drops arg.
+			let drop = cast(fn(i64), job[jDrop])
+			drop(arg)
+			free(job)
+		} else {
+			job[jGone] = 1
+		}
 		fail cast(fault, rt_wait_fault())
 	}
 	free(job)
@@ -7466,7 +7473,14 @@ fn rt_helper_done(job i64) i64 {
 		free(job)
 		return 0
 	}
-	return job[jTask]
+	let t = job[jTask]
+	if t[tWaiting] == 0 {
+		// Cancelled and already queued to run (rt_task_interrupt) but not yet run: it resumes with waitDeadline
+		// from the queue, once; resuming it here too would run it twice. It drops arg itself (jGone 2).
+		job[jGone] = 2
+		return 0
+	}
+	return t
 }
 
 fn rt_helper_take() i64 {

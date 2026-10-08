@@ -1,0 +1,69 @@
+package main
+
+import "anvil"
+import "fault"
+import "say"
+import "twine"
+
+// anvil's multipart/form-data reader (#823). tools/ci/multipart_check compares it with Go's mime/multipart over thousands of generated bodies; this
+// is the plain use: parts with their names, file names and headers, a form read whole, errors, and a limit.
+
+fn handler(q anvil.Req, w mut anvil.Out) {
+	let mr = q.Multipart() catch err {
+		w.Status(400)
+		w.Text("not multipart: {err}")
+		return
+	}
+	mut out = ""
+	for {
+		let p = mr.NextPart() catch err {
+			out += "error: {err}\n"
+			break
+		}
+		if p == nil {
+			break
+		}
+		let part = p
+		let data = part.Bytes(1000) catch err {
+			out += "part error: {err}\n"
+			break
+		}
+		out += "[{part.FormName()}|{part.FileName()}|{part.Header(`Content-Type`)}|{len(data)}|{data}]\n"
+	}
+	w.Text(out)
+}
+
+fn form(q anvil.Req, w mut anvil.Out) {
+	let f = q.MultipartForm(200) catch err {
+		w.Status(413)
+		w.Text("form error: {err} limit={fault.Is(err, fault.LimitExceeded)}")
+		return
+	}
+	mut out = "values {f.Values.Len()} title={f.Values.Get(`title`)} tags={f.Values.All(`tag`)}\n"
+	for file in f.Files {
+		out += "file {file.Field} {file.FileName} {file.ContentType} {len(file.Data)}\n"
+	}
+	w.Text(out)
+}
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Post("/parts", handler)
+	r.Post("/form", form)
+	let ct = []str{"Content-Type: multipart/form-data; boundary=XX"}
+	let body = "preamble\r\n--XX\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n--XX\r\nContent-Disposition: form-data; name=\"tag\"\r\n\r\na\r\n--XX\r\nContent-Disposition: form-data; name=\"tag\"\r\n\r\nb\r\n--XX\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../dir/x.txt\"\r\nContent-Type: text/plain\r\n\r\nline 1\r\nline 2\r\n--XXY not a boundary\r\n--XX--\r\nepilogue"
+	say.Line(str(r.RunWith("POST", "/parts", ct, body).Body))
+	say.Line(str(r.RunWith("POST", "/form", ct, body).Body))
+	// bare LF line ends, a quoted boundary, a RFC 2231 file name, a folded header
+	let lf = "--q b\nContent-Disposition: form-data; name=a;\n filename*=utf-8''%C3%A9t%C3%A9.txt\nX-Long: one\n  two\n\nvalue\n--q b--\n"
+	say.Line(str(r.RunWith("POST", "/parts", []str{"Content-Type: multipart/form-data; boundary=\"q b\""}, lf).Body))
+	// not multipart, no boundary, a body cut inside a part, and the limit
+	let plain = r.RunWith("POST", "/parts", []str{"Content-Type: text/plain"}, "x")
+	say.Line(plain.Code(), str(plain.Body))
+	let nob = r.RunWith("POST", "/parts", []str{"Content-Type: multipart/form-data"}, "x")
+	say.Line(nob.Code(), str(nob.Body))
+	say.Line(str(r.RunWith("POST", "/parts", ct, "--XX\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ncut off").Body))
+	say.Line(str(r.RunWith("POST", "/parts", ct, "--XX\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n" + twine.Repeat("0123456789", 150) + "\r\n--XX--\r\n").Body))
+	let big = r.RunWith("POST", "/form", ct, body + twine.Repeat("0123456789", 30))
+	say.Line(big.Code(), str(big.Body))
+}

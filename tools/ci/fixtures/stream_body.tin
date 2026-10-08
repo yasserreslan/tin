@@ -15,6 +15,7 @@ import "tide"
 //	POST /whole             (Router.Post) reads the whole body through BodyStream
 //	POST /count             (Router.Stream) counts the bytes, for uploads of a GiB
 //	POST /echo              (Router.Stream) streams each piece back as it is read
+//	POST /multipart         (Router.Stream) reads a multipart/form-data body part by part and answers "name=len/sum;..." (#823)
 //
 // With TLS_CERT and TLS_KEY it serves HTTPS too (h2 by ALPN).
 
@@ -116,8 +117,48 @@ fn echo(q anvil.Req, w mut anvil.Out) {
 	}
 }
 
+fn multipart(q anvil.Req, w mut anvil.Out) {
+	let mr = q.Multipart() catch e {
+		w.Status(400)
+		w.Text("fault {e}")
+		return
+	}
+	mut out = ""
+	mut buf = make([]u8, 65536)
+	for {
+		let p = mr.NextPart() catch e {
+			w.Status(400)
+			w.Text("fault {e}")
+			return
+		}
+		if p == nil {
+			break
+		}
+		let part = p
+		mut n = 0
+		mut sum = 0
+		for {
+			let k = part.Read(mut buf) catch e {
+				w.Status(400)
+				w.Text("fault {e}")
+				return
+			}
+			if k == 0 {
+				break
+			}
+			for i in 0..k {
+				sum = (sum*31 + i64(buf[i])) % 1000000007
+			}
+			n += k
+		}
+		out += "{part.FormName()}|{part.FileName()}={n}/{sum};"
+	}
+	w.Text(out)
+}
+
 fn main() {
 	let r = anvil.NewRouter()
+	r.Stream("POST", "/multipart", multipart)
 	r.Stream("POST", "/upload", upload)
 	r.Stream("POST", "/partial", partial)
 	r.Stream("POST", "/count", count)

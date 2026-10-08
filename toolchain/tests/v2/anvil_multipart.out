@@ -1,0 +1,17 @@
+[title|||5|hello]
+[tag|||1|a]
+[tag|||1|b]
+[file|x.txt|text/plain|36|line 1
+line 2
+--XXY not a boundary]
+
+form error: anvil: multipart body over its limit: limit exceeded limit=true
+[a|été.txt||5|value]
+
+400 not multipart: anvil: request Content-Type isn't multipart/form-data
+400 not multipart: anvil: no multipart boundary param in Content-Type
+part error: multipart: unexpected EOF
+
+part error: anvil: multipart part over 1000 bytes: limit exceeded
+
+413 form error: anvil: multipart body over its limit: limit exceeded limit=true
