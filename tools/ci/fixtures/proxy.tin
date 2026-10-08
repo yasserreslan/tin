@@ -33,6 +33,29 @@ fn large(q anvil.Req, w mut anvil.Out) {
 	}
 }
 
+// cut sends the first chunk of a chunked body and aborts it, so the connection closes before the last chunk (#739).
+fn cut(q anvil.Req, w mut anvil.Out) {
+	w.Type("text/csv; charset=utf-8")
+	w.Stream() catch _ { return }
+	w.WriteString("hello") catch _ { return }
+	w.Abort()
+}
+
+// cutLength sends part of a body of 10 bytes and aborts it, so the connection closes short of the Content-Length.
+fn cutLength(q anvil.Req, w mut anvil.Out) {
+	w.Type("text/csv; charset=utf-8")
+	w.Stream() catch _ { return }
+	w.Length(10) catch _ { return }
+	w.WriteString("hello") catch _ { return }
+	w.Abort()
+}
+
+// typed answers with a body whose Content-Type is set.
+fn typed(q anvil.Req, w mut anvil.Out) {
+	w.Json()
+	w.Text("{{}}")
+}
+
 fn repeated(n i64) str {
 	mut b = make([]u8, n)
 	for i in 0..n { b[i] = u8(i % 251) }
@@ -54,6 +77,9 @@ fn main() {
 		r.Stream("POST", "/echo", echo)
 		r.Get("/meta", metadata)
 		r.Get("/large", large)
+		r.Get("/cut", cut)
+		r.Get("/cut-length", cutLength)
+		r.Get("/typed", typed)
 		r.Serve(":" + port) catch err { say.Line(err) }
 		return
 	}
@@ -65,5 +91,8 @@ fn main() {
 	r.Stream("POST", "/echo", p.ServeHTTP)
 	r.Get("/meta", p.ServeHTTP)
 	r.Get("/large", p.ServeHTTP)
+	r.Get("/cut", p.ServeHTTP)
+	r.Get("/cut-length", p.ServeHTTP)
+	r.Get("/typed", p.ServeHTTP)
 	r.Serve(":" + port) catch err { say.Line(err) }
 }

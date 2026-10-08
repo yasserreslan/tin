@@ -1,1 +1,5 @@
 502 "text/plain; charset=utf-8" "" ""
+cut chunked 200 chunked types=1 "text/csv; charset=utf-8" body="5\r\nhello\r\n"
+cut length 200 length=10 types=1 "text/csv; charset=utf-8" body="hello"
+typed 200 length=2 types=1 "application/json" body="{}"
+bare 200 length=2 types=1 "text/plain; charset=utf-8" body="ok"
