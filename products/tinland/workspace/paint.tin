@@ -55,12 +55,12 @@ fn (ws mut Workspace) Paint(scene mut metal.Scene) {
 	// the editor and the terminal paint their own areas: draw what comes before each, then it, then the rest
 	mut from = 0
 	for i in 0..len(cmds) {
-		if cmds[i].Kind == ui.CmdCustom && (cmds[i].Arg == idEditor || cmds[i].Arg == idEditor2 || cmds[i].Arg == idTerminal) {
+		if cmds[i].Kind == ui.CmdCustom && (isPane(cmds[i].Arg) || cmds[i].Arg == idTerminal) {
 			render.Draw(cmds[from:i], t.Texts, mut scene, noCustom)
 			let c = cmds[i]
-			if c.Arg == idEditor || c.Arg == idEditor2 {
+			if isPane(c.Arg) {
 				ws.Panes[paneOf(c.Arg)].Paint(th, c.X, c.Y, c.W, c.H, mut scene)
-				if !ws.HasProj && c.Arg == idEditor && ws.Panes[0].Empty() {
+				if !ws.HasProj && c.Arg == paneId(0) && ws.Panes[0].Empty() {
 					ws.welcome(c.X, c.Y, c.W, c.H, mut scene)
 				}
 			} else {
