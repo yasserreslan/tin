@@ -184,8 +184,8 @@ type chOptions struct {
 	tls12  bool // also offer TLS 1.2 (#473): its suites, ec_point_formats, extended_master_secret, renegotiation_info
 }
 
-// client_hello encodes a ClientHello. share is the key_share entry (group, key). With a PSK
-// offer it ends with psk_key_exchange_modes and pre_shared_key, whose binder is zeros: the
+// client_hello encodes a ClientHello. share is the key_share entry (group, key). It ends with
+// psk_key_exchange_modes, and with a PSK offer also pre_shared_key, whose binder is zeros: the
 // caller computes it over the message without its last binders_len(offer) bytes.
 fn client_hello(random []u8, session []u8, suites []i64, name str, alpn []str, group i64, share []u8, opt chOptions) []u8 {
 	let cookie = opt.cookie
@@ -281,11 +281,13 @@ fn client_hello(random []u8, session []u8, suites []i64, name str, alpn []str, g
 	b = append(b, share...)
 	close_len(mut b, entries, 2)
 	close_len(mut b, ks, 2)
+	// psk_key_exchange_modes always: a server (Go's crypto/tls among them) sends NewSessionTicket only to a client that offered a mode
+	// (RFC 8446 4.2.9), so without it a first connection never gets a ticket to resume with.
+	put16(mut b, extPSKModes)
+	put16(mut b, 2)
+	b = append(b, 1, 1) // psk_dhe_ke
 	let offer = opt.offer
 	if offer != nil {
-		put16(mut b, extPSKModes)
-		put16(mut b, 2)
-		b = append(b, 1, 1) // psk_dhe_ke
 		put16(mut b, extPreSharedKey)
 		let e = open_len(mut b, 2)
 		let ids = open_len(mut b, 2)

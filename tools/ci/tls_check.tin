@@ -1,0 +1,511 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "seal"
+import "tide"
+import "twine"
+import "wire"
+
+// The TLS 1.3 client (packages/tls, #124): the RFC 8448 trace, interop with openssl s_server and Go's crypto/tls
+// (tools/ci/fixtures/tls_peer.go), KeyUpdate, timeouts, truncation, https:// in wire and wss:// in websocket.
+//
+// Certificates are generated here with the runner's openssl, so no key is checked in. The interop runs use InsecureSkipVerify; the
+// verified runs trust the generated certificate through RootCAs (chain, host name and CertificateVerify checked for RSA-PSS, ECDSA and
+// Ed25519 keys), and the default configuration refuses it as signed by an unknown authority.
+
+fn suites() []str {
+	return []str{"TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"}
+}
+
+fn groups() []str {
+	return []str{"X25519", "P-256"}
+}
+
+fn rfc8448Expected() str {
+	let lines = []str{"handshake ok true X25519", "client hello sent as given true", "client Finished true", "server data after a ticket pong", "client data true", "server data after KeyUpdate after update", "client KeyUpdate true", "client data after KeyUpdate true", "close_notify true", "tampered record tls: record authentication failed", "bad_record_mac alert under the client handshake key true"}
+	return twine.Join(lines, "\n") + "\n"
+}
+
+// Env is what the checks share.
+type Env struct {
+	Work str
+	Exe str
+	Openssl str
+	Certs []tlsutil.Cert
+	Peer str
+}
+
+fn run(e Env, args []str, env []str) str {
+	mut argv = []str{e.Exe}
+	for a in args {
+		argv = append(argv, a)
+	}
+	let o = ci.ExecEnv(argv, "", 60, env, []str{})
+	ci.Check(o.Code == 0, "tls_client " + twine.Join(args, " ") + ": exit " + mint.Itoa(o.Code) + " " + o.Stdout + o.Stderr)
+	return o.Stdout
+}
+
+fn plain(e Env, args []str) str {
+	return run(e, args, []str{})
+}
+
+fn certOf(e Env, kind str) tlsutil.Cert {
+	return tlsutil.Of(e.Certs, kind)
+}
+
+// sServer starts openssl s_server on a free port and returns it.
+fn sServer(e Env, name str, cert tlsutil.Cert, version str, extra []str) nettest.Server {
+	let port = nettest.Port()
+	mut args = []str{"s_server", version, "-accept", mint.Itoa(port), "-cert", cert.Cert, "-key", cert.Key, "-www", "-quiet"}
+	for a in extra {
+		args = append(args, a)
+	}
+	let s = nettest.Start(e.Openssl, args, []str{}, ci.Join(e.Work, name + ".log"), 0)
+	let probe = nettest.Server{Pid: s.Pid, Port: port, Log: s.Log}
+	probe.Ready(10)
+	return probe
+}
+
+fn addr(s nettest.Server) str {
+	return "127.0.0.1:" + mint.Itoa(s.Port)
+}
+
+fn rfc8448(work str) {
+	let root = ci.Join(work, "probe-root")
+	ci.CopyTree(ci.Root(), root)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/tls_rfc8448_probe.tin"), ci.Join(root, "packages/tls/probe_rfc8448.tin"))
+	let exe = ci.Join(work, "rfc8448")
+	ci.BuildTin("tools/ci/fixtures/tls_rfc8448.tin", exe, root, []str{})
+	let o = ci.Exec([]str{exe}, "", 60)
+	ci.Check(o.Code == 0 && o.Stdout == rfc8448Expected(), "RFC 8448 trace: " + o.Stdout + o.Stderr)
+	say.Line("PASS RFC 8448 trace: Finished both ways, application data, ticket, KeyUpdate, close_notify, bad_record_mac")
+}
+
+fn kindNames(e Env) str {
+	mut names = []str{}
+	for c in e.Certs {
+		names = append(names, c.Kind)
+	}
+	return twine.Join(names, ", ")
+}
+
+// opensslMatrix: every cipher suite and group against every certificate type, then ALPN.
+fn opensslMatrix(e Env) {
+	mut count = 0
+	for cert in e.Certs {
+		for suite in suites() {
+			for group in groups() {
+				let s = sServer(e, "matrix", cert, "-tls1_3", []str{"-ciphersuites", suite, "-groups", group})
+				let out = plain(e, []str{"get", addr(s)})
+				s.Stop()
+				ci.Check(out == "ok " + suite + " " + group + " alpn= 1 true\n", cert.Kind + " " + suite + " " + group + ": " + out)
+				count += 1
+			}
+		}
+	}
+	say.Line("PASS openssl s_server: " + mint.Itoa(count) + " runs (certificates " + kindNames(e) + "; every suite; X25519 and P-256 by HelloRetryRequest)")
+	let s = sServer(e, "alpn", certOf(e, "ecdsa"), "-tls1_3", []str{"-alpn", "http/1.1"})
+	let with = plain(e, []str{"get", addr(s), "http/1.1"})
+	ci.Check(twine.HasPrefix(with, "ok ") && twine.Contains(with, " alpn=http/1.1 "), "ALPN chosen: " + with)
+	let without = plain(e, []str{"get", addr(s)})
+	ci.Check(twine.HasPrefix(without, "ok ") && twine.Contains(without, " alpn= "), "ALPN absent: " + without)
+	s.Stop()
+	say.Line("PASS ALPN chosen and absent")
+}
+
+// The TLS 1.2 suites (#473) by the key type of the server's certificate: OpenSSL's name and the tls_client fixture's.
+fn suites12(kind str) ([]str, []str) {
+	if kind == "ecdsa" {
+		return []str{"ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-ECDSA-AES256-GCM-SHA384", "ECDHE-ECDSA-CHACHA20-POLY1305"}, []str{"TLS12_ECDHE_ECDSA_AES_128_GCM", "TLS12_ECDHE_ECDSA_AES_256_GCM", "TLS12_ECDHE_ECDSA_CHACHA20"}
+	}
+	if kind == "rsa" {
+		return []str{"ECDHE-RSA-AES128-GCM-SHA256", "ECDHE-RSA-AES256-GCM-SHA384", "ECDHE-RSA-CHACHA20-POLY1305"}, []str{"TLS12_ECDHE_RSA_AES_128_GCM", "TLS12_ECDHE_RSA_AES_256_GCM", "TLS12_ECDHE_RSA_CHACHA20"}
+	}
+	return []str{"ECDHE-ECDSA-AES128-GCM-SHA256"}, []str{"TLS12_ECDHE_ECDSA_AES_128_GCM"}
+}
+
+fn keylogLines(path str) []str {
+	let labels = []str{"CLIENT_HANDSHAKE_TRAFFIC_SECRET", "SERVER_HANDSHAKE_TRAFFIC_SECRET", "CLIENT_TRAFFIC_SECRET_0", "SERVER_TRAFFIC_SECRET_0", "CLIENT_RANDOM"}
+	mut out = []str{}
+	for l in ci.Lines(ci.Read(path)) {
+		let label = twine.Split(l, " ")[0]
+		for want in labels {
+			if label == want {
+				out = append(out, l)
+			}
+		}
+	}
+	// sorted (OpenSSL also writes EXPORTER_SECRET)
+	for i in 0..len(out) {
+		for j in i + 1..len(out) {
+			if out[j] < out[i] {
+				let t = out[i]
+				out[i] = out[j]
+				out[j] = t
+			}
+		}
+	}
+	return out
+}
+
+fn startPeer(e Env, mode str, cert tlsutil.Cert, log str) nettest.Server {
+	ci.Remove(log)
+	let s = nettest.Start(e.Peer, []str{mode, cert.Cert, cert.Key, log}, []str{}, ci.Join(e.Work, "peer_" + mode + ".out"), nettest.Port())
+	s.Ready(10)
+	return s
+}
+
+// tls12Client: the client against TLS 1.2-only servers (#473): every suite on each certificate type with X25519 and P-256, verified
+// against RootCAs; ALPN; SSLKEYLOGFILE's CLIENT_RANDOM line; a Go server; MinVersion 1.3 refuses.
+fn tls12Client(e Env) {
+	mut count = 0
+	for cert in e.Certs {
+		let (ciphers, names) = suites12(cert.Kind)
+		for i in 0..len(ciphers) {
+			for group in groups() {
+				let s = sServer(e, "tls12", cert, "-tls1_2", []str{"-cipher", ciphers[i], "-groups", group})
+				let got = plain(e, []str{"get", addr(s)})
+				ci.Check(got == "ok " + names[i] + " " + group + " alpn= 1 true\n", cert.Kind + " " + ciphers[i] + " " + group + ": " + got)
+				let resumed = plain(e, []str{"resume", addr(s), "1", cert.Cert})
+				ci.Check(resumed == "resumed false " + names[i] + " " + group + " 1 true\n", cert.Kind + " " + ciphers[i] + " " + group + " resume: " + resumed)
+				s.Stop()
+				count += 1
+			}
+		}
+	}
+	let mine = ci.Join(e.Work, "keylog12-client.txt")
+	let theirs = ci.Join(e.Work, "keylog12-s_server.txt")
+	ci.Remove(mine)
+	ci.Remove(theirs)
+	let s = sServer(e, "tls12_alpn", certOf(e, "ecdsa"), "-tls1_2", []str{"-alpn", "http/1.1", "-keylogfile", theirs})
+	let withLog = run(e, []str{"get", addr(s), "http/1.1"}, []str{"SSLKEYLOGFILE=" + mine})
+	ci.Check(twine.HasPrefix(withLog, "ok TLS12_") && twine.Contains(withLog, " alpn=http/1.1 "), "TLS 1.2 ALPN: " + withLog)
+	let refused = run(e, []str{"get", addr(s)}, []str{"TLS_MIN13=1"})
+	ci.Check(twine.HasPrefix(refused, "fault tls: ") && twine.Contains(refused, "protocol version"), "MinVersion 1.3: " + refused)
+	s.Stop()
+	let a = keylogLines(mine)
+	let b = keylogLines(theirs)
+	ci.Check(len(a) == 1 && twine.HasPrefix(a[0], "CLIENT_RANDOM ") && len(b) == 1 && a[0] == b[0], "TLS 1.2 key log: " + twine.Join(a, "|") + " vs " + twine.Join(b, "|"))
+	let peer = startPeer(e, "tls12", certOf(e, "rsa"), ci.Join(e.Work, "tls12_peer.log"))
+	let goOut = plain(e, []str{"get", addr(peer)})
+	peer.Stop()
+	ci.Check(twine.HasPrefix(goOut, "ok TLS12_ECDHE_RSA_") && twine.HasSuffix(goOut, " 1 true\n"), "a Go TLS 1.2 server: " + goOut)
+	say.Line("PASS TLS 1.2: " + mint.Itoa(count) + " openssl s_server -tls1_2 runs (every ECDHE suite on ECDSA, RSA and Ed25519 certificates, X25519 and P-256, verified against RootCAs), ALPN, SSLKEYLOGFILE, a Go server; MinVersion 1.3 refuses")
+}
+
+// opensslPq is whether this OpenSSL has the X25519MLKEM768 group (3.5 and later): its s_server and s_client then offer it by default.
+fn opensslPq(e Env) bool {
+	let o = ci.Exec([]str{e.Openssl, "list", "-kem-algorithms"}, "", 20)
+	return twine.Contains(o.Stdout, "X25519MLKEM768")
+}
+
+// verified: verification on (the default) with the server's certificate in RootCAs: each key type.
+fn verified(e Env) {
+	mut group = "X25519"
+	if opensslPq(e) {
+		group = "X25519MLKEM768"
+	}
+	for cert in e.Certs {
+		let s = sServer(e, "verified", cert, "-tls1_3", []str{"-ciphersuites", "TLS_AES_128_GCM_SHA256"})
+		let out = plain(e, []str{"resume", addr(s), "1", cert.Cert})
+		s.Stop()
+		ci.Check(out == "resumed false TLS_AES_128_GCM_SHA256 " + group + " 1 true\n", cert.Kind + ": " + out)
+	}
+	say.Line("PASS verification against RootCAs: certificates " + kindNames(e) + " (chain, name, CertificateVerify)")
+}
+
+// resumption: session tickets (#348): the second and later connections of one client process resume.
+fn resumption(e Env) {
+	// openssl s_server: every suite, X25519 and P-256 (a HelloRetryRequest with the PSK offered again).
+	mut count = 0
+	for suite in suites() {
+		for group in groups() {
+			let s = sServer(e, "resume", certOf(e, "ecdsa"), "-tls1_3", []str{"-ciphersuites", suite, "-groups", group})
+			let out = ci.Lines(plain(e, []str{"resume", addr(s), "4"}))
+			s.Stop()
+			let head = "resumed "
+			let tail = " " + suite + " " + group + " "
+			let want = []str{head + "false" + tail + "1 true", head + "true" + tail + "0 true", head + "true" + tail + "0 true", head + "true" + tail + "0 true"}
+			ci.Check(twine.Join(out, "|") == twine.Join(want, "|"), suite + " " + group + ": " + twine.Join(out, "|"))
+			count += 1
+		}
+	}
+	say.Line("PASS resumption: " + mint.Itoa(count) + " openssl s_server runs (every suite; X25519 and P-256 by HelloRetryRequest): the first connection is full, the next three resume")
+	// A server that forgets its ticket keys after three connections (a restart): the client's old ticket is not understood, and it
+	// falls back to a full handshake and carries on.
+	let log = ci.Join(e.Work, "tickets.log")
+	let peer = startPeer(e, "tickets", certOf(e, "ecdsa"), log)
+	let out = ci.Lines(plain(e, []str{"resume", addr(peer), "6"}))
+	peer.Stop()
+	mut flags = []str{}
+	for l in out {
+		flags = append(flags, twine.Fields(l)[1])
+	}
+	ci.Check(twine.Join(flags, ",") == "false,true,true,false,true,true", "client resumption across a ticket key change: " + twine.Join(flags, ","))
+	let reused = ci.Lines(ci.Read(log))
+	ci.Check(twine.Join(reused, ",") == "reused=false,reused=true,reused=true,reused=false,reused=true,reused=true", "server resumption: " + twine.Join(reused, ","))
+	say.Line("PASS resumption: a server that lost its ticket keys gets a full handshake, then resumption again")
+}
+
+// clientCertificate (#475): mutual TLS from the client: openssl s_server requiring a certificate from the test PKI's CA accepts the
+// Tin client's (ECDSA and RSA keys) and refuses a client without one.
+fn clientCertificate(e Env) {
+	let pki = ci.Join(e.Work, "pki")
+	ci.Mkdirs(pki)
+	ci.Must(ci.Exec([]str{"go", "run", "tools/ci/fixtures/mtlspki.go", pki}, ci.Root(), 300), "go run mtlspki.go")
+	let cert = certOf(e, "ecdsa")
+	let extra = []str{"-Verify", "1", "-CAfile", ci.Join(pki, "ca.pem"), "-verify_return_error"}
+	let s = sServer(e, "mtls13", cert, "-tls1_3", extra)
+	for name in []str{"alice", "rsa", "dave"} {
+		let out = plain(e, []str{"mtls", addr(s), "1", cert.Cert, ci.Join(pki, name + ".pem"), ci.Join(pki, name + ".key")})
+		ci.Check(twine.HasPrefix(out, "mtls false <HTML>") && twine.Contains(out, "TLSv1.3"), name + ": " + out[0:min(len(out), 500)])
+	}
+	let none = plain(e, []str{"mtls", addr(s), "1", cert.Cert})
+	ci.Check(twine.HasPrefix(none, "fault tls: remote error: certificate required"), "no client certificate: " + none)
+	s.Stop()
+	// The same over TLS 1.2 (#473): CertificateRequest, Certificate and CertificateVerify.
+	let s12 = sServer(e, "mtls12", cert, "-tls1_2", extra)
+	for name in []str{"alice", "rsa", "dave"} {
+		let out = plain(e, []str{"mtls", addr(s12), "1", cert.Cert, ci.Join(pki, name + ".pem"), ci.Join(pki, name + ".key")})
+		ci.Check(twine.HasPrefix(out, "mtls false <HTML>") && twine.Contains(out, "TLSv1.2"), name + " over TLS 1.2: " + out[0:min(len(out), 500)])
+	}
+	// TLS 1.2 has no certificate_required: OpenSSL refuses with handshake_failure.
+	let none12 = plain(e, []str{"mtls", addr(s12), "1", cert.Cert})
+	ci.Check(twine.HasPrefix(none12, "fault tls: remote error: handshake failure"), "no client certificate over TLS 1.2: " + none12)
+	s12.Stop()
+	say.Line("PASS client certificates: openssl s_server -Verify accepts the Tin client's ECDSA, RSA and Ed25519 certificates over TLS 1.3 and 1.2, and refuses a client without one")
+}
+
+// postQuantum: X25519MLKEM768 (#479) against Go's crypto/tls (tools/ci/fixtures/tls_pq.go): offered first, taken by a server that
+// prefers it or knows only it; a server without it gets X25519, or P-256 by HelloRetryRequest. And against OpenSSL 3.5's, where the
+// runner has it.
+fn postQuantum(e Env) {
+	let gopq = ci.Join(e.Work, "tls_pq")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", gopq, "tools/ci/fixtures/tls_pq.go"}, ci.Root(), 300), "go build tls_pq.go")
+	let cert = certOf(e, "ecdsa")
+	let prefs = []str{"X25519MLKEM768,X25519", "X25519MLKEM768", "X25519", "P-256"}
+	let wants = []str{"X25519MLKEM768", "X25519MLKEM768", "X25519", "P-256"}
+	for i in 0..4 {
+		let port = nettest.Port()
+		let s = nettest.Start(gopq, []str{"server", mint.Itoa(port), cert.Cert, cert.Key, prefs[i]}, []str{}, ci.Join(e.Work, "pq.log"), 0)
+		let probe = nettest.Server{Pid: s.Pid, Port: port, Log: s.Log}
+		probe.Ready(10)
+		let out = plain(e, []str{"resume", "127.0.0.1:" + mint.Itoa(port), "1", cert.Cert})
+		s.Stop()
+		ci.Check(twine.HasPrefix(out, "resumed false TLS_") && twine.Contains(out, " " + wants[i] + " 1 true"), prefs[i] + ": " + out)
+	}
+	mut tried = "Go"
+	if opensslPq(e) {
+		let s = sServer(e, "pq_openssl", cert, "-tls1_3", []str{"-groups", "X25519MLKEM768"})
+		let out = plain(e, []str{"get", addr(s)})
+		s.Stop()
+		ci.Check(twine.HasPrefix(out, "ok ") && twine.Contains(out, " X25519MLKEM768 "), "OpenSSL's X25519MLKEM768: " + out)
+		tried = "Go and OpenSSL"
+	}
+	say.Line("PASS X25519MLKEM768 against " + tried + ": chosen when the server has it, X25519 or P-256 (HelloRetryRequest) when it does not")
+}
+
+// keylog: SSLKEYLOGFILE (#478): the client logs the same four secrets openssl s_server logs.
+fn keylog(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let mine = ci.Join(e.Work, "keylog-client.txt")
+	let theirs = ci.Join(e.Work, "keylog-s_server.txt")
+	ci.Remove(mine)
+	ci.Remove(theirs)
+	let s = sServer(e, "keylog", cert, "-tls1_3", []str{"-keylogfile", theirs})
+	let out = run(e, []str{"resume", addr(s), "1", cert.Cert}, []str{"SSLKEYLOGFILE=" + mine})
+	s.Stop()
+	ci.Check(twine.HasPrefix(out, "resumed false"), "key log run: " + out)
+	let a = keylogLines(mine)
+	let b = keylogLines(theirs)
+	ci.Check(len(a) == 4 && twine.Join(a, "|") == twine.Join(b, "|"), "key logs differ: " + twine.Join(a, "|") + " vs " + twine.Join(b, "|"))
+	say.Line("PASS SSLKEYLOGFILE: the client logs the four TLS 1.3 traffic secrets openssl s_server logs for the connection")
+}
+
+// keyupdate: an interactive s_server sends KeyUpdate with and without request_update; the client reads on, answers and keeps writing
+// on its next key. The script that feeds s_server's stdin waits for what the client printed before it types each line.
+fn keyupdate(e Env) {
+	let cert = certOf(e, "ecdsa")
+	let port = nettest.Port()
+	let out = ci.Join(e.Work, "keyupdate-server.txt")
+	ci.Remove(out)
+	let script = "out=$0; wait_for() {{ i=0; while [ $i -lt 400 ]; do grep -q \"$1\" \"$out\" 2>/dev/null && return; sleep 0.05; i=$((i+1)); done; }}; {{ wait_for ping; printf 'K\\n'; sleep 0.3; printf 'one\\n'; wait_for 'after one'; printf 'k\\n'; sleep 0.3; printf 'two\\n'; wait_for 'after two'; printf 'bye\\n'; sleep 2; }} | exec " + e.Openssl + " s_server -tls1_3 -accept " + mint.Itoa(port) + " -cert " + cert.Cert + " -key " + cert.Key + " -ign_eof > \"$out\" 2>&1"
+	let s = nettest.Start("sh", []str{"-c", script, out}, []str{}, ci.Join(e.Work, "keyupdate-sh.log"), 0)
+	let probe = nettest.Server{Pid: s.Pid, Port: port, Log: s.Log}
+	probe.Ready(10)
+	let o = ci.Exec([]str{e.Exe, "keyupdate", "127.0.0.1:" + mint.Itoa(port)}, "", 60)
+	ci.Check(o.Code == 0, "keyupdate client: " + o.Stderr)
+	ci.Check(o.Stdout == "got one\ngot two\ngot bye\n", "keyupdate output: " + o.Stdout)
+	let text = ci.Read(out)
+	// s_server reports each KeyUpdate it sends (KEYUPDATE, or SSL_do_handshake -> 1 in 3.0).
+	let at = twine.Index(text, "ping")
+	ci.Check(at >= 0, "the server never saw ping")
+	let after = text[at:]
+	let seen = len(twine.Split(after, "KEYUPDATE")) - 1 + len(twine.Split(after, "SSL_do_handshake -> 1")) - 1
+	ci.Check(seen >= 2, "the server sent " + mint.Itoa(seen) + " KeyUpdates")
+	probe.Stop()
+	say.Line("PASS KeyUpdate from the server, with and without request_update")
+}
+
+fn numberAfter(s str, prefix str) i64 {
+	if !twine.HasPrefix(s, prefix) {
+		return -1
+	}
+	let rest = s[len(prefix):]
+	mut n = 0
+	mut i = 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		n = n * 10 + i64(rest[i] - '0')
+		i += 1
+	}
+	if i == 0 {
+		return -1
+	}
+	return n
+}
+
+// goServers: timeouts, truncation, a non-TLS server, https:// and wss:// against Go's crypto/tls and a hand-made plain server.
+fn goServers(e Env) {
+	let cert = certOf(e, "ecdsa")
+	// A server that accepts and never answers: the handshake times out after Config.Timeout.
+	let quiet = wire.Listen("127.0.0.1:0") catch _ {
+		ci.Fail("cannot listen")
+		panic("unreachable")
+	}
+	let timeout = plain(e, []str{"timeout", "127.0.0.1:" + mint.Itoa(quiet.Port()), "300"})
+	let waited = numberAfter(timeout, "fault tls: read timed out ")
+	ci.Check(waited >= 250 && waited < 5000, "handshake timeout: " + timeout)
+	quiet.Close()
+	// A server that speaks HTTP instead of TLS: this check is the server, the client is a process of its own.
+	let plainL = wire.Listen("127.0.0.1:0") catch _ {
+		ci.Fail("cannot listen")
+		panic("unreachable")
+	}
+	let client = nettest.StartCoded(e.Exe, []str{"get", "127.0.0.1:" + mint.Itoa(plainL.Port())}, []str{}, ci.Join(e.Work, "http_instead.log"), 0)
+	let c = plainL.AcceptTimeout(10000000000) catch _ {
+		ci.Fail("the client never connected")
+		panic("unreachable")
+	}
+	mut buf = []u8{}
+	c.Read(mut buf, 4096) catch _ {
+		0
+	}
+	c.Write("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch _ {
+		ci.Fail("cannot answer the client")
+	}
+	tide.Sleep(500000000)
+	c.Close()
+	let (code, done) = client.ExitCode(10.0)
+	let instead = ci.Read(client.Log)
+	ci.Check(done && code == 0 && twine.HasPrefix(instead, "fault tls: unexpected record type 72"), "a non-TLS server: " + instead)
+	plainL.Close()
+	// A server that closes TCP without close_notify: the read fails instead of a clean EOF.
+	let trunc = startPeer(e, "truncate", cert, ci.Join(e.Work, "trunc.log"))
+	let truncated = plain(e, []str{"truncated", addr(trunc)})
+	ci.Check(truncated == "fault tls: connection closed by the peer without close_notify 12\n", "truncation: " + truncated)
+	trunc.Stop()
+	// Verification is the default: a server whose certificate no trusted root signed is refused. The trusted roots are an unrelated
+	// certificate (SSL_CERT_FILE), so the outcome does not depend on whether this machine has a CA bundle.
+	let httpLog = ci.Join(e.Work, "http_alpn.log")
+	let srv = startPeer(e, "http", cert, httpLog)
+	let verify = run(e, []str{"verify", addr(srv), "localhost"}, []str{"SSL_CERT_FILE=" + ci.Join(e.Work, "other-root.pem")})
+	ci.Check(twine.HasPrefix(verify, "fault tls: x509: certificate signed by unknown authority"), "verification by default: " + verify)
+	let want = seal.Sha256Hex(twine.Repeat("hello over tls ", 4096))
+	let https = plain(e, []str{"https", "https://" + addr(srv) + "/x"})
+	ci.Check(https == "get 200 " + mint.Itoa(15 * 4096) + " " + want + "\npost 200 posted over tls\n", "https:// through wire: " + https)
+	ci.Check(twine.Join(ci.Lines(ci.Read(httpLog)), ",") == "alpn=http/1.1", "wire offers ALPN http/1.1: " + ci.Read(httpLog))
+	srv.Stop()
+	// wss:// with a small WebSocket echo server over TLS.
+	let wssLog = ci.Join(e.Work, "wss_alpn.log")
+	let ws = startPeer(e, "wss", cert, wssLog)
+	let wss = plain(e, []str{"wss", "wss://" + addr(ws) + "/chat"})
+	ci.Check(wss == "wss true echo: hello wss\n", "wss://: " + wss)
+	ci.Check(twine.Join(ci.Lines(ci.Read(wssLog)), ",") == "alpn=http/1.1", "websocket offers ALPN http/1.1: " + ci.Read(wssLog))
+	ws.Stop()
+	say.Line("PASS handshake timeout, a non-TLS server, truncation without close_notify, verification by default, https:// and wss:// (both offering ALPN http/1.1)")
+}
+
+// requestTasks: on one core, eight requests that each make a TLS handshake taking 0.5 s overlap, a fast request answers meanwhile, and
+// a request deadline ends a handshake that never finishes.
+fn requestTasks(e Env) {
+	let exe = ci.Join(e.Work, "tls_server")
+	ci.BuildTin("tools/ci/fixtures/tls_server.tin", exe, "", []str{})
+	let slow = startPeer(e, "slow", certOf(e, "ecdsa"), ci.Join(e.Work, "slow.log"))
+	let hole = wire.Listen("127.0.0.1:0") catch _ {
+		ci.Fail("cannot listen")
+		panic("unreachable")
+	}
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1", "TIN_DEADLINE_MS=1500"}, ci.Join(e.Work, "tls_server.log"), nettest.Port())
+	server.Ready(10)
+	let t0 = tide.Now()
+	mut conns = []wire.Conn{}
+	for i in 0..8 {
+		conns = append(conns, nettest.Send(server.Port, nettest.GetRequest("/fetch?port=" + mint.Itoa(slow.Port))))
+	}
+	tide.Sleep(100000000)
+	mut worst = 0.0
+	for i in 0..5 {
+		let f0 = tide.Now()
+		nettest.Get(server.Port, "/fast")
+		let took = f64(tide.Now() - f0) / 1000000000.0
+		if took > worst {
+			worst = took
+		}
+	}
+	for i in 0..8 {
+		mut c = conns[i]
+		let r = nettest.Finish(mut c, 30)
+		ci.Check(r.Body == "via tls: slow", "a fetch answered " + r.Body)
+	}
+	let total = f64(tide.Now() - t0) / 1000000000.0
+	ci.Check(total < 2.5, "8 handshakes of 0.5 s took " + mint.Itoa(i64(total * 100.0)) + " centiseconds on one core: they did not overlap")
+	ci.Check(worst < 0.4, "a fast request waited " + mint.Itoa(i64(worst * 100.0)) + " centiseconds behind TLS handshakes")
+	let d0 = tide.Now()
+	let stuck = nettest.Parse(nettest.Raw(server.Port, nettest.GetRequest("/fetch?port=" + mint.Itoa(hole.Port())), 30))
+	let took = f64(tide.Now() - d0) / 1000000000.0
+	ci.Check(twine.Contains(stuck.Body, "upstream: deadline exceeded") && took > 1.0 && took < 4.0, "a stuck handshake: " + stuck.Body)
+	server.Stop()
+	slow.Stop()
+	hole.Close()
+	say.Line("PASS request tasks: 8 slow handshakes overlap on one core, /fast stays fast, the deadline ends a stuck handshake")
+}
+
+fn main() {
+	let work0 = ci.Join(ci.Root(), "bin/ci/tls")
+	ci.Mkdirs(work0)
+	let work = ci.TempDir(work0, "tls-")
+	let exe = ci.Join(work, "tls_client")
+	ci.BuildTin("tools/ci/fixtures/tls_client.tin", exe, "", []str{})
+	ci.BuildTin("examples/https_client.tin", ci.Join(work, "https_client"), "", []str{})
+	rfc8448(work)
+	let openssl3 = tlsutil.Openssl3()
+	mut openssl = openssl3
+	if len(openssl) == 0 {
+		openssl = "openssl"
+	}
+	let certs = tlsutil.MakeCerts(openssl, work, []str{"rsa", "ecdsa", "ed25519"})
+	ci.Check(len(certs) >= 2, "openssl could not make test certificates")
+	let peer = ci.Join(work, "tls_peer")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", peer, "tools/ci/fixtures/tls_peer.go"}, ci.Root(), 300), "go build tls_peer.go")
+	let e = Env{Work: work, Exe: exe, Openssl: openssl, Certs: certs, Peer: peer}
+	goServers(e)
+	requestTasks(e)
+	if len(openssl3) > 0 {
+		opensslMatrix(e)
+		verified(e)
+		postQuantum(e)
+		tls12Client(e)
+		resumption(e)
+		keylog(e)
+		clientCertificate(e)
+		keyupdate(e)
+	} else {
+		say.Line("SKIP openssl s_server interop: no OpenSSL 3 command line on this runner")
+	}
+	ci.Remove(work)
+	ci.Pass("tls: the RFC 8448 trace, interop with OpenSSL and Go, resumption, key logs, client certificates, KeyUpdate")
+}

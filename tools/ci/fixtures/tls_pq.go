@@ -1,4 +1,4 @@
-// tls_pq is the Go side of the post-quantum key exchange checks (#479) in tls_check.py and
+// tls_pq is the Go side of the post-quantum key exchange checks (#479) in tls_check.tin and
 // tls_server_check.py. It prints the group crypto/tls negotiated.
 //
 //	go run tls_pq.go server PORT CERT KEY GROUPS   serve "ok" on 127.0.0.1:PORT, print each connection's group
