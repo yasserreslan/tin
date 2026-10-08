@@ -164,3 +164,19 @@ fn TestMatch(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// A file that compresses as far as zlib goes (8 MB of zeros) is read back within the loose store's memory budget.
+fn TestLooseCompressible(t mut crucible.T) {
+	let d = freshDir("zeros")
+	mut l = NewLoose(d)
+	let zeros = str(make([]u8, 8000000))
+	let id = l.PutRaw(object.Kind.Blob, zeros) catch e {
+		t.Error("put: {e}")
+		return
+	}
+	let (_, body, err) = l.GetRaw(id)
+	t.NoFault("read", err)
+	crucible.Equal(mut t, "the same bytes", len(body), len(zeros))
+	quarry.RemoveAll(d) catch _ {
+	}
+}

@@ -91,7 +91,10 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 			e = append(e, u8(typeOf(items[i].kind)))
 			appendUv(mut e, len(items[i].body))
 		}
-		let z = squash.Zlib(payload, squash.Default)
+		// each entry compresses in an arena: the deflater's tables and buffers go with it, only the stream is kept
+		let z = arena {
+			squash.Zlib(payload, squash.Default)
+		}
 		appendUv(mut e, len(z))
 		appendStr(mut e, z)
 		crcs[i] = stamp.Crc32(str(e))

@@ -1,0 +1,231 @@
+package anvil
+
+import "fault"
+import "link"
+
+// Forms and redirects (#823): the fields of an application/x-www-form-urlencoded body, as Go's
+// Request.ParseForm reads them, and http.Redirect.
+
+// maxFormSize is the most a urlencoded form body may hold (Go's 10 MiB).
+const maxFormSize = 10 * 1024 * 1024
+
+// media_type is the lower-case media type of Content-Type value ct, without its parameters.
+fn media_type(ct str) str {
+	mut t = ct
+	let semi = index_byte(t, ';')
+	if semi >= 0 {
+		t = t[:semi]
+	}
+	return lower_str(trim_ows(t))
+}
+
+fn lower_str(s str) str {
+	mut b = make([]u8, 0, len(s))
+	for i in 0..len(s) {
+		b = append(b, lower(s[i]))
+	}
+	return str(b)
+}
+
+// PostForm returns the fields of an application/x-www-form-urlencoded request body of a POST, PUT
+// or PATCH request, and nothing for any other request. A body over 10 MiB fails with
+// fault.LimitExceeded, and a malformed field (a bad escape, a semicolon) fails with the first
+// error. Use Multipart for multipart/form-data.
+fn (q Req) PostForm() !link.Values {
+	if q.Method != "POST" && q.Method != "PUT" && q.Method != "PATCH" {
+		return link.NewValues()
+	}
+	if media_type(q.Header("content-type")) != "application/x-www-form-urlencoded" {
+		return link.NewValues()
+	}
+	if q.bn > maxFormSize {
+		fail fault.Wrap(fault.LimitExceeded, "anvil: form body over 10 MiB")
+	}
+	return try link.ParseQuery(q.Body())
+}
+
+// Form returns the form fields of the request: those of a urlencoded body first (see PostForm),
+// then those of the URL query, as Go's Request.Form does.
+fn (q Req) Form() !link.Values {
+	let v = try q.PostForm()
+	let query = try link.ParseQuery(q.Query)
+	for k in query.Keys() {
+		for x in query.All(k) {
+			v.Add(k, x)
+		}
+	}
+	return v
+}
+
+// FormValue returns the first value of form field key (see Form), or "" when there is none or the
+// form is malformed.
+fn (q Req) FormValue(key str) str {
+	let v = q.Form() catch _ {
+		return ""
+	}
+	return v.Get(key)
+}
+
+// Redirect answers with status code (301, 302, 303, 307 or 308) and a Location header, as Go's
+// http.Redirect does: a url without a scheme and host is made absolute against the request's path
+// (relative ones are resolved here, "." and ".." removed, the query kept), bytes outside ASCII are
+// percent-encoded, a GET gets a small HTML body with a link, and a HEAD or a POST none.
+fn (w mut Out) Redirect(url_in str, code i64) {
+	mut url = url_in
+	if !has_scheme_or_host(url) {
+		url = absolute_redirect(w.rpath, url)
+	}
+	w.Status(code)
+	let hadType = len(w.Header("content-type")) > 0 && w.ctype != "text/plain; charset=utf-8"
+	w.Head("Location", hex_escape_non_ascii(url))
+	if !hadType && (w.meth == "GET" || w.meth == "HEAD") {
+		w.Type("text/html; charset=utf-8")
+	}
+	if !hadType && w.meth == "GET" {
+		w.Body = append(w.Body, "<a href=\""...)
+		w.Body = append(w.Body, html_escape(url)...)
+		w.Body = append(w.Body, "\">"...)
+		w.Body = append(w.Body, status_text(code)...)
+		w.Body = append(w.Body, "</a>.\n\n"...)
+	}
+}
+
+// has_scheme_or_host reports a url that is not just a path: it has a scheme ("http:") or starts with "//".
+fn has_scheme_or_host(u str) bool {
+	if len(u) >= 2 && u[0] == '/' && u[1] == '/' {
+		return true
+	}
+	for i in 0..len(u) {
+		let c = u[i]
+		if c == ':' {
+			return i > 0
+		}
+		let alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		let more = (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
+		if !(alpha || (i > 0 && more)) {
+			return false
+		}
+	}
+	return false
+}
+
+// absolute_redirect makes a relative redirect target absolute against request path old, as Go does.
+fn absolute_redirect(old_in str, url_in str) str {
+	mut old = old_in
+	mut url = url_in
+	if old == "" {
+		old = "/"
+	}
+	if url == "" || url[0] != '/' {
+		mut slash = -1
+		for i in 0..len(old) {
+			if old[i] == '/' {
+				slash = i
+			}
+		}
+		url = old[:slash+1] + url
+	}
+	mut query = ""
+	let qi = index_byte(url, '?')
+	if qi >= 0 {
+		query = url[qi:]
+		url = url[:qi]
+	}
+	let trailing = len(url) > 0 && url[len(url)-1] == '/'
+	url = clean_path(url)
+	if trailing && url[len(url)-1] != '/' {
+		url += "/"
+	}
+	return url + query
+}
+
+// clean_path is path.Clean: the shortest equivalent path ("." and ".." and repeated slashes removed).
+fn clean_path(p str) str {
+	if len(p) == 0 {
+		return "."
+	}
+	let rooted = p[0] == '/'
+	mut parts = []str{}
+	mut i = 0
+	for i <= len(p) {
+		mut j = i
+		for j < len(p) && p[j] != '/' {
+			j += 1
+		}
+		let seg = p[i:j]
+		if seg == "" || seg == "." {
+		} else if seg == ".." {
+			if len(parts) > 0 && parts[len(parts)-1] != ".." {
+				parts = parts[:len(parts)-1]
+			} else if !rooted {
+				parts = append(parts, "..")
+			}
+		} else {
+			parts = append(parts, seg)
+		}
+		i = j + 1
+	}
+	mut out = ""
+	if rooted {
+		out = "/"
+	}
+	for k in 0..len(parts) {
+		if k > 0 {
+			out += "/"
+		}
+		out += parts[k]
+	}
+	if out == "" {
+		return "."
+	}
+	return out
+}
+
+// hex_escape_non_ascii percent-encodes the bytes of s above 0x7f (Go's hexEscapeNonASCII).
+fn hex_escape_non_ascii(s str) str {
+	mut clean = true
+	for i in 0..len(s) {
+		if s[i] >= 0x80 {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	let hex = "0123456789abcdef"
+	mut b = make([]u8, 0, len(s)+8)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 0x80 {
+			b = append(b, '%')
+			b = append(b, hex[c>>4])
+			b = append(b, hex[c&15])
+		} else {
+			b = append(b, c)
+		}
+	}
+	return str(b)
+}
+
+// html_escape is the escaping of Go's htmlEscape for the link in a redirect body: & < > " and '.
+fn html_escape(s str) str {
+	mut b = make([]u8, 0, len(s)+8)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c == '&' {
+			b = append(b, "&amp;"...)
+		} else if c == '<' {
+			b = append(b, "&lt;"...)
+		} else if c == '>' {
+			b = append(b, "&gt;"...)
+		} else if c == '"' {
+			b = append(b, "&#34;"...)
+		} else if c == '\'' {
+			b = append(b, "&#39;"...)
+		} else {
+			b = append(b, c)
+		}
+	}
+	return str(b)
+}
