@@ -1,0 +1,189 @@
+package index
+
+import "../cores"
+import "../ignore"
+import "../object"
+import "../store"
+import "fault"
+import "quarry"
+import "sift"
+import "twine"
+
+// Status (#783): what the next commit would change (the last commit's tree against the index) and what is not staged
+// (the index against the working directory), plus the files no one tracks. A tracked file whose size, times, inode
+// and device equal its entry's is not read; the others are hashed, on every core when the pool is running, and an
+// unchanged file's new stat is written back into the index so the next status skips it.
+
+// ErrUnreadable is the fault of a tracked file that cannot be read.
+let ErrUnreadable = fault("cannot read a tracked file")
+
+// Report is what status found, each list sorted by path.
+type Report struct {
+	Staged    []FileStatus
+	Unstaged  []FileStatus
+	Untracked []str
+}
+
+// flatten is the commit tree's files as their index entries, by path (a map of Entry rather than of a small struct
+// holding object.Id: two fields of another package's value struct share a slot today, #847).
+fn flatten[S store.ObjectStore](s mut S, tree object.Id) !map[str]Entry {
+	let idx = try FromTree(mut s, tree)
+	mut out = map[str]Entry{}
+	for e in idx.Entries {
+		out[e.Path] = e
+	}
+	return out
+}
+
+fn pathOf(f FileStatus) str {
+	return match f {
+		Added(p) => p
+		Modified(p) => p
+		Deleted(p) => p
+		Renamed(_, p) => p
+		TypeChanged(p) => p
+		Untracked(p) => p
+		Conflicted(p) => p
+	}
+}
+
+fn sortStatus(xs mut []FileStatus) {
+	sift.SortStableFunc(mut xs, fn(a FileStatus, b FileStatus) i64 {
+		let pa = pathOf(a)
+		let pb = pathOf(b)
+		if pa < pb {
+			return -1
+		}
+		if pa > pb {
+			return 1
+		}
+		return 0
+	})
+}
+
+fn isLink(m object.Mode) bool {
+	return m == object.Mode.Link
+}
+
+// Status compares the commit tree head (object.NoId before the first commit), the index and the working directory
+// at root. idx gets the new stat of files found unchanged.
+fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index, rules mut ignore.Rules) !Report {
+	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}}
+	let h = try flatten(mut s, head)
+	// staged: the last commit against the index
+	mut conflicted = map[str]bool{}
+	mut inIndex = map[str]bool{}
+	for e in idx.Entries {
+		inIndex[e.Path] = true
+		if e.Stage != 0 {
+			if !conflicted[e.Path] {
+				conflicted[e.Path] = true
+				rep.Staged = append(rep.Staged, FileStatus.Conflicted(e.Path))
+			}
+			continue
+		}
+		let (he, ok) = h[e.Path]
+		if !ok {
+			rep.Staged = append(rep.Staged, FileStatus.Added(e.Path))
+		} else if isLink(he.Mode) != isLink(e.Mode) {
+			rep.Staged = append(rep.Staged, FileStatus.TypeChanged(e.Path))
+		} else if he.Hash != e.Hash || he.Mode != e.Mode {
+			rep.Staged = append(rep.Staged, FileStatus.Modified(e.Path))
+		}
+	}
+	for path, _ in h {
+		if !inIndex[path] {
+			rep.Staged = append(rep.Staged, FileStatus.Deleted(path))
+		}
+	}
+	// the working directory
+	mut files = map[str]quarry.FileInfo{}
+	try walk(root, "", mut files, mut rules, idx, mut rep.Untracked)
+	// unstaged: the index against the files
+	mut toHash = []str{}
+	mut hashIdx = []i64{}
+	for i in 0..len(idx.Entries) {
+		let e = idx.Entries[i]
+		if e.Stage != 0 {
+			continue
+		}
+		let (info, present) = files[e.Path]
+		if !present {
+			rep.Unstaged = append(rep.Unstaged, FileStatus.Deleted(e.Path))
+			continue
+		}
+		let mode = ModeOf(info)
+		if isLink(mode) != isLink(e.Mode) {
+			rep.Unstaged = append(rep.Unstaged, FileStatus.TypeChanged(e.Path))
+			continue
+		}
+		if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && mode == e.Mode {
+			continue
+		}
+		toHash = append(toHash, root + "/" + e.Path)
+		hashIdx = append(hashIdx, i)
+	}
+	let hashed = cores.HashPaths(toHash)
+	for k in 0..len(hashed) {
+		let i = hashIdx[k]
+		let e = idx.Entries[i]
+		let info = files[e.Path]
+		if len(hashed[k].Err) > 0 {
+			fail fault.Wrap(ErrUnreadable, "{e.Path}: {hashed[k].Err}")
+		}
+		if hashed[k].Id.Bytes() != e.Hash || ModeOf(info) != e.Mode {
+			rep.Unstaged = append(rep.Unstaged, FileStatus.Modified(e.Path))
+		} else {
+			idx.Entries[i] = Entry{Path: e.Path, Hash: e.Hash, Mode: e.Mode, Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device}
+		}
+	}
+	sortStatus(mut rep.Staged)
+	sortStatus(mut rep.Unstaged)
+	sift.Sort(mut rep.Untracked)
+	return rep
+}
+
+// hasTracked reports whether the index tracks anything under dir/.
+fn hasTracked(idx Index, dir str) bool {
+	let prefix = dir + "/"
+	for e in idx.Entries {
+		if twine.HasPrefix(e.Path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+fn walk(root str, dir str, files mut map[str]quarry.FileInfo, rules mut ignore.Rules, idx Index, untracked mut []str) ! {
+	mut full = root
+	if len(dir) > 0 {
+		full = root + "/" + dir
+		try rules.Enter(dir)
+	}
+	let entries = try quarry.ReadDirEntries(full)
+	for e in entries {
+		if len(dir) == 0 && (e.Name == ".tit" || e.Name == ".git") {
+			continue
+		}
+		mut rel = e.Name
+		if len(dir) > 0 {
+			rel = dir + "/" + e.Name
+		}
+		if e.Type == quarry.FileType.Dir {
+			if rules.Ignored(rel, true) && !hasTracked(idx, rel) {
+				continue
+			}
+			try walk(root, rel, mut files, mut rules, idx, mut untracked)
+			continue
+		}
+		if e.Type != quarry.FileType.Regular && e.Type != quarry.FileType.Symlink {
+			continue
+		}
+		let info = try quarry.Lstat(root + "/" + rel)
+		files[rel] = info
+		let tracked = idx.Find(rel)
+		if tracked == nil && !rules.Ignored(rel, false) {
+			untracked = append(untracked, rel)
+		}
+	}
+}
