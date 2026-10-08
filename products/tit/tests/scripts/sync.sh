@@ -84,3 +84,33 @@ t commit --amend > /dev/null
 t sync > /dev/null || fail "sync after resolving"
 [ "$(t -C "$d/server" log --format=subject -n 3 feat | tr '\n' '|')" = "feat two|feat one|c changes b|" ] || fail "after resolving: $(t -C "$d/server" log --format=subject -n 3 feat)"
 echo "ok a conflict waits for tit edit, then sync pushes"
+
+# two users with stacks of their own: the trunk moves, and each one's sync rebases and pushes their stack
+cd "$d/c"
+t pull > /dev/null
+t switch -c cfeat > /dev/null
+printf 'c one\n' > c1.txt
+t add c1.txt
+t commit -m "cfeat one" > /dev/null
+printf 'c two\n' > c2.txt
+t add c2.txt
+t commit -m "cfeat two" > /dev/null
+cchanges=$(t log --format=change -n 2 | tr '\n' ' ')
+t sync > /dev/null || fail "c's first sync"
+cd "$d/b"
+t switch main > /dev/null
+t pull > /dev/null
+printf 'one\ntwo\nthree\nfour, from c\nfive, from b on main\n' > a.txt
+t commit -am "b on main" > /dev/null
+t push > /dev/null
+t switch feat > /dev/null
+bchanges=$(t log --format=change -n 2 | tr '\n' ' ')
+t sync > /dev/null || fail "b's sync after main moved"
+cd "$d/c"
+t sync > /dev/null || fail "c's sync after main moved"
+trunk=$(t -C "$d/server" log --format=id -n 1 main)
+[ "$(t -C "$d/server" log --format=id -n 1 feat~2)" = "$trunk" ] || fail "the server's feat is not on the new main"
+[ "$(t -C "$d/server" log --format=id -n 1 cfeat~2)" = "$trunk" ] || fail "the server's cfeat is not on the new main"
+[ "$(t -C "$d/server" log --format=change -n 2 feat | tr '\n' ' ')" = "$bchanges" ] || fail "feat's change ids"
+[ "$(t -C "$d/server" log --format=change -n 2 cfeat | tr '\n' ' ')" = "$cchanges" ] || fail "cfeat's change ids"
+echo "ok two users' stacks both rebased onto the moved trunk and pushed"

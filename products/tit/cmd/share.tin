@@ -471,12 +471,23 @@ fn syncRebase(g Global, a ShareArgs) !i64 {
 	if remoteTrunk != nil {
 		let upstream = try r.resolve("refs/remotes/" + a.Remote + "/" + trunk)
 		let localTrunk = try r.resolve(trunk)
-		if upstream != localTrunk {
-			let behind = try revwalk.IsAncestor(mut r.Store, localTrunk, upstream)
-			if !behind {
-				fail "{trunk} has commits {a.Remote}/{trunk} lacks: push or reconcile {trunk} first"
+		// the stack's base: the parent of its first change (the trunk itself when there is none)
+		mut base = localTrunk
+		if len(st.Commits) > 0 {
+			let first = try commitData(mut r, st.Commits[0])
+			if len(first.Parents) > 0 {
+				base = first.Parents[0]
 			}
-			mut extra = []oplog.RefChange{oplog.RefChange{Name: "refs/heads/" + trunk, Before: commitText(localTrunk), After: commitText(upstream)}}
+		}
+		if upstream != localTrunk || base != upstream {
+			mut extra = []oplog.RefChange{}
+			if upstream != localTrunk {
+				let behind = try revwalk.IsAncestor(mut r.Store, localTrunk, upstream)
+				if !behind {
+					fail "{trunk} has commits {a.Remote}/{trunk} lacks: push or reconcile {trunk} first"
+				}
+				extra = append(extra, oplog.RefChange{Name: "refs/heads/" + trunk, Before: commitText(localTrunk), After: commitText(upstream)})
+			}
 			if len(st.Commits) == 0 {
 				// nothing of ours above the trunk: the branch follows the trunk
 				if st.Branch != "refs/heads/" + trunk {

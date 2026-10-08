@@ -103,8 +103,8 @@ files . > "$d/tit.files"
 gitfiles . main > "$d/git.files"
 cmp -s "$d/tit.files" "$d/git.files" || fail "back on main the files differ"
 echo "ok #784 #789 switching through $k commits across history leaves exactly each commit's files"
-f=$(git ls-files | grep '\.tin$' | head -1)
-old=$(git rev-list main -n 1 --skip=$((commits / 2)) -- "$f" || true)
+f=$(git log --name-only --format= main -- '*.tin' | grep . | sort | uniq -c | sort -rn | awk 'NR == 1 { print $2 }')
+old=$(git rev-list main -n 1 --skip=1 -- "$f" || true)
 if [ -n "$old" ] && [ "$(git rev-parse "$old:$f")" != "$(git rev-parse "main:$f")" ]; then
 	printf '\n// unsaved\n' >> "$f"
 	if t switch --detach "git:$old" > "$d/out.txt" 2>&1; then
@@ -115,6 +115,8 @@ if [ -n "$old" ] && [ "$(git rev-parse "$old:$f")" != "$(git rev-parse "main:$f"
 	git checkout -q -- "$f" 2> /dev/null || t timeline "$f" > /dev/null
 	git show "main:$f" > "$f"
 	echo "ok #784 a dirty file blocks the switch, naming it"
+else
+	fail "no file to check the dirty switch with"
 fi
 
 # #783: status equals git's after scripted changes
@@ -157,7 +159,9 @@ for br in $(git branch --format='%(refname:short)' | grep -v '^main$' | head -40
 	gtree=$(git merge-tree --write-tree main "$br" 2> /dev/null | head -1) || continue
 	[ "$(git merge-base main "$br")" = "$(git rev-parse "$br")" ] && continue
 	[ "$(git merge-base main "$br")" = "$(git rev-parse main)" ] && continue
-	t switch --detach main > /dev/null
+	t switch main > /dev/null
+	t branch -D tinrepo-merge > /dev/null 2>&1 || true
+	t switch -c tinrepo-merge > /dev/null
 	t merge "$br" -m "merge $br" > "$d/merge.txt" 2>&1 || fail "git merges $br cleanly, tit does not: $(cat "$d/merge.txt")"
 	files . > "$d/tit.files"
 	gitfiles . "$gtree" > "$d/git.files"
@@ -166,6 +170,7 @@ for br in $(git branch --format='%(refname:short)' | grep -v '^main$' | head -40
 	[ $m -lt 10 ] || break
 done
 t switch main > /dev/null
+t branch -D tinrepo-merge > /dev/null 2>&1 || true
 echo "ok #791 $m real branches merge into main to the trees git merge-tree gives"
 
 # #805: the mirror reproduces git's ids, and a git clone of it has the same trees
