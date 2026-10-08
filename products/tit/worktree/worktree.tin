@@ -1,11 +1,25 @@
 package worktree
 
+import "../cores"
+import "../diff"
+import "../index"
+import "../object"
+import "../store"
 import "fault"
+import "quarry"
+import "sift"
+import "trail"
+import "twine"
 
-// Checkout, switch and workspaces (design/tit.md sections 4 and 10; #784).
+// Checkout, switch and workspaces (design/tit.md sections 4 and 10; #784). A checkout moves the working directory
+// from one tree to another, changing only the files that differ, and refuses (ErrDirty, naming every file) when a
+// file it would change or remove has uncommitted changes, or when an untracked file stands where it would write.
 
 // ErrDirty is the fault of a switch that would overwrite uncommitted changes.
 let ErrDirty = fault("uncommitted changes would be overwritten")
+
+// ErrNoWorkspace is the fault of a directory that is in no tit workspace.
+let ErrNoWorkspace = fault("not in a tit workspace")
 
 // Workspace is a working directory and its state in the shared store.
 type Workspace struct {
@@ -14,7 +28,211 @@ type Workspace struct {
 	Store str
 }
 
-// Find is the workspace containing dir: the nearest .tit directory or .tit file above it (#784).
+// State is the workspace's own state directory: .tit/workspaces/<name> (HEAD, index).
+fn (w Workspace) State() str {
+	return w.Store + "/workspaces/" + w.Name
+}
+
+// IndexPath is the workspace's index file.
+fn (w Workspace) IndexPath() str {
+	return w.State() + "/index"
+}
+
+// Find is the workspace containing dir: the nearest .tit directory (the default workspace) or .tit file (another
+// workspace, naming the shared store and its name) at or above it.
 fn Find(dir str) !Workspace {
-	fail "worktree.Find: not implemented yet (#784)"
+	mut d = trail.Clean(dir)
+	for {
+		let p = d + "/.tit"
+		if quarry.IsDir(p) {
+			return Workspace{Name: "default", Root: d, Store: p}
+		}
+		if quarry.Exists(p) {
+			let text = try quarry.ReadFile(p)
+			mut storeDir = ""
+			mut name = ""
+			for line in twine.Split(text, "\n") {
+				if twine.HasPrefix(line, "store ") {
+					storeDir = line[6:]
+				} else if twine.HasPrefix(line, "workspace ") {
+					name = line[10:]
+				}
+			}
+			if len(storeDir) == 0 || len(name) == 0 || !quarry.IsDir(storeDir) {
+				fail fault.Wrap(ErrNoWorkspace, "{p} does not name a store and a workspace")
+			}
+			return Workspace{Name: name, Root: d, Store: storeDir}
+		}
+		if d == "/" || len(d) == 0 {
+			fail fault.Wrap(ErrNoWorkspace, dir)
+		}
+		d = trail.Dir(d)
+	}
+}
+
+fn dirOf(path str) str {
+	let slash = twine.LastIndex(path, "/")
+	if slash <= 0 {
+		return ""
+	}
+	return path[0:slash]
+}
+
+// dirty reports whether the working file at path has changes the index does not hold (or is absent when it should be
+// there, which is not a change worth keeping).
+fn dirty(root str, e index.Entry) !bool {
+	let full = root + "/" + e.Path
+	let (info, err) = quarry.Lstat(full)
+	if err != nil {
+		return false
+	}
+	let mode = index.ModeOf(info)
+	if mode != e.Mode {
+		return true
+	}
+	if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device {
+		return false
+	}
+	let id = try cores.HashPath(full)
+	return id.Bytes() != e.Hash
+}
+
+// Checkout moves the working directory of w from the tree from to the tree to, updating idx, and fails with ErrDirty
+// (writing nothing) when it would lose changes; force writes anyway.
+fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from object.Id, to object.Id, force bool) ! {
+	let changes = try diff.TreeDiff(mut s, from, to, false)
+	// first every check, so a refused checkout changes nothing
+	mut blocked = []str{}
+	for c in changes {
+		let e = idx.Find(c.Path)
+		if e != nil {
+			let d = try dirty(w.Root, e)
+			if d {
+				blocked = append(blocked, c.Path)
+			}
+		} else if c.Kind == diff.Kind.Added && quarry.Exists(w.Root + "/" + c.Path) {
+			// an untracked file stands where the checkout would write
+			let existing = quarry.Lstat(w.Root + "/" + c.Path) catch _ {
+				continue
+			}
+			if existing.Type != quarry.FileType.Dir {
+				let id = try cores.HashPath(w.Root + "/" + c.Path)
+				if id.Bytes() != c.NewHash {
+					blocked = append(blocked, c.Path)
+				}
+			}
+		}
+	}
+	if len(blocked) > 0 && !force {
+		sift.Sort(mut blocked)
+		fail fault.Wrap(ErrDirty, twine.Join(blocked, ", "))
+	}
+	// deletions first (a file may become a directory), then the new and changed files, written in parallel tasks so
+	// their I/O overlaps
+	mut emptied = map[str]bool{}
+	for c in changes {
+		if c.Kind == diff.Kind.Deleted {
+			let full = w.Root + "/" + c.Path
+			if quarry.Exists(full) {
+				try quarry.Remove(full)
+			}
+			idx.Remove(c.Path)
+			emptied[dirOf(c.Path)] = true
+		}
+	}
+	mut writes = []diff.FileChange{}
+	for c in changes {
+		if c.Kind != diff.Kind.Deleted {
+			writes = append(writes, c)
+		}
+	}
+	mut bodies = make([]str, len(writes))
+	for i in 0..len(writes) {
+		let id = try object.IdOf(writes[i].NewHash)
+		let (_, body) = try s.GetRaw(id)
+		bodies[i] = body
+	}
+	mut paths = make([]str, 0, len(writes))
+	mut modes = make([]object.Mode, 0, len(writes))
+	for i in 0..len(writes) {
+		paths = append(paths, writes[i].Path)
+		modes = append(modes, writes[i].NewMode)
+	}
+	try writeAll(w.Root, paths, modes, bodies)
+	for i in 0..len(writes) {
+		try index.AddStat(mut idx, w.Root, writes[i].Path, writes[i].NewHash, writes[i].NewMode)
+	}
+	// remove directories the deletions left empty, deepest first
+	mut dirs = []str{}
+	for d, _ in emptied {
+		mut x = d
+		for len(x) > 0 {
+			dirs = append(dirs, x)
+			x = dirOf(x)
+		}
+	}
+	sift.Sort(mut dirs)
+	for i in 0..len(dirs) {
+		let d = dirs[len(dirs) - 1 - i]
+		let full = w.Root + "/" + d
+		if quarry.IsDir(full) {
+			let left = quarry.ReadDir(full) catch _ {
+				[]str{"?"}
+			}
+			if len(left) == 0 {
+				quarry.Remove(full) catch _ {
+				}
+			}
+		}
+	}
+}
+
+// writeAll writes the files in parallel tasks, so their I/O overlaps.
+fn writeAll(root str, paths []str, modes []object.Mode, bodies []str) ! {
+	scope sc {
+		for i in 0..len(paths) {
+			let k = i
+			sc.spawn(fn() ! {
+				try writeFile(root, paths[k], modes[k], bodies[k])
+			})
+		}
+	}
+}
+
+// writeFile writes one file of a tree: a regular file (0644), an executable (0755) or a symlink.
+fn writeFile(root str, path str, mode object.Mode, body str) ! {
+	let full = root + "/" + path
+	let d = dirOf(path)
+	if len(d) > 0 {
+		let dir = root + "/" + d
+		let (info, err) = quarry.Lstat(dir)
+		if err == nil && info.Type != quarry.FileType.Dir {
+			try quarry.Remove(dir)
+		}
+		try quarry.MkdirAll(dir)
+	}
+	let (old, oerr) = quarry.Lstat(full)
+	if oerr == nil {
+		if old.Type == quarry.FileType.Dir {
+			try quarry.RemoveAll(full)
+		} else {
+			try quarry.Remove(full)
+		}
+	}
+	match mode {
+		Link => {
+			try quarry.Symlink(body, full)
+		}
+		Exec => {
+			try quarry.WriteFile(full, body)
+			try quarry.Chmod(full, 493)
+		}
+		File => {
+			try quarry.WriteFile(full, body)
+			try quarry.Chmod(full, 420)
+		}
+		Dir => {
+			fail fault.Wrap(object.ErrCorrupt, "{path}: a directory where a file was expected")
+		}
+	}
 }
