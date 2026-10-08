@@ -1,0 +1,85 @@
+package main
+
+import "embed"
+import "fault"
+import "fs"
+import "say"
+
+// The tree below is embed_tree/ next to this file; hidden and underscore names are left out, as in Go's embed.
+// embed: embed_tree/*
+let site str
+
+// embed: embed_tree/docs/guide.txt
+let guide str
+
+fn visit(path str, d ?fs.DirEntry, err fault) ! {
+	if err != nil {
+		say.Line("error", path, err)
+		return
+	}
+	if let e = d {
+		if e.IsDir() {
+			say.Line("dir", path)
+		} else {
+			say.Line("file", path)
+		}
+	}
+}
+
+fn run() ! {
+	let tree = try embed.Parse(site)
+	try fs.WalkDir(tree, ".", visit)
+
+	let body = try fs.ReadFile(tree, "embed_tree/a.txt")
+	say.Line("a.txt", len(body), say.Str(body) == "alpha\n")
+
+	let bin = try fs.ReadFile(tree, "embed_tree/docs/deep/bin.dat")
+	say.Line("bin.dat", len(bin), i64(bin[0]), i64(bin[1]), i64(bin[2]), i64(bin[3]))
+
+	let f = try tree.Open("embed_tree/docs/guide.txt")
+	mut buf = make([]u8, 64)
+	let n = try f.Read(mut buf)
+	say.Line("read", n, i64(buf[n - 1]))
+	let end = try f.Read(mut buf)
+	say.Line("end", end)
+	try f.Close()
+
+	let ents = try tree.ReadDir("embed_tree")
+	for e in ents {
+		say.Line("entry", e.Name, e.IsDir())
+	}
+
+	let matches = try fs.Glob(tree, "embed_tree/*.txt")
+	for m in matches {
+		say.Line("glob", m)
+	}
+
+	let si = try fs.Stat(tree, "embed_tree/docs")
+	say.Line("stat", si.Name, fs.ModeString(si.Mode))
+	let fi = try fs.Stat(tree, "embed_tree/docs/deep/bin.dat")
+	say.Line("stat", fi.Name, fs.ModeString(fi.Mode), fi.Size)
+
+	tree.Open("embed_tree/nope") catch err {
+		say.Line("open", err)
+	}
+	tree.Open("embed_tree/.hidden") catch err {
+		say.Line("open", err)
+	}
+	tree.ReadDir("embed_tree/a.txt") catch err {
+		say.Line("readdir", err)
+	}
+
+	let single = try embed.Parse(guide)
+	let gb = try fs.ReadFile(single, "embed_tree/docs/guide.txt")
+	say.Line("guide", len(gb))
+
+	embed.Parse("not a tree") catch err {
+		say.Line("parse", err)
+	}
+}
+
+fn main() {
+	run() catch err {
+		say.Line("failed", err)
+	}
+}

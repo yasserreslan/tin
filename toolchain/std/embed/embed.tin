@@ -1,0 +1,297 @@
+// Package embed is the file tree the compiler puts into a program's image (#928), read-only, as Go's embed.FS is. A line
+// "//embed: PATTERN" at column 1, directly above a top-level "let NAME str", makes NAME the blob of the files PATTERN names,
+// relative to the directory of the source file (globs with * and ?; directories are walked, hidden names left out). Parse
+// reads that blob as a file system: Open, ReadDir, Stat and ReadFile satisfy the fs package's shapes, so fs.ReadFile,
+// fs.WalkDir and fs.Glob work on it. Nothing is read from disk at run time, and the bytes stay in the image.
+//
+// The blob has one record per file: its slash-separated name, a newline, its size in decimal, a newline and its bytes. The
+// compiler writes each directory's records in name order, and Parse checks that order, so a blob that is not a tree from
+// the compiler fails with ErrFormat rather than giving unsorted listings.
+package embed
+
+import "fault"
+import "fs"
+
+// ErrFormat is the fault of a blob that is not an embedded file tree.
+let ErrFormat = fault("embed: not an embedded file tree")
+
+// errIsDir and errNotDir are the faults of reading a directory as a file and a file as a directory.
+let errIsDir = fault("is a directory")
+let errNotDir = fault("not a directory")
+
+// FS is an embedded file tree, read-only: a value from Parse (the zero value has no files and no maps).
+type FS struct {
+	blob  str                    // the bytes of every file, as the compiler wrote them
+	offs  map[str]i64            // where each file's bytes start in blob
+	sizes map[str]i64            // how many bytes each file has
+	kids  map[str][]fs.DirEntry  // each directory's entries, by name; the root is "."
+}
+
+// Parse reads blob, the bytes of a tree the compiler embedded, as a file system; a blob that is not one fails with ErrFormat.
+fn Parse(blob str) !FS {
+	mut offs = map[str]i64{}
+	mut sizes = map[str]i64{}
+	mut kids = map[str][]fs.DirEntry{}
+	mut pos = 0
+	for pos < len(blob) {
+		let nl = indexFrom(blob, pos, '\n')
+		if nl < 0 {
+			fail ErrFormat
+		}
+		let name = blob[pos:nl]
+		if !fs.ValidPath(name) || name == "." {
+			fail ErrFormat
+		}
+		let sizeEnd = indexFrom(blob, nl+1, '\n')
+		if sizeEnd < 0 {
+			fail ErrFormat
+		}
+		let size = decimal(blob[nl+1:sizeEnd]) catch _ {
+			fail ErrFormat
+		}
+		let start = sizeEnd + 1
+		if size > i64(len(blob) - start) {
+			fail ErrFormat
+		}
+		let (_, dup) = offs[name]
+		if dup {
+			fail ErrFormat
+		}
+		offs[name] = i64(start)
+		sizes[name] = size
+		pos = start + size
+		// the file is listed in its directory; a directory is listed in its parent the first time one of its files comes
+		mut child = name
+		mut parent = parentOf(name)
+		mut kind = i64(0)
+		for {
+			let (list, existed) = kids[parent]
+			if len(list) > 0 && !(list[len(list)-1].Name < baseOf(child)) {
+				fail ErrFormat
+			}
+			kids[parent] = append(list, fs.DirEntry{Name: baseOf(child), Type: kind})
+			if existed || parent == "." {
+				break
+			}
+			child = parent
+			parent = parentOf(parent)
+			kind = fs.ModeDir
+		}
+	}
+	return FS{blob: blob, offs: offs, sizes: sizes, kids: kids}
+}
+
+// Open opens the named file or directory for reading.
+fn (f FS) Open(name str) !dyn fs.File {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	if f.isDir(name) {
+		return embedDir{name: name, list: f.dirList(name), at: 0, closed: false}
+	}
+	let (off, ok) = f.offs[name]
+	if !ok {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	return embedFile{name: name, data: f.blob[off:off+f.sizes[name]], at: 0, closed: false}
+}
+
+// ReadFile reads the named file whole.
+fn (f FS) ReadFile(name str) !str {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	let (off, ok) = f.offs[name]
+	if !ok {
+		if f.isDir(name) {
+			fail fs.PathError("read", name, errIsDir)
+		}
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	return f.blob[off:off+f.sizes[name]]
+}
+
+// ReadDir lists the named directory, sorted by name, with each entry's type.
+fn (f FS) ReadDir(name str) ![]fs.DirEntry {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	if !f.isDir(name) {
+		let (_, ok) = f.offs[name]
+		if ok {
+			fail fs.PathError("read", name, errNotDir)
+		}
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	return f.dirList(name)
+}
+
+// Stat describes the named file or directory: files are read-only (0444), directories 0555.
+fn (f FS) Stat(name str) !fs.FileInfo {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	if f.isDir(name) {
+		return fs.FileInfo{Name: baseOf(name), Size: 0, Mode: fs.ModeDir | 0o555, ModTime: 0}
+	}
+	let (_, ok) = f.offs[name]
+	if !ok {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	return fs.FileInfo{Name: baseOf(name), Size: f.sizes[name], Mode: 0o444, ModTime: 0}
+}
+
+// isDir reports whether name is the root or a directory with entries.
+fn (f FS) isDir(name str) bool {
+	if name == "." {
+		return true
+	}
+	let (_, ok) = f.kids[name]
+	return ok
+}
+
+// dirList is a copy of the entries of the directory name.
+fn (f FS) dirList(name str) []fs.DirEntry {
+	let list = f.kids[name]
+	mut out = make([]fs.DirEntry, 0, len(list))
+	for e in list {
+		out = append(out, e)
+	}
+	return out
+}
+
+// embedFile is an open file of an FS.
+type embedFile struct {
+	name   str
+	data   str
+	at     i64
+	closed bool
+}
+
+// Read reads the next bytes of the file into buf: 0 at the end.
+fn (f mut embedFile) Read(buf mut []u8) !i64 {
+	if f.closed {
+		fail fs.PathError("read", f.name, fs.ErrClosed)
+	}
+	if f.at >= i64(len(f.data)) || len(buf) == 0 {
+		return 0
+	}
+	let n = min(i64(len(buf)), i64(len(f.data)) - f.at)
+	copy(buf[0:n], f.data[f.at:f.at+n])
+	f.at += n
+	return n
+}
+
+// Stat describes the file.
+fn (f embedFile) Stat() !fs.FileInfo {
+	if f.closed {
+		fail fs.PathError("stat", f.name, fs.ErrClosed)
+	}
+	return fs.FileInfo{Name: baseOf(f.name), Size: i64(len(f.data)), Mode: 0o444, ModTime: 0}
+}
+
+// ReadDir fails: a file has no entries.
+fn (f mut embedFile) ReadDir(n i64) ![]fs.DirEntry {
+	fail fs.PathError("readdirent", f.name, errNotDir)
+}
+
+// Close closes the file; a second Close fails with fs.ErrClosed.
+fn (f mut embedFile) Close() ! {
+	if f.closed {
+		fail fs.PathError("close", f.name, fs.ErrClosed)
+	}
+	f.closed = true
+}
+
+// embedDir is an open directory of an FS: its entries, handed out by ReadDir.
+type embedDir struct {
+	name   str
+	list   []fs.DirEntry
+	at     i64
+	closed bool
+}
+
+// Read fails: a directory cannot be read as a file (Go names it with a trailing slash too).
+fn (f mut embedDir) Read(buf mut []u8) !i64 {
+	fail fs.PathError("read", f.name + "/", errIsDir)
+}
+
+// Stat describes the directory.
+fn (f embedDir) Stat() !fs.FileInfo {
+	if f.closed {
+		fail fs.PathError("stat", f.name, fs.ErrClosed)
+	}
+	return fs.FileInfo{Name: baseOf(f.name), Size: 0, Mode: fs.ModeDir | 0o555, ModTime: 0}
+}
+
+// ReadDir gives the next n entries (all that are left for n <= 0), sorted by name; an empty slice at the end.
+fn (f mut embedDir) ReadDir(n i64) ![]fs.DirEntry {
+	if f.closed {
+		fail fs.PathError("readdirent", f.name, fs.ErrClosed)
+	}
+	let left = i64(len(f.list)) - f.at
+	mut k = left
+	if n > 0 && n < k {
+		k = n
+	}
+	let out = f.list[f.at : f.at+k]
+	f.at += k
+	return out
+}
+
+// Close closes the directory; a second Close fails with fs.ErrClosed.
+fn (f mut embedDir) Close() ! {
+	if f.closed {
+		fail fs.PathError("close", f.name, fs.ErrClosed)
+	}
+	f.closed = true
+}
+
+// indexFrom is the index of the first byte c of s at or after from, or -1.
+fn indexFrom(s str, from i64, c u8) i64 {
+	for i in from..i64(len(s)) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// decimal reads a size: one or more digits, at most 2^40 (an image cannot hold more).
+fn decimal(s str) !i64 {
+	if len(s) == 0 || len(s) > 13 {
+		fail ErrFormat
+	}
+	mut n = i64(0)
+	for i in 0..len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			fail ErrFormat
+		}
+		n = n*10 + i64(s[i] - '0')
+	}
+	return n
+}
+
+// parentOf is the directory of name ("." for a name in the root).
+fn parentOf(name str) str {
+	mut i = len(name) - 1
+	for i >= 0 && name[i] != '/' {
+		i = i - 1
+	}
+	if i < 0 {
+		return "."
+	}
+	return name[0:i]
+}
+
+// baseOf is the last element of name ("." for the root).
+fn baseOf(name str) str {
+	mut i = len(name) - 1
+	for i >= 0 && name[i] != '/' {
+		i = i - 1
+	}
+	if name == "." {
+		return "."
+	}
+	return name[i+1:]
+}

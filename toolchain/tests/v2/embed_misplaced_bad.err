@@ -1,0 +1,1 @@
+toolchain/tests/v2/embed_misplaced_bad.tin:6:2: error E004 EMBED: an embed directive goes on the line directly above a top-level let

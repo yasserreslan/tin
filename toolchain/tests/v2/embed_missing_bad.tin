@@ -1,0 +1,10 @@
+package main
+
+import "say"
+
+//embed: embed_tree/nothing/*.txt
+let site str
+
+fn main() {
+	say.Line(len(site))
+}

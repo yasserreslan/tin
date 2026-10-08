@@ -1,0 +1,1 @@
+toolchain/tests/v2/embed_missing_bad.tin:5:1: error E004 EMBED: no file matches embed_tree/nothing/*.txt
