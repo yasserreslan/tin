@@ -4,7 +4,7 @@
 The tests start real processes, so they cannot run in the empty-root image; debian:bookworm-slim
 provides the programs. On Linux the fixture is built for the host's architecture and run in that
 architecture's container, so the check works on a Linux runner and on a Mac's Docker VM alike; on
-macOS it is built for the host and run directly, exercising posix_spawn and the kqueue wait. It
+macOS it is built for the host and run directly, exercising posix_spawn and the scheduler's wait. It
 covers start and wait, exit codes, a missing program, PATH lookup, a working directory, signals,
 a deadline that kills and reaps, a 1 MiB stdin pipe round trip, streaming reads, Run's separate
 stdout and stderr, and the maxOutput cap.
@@ -58,7 +58,7 @@ def main():
             subprocess.run([str(ROOT / 'tin'), 'build', 'tools/ci/fixtures/spawn.tin', '-o', str(exe)],
                            check=True, cwd=ROOT, env=env, timeout=300)
             result = subprocess.run([str(exe)], capture_output=True, cwd=ROOT, timeout=300)
-            where = 'macOS native (posix_spawn and kqueue)'
+            where = 'macOS native (posix_spawn and the scheduler wait)'
         else:
             target, docker_platform = host_target()
             subprocess.run([str(ROOT / 'tin'), 'build', 'tools/ci/fixtures/spawn.tin', '-o', str(exe),

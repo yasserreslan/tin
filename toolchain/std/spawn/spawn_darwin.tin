@@ -3,12 +3,13 @@ package spawn
 import "say"
 import "quarry"
 
-// The macOS part of #576: the child record, posix_spawn with file actions, the kqueue wait and
-// the PATH search. The runtime does the raw work (toolchain/runtime/spawn_darwin.tin), and
+// The macOS part of #576: the child record, posix_spawn with file actions, the scheduler's wait
+// and the PATH search. The runtime does the raw work (toolchain/runtime/spawn_darwin.tin), and
 // POSIX_SPAWN_CLOEXEC_DEFAULT keeps the runtime's descriptors out of the child.
 
 // spawnStart starts c: build the child's argument and environment vectors and its standard
-// descriptors, posix_spawn it, and keep the pipe ends the parent talks through.
+// descriptors, posix_spawn it, and keep the pipe ends the parent talks through. macOS has no
+// pidfd, so the Process carries -1 and the wait polls (the runtime's rt_spawn_wait).
 fn spawnStart(c Cmd) !Process {
 	let prog = try resolveProgram(c.Argv[0])
 	mut cargv = calloc(len(c.Argv)+1, 8)
