@@ -1,0 +1,191 @@
+// Package signal lets a program handle operating-system signals, like Go's os/signal: Notify
+// sends the chosen signals to a Chan, and a task takes them with Recv (#737). The handler the
+// runtime installs only marks the signal and wakes the Chan (a byte on the Chan's pipe); the
+// signal is taken by the task waiting in Recv, on that task's core, never in the handler. A
+// signal no Chan listens for keeps its default action: Stop and Reset give a signal its first
+// disposition back (usually the default, so the exit status shows the signal) and Ignore
+// discards it. SIGSEGV and SIGBUS stay the runtime's, and SIGKILL and SIGSTOP cannot be caught.
+//
+// In an anvil server, SIGTERM and SIGINT start the graceful drain as before; a Chan that listens
+// for them gets them as well (anvil hands them on from its event loop), so an application can
+// log or flush while the drain runs. Ignoring them there stops the drain too.
+package signal
+
+import "say"
+
+// Signal is an operating-system signal number (Go's os.Signal / syscall.Signal).
+type Signal i64
+
+// Interrupt is SIGINT (Go's os.Interrupt), the same on every platform.
+const Interrupt Signal = 2
+
+// Kill is SIGKILL (Go's os.Kill): it cannot be caught or ignored.
+const Kill Signal = 9
+
+// Chan receives the signals Notify sends it (Go's chan os.Signal); a task takes them with Recv.
+// Its signals wait in a pipe, so none is lost while no task waits (up to the pipe's 64 KiB).
+type Chan struct {
+	rfd i64
+	wfd i64
+	slot i64
+}
+
+// New makes a Chan that listens for nothing yet; Notify adds signals. It fails when the process
+// has no descriptor left, or 64 Chans are open at once.
+fn New() !Chan {
+	let fds = calloc(2, 4)
+	let r = i64(i32(rt_sys_pipe(fds)))
+	let rfd = i64(i32(__ld(fds, 2)))
+	let wfd = i64(i32(__ld(fds+4, 2)))
+	free(fds)
+	if r < 0 {
+		fail say.Fault("signal: cannot make a pipe (errno %d)", rt_errno())
+	}
+	rt_sys_fcntl(rfd, F_SETFL, O_NONBLOCK)
+	rt_sys_fcntl(wfd, F_SETFL, O_NONBLOCK)
+	let slot = rt_sig_slot(wfd)
+	if slot < 0 {
+		rt_sys_close(rfd)
+		rt_sys_close(wfd)
+		fail say.Fault("signal: too many Chans open (64)")
+	}
+	return Chan{rfd: rfd, wfd: wfd, slot: slot}
+}
+
+// Notify sends sigs to c from now on (Go's signal.Notify); with no sigs, every signal it can
+// catch. Any core may call it. It fails for SIGKILL, SIGSTOP, the fault signals the runtime
+// owns or must not return into (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), a number out of range
+// or a closed Chan.
+fn Notify(c Chan, sigs ...Signal) ! {
+	if c.slot < 0 {
+		fail say.Fault("signal: Notify on a closed Chan")
+	}
+	let mask = try maskOf(sigs)
+	rt_sig_listen(c.slot, mask)
+}
+
+// Stop ends every Notify of c (Go's signal.Stop): once it returns, no further signal reaches c.
+// A signal no other Chan listens for gets its first disposition back. Signals already in c stay.
+fn Stop(c Chan) {
+	if c.slot >= 0 {
+		rt_sig_unlisten(c.slot, -1, 0)
+	}
+}
+
+// Reset undoes every Notify and Ignore of sigs (Go's signal.Reset), giving each the disposition
+// it had when the program started (usually the default action); with no sigs, every signal.
+fn Reset(sigs ...Signal) ! {
+	let mask = try maskOf(sigs)
+	rt_sig_unlisten(-1, mask, 0)
+}
+
+// Ignore makes sigs ignored (Go's signal.Ignore): no Chan gets them and they do nothing; with no
+// sigs, every signal Notify could catch. Reset or a later Notify undoes it.
+fn Ignore(sigs ...Signal) ! {
+	let mask = try maskOf(sigs)
+	rt_sig_unlisten(-1, mask, 1)
+}
+
+// Ignored reports whether sig is ignored now (Go's signal.Ignored): by Ignore, or inherited
+// ignored from the parent (nohup ignores SIGHUP).
+fn Ignored(sig Signal) bool {
+	return rt_sig_ignored(i64(sig))
+}
+
+// Notified reports whether some Chan listens for sig now.
+fn Notified(sig Signal) bool {
+	return rt_sig_listening(i64(sig))
+}
+
+// Raise sends sig to this process (kill(getpid(), sig)): a handled signal reaches the Chans
+// listening for it, an unhandled one takes its default action, which may end the process (its
+// buffered output is lost then: flush first).
+fn Raise(sig Signal) ! {
+	if i64(i32(rt_sys_kill(sigPid(), i64(sig)))) < 0 {
+		fail say.Fault("signal: raise %d: errno %d", i64(sig), rt_errno())
+	}
+}
+
+// Recv waits for the next signal sent to c and returns it. The wait takes the task's deadline and
+// cancellation like any other (inside `within 5s` it fails with fault.DeadlineExceeded); the
+// core runs its other tasks meanwhile, and in main (outside a task) it blocks.
+fn (c Chan) Recv() !Signal {
+	if c.slot < 0 {
+		fail say.Fault("signal: Recv on a closed Chan")
+	}
+	let b = make([]u8, 1)
+	for {
+		let r = rt_task_wait(c.rfd, 1, 0)
+		if r == waitDeadline {
+			fail cast(fault, rt_wait_fault())
+		}
+		if rt_sys_read(c.rfd, cast(i64, b)[2], 1) == 1 {
+			return Signal(i64(b[0]))
+		}
+	}
+}
+
+// TryRecv takes a signal waiting in c without waiting; ok is false when there is none.
+fn (c Chan) TryRecv() (Signal, bool) {
+	if c.slot < 0 {
+		return Signal(0), false
+	}
+	let b = make([]u8, 1)
+	if rt_sys_read(c.rfd, cast(i64, b)[2], 1) == 1 {
+		return Signal(i64(b[0])), true
+	}
+	return Signal(0), false
+}
+
+// Close stops c and frees its descriptors and slot; signals still in it are dropped. Using c
+// afterwards fails (Notify, Recv) or does nothing (Stop, TryRecv).
+fn (c mut Chan) Close() {
+	if c.slot < 0 {
+		return
+	}
+	rt_sig_release(c.slot)
+	rt_sys_close(c.rfd)
+	rt_sys_close(c.wfd)
+	c.slot = -1
+}
+
+// String is the signal's description, as Go's syscall.Signal prints it ("interrupt",
+// "terminated"), or "signal N" for a number without one.
+fn (s Signal) String() str {
+	let name = sigName(i64(s))
+	if len(name) > 0 {
+		return name
+	}
+	return say.Fmt("signal %d", i64(s))
+}
+
+// maskOf is the mask word of sigs: bit n for signal n; no sigs is every catchable signal.
+fn maskOf(sigs []Signal) !i64 {
+	if len(sigs) == 0 {
+		mut all = i64(0)
+		for n in 1..32 {
+			if !refused(n) {
+				all |= i64(1) << n
+			}
+		}
+		return all
+	}
+	mut mask = i64(0)
+	for s in sigs {
+		let n = i64(s)
+		if n <= 0 || n >= 64 {
+			fail say.Fault("signal: %d is not a signal", n)
+		}
+		if refused(n) {
+			fail say.Fault("signal: signal %d (%s) cannot be handled", n, Signal(n).String())
+		}
+		mask |= i64(1) << n
+	}
+	return mask
+}
+
+// refused reports a signal the package never handles: uncatchable, or a fault that the runtime
+// owns or that a returning handler would only raise again.
+fn refused(n i64) bool {
+	return n == i64(SIGKILL) || n == i64(SIGSTOP) || n == i64(SIGSEGV) || n == i64(SIGBUS) || n == i64(SIGILL) || n == i64(SIGFPE) || n == i64(SIGTRAP)
+}
