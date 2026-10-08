@@ -3051,6 +3051,12 @@ fn (w mut Out) SendFile(path str, off i64, n i64) ! {
 		rt_sys_close(fd)
 		fail "anvil: SendFile asks for more than the file holds"
 	}
+	try w.send_fd(c, fd, off, count)
+}
+
+// send_fd sends count bytes from off of the open file fd (closing it) as SendFile does, once SendFile or ServeFile has opened it and
+// checked the range.
+fn (w mut Out) send_fd(c i64, fd i64, off i64, count i64) ! {
 	if c[cH2] != 0 {
 		let herr = h2_sendfile(c, h2_stream(), mut w, fd, off, count) // DATA frames within the windows (#360)
 		rt_sys_close(fd)

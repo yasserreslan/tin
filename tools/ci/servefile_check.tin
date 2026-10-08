@@ -1,0 +1,138 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "dice"
+import "mint"
+import "say"
+import "seal"
+import "tide"
+import "twine"
+
+// Compare anvil's ServeFile with Go's http.ServeContent over generated requests (#823): one file served by both (tools/ci/fixtures/servefile.tin
+// and bench/ref/servefile), the same ETag and Content-Type, and requests with Range, If-Range, If-Match, If-None-Match, If-Modified-Since and
+// If-Unmodified-Since in many combinations, GET, HEAD and POST. For each answer the status, and for 200 and 206 the length, range, validators and
+// a hash of the body, for 304 the validators, for 416 the Content-Range, must be the same. Several ranges in one request are the one
+// difference: Go answers multipart/byteranges, anvil the whole file (RFC 9110 allows it), which this check asserts instead.
+
+const SEED = 823
+const FILE_SIZE = 100000
+const REQUESTS = 1500
+
+fn pick(rng dice.Rand, n i64) i64 {
+	return rng.I64n(n)
+}
+
+fn chooseStr(rng dice.Rand, xs []str) str {
+	return xs[pick(rng, len(xs))]
+}
+
+fn hex(v i64) str {
+	if v == 0 {
+		return "0"
+	}
+	let digits = "0123456789abcdef"
+	mut out = ""
+	mut x = v
+	for x > 0 {
+		out = digits[x % 16:x % 16 + 1] + out
+		x = x / 16
+	}
+	return out
+}
+
+// summary is what must match for one answer.
+fn summary(r nettest.Reply) str {
+	if !r.Ok {
+		return "no answer: " + r.Head
+	}
+	if r.Status == 200 || r.Status == 206 {
+		return say.Fmt("%d len=%s range=%s type=%s lm=%s etag=%s body=%d/%s", r.Status, r.Header("Content-Length"), r.Header("Content-Range"), r.Header("Content-Type"), r.Header("Last-Modified"), r.Header("ETag"), len(r.Body), seal.Hex(seal.Sha1(r.Body)))
+	}
+	if r.Status == 304 {
+		return say.Fmt("304 lm=%s etag=%s", r.Header("Last-Modified"), r.Header("ETag"))
+	}
+	if r.Status == 416 {
+		return say.Fmt("416 range=%s", r.Header("Content-Range"))
+	}
+	return say.Fmt("%d", r.Status)
+}
+
+// one sends request n, made of random headers, to both servers and returns 1 when the answers differ.
+fn one(n i64, rng dice.Rand, tinPort i64, goPort i64, target str, gotarget str, dates []str, tags []str, ranges []str) i64 {
+	let methods = []str{"GET", "GET", "GET", "HEAD", "POST"}
+	mut hs = []str{}
+	let k = pick(rng, 4)
+	for i in 0..k {
+		let w = pick(rng, 6)
+		if w == 0 {
+			hs = append(hs, "Range: " + chooseStr(rng, ranges))
+		} else if w == 1 {
+			hs = append(hs, "If-None-Match: " + chooseStr(rng, tags))
+		} else if w == 2 {
+			hs = append(hs, "If-Match: " + chooseStr(rng, tags))
+		} else if w == 3 {
+			hs = append(hs, "If-Modified-Since: " + chooseStr(rng, dates))
+		} else if w == 4 {
+			hs = append(hs, "If-Unmodified-Since: " + chooseStr(rng, dates))
+		} else {
+			hs = append(hs, "If-Range: " + chooseStr(rng, append(tags[0:3], dates[0:5]...)))
+		}
+	}
+	let method = chooseStr(rng, methods)
+	let a = nettest.Do(tinPort, method, target, hs, "")
+	let b = nettest.Do(goPort, method, gotarget, hs, "")
+	let sa = summary(a)
+	let sb = summary(b)
+	if sa != sb {
+		say.Line("request " + mint.Itoa(n) + ": " + method + " " + twine.Join(hs, " | ") + "\n  Go:  " + sb + "\n  Tin: " + sa)
+		return 1
+	}
+	return 0
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/servefile")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "sf-")
+	let file = ci.Join(work, "data.bin")
+	let data = make([]u8, FILE_SIZE)
+	for i in 0..FILE_SIZE {
+		data[i] = u8((i * 7 + i / 251) % 256)
+	}
+	ci.Write(file, str(data))
+	ci.Must(ci.Sh("TZ=UTC touch -t 202001020304.05 \"" + file + "\"", "", 10), "touch")
+	let mtime = tide.Date(2020, 1, 2, 3, 4, 5, 0) / 1000000000
+	let exe = ci.Join(work, "servefile-tin")
+	ci.BuildTin("tools/ci/fixtures/servefile.tin", exe, "", []str{})
+	let goexe = ci.Join(work, "servefile-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/servefile"}, ci.Root(), 300), "go build servefile")
+	let tinPort = nettest.Port()
+	let goPort = nettest.Port()
+	let tin = nettest.Start(exe, []str{}, []str{"TIN_CORES=1"}, ci.Join(work, "tin.log"), tinPort)
+	let gosrv = nettest.Start(goexe, []str{file, mint.Itoa(goPort)}, []str{}, ci.Join(work, "go.log"), goPort)
+	tin.Ready(10)
+	gosrv.Ready(10)
+	let etag = "\"" + hex(mtime) + "-" + hex(FILE_SIZE) + "\""
+	let target = "/f?path=" + file
+	let gotarget = "/f"
+	let rng = dice.New(u64(SEED))
+	let dates = []str{tide.FormatHTTP(mtime), tide.FormatHTTP(mtime + 1), tide.FormatHTTP(mtime - 1), tide.FormatHTTP(mtime + 86400), tide.FormatHTTP(mtime - 86400), "Thu, 02 Jan 2020 03:04:05 GMT", "Thursday, 02-Jan-20 03:04:05 GMT", "Thu Jan  2 03:04:05 2020", "garbage", ""}
+	let tags = []str{etag, "W/" + etag, "\"x\"", "\"x\", " + etag, etag + ", \"y\"", "*", "xx", "W/\"x\"", "", etag + "," + etag}
+	let ranges = []str{"bytes=0-0", "bytes=0-99", "bytes=100-", "bytes=-100", "bytes=-0", "bytes=99999-", "bytes=100000-", "bytes=0-99999999", "bytes=5-2", "bytes=a-b", "bytes=", "items=0-1", " bytes=1-2", "bytes= 1 - 2 ", "bytes=0-", "bytes=-100000", "bytes=-100001", "bytes=99999-99999", "bytes=1-", "bytes=00-01", "bytes=-1"}
+	let multi = []str{"bytes=0-5,10-20", "bytes=-1,-2", "bytes=0-0,0-0"}
+	mut bad = 0
+	for n in 0..REQUESTS {
+		bad += arena { one(n, rng, tinPort, goPort, target, gotarget, dates, tags, ranges) }
+	}
+	// Several ranges: the whole file.
+	for m in multi {
+		let r = nettest.Do(tinPort, "GET", target, []str{"Range: " + m}, "")
+		ci.Check(r.Status == 200 && len(r.Body) == FILE_SIZE, "several ranges " + m + ": " + summary(r))
+	}
+	tin.Stop()
+	gosrv.Stop()
+	ci.Check(bad == 0, "servefile: " + mint.Itoa(bad) + " of " + mint.Itoa(REQUESTS) + " answers differ from Go's http.ServeContent")
+	ci.Remove(work)
+	ci.Pass("servefile: " + mint.Itoa(REQUESTS) + " generated requests answered like http.ServeContent")
+}
