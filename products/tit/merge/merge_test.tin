@@ -176,3 +176,22 @@ fn TestNoBase(t mut crucible.T) {
 	let tree = treeIdOf(r)
 	t.True("both new names kept", entryOf(mut s, tree, "mine") != nil && entryOf(mut s, tree, "yours") != nil)
 }
+
+// Two functions added at the same place merge by declaration, where the line merge conflicts; one function changed
+// differently on both sides still conflicts and is named (#799).
+fn TestMergeTin(t mut crucible.T) {
+	let base = "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let ours = "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn c() i64 {{\n\treturn 3\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let theirs = "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn d() i64 {{\n\treturn 4\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let (_, lineClean) = MergeText(base, ours, theirs, "ours", "theirs")
+	t.False("the line merge conflicts", lineClean)
+	let (text, ok, _) = MergeTin(base, ours, theirs)
+	t.True("by declaration it merges", ok)
+	crucible.Equal(mut t, "both functions", text, "package p\n\nfn a() i64 {{\n\treturn 1\n}}\n\nfn c() i64 {{\n\treturn 3\n}}\n\nfn d() i64 {{\n\treturn 4\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n")
+	let o2 = "package p\n\nfn a() i64 {{\n\treturn 10\n}}\n\nfn b() i64 {{\n\treturn 2\n}}\n"
+	let t2 = "package p\n\nfn a() i64 {{\n\treturn 11\n}}\n\nfn b() i64 {{\n\treturn 20\n}}\n"
+	let (_, ok2, names) = MergeTin(base, o2, t2)
+	t.False("one function changed on both sides", ok2)
+	crucible.Equal(mut t, "named", len(names), 1)
+	crucible.Equal(mut t, "fn a", names[0], "fn a")
+}

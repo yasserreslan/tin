@@ -50,6 +50,7 @@ type Command enum {
 	Rewrite(RewriteArgs)
 	Bench(BenchArgs)
 	History(HistoryArgs)
+	Overlap
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -202,6 +203,7 @@ commands:
                              benchmark results kept with the change and the machine (macOS never against Linux)
   history <[package.]Name or Type.Method> [-n N]
                              the commits that changed one Tin declaration, following renames and moves
+  overlap                    other branches (and fetched remote ones) changing the declarations this one changes
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -800,6 +802,10 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.History(ha)
 	}
+	if name == "overlap" {
+		try noMore(rest, 0, "overlap")
+		return g, Command.Overlap
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -934,6 +940,7 @@ fn commandName(c Command) str {
 		Rewrite(_) => "rewrite"
 		Bench(_) => "bench"
 		History(_) => "history"
+		Overlap => "overlap"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -1056,6 +1063,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		History(ha) => {
 			try doHistory(g, ha, mut o)
+		}
+		Overlap => {
+			try doOverlap(g, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

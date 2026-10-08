@@ -2,6 +2,7 @@ package merge
 
 import "../object"
 import "../store"
+import "twine"
 import "fault"
 import "sift"
 
@@ -189,7 +190,15 @@ fn mergeFile[S store.ObjectStore](s mut S, path str, be ?object.Entry, oe object
 		conflicts = append(conflicts, NewConflict(path, idOf(be), oe.Id, te.Id))
 		return oe
 	}
-	let (text, clean) = MergeText(bb, ob, tb, "ours", "theirs")
+	mut (text, clean) = MergeText(bb, ob, tb, "ours", "theirs")
+	if !clean && twine.HasSuffix(path, ".tin") {
+		// a Tin file merges again by declaration (#799): changes to different declarations go side by side
+		let (dt, dok, _) = MergeTin(bb, ob, tb)
+		if dok {
+			text = dt
+			clean = true
+		}
+	}
 	if !clean || !modeOk {
 		conflicts = append(conflicts, NewConflict(path, idOf(be), oe.Id, te.Id))
 		return oe

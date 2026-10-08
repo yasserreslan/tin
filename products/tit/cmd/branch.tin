@@ -373,8 +373,19 @@ fn doMerge(g Global, a MergeArgs, o mut Out) ! {
 	try idx.Write(r.Ws.IndexPath())
 	try quarry.WriteFile(state + "/MERGE_HEAD", theirs.Hex() + "\n")
 	try quarry.WriteFile(state + "/MERGE_MSG", message)
-	for p in paths {
-		o.Line("CONFLICT: " + p)
+	for c in res.Conflicts {
+		mut named = ""
+		if isTin(c.Path) && c.Base() != object.NoId && c.Ours() != object.NoId && c.Theirs() != object.NoId {
+			// a Tin file names the declarations both sides changed (#799)
+			let (_, bt) = try r.Store.GetRaw(c.Base())
+			let (_, ot) = try r.Store.GetRaw(c.Ours())
+			let (_, tt) = try r.Store.GetRaw(c.Theirs())
+			let (_, _, names) = merge.MergeTin(bt, ot, tt)
+			if len(names) > 0 {
+				named = " (" + twine.Join(names, ", ") + ")"
+			}
+		}
+		o.Line("CONFLICT: " + c.Path + named)
 	}
 	fail "the merge has conflicts: edit them, tit add each file, then tit commit (or tit merge --abort)"
 }
