@@ -125,9 +125,10 @@ different functions at the same place merge cleanly, and a conflict names the fu
 
 ## Large repositories
 
-Files over 8 MiB are stored in content-defined chunks, so an edit stores what it touched. `tit clone --lazy` takes
-the history now and file contents when something reads them; `tit focus <dir>...` checks out only those
-directories (with a lazy clone, the rest is never fetched).
+Files over 8 MiB are stored in content-defined chunks, so an edit stores what it touched, and they check out a chunk
+at a time. `tit clone --lazy` takes the history now and file contents when something reads them; `tit focus
+<dir>...` checks out only those directories (with a lazy clone, the rest is never fetched). `tit repack` gathers the
+packs an adopt leaves into three (commits, trees, blobs), finding deltas and compressing on every core.
 
 ## Releases and benchmarks
 
