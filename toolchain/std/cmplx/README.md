@@ -21,7 +21,10 @@ Complex numbers and the functions of Go's `math/cmplx` (#916).
 ## Known gaps
 
 - `Pow(0, y)` with a NaN real part and an infinite imaginary part of `y` makes Go panic ("not reached"); this returns NaN.
-- `gauge.Log` is not Go's `math.Log` in the last bit for about one input in a thousand (Go's arm64 and amd64 differ too),
-  so `Log`, `Log10`, `Pow` and the inverse functions can differ from Go's by one ulp for those inputs. `cmplx_check`
-  reports them.
+- `gauge.Log` is not Go's `math.Log` in the last bit for about one input in 300,000 on arm64, and Go's own `math.Log`
+  differs between its amd64 and arm64 paths, so no one Tin `Log` matches Go on both. The results that pass through it
+  may differ from Go's: `Log`, `Asin`, `Acos`, `Asinh`, `Acosh`, `Atan` and `Atanh` by one ulp per component, `Log10` by
+  two (it scales `Log` by `Log10E`), and `Pow` by a bound that follows from the `Log` error. `cmplx_check` accepts
+  exactly these bounds (the formulas are in its header) and every other result is bit for bit. Making `gauge.Log` more
+  accurate is separate work in `gauge`, not here.
 - NaN payloads are not part of a result: the check compares every NaN as NaN.

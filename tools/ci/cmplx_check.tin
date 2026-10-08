@@ -8,6 +8,28 @@ package main
 // magnitude, of values near the branch cuts and of big arguments. Each line is fed to bench/ref/cmplx (Go's math/cmplx)
 // and to tools/ci/fixtures/cmplx.tin, and the check compares their output line by line: every real part and imaginary
 // part as bits (a NaN is compared as NaN), and the bool and real results.
+//
+// The exception (#916). gauge.Log is not Go's math.Log in the last bit for about one input in 300,000 on arm64, and Go's own
+// math.Log differs between its amd64 (assembly) and arm64 (pure Go, fused) paths for 429 of 300,000 inputs. One Tin
+// implementation therefore cannot be bit-exact with Go on both, so the results of the functions that pass through gauge.Log
+// may differ from Go's in each component (the real part and the imaginary part) by at most these bounds:
+//
+//	Log, Asin, Acos, Asinh, Acosh, Atan, Atanh   1 ulp
+//	Log10                                        2 ulps: Log10 multiplies Log by Log10E and rounds the product, so the
+//	                                             one ulp of Log can come out as two ulps of Log10
+//	Pow                                          2 + 2·L·(|Re y| + |Im y|·|w|/|c|) ulps, where L = Log(Abs(x)), w is Go's
+//	                                             result and c is its component. An ulp of L moves Pow's angle by |Im y|
+//	                                             times it, which moves each component by |w| times that, and it moves the
+//	                                             modulus by |Re y| times it (gauge.Pow takes Log for a fractional
+//	                                             exponent), which moves each component by the same relative amount. An
+//	                                             ulp of c is at least 2⁻⁵³|c|, which gives the factor 2; the 2 covers the
+//	                                             rounding of the other steps.
+//
+// The bounds are per function: Atanh's covers every line, including those whose Atan takes gauge.Atanh and stays exact. A
+// zero, infinite or NaN component of Go's Pow result, or an input whose Log or result is not finite, is compared exactly.
+// Every other function stays bit for bit. A difference beyond these bounds, a sign change (including +0 against -0), or a
+// NaN against a number fails the check, and every such line is counted. The fix for the last bit is a separate accuracy
+// effort in toolchain/std/gauge, not this check: the exception goes when the results match Go's on every platform.
 
 import "./ci"
 import "cmplx"
@@ -165,6 +187,118 @@ fn unaryOps() []str {
 		"Tan", "Cot", "Sinh", "Cosh", "Tanh", "Conj", "Abs", "Phase", "IsNaN", "IsInf", "Polar"}
 }
 
+// ulpBound is the bound per component of a function in the exception (see the header); every other function is exact.
+fn ulpBound(op str) f64 {
+	if op == "Log10" {
+		return 2
+	}
+	for name in []str{"Log", "Asin", "Acos", "Asinh", "Acosh", "Atan", "Atanh"} {
+		if name == op {
+			return 1
+		}
+	}
+	return 0
+}
+
+// hexBits reads a hex number of at most 16 digits, as the bits of a float.
+fn hexBits(s str) u64 {
+	mut v = u64(0)
+	for i in 0..len(s) {
+		v = v*16 + hexDigit(s[i])
+	}
+	return v
+}
+
+// hexDigit is the value of one lowercase hex digit.
+fn hexDigit(c u8) u64 {
+	if c >= '0' && c <= '9' {
+		return u64(c - '0')
+	}
+	return u64(c-'a') + 10
+}
+
+// ulps is the distance between two output fields in ulps: 0 for the same text, else the distance between the bits of two
+// floats of the same sign. It is -1 when the fields cannot be compared: a NaN against anything but the same text, and two
+// floats of different signs (+0 and -0 included).
+fn ulps(a str, b str) f64 {
+	if a == b {
+		return 0
+	}
+	if a == "nan" || b == "nan" {
+		return -1
+	}
+	let x = hexBits(a)
+	let y = hexBits(b)
+	if x>>63 != y>>63 {
+		return -1
+	}
+	if x > y {
+		return f64(x - y)
+	}
+	return f64(y - x)
+}
+
+// inUlps reports whether two output fields are within n ulps of each other (see ulps).
+fn inUlps(a str, b str, n f64) bool {
+	let d = ulps(a, b)
+	return d >= 0 && d <= n
+}
+
+// bitsFloat is the float of an output field's hex bits.
+fn bitsFloat(s str) f64 {
+	return gauge.F64frombits(hexBits(s))
+}
+
+// finite reports whether a float is neither infinite nor NaN.
+fn finite(v f64) bool {
+	return !gauge.IsNaN(v) && !gauge.IsInf(v, 0)
+}
+
+// powWithin reports whether a Pow line is within its bound (see the header): each component of Tin's result is within
+// 2 + 2·L·(|Re y| + |Im y|·|w|/|c|) ulps of Go's, where L = Log(Abs(x)), w is Go's result and c is its component. A zero
+// component, or an L, a modulus or a component that is not finite, is compared exactly.
+fn powWithin(f []str, w []str, g []str) bool {
+	let x = cmplx.New(bitsFloat(f[1]), bitsFloat(f[2]))
+	let re = gauge.Abs(bitsFloat(f[3]))
+	let im = gauge.Abs(bitsFloat(f[4]))
+	let l = gauge.Abs(gauge.Log(cmplx.Abs(x)))
+	let m = cmplx.Abs(cmplx.New(bitsFloat(w[1]), bitsFloat(w[2])))
+	for k in 1..3 {
+		let c = gauge.Abs(bitsFloat(w[k]))
+		mut n = f64(0)
+		if c != 0 && finite(l) && finite(m) && finite(c) {
+			let b = 2 + 2*l*(re+im*m/c)
+			if finite(b) {
+				n = b
+			}
+		}
+		if !inUlps(w[k], g[k], n) {
+			return false
+		}
+	}
+	return true
+}
+
+// tolerated reports whether a line that differs is allowed by the exception (see the header): its function is in it, the op
+// and the number of fields match, and each field of the result is within the bound of Go's.
+fn tolerated(corpus str, want str, got str) bool {
+	let f = twine.Split(corpus, " ")
+	let w = twine.Split(want, " ")
+	let g = twine.Split(got, " ")
+	if len(w) != len(g) || w[0] != g[0] || f[0] != w[0] {
+		return false
+	}
+	if f[0] == "Pow" {
+		return len(w) == 3 && powWithin(f, w, g)
+	}
+	let n = ulpBound(f[0])
+	for k in 1..len(w) {
+		if !inUlps(w[k], g[k], n) {
+			return false
+		}
+	}
+	return true
+}
 fn run(exe str, data str) []str {
 	let o = ci.ExecIn([]str{exe}, ci.Root(), 900, data, []str{})
 	ci.Must(o, exe)
@@ -185,8 +319,16 @@ fn main() {
 	let got = run(tin, data)
 	ci.Check(len(got) == len(want), "cmplx: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
 	mut bad = 0
+	mut eased = 0
 	for i in 0..len(want) {
-		if want[i] != got[i] {
+		if want[i] == got[i] {
+			continue
+		}
+		if i < len(lines) && tolerated(lines[i], want[i], got[i]) {
+			eased += 1
+			continue
+		}
+		if bad < 6 {
 			if i < len(lines) {
 				say.Line("line " + mint.Itoa(i + 1) + " (corpus: " + lines[i] + "):")
 			} else {
@@ -194,13 +336,10 @@ fn main() {
 			}
 			say.Line("  Go:  " + want[i])
 			say.Line("  Tin: " + got[i])
-			bad += 1
-			if bad >= 6 {
-				break
-			}
 		}
+		bad += 1
 	}
-	ci.Check(bad == 0, "cmplx: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Check(bad == 0, "cmplx: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ beyond the exception")
 	ci.Remove(work)
-	ci.Pass("cmplx: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's math/cmplx")
+	ci.Pass("cmplx: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's math/cmplx; " + mint.Itoa(eased) + " results differ within the exception's bounds (see the header)")
 }

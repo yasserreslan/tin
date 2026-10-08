@@ -470,18 +470,21 @@ fn tanSeries(z Complex) f64 {
 		f *= rn
 		rn += 1
 		f *= rn
-		x2 *= x
-		y2 *= y
-		mut t = y2 + x2
+		// Go fuses the power of x into each sum on arm64 and rounds the power of y first, so the sums are written that way.
+		let x2a = x2
+		x2 = f64(x2 * x)
+		y2 = f64(y2 * y)
+		mut t = y2 + x2a*x
 		t /= f
 		d += t
 		rn += 1
 		f *= rn
 		rn += 1
 		f *= rn
-		x2 *= x
-		y2 *= y
-		t = y2 - x2
+		let x2b = x2
+		x2 = f64(x2 * x)
+		y2 = f64(y2 * y)
+		t = y2 - x2b*x
 		t /= f
 		d += t
 		if !(gauge.Abs(t/d) > machep) {
@@ -604,7 +607,6 @@ fn Atan(z Complex) Complex {
 	if gauge.IsNaN(re) || gauge.IsNaN(im) {
 		return NaN()
 	}
-	let x2 = re * re
 	let a = 1 - re*re - im*im
 	if a == 0 {
 		return NaN()
@@ -612,13 +614,13 @@ fn Atan(z Complex) Complex {
 	let t0 = 0.5 * gauge.Atan2(2*re, a)
 	let w = reducePi(t0)
 	mut t = im - 1
-	// Go does not fuse these two sums on arm64, so the products are rounded (f64) before the add.
-	let b = x2 + f64(t*t)
+	// Go fuses re*re into this sum on arm64 and rounds t*t first, so the sums are written the same way.
+	let b = re*re + f64(t*t)
 	if b == 0 {
 		return NaN()
 	}
 	t = im + 1
-	let c = (x2 + f64(t*t)) / b
+	let c = (re*re + f64(t*t)) / b
 	return New(w, 0.25*gauge.Log(c))
 }
 
