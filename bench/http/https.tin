@@ -1,4 +1,4 @@
-// The HTTPS benchmark server (bench/http/run_https.py): anvil.ServeTLS with /plaintext and
+// The HTTPS benchmark server (bench/http/run_https.tin): anvil.ServeTLS with /plaintext and
 // /big?n=N (up to 1 MiB, byte i is i % 251), the certificate and key in TLS_CERT and TLS_KEY.
 // Its twin is bench/http/gotls (Go's crypto/tls).
 package main

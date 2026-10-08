@@ -209,7 +209,7 @@ global's dot does too.
 | `make linux-test` | cross-compile every strict test for linux-arm64 and run it in an arm64 container (`tools/dev/linuxtest.sh`) |
 | `make linux-bootstrap` | cross-compile a Linux compiler, then in the container it must rebuild itself identically; refreshes `toolchain/seed/tinc-linux-arm64` |
 | `make linux-amd64-bootstrap` | the same for x86-64 in `tin-debian-amd64` (emulated on an arm64 Mac); refreshes `toolchain/seed/tinc-linux-amd64` |
-| `make bench` | the CPU benchmarks vs Go (`bench/run.py`) |
+| `make bench` | the CPU benchmarks vs Go (`bench/run.tin`) |
 | `make install` | link `tin` into `$(PREFIX)/bin` (created if needed; see §1 for the default) |
 | `make dist` | package the native compiler, library and sources in a versioned archive with a SHA-256 checksum |
 | `make print-VAR` | print a Makefile variable (e.g. `make print-SELF`, the compiler's sources) |
@@ -361,7 +361,7 @@ Go binaries for the container: `GOOS=linux GOARCH=arm64 go build -o bin/linux/x 
 | `bench/http/hammer` | a Go load generator (wrk-like) with exact latency histograms |
 | `bench/router/router.tin` + `bench/router/go` | routing cost with 1, 20 and 200 routes: a lookup (`Match`) and a whole request through the router (`Run`), against chi's `Find` and `ServeHTTP` |
 | `bench/http/routes.tin` | `/json` and `/plaintext` behind a router of `ROUTES` routes (port 9180, like `examples/api.tin`), for routing inside a served request |
-| `bench/v04/run.py` | `GET /users/{id}` through Redis over MySQL, Tin vs Go + chi under wrk2: max req/s, req per CPU-second, p50/p99/p99.9 at a fixed rate, RSS (needs Redis, MySQL seeded by `bench/v04/seed.py`, and `WRK2`) |
+| `bench/v04/run.tin` | `GET /users/{id}` through Redis over MySQL, Tin vs Go + chi under wrk2: max req/s, req per CPU-second, p50/p99/p99.9 at a fixed rate, RSS (needs Redis, MySQL seeded by `bench/v04/seed.tin` (`sh tools/ci/tin.sh bench/v04/seed.tin`), and `WRK2`) |
 
 Servers used: `examples/api.tin` (port 9180, `TIN_CORES=n`), `bench/http/fast` (fasthttp,
 9182), `bench/http/gonet` (net/http, 9181), with `GOMAXPROCS=n`. Results and analysis:

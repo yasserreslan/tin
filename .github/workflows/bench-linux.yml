@@ -99,11 +99,11 @@ jobs:
           cat bin/bench-machine.txt >> "$GITHUB_STEP_SUMMARY"
       - name: CPU reference (Tin versus Go)
         run: |
-          BENCH_DIR=bench/v2 python3 bench/run.py --json bin/bench-cpu-reference.json | tee bin/bench-cpu-reference.txt
+          BENCH_DIR=bench/v2 sh tools/ci/tin.sh bench/run.tin --json bin/bench-cpu-reference.json | tee bin/bench-cpu-reference.txt
           { echo '### CPU reference'; cat bin/bench-cpu-reference.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: CPU base versus head
         run: |
-          python3 bench/compare.py --base-root bin/bench-base --json bin/bench-cpu-compare.json | tee bin/bench-cpu-compare.txt
+          sh tools/ci/tin.sh bench/compare.tin --base-root bin/bench-base --json bin/bench-cpu-compare.json | tee bin/bench-cpu-compare.txt
           { echo '### CPU revision comparison'; cat bin/bench-cpu-compare.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: HTTP reference (Tin versus Go)
         run: |
@@ -117,13 +117,13 @@ jobs:
           ./tin build bench/http/https.tin -o bin/https_bench
           go -C bench/http build -o "$GITHUB_WORKSPACE/bin/gotls" ./gotls
           go -C bench/http build -o "$GITHUB_WORKSPACE/bin/tlsload" ./tlsload
-          python3 bench/http/run_https.py 5 5 --json bin/bench-https-reference.json | tee bin/bench-https-reference.txt
+          sh tools/ci/tin.sh bench/http/run_https.tin 5 5 --json bin/bench-https-reference.json | tee bin/bench-https-reference.txt
           { echo '### HTTPS reference (anvil.ServeTLS versus Go crypto/tls)'; cat bin/bench-https-reference.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: HTTP/2 reference (Tin versus Go net/http, h2c)
         run: |
           go -C bench/http build -o "$GITHUB_WORKSPACE/bin/goh2c" ./goh2c
           echo 'HTTP/2: 1 server core, h2load -t2 -c32 -m10 (h2c by prior knowledge), 10 s after a 2 s warm-up, 5 alternating rounds.' > bin/bench-h2-reference.txt
-          python3 bench/http/run_h2load.py 1 2 32 10 10 5 --json bin/bench-h2-reference.json | tee -a bin/bench-h2-reference.txt
+          sh tools/ci/tin.sh bench/http/run_h2load.tin 1 2 32 10 10 5 --json bin/bench-h2-reference.json | tee -a bin/bench-h2-reference.txt
           { echo '### HTTP/2 reference'; cat bin/bench-h2-reference.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: HTTP client (wire's HTTP/2 and HTTP/1.1 against Go's net/http client)
         run: |
@@ -131,15 +131,15 @@ jobs:
           go -C bench/http build -o "$GITHUB_WORKSPACE/bin/goload" ./goload
           go -C bench/http build -o "$GITHUB_WORKSPACE/bin/goh2c" ./goh2c
           echo 'HTTP client: 1 client core each (wire, Go net/http with GOMAXPROCS=1) calling Go net/http (2 cores), 100 callers at once, 20000 GETs of /plaintext per round, 5 alternating rounds after a warm-up.' > bin/bench-wire.txt
-          python3 bench/http/run_wire.py 20000 5 --json bin/bench-wire.json | tee -a bin/bench-wire.txt
+          sh tools/ci/tin.sh bench/http/run_wire.tin 20000 5 --json bin/bench-wire.json | tee -a bin/bench-wire.txt
           { echo '### HTTP client (wire)'; cat bin/bench-wire.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: HTTP base versus head
         run: |
-          python3 bench/compare.py --suite http --base-root bin/bench-base --json bin/bench-http-compare.json | tee bin/bench-http-compare.txt
+          sh tools/ci/tin.sh bench/compare.tin --suite http --base-root bin/bench-base --json bin/bench-http-compare.json | tee bin/bench-http-compare.txt
           { echo '### HTTP revision comparison'; cat bin/bench-http-compare.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: File reads (quarry.ReadFile of 10k files, io_uring versus helper threads)
         run: |
-          python3 bench/files/run.py --json bin/bench-files.json | tee bin/bench-files.txt
+          sh tools/ci/tin.sh bench/files/run.tin --json bin/bench-files.json | tee bin/bench-files.txt
           { echo '### File reads (head: io_uring versus TIN_IO_URING=0)'; echo '```'; cat bin/bench-files.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep raw samples and server logs
         if: always()

@@ -8,7 +8,7 @@ index and scale, 0/8/32-bit displacements and rip-relative labels and symbols, l
 relaxed short branches), writes the encoded bytes to `out.bin` and our Intel-syntax listing to
 `ours.txt`, disassembles the bytes with `x86_64-linux-gnu-objdump -D -b binary -m i386:x86-64
 -M intel` inside a `debian:bookworm-slim` container (set `X64FUZZ_IMAGE` to an image that
-already has `binutils-x86-64-linux-gnu` to skip the apt-get), and `compare.py` normalizes
+already has `binutils-x86-64-linux-gnu` to skip the apt-get), and `compare.tin` normalizes
 both listings and diffs them instruction by instruction, exiting non-zero on any mismatch; the
 driver also checks that `x64_layout`, `x64_encode` and `x64_assemble` agree on sizes and bytes.
 Work files land in `$X64FUZZ_DIR` (default `$TMPDIR/x64fuzz`).
