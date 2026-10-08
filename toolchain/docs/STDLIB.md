@@ -76,6 +76,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [asn1](#asn1) | ASN.1 DER: tags, lengths, object identifiers, bit strings and times (encoding/asn1) |
+| [gob](#gob) | Go's gob streams: type descriptions, values and the encoder and decoder over a schema (encoding/gob) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
 | [mail](#mail) | RFC 5322 message and address parsing (net/mail) |
 | [textproto](#textproto) | line-oriented and dot-framed protocol I/O (net/textproto) |
@@ -2976,6 +2977,49 @@ Package html tokenizes, parses and escapes HTML, as Go's html and golang.org/x/n
 - `StringValue(r RawValue) !str`: StringValue reads a string of the UTF8, Numeric, Printable, T61 or IA5 tag as UTF-8 text (T61 as Latin-1, as Go does).
 - `TimeValue(r RawValue) !DateTime`: TimeValue reads a UTCTime (years 1950 to 2049) or a GeneralizedTime in UTC.
 - `ExplicitValue(r RawValue, tag i64) !RawValue`: ExplicitValue reads the element inside an EXPLICIT tag [tag] that r is.
+
+## gob
+
+- `const KindBool = 1`: KindBool is the kind of bool values.
+- `const KindInt = 2`: KindInt is the kind of int values (every signed integer width).
+- `const KindUint = 3`: KindUint is the kind of uint values.
+- `const KindFloat = 4`: KindFloat is the kind of float64 values.
+- `const KindString = 5`: KindString is the kind of string values.
+- `const KindBytes = 6`: KindBytes is the kind of []byte values.
+- `const KindSlice = 7`: KindSlice is the kind of slices.
+- `const KindMap = 8`: KindMap is the kind of maps.
+- `const KindStruct = 9`: KindStruct is the kind of structs.
+- `const Bool = 0`: Bool is the handle of the builtin bool type.
+- `const Int = 1`: Int is the handle of the builtin int type.
+- `const Uint = 2`: Uint is the handle of the builtin uint type.
+- `const Float = 3`: Float is the handle of the builtin float64 type.
+- `const String = 4`: String is the handle of the builtin string type.
+- `const Bytes = 5`: Bytes is the handle of the builtin []byte type.
+- `type Field struct`: Field is a struct field of a Schema: its name and the type handle of its values.
+- `type Schema struct`: Schema is the set of types a stream is made of.
+- `NewSchema() Schema`: NewSchema returns a schema holding the builtin types Bool, Int, Uint, Float, String and Bytes.
+- `(s mut Schema) Slice(elem i64) i64`: Slice declares the type of slices of elem and returns its handle.
+- `(s mut Schema) Map(key i64, elem i64) i64`: Map declares the type of maps from key to elem and returns its handle.
+- `(s mut Schema) Struct(name str) i64`: Struct declares a struct type named name, with no fields yet, and returns its handle; AddField adds the fields.
+- `(s mut Schema) AddField(t i64, name str, typ i64) !`: AddField appends the field name of type typ to the struct type t; a field is sent in the order added.
+- `(s Schema) Kind(t i64) i64`: Kind returns the kind of the type t.
+- `type Value struct`: Value is a value of a Schema type: its number (I, U or F), its flag (B), its text or bytes (S), and the elements, fields or map values it holds (Items) and the map keys (Keys).
+- `IntV(v i64) Value`: IntV is an Int value.
+- `UintV(v u64) Value`: UintV is a Uint value.
+- `FloatV(v f64) Value`: FloatV is a Float value.
+- `BoolV(v bool) Value`: BoolV is a Bool value.
+- `StringV(v str) Value`: StringV is a String value.
+- `BytesV(v []u8) Value`: BytesV is a Bytes value.
+- `SliceV(items []Value) Value`: SliceV is a slice value holding items.
+- `MapV(keys []Value, vals []Value) Value`: MapV is a map value holding keys and their values, in the same order.
+- `StructV(fields []Value) Value`: StructV is a struct value holding its fields in declaration order.
+- `type Encoder struct`: Encoder writes values of a Schema as a gob stream. It keeps the types it has described, so a type is sent once.
+- `NewEncoder(s Schema) Encoder`: NewEncoder returns an encoder for the types of s.
+- `(e mut Encoder) Encode(t i64, v Value) ![]u8`: Encode returns the messages that send a value of type t: the descriptions of the types not sent yet, then the value.
+- `type Decoder struct`: Decoder reads the messages of a gob stream.
+- `NewDecoder(b []u8) Decoder`: NewDecoder returns a decoder of the stream b.
+- `(d mut Decoder) Decode(s Schema, t i64) !Value`: Decode reads the next value of the stream as a value of the type t of s, reading the type descriptions before it.
+- `(s Schema) Fields(t i64) []Field`: Fields returns the fields of the struct type t, in declaration order.
 
 ## mime
 

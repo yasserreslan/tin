@@ -104,6 +104,8 @@ jobs:
         run: sh tools/ci/tin.sh mail_check
       - name: ASN.1 DER against Go's encoding/asn1 (generated values both ways, and mutated bytes)
         run: sh tools/ci/tin.sh asn1_check
+      - name: gob streams against Go's encoding/gob (330 seeds encoded and decoded both ways, damaged streams)
+        run: sh tools/ci/tin.sh gob_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
       - name: container/list and container/ring against Go (generated and exhaustive small cases)
