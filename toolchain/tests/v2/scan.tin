@@ -1,0 +1,131 @@
+package main
+
+// scan: Go's text/scanner. Tokens, texts and positions under the default mode, comments kept and
+// skipped, the mode bits, white space sets, an identifier predicate, Next and Peek between scans,
+// Init on a new text, and the errors with their positions. The output is the same on every platform.
+
+import "glyph"
+import "say"
+import "scan"
+
+// all scans the rest of s, one line per token.
+fn all(s mut scan.Scanner) {
+	for {
+		let tok = s.Scan()
+		say.Line(" ", s.Position().String(), scan.TokenString(tok), "[" + s.TokenText() + "]")
+		if tok == scan.EOF {
+			return
+		}
+	}
+}
+
+// errors prints the errors s kept.
+fn errors(s scan.Scanner) {
+	say.Line("  errors", s.ErrorCount)
+	for e in s.Errors() {
+		say.Line("   ", e.String(), e.Pos.Offset)
+	}
+}
+
+// dollar takes '$' and letters anywhere, and '-' and digits after the first rune.
+fn dollar(ch i32, i i64) bool {
+	return ch == '$' || glyph.IsLetter(ch) || i > 0 && (ch == '-' || glyph.IsDigit(ch))
+}
+
+fn main() {
+	say.Line("kinds", scan.EOF, scan.Ident, scan.Int, scan.Float, scan.Char, scan.String, scan.RawString, scan.Comment)
+	say.Line("modes", scan.ScanIdents, scan.ScanInts, scan.ScanFloats, scan.ScanChars, scan.ScanStrings, scan.ScanRawStrings, scan.ScanComments, scan.SkipComments, scan.GoTokens)
+	say.Line("whitespace", scan.GoWhitespace)
+	say.Line("names", scan.TokenString(scan.EOF), scan.TokenString(scan.Ident), scan.TokenString(scan.Comment), scan.TokenString('+'), scan.TokenString('é'), scan.TokenString('\n'), scan.TokenString(0xd800))
+
+	// The default mode: Go tokens, comments skipped.
+	let src = "// main prints.\nfn main() {{\n\tlet x = 1_000 + 0x1F * 2.5e-3\n\tsay.Line(\"hi\\n\", 'c', `raw\nstring`) /* done */\n}}\n"
+	say.Line("default")
+	mut s = scan.New(src)
+	s.Filename = "main.tin"
+	all(mut s)
+	errors(s)
+	say.Line("  after", s.Pos().String(), s.Pos().Offset, s.Position().IsValid())
+
+	// Comments as tokens, then no literals at all.
+	say.Line("comments")
+	s.Init("a /* b */ c // d\ne")
+	s.Mode = scan.ScanIdents | scan.ScanComments
+	all(mut s)
+	say.Line("skip without ScanComments")
+	s.Init("a /* b */ c")
+	s.Mode = scan.ScanIdents | scan.SkipComments
+	all(mut s)
+	say.Line("no modes")
+	s.Init("ab 12 \"s\"")
+	s.Mode = 0
+	all(mut s)
+	say.Line("ints only")
+	s.Init("1.5 0x1p3 7e2")
+	s.Mode = scan.ScanInts
+	all(mut s)
+
+	// Newlines as tokens: the white space without '\n'.
+	say.Line("newlines")
+	s.Init("a\n\nb\r\n")
+	s.Whitespace = scan.GoWhitespace & ~(u64(1) << 10)
+	all(mut s)
+
+	// An identifier predicate, kept by Init, and back to Go's.
+	say.Line("predicate")
+	s.SetIdentRune(dollar)
+	s.Init("$x-1 a-b 9z")
+	all(mut s)
+	s.ResetIdentRune()
+	s.Init("$x-1")
+	all(mut s)
+
+	// Next and Peek between scans: Next makes Position invalid and the token text empty.
+	say.Line("next and peek")
+	s.Init("ab\ncd é")
+	say.Line("  peek", scan.TokenString(s.Peek()), s.Pos().String())
+	say.Line("  scan", scan.TokenString(s.Scan()), s.TokenText(), s.Position().String())
+	say.Line("  peek", scan.TokenString(s.Peek()))
+	say.Line("  next", scan.TokenString(s.Next()), "[" + s.TokenText() + "]", s.Position().IsValid(), s.Position().String(), s.Pos().String())
+	say.Line("  next", scan.TokenString(s.Next()), s.Pos().String())
+	say.Line("  scan", scan.TokenString(s.Scan()), s.TokenText(), s.Position().String())
+	say.Line("  next", scan.TokenString(s.Next()), s.Pos().String())
+	say.Line("  next", scan.TokenString(s.Next()), s.Pos().String())
+	say.Line("  next", scan.TokenString(s.Next()), s.Pos().String())
+	say.Line("  peek", scan.TokenString(s.Peek()))
+
+	// A byte order mark is skipped, but still counts as a column.
+	say.Line("bom")
+	s.Init("\xef\xbb\xbfx")
+	all(mut s)
+
+	// Errors: the scan goes on, each error at its token (or the place) where it was met.
+	say.Line("errors")
+	s.Init("0b12 08 1__0 0x 0x1.8 0o1.2 1e+ 'ab' '\\q' \"open\nx /* never")
+	all(mut s)
+	errors(s)
+	s.Err() catch err {
+		say.Line("  err", err)
+	}
+	say.Line("bytes")
+	s.Init("a\xffb \x00 \"\xff\"")
+	all(mut s)
+	errors(s)
+
+	// Init clears the errors and the mode; the file name stays.
+	say.Line("init")
+	s.Init("ok")
+	say.Line("  ", s.ErrorCount, len(s.Errors()), s.Mode, s.Whitespace == scan.GoWhitespace, s.Filename, s.Position().IsValid())
+	all(mut s)
+	s.Err() catch err {
+		say.Line("  unexpected", err)
+	}
+	say.Line("  no error")
+
+	// An empty source and a fresh scanner's positions.
+	say.Line("empty")
+	mut e = scan.New("")
+	say.Line("  pos", e.Pos().String(), e.Position().String())
+	all(mut e)
+	say.Line("  scan again", scan.TokenString(e.Scan()), e.Pos().String())
+}
