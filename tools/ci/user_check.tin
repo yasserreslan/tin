@@ -1,0 +1,51 @@
+package main
+
+import "./ci"
+import "quarry"
+import "say"
+import "twine"
+
+// Compare user, group and group-membership lookups with Go's os/user on this machine.
+fn main() {
+	mut cases = []str{"C", "I\t987654321", "N\ttin-no-such-user-911", "G\ttin-no-such-group-911"}
+	let passwd = quarry.ReadFile("/etc/passwd") catch _ { "" }
+	for row in twine.Split(passwd, "\n") {
+		let f = twine.Split(row, ":")
+		if len(f) >= 7 && len(f[0]) > 0 {
+			cases = append(cases, "N\t" + f[0])
+			cases = append(cases, "I\t" + f[2])
+			cases = append(cases, "M\t" + f[2])
+		}
+	}
+	let group = quarry.ReadFile("/etc/group") catch _ { "" }
+	for row in twine.Split(group, "\n") {
+		let f = twine.Split(row, ":")
+		if len(f) >= 4 && len(f[0]) > 0 {
+			cases = append(cases, "G\t" + f[0])
+		}
+	}
+	let input = twine.Join(cases, "\n") + "\n"
+	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci/user"), "user-")
+	let tin = ci.Join(dir, "tin-user")
+	let goexe = ci.Join(dir, "go-user")
+	ci.BuildTin("tools/ci/fixtures/user.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/user"}, ci.Root(), 300), "go build user reference")
+	let wantResult = ci.ExecIn([]str{goexe}, ci.Root(), 120, input, []str{})
+	let gotResult = ci.ExecIn([]str{tin}, ci.Root(), 120, input, []str{})
+	ci.Must(wantResult, "Go user reference")
+	ci.Must(gotResult, "Tin user fixture")
+	let want = ci.Lines(wantResult.Stdout)
+	let got = ci.Lines(gotResult.Stdout)
+	ci.Check(len(want) == len(got), "user: " + say.Str(len(got)) + " lines against Go's " + say.Str(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("user mismatch at line", i+1, "Go:", want[i], "Tin:", got[i])
+			bad += 1
+			if bad == 10 { break }
+		}
+	}
+	ci.Check(bad == 0, "user: " + say.Str(bad) + " mismatches in " + say.Str(len(cases)) + " lookup calls")
+	ci.Remove(dir)
+	ci.Pass("user: " + say.Str(len(cases)) + " lookups match Go os/user")
+}

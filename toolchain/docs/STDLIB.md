@@ -29,6 +29,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [ore](#ore) | byte slices (bytes) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
+| [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [signal](#signal) | operating-system signals (os/signal) |
 | [trail](#trail) | paths (path, path/filepath on Unix) |
@@ -1133,6 +1134,16 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `Exit(code i64)`: Exit flushes stdout and ends the program with status code.
 - `Eprint(s str)`: Eprint writes s to stderr.
 - `Eprintln(s str)`: Eprintln writes s and a newline to stderr in one write.
+
+## user
+
+- `type User struct`: User is an account from the system user database.
+- `type Group struct`: Group is an account from the system group database.
+- `Current() !User`: Current returns the user identified by the process's real user ID.
+- `LookupId(uid str) !User`: LookupId looks up a user by numeric user ID.
+- `Lookup(username str) !User`: Lookup looks up a user by login name.
+- `LookupGroup(name str) !Group`: LookupGroup looks up a group by name.
+- `(u User) GroupIds() ![]str`: GroupIds returns the IDs of the groups to which u belongs, including its primary group.
 
 ## spawn
 
