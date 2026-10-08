@@ -47,6 +47,7 @@ type Command enum {
 	Who(WhoArgs)
 	Stack(StackArgs)
 	Sync(ShareArgs)
+	Rewrite(RewriteArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -192,6 +193,9 @@ commands:
   split <change> <paths> [-m msg]
                              make a new change, just below, of what the change did to these paths
   absorb                     put each uncommitted hunk into the change of the stack that wrote those lines
+  rewrite [--stack|--all] <cmd>
+                             run cmd on every change of the stack (or of every branch); what it leaves is each
+                             change's new version, the changes above follow; one undo reverses it all
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -716,6 +720,24 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Stack(sa)
 	}
+	if name == "rewrite" {
+		mut ra = RewriteArgs{Command: "", Branches: false}
+		for a in rest {
+			if a == "--all" || a == "--branches" {
+				ra.Branches = true
+			} else if a == "--stack" {
+				ra.Branches = false
+			} else if len(ra.Command) == 0 {
+				ra.Command = a
+			} else {
+				fail fault.Wrap(ErrUsage, "rewrite takes one command (quote it)")
+			}
+		}
+		if len(ra.Command) == 0 {
+			fail fault.Wrap(ErrUsage, "rewrite [--stack|--all] <command>")
+		}
+		return g, Command.Rewrite(ra)
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -847,6 +869,7 @@ fn commandName(c Command) str {
 		Who(_) => "who"
 		Stack(sa) => sa.Action
 		Sync(_) => "sync"
+		Rewrite(_) => "rewrite"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -960,6 +983,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Sync(sa) => {
 			try doSync(g, sa, mut o)
+		}
+		Rewrite(ra) => {
+			try doRewrite(g, ra, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
