@@ -41,6 +41,7 @@ fn (ws Workspace) Build(t mut ui.Tree) {
 		}
 		t.Open(ui.VBox().Flex(1.0), 0)
 		ws.tabBar(mut t, p)
+		ws.breadcrumbs(mut t, p)
 		t.Custom(ui.Box().Flex(1.0), paneId(p))
 		t.Close()
 	}
@@ -365,6 +366,32 @@ fn (ws Workspace) pickerOverlay(t mut ui.Tree) {
 			t.Close()
 		}
 		t.Close()
+	}
+	t.Close()
+}
+
+// breadcrumbs is the path of the pane's file below the project folder, a chevron between its parts.
+fn (ws Workspace) breadcrumbs(t mut ui.Tree, pane i64) {
+	let th = ws.Th
+	let ed = ws.Panes[pane]
+	mut path = ed.Buf.Path
+	if len(path) == 0 {
+		return
+	}
+	if ws.HasProj && twine.HasPrefix(path, ws.Proj.Root + "/") {
+		path = twine.TrimPrefix(path, ws.Proj.Root + "/")
+	}
+	let parts = twine.Split(path, "/")
+	t.Open(ui.HBox().High(24.0).Items(ui.Center).Spacing(4.0).PadXY(14.0, 0.0).Fill(th.Editor).Clipped(), 0)
+	for i in 0..len(parts) {
+		if i > 0 {
+			t.Icon(render.IconChevronRight, 8.0, th.Faint, ui.Box())
+		}
+		mut color = th.Muted
+		if i == len(parts) - 1 {
+			color = th.Text
+		}
+		t.Text(parts[i], render.FontSmall, color, ui.Box())
 	}
 	t.Close()
 }

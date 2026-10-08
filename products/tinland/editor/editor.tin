@@ -238,13 +238,16 @@ fn (ed mut Editor) Load(path str) bool {
 	return true
 }
 
-// closeTab closes the active tab (asking about unsaved changes); closing the last one quits.
+// closeTab closes the active tab (asking about unsaved changes); closing the last one leaves an empty tab.
 fn (ed mut Editor) closeTab() {
 	if !ed.confirm() {
 		return
 	}
 	if len(ed.Tabs) == 1 {
-		ed.Quit = true
+		// the last tab closes into an empty one
+		ed.Tabs = []Tab{Tab{Buf: textedit.New()}}
+		ed.Active = -1
+		ed.activate(0)
 		return
 	}
 	let at = ed.Active
