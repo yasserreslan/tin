@@ -1,0 +1,211 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "quarry"
+import "seal"
+import "say"
+import "twine"
+
+// Compare anvil's multipart reader with Go's mime/multipart over generated bodies (#823). Each case is a boundary, a body, a read chunk
+// size and a read-ahead buffer size; both sides (bench/ref/multipart and tools/ci/fixtures/multipart.tin) print one line per part
+// (form name, file name, content type, length and SHA-1 of its content) and whether the body ended well, and the check compares the
+// lines (arguments: seed and number of cases). The bodies are mostly well formed (CRLF or bare LF lines, a preamble, headers with folded lines, delimiter lines with trailing
+// blanks, a final boundary with or without its newline, an epilogue) and their contents hold look-alikes of the delimiter (a
+// shortened boundary, one extra byte, "--boundary" with no newline in front); a quarter are cut short and some have a byte changed.
+
+const SEED = 823
+const DEFAULT_CASES = 4000
+
+fn pick(rng dice.Rand, n i64) i64 {
+	return rng.I64n(n)
+}
+
+fn chooseStr(rng dice.Rand, xs []str) str {
+	return xs[pick(rng, len(xs))]
+}
+
+fn randomBytes(rng dice.Rand, n i64, binary bool) str {
+	mut b = make([]u8, 0, n)
+	for i in 0..n {
+		if binary {
+			b = append(b, u8(pick(rng, 256)))
+		} else {
+			b = append(b, u8(32 + pick(rng, 95)))
+		}
+	}
+	return str(b)
+}
+
+fn boundaryOf(rng dice.Rand) str {
+	let alphabet = "abcdefXYZ0123456789-_.=+"
+	let n = 1 + pick(rng, 24)
+	mut b = make([]u8, 0, n)
+	for i in 0..n {
+		b = append(b, alphabet[pick(rng, len(alphabet))])
+	}
+	return str(b)
+}
+
+fn content(rng dice.Rand, boundary str, nl str) str {
+	let dash = "--" + boundary
+	let pieces = pick(rng, 6)
+	mut out = ""
+	for i in 0..pieces {
+		let k = pick(rng, 9)
+		if k == 0 {
+			out += randomBytes(rng, pick(rng, 40), false)
+		} else if k == 1 {
+			out += randomBytes(rng, pick(rng, 40), true)
+		} else if k == 2 {
+			out += nl
+		} else if k == 3 {
+			out += nl + dash[0:pick(rng, len(dash) + 1)]
+		} else if k == 4 {
+			out += nl + dash + chooseStr(rng, []str{"x", "-", "- ", "-y", "\t", " ", "9"})
+		} else if k == 5 {
+			out += dash + chooseStr(rng, []str{"", "x", "-", "--", " "})
+		} else if k == 6 {
+			out += "\n" + dash[0:pick(rng, len(dash) + 1)]
+		} else if k == 7 {
+			out += randomBytes(rng, 100 + pick(rng, 3000), false)
+		} else {
+			out += "\r"
+		}
+	}
+	return out
+}
+
+fn headers(rng dice.Rand, i i64, nl str) str {
+	mut h = "Content-Disposition: form-data; name=\"f{i}\""
+	let k = pick(rng, 6)
+	if k == 0 {
+		h += "; filename=\"dir/sub/file{i}.txt\""
+	} else if k == 1 {
+		h += "; filename=\"\""
+	} else if k == 2 {
+		h = "Content-Disposition: attachment; name=\"x\"; filename=\"a b.bin\""
+	} else if k == 3 {
+		h = "content-disposition: form-data;\tname=f{i}; filename=plain.txt"
+	}
+	h += nl
+	if pick(rng, 2) == 0 {
+		h += "Content-Type: " + chooseStr(rng, []str{"text/plain", "application/octet-stream", "image/png; x=y", "TEXT/HTML"}) + nl
+	}
+	if pick(rng, 4) == 0 {
+		h += "X-Folded: one" + nl + " two" + nl + "\tthree" + nl
+	}
+	if pick(rng, 5) == 0 {
+		h += "X-Other:  spaced value  " + nl
+	}
+	return h
+}
+
+fn genCase(rng dice.Rand) (str, str, i64, i64) {
+	let boundary = boundaryOf(rng)
+	let nl = chooseStr(rng, []str{"\r\n", "\r\n", "\r\n", "\r\n", "\n"})
+	let dash = "--" + boundary
+	mut body = ""
+	if pick(rng, 3) == 0 {
+		for i in 0..pick(rng, 3) {
+			body += randomBytes(rng, pick(rng, 30), false) + nl
+		}
+		if pick(rng, 4) == 0 {
+			body += dash[0:pick(rng, len(dash))] + nl
+		}
+	}
+	let parts = pick(rng, 6)
+	for i in 0..parts {
+		body += dash + chooseStr(rng, []str{"", "", "", " ", "\t ", "  "}) + nl
+		body += headers(rng, i, nl) + nl
+		body += content(rng, boundary, nl)
+		body += nl
+	}
+	body += dash + "--" + chooseStr(rng, []str{"", "", " ", "\t"})
+	if pick(rng, 4) != 0 {
+		body += nl
+	}
+	if pick(rng, 3) == 0 {
+		body += randomBytes(rng, pick(rng, 50), false)
+	}
+	let m = pick(rng, 12)
+	if m < 3 && len(body) > 0 {
+		body = body[0:pick(rng, len(body))]
+	} else if m == 3 && len(body) > 0 {
+		let at = pick(rng, len(body))
+		body = body[0:at] + str(u8(pick(rng, 256))) + body[at + 1:]
+	}
+	let chunk = []i64{1, 2, 3, 7, 64, 4096}[pick(rng, 6)]
+	let size = []i64{128, 200, 1024, 65536}[pick(rng, 4)]
+	return boundary, body, chunk, size
+}
+
+fn hex(s str) str {
+	return seal.Hex([]u8(s))
+}
+
+// byCase joins the output lines of each case ("N ..." lines) into one text.
+fn byCase(lines []str, n i64) []str {
+	mut out = make([]str, n)
+	for l in lines {
+		let sp = twine.Index(l, " ")
+		let k = mint.Atoi(l[0:sp]) catch _ {
+			-1
+		}
+		if k >= 0 && k < n {
+			out[k] = out[k] + l + "\n"
+		}
+	}
+	return out
+}
+
+fn main() {
+	let args = quarry.Args()
+	mut seed = SEED
+	mut cases = DEFAULT_CASES
+	if len(args) > 1 {
+		seed = mint.Atoi(args[1]) catch _ {
+			SEED
+		}
+	}
+	if len(args) > 2 {
+		cases = mint.Atoi(args[2]) catch _ {
+			DEFAULT_CASES
+		}
+	}
+	let directory = ci.Join(ci.Root(), "bin/ci/multipart")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "mp-")
+	let tin = ci.Join(work, "multipart-tin")
+	ci.BuildTin("tools/ci/fixtures/multipart.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "multipart-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/multipart"}, ci.Root(), 300), "go build multipart")
+	let rng = dice.New(u64(seed))
+	mut lines = []str{}
+	mut bodies = []str{}
+	for i in 0..cases {
+		let (boundary, body, chunk, size) = genCase(rng)
+		bodies = append(bodies, "boundary " + boundary + " chunk " + mint.Itoa(chunk) + " size " + mint.Itoa(size) + "\nbody " + hex(body))
+		lines = append(lines, hex(boundary) + "\t" + hex(body) + "\t" + mint.Itoa(chunk) + "\t" + mint.Itoa(size))
+	}
+	let input = twine.Join(lines, "\n") + "\n"
+	let want = ci.Lines(ci.ExecIn([]str{goexe}, ci.Root(), 600, input, []str{}).Stdout)
+	let o = ci.ExecIn([]str{tin}, ci.Root(), 600, input, []str{})
+	ci.Must(o, "multipart fixture")
+	let got = ci.Lines(o.Stdout)
+	let wantBy = byCase(want, cases)
+	let gotBy = byCase(got, cases)
+	mut bad = 0
+	for n in 0..cases {
+		if wantBy[n] != gotBy[n] {
+			bad += 1
+			if bad <= 5 {
+				say.Line("case " + mint.Itoa(n) + ": " + bodies[n] + "\n  Go:  " + twine.Replace(wantBy[n], "\n", "\n       ", -1) + "\n  Tin: " + twine.Replace(gotBy[n], "\n", "\n       ", -1))
+			}
+		}
+	}
+	ci.Check(bad == 0, "multipart: " + mint.Itoa(bad) + " of " + mint.Itoa(cases) + " cases differ from Go's mime/multipart")
+	ci.Remove(work)
+	ci.Pass("multipart: " + mint.Itoa(cases) + " generated bodies read like Go's mime/multipart ")
+}

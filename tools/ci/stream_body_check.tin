@@ -215,6 +215,41 @@ fn main() {
 		say.Line("SKIP h2c uploads: no curl with HTTP/2")
 	}
 	ci.Remove(gib)
+	// A multipart/form-data upload (#823): a small field and a file part of 256 MiB, read part by part as they arrive.
+	{
+		let head = "--B0und\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n--B0und\r\nContent-Disposition: form-data; name=\"file\"; filename=\"dir/big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+		let tail = "\r\n--B0und--\r\n"
+		let fileSize = 256 * 1048576
+		let c = dial(port)
+		mut mpeak = newPeak(srv.Pid)
+		send(c, "POST /multipart HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=B0und\r\nContent-Length: " + mint.Itoa(len(head) + fileSize + len(tail)) + "\r\n\r\n" + head)
+		let block = pattern(4096)
+		mut sent = 0
+		mut mcount = 0
+		for sent < fileSize {
+			send(c, block)
+			sent += len(block)
+			mcount += 1
+			if mcount % 32 == 0 {
+				mpeak.sample()
+			}
+		}
+		send(c, tail)
+		mut mclient = nettest.Client{C: c, Buf: ""}
+		let mr = mclient.Answer(120.0)
+		mclient.Close()
+		let mgrew = mpeak.grew()
+		// The server folds the checksum byte by byte over the whole part, and the part is the 4096-byte pattern repeated.
+		mut folded = 0
+		for blk in 0..fileSize / len(block) {
+			for i in 0..len(block) {
+				folded = (folded*31 + i64(block[i])) % 1000000007
+			}
+		}
+		ci.Check(mr.Status == 200 && mr.Body == "title|=5/" + mint.Itoa(digest("hello")) + ";file|big.bin=" + mint.Itoa(fileSize) + "/" + mint.Itoa(folded) + ";", "multipart upload answered " + mr.Head + " " + mr.Body)
+		ci.Check(mgrew < 64, "RSS grew " + mint.Itoa(mgrew) + " MiB over a 256 MiB multipart upload")
+		say.Line("PASS a 256 MiB multipart/form-data file part read as it came in, RSS grew " + mint.Itoa(mgrew) + " MiB")
+	}
 	// A slow reader holds the client back: the server does not buffer what it has not read.
 	let size = 64 * 1048576
 	mut peak = newPeak(srv.Pid)

@@ -1,0 +1,918 @@
+package anvil
+
+import "fault"
+import "link"
+import "say"
+
+// multipart/form-data (#823): a streaming reader over a request body, a port of the parts of Go's mime/multipart that HTTP uses.
+//
+//	mr = try q.Multipart()
+//	for {
+//	    let p = try mr.NextPart()
+//	    if p == nil { break }
+//	    ...p.FormName(), p.FileName(), p.Header("content-type"), p.Read(mut buf) until it returns 0...
+//	}
+//
+// Parts are read one at a time: NextPart skips what is left of the previous one. The body is read as it arrives on a route
+// registered with Router.Stream (a file part never has to fit in memory), and from memory elsewhere. MultipartForm reads the
+// whole form into memory with a limit.
+
+const mpChunk = 65536
+const mpMaxHeader = 1048576
+const mpMaxLine = 65536
+
+// error kinds a Part or the reader reports once its data is read.
+const mpNone = 0
+const mpEOF = 1       // the part ended at its boundary
+const mpUnexpected = 2 // the body ended inside the part
+const mpFault = 3     // reading the body failed
+const mpLimit = 4     // the reader's limit was passed
+
+// MultipartReader reads the parts of a multipart body in order.
+type MultipartReader struct {
+	src       BodyReader
+	buf       []u8
+	pos       i64 // buf[pos:end] holds bytes read from the body and not yet used
+	end       i64
+	srcErr    i64 // mpNone, mpUnexpected (the body ended) or mpFault (reading it failed)
+	srcMsg    str
+	nl        str
+	nlDash    str // nl + "--" + boundary
+	dash      str // "--" + boundary
+	dashDash  str // "--" + boundary + "--"
+	partsRead i64
+	cur       ?Part
+	maxBytes  i64 // the most body bytes to read, 0: no limit
+	taken     i64 // body bytes read so far
+}
+
+// Part is one part of a multipart body: its header fields and its content, which Read gives.
+type Part struct {
+	m       MultipartReader
+	lines   []str // the header fields, "Name: value", folded lines joined
+	n       i64   // content bytes known to wait in the reader's buffer
+	total   i64   // content bytes read already
+	errKind i64   // what Read reports once n is 0: mpEOF at the end of the part
+	errMsg  str
+	readErr i64 // what reading the body reported while this part scanned the buffer
+}
+
+// Multipart returns a reader for the request's multipart/form-data body. It fails when the Content-Type is not
+// multipart/form-data or has no boundary parameter.
+fn (q Req) Multipart() !MultipartReader {
+	let ct = q.Header("content-type")
+	if len(ct) == 0 {
+		fail "anvil: request has no Content-Type"
+	}
+	let (mt, params, ok) = parse_media_type(ct)
+	if !ok || mt != "multipart/form-data" {
+		fail "anvil: request Content-Type isn't multipart/form-data"
+	}
+	let (boundary, have) = params["boundary"]
+	if !have {
+		fail "anvil: no multipart boundary param in Content-Type"
+	}
+	return multipart_reader(q.BodyStream(), boundary)
+}
+
+// multipart_reader is a reader over body for the given boundary.
+fn multipart_reader(body BodyReader, boundary str) MultipartReader {
+	let dash = "--" + boundary
+	return MultipartReader{src: body, buf: make([]u8, mpChunk), pos: 0, end: 0, srcErr: mpNone, srcMsg: "", nl: "\r\n", nlDash: "\r\n" + dash, dash: dash, dashDash: dash + "--", partsRead: 0, cur: nil, maxBytes: 0, taken: 0}
+}
+
+// NewMultipartReader reads the multipart body in memory (for example a stored message) with the given boundary, as q.Multipart
+// does a request's.
+fn NewMultipartReader(body str, boundary str) MultipartReader {
+	return multipart_reader(BodyReader{c: 0, s: 0, st: []i64{cast(i64, body) + 8, len(body), 0}}, boundary)
+}
+
+// SetBufferSize sets the size of the reader's read-ahead buffer (at least 128 bytes; the default is 64 KiB): a small buffer
+// makes the body cross buffer boundaries often, which the tests use.
+fn (m mut MultipartReader) SetBufferSize(n i64) {
+	mut size = n
+	if size < 128 {
+		size = 128
+	}
+	m.buf = make([]u8, size)
+	m.pos = 0
+	m.end = 0
+}
+
+// SetLimit makes reading more than n body bytes fail with fault.LimitExceeded (the headers and the preamble count).
+fn (m mut MultipartReader) SetLimit(n i64) {
+	m.maxBytes = n
+}
+
+// fill reads more of the body into the buffer; it reports whether it added bytes. At the end of the body, or when reading
+// failed, it sets srcErr and reports false.
+fn (m mut MultipartReader) fill() bool {
+	if m.srcErr != mpNone {
+		return false
+	}
+	if m.pos > 0 && m.pos == m.end {
+		m.pos = 0
+		m.end = 0
+	}
+	if m.end == len(m.buf) {
+		if m.pos > 0 {
+			memmove(cast(i64, m.buf)[2], cast(i64, m.buf)[2]+m.pos, m.end-m.pos)
+			m.end -= m.pos
+			m.pos = 0
+		} else {
+			// A line or header block that fills the buffer: grow it.
+			mut bigger = make([]u8, len(m.buf)*2)
+			copy(bigger, m.buf[:m.end])
+			m.buf = bigger
+		}
+	}
+	mut room = len(m.buf) - m.end
+	if m.maxBytes > 0 && m.taken+room > m.maxBytes+1 {
+		room = m.maxBytes + 1 - m.taken
+		if room <= 0 {
+			m.srcErr = mpLimit
+			return false
+		}
+	}
+	let view = m.buf[m.end:m.end+room]
+	let k = m.src.Read(mut view) catch err {
+		m.srcErr = mpFault
+		m.srcMsg = say_fault(err)
+		return false
+	}
+	if k == 0 {
+		m.srcErr = mpUnexpected
+		return false
+	}
+	m.end += k
+	m.taken += k
+	if m.maxBytes > 0 && m.taken > m.maxBytes {
+		m.srcErr = mpLimit
+		m.end -= m.taken - m.maxBytes
+		m.taken = m.maxBytes
+		return m.end > m.pos
+	}
+	return true
+}
+
+// fail_source fails with the fault that ended reading the body, if one did.
+fn (m mut MultipartReader) fail_source() ! {
+	if m.srcErr == mpLimit {
+		fail fault.Wrap(fault.LimitExceeded, "anvil: multipart body over its limit")
+	}
+	if m.srcErr == mpFault {
+		fail m.srcMsg
+	}
+}
+
+fn say_fault(err fault) str {
+	return "{err}"
+}
+
+// index_in is the first position of s in buf[from:end], or -1.
+fn index_in(buf []u8, from i64, end i64, s str) i64 {
+	let n = len(s)
+	if n == 0 {
+		return from
+	}
+	let first = s[0]
+	mut i = from
+	for i+n <= end {
+		let j = memchr(cast(i64, buf)[2]+i, i64(first), end-i-n+1)
+		if j == 0 {
+			return -1
+		}
+		i = j - cast(i64, buf)[2]
+		mut ok = true
+		for k in 1..n {
+			if buf[i+k] != s[k] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return i
+		}
+		i += 1
+	}
+	return -1
+}
+
+fn has_prefix_at(buf []u8, from i64, end i64, s str) bool {
+	if end-from < len(s) {
+		return false
+	}
+	for k in 0..len(s) {
+		if buf[from+k] != s[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// is_prefix_of_buf reports whether buf[from:end] is a prefix of s (the bytes so far could still become s).
+fn is_prefix_of_buf(s str, buf []u8, from i64, end i64) bool {
+	if end-from > len(s) {
+		return false
+	}
+	for k in 0..end-from {
+		if buf[from+k] != s[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// read_line returns the next line of the body with its "\n" (and any "\r" before it), or what is left when the body ends
+// first; ok is false when there is nothing left at all. A line longer than 64 KiB fails.
+fn (m mut MultipartReader) read_line() !(str, bool) {
+	mut from = m.pos
+	for {
+		let nl = index_byte_in(m.buf, from, m.end, '\n')
+		if nl >= 0 {
+			let line = str(m.buf[m.pos:nl+1])
+			m.pos = nl + 1
+			return line, true
+		}
+		if m.end-m.pos > mpMaxLine {
+			fail "multipart: line too long"
+		}
+		let had = m.end - m.pos
+		if !m.fill() {
+			try m.fail_source()
+			if m.end > m.pos {
+				let line = str(m.buf[m.pos:m.end])
+				m.pos = m.end
+				return line, true
+			}
+			return "", false
+		}
+		from = m.pos + had
+	}
+}
+
+fn index_byte_in(buf []u8, from i64, end i64, c u8) i64 {
+	if end <= from {
+		return -1
+	}
+	let j = memchr(cast(i64, buf)[2]+from, i64(c), end-from)
+	if j == 0 {
+		return -1
+	}
+	return j - cast(i64, buf)[2]
+}
+
+fn skip_lwsp(s str) str {
+	mut i = 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i += 1
+	}
+	return s[i:]
+}
+
+fn (m MultipartReader) is_final_boundary(line str) bool {
+	if !has_prefix(line, m.dashDash) {
+		return false
+	}
+	let rest = skip_lwsp(line[len(m.dashDash):])
+	return len(rest) == 0 || rest == m.nl
+}
+
+fn has_prefix(s str, p str) bool {
+	return len(s) >= len(p) && s[:len(p)] == p
+}
+
+fn (m mut MultipartReader) is_boundary_delimiter_line(line str) bool {
+	if !has_prefix(line, m.dash) {
+		return false
+	}
+	let rest = skip_lwsp(line[len(m.dash):])
+	// On the first part, lines ending in "\n" instead of "\r\n" switch to that mode (a violation of the spec that occurs in practice).
+	if m.partsRead == 0 && rest == "\n" {
+		m.nl = "\n"
+		m.nlDash = m.nlDash[1:]
+	}
+	return rest == m.nl
+}
+
+// NextPart returns the next part, or nil when the body has no more. What is left of the previous part is skipped.
+fn (m mut MultipartReader) NextPart() !?Part {
+	let before = m.cur
+	if before != nil {
+		try before.drain()
+		m.cur = nil
+	}
+	if m.dash == "--" {
+		fail "multipart: boundary is empty"
+	}
+	mut expectNewPart = false
+	for {
+		let (line, ok) = try m.read_line()
+		if !ok {
+			fail "multipart: NextPart: EOF"
+		}
+		if !has_suffix(line, "\n") && m.is_final_boundary(line) {
+			return nil
+		}
+		if !has_suffix(line, "\n") {
+			fail "multipart: NextPart: unexpected EOF"
+		}
+		if m.is_boundary_delimiter_line(line) {
+			m.partsRead += 1
+			let p = try m.new_part()
+			m.cur = p
+			return p
+		}
+		if m.is_final_boundary(line) {
+			return nil
+		}
+		if expectNewPart {
+			fail "multipart: expecting a new Part; got line {line}"
+		}
+		if m.partsRead == 0 {
+			continue
+		}
+		// The "\n" or "\r\n" between the body of the previous part and the boundary line that follows.
+		if line == m.nl {
+			expectNewPart = true
+			continue
+		}
+		fail "multipart: unexpected line in Next(): {line}"
+	}
+}
+
+fn has_suffix(s str, p str) bool {
+	return len(s) >= len(p) && s[len(s)-len(p):] == p
+}
+
+// new_part reads the header fields of a part. It gives nil when the body ends inside them: Go's reader reports that as the
+// end of the parts, not as an error.
+fn (m mut MultipartReader) new_part() !?Part {
+	mut lines = []str{}
+	mut size = 0
+	mut first = true
+	for {
+		let (line, ok) = try m.read_line()
+		if !ok {
+			return nil
+		}
+		size += len(line)
+		if size > mpMaxHeader || len(lines) > 10000 {
+			fail "multipart: message too large"
+		}
+		mut t = line
+		if has_suffix(t, "\n") {
+			t = t[:len(t)-1]
+			if has_suffix(t, "\r") {
+				t = t[:len(t)-1]
+			}
+		}
+		if first && len(t) > 0 && (t[0] == ' ' || t[0] == '\t') {
+			fail "malformed MIME header initial line: {t}"
+		}
+		first = false
+		if len(t) == 0 {
+			break
+		}
+		if t[0] == ' ' || t[0] == '\t' {
+			// A folded line continues the previous field.
+			let more = trim_ows(t)
+			for i in 0..len(more) {
+				let c = more[i]
+				if (c < 0x20 && c != '\t') || c == 0x7f {
+					fail "malformed MIME header line: {t}"
+				}
+			}
+			lines[len(lines)-1] = lines[len(lines)-1] + " " + more
+			continue
+		}
+		let colon = index_byte(t, ':')
+		if colon <= 0 || !header_key_ok(t[:colon]) {
+			fail "malformed MIME header line: {t}"
+		}
+		let value = t[colon+1:]
+		for i in 0..len(value) {
+			let c = value[i]
+			if (c < 0x20 && c != '\t') || c == 0x7f {
+				fail "malformed MIME header line: {t}"
+			}
+		}
+		lines = append(lines, t[:colon] + ": " + trim_ows(value))
+	}
+	return Part{m: m, lines: lines, n: 0, total: 0, errKind: mpNone, errMsg: "", readErr: mpNone}
+}
+
+// header_key_ok reports a header field name: token bytes, and spaces (Go accepts a name with a space before the colon, and does
+// not canonicalize it).
+fn header_key_ok(k str) bool {
+	for i in 0..len(k) {
+		if k[i] != ' ' && !is_token(k[i:i+1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// Header returns the value of the part's header field name (any case), the first when there are several, or "".
+fn (p Part) Header(name str) str {
+	for l in p.lines {
+		let colon = index_byte(l, ':')
+		if colon == len(name) && lower_str(l[:colon]) == lower_str(name) {
+			return l[colon+2:]
+		}
+	}
+	return ""
+}
+
+// Headers returns every header field of the part as "Name: value".
+fn (p Part) Headers() []str {
+	return p.lines
+}
+
+// FormName returns the name parameter of the part's Content-Disposition when it is form-data, and "" otherwise.
+fn (p Part) FormName() str {
+	let (disp, params, ok) = parse_media_type(p.Header("content-disposition"))
+	if !ok || disp != "form-data" {
+		return ""
+	}
+	return params["name"]
+}
+
+// FileName returns the filename parameter of the part's Content-Disposition without its directory (what follows the
+// last "/"), or "".
+fn (p Part) FileName() str {
+	let (_, params, ok) = parse_media_type(p.Header("content-disposition"))
+	if !ok {
+		return ""
+	}
+	let f = params["filename"]
+	if len(f) == 0 {
+		return ""
+	}
+	return base_name(f)
+}
+
+fn base_name(f str) str {
+	mut e = len(f)
+	for e > 0 && f[e-1] == '/' {
+		e -= 1
+	}
+	if e == 0 {
+		return "/"
+	}
+	let t = f[:e]
+	let s = last_index_byte(t, '/')
+	return t[s+1:]
+}
+
+fn last_index_byte(s str, c u8) i64 {
+	mut i = len(s) - 1
+	for i >= 0 {
+		if s[i] == c {
+			return i
+		}
+		i -= 1
+	}
+	return -1
+}
+
+// Read reads the part's content into buf and returns how many bytes it wrote, 0 at the end of the part. It fails when the
+// body ends inside the part, when reading the body fails and when the reader's limit is passed.
+fn (p mut Part) Read(buf mut []u8) !i64 {
+	let m = p.m
+	for p.n == 0 && p.errKind == mpNone {
+		let (n, e) = scan_until_boundary(m.buf, m.pos, m.end, m.dash, m.nlDash, p.total, p.readErr)
+		p.n = n
+		p.errKind = e
+		if p.n == 0 && p.errKind == mpNone {
+			// Force more of the body into the buffer.
+			if m.srcErr != mpNone {
+				p.readErr = m.srcErr
+			} else if !m.fill() {
+				p.readErr = m.srcErr
+				if p.readErr == mpFault {
+					p.errMsg = m.srcMsg
+				}
+			}
+		}
+	}
+	if p.n == 0 {
+		if p.errKind == mpEOF {
+			return 0
+		}
+		if p.errKind == mpUnexpected {
+			fail "multipart: unexpected EOF"
+		}
+		if p.errKind == mpLimit {
+			fail fault.Wrap(fault.LimitExceeded, "anvil: multipart body over its limit")
+		}
+		fail p.errMsg
+	}
+	mut want = len(buf)
+	if want > p.n {
+		want = p.n
+	}
+	copy(buf[:want], m.buf[m.pos:m.pos+want])
+	m.pos += want
+	p.total += want
+	p.n -= want
+	if p.n == 0 && p.errKind != mpNone && p.errKind != mpEOF {
+		// The data before the failure was delivered; the next Read reports it.
+	}
+	return want
+}
+
+// drain reads the rest of the part and drops it.
+fn (p mut Part) drain() ! {
+	let sink = make([]u8, 4096)
+	for {
+		let k = p.Read(mut sink) catch _ {
+			return
+		}
+		if k == 0 {
+			return
+		}
+	}
+}
+
+// Bytes reads the whole content of the part, failing with fault.LimitExceeded when it is longer than max bytes.
+fn (p mut Part) Bytes(max i64) !str {
+	let chunk = make([]u8, 8192)
+	mut out = []u8{}
+	for {
+		let k = try p.Read(mut chunk)
+		if k == 0 {
+			return str(out)
+		}
+		if len(out)+k > max {
+			fail fault.Wrap(fault.LimitExceeded, "anvil: multipart part over {max} bytes")
+		}
+		out = append(out, chunk[:k]...)
+	}
+}
+
+// scan_until_boundary says how many bytes of buf[from:end] can be given out as content of the part (n) and what ends it
+// (mpEOF at the boundary, mpNone to go on, or the read error): Go's scanUntilBoundary. total is how many content bytes were
+// given out before, and readErr the error reading the body gave after the bytes in buf.
+fn scan_until_boundary(buf []u8, from i64, end i64, dash str, nlDash str, total i64, readErr i64) (i64, i64) {
+	if total == 0 {
+		// At the beginning of the content a "--boundary" without a newline in front is recognized.
+		if has_prefix_at(buf, from, end, dash) {
+			let r = match_after_prefix(buf, from, end, dash, readErr)
+			if r == -1 {
+				return len(dash), mpNone
+			}
+			if r == 0 {
+				return 0, mpNone
+			}
+			return 0, mpEOF
+		}
+		if is_prefix_of_buf(dash, buf, from, end) {
+			return 0, readErr
+		}
+	}
+	let i = index_in(buf, from, end, nlDash)
+	if i >= 0 {
+		let r = match_after_prefix(buf, i, end, nlDash, readErr)
+		if r == -1 {
+			return i - from + len(nlDash), mpNone
+		}
+		if r == 0 {
+			return i - from, mpNone
+		}
+		return i - from, mpEOF
+	}
+	if is_prefix_of_buf(nlDash, buf, from, end) {
+		return 0, readErr
+	}
+	// Anything up to the final newline is content; so is the tail from it on, if it is not a prefix of the boundary.
+	let li = last_index_in(buf, from, end, nlDash[0])
+	if li >= 0 && is_prefix_of_buf(nlDash, buf, li, end) {
+		return li - from, mpNone
+	}
+	return end - from, readErr
+}
+
+fn last_index_in(buf []u8, from i64, end i64, c u8) i64 {
+	mut i = end - 1
+	for i >= from {
+		if buf[i] == c {
+			return i
+		}
+		i -= 1
+	}
+	return -1
+}
+
+// match_after_prefix says whether buf[at:] (which starts with prefix) is a boundary: +1 when the prefix is followed by "--",
+// space, tab, CR, LF or the end of the input; -1 when it is followed by anything else; 0 when more input is needed.
+fn match_after_prefix(buf []u8, at i64, end i64, prefix str, readErr i64) i64 {
+	let have = end - at
+	if have == len(prefix) {
+		if readErr != mpNone {
+			return 1
+		}
+		return 0
+	}
+	let c = buf[at+len(prefix)]
+	if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+		return 1
+	}
+	if c == '-' {
+		if have == len(prefix)+1 {
+			if readErr != mpNone {
+				return -1
+			}
+			return 0
+		}
+		if buf[at+len(prefix)+1] == '-' {
+			return 1
+		}
+	}
+	return -1
+}
+
+// is_tspecial reports a MIME tspecial character.
+fn is_tspecial(c u8) bool {
+	return c == '(' || c == ')' || c == '<' || c == '>' || c == '@' || c == ',' || c == ';' || c == ':' || c == '\\' || c == '"' || c == '/' || c == '[' || c == ']' || c == '?' || c == '='
+}
+
+fn is_mime_token_char(c u8) bool {
+	return c > 0x20 && c < 0x7f && !is_tspecial(c)
+}
+
+// consume_token splits v into its leading token and the rest.
+fn consume_token(v str) (str, str) {
+	mut i = 0
+	for i < len(v) && is_mime_token_char(v[i]) {
+		i += 1
+	}
+	return v[:i], v[i:]
+}
+
+fn is_space_byte(c u8) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0x0b || c == 0x0c
+}
+
+fn trim_left_space(s str) str {
+	mut i = 0
+	for i < len(s) && is_space_byte(s[i]) {
+		i += 1
+	}
+	return s[i:]
+}
+
+// consume_value splits v into a token or a quoted string (unquoted) and the rest; ("", v) when v does not start with a
+// valid one. A backslash before a tspecial escapes it, and any other backslash is literal (what MSIE sends).
+fn consume_value(v str) (str, str) {
+	if len(v) == 0 {
+		return "", ""
+	}
+	if v[0] != '"' {
+		return consume_token(v)
+	}
+	mut b = make([]u8, 0, 16)
+	mut i = 1
+	for i < len(v) {
+		let r = v[i]
+		if r == '"' {
+			return str(b), v[i+1:]
+		}
+		if r == '\\' && i+1 < len(v) && is_tspecial(v[i+1]) {
+			b = append(b, v[i+1])
+			i += 2
+			continue
+		}
+		if r == '\r' || r == '\n' {
+			return "", v
+		}
+		b = append(b, v[i])
+		i += 1
+	}
+	return "", v
+}
+
+// consume_media_param reads "; name=value" from v: the name (lower case), the value and the rest, or ("", "", v) when there
+// is none.
+fn consume_media_param(v str) (str, str, str) {
+	mut rest = trim_left_space(v)
+	if len(rest) == 0 || rest[0] != ';' {
+		return "", "", v
+	}
+	rest = trim_left_space(rest[1:])
+	let (name, r1) = consume_token(rest)
+	if len(name) == 0 {
+		return "", "", v
+	}
+	rest = trim_left_space(r1)
+	if len(rest) == 0 || rest[0] != '=' {
+		return "", "", v
+	}
+	rest = trim_left_space(rest[1:])
+	let (value, rest2) = consume_value(rest)
+	if len(value) == 0 && rest2 == rest {
+		return "", "", v
+	}
+	return lower_str(name), value, rest2
+}
+
+// percent_hex_unescape decodes %XX; a "%" that is not followed by two hex digits (or is among the last two bytes) fails,
+// as Go's does.
+fn percent_hex_unescape(s str) (str, bool) {
+	mut i = 0
+	mut percents = 0
+	for i < len(s) {
+		if s[i] != '%' {
+			i += 1
+			continue
+		}
+		percents += 1
+		if i+2 >= len(s) || hexval(s[i+1]) < 0 || hexval(s[i+2]) < 0 {
+			return "", false
+		}
+		i += 3
+	}
+	if percents == 0 {
+		return s, true
+	}
+	mut b = make([]u8, 0, len(s))
+	i = 0
+	for i < len(s) {
+		if s[i] == '%' {
+			b = append(b, u8(hexval(s[i+1])*16+hexval(s[i+2])))
+			i += 3
+		} else {
+			b = append(b, s[i])
+			i += 1
+		}
+	}
+	return str(b), true
+}
+
+// decode2231 decodes charset'language'percent-encoded for us-ascii and utf-8.
+fn decode2231(v str) (str, bool) {
+	let a = index_byte(v, '\'')
+	if a < 0 {
+		return "", false
+	}
+	let b = index_byte(v[a+1:], '\'')
+	if b < 0 {
+		return "", false
+	}
+	let charset = lower_str(v[:a])
+	if len(charset) == 0 || (charset != "us-ascii" && charset != "utf-8") {
+		return "", false
+	}
+	return percent_hex_unescape(v[a+1+b+1:])
+}
+
+// parse_media_type is Go's mime.ParseMediaType: the lower-case media type and the parameters (names lower-case, values with
+// their case, RFC 2231 continuations and encodings joined). ok is false for a value that is not a media type with
+// well-formed parameters, a repeated name with another value, in which case the parameters are empty.
+fn parse_media_type(v str) (str, map[str]str, bool) {
+	let var_empty = map[str]str{}
+	let semi = index_byte(v, ';')
+	mut base = v
+	if semi >= 0 {
+		base = v[:semi]
+	}
+	let mt = lower_str(trim_ows(base))
+	let (typ, trest) = consume_token(mt)
+	if len(typ) == 0 {
+		return "", var_empty, false
+	}
+	if len(trest) > 0 {
+		if trest[0] != '/' {
+			return "", var_empty, false
+		}
+		let (sub, rest2) = consume_token(trest[1:])
+		if len(sub) == 0 || len(rest2) > 0 {
+			return "", var_empty, false
+		}
+	}
+	mut params = map[str]str{}
+	mut cont = map[str]str{}
+	mut bases = []str{}
+	mut rest = v[len(base):]
+	for len(rest) > 0 {
+		rest = trim_left_space(rest)
+		if len(rest) == 0 {
+			break
+		}
+		let (key, value, after) = consume_media_param(rest)
+		if len(key) == 0 {
+			if trim_ows(after) == ";" {
+				break
+			}
+			return mt, var_empty, false
+		}
+		let star = index_byte(key, '*')
+		if star >= 0 {
+			let (old, have) = cont[key]
+			if have && old != value {
+				return "", var_empty, false
+			}
+			cont[key] = value
+			bases = append(bases, key[:star])
+		} else {
+			let (old, have) = params[key]
+			if have && old != value {
+				return "", var_empty, false
+			}
+			params[key] = value
+		}
+		rest = after
+	}
+	for base in bases {
+		let (single, have) = cont[base + "*"]
+		if have {
+			let (dec, ok) = decode2231(single)
+			if ok {
+				params[base] = dec
+			}
+			continue
+		}
+		mut b = ""
+		mut valid = false
+		mut n = 0
+		for {
+			let simple = base + "*" + say.Fmt("%d", n)
+			let (sv, sok) = cont[simple]
+			if sok {
+				valid = true
+				b += sv
+				n += 1
+				continue
+			}
+			let (ev, eok) = cont[simple + "*"]
+			if !eok {
+				break
+			}
+			valid = true
+			if n == 0 {
+				let (dec, ok) = decode2231(ev)
+				if ok {
+					b += dec
+				}
+			} else {
+				let (dec, ok) = percent_hex_unescape(ev)
+				if ok {
+					b += dec
+				}
+			}
+			n += 1
+		}
+		if valid {
+			params[base] = b
+		}
+	}
+	return mt, params, true
+}
+
+// FormFile is one uploaded file of a MultipartForm: the form field, the file's name as sent (without directories), its
+// Content-Type and its bytes.
+type FormFile struct {
+	Field       str
+	FileName    str
+	ContentType str
+	Data        str
+}
+
+// MultipartForm is a whole multipart form read into memory.
+type MultipartForm struct {
+	Values link.Values
+	Files  []FormFile
+}
+
+// MultipartForm reads the whole multipart/form-data body into memory: the parts with a filename become Files, the others
+// Values. It fails with fault.LimitExceeded when the body is longer than max bytes.
+fn (q Req) MultipartForm(max i64) !MultipartForm {
+	let m = try q.Multipart()
+	m.SetLimit(max)
+	let values = link.NewValues()
+	mut files = []FormFile{}
+	mut parts = 0
+	for {
+		let p = try m.NextPart()
+		if p == nil {
+			break
+		}
+		let part = p
+		parts += 1
+		if parts > 1000 {
+			fail "multipart: too many parts"
+		}
+		let name = part.FormName()
+		if len(name) == 0 {
+			continue
+		}
+		let data = try part.Bytes(max)
+		let file = part.FileName()
+		if len(file) > 0 {
+			files = append(files, FormFile{Field: name, FileName: file, ContentType: part.Header("content-type"), Data: data})
+		} else {
+			values.Add(name, data)
+		}
+	}
+	return MultipartForm{Values: values, Files: files}
+}

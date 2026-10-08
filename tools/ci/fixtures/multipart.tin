@@ -1,0 +1,84 @@
+package main
+
+// The multipart twin, Tin side: read cases (hex boundary, hex body, read chunk size, buffer size; tab separated, one per line)
+// on stdin and print what anvil's multipart reader makes of each, in the format of bench/ref/multipart (Go's mime/multipart): a line
+// per part (hex of its form name, file name and content type, the length and SHA-1 of its content) and a last line "ok" or "err"
+// with the number of parts read. tools/ci/multipart_check.tin feeds both sides the same cases and compares the lines (#823).
+
+import "anvil"
+import "mint"
+import "ore"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+fn unhex(s str) str {
+	let b = seal.HexDecode(s) catch _ {
+		[]u8{}
+	}
+	return str(b)
+}
+
+fn hexOf(s str) str {
+	return seal.Hex([]u8(s))
+}
+
+fn run(n i64, boundary str, body str, chunk i64, size i64) {
+	let r = anvil.NewMultipartReader(body, boundary)
+	r.SetBufferSize(size)
+	mut parts = 0
+	for {
+		let p = r.NextPart() catch _ {
+			say.Line("{n} end err {parts}")
+			return
+		}
+		if p == nil {
+			say.Line("{n} end ok {parts}")
+			return
+		}
+		let part = p
+		parts += 1
+		mut total = 0
+		mut content = []u8{}
+		let buf = make([]u8, chunk)
+		mut failed = false
+		for {
+			let k = part.Read(mut buf) catch _ {
+				failed = true
+				0
+			}
+			if failed || k == 0 {
+				break
+			}
+			total += k
+			content = append(content, buf[:k]...)
+		}
+		say.Line("{n} part {hexOf(part.FormName())} {hexOf(part.FileName())} {hexOf(part.Header(`Content-Type`))} {total} {seal.Hex(seal.Sha1(ore.ToStr(content)))}")
+		if failed {
+			say.Line("{n} end err {parts}")
+			return
+		}
+	}
+}
+
+fn main() {
+	let text = quarry.ReadStdin() catch _ {
+		return
+	}
+	mut n = 0
+	for line in twine.Split(text, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		let f = twine.Split(line, "\t")
+		let chunk = mint.Atoi(f[2]) catch _ {
+			1
+		}
+		let size = mint.Atoi(f[3]) catch _ {
+			4096
+		}
+		run(n, unhex(f[0]), unhex(f[1]), chunk, size)
+		n += 1
+	}
+}
