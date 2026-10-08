@@ -1,0 +1,102 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Compare PNG pixels in both directions with Go's image/png over concrete image types and awkward dimensions.
+fn main() {
+	let root = ci.Root()
+	let directory = ci.Join(root, "bin/ci/png")
+	let work = ci.TempDir(directory, "png-")
+	let tin = ci.Join(work, "png-tin")
+	let goexe = ci.Join(work, "png-go")
+	ci.BuildTin("tools/ci/fixtures/png.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/png"}, root, 300), "go build png")
+	let corpus = ci.Exec([]str{goexe}, root, 300)
+	ci.Must(corpus, "Go PNG corpus")
+	let expected = ci.Lines(corpus.Stdout)
+	mut input = ""
+	for line in expected {
+		let fields = twine.Split(line, " ")
+		ci.Check(len(fields) == 2, "malformed Go PNG corpus record")
+		input += fields[0] + "\n"
+	}
+	let decoded = ci.ExecIn([]str{tin}, root, 300, input, []str{})
+	ci.Must(decoded, "Tin PNG decoder")
+	let actual = ci.Lines(decoded.Stdout)
+	ci.Check(len(actual) == len(expected), "PNG corpus count: Tin " + mint.Itoa(len(actual)) + " Go " + mint.Itoa(len(expected)))
+	mut verify = ""
+	mut bad = i64(0)
+	for i in 0..len(expected) {
+		let want = twine.Split(expected[i], " ")
+		let got = twine.Split(actual[i], " ")
+		if len(got) != 2 || got[0] != want[1] {
+			say.Line("PNG decode mismatch", i+1)
+			if len(got) > 0 {
+				say.Line("  want", want[1])
+				say.Line("  got ", got[0])
+			}
+			bad += 1
+		}
+		if len(got) == 2 {
+			verify += got[1] + " " + want[1] + "\n"
+		}
+	}
+	ci.Check(bad == 0, "PNG decoded pixels differ in " + mint.Itoa(bad) + " corpus cases")
+	let roundtrip = ci.ExecIn([]str{goexe, "verify"}, root, 300, verify, []str{})
+	ci.Must(roundtrip, "Go decode of Tin PNG encodings")
+	ci.Check(twine.TrimSpace(roundtrip.Stdout) == "OK", "Go PNG decoder rejected Tin output")
+	mut encInput = ""
+	for i in 0..7 { encInput += "E " + mint.Itoa(i) + "\n" }
+	let encoded = ci.ExecIn([]str{tin}, root, 300, encInput, []str{})
+	ci.Must(encoded, "Tin PNG encoder image types")
+	let encLines = ci.Lines(encoded.Stdout)
+	ci.Check(len(encLines) == 7, "Tin PNG encoder image type count differs")
+	mut goEncInput = ""
+	for line in encLines {
+		let fields = twine.Split(line, " ")
+		ci.Check(len(fields) == 3 && fields[0] == "E", "malformed Tin PNG encoder output")
+		goEncInput += fields[1] + " " + fields[2] + "\n"
+	}
+	let goEncCheck = ci.ExecIn([]str{goexe, "verify"}, root, 300, goEncInput, []str{})
+	ci.Must(goEncCheck, "Go decode of Tin concrete image encodings")
+	ci.Check(twine.TrimSpace(goEncCheck.Stdout) == "OK", "Go PNG decoder rejected a Tin image type")
+	let malformed = ci.Exec([]str{goexe, "malformed"}, root, 300)
+	ci.Must(malformed, "Go malformed PNG corpus")
+	let badCases = ci.Lines(malformed.Stdout)
+	mut badInput = ""
+	for line in badCases {
+		let fields = twine.Split(line, " ")
+		ci.Check(len(fields) == 2, "malformed Go PNG record")
+		badInput += fields[1] + "\n"
+		let rejected = ci.ExecIn([]str{tin}, root, 30, fields[1] + "\n", []str{})
+		ci.Must(rejected, "Tin malformed PNG harness")
+		ci.Check(twine.HasPrefix(rejected.Stdout, "decode fault "), "Tin accepted malformed PNG " + fields[0])
+	}
+	let goRejected = ci.ExecIn([]str{goexe, "verifybad"}, root, 300, badInput, []str{})
+	ci.Must(goRejected, "Go malformed PNG validation")
+	ci.Check(twine.TrimSpace(goRejected.Stdout) == "OK", "Go malformed PNG check")
+	let goDraw = ci.Exec([]str{goexe, "draw"}, root, 300)
+	ci.Must(goDraw, "Go image/draw corpus")
+	mut drawInput = ""
+	for i in 0..4 {
+		drawInput += "D " + mint.Itoa(i) + "\n"
+	}
+	let tinDraw = ci.ExecIn([]str{tin}, root, 300, drawInput, []str{})
+	ci.Must(tinDraw, "Tin image/draw corpus")
+	let drawWant = ci.Lines(goDraw.Stdout)
+	let drawGot = ci.Lines(tinDraw.Stdout)
+	ci.Check(len(drawGot) == len(drawWant), "draw corpus line count differs")
+	mut drawBad = i64(0)
+	for i in 0..len(drawWant) {
+		if drawGot[i] != drawWant[i] {
+			say.Line("draw mismatch", i)
+			drawBad += 1
+		}
+	}
+	ci.Check(drawBad == 0, "Draw/DrawMask results differ from Go in " + mint.Itoa(drawBad) + " cases")
+	ci.Remove(work)
+	ci.Pass("PNG: " + mint.Itoa(len(expected)) + " Go PNG cases round-trip; 7 Tin image types encode for Go; " + mint.Itoa(len(badCases)) + " malformed PNGs rejected by both; Draw/DrawMask match Go")
+}

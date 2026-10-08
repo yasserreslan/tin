@@ -1,0 +1,155 @@
+package image
+
+import "image/color"
+
+// Paletted is an image of palette indices, one byte per pixel, over Palette (a color.Palette held as its slice type).
+type Paletted struct {
+	Pix     []u8
+	Stride  i64
+	Rect    Rectangle
+	Palette []color.NRGBA
+}
+
+// NewPaletted is a Paletted image of r over palette p, every pixel index 0.
+fn NewPaletted(r Rectangle, p color.Palette) Paletted {
+	return Paletted{Pix: make([]u8, pixelBufferLength(1, r, "Paletted")), Stride: r.Dx(), Rect: r, Palette: p}
+}
+
+// ColorModel is PaletteModel: the image's Palette.
+fn (p Paletted) ColorModel() color.Model {
+	return color.PaletteModel
+}
+
+// Bounds is the image's rectangle.
+fn (p Paletted) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer and palette.
+fn (p Paletted) Layout() Layout {
+	return Layout{Kind: KindPaletted, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect, Palette: p.Palette}
+}
+
+// PixOffset is the index in Pix of pixel (x, y).
+fn (p Paletted) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x - p.Rect.Min.X)
+}
+
+// At is the palette color of the pixel at (x, y), premultiplied (the first palette color outside the bounds, zero for
+// an empty palette).
+fn (p Paletted) At(x i64, y i64) color.RGBA64 {
+	if len(p.Palette) == 0 {
+		return color.RGBA64{}
+	}
+	if !Pt(x, y).In(p.Rect) {
+		return color.ToRGBA64(p.Palette[0])
+	}
+	return color.ToRGBA64(p.Palette[i64(p.Pix[p.PixOffset(x, y)])])
+}
+
+// ColorIndexAt is the palette index at (x, y) (0 outside the bounds).
+fn (p Paletted) ColorIndexAt(x i64, y i64) u8 {
+	if !Pt(x, y).In(p.Rect) {
+		return 0
+	}
+	return p.Pix[p.PixOffset(x, y)]
+}
+
+// Set stores the index of the palette color nearest to c at (x, y) (nothing outside the bounds).
+fn (p mut Paletted) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	let pal color.Palette = p.Palette
+	p.Pix[p.PixOffset(x, y)] = u8(pal.Index(c))
+}
+
+// SetColorIndex stores index at (x, y) (nothing outside the bounds).
+fn (p mut Paletted) SetColorIndex(x i64, y i64, index u8) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	p.Pix[p.PixOffset(x, y)] = index
+}
+
+// SubImage is the part of p inside r, sharing p's pixels and palette.
+fn (p Paletted) SubImage(r Rectangle) Paletted {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return Paletted{Palette: p.Palette}
+	}
+	return Paletted{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s, Palette: p.Palette}
+}
+
+// Opaque reports whether every palette color some pixel uses is fully opaque.
+fn (p Paletted) Opaque() bool {
+	mut present = make([]bool, 256)
+	mut i0 = i64(0)
+	mut i1 = p.Rect.Dx()
+	for y in p.Rect.Min.Y..p.Rect.Max.Y {
+		for i in i0..i1 {
+			present[i64(p.Pix[i])] = true
+		}
+		i0 += p.Stride
+		i1 += p.Stride
+	}
+	for i, c in p.Palette {
+		if present[i] && c.A != 0xff {
+			return false
+		}
+	}
+	return true
+}
+
+// Uniform is an image of one color everywhere (Go's bounds: a square of side 2e9 around the origin); it is also a
+// color.Color.
+type Uniform struct {
+	C color.RGBA64
+}
+
+// NewUniform is the image of color c everywhere.
+fn NewUniform[C color.Color](c C) Uniform {
+	return Uniform{C: color.ToRGBA64(c)}
+}
+
+// RGBA is the uniform color's 16-bit premultiplied channels.
+fn (u Uniform) RGBA() (u32, u32, u32, u32) {
+	return u32(u.C.R), u32(u.C.G), u32(u.C.B), u32(u.C.A)
+}
+
+// ColorModel is RGBA64Model (Go answers the Uniform itself).
+fn (u Uniform) ColorModel() color.Model {
+	return color.RGBA64Model
+}
+
+// Bounds is (-1e9,-1e9)-(1e9,1e9).
+fn (u Uniform) Bounds() Rectangle {
+	return Rectangle{Min: Point{X: -1000000000, Y: -1000000000}, Max: Point{X: 1000000000, Y: 1000000000}}
+}
+
+// At is the color, wherever.
+fn (u Uniform) At(x i64, y i64) color.RGBA64 {
+	return u.C
+}
+
+// Layout says a Uniform has no pixel buffer.
+fn (u Uniform) Layout() Layout {
+	return Layout{Kind: KindUniform, Rect: u.Bounds()}
+}
+
+// Opaque reports whether the color is fully opaque.
+fn (u Uniform) Opaque() bool {
+	return u.C.A == 0xffff
+}
+
+// Black is the opaque black Uniform.
+let Black = Uniform{C: color.RGBA64{A: 0xffff}}
+
+// White is the opaque white Uniform.
+let White = Uniform{C: color.RGBA64{R: 0xffff, G: 0xffff, B: 0xffff, A: 0xffff}}
+
+// Transparent is the fully transparent Uniform.
+let Transparent = Uniform{C: color.RGBA64{}}
+
+// Opaque is the fully opaque Uniform (opaque white, as a mask).
+let Opaque = Uniform{C: color.RGBA64{R: 0xffff, G: 0xffff, B: 0xffff, A: 0xffff}}
