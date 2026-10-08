@@ -73,6 +73,15 @@ Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.ur
 | `tit tag -a <name> -m <msg> [rev]` | an annotated tag, signed when you have a key |
 | `tit tag -d <name>` | delete a tag |
 
+## Workspaces
+
+| command | |
+|---|---|
+| `tit workspace new <name> [dir] [--from rev]` | another working directory on this store (`../<repo>-<name>` by default), on its own new branch from `main` (or `rev`), with its own HEAD, index and undo |
+| `tit workspaces` | the workspaces, `*` on this one, with their branch and directory |
+| `tit workspace rm <name>` | forget a workspace and remove its directory, when nothing in it is uncommitted; its branch stays |
+| `tit who <path> [-n N]` | who changed a file or directory in the last N commits (500), most changes first |
+
 ## Undo
 
 | command | |

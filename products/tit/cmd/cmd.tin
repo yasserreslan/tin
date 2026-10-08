@@ -43,6 +43,8 @@ type Command enum {
 	Guard([]str)
 	Verify(str)
 	Bisect(BisectArgs)
+	Workspace(WorkspaceArgs)
+	Who(WhoArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -177,6 +179,9 @@ commands:
   verify [rev or range]      check every commit's signature against .tit-signers as of its parent
   bisect --run <cmd> --good <rev> [--bad <rev>]
                              find the first change where cmd fails (status 125: cannot test, skip it)
+  workspace new <name> [dir] [--from rev] | workspace rm <name> | workspaces
+                             another working directory on this store, with its own branch, HEAD and undo
+  who <path> [-n N]          who changed this file or directory in the last N commits (500), most changes first
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -595,6 +600,64 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Bisect(ba)
 	}
+	if name == "workspaces" {
+		try noMore(rest, 0, "workspaces")
+		return g, Command.Workspace(WorkspaceArgs{Action: "list", Name: "", Dir: "", From: ""})
+	}
+	if name == "workspace" {
+		mut wa = WorkspaceArgs{Action: "", Name: "", Dir: "", From: ""}
+		mut pos = []str{}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "--from" && k + 1 < len(rest) {
+				k += 1
+				wa.From = rest[k]
+			} else if len(a) > 1 && a[0] == '-' {
+				fail fault.Wrap(ErrUsage, "workspace: unknown option {a}")
+			} else {
+				pos = append(pos, a)
+			}
+			k += 1
+		}
+		if len(pos) == 0 || pos[0] == "list" {
+			wa.Action = "list"
+		} else if (pos[0] == "new" && (len(pos) == 2 || len(pos) == 3)) || (pos[0] == "rm" && len(pos) == 2) {
+			wa.Action = pos[0]
+			wa.Name = pos[1]
+			if len(pos) == 3 {
+				wa.Dir = pos[2]
+			}
+		} else {
+			fail fault.Wrap(ErrUsage, "workspace new <name> [dir] [--from rev] | workspace rm <name> | workspaces")
+		}
+		return g, Command.Workspace(wa)
+	}
+	if name == "who" {
+		mut wh = WhoArgs{Path: "", Most: 500}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "-n" && k + 1 < len(rest) {
+				k += 1
+				wh.Most = parseCount(rest[k]) catch _ {
+					-1
+				}
+				if wh.Most <= 0 {
+					fail fault.Wrap(ErrUsage, "who: -n takes a number")
+				}
+			} else if len(wh.Path) == 0 {
+				wh.Path = a
+			} else {
+				fail fault.Wrap(ErrUsage, "who takes one path")
+			}
+			k += 1
+		}
+		if len(wh.Path) == 0 {
+			fail fault.Wrap(ErrUsage, "who takes a path")
+		}
+		return g, Command.Who(wh)
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -722,6 +785,8 @@ fn commandName(c Command) str {
 		Guard(_) => "guard"
 		Verify(_) => "verify"
 		Bisect(_) => "bisect"
+		Workspace(_) => "workspace"
+		Who(_) => "who"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -823,6 +888,12 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Bisect(ba) => {
 			try doBisect(g, ba, mut o)
+		}
+		Workspace(wa) => {
+			try doWorkspace(g, wa, mut o)
+		}
+		Who(wh) => {
+			try doWho(g, wh, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
