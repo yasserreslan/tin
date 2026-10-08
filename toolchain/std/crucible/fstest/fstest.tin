@@ -1,0 +1,336 @@
+// Package fstest is an in-memory file system for tests, and a check that a file system is consistent,
+// as Go's testing/fstest is. MapFS maps slash-separated names to files; the directories are the
+// names' parents, plus any entry whose Mode has ModeDir. TestFS walks a file system with fs.WalkDir
+// and checks what the walk shows against Open, Stat and ReadDir.
+//
+//	let fsys = fstest.MapFS{"a/b.txt": fstest.MapFile{Data: "hi"}}
+//	try fstest.TestFS(fsys, []str{"a/b.txt"})
+//
+// Go's MapFS also has Glob and Sub; Tin's fs.Glob and fs.Sub work over it, since they take any shape.
+package fstest
+
+import "fault"
+import "fs"
+import "mint"
+import "sift"
+import "trail"
+import "twine"
+
+// errIsDir and errNotDir are the faults of reading a directory as a file and listing a file.
+let errIsDir = fault("is a directory")
+let errNotDir = fault("not a directory")
+
+// MapFile is one entry of a MapFS: its contents, its mode (type bits and permissions; 0 is a file with
+// mode 0444) and its modification time in unix nanoseconds.
+type MapFile struct {
+	Data    str
+	Mode    i64
+	ModTime i64
+}
+
+// MapFS is a file system held in a map from names to files, as Go's fstest.MapFS.
+type MapFS map[str]MapFile
+
+// Open opens the named file or directory; a directory is one whose name is a parent of an entry, or ".".
+fn (m MapFS) Open(name str) !dyn fs.File {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	let info = m.stat(name) catch err {
+		fail fs.PathError("open", name, err)
+	}
+	mut entries = []fs.DirEntry{}
+	if info.IsDir() {
+		entries = m.children(name)
+	}
+	return mapFile{name: name, info: info, data: m.dataOf(name), entries: entries, at: 0, closed: false}
+}
+
+// Stat describes the named file or directory.
+fn (m MapFS) Stat(name str) !fs.FileInfo {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("stat", name, fs.ErrNotExist)
+	}
+	return try m.stat(name)
+}
+
+// ReadDir lists the named directory, sorted by name, with the type of each entry.
+fn (m MapFS) ReadDir(name str) ![]fs.DirEntry {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("readdir", name, fs.ErrNotExist)
+	}
+	let info = try m.stat(name)
+	if !info.IsDir() {
+		fail fs.PathError("readdir", name, errNotDir)
+	}
+	return m.children(name)
+}
+
+// ReadFile reads the named file's contents.
+fn (m MapFS) ReadFile(name str) !str {
+	if !fs.ValidPath(name) {
+		fail fs.PathError("open", name, fs.ErrNotExist)
+	}
+	let info = try m.stat(name)
+	if info.IsDir() {
+		fail fs.PathError("read", name, errIsDir)
+	}
+	return m.dataOf(name)
+}
+
+// stat describes name, which is valid: an entry, or a directory made of entries.
+fn (m MapFS) stat(name str) !fs.FileInfo {
+	if name == "." {
+		return fs.FileInfo{Name: ".", Mode: fs.ModeDir | 0o555}
+	}
+	let (f, ok) = m[name]
+	if ok {
+		return infoOf(name, f)
+	}
+	let prefix = name + "/"
+	for k, _ in m {
+		if twine.HasPrefix(k, prefix) {
+			return fs.FileInfo{Name: trail.Base(name), Mode: fs.ModeDir | 0o555}
+		}
+	}
+	fail fs.PathError("stat", name, fs.ErrNotExist)
+}
+
+// dataOf is the contents of the named entry ("" for a directory or a missing name).
+fn (m MapFS) dataOf(name str) str {
+	let (f, ok) = m[name]
+	if ok && f.Mode&fs.ModeDir == 0 {
+		return f.Data
+	}
+	return ""
+}
+
+// children lists the entries directly under dir (a valid directory name), sorted by name.
+fn (m MapFS) children(dir str) []fs.DirEntry {
+	mut names = []str{}
+	mut types = map[str]i64{}
+	let prefix = dir + "/"
+	for k, f in m {
+		mut rest = k
+		if dir != "." {
+			if !twine.HasPrefix(k, prefix) {
+				continue
+			}
+			rest = k[len(prefix):len(k)]
+		}
+		let parts = twine.Split(rest, "/")
+		let child = parts[0]
+		mut typ = f.Mode & fs.ModeType
+		if len(parts) > 1 {
+			typ = fs.ModeDir
+		}
+		let (_, known) = types[child]
+		if !known {
+			names = append(names, child)
+		}
+		if !known || len(parts) > 1 {
+			types[child] = typ
+		}
+	}
+	sift.Sort(mut names)
+	mut out = []fs.DirEntry{}
+	for n in names {
+		out = append(out, fs.DirEntry{Name: n, Type: types[n]})
+	}
+	return out
+}
+
+// infoOf describes the entry f of name.
+fn infoOf(name str, f MapFile) fs.FileInfo {
+	mut mode = f.Mode
+	if mode&fs.ModeDir == 0 && mode&fs.ModePerm == 0 {
+		mode = mode | 0o444
+	}
+	return fs.FileInfo{Name: trail.Base(name), Size: i64(len(f.Data)), Mode: mode, ModTime: f.ModTime}
+}
+
+// mapFile is an open MapFS entry: a file's contents, or a directory's entries.
+type mapFile struct {
+	name    str
+	info    fs.FileInfo
+	data    str
+	entries []fs.DirEntry
+	at      i64
+	closed  bool
+}
+
+// Read reads the next bytes of the file into buf: 0 at its end. A directory cannot be read.
+fn (f mut mapFile) Read(buf mut []u8) !i64 {
+	if f.closed {
+		fail fs.PathError("read", f.name, fs.ErrClosed)
+	}
+	if f.info.IsDir() {
+		fail fs.PathError("read", f.name, errIsDir)
+	}
+	mut n = i64(len(f.data)) - f.at
+	if n <= 0 {
+		return 0
+	}
+	if n > i64(len(buf)) {
+		n = i64(len(buf))
+	}
+	for i in 0..n {
+		buf[i] = f.data[f.at+i]
+	}
+	f.at += n
+	return n
+}
+
+// Stat describes the open file.
+fn (f mapFile) Stat() !fs.FileInfo {
+	if f.closed {
+		fail fs.PathError("stat", f.name, fs.ErrClosed)
+	}
+	return f.info
+}
+
+// ReadDir lists the directory's entries, n at a time (all that are left when n <= 0), sorted by name.
+fn (f mut mapFile) ReadDir(n i64) ![]fs.DirEntry {
+	if f.closed {
+		fail fs.PathError("readdir", f.name, fs.ErrClosed)
+	}
+	if !f.info.IsDir() {
+		fail fs.PathError("readdir", f.name, errNotDir)
+	}
+	mut left = i64(len(f.entries)) - f.at
+	if n > 0 && left > n {
+		left = n
+	}
+	let out = f.entries[f.at:f.at+left]
+	f.at += left
+	return out
+}
+
+// Close closes the open file.
+fn (f mut mapFile) Close() ! {
+	if f.closed {
+		fail fs.PathError("close", f.name, fs.ErrClosed)
+	}
+	f.closed = true
+}
+
+// TestFS checks that fsys is a consistent file system: every name in expected is in it, each file
+// reads the same through Open, ReadFile and Stat, each directory's ReadDir lists the entries that
+// fs.WalkDir visits under it, and every listed entry's Stat agrees with its type. It fails with
+// every problem it finds, as Go's fstest.TestFS does.
+fn TestFS[F fs.TreeFS](fsys F, expected []str) ! {
+	mut bad = []fault{}
+	mut visited = map[str]fs.DirEntry{}
+	mut under = map[str]i64{}
+	let walked = fs.WalkDir(fsys, ".", fn(p str, d ?fs.DirEntry, err fault) ! {
+		if err != nil {
+			fail fault.Wrap(err, "walk " + p)
+		}
+		if let e = d {
+			visited[p] = e
+			if p != "." {
+				under[trail.Dir(p)] += 1
+			}
+		}
+	})
+	if walked != nil {
+		bad = append(bad, walked)
+	}
+	for name in expected {
+		let (_, found) = visited[name]
+		if !found {
+			bad = append(bad, fail("expected file " + name + " is missing"))
+		}
+	}
+	for p, e in visited {
+		if e.IsDir() {
+			bad = append(bad, checkDir(fsys, p, under[p])...)
+		} else {
+			bad = append(bad, checkFile(fsys, p)...)
+		}
+	}
+	if len(bad) > 0 {
+		try fault.Join(bad)
+	}
+}
+
+// checkFile checks one regular file: its Stat, and that Open, ReadFile and Stat's size agree.
+fn checkFile[F fs.TreeFS](fsys F, p str) []fault {
+	mut bad = []fault{}
+	let (info, serr) = fs.Stat(fsys, p)
+	if serr != nil {
+		return []fault{fault.Wrap(serr, "stat " + p)}
+	}
+	if info.IsDir() || info.Name != trail.Base(p) {
+		bad = append(bad, fail("stat " + p + ": not the file the walk saw"))
+	}
+	let (whole, ferr) = fs.ReadFile(fsys, p)
+	if ferr != nil {
+		return append(bad, fault.Wrap(ferr, "readfile " + p))
+	}
+	if i64(len(whole)) != info.Size {
+		bad = append(bad, fail("stat " + p + ": size " + mint.Itoa(info.Size) + ", contents " + mint.Itoa(i64(len(whole)))))
+	}
+	let (opened, oerr) = readOpen(fsys, p)
+	if oerr != nil {
+		return append(bad, fault.Wrap(oerr, "open " + p))
+	}
+	if opened != whole {
+		bad = append(bad, fail("open " + p + ": contents differ from ReadFile"))
+	}
+	return bad
+}
+
+// checkDir checks one directory: its ReadDir lists count entries (the ones the walk visited under it),
+// sorted by name, and each entry's Stat agrees with its type.
+fn checkDir[F fs.TreeFS](fsys F, p str, count i64) []fault {
+	mut bad = []fault{}
+	let (entries, rerr) = fs.ReadDir(fsys, p)
+	if rerr != nil {
+		return []fault{fault.Wrap(rerr, "readdir " + p)}
+	}
+	if i64(len(entries)) != count {
+		bad = append(bad, fail("readdir " + p + ": " + mint.Itoa(i64(len(entries))) + " entries, the walk visited " + mint.Itoa(count)))
+	}
+	for i in 1..len(entries) {
+		if entries[i-1].Name >= entries[i].Name {
+			bad = append(bad, fail("readdir " + p + ": entries are not sorted by name"))
+		}
+	}
+	for e in entries {
+		let child = childPath(p, e.Name)
+		let (info, serr) = fs.Stat(fsys, child)
+		if serr != nil {
+			bad = append(bad, fault.Wrap(serr, "stat " + child))
+			continue
+		}
+		if info.IsDir() != e.IsDir() {
+			bad = append(bad, fail("stat " + child + ": type differs from its directory entry"))
+		}
+	}
+	return bad
+}
+
+// childPath is the name of entry name in directory dir.
+fn childPath(dir str, name str) str {
+	if dir == "." {
+		return name
+	}
+	return dir + "/" + name
+}
+
+// readOpen reads the named file through Open and Read, to the end, in 3-byte reads.
+fn readOpen[F fs.TreeFS](fsys F, p str) !str {
+	mut f = try fsys.Open(p)
+	mut out = []u8{}
+	mut buf = make([]u8, 3)
+	for {
+		let n = try f.Read(mut buf)
+		if n <= 0 {
+			break
+		}
+		out = append(out, buf[0:n]...)
+	}
+	try f.Close()
+	return str(out)
+}

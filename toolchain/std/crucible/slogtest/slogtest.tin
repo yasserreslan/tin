@@ -1,0 +1,111 @@
+// Package slogtest checks a log handler against records, as Go's log/slog/slogtest does for slog
+// handlers. Its handler is herald: Check runs each record through herald.Line under a fixed clock
+// and reports every line that does not have herald's layout.
+//
+//	let problems = slogtest.Check([]slogtest.Record{{Level: herald.LInfo, Msg: "listening", KV: []str{"addr", ":8080"}}})
+//	crucible.True("lines", len(problems) == 0)
+//
+// A line is "TIMESTAMP LEVEL core=N MESSAGE KEY=VALUE..." with a newline at its end. A value is quoted
+// with %q when it is empty or holds a byte that is a space, a quote, '=', a control byte or a byte above
+// 0x7e; a key with no value after it is left out, as herald.Line does.
+package slogtest
+
+import "herald"
+import "say"
+import "twine"
+
+// Record is one log call: a level (herald.LDebug to herald.LError), a message and key/value pairs.
+type Record struct {
+	Level i64
+	Msg   str
+	KV    []str
+}
+
+// fixedMs is the clock of the checks: 2023-11-14T22:13:20.000Z.
+const fixedMs = 1700000000000
+
+// fixedClock is the clock Check uses, in unix milliseconds.
+fn fixedClock() i64 {
+	return fixedMs
+}
+
+// Check formats each record and returns one problem per line that is not in herald's layout, in record
+// order; it returns none when every line is right. It replaces herald's clock on this core.
+fn Check(records []Record) []str {
+	herald.SetClock(fixedClock)
+	mut problems = []str{}
+	for i, r in records {
+		let line = herald.Line(r.Level, r.Msg, r.KV)
+		let got = coreOf(line, r.Level)
+		let want = layout(r, got.core)
+		if got.ok && line != want {
+			problems = append(problems, say.Fmt("record %d: got %q, want %q", i+1, line, want))
+		}
+		if !got.ok {
+			problems = append(problems, say.Fmt("record %d: %q does not start with the timestamp, level and core", i+1, line))
+		}
+	}
+	return problems
+}
+
+// parsed is the core number a line names, and whether the line has the timestamp, level and core prefix.
+type parsed struct {
+	core str
+	ok   bool
+}
+
+// coreOf reads the core number out of line: it must follow the level's prefix and be digits.
+fn coreOf(line str, level i64) parsed {
+	let head = "2023-11-14T22:13:20.000Z " + levelName(level) + " core="
+	if !twine.HasPrefix(line, head) {
+		return parsed{core: "", ok: false}
+	}
+	let rest = line[len(head):len(line)]
+	mut n = 0
+	for n < len(rest) && rest[n] >= '0' && rest[n] <= '9' {
+		n += 1
+	}
+	if n == 0 || n >= len(rest) || rest[n] != ' ' {
+		return parsed{core: "", ok: false}
+	}
+	return parsed{core: rest[0:n], ok: true}
+}
+
+// layout is the line herald should write for r on core: the prefix, the message and the pairs.
+fn layout(r Record, core str) str {
+	mut s = "2023-11-14T22:13:20.000Z " + levelName(r.Level) + " core=" + core + " " + r.Msg
+	mut i = 0
+	for i+1 < len(r.KV) {
+		s = s + " " + r.KV[i] + "=" + value(r.KV[i+1])
+		i += 2
+	}
+	return s + "\n"
+}
+
+// value is how herald writes a value: quoted with %q when it needs quotes.
+fn value(v str) str {
+	if len(v) == 0 {
+		return say.Fmt("%q", v)
+	}
+	for i in 0..len(v) {
+		let c = v[i]
+		if c <= ' ' || c == '"' || c == '=' || c >= 0x7f {
+			return say.Fmt("%q", v)
+		}
+	}
+	return v
+}
+
+// levelName is the name herald writes for a level.
+fn levelName(l i64) str {
+	if l == herald.LDebug {
+		return "DEBUG"
+	}
+	if l == herald.LInfo {
+		return "INFO"
+	}
+	if l == herald.LWarn {
+		return "WARN"
+	}
+	return "ERROR"
+}

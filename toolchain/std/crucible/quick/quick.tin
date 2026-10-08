@@ -1,0 +1,124 @@
+// Package quick checks properties over generated values, as Go's testing/quick does. Go picks the
+// generator from a function's parameter types at run time; Tin's generics are fully specialized, so
+// each check takes a generator per parameter: Int64, Uint64, Float64, Bool, Str and Bytes are the
+// ones in this package, and a test may pass its own.
+//
+//	quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
+//
+// Values come from dice seeded by Config.Seed, so a run is the same every time. A failure reports
+// the case number and the input, as Go's error does: "#3: failed on input 42".
+package quick
+
+import "constraints"
+import "dice"
+import "fault"
+import "mint"
+import "say"
+
+// Config sets how many cases a check runs and the seed of its generator. The zero Config runs 100
+// cases from seed 1.
+type Config struct {
+	MaxCount i64 // cases to run; 0 means 100
+	Seed     u64 // the seed of the generator; 0 means 1
+}
+
+// Check runs f on MaxCount values from gen and fails at the first value f rejects, as Go's quick.Check.
+fn Check[A constraints.Any](f fn(A) bool, gen fn(mut dice.Rand) A, cfg Config) ! {
+	mut r = dice.New(seedOf(cfg))
+	for i in 0..countOf(cfg) {
+		let a = gen(mut r)
+		if !f(a) {
+			fail(caseText(i, say.Str(a)))
+		}
+	}
+}
+
+// Check2 is Check over two arguments, drawn in order from genA and then genB for each case.
+fn Check2[A constraints.Any, B constraints.Any](f fn(A, B) bool, genA fn(mut dice.Rand) A, genB fn(mut dice.Rand) B, cfg Config) ! {
+	mut r = dice.New(seedOf(cfg))
+	for i in 0..countOf(cfg) {
+		let a = genA(mut r)
+		let b = genB(mut r)
+		if !f(a, b) {
+			fail(caseText(i, say.Str(a) + ", " + say.Str(b)))
+		}
+	}
+}
+
+// CheckEqual fails at the first value on which f and g give different results, as Go's quick.CheckEqual.
+fn CheckEqual[A constraints.Any, B constraints.Comparable](f fn(A) B, g fn(A) B, gen fn(mut dice.Rand) A, cfg Config) ! {
+	mut r = dice.New(seedOf(cfg))
+	for i in 0..countOf(cfg) {
+		let a = gen(mut r)
+		let x = f(a)
+		let y = g(a)
+		if x != y {
+			fail(caseText(i, say.Str(a)))
+		}
+	}
+}
+
+// Int64 is a signed integer of any size, half of them negative.
+fn Int64(r mut dice.Rand) i64 {
+	let v = i64(r.U64() >> 1)
+	if (r.U64() & 1) == 1 {
+		return -v
+	}
+	return v
+}
+
+// Uint64 is an unsigned integer of any size.
+fn Uint64(r mut dice.Rand) u64 {
+	return r.U64()
+}
+
+// Float64 is a float between -1 and 1.
+fn Float64(r mut dice.Rand) f64 {
+	return 2*r.F64() - 1
+}
+
+// Bool is true or false, each half the time.
+fn Bool(r mut dice.Rand) bool {
+	return (r.U64() & 1) == 1
+}
+
+// strPieces are the pieces Str builds its strings from: ASCII, a quote, a newline and multi-byte UTF-8.
+let strPieces = []str{"a", "Z", "0", " ", "\"", "=", "\n", "é", "世"}
+
+// maxLen bounds the length of Str and Bytes values.
+const maxLen = 24
+
+// Str is a string of up to 24 pieces, including quotes, spaces and multi-byte UTF-8.
+fn Str(r mut dice.Rand) str {
+	mut s = ""
+	for i in 0..r.Range(0, maxLen) {
+		s = s + strPieces[r.Range(0, len(strPieces))]
+	}
+	return s
+}
+
+// Bytes is a byte slice of up to 24 bytes.
+fn Bytes(r mut dice.Rand) []u8 {
+	return r.Bytes(r.Range(0, maxLen))
+}
+
+// countOf is how many cases cfg runs.
+fn countOf(cfg Config) i64 {
+	if cfg.MaxCount <= 0 {
+		return 100
+	}
+	return cfg.MaxCount
+}
+
+// seedOf is the generator seed of cfg.
+fn seedOf(cfg Config) u64 {
+	if cfg.Seed == 0 {
+		return 1
+	}
+	return cfg.Seed
+}
+
+// caseText is the failure message of case i (counted from 0) with its input.
+fn caseText(i i64, input str) str {
+	return "#" + mint.Itoa(i+1) + ": failed on input " + input
+}

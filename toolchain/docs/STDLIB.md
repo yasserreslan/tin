@@ -51,6 +51,11 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [herald](#herald) | logging (log/slog) |
 | [expvar](#expvar) | published variables and their JSON handler (expvar) |
 | [crucible](#crucible) | testing helpers (testing) |
+| [crucible/iotest](#crucible/iotest) | readers and writers that fail or cut short (testing/iotest) |
+| [crucible/quick](#crucible/quick) | properties checked over generated values (testing/quick) |
+| [crucible/fstest](#crucible/fstest) | an in-memory file system and its consistency check (testing/fstest) |
+| [crucible/slogtest](#crucible/slogtest) | herald's log lines checked against their layout (log/slog/slogtest) |
+| [crucible/cryptotest](#crucible/cryptotest) | buffers for constant-time comparisons (testing/cryptotest, crypto/subtle) |
 | [constraints](#constraints) | named generic constraint shapes |
 | [policy](#policy) | with policies and slots (context values, retry/cache/trace middleware) |
 | [redis](#redis) | Redis client (go-redis) |
@@ -2148,6 +2153,103 @@ crucible.Done()
 - `Run(name str, f fn(mut T))`: Run runs one test and prints its result like go test -v (or as JSON events, see Configure); a test that does not match the -run pattern is not run.
 - `RunBench(name str, f fn(mut B))`: RunBench runs one benchmark with b.N doubling until it takes at least 1 s, then prints the time per operation.
 - `Finish()`: Finish prints PASS or FAIL and exits with status 1 when a test failed.
+
+## crucible/iotest
+
+Package iotest wraps the io shapes to misbehave in the ways tests need, as Go's testing/iotest does: TimeoutReader fails its second read, HalfReader returns half of what each read asks for, DataErrReader turns the end of its source into a fault, and TruncateWriter drops what a writer takes past a limit while it still reports every byte as written.
+
+```tin body
+let r = iotest.HalfReader(src)             // reads at most (len(buf)+1)/2 bytes at a time
+let w = iotest.TruncateWriter(sink, 7)     // the sink gets the first 7 bytes; Write says all
+```
+
+Tin has no read that returns data and an error together (a stream ends with a read of 0, and a fault is an error on its own), so DataErrReader returns the data first and its fault on the read after the source's end; Go's version returns the last data with io.EOF in the same call.
+
+- `type TimeoutReaderOf[R io.Reader] struct`: TimeoutReaderOf is the reader TimeoutReader returns.
+- `TimeoutReader[R io.Reader](r R) TimeoutReaderOf[R]`: TimeoutReader returns a reader that fails with ErrTimeout on its second read; the reads after it succeed.
+- `(t mut TimeoutReaderOf[R]) Read(buf mut []u8) !i64`: Read fails with ErrTimeout on the second call, and reads from the source on every other call.
+- `type HalfReaderOf[R io.Reader] struct`: HalfReaderOf is the reader HalfReader returns.
+- `HalfReader[R io.Reader](r R) HalfReaderOf[R]`: HalfReader returns a reader that reads at most half of the buffer it is given, rounded up.
+- `(h mut HalfReaderOf[R]) Read(buf mut []u8) !i64`: Read reads into the first (len(buf)+1)/2 bytes of buf.
+- `type DataErrReaderOf[R io.Reader] struct`: DataErrReaderOf is the reader DataErrReader returns.
+- `DataErrReader[R io.Reader](r R, err fault) DataErrReaderOf[R]`: DataErrReader returns a reader that passes its source's data on and fails with err where the source ends (its read of 0), so the data always comes before the fault.
+- `(d mut DataErrReaderOf[R]) Read(buf mut []u8) !i64`: Read reads from the source; a read of 0 into a non-empty buffer fails with the reader's fault.
+- `type TruncateWriterOf[W io.Writer] struct`: TruncateWriterOf is the writer TruncateWriter returns.
+- `TruncateWriter[W io.Writer](w W, n i64) TruncateWriterOf[W]`: TruncateWriter returns a writer that passes the first n bytes it is given to w and drops the rest without an error; each Write reports all of its bytes as written.
+- `(t mut TruncateWriterOf[W]) Write(data []u8) !i64`: Write passes the bytes that are still under the limit to the writer and reports all of data as written.
+
+## crucible/quick
+
+Package quick checks properties over generated values, as Go's testing/quick does. Go picks the generator from a function's parameter types at run time; Tin's generics are fully specialized, so each check takes a generator per parameter: Int64, Uint64, Float64, Bool, Str and Bytes are the ones in this package, and a test may pass its own.
+
+```tin body
+quick.Check(fn(s str) bool { return twine.Join(twine.Split(s, ","), ",") == s }, quick.Str, quick.Config{})
+```
+
+Values come from dice seeded by Config.Seed, so a run is the same every time. A failure reports the case number and the input, as Go's error does: "#3: failed on input 42".
+
+- `type Config struct`: Config sets how many cases a check runs and the seed of its generator. The zero Config runs 100 cases from seed 1.
+- `Check[A constraints.Any](f fn(A) bool, gen fn(mut dice.Rand) A, cfg Config) !`: Check runs f on MaxCount values from gen and fails at the first value f rejects, as Go's quick.Check.
+- `Check2[A constraints.Any, B constraints.Any](f fn(A, B) bool, genA fn(mut dice.Rand) A, genB fn(mut dice.Rand) B, cfg Config) !`: Check2 is Check over two arguments, drawn in order from genA and then genB for each case.
+- `CheckEqual[A constraints.Any, B constraints.Comparable](f fn(A) B, g fn(A) B, gen fn(mut dice.Rand) A, cfg Config) !`: CheckEqual fails at the first value on which f and g give different results, as Go's quick.CheckEqual.
+- `Int64(r mut dice.Rand) i64`: Int64 is a signed integer of any size, half of them negative.
+- `Uint64(r mut dice.Rand) u64`: Uint64 is an unsigned integer of any size.
+- `Float64(r mut dice.Rand) f64`: Float64 is a float between -1 and 1.
+- `Bool(r mut dice.Rand) bool`: Bool is true or false, each half the time.
+- `Str(r mut dice.Rand) str`: Str is a string of up to 24 pieces, including quotes, spaces and multi-byte UTF-8.
+- `Bytes(r mut dice.Rand) []u8`: Bytes is a byte slice of up to 24 bytes.
+
+## crucible/fstest
+
+Package fstest is an in-memory file system for tests, and a check that a file system is consistent, as Go's testing/fstest is. MapFS maps slash-separated names to files; the directories are the names' parents, plus any entry whose Mode has ModeDir. TestFS walks a file system with fs.WalkDir and checks what the walk shows against Open, Stat and ReadDir.
+
+```tin body
+let fsys = fstest.MapFS{"a/b.txt": fstest.MapFile{Data: "hi"}}
+try fstest.TestFS(fsys, []str{"a/b.txt"})
+```
+
+Go's MapFS also has Glob and Sub; Tin's fs.Glob and fs.Sub work over it, since they take any shape.
+
+- `type MapFile struct`: MapFile is one entry of a MapFS: its contents, its mode (type bits and permissions; 0 is a file with mode 0444) and its modification time in unix nanoseconds.
+- `type MapFS map[str]MapFile`: MapFS is a file system held in a map from names to files, as Go's fstest.MapFS.
+- `(m MapFS) Open(name str) !dyn fs.File`: Open opens the named file or directory; a directory is one whose name is a parent of an entry, or ".".
+- `(m MapFS) Stat(name str) !fs.FileInfo`: Stat describes the named file or directory.
+- `(m MapFS) ReadDir(name str) ![]fs.DirEntry`: ReadDir lists the named directory, sorted by name, with the type of each entry.
+- `(m MapFS) ReadFile(name str) !str`: ReadFile reads the named file's contents.
+- `(f mut mapFile) Read(buf mut []u8) !i64`: Read reads the next bytes of the file into buf: 0 at its end. A directory cannot be read.
+- `(f mapFile) Stat() !fs.FileInfo`: Stat describes the open file.
+- `(f mut mapFile) ReadDir(n i64) ![]fs.DirEntry`: ReadDir lists the directory's entries, n at a time (all that are left when n <= 0), sorted by name.
+- `(f mut mapFile) Close() !`: Close closes the open file.
+- `TestFS[F fs.TreeFS](fsys F, expected []str) !`: TestFS checks that fsys is a consistent file system: every name in expected is in it, each file reads the same through Open, ReadFile and Stat, each directory's ReadDir lists the entries that fs.WalkDir visits under it, and every listed entry's Stat agrees with its type. It fails with every problem it finds, as Go's fstest.TestFS does.
+
+## crucible/slogtest
+
+Package slogtest checks a log handler against records, as Go's log/slog/slogtest does for slog handlers. Its handler is herald: Check runs each record through herald.Line under a fixed clock and reports every line that does not have herald's layout.
+
+```tin body
+let problems = slogtest.Check([]slogtest.Record{{Level: herald.LInfo, Msg: "listening", KV: []str{"addr", ":8080"}}})
+crucible.True("lines", len(problems) == 0)
+```
+
+A line is "TIMESTAMP LEVEL core=N MESSAGE KEY=VALUE..." with a newline at its end. A value is quoted with %q when it is empty or holds a byte that is a space, a quote, '=', a control byte or a byte above 0x7e; a key with no value after it is left out, as herald.Line does.
+
+- `type Record struct`: Record is one log call: a level (herald.LDebug to herald.LError), a message and key/value pairs.
+- `Check(records []Record) []str`: Check formats each record and returns one problem per line that is not in herald's layout, in record order; it returns none when every line is right. It replaces herald's clock on this core.
+
+## crucible/cryptotest
+
+Package cryptotest makes the buffers that constant-time comparison tests need: filled and seeded byte slices, copies that differ in one byte, and Equal, which is seal.Equal over byte slices. Go's testing/cryptotest seeds crypto/rand for a test; Tin has no process-wide random source to seed, so each buffer carries its own seed and the same seed gives the same bytes on every run.
+
+```tin body
+let a = cryptotest.Seeded(7, 32)
+let b = cryptotest.Flip(a, 31, 0x80)        // the last byte differs in its top bit
+crucible.False("tag", cryptotest.Equal(a, b))
+```
+
+- `Filled(n i64, b u8) []u8`: Filled returns n bytes, all of value b.
+- `Seeded(seed u64, n i64) []u8`: Seeded returns n pseudo-random bytes from seed: the same bytes for the same seed.
+- `Flip(b []u8, i i64, mask u8) []u8`: Flip returns a copy of b with the byte at index i xor-ed with mask, so the copy differs from b in the bits of mask (and is equal to it when mask is 0).
+- `Equal(a []u8, b []u8) bool`: Equal reports whether a and b hold the same bytes, by seal.Equal: it takes time that depends only on their lengths, so it is what a secret comparison should use.
 
 ## constraints
 

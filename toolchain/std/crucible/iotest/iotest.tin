@@ -1,0 +1,102 @@
+// Package iotest wraps the io shapes to misbehave in the ways tests need, as Go's testing/iotest does:
+// TimeoutReader fails its second read, HalfReader returns half of what each read asks for,
+// DataErrReader turns the end of its source into a fault, and TruncateWriter drops what a writer
+// takes past a limit while it still reports every byte as written.
+//
+//	let r = iotest.HalfReader(src)             // reads at most (len(buf)+1)/2 bytes at a time
+//	let w = iotest.TruncateWriter(sink, 7)     // the sink gets the first 7 bytes; Write says all
+//
+// Tin has no read that returns data and an error together (a stream ends with a read of 0, and a
+// fault is an error on its own), so DataErrReader returns the data first and its fault on the read
+// after the source's end; Go's version returns the last data with io.EOF in the same call.
+package iotest
+
+import "fault"
+import "io"
+
+// ErrTimeout is the fault TimeoutReader fails with on its second read.
+let ErrTimeout = fault("timeout")
+
+// TimeoutReaderOf is the reader TimeoutReader returns.
+type TimeoutReaderOf[R io.Reader] struct {
+	r     R
+	count i64
+}
+
+// TimeoutReader returns a reader that fails with ErrTimeout on its second read; the reads after it succeed.
+fn TimeoutReader[R io.Reader](r R) TimeoutReaderOf[R] {
+	return TimeoutReaderOf[R]{r: r}
+}
+
+// Read fails with ErrTimeout on the second call, and reads from the source on every other call.
+fn (t mut TimeoutReaderOf[R]) Read(buf mut []u8) !i64 {
+	t.count += 1
+	if t.count == 2 {
+		fail ErrTimeout
+	}
+	return try t.r.Read(mut buf)
+}
+
+// HalfReaderOf is the reader HalfReader returns.
+type HalfReaderOf[R io.Reader] struct {
+	r R
+}
+
+// HalfReader returns a reader that reads at most half of the buffer it is given, rounded up.
+fn HalfReader[R io.Reader](r R) HalfReaderOf[R] {
+	return HalfReaderOf[R]{r: r}
+}
+
+// Read reads into the first (len(buf)+1)/2 bytes of buf.
+fn (h mut HalfReaderOf[R]) Read(buf mut []u8) !i64 {
+	let half = (len(buf) + 1) / 2
+	mut b = buf[0:half]
+	return try h.r.Read(mut b)
+}
+
+// DataErrReaderOf is the reader DataErrReader returns.
+type DataErrReaderOf[R io.Reader] struct {
+	r   R
+	err fault
+}
+
+// DataErrReader returns a reader that passes its source's data on and fails with err where the source
+// ends (its read of 0), so the data always comes before the fault.
+fn DataErrReader[R io.Reader](r R, err fault) DataErrReaderOf[R] {
+	return DataErrReaderOf[R]{r: r, err: err}
+}
+
+// Read reads from the source; a read of 0 into a non-empty buffer fails with the reader's fault.
+fn (d mut DataErrReaderOf[R]) Read(buf mut []u8) !i64 {
+	let n = try d.r.Read(mut buf)
+	if n <= 0 && len(buf) > 0 {
+		fail d.err
+	}
+	return n
+}
+
+// TruncateWriterOf is the writer TruncateWriter returns.
+type TruncateWriterOf[W io.Writer] struct {
+	w W
+	n i64
+}
+
+// TruncateWriter returns a writer that passes the first n bytes it is given to w and drops the rest
+// without an error; each Write reports all of its bytes as written.
+fn TruncateWriter[W io.Writer](w W, n i64) TruncateWriterOf[W] {
+	return TruncateWriterOf[W]{w: w, n: n}
+}
+
+// Write passes the bytes that are still under the limit to the writer and reports all of data as written.
+fn (t mut TruncateWriterOf[W]) Write(data []u8) !i64 {
+	if t.n <= 0 {
+		return i64(len(data))
+	}
+	mut k = i64(len(data))
+	if k > t.n {
+		k = t.n
+	}
+	let m = try t.w.Write(data[0:k])
+	t.n -= m
+	return i64(len(data))
+}
