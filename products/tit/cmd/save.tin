@@ -38,6 +38,7 @@ type CommitArgs struct {
 
 // DiffArgs are tit diff's arguments.
 type DiffArgs struct {
+	Semantic bool
 	Staged bool
 	Stat   bool
 	Revs   []str
@@ -622,6 +623,10 @@ fn doDiff(g Global, a DiffArgs, o mut Out) ! {
 		for c in changes {
 			o.Line("{{\"kind\":\"" + diff.KindLetter(c.Kind) + "\",\"path\":" + jsonStr(c.Path) + ",\"old_path\":" + jsonStr(c.OldPath) + "}}")
 		}
+		return
+	}
+	if a.Semantic {
+		try writeSemantic(g, mut s, changes, mut o)
 		return
 	}
 	if a.Stat {

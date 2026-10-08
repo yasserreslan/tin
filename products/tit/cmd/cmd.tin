@@ -49,6 +49,7 @@ type Command enum {
 	Sync(ShareArgs)
 	Rewrite(RewriteArgs)
 	Bench(BenchArgs)
+	History(HistoryArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -152,7 +153,7 @@ commands:
   commit [-m msg]... [-a] [--amend]
                              record the staged files (-a stages every tracked change first; without -m,
                              $EDITOR asks for the message; --amend makes a new version of the last change)
-  diff [--staged] [--stat] [A B] [paths]
+  diff [--staged] [--stat] [--semantic] [A B] [paths]
                              changes not staged yet, the staged ones, or between two revisions
   log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id|change|subject|git-id]
                              the history from rev (HEAD by default)
@@ -199,6 +200,8 @@ commands:
                              change's new version, the changes above follow; one undo reverses it all
   bench record <name> <value> [--unit u] | bench log <name> | bench compare <name> <A> <B>
                              benchmark results kept with the change and the machine (macOS never against Linux)
+  history <[package.]Name or Type.Method> [-n N]
+                             the commits that changed one Tin declaration, following renames and moves
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -319,7 +322,7 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Commit(ca)
 	}
 	if name == "diff" {
-		mut da = DiffArgs{Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
+		mut da = DiffArgs{Semantic: false, Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
 		mut paths = false
 		for a in rest {
 			if paths {
@@ -330,6 +333,8 @@ fn Parse(args []str) !(Global, Command) {
 				da.Staged = true
 			} else if a == "--stat" {
 				da.Stat = true
+			} else if a == "--semantic" {
+				da.Semantic = true
 			} else if len(a) > 1 && a[0] == '-' {
 				fail fault.Wrap(ErrUsage, "diff: unknown option {a}")
 			} else if isPath(g, a) {
@@ -771,6 +776,30 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Bench(ba)
 	}
+	if name == "history" {
+		mut ha = HistoryArgs{Name: "", Most: 0}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "-n" && k + 1 < len(rest) {
+				k += 1
+				ha.Most = parseCount(rest[k]) catch _ {
+					-1
+				}
+				if ha.Most <= 0 {
+					fail fault.Wrap(ErrUsage, "history: -n takes a number")
+				}
+			} else if len(ha.Name) == 0 {
+				ha.Name = rest[k]
+			} else {
+				fail fault.Wrap(ErrUsage, "history takes one declaration")
+			}
+			k += 1
+		}
+		if len(ha.Name) == 0 {
+			fail fault.Wrap(ErrUsage, "history takes a declaration: Name, Type.Method or package.Name")
+		}
+		return g, Command.History(ha)
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -904,6 +933,7 @@ fn commandName(c Command) str {
 		Sync(_) => "sync"
 		Rewrite(_) => "rewrite"
 		Bench(_) => "bench"
+		History(_) => "history"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -1023,6 +1053,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Bench(ba) => {
 			try doBench(g, ba, mut o)
+		}
+		History(ha) => {
+			try doHistory(g, ha, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
