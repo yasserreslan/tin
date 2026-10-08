@@ -1,0 +1,81 @@
+package seal
+
+// ---- RC4, as Go's crypto/rc4 ----
+// RC4 is broken (biased keystream; RFC 7465 forbids it in TLS). It is here for the protocols that
+// still name it (NTLM, MSCHAP's MPPE, old Kerberos); use ChaCha20-Poly1305 for anything new. Its
+// state is indexed by key and data, so it is not constant-time.
+
+// RC4 is an RC4 keystream with its state, as Go's rc4.Cipher; it satisfies Stream. Broken: legacy
+// protocols only.
+type RC4 struct {
+	s []u32
+	i u8
+	j u8
+}
+
+// NewRC4 is RC4 keyed with 1 to 256 bytes, as Go's rc4.NewCipher; another length fails as Go's
+// KeySizeError does.
+fn NewRC4(key secret []u8) !RC4 {
+	let k = len(key)
+	if k < 1 || k > 256 {
+		fail "seal: invalid RC4 key size {k}"
+	}
+	let s = make([]u32, 256)
+	for i in 0..256 {
+		s[i] = u32(i)
+	}
+	mut j = u8(0)
+	for i in 0..256 {
+		j = j +% u8(s[i]) +% key[i%k]
+		let t = s[i]
+		s[i] = s[i64(j)]
+		s[i64(j)] = t
+	}
+	return RC4{s: s, i: 0, j: 0}
+}
+
+// Reset zeroes the key state; the RC4 is unusable afterwards (Go's deprecated Reset).
+fn (c mut RC4) Reset() {
+	for i in 0..256 {
+		c.s[i] = 0
+	}
+	c.i = 0
+	c.j = 0
+}
+
+// XORKeyStream XORs src with the keystream into dst (dst may be src); it fails, writing nothing,
+// when dst is shorter than src or overlaps it shifted.
+fn (c mut RC4) XORKeyStream(dst mut []u8, src []u8) ! {
+	let n = len(src)
+	if n == 0 {
+		return
+	}
+	if len(dst) < n {
+		fail "seal: output smaller than input"
+	}
+	let dp = cast(i64, dst)[2]
+	let sp = cast(i64, src)[2]
+	if inexact_overlap(dp, n, sp, n) {
+		fail "seal: invalid buffer overlap"
+	}
+	c.j = rc4_xor(cast(i64, c.s)[2], c.i, c.j, dp, sp, n)
+	// i moves by one per byte.
+	c.i = c.i +% u8(n & 0xff)
+}
+
+// rc4_xor generates n keystream bytes over the 256-word state at s from indexes i and j, XORing
+// src into dst; it returns the final j.
+@wrap fn rc4_xor(s i64, i0 u8, j0 u8, dst i64, src i64, n i64) u8 {
+	mut i = i0
+	mut j = j0
+	for k in 0..n {
+		i += 1
+		let x = __ld(s+4*i64(i), 2)
+		j += u8(x)
+		let y = __ld(s+4*i64(j), 2)
+		__st(s+4*i64(i), y, 2)
+		__st(s+4*i64(j), x, 2)
+		store8(dst+k, load8(src+k) ^ u8(__ld(s+4*i64(u8(x+y)), 2)))
+	}
+	return j
+}

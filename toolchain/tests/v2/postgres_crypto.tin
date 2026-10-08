@@ -2,7 +2,6 @@ package main
 
 import "seal"
 import "say"
-import "postgres/md5"
 import "postgres/sasl"
 
 fn main() {
@@ -28,13 +27,13 @@ fn main() {
 	say.Line("invalid 2", e2 != nil)
 	let (_, e3) = seal.Pbkdf2Sha256("p", "s", 1, 1048577)
 	say.Line("invalid 3", e3 != nil)
-	say.Line("md5 0", seal.Hex(md5.Sum("")))
-	say.Line("md5 1", seal.Hex(md5.Sum("a")))
-	say.Line("md5 2", seal.Hex(md5.Sum("abc")))
-	say.Line("md5 3", seal.Hex(md5.Sum("message digest")))
-	say.Line("md5 4", seal.Hex(md5.Sum("abcdefghijklmnopqrstuvwxyz")))
-	say.Line("md5 5", seal.Hex(md5.Sum("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")))
-	say.Line("md5 6", seal.Hex(md5.Sum("12345678901234567890123456789012345678901234567890123456789012345678901234567890")))
+	say.Line("md5 0", seal.Hex(seal.Md5("")))
+	say.Line("md5 1", seal.Hex(seal.Md5("a")))
+	say.Line("md5 2", seal.Hex(seal.Md5("abc")))
+	say.Line("md5 3", seal.Hex(seal.Md5("message digest")))
+	say.Line("md5 4", seal.Hex(seal.Md5("abcdefghijklmnopqrstuvwxyz")))
+	say.Line("md5 5", seal.Hex(seal.Md5("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")))
+	say.Line("md5 6", seal.Hex(seal.Md5("12345678901234567890123456789012345678901234567890123456789012345678901234567890")))
 	say.Line("sasl 0", seal.Hex([]u8(sasl.Prep("plain"))))
 	say.Line("sasl 1", seal.Hex([]u8(sasl.Prep("I­X"))))
 	say.Line("sasl 2", seal.Hex([]u8(sasl.Prep("ª"))))

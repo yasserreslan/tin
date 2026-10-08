@@ -1636,7 +1636,7 @@ It is not constant-time: use seal for cryptography. There is no formatting hook 
 
 ## seal
 
-Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-256, SHA3-512, and SHAKE128 and SHAKE256), HMAC over any of the SHA-2 hashes, HKDF, PBKDF2-HMAC-SHA-256, P-256 ECDH, ML-KEM-768 (FIPS 203), RSA signature verification (PKCS #1 v1.5 and PSS), X.509 certificates with chain and host name verification, constant-time comparison, secure random bytes, the hex, base64 and PEM encodings, and RSA-OAEP encryption with a public key.
+Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SHA3-256, SHA3-512, and SHAKE128 and SHAKE256), HMAC over any of the SHA-2 hashes, HKDF, PBKDF2-HMAC-SHA-256, AES and DES/3DES block ciphers, CBC, CTR, CFB and OFB modes, RC4, PKCS #7 padding, AES-GCM, ChaCha20-Poly1305, P-256 ECDH, ML-KEM-768 (FIPS 203), RSA signature verification (PKCS #1 v1.5 and PSS), X.509 certificates with chain and host name verification, constant-time comparison, secure random bytes, the hex, base64 and PEM encodings, and RSA-OAEP encryption with a public key. MD5, DES/3DES, RC4, CBC, CFB and OFB are for legacy interoperability only; prefer an authenticated cipher for new protocols.
 
 - `type AEAD struct`: AEAD is an authenticated cipher with its key (AES-GCM or ChaCha20-Poly1305): Seal encrypts and appends a 16-byte tag, Open checks the tag in constant time and decrypts.
 - `NewChaCha20Poly1305(key secret []u8) !AEAD`: NewChaCha20Poly1305 is the RFC 8439 AEAD with a 32-byte key.
@@ -1649,8 +1649,24 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `AESHardware() bool`: AESHardware reports whether AES-GCM runs on the CPU's AES instructions here (AES-NI and PCLMULQDQ, or ARMv8 AES and PMULL); without them it runs a slower constant-time software path and ChaCha20-Poly1305 is the faster choice.
 - `NewAESGCM(key secret []u8) !AEAD`: NewAESGCM is AES-GCM (16-byte tags, 12-byte nonces) with a 16-, 24- or 32-byte key (AES-128, AES-192 or AES-256).
 - `ArithDigest() str`: ArithDigest is the SHA-256 of the results of seal's multi-word arithmetic on a fixed set of operands (#488): the Montgomery multiplication and squaring for n = 2 to 48 limbs over random moduli and moduli of all-one limbs, with operands 0, 1, m-1, all-ones limbs and random values, z aliasing x and y; and the X25519 field multiplication and squaring on limbs of every size up to 2^52 - 1. Where the CPU's assembly (mont_mul, m4_mont, fe_mul_hw, fe_sq_hw) is in use the digest must equal the portable code's (run with TIN_SEAL_SOFT=1): the test pins the value.
+- `shape Block`: Block is a block cipher with its key, as Go's cipher.Block; AES and DES satisfy it. Encrypt and Decrypt transform the first block of src into dst (dst may be src). EncryptBlocks and DecryptBlocks transform every whole block of src on its own: the batch form the modes call. On its own that is ECB, which shows which blocks are equal: never use it as a mode.
+- `type AES struct`: AES is the AES block cipher with its key (AES-128, AES-192 or AES-256 by the key's length), as Go's aes.NewCipher; it satisfies Block. It keeps scratch space for its blocks, so it allocates nothing per call: use it on one core (not from a shared let).
+- `NewAES(key secret []u8) !AES`: NewAES is AES with a 16-, 24- or 32-byte key; another length fails as Go's KeySizeError does.
+- `(a AES) BlockSize() i64`: BlockSize is AES's block length, 16 bytes.
+- `(a AES) Encrypt(dst mut []u8, src []u8)`: Encrypt encrypts the first 16 bytes of src into dst (dst may be src).
+- `(a AES) Decrypt(dst mut []u8, src []u8)`: Decrypt decrypts the first 16 bytes of src into dst (dst may be src).
+- `(a AES) EncryptBlocks(dst mut []u8, src []u8)`: EncryptBlocks encrypts every 16-byte block of src on its own into dst (the modes' batch form).
+- `(a AES) DecryptBlocks(dst mut []u8, src []u8)`: DecryptBlocks decrypts every 16-byte block of src on its own into dst (the modes' batch form).
 - `ChaCha20(key secret []u8, nonce []u8, counter u32, data []u8) ![]u8`: ChaCha20 XORs data with the ChaCha20 keystream (RFC 8439) for a 32-byte key, a 12-byte nonce and the initial block counter.
 - `ParseRSAPublicKeyDER(der []u8) !RSAPublicKey`: ParseRSAPublicKeyDER reads a DER RSAPublicKey (PKCS #1) or SubjectPublicKeyInfo holding one.
+- `type DES struct`: DES is the DES or triple-DES (EDE, three keys) block cipher with its key, as Go's des.NewCipher and des.NewTripleDESCipher; it satisfies Block. Broken or deprecated: legacy protocols only.
+- `NewDES(key secret []u8) !DES`: NewDES is DES with an 8-byte key, as Go's des.NewCipher (the parity bits are ignored); another length fails as Go's KeySizeError does. DES is broken: legacy protocols only.
+- `NewTripleDES(key secret []u8) !DES`: NewTripleDES is triple DES (encrypt with the first 8 key bytes, decrypt with the next 8, encrypt with the last 8) with a 24-byte key, as Go's des.NewTripleDESCipher; another length fails as Go's KeySizeError does. Two-key 3DES is a key whose last 8 bytes repeat the first. Deprecated.
+- `(d DES) BlockSize() i64`: BlockSize is DES's block length, 8 bytes.
+- `(d DES) Encrypt(dst mut []u8, src []u8)`: Encrypt encrypts the first 8 bytes of src into dst (dst may be src).
+- `(d DES) Decrypt(dst mut []u8, src []u8)`: Decrypt decrypts the first 8 bytes of src into dst (dst may be src).
+- `(d DES) EncryptBlocks(dst mut []u8, src []u8)`: EncryptBlocks encrypts every 8-byte block of src on its own into dst (the modes' batch form).
+- `(d DES) DecryptBlocks(dst mut []u8, src []u8)`: DecryptBlocks decrypts every 8-byte block of src on its own into dst (the modes' batch form).
 - `VerifyECDSA(curve str, pub []u8, digest []u8, sig []u8) !`: VerifyECDSA checks a DER-encoded ECDSA signature over digest (a hash of the message) by the public key pub, an uncompressed point on curve ("P-256" or "P-384"). A digest longer than the curve's order is truncated to its leftmost bytes, as FIPS 186-5 says.
 - `SignECDSA(k ECPrivateKey, h Hash, digest []u8) ![]u8`: SignECDSA signs digest (a hash of the message, made with h) with k and returns a DER ECDSA-Sig-Value. The nonce is RFC 6979's, derived with HMAC over h, so equal inputs give equal signatures.
 - `(k PrivateKey) SignTLS12(scheme i64, msg []u8) ![]u8`: SignTLS12 signs msg for TLS 1.2 (ServerKeyExchange, CertificateVerify; #473) with scheme: also RSA PKCS #1 v1.5 (0x0401, 0x0501, 0x0601) and ECDSA with the scheme's hash on either curve.
@@ -1659,12 +1675,14 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `type Ed25519PrivateKey struct`: Ed25519PrivateKey is an Ed25519 key: the 32-byte seed and the public key it gives.
 - `Ed25519PublicKey(seed secret []u8) ![]u8`: Ed25519PublicKey is the 32-byte public key of a 32-byte Ed25519 seed.
 - `SignEd25519(seed secret []u8, msg []u8) ![]u8`: SignEd25519 is the 64-byte Ed25519 signature of msg by the key with the 32-byte seed (pure Ed25519: msg is not hashed first).
-- `type Hasher struct`: Hasher is an incremental SHA-256 or SHA-1; it satisfies io.Writer.
+- `type Hasher struct`: Hasher is an incremental SHA-256, SHA-1 or MD5; it satisfies io.Writer.
 - `NewSha256() Hasher`: NewSha256 is an incremental SHA-256.
 - `NewSha1() Hasher`: NewSha1 is an incremental SHA-1; use it only where a protocol requires SHA-1.
+- `NewMd5() Hasher`: NewMd5 is an incremental MD5, as Go's md5.New; MD5 is broken, use it only where a protocol names it.
 - `(x mut Hasher) Reset()`: Reset forgets everything written, as if the hasher were new.
-- `(x Hasher) Size() i64`: Size is the length of the digest: 32 for SHA-256, 20 for SHA-1.
+- `(x Hasher) Size() i64`: Size is the length of the digest: 32 for SHA-256, 20 for SHA-1, 16 for MD5.
 - `(x Hasher) Len() i64`: Len is the number of bytes written since the hasher was made or reset.
+- `(x Hasher) BlockSize() i64`: BlockSize is the hash's block length in bytes (64 for all three).
 - `(x mut Hasher) Write(data []u8) !i64`: Write adds data to the hash; it never fails, and returns len(data).
 - `(x mut Hasher) WriteStr(s str)`: WriteStr adds the bytes of s to the hash.
 - `(x Hasher) Sum() []u8`: Sum is the digest of everything written so far; the hasher can go on taking data.
@@ -1682,6 +1700,8 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `ParsePrivateKeyDER(der []u8) !PrivateKey`: ParsePrivateKeyDER reads a PKCS #8 PrivateKeyInfo, a PKCS #1 RSAPrivateKey or a SEC 1 ECPrivateKey.
 - `ParsePrivateKeyPEM(pem str) !PrivateKey`: ParsePrivateKeyPEM reads the first "PRIVATE KEY", "RSA PRIVATE KEY" or "EC PRIVATE KEY" block of pem.
 - `(k PrivateKey) MatchesCertificate(c Certificate) bool`: MatchesCertificate reports whether k is the private key of c's public key.
+- `Md5(s secret str) []u8`: Md5 is the MD5 digest of s (16 bytes), as Go's md5.Sum; s may be secret. MD5 is broken: use it only where a protocol names it (PostgreSQL's md5 login), never for new designs.
+- `Md5Hex(s secret str) str`: Md5Hex is the MD5 digest of s in lower-case hex; s may be secret.
 - `const MLKEM768EncapsulationKeySize = 1184`: MLKEM768EncapsulationKeySize, MLKEM768DecapsulationKeySize and MLKEM768CiphertextSize are ML-KEM-768's sizes in bytes; the shared key is 32 bytes.
 - `const MLKEM768DecapsulationKeySize = 2400`
 - `const MLKEM768CiphertextSize = 1088`
@@ -1690,9 +1710,29 @@ Package seal has cryptographic hashes (SHA-256, SHA-384, SHA-512, SHA-1, SHA3-25
 - `MLKEM768Encapsulate(ek []u8) !([]u8, []u8)`: MLKEM768Encapsulate makes a shared key for the holder of encapsulation key ek: the shared key (32 bytes) and the ciphertext to send (1088 bytes). A key of the wrong size or with a value not below q is refused (FIPS 203's input check).
 - `MLKEM768EncapsulateDerand(ek []u8, m secret []u8) !([]u8, []u8)`: MLKEM768EncapsulateDerand is MLKEM768Encapsulate with its 32 random bytes given (FIPS 203's ML-KEM.Encaps_internal): for known-answer tests only.
 - `MLKEM768Decapsulate(dk secret []u8, c []u8) ![]u8`: MLKEM768Decapsulate is the shared key in ciphertext c for decapsulation key dk. A ciphertext that was not made for dk gives a key derived from dk's secret z and c (implicit rejection), in the same time; only wrong sizes fail.
+- `shape BlockMode`: BlockMode is a block cipher mode that works on whole blocks, as Go's cipher.BlockMode; CBC satisfies it.
+- `shape Stream`: Stream is a stream cipher, as Go's cipher.Stream: XORKeyStream XORs src with the keystream into dst, keeping its place between calls. BlockStream (CTR, CFB, OFB) and RC4 satisfy it.
+- `type CBC struct`: CBC is cipher block chaining over a Block, encrypting or decrypting, with its current IV; it satisfies BlockMode. CBC needs padding (Pkcs7Pad) and a MAC over the ciphertext: CBC decryption that reports bad padding is a padding oracle.
+- `NewCBCEncrypter(b dyn Block, iv []u8) !CBC`: NewCBCEncrypter is CBC encryption with b and a one-block IV, as Go's cipher.NewCBCEncrypter; an IV of another length is a fault. The IV must be unpredictable (RandomBytes) for each message.
+- `NewCBCDecrypter(b dyn Block, iv []u8) !CBC`: NewCBCDecrypter is CBC decryption with b and a one-block IV, as Go's cipher.NewCBCDecrypter; an IV of another length is a fault.
+- `(c CBC) BlockSize() i64`: BlockSize is the block length of the mode's cipher.
+- `(c mut CBC) SetIV(iv []u8) !`: SetIV starts a new message with iv, as Go's CBC SetIV; an IV of another length is a fault.
+- `(c mut CBC) CryptBlocks(dst mut []u8, src []u8) !`: CryptBlocks encrypts or decrypts src into dst (dst may be src), carrying the chain into the next call. It fails, writing nothing, when src is not whole blocks, dst is shorter than src, or dst overlaps src shifted (Go's panics, in the same order).
+- `Pkcs7Pad(data []u8, bs i64) ![]u8`: Pkcs7Pad is data followed by PKCS #7 padding for blocks of bs bytes (1 to 255): n bytes of value n, 1 <= n <= bs, so the result is whole blocks. It is a helper for CBC, not part of the mode.
+- `Pkcs7Unpad(data []u8, bs i64) ![]u8`: Pkcs7Unpad is data without its PKCS #7 padding for blocks of bs bytes (1 to 255), sharing data's memory. Empty data, data that is not whole blocks and wrong padding all fail with one fault, and the padding is read in time that depends only on bs. A CBC decryption that reports bad padding to an attacker who can send ciphertexts is a padding oracle: check a MAC first.
+- `type BlockStream struct`: BlockStream is a Block run as a stream cipher (CTR, CFB or OFB), with its place in the keystream; it satisfies Stream. Never use one key and IV for two messages.
+- `NewCTR(b dyn Block, iv []u8) !BlockStream`: NewCTR is counter mode with b and a one-block initial counter, as Go's cipher.NewCTR: the counter is the whole block, big-endian, wrapping to zero. An IV of another length is a fault.
+- `NewCFBEncrypter(b dyn Block, iv []u8) !BlockStream`: NewCFBEncrypter is full-block cipher feedback encryption with b and a one-block IV, as Go's cipher.NewCFBEncrypter (deprecated there: use CTR or an AEAD). An IV of another length is a fault.
+- `NewCFBDecrypter(b dyn Block, iv []u8) !BlockStream`: NewCFBDecrypter is full-block cipher feedback decryption with b and a one-block IV, as Go's cipher.NewCFBDecrypter (deprecated there: use CTR or an AEAD). An IV of another length is a fault.
+- `NewOFB(b dyn Block, iv []u8) !BlockStream`: NewOFB is output feedback mode with b and a one-block IV, as Go's cipher.NewOFB (deprecated there: use CTR or an AEAD). An IV of another length is a fault.
+- `(x mut BlockStream) XORKeyStream(dst mut []u8, src []u8) !`: XORKeyStream XORs src with the keystream into dst (dst may be src), going on from where the last call stopped. It fails, writing nothing, when dst is shorter than src or overlaps it shifted.
 - `P256NewPrivateKey() []u8`: P256NewPrivateKey returns a random P-256 private key: 32 big-endian bytes in [1, n-1].
 - `P256PublicKey(priv secret []u8) ![]u8`: P256PublicKey is the uncompressed public key (65 bytes) of a P-256 private key; it fails unless priv is 32 bytes in [1, n-1]. Constant-time in priv.
 - `P256ECDH(priv secret []u8, peer []u8) ![]u8`: P256ECDH is the P-256 Diffie-Hellman shared secret (the 32-byte x coordinate of priv*peer). peer is an uncompressed or compressed public key; it fails for an invalid private key, a point not on the curve, or a result at infinity. Constant-time in priv.
+- `type RC4 struct`: RC4 is an RC4 keystream with its state, as Go's rc4.Cipher; it satisfies Stream. Broken: legacy protocols only.
+- `NewRC4(key secret []u8) !RC4`: NewRC4 is RC4 keyed with 1 to 256 bytes, as Go's rc4.NewCipher; another length fails as Go's KeySizeError does.
+- `(c mut RC4) Reset()`: Reset zeroes the key state; the RC4 is unusable afterwards (Go's deprecated Reset).
+- `(c mut RC4) XORKeyStream(dst mut []u8, src []u8) !`: XORKeyStream XORs src with the keystream into dst (dst may be src); it fails, writing nothing, when dst is shorter than src or overlaps it shifted.
 - `RSAKeyBits(key RSAPublicKey) i64`: RSAKeyBits is the size of key's modulus in bits.
 - `VerifyPKCS1v15(key RSAPublicKey, h Hash, digest []u8, sig []u8) !`: VerifyPKCS1v15 checks an RSASSA-PKCS1-v1_5 signature over digest, a hash made with h.
 - `VerifyPSS(key RSAPublicKey, h Hash, digest []u8, sig []u8, saltLen i64) !`: VerifyPSS checks an RSASSA-PSS signature over digest, a hash made with h, with MGF1 over the same hash. saltLen is the exact salt length, or -1 to accept any.

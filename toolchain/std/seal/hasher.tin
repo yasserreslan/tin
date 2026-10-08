@@ -1,11 +1,12 @@
 package seal
 
-// Incremental SHA-256 and SHA-1 (#773): write the data in pieces, then Sum. They share the block functions
-// (and SHA-256's hardware path) with Sha256 and Sha1, so a stream hashes at the same speed as one string.
+// Incremental SHA-256, SHA-1 and MD5 (#773, #755): write the data in pieces, then Sum. They share the block functions
+// (and SHA-256's hardware path) with Sha256, Sha1 and Md5, so a stream hashes at the same speed as one string.
 
-// Hasher is an incremental SHA-256 or SHA-1; it satisfies io.Writer.
+// Hasher is an incremental SHA-256, SHA-1 or MD5; it satisfies io.Writer.
 type Hasher struct {
 	sha1 bool
+	md5  bool
 	h    []u32
 	w    []u32
 	buf  []u8
@@ -14,21 +15,30 @@ type Hasher struct {
 
 // NewSha256 is an incremental SHA-256.
 fn NewSha256() Hasher {
-	mut x = Hasher{sha1: false, h: []u32{}, w: make([]u32, 64), buf: make([]u8, 0, 64), n: 0}
+	mut x = Hasher{sha1: false, md5: false, h: []u32{}, w: make([]u32, 64), buf: make([]u8, 0, 64), n: 0}
 	x.Reset()
 	return x
 }
 
 // NewSha1 is an incremental SHA-1; use it only where a protocol requires SHA-1.
 fn NewSha1() Hasher {
-	mut x = Hasher{sha1: true, h: []u32{}, w: make([]u32, 80), buf: make([]u8, 0, 64), n: 0}
+	mut x = Hasher{sha1: true, md5: false, h: []u32{}, w: make([]u32, 80), buf: make([]u8, 0, 64), n: 0}
+	x.Reset()
+	return x
+}
+
+// NewMd5 is an incremental MD5, as Go's md5.New; MD5 is broken, use it only where a protocol names it.
+fn NewMd5() Hasher {
+	mut x = Hasher{sha1: false, md5: true, h: []u32{}, w: []u32{}, buf: make([]u8, 0, 64), n: 0}
 	x.Reset()
 	return x
 }
 
 // Reset forgets everything written, as if the hasher were new.
 fn (x mut Hasher) Reset() {
-	if x.sha1 {
+	if x.md5 {
+		x.h = []u32{0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476}
+	} else if x.sha1 {
 		x.h = []u32{0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0}
 	} else {
 		x.h = []u32{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}
@@ -37,8 +47,11 @@ fn (x mut Hasher) Reset() {
 	x.n = 0
 }
 
-// Size is the length of the digest: 32 for SHA-256, 20 for SHA-1.
+// Size is the length of the digest: 32 for SHA-256, 20 for SHA-1, 16 for MD5.
 fn (x Hasher) Size() i64 {
+	if x.md5 {
+		return 16
+	}
 	if x.sha1 {
 		return 20
 	}
@@ -50,12 +63,19 @@ fn (x Hasher) Len() i64 {
 	return x.n
 }
 
+// BlockSize is the hash's block length in bytes (64 for all three).
+fn (x Hasher) BlockSize() i64 {
+	return 64
+}
+
 // blocks compresses n whole blocks at address p into state h.
 fn hasherBlocks(sha1 bool, h mut []u32, w mut []u32, p i64, n i64) {
 	if n <= 0 {
 		return
 	}
-	if sha1 {
+	if len(h) == 4 { // MD5's state is four words
+		md5_blocks(mut h, p, n)
+	} else if sha1 {
 		sha1_blocks(mut h, mut w, p, n)
 	} else if sha_hw {
 		hw_blocks(cast(i64, h)[2], p, n, cast(i64, k256)[2])
@@ -118,10 +138,17 @@ fn (x Hasher) Sum() []u8 {
 		tail[i] = x.buf[i]
 	}
 	tail[rest] = 0x80
-	let bitlen = u64(x.n) * 8
+	let bitlen = u64(x.n) *% 8
 	for i in 0..8 {
-		tail[total - 1 - i] = u8(bitlen >> u64(8 * i))
+		if x.md5 {
+			tail[total - 8 + i] = u8(bitlen >> u64(8 * i))
+		} else {
+			tail[total - 1 - i] = u8(bitlen >> u64(8 * i))
+		}
 	}
 	hasherBlocks(x.sha1, mut h, mut w, cast(i64, tail)[2], total / 64)
+	if x.md5 {
+		return md5_digest(h)
+	}
 	return digest(h)
 }
