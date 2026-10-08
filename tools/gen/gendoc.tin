@@ -41,6 +41,7 @@ fn packages() []str {
 		"glyph", "UTF-8, UTF-16 and Unicode (unicode/utf8, unicode/utf16, unicode)",
 		"mint", "number and string conversion (strconv)",
 		"gauge", "math (math)",
+		"cmplx", "complex numbers and the functions of math/cmplx",
 		"bits", "bit counting and manipulation (math/bits)",
 		"link", "URLs and their escaping (net/url)",
 		"netip", "IP addresses, address/port pairs and prefixes as value types (net/netip)",

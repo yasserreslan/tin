@@ -1,0 +1,64 @@
+New 3 4
+Abs(3+4i) 5
+Abs(0) 0
+Phase(1+0i) 0
+Phase(-1+0i) 3.141592653589793
+Phase(-1-0i) -3.141592653589793
+Phase(0-1i) -1.5707963267948966
+Phase(-0+0i) 3.141592653589793
+Phase(0-0i) -0
+Polar(2i) 2 1.5707963267948966
+Rect(2,0) 2 0
+Conj(1+2i) 1 -2
+Conj(1+0i) -0
+Inf +Inf +Inf
+NaN NaN NaN
+IsNaN(NaN+1i) true false
+IsNaN(1+1i) false
+IsInf(Inf+NaN i) true true
+IsInf(NaN+1i) false
+Sqrt(-4+0i) 0 2
+Sqrt(-4-0i) 0 -2
+Sqrt(0-0i) 0 -0
+Sqrt(-0+0i) 0 0
+Sqrt(3+4i) 2 1
+Sqrt(-3+4i) 1 2
+Sqrt(-3-4i) 1 -2
+Sqrt(-inf+1i) 0 +Inf
+Sqrt(1-inf i) +Inf -Inf
+Sqrt(NaN+inf i) +Inf +Inf
+Exp(0) 1 0
+Exp(+inf+0i) +Inf 0
+Exp(-inf+inf i) 0 0
+Exp(+inf+inf i) +Inf NaN
+Exp(NaN+0i) NaN 0
+Sin(0) 0 0
+Sin(-0+inf i) -0 +Inf
+Cos(0) 1 -0
+Sinh(0-0i) 0 -0
+Cosh(0) 1 0
+Tanh(inf+0i) 1 0
+Tan(0+inf i) 0 1
+Cot(0) +Inf +Inf
+Pow(0, 0) 1 0
+Pow(0, 2) 0 0
+Pow(-0, -1) +Inf 0
+Pow(0, -1i) 1 0
+Pow(0, NaN) NaN NaN
+Pow(2, 3) 8 0
+Log(1) 0 0
+Log(-1+0i) 0 3.141592653589793
+Log(-1-0i) 0 -3.141592653589793
+Log(0) -Inf 0
+Asin(0) 0 0
+Asin(inf+inf i) 0.7853981633974483 +Inf
+Asin(NaN+inf i) NaN +Inf
+Acosh(0) 0 1.5707963267948966
+Atan(0) 0 0
+Atan(inf+inf i) 1.5707963267948966 0
+Atan(NaN+inf i) NaN 0
+Atanh(0) 0 0
+From64(0.1-2.5i) 0.1 -2.5
+To128 0.10000000149011612 -2.5
+From64(1e39) +Inf
+From64(NaN) NaN
