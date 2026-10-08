@@ -57,7 +57,7 @@ before=$(t oplog | wc -l)
 for w in w1 w2; do
 	(
 		i=0
-		while [ $i -lt 15 ]; do
+		while [ $i -lt 40 ]; do
 			printf '%s\n' $i > "$d/r-$w/$w.txt"
 			t -C "$d/r-$w" add "$w.txt"
 			t -C "$d/r-$w" commit -m "$w $i" > /dev/null
@@ -66,9 +66,17 @@ for w in w1 w2; do
 	) &
 done
 wait
-[ "$(t log --format=subject w1 | grep -c '^w1 ')" = 15 ] || fail "w1 lost commits"
-[ "$(t log --format=subject w2 | grep -c '^w2 ')" = 15 ] || fail "w2 lost commits"
-[ $(($(t oplog | wc -l) - before)) = 30 ] || fail "operations: $(($(t oplog | wc -l) - before))"
+[ "$(t log --format=subject w1 | grep -c '^w1 ')" = 40 ] || fail "w1 lost commits"
+[ "$(t log --format=subject w2 | grep -c '^w2 ')" = 40 ] || fail "w2 lost commits"
+[ $(($(t oplog | wc -l) - before)) = 80 ] || fail "operations: $(($(t oplog | wc -l) - before))"
+# the shared store is whole: every commit of both reads back, with the file it wrote
+for w in w1 w2; do
+	k=39
+	for id in $(t log --format=id $w -n 40); do
+		t show "$id" | grep -q "^+$k$" || fail "$w's commit $id does not read back with $k"
+		k=$((k - 1))
+	done
+done
 [ "$(t oplog | cut -d' ' -f1 | sort | uniq -d)" = "" ] || fail "an operation number twice"
 echo "ok two workspaces committing at once"
 

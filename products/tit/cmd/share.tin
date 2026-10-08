@@ -380,7 +380,11 @@ fn doPush(g Global, a ShareArgs, o mut Out) ! {
 			continue
 		}
 		if ref.Name != branch && r.Store.Has(id) {
-			hide = append(hide, id)
+			// an annotated tag counts as the commit it tags
+			let cid = r.resolve(id.Hex()) catch _ {
+				continue
+			}
+			hide = append(hide, cid)
 		}
 	}
 	let ids = try sendObjects(mut r, tip, hide)

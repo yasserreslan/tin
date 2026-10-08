@@ -32,7 +32,7 @@
 \ No newline at end of file
 --- a/one-change.old
 +++ b/one-change.new
-@@ -2,7 +2,7 @@
+@@ -2,7 +2,7 @@ line 1
  line 2
  line 3
  line 4
@@ -51,7 +51,7 @@
  line 4
  line 5
  line 6
-@@ -32,7 +32,7 @@
+@@ -32,7 +32,7 @@ line 31
  line 32
  line 33
  line 34
@@ -62,7 +62,7 @@
  line 38
 --- a/close-together.old
 +++ b/close-together.new
-@@ -2,13 +2,13 @@
+@@ -2,13 +2,13 @@ line 1
  line 2
  line 3
  line 4

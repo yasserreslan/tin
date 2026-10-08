@@ -12,6 +12,6 @@ out=products/tit/tests/golden/diff_git.out
 : > "$out"
 for name in same empty-to-text text-to-empty no-newline-old no-newline-new no-newline-both one-change far-apart close-together insert-start delete-end rewrite blocks; do
 	(cd /tmp/tin-test-tit-diff && git -c core.quotepath=off diff --no-index --no-indent-heuristic --no-color -U3 "$name.old" "$name.new" || true) |
-		grep -v '^diff --git \|^index \|^new file mode\|^deleted file mode' | sed 's/^\(@@ [^@]* @@\).*/\1/' | sed "s|^--- a/|--- a/|" >> "$out"
+		grep -v '^diff --git \|^index \|^new file mode\|^deleted file mode' | sed "s|^--- a/|--- a/|" >> "$out"
 done
 echo "wrote $out"

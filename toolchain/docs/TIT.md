@@ -48,10 +48,11 @@ Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.ur
 |---|---|
 | `tit status [-s]` | staged, unstaged and untracked files; `-s` is git's short form |
 | `tit add <paths>` | stage files; a directory stages what is below it (not what `.gitignore` ignores); `.` stages everything, deletions too |
+| `tit add -p [paths]` | stage the changes of tracked files hunk by hunk, answering each question with a line: `y` stage it, `n` leave it, `a` it and the rest of the file, `d` none of the rest of the file, `q` stop |
 | `tit rm [-r] [-f] [--cached] <paths>` | stop tracking files and remove them; `--cached` keeps them on the disk; `-f` removes one with unstaged changes |
 | `tit mv <from> <to>` | move or rename a tracked file or directory |
 | `tit commit [-m msg]... [-a] [--amend]` | record the staged files; each `-m` is a paragraph; `-a` stages every tracked change first; without `-m`, `$TIT_EDITOR` or `$EDITOR` asks; `--amend` makes a new version of the last change (same change id) |
-| `tit diff [--staged] [--stat] [A B] [paths]` | unstaged changes, staged ones, or between two revisions, in git's patch format |
+| `tit diff [--staged] [--stat] [--word] [--semantic] [A B] [paths]` | unstaged changes, staged ones, or between two revisions, in git's patch format (each hunk header with the function line above it, as git's); `--word` as git's `--word-diff=plain`; `--semantic` by Tin declaration |
 | `tit log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id\|change\|subject\|git-id]` | the history |
 | `tit show [rev]` | a commit, its `--stat` and its diff |
 | `tit cat <rev or id>` | an object's content |
@@ -73,6 +74,7 @@ Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.ur
 | `tit tag <name> [rev]` | a lightweight tag |
 | `tit tag -a <name> -m <msg> [rev]` | an annotated tag, signed when you have a key |
 | `tit tag -d <name>` | delete a tag |
+| `tit ship <version> [--remote name] [--no-push] [--dry-run]` | a release: an annotated tag on HEAD whose message is the changelog (the first line of every change since the last tag, oldest first), signed when you have a key, then the branch and the tag pushed (`origin` by default); refuses uncommitted changes; `--dry-run` prints the changelog |
 
 ## Workspaces
 
