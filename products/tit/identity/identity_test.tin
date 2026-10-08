@@ -88,7 +88,7 @@ fn TestKeys(t mut crucible.T) {
 	t.True("junk is ErrBadKey", junk != nil && fault.Is(junk, ErrBadKey))
 	quarry.Chmod(path, 384) catch _ {
 	}
-	let c = object.CommitData{Tree: object.Hash(object.Kind.Tree, ""), Parents: []object.Id{}, Change: object.AdoptedChangeId("k"), Author: person("ana@x"), Committer: person("ana@x"), GitHeaders: []str{}, Signature: "", Message: "signed\n"}
+	let c = object.CommitData{Tree: object.Hash(object.Kind.Tree, ""), Parents: []object.Id{}, Change: object.AdoptedChangeId("k"), Author: person("ana@x"), Committer: person("ana@x"), GitHeaders: []str{}, Signature: "", Message: "signed\n", Conflicts: []str{}}
 	let signed = s.SignCommit(c) catch err {
 		t.Error("sign: {fault.Message(err)}")
 		return
@@ -96,7 +96,7 @@ fn TestKeys(t mut crucible.T) {
 	crucible.Equal(mut t, "64-byte signature", len(signed.Signature), 64)
 	let keys = []TrustedKey{TrustedKey{Email: "ana@x", Public: s.Public}}
 	t.NoFault("verifies", VerifyCommit(signed, keys))
-	let changed = object.CommitData{Tree: signed.Tree, Parents: signed.Parents, Change: signed.Change, Author: signed.Author, Committer: signed.Committer, GitHeaders: signed.GitHeaders, Signature: signed.Signature, Message: "signed!\n"}
+	let changed = object.CommitData{Tree: signed.Tree, Parents: signed.Parents, Change: signed.Change, Author: signed.Author, Committer: signed.Committer, GitHeaders: signed.GitHeaders, Signature: signed.Signature, Message: "signed!\n", Conflicts: []str{}}
 	let e1 = VerifyCommit(changed, keys)
 	t.True("a changed commit fails", e1 != nil && fault.Is(e1, ErrBadSignature))
 	let e2 = VerifyCommit(signed, []TrustedKey{TrustedKey{Email: "bo@x", Public: s.Public}})
@@ -115,7 +115,7 @@ fn commitWith(st mut store.Mem, s Signer, signers str, parents []object.Id, emai
 	let tree = st.Put(object.Object.Tree([]object.Entry{object.Entry{Mode: object.Mode.File, Name: ".tit-signers", Id: blob}})) catch _ {
 		object.NoId
 	}
-	let c = object.CommitData{Tree: tree, Parents: parents, Change: object.NewChangeId(), Author: person(email), Committer: person(email), GitHeaders: []str{}, Signature: "", Message: "m\n"}
+	let c = object.CommitData{Tree: tree, Parents: parents, Change: object.NewChangeId(), Author: person(email), Committer: person(email), GitHeaders: []str{}, Signature: "", Message: "m\n", Conflicts: []str{}}
 	let signed = s.SignCommit(c) catch _ {
 		c
 	}

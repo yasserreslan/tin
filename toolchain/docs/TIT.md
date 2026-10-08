@@ -82,6 +82,21 @@ Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.ur
 | `tit workspace rm <name>` | forget a workspace and remove its directory, when nothing in it is uncommitted; its branch stays |
 | `tit who <path> [-n N]` | who changed a file or directory in the last N commits (500), most changes first |
 
+## Stacks
+
+A stack is the current branch's changes above the trunk (`stack.trunk`, `main` by default). Each command below that
+rewrites a change rebases every change above it, as one operation (one undo). A conflict does not stop the rebase:
+the new version records it, `tit stack` shows it, and `tit edit` puts git's markers back on the disk.
+
+| command | |
+|---|---|
+| `tit stack` | the changes above the trunk, oldest first, with the conflicts they record |
+| `tit edit <change>` | go to a change to amend it (its conflicts as markers and index stages); `tit commit --amend` makes the new version, rebases the changes above it and goes back to the branch |
+| `tit move <change> --before\|--after <change>` | reorder the stack |
+| `tit split <change> <paths> [-m msg]` | a new change, just below, holding what the change did to these paths |
+| `tit absorb` | each uncommitted hunk goes into the change that wrote those lines; a hunk no single change owns stays (listed) |
+| `tit sync [remote]` | fetch, rebase the stack onto `<remote>/<trunk>` (the local trunk follows), push the branch; nothing that records a conflict is pushed |
+
 ## Undo
 
 | command | |

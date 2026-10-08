@@ -480,6 +480,9 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 			continue
 		}
 		let c = try commitOf(mut st, id)
+		if len(c.Conflicts) > 0 {
+			try refusal(Code.Conflicted, "{c.Change.Letters()} records conflicts ({id.Hex()[0:12]}): resolve them (tit edit) before pushing")
+		}
 		mut from = id
 		if len(c.Parents) > 0 {
 			from = c.Parents[0]

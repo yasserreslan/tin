@@ -61,7 +61,7 @@ fn commit(r mut dice.Rand) CommitData {
 	if r.Intn(2) == 0 {
 		sig = str(r.Bytes(64))
 	}
-	return CommitData{Tree: someId(mut r), Parents: parents, Change: NewChangeId(), Author: person(mut r), Committer: person(mut r), GitHeaders: hs, Signature: sig, Message: r.Str(r.Intn(40), "ab \n:")}
+	return CommitData{Tree: someId(mut r), Parents: parents, Change: NewChangeId(), Author: person(mut r), Committer: person(mut r), GitHeaders: hs, Signature: sig, Message: r.Str(r.Intn(40), "ab \n:"), Conflicts: []str{}}
 }
 
 fn tag(r mut dice.Rand) TagData {
@@ -322,4 +322,40 @@ fn TestTagSigningPayloadKeepsTheTag(t mut crucible.T) {
 	let (_, err) = TagSigningPayload(tg)
 	t.NoFault("payload", err)
 	crucible.Equal(mut t, "the tag keeps its signature", len(tg.Signature), 64)
+}
+
+// A commit's recorded conflicts survive encoding, sit right after the committer, and a line with a newline is refused
+// (#786).
+fn TestConflictLines(t mut crucible.T) {
+	let who = Person{Name: "Ada", Email: "ada@example.com", When: 1700000000, Zone: 0}
+	let tree = Hash(Kind.Tree, "")
+	let line = "a.txt\t-\t" + Hash(Kind.Blob, "ours").Hex() + "\t" + Hash(Kind.Blob, "theirs").Hex()
+	let c = CommitData{Tree: tree, Parents: []Id{}, Change: NewChangeId(), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: "m\n", Conflicts: []str{line}}
+	let body = Body(Object.Commit(c)) catch e {
+		t.Error("encode: {e}")
+		return
+	}
+	t.True("after the committer", twine.Contains(body, "committer Ada <ada@example.com> 1700000000 +0000\nconflict " + line + "\n\nm\n"))
+	let back = Decode(Kind.Commit, body) catch e {
+		t.Error("decode: {e}")
+		return
+	}
+	match back {
+		Commit(d) => {
+			crucible.Equal(mut t, "conflicts", len(d.Conflicts), 1)
+			crucible.Equal(mut t, "the line", d.Conflicts[0], line)
+		}
+		Tree(_) => {
+			t.Error("not a commit")
+		}
+		Tag(_) => {
+			t.Error("not a commit")
+		}
+		Blob(_) => {
+			t.Error("not a commit")
+		}
+	}
+	let bad = CommitData{Tree: tree, Parents: []Id{}, Change: NewChangeId(), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: "m\n", Conflicts: []str{"a\nb"}}
+	let (_, err) = Body(Object.Commit(bad))
+	t.True("a newline is refused", err != nil)
 }

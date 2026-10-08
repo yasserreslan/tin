@@ -22,7 +22,7 @@ fn suite[S ObjectStore](t mut crucible.T, label str, s mut S) {
 	let tree = object.Object.Tree([]object.Entry{object.Entry{Mode: object.Mode.File, Name: "README", Id: blob}})
 	let (tid, e2) = s.Put(tree)
 	t.NoFault(label + " put tree", e2)
-	let c = object.CommitData{Tree: tid, Parents: []object.Id{}, Change: object.AdoptedChangeId("abc"), Author: person(), Committer: person(), GitHeaders: []str{}, Signature: "", Message: "first\n"}
+	let c = object.CommitData{Tree: tid, Parents: []object.Id{}, Change: object.AdoptedChangeId("abc"), Author: person(), Committer: person(), GitHeaders: []str{}, Signature: "", Message: "first\n", Conflicts: []str{}}
 	let (cid, e3) = s.Put(object.Object.Commit(c))
 	t.NoFault(label + " put commit", e3)
 	t.True(label + " has all three", s.Has(blob) && s.Has(tid) && s.Has(cid))

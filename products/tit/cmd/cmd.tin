@@ -45,6 +45,8 @@ type Command enum {
 	Bisect(BisectArgs)
 	Workspace(WorkspaceArgs)
 	Who(WhoArgs)
+	Stack(StackArgs)
+	Sync(ShareArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -173,6 +175,7 @@ commands:
   fetch [remote]             bring a remote's new commits in (refs/remotes/<remote>/...)
   push [remote] [branch]     send a branch to a remote (origin and the current branch by default)
   pull [remote]              fetch, then merge the remote's copy of the current branch
+  sync [remote]              fetch, rebase the stack onto the remote's trunk, push the branch
   serve [--addr host:port] [--public] [--allow file]
                              serve this repository over the tit protocol (keys: .tit/allowed-keys)
   guard [paths]              search the tracked files (or these) for private keys and tokens; commit runs it too
@@ -182,6 +185,13 @@ commands:
   workspace new <name> [dir] [--from rev] | workspace rm <name> | workspaces
                              another working directory on this store, with its own branch, HEAD and undo
   who <path> [-n N]          who changed this file or directory in the last N commits (500), most changes first
+  stack                      the changes of this branch above the trunk (stack.trunk, main), oldest first
+  edit <change>              go to a change of the stack to amend it; tit commit --amend rebases what is above
+  move <change> --before|--after <change>
+                             reorder the stack (what is above the move is rebased; conflicts are recorded)
+  split <change> <paths> [-m msg]
+                             make a new change, just below, of what the change did to these paths
+  absorb                     put each uncommitted hunk into the change of the stack that wrote those lines
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
@@ -519,10 +529,19 @@ fn Parse(args []str) !(Global, Command) {
 		if len(rest) == 2 {
 			dir = rest[1]
 		}
-		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir})
+		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir, Lease: false})
+	}
+	if name == "sync" {
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: true}
+		if len(rest) == 1 {
+			sa.Remote = rest[0]
+		} else if len(rest) > 1 {
+			fail fault.Wrap(ErrUsage, "sync takes a remote")
+		}
+		return g, Command.Sync(sa)
 	}
 	if name == "fetch" || name == "pull" || name == "push" {
-		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: ""}
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: "", Lease: false}
 		if len(rest) > 0 {
 			sa.Remote = rest[0]
 		}
@@ -658,6 +677,45 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Who(wh)
 	}
+	if name == "stack" {
+		try noMore(rest, 0, "stack")
+		return g, Command.Stack(StackArgs{Action: "list", Change: "", Other: "", Before: false, Paths: []str{}, Message: ""})
+	}
+	if name == "absorb" {
+		try noMore(rest, 0, "absorb")
+		return g, Command.Stack(StackArgs{Action: "absorb", Change: "", Other: "", Before: false, Paths: []str{}, Message: ""})
+	}
+	if name == "edit" {
+		if len(rest) != 1 {
+			fail fault.Wrap(ErrUsage, "edit takes a change of the stack")
+		}
+		return g, Command.Stack(StackArgs{Action: "edit", Change: rest[0], Other: "", Before: false, Paths: []str{}, Message: ""})
+	}
+	if name == "move" {
+		if len(rest) != 3 || (rest[1] != "--before" && rest[1] != "--after") {
+			fail fault.Wrap(ErrUsage, "move <change> --before|--after <change>")
+		}
+		return g, Command.Stack(StackArgs{Action: "move", Change: rest[0], Other: rest[2], Before: rest[1] == "--before", Paths: []str{}, Message: ""})
+	}
+	if name == "split" {
+		mut sa = StackArgs{Action: "split", Change: "", Other: "", Before: false, Paths: []str{}, Message: ""}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "-m" && k + 1 < len(rest) {
+				k += 1
+				sa.Message = rest[k]
+			} else if len(sa.Change) == 0 {
+				sa.Change = rest[k]
+			} else {
+				sa.Paths = append(sa.Paths, rest[k])
+			}
+			k += 1
+		}
+		if len(sa.Change) == 0 || len(sa.Paths) == 0 {
+			fail fault.Wrap(ErrUsage, "split <change> <paths> [-m msg]")
+		}
+		return g, Command.Stack(sa)
+	}
 	if name == "mirror" {
 		mut path = ""
 		if len(rest) == 1 {
@@ -787,6 +845,8 @@ fn commandName(c Command) str {
 		Bisect(_) => "bisect"
 		Workspace(_) => "workspace"
 		Who(_) => "who"
+		Stack(sa) => sa.Action
+		Sync(_) => "sync"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -894,6 +954,12 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Who(wh) => {
 			try doWho(g, wh, mut o)
+		}
+		Stack(sa) => {
+			try doStack(g, sa, mut o)
+		}
+		Sync(sa) => {
+			try doSync(g, sa, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

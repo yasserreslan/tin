@@ -84,7 +84,7 @@ fn LoadKey(path str) !Signer {
 fn (s Signer) SignCommit(c object.CommitData) !object.CommitData {
 	let payload = try object.SigningPayload(c)
 	let sig = try seal.SignEd25519(s.seed, []u8(payload))
-	return object.CommitData{Tree: c.Tree, Parents: c.Parents, Change: c.Change, Author: c.Author, Committer: c.Committer, GitHeaders: c.GitHeaders, Signature: str(sig), Message: c.Message}
+	return object.CommitData{Tree: c.Tree, Parents: c.Parents, Change: c.Change, Author: c.Author, Committer: c.Committer, GitHeaders: c.GitHeaders, Signature: str(sig), Message: c.Message, Conflicts: c.Conflicts}
 }
 
 // Sign is the ed25519 signature of payload with this key (for requests to a server, transport section 15).

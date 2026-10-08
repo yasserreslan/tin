@@ -50,7 +50,7 @@ fn commitOf(s mut store.Loose, files []str, parents []object.Id, when i64, msg s
 		object.NoId
 	}
 	let who = object.Person{Name: "Ada", Email: "ada@example.com", When: when, Zone: 120}
-	let c = object.CommitData{Tree: tree, Parents: parents, Change: object.AdoptedChangeId(msg), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: msg}
+	let c = object.CommitData{Tree: tree, Parents: parents, Change: object.AdoptedChangeId(msg), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: msg, Conflicts: []str{}}
 	return s.Put(object.Object.Commit(c)) catch _ {
 		object.NoId
 	}

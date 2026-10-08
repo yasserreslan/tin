@@ -32,7 +32,7 @@ fn commit(g mut graph, name str, parents []str, when i64) {
 	let tree = g.s.Put(object.Object.Tree([]object.Entry{})) catch _ {
 		object.NoId
 	}
-	let c = object.CommitData{Tree: tree, Parents: ps, Change: object.AdoptedChangeId(name), Author: person(when), Committer: person(when), GitHeaders: []str{}, Signature: "", Message: name + "\n"}
+	let c = object.CommitData{Tree: tree, Parents: ps, Change: object.AdoptedChangeId(name), Author: person(when), Committer: person(when), GitHeaders: []str{}, Signature: "", Message: name + "\n", Conflicts: []str{}}
 	let id = g.s.Put(object.Object.Commit(c)) catch _ {
 		object.NoId
 	}

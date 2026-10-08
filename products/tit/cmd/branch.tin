@@ -278,7 +278,7 @@ fn mergeMessage(r Repo, rev str) str {
 fn newCommit(r Repo, tree object.Id, parents []object.Id, message str, when i64) !object.CommitData {
 	let cfg = try r.config()
 	let who = try identity.Who(cfg, identity.FixedClock{At: when})
-	mut c = object.CommitData{Tree: tree, Parents: parents, Change: object.NewChangeId(), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: message}
+	mut c = object.CommitData{Tree: tree, Parents: parents, Change: object.NewChangeId(), Author: who, Committer: who, GitHeaders: []str{}, Signature: "", Message: message, Conflicts: []str{}}
 	let keyPath = identity.DefaultKeyPath(cfg)
 	if quarry.Exists(keyPath) {
 		let signer = try identity.LoadKey(keyPath)

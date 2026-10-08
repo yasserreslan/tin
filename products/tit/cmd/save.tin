@@ -451,7 +451,17 @@ fn doCommit(g Global, a CommitArgs, o mut Out) ! {
 	if len(message) == 0 {
 		fail "the message is empty: the commit was not made"
 	}
-	mut c = object.CommitData{Tree: tree, Parents: parents, Change: changeId, Author: author, Committer: committer, GitHeaders: []str{}, Signature: "", Message: message}
+	mut c = object.CommitData{Tree: tree, Parents: parents, Change: changeId, Author: author, Committer: committer, GitHeaders: []str{}, Signature: "", Message: message, Conflicts: []str{}}
+	// a change of the stack being edited (tit edit): the amend rebases what is above it, in one operation
+	let editing = try editState(r)
+	if editing != nil {
+		if !a.Amend {
+			fail "a change of the stack is being edited: tit commit --amend makes its new version"
+		}
+		try idx.Write(r.Ws.IndexPath())
+		try finishEdit(mut r, editing, c, mut o)
+		return
+	}
 	let keyPath = identity.DefaultKeyPath(cfg)
 	if quarry.Exists(keyPath) {
 		let signer = try identity.LoadKey(keyPath)
