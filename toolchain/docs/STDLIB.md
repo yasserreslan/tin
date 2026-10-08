@@ -75,6 +75,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [html](#html) | HTML tokenizer and escaping (html, golang.org/x/net/html) |
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
+| [asn1](#asn1) | ASN.1 DER: tags, lengths, object identifiers, bit strings and times (encoding/asn1) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
 | [mail](#mail) | RFC 5322 message and address parsing (net/mail) |
 | [textproto](#textproto) | line-oriented and dot-framed protocol I/O (net/textproto) |
@@ -2908,6 +2909,73 @@ Package html tokenizes, parses and escapes HTML, as Go's html and golang.org/x/n
 - `Uvarint(b []u8) !(u64, i64)`: Uvarint reads a variable-length unsigned integer and returns it with the number of bytes it took. A cut-off or over-long encoding fails with a fault.
 - `PutVarint(b mut []u8, v i64) []u8`: PutVarint appends v in the zigzag varint form (Go's Varint): small magnitudes take few bytes, negative numbers too.
 - `Varint(b []u8) !(i64, i64)`: Varint reads a zigzag varint and returns it with the number of bytes it took.
+
+## asn1
+
+- `const ClassUniversal = 0`: ClassUniversal is the class of the universal types.
+- `const ClassApplication = 1`: ClassApplication is the class of application-defined tags.
+- `const ClassContextSpecific = 2`: ClassContextSpecific is the class of the [n] tags of a type, such as EXPLICIT and IMPLICIT tags.
+- `const ClassPrivate = 3`: ClassPrivate is the class of private tags.
+- `const TagBoolean = 1`: TagBoolean is the universal tag of BOOLEAN.
+- `const TagInteger = 2`: TagInteger is the universal tag of INTEGER.
+- `const TagBitString = 3`: TagBitString is the universal tag of BIT STRING.
+- `const TagOctetString = 4`: TagOctetString is the universal tag of OCTET STRING.
+- `const TagNull = 5`: TagNull is the universal tag of NULL.
+- `const TagOID = 6`: TagOID is the universal tag of OBJECT IDENTIFIER.
+- `const TagEnum = 10`: TagEnum is the universal tag of ENUMERATED.
+- `const TagUTF8String = 12`: TagUTF8String is the universal tag of UTF8String.
+- `const TagSequence = 16`: TagSequence is the universal tag of SEQUENCE and SEQUENCE OF.
+- `const TagSet = 17`: TagSet is the universal tag of SET and SET OF.
+- `const TagNumericString = 18`: TagNumericString is the universal tag of NumericString.
+- `const TagPrintableString = 19`: TagPrintableString is the universal tag of PrintableString.
+- `const TagT61String = 20`: TagT61String is the universal tag of T61String.
+- `const TagIA5String = 22`: TagIA5String is the universal tag of IA5String.
+- `const TagUTCTime = 23`: TagUTCTime is the universal tag of UTCTime.
+- `const TagGeneralizedTime = 24`: TagGeneralizedTime is the universal tag of GeneralizedTime.
+- `type RawValue struct`: RawValue is one element: its class, its tag, whether its contents are constructed, the contents and, for a parsed element, its whole encoding (Go's asn1.RawValue).
+- `type ObjectIdentifier struct`: ObjectIdentifier is a sequence of arcs, such as 1.2.840.113549.
+- `type BitString struct`: BitString is a bit string: its bytes, most significant bit first, and its length in bits. Its bytes are ceil(BitLength / 8) long, and the unused bits of the last byte are zero.
+- `type DateTime struct`: DateTime is a UTCTime or GeneralizedTime in UTC: its year, month, day, hour, minute and second.
+- `OIDFromArcs(arcs []i64) !ObjectIdentifier`: OIDFromArcs returns the object identifier with the given arcs: at least two, the first 0, 1 or 2, the second below 40 unless the first is 2.
+- `ParseOID(s str) !ObjectIdentifier`: ParseOID returns the object identifier written as dotted decimal arcs, such as "1.2.840.113549".
+- `(o ObjectIdentifier) Arcs() []i64`: Arcs returns a copy of the arcs of o.
+- `(o ObjectIdentifier) Equal(other ObjectIdentifier) bool`: Equal reports whether o and other have the same arcs.
+- `(o ObjectIdentifier) String() str`: String returns the dotted decimal form of o, such as "1.2.840.113549"; the zero value is "".
+- `(b BitString) At(i i64) i64`: At returns the bit at index i (0 for the first bit), or 0 outside the string.
+- `(b BitString) RightAlign() []u8`: RightAlign returns the bytes of b with the unused bits of the last byte shifted out, as Go's RightAlign does.
+- `Marshal(r RawValue) []u8`: Marshal returns the encoding of r: its FullBytes when it has them, else its header and contents.
+- `Element(class i64, tag i64, compound bool, contents []u8) []u8`: Element returns the encoding of an element with the given class, tag, compound flag and contents.
+- `Concat(parts [][]u8) []u8`: Concat returns the encodings in parts joined end to end.
+- `Int(v i64) []u8`: Int returns the DER encoding of the INTEGER v, in the fewest two's complement octets.
+- `IntegerBytes(content []u8) ![]u8`: IntegerBytes returns the INTEGER whose contents are the two's complement bytes content, which must be minimal.
+- `Bool(v bool) []u8`: Bool returns the DER encoding of the BOOLEAN v: 0xff for true and 0x00 for false.
+- `Null() []u8`: Null returns the DER encoding of NULL.
+- `OID(o ObjectIdentifier) ![]u8`: OID returns the DER encoding of the object identifier o, which fails when o is the zero value.
+- `Octets(b []u8) []u8`: Octets returns the DER encoding of the OCTET STRING b.
+- `Bits(b BitString) ![]u8`: Bits returns the DER encoding of the BIT STRING b. Its bytes must be ceil(BitLength / 8) long.
+- `UTF8(s str) []u8`: UTF8 returns the DER encoding of the UTF8String s. As in Go, the bytes are written without a UTF-8 check.
+- `Printable(s str) ![]u8`: Printable returns the DER encoding of the PrintableString s.
+- `IA5(s str) ![]u8`: IA5 returns the DER encoding of the IA5String s, which must be ASCII.
+- `Numeric(s str) ![]u8`: Numeric returns the DER encoding of the NumericString s: digits and spaces.
+- `UTCTime(t DateTime) ![]u8`: UTCTime returns the DER encoding of t as a UTCTime, for the years 1950 to 2049.
+- `GeneralizedTime(t DateTime) ![]u8`: GeneralizedTime returns the DER encoding of t as a GeneralizedTime, for the years 0 to 9999.
+- `Seq(contents []u8) []u8`: Seq returns the DER encoding of a SEQUENCE whose contents are the encodings in contents.
+- `Set(contents []u8) []u8`: Set returns the DER encoding of a SET whose contents are the encodings in contents, in the order given.
+- `Explicit(tag i64, inner []u8) []u8`: Explicit wraps the encoding inner in a context-specific constructed tag [tag] (an EXPLICIT tag).
+- `Implicit(tag i64, r RawValue) []u8`: Implicit returns r with the context-specific tag [tag] in place of its own tag (an IMPLICIT tag).
+- `Unmarshal(b []u8) !(RawValue, []u8)`: Unmarshal reads the element at the start of b and returns it with the bytes after it. Its Bytes and FullBytes are views of b.
+- `Elements(b []u8) ![]RawValue`: Elements returns the elements of b, which must hold whole elements only (the contents of a SEQUENCE or SET).
+- `Expect(r RawValue, class i64, tag i64, compound bool) !`: Expect fails unless r has the class, tag and compound flag given.
+- `IntValue(r RawValue) !i64`: IntValue reads an INTEGER that fits in an i64.
+- `IntegerContent(r RawValue) ![]u8`: IntegerContent returns the two's complement contents of an INTEGER, of any length.
+- `BoolValue(r RawValue) !bool`: BoolValue reads a BOOLEAN: 0x00 is false and 0xff is true.
+- `NullValue(r RawValue) !`: NullValue reads a NULL. Its contents are not checked, as in Go's encoding/asn1.
+- `OIDValue(r RawValue) !ObjectIdentifier`: OIDValue reads an OBJECT IDENTIFIER.
+- `BitsValue(r RawValue) !BitString`: BitsValue reads a BIT STRING.
+- `OctetsValue(r RawValue) ![]u8`: OctetsValue reads an OCTET STRING.
+- `StringValue(r RawValue) !str`: StringValue reads a string of the UTF8, Numeric, Printable, T61 or IA5 tag as UTF-8 text (T61 as Latin-1, as Go does).
+- `TimeValue(r RawValue) !DateTime`: TimeValue reads a UTCTime (years 1950 to 2049) or a GeneralizedTime in UTC.
+- `ExplicitValue(r RawValue, tag i64) !RawValue`: ExplicitValue reads the element inside an EXPLICIT tag [tag] that r is.
 
 ## mime
 

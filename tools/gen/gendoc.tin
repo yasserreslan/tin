@@ -92,6 +92,7 @@ fn packages() []str {
 		"html", "HTML tokenizer and escaping (html, golang.org/x/net/html)",
 		"lasso", "regular expressions with linear-time matching (regexp)",
 		"pack", "numbers as bytes: byte order and varints (encoding/binary)",
+		"asn1", "ASN.1 DER: tags, lengths, object identifiers, bit strings and times (encoding/asn1)",
 		"mime", "media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart)",
 		"mail", "RFC 5322 message and address parsing (net/mail)",
 		"textproto", "line-oriented and dot-framed protocol I/O (net/textproto)",

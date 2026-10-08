@@ -102,6 +102,8 @@ jobs:
         run: sh tools/ci/tin.sh mime_check
       - name: Mail parsing and text protocol framing against Go
         run: sh tools/ci/tin.sh mail_check
+      - name: ASN.1 DER against Go's encoding/asn1 (generated values both ways, and mutated bytes)
+        run: sh tools/ci/tin.sh asn1_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
       - name: container/list and container/ring against Go (generated and exhaustive small cases)
