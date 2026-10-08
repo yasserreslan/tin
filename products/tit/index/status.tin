@@ -69,7 +69,26 @@ fn isLink(m object.Mode) bool {
 // at root. idx gets the new stat of files found unchanged.
 fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index, rules mut ignore.Rules) !Report {
 	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}}
-	let h = try flatten(mut s, head)
+	// the index as a tree, hashed in memory: when it is the last commit's tree, nothing is staged and the commit's
+	// trees need not be read at all
+	mut conflictedAny = false
+	for e in idx.Entries {
+		if e.Stage != 0 {
+			conflictedAny = true
+		}
+	}
+	mut same = false
+	if !conflictedAny && head != object.NoId {
+		mut mem = store.NewMem()
+		let itree = WriteTree(mut mem, idx) catch _ {
+			object.NoId
+		}
+		same = itree == head
+	}
+	mut h = map[str]Entry{}
+	if !same {
+		h = try flatten(mut s, head)
+	}
 	// staged: the last commit against the index
 	mut conflicted = map[str]bool{}
 	mut inIndex = map[str]bool{}
@@ -80,6 +99,9 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 				conflicted[e.Path] = true
 				rep.Staged = append(rep.Staged, FileStatus.Conflicted(e.Path))
 			}
+			continue
+		}
+		if same {
 			continue
 		}
 		let (he, ok) = h[e.Path]
@@ -146,12 +168,8 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 // hasTracked reports whether the index tracks anything under dir/.
 fn hasTracked(idx Index, dir str) bool {
 	let prefix = dir + "/"
-	for e in idx.Entries {
-		if twine.HasPrefix(e.Path, prefix) {
-			return true
-		}
-	}
-	return false
+	let at = idx.lowerBound(prefix)
+	return at < len(idx.Entries) && twine.HasPrefix(idx.Entries[at].Path, prefix)
 }
 
 fn walk(root str, dir str, files mut map[str]quarry.FileInfo, rules mut ignore.Rules, idx Index, untracked mut []str) ! {

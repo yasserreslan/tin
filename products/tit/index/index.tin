@@ -198,7 +198,13 @@ fn (idx Index) Stages(path str) (bool, bool, bool) {
 	mut b = false
 	mut o = false
 	mut t = false
-	for e in idx.Entries {
+	// the entries of a path are one run, found by binary search
+	let lo = idx.lowerBound(path)
+	for i in lo..len(idx.Entries) {
+		let e = idx.Entries[i]
+		if e.Path != path {
+			break
+		}
 		if e.Path == path {
 			if e.Stage == 1 {
 				b = true
