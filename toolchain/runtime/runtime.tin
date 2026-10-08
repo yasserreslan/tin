@@ -1345,8 +1345,10 @@ fn rt_flush() {
 	rtOut[0] = 0
 }
 
-// rt_out appends n bytes to the stdout buffer, flushing at 64 KiB or, on a terminal,
-// at every newline.
+// rt_out appends n bytes to the stdout buffer, flushing at 64 KiB and at every newline, on a
+// terminal, a pipe or a file alike (#747): a server's stdout is a pipe to a log collector, and a
+// line held in the buffer arrives late and is lost when the process is killed. Text without a
+// newline (say.Text) waits for the next one.
 fn rt_out(p i64, n i64) {
 	rt_lock(&rtOutLock)
 	if rtOut[0]+n > rtOut[1] {
@@ -1359,7 +1361,7 @@ fn rt_out(p i64, n i64) {
 	}
 	memcpy(rtOut[2]+rtOut[0], p, n)
 	rtOut[0] += n
-	if rtOutTTY {
+	if rtOutTTY || memchr(p, '\n', n) != 0 {
 		rt_flush()
 	}
 	rt_unlock(&rtOutLock)

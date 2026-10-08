@@ -2015,7 +2015,10 @@ or `<nil>`.
 `%+v` is not `%v` with a sign: it prints no `+` on numbers and gives structs their field
 names (`{a:1 b:2.5}`). `%+d`, `%+g`, `%+f` and `%+e` do print the sign.
 
-Output to stdout is buffered (64 KiB, or per line on a terminal) and flushed at exit.
+Output to stdout is written at every newline, to a terminal, a pipe or a file alike, as Go's is
+(#747): `say.Line` and a format ending in `\n` reach a server's log collector before its response
+does, and survive a SIGKILL. Text without a newline (`say.Text`) waits in a 64 KiB buffer for
+the next one, or for exit.
 
 ---
 

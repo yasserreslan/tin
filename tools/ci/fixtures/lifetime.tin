@@ -87,6 +87,12 @@ fn handle(q anvil.Req, w mut anvil.Out) {
 		}
 		return
 	}
+	if q.Path == "/log" {
+		// #747: a server's say.Line reaches its stdout pipe before the response does.
+		say.Line("log", q.Param("n"), "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+		w.Text("logged")
+		return
+	}
 	if q.Path == "/stats" {
 		w.Text("{websocket.ProbeClosed()}|{websocket.ProbeBadCleanup()}|{websocket.ProbeHelpers()}|{saved}|{websocket.ProbeScoped()}")
 		return
