@@ -1,0 +1,75 @@
+package main
+
+import "mint"
+import "quarry"
+import "say"
+import "syslog"
+import "twine"
+
+// The Tin side of syslog_check (#929): it runs the script bench/ref/syslog reads on stdin through syslog.Dial, with the arguments
+// NETWORK RADDR PRIORITY TAG, and prints nothing on success.
+
+// hexVal is the value of one hex digit.
+fn hexVal(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c) - '0'
+	}
+	return i64(c) - 'a' + 10
+}
+
+// unhex decodes the hex text of a message ("-" is the empty message).
+fn unhex(s str) []u8 {
+	mut out = []u8{}
+	if s == "-" {
+		return out
+	}
+	let n = len(s) / 2
+	for i in 0..n {
+		out = append(out, u8(hexVal(s[2*i])*16 + hexVal(s[2*i+1])))
+	}
+	return out
+}
+
+// sendAt writes msg at severity sev (0 Emerg to 7 Debug), the method the script names.
+fn sendAt(w mut syslog.Writer, sev i64, msg str) ! {
+	match sev {
+		0 => { try w.Emerg(msg) }
+		1 => { try w.Alert(msg) }
+		2 => { try w.Crit(msg) }
+		3 => { try w.Err(msg) }
+		4 => { try w.Warning(msg) }
+		5 => { try w.Notice(msg) }
+		6 => { try w.Info(msg) }
+		_ => { try w.Debug(msg) }
+	}
+}
+
+fn run() ! {
+	let args = quarry.Args()
+	let prio = try mint.Atoi(args[3])
+	mut w = try syslog.Dial(args[1], args[2], prio, args[4])
+	let text = try quarry.ReadStdin()
+	for line in twine.Split(text, "\n") {
+		let f = twine.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if f[0] == "C" {
+			w.Close()
+		} else if f[0] == "W" {
+			let n = try w.Write(unhex(f[1]))
+		} else if f[0] == "S" {
+			let sev = try mint.Atoi(f[1])
+			try sendAt(mut w, sev, str(unhex(f[2])))
+		} else {
+			fail "unknown operation {f[0]}"
+		}
+	}
+}
+
+fn main() {
+	run() catch err {
+		say.Line("syslog fixture: " + say.Str(err))
+		quarry.Exit(1)
+	}
+}
