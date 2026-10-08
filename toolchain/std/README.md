@@ -38,4 +38,4 @@ An import name is looked up in `toolchain/std/` and then `packages/`; the layout
 ## Adding a package
 
 Create `toolchain/std/NAME/NAME.tin` (or `packages/NAME/NAME.tin`) starting with `package NAME`, add the name and a one-line role to
-`ORDER` and `ROLE` in `tools/gen/gendoc.tin`, run it, and add a test under `toolchain/tests/v2/`.
+`PACKAGES` in `tools/gen/gendoc.tin`, run it, and add a test under `toolchain/tests/v2/`.

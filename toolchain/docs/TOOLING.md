@@ -548,7 +548,7 @@ one-line comment above every exported declaration.
 dialect to typed edition 1 written with `i64` words (#228); a one-time migration tool, kept until the
 dialect is gone.
 
-`python3 tools/gen/gen_unicode.py` rewrites `toolchain/std/glyph/tables.tin` and `toolchain/runtime/printable.tin` (the Unicode
+`sh tools/ci/tin.sh tools/gen/gen_unicode.tin` rewrites `toolchain/std/glyph/tables.tin` and `toolchain/runtime/printable.tin` (the Unicode
 tables) from Go's `unicode/tables.go`; it needs a Go tree only to read that one file.
 
 ## Integer overflow checks
