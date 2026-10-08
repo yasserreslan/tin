@@ -1,8 +1,6 @@
-package netip
-
 // Package netip holds IP addresses, address/port pairs and prefixes as small value types, like Go's net/netip.
-// An Addr is a value struct of 16 bytes, a zone and a kind byte: it is copied by every store, compares with ==
-// and is a map key with no allocation for the lookup.
+// An Addr is a value struct of 16 bytes, a zone and a kind byte: it is copied by every store, compares with == and
+// is a map key by value. Comparing, classifying, Contains, Overlaps and AppendTo allocate nothing.
 //
 //	let a = try netip.ParseAddr("192.168.1.10")
 //	let p = try netip.ParsePrefix("192.168.0.0/16")
@@ -15,6 +13,7 @@ package netip
 // Parsing, formatting, the fault messages and every classification follow net/netip exactly: an IPv4 address is
 // stored as its IPv4-mapped IPv6 form with the IPv4 kind, IPv4 fields with leading zeros are refused, an IPv6
 // address may end in an embedded IPv4 address and carry a zone after %, and the zero Addr is invalid.
+package netip
 
 import "fault"
 import "mint"
