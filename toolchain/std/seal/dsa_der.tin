@@ -1,0 +1,53 @@
+package seal
+
+// ---- DSA parameters, public values and signatures as DER, read to big-endian bytes for package nist (#927) ----
+// The same strict reader as the certificate and key parsers (der.tin). Each value comes back as its magnitude
+// without leading zeros; nist turns them into numbers and checks them, so this file has no big integers.
+
+// oidDSA is the algorithm identifier of a DSA public key (id-dsa).
+const oidDSA = "1.2.840.10040.4.1"
+
+// ParseDSAPublicKeyBytes reads a DSA SubjectPublicKeyInfo as certificates carry it and returns the magnitudes of its
+// parameters p, q and g and of the public value y.
+fn ParseDSAPublicKeyBytes(der []u8) !([]u8, []u8, []u8, []u8) {
+	let (from, to) = try der_expect(der, 0, len(der), derSequence, "a public key")
+	if to != len(der) {
+		fail "seal: trailing data after the DSA public key"
+	}
+	let (algFrom, algTo) = try der_expect(der, from, to, derSequence, "an algorithm identifier")
+	let (oid, after) = try der_oid(der, algFrom, algTo)
+	if oid != oidDSA {
+		fail "seal: not a DSA public key (algorithm " + oid + ")"
+	}
+	let (pFrom, pTo) = try der_expect(der, after, algTo, derSequence, "DSA parameters")
+	let (pb, n1) = try der_posint(der, pFrom, pTo)
+	let (qb, n2) = try der_posint(der, n1, pTo)
+	let (gb, last) = try der_posint(der, n2, pTo)
+	if last != pTo {
+		fail "seal: trailing data in the DSA parameters"
+	}
+	let (bits, end) = try der_bits(der, algTo, to)
+	if end != to {
+		fail "seal: trailing data after the DSA public key"
+	}
+	let (yb, yEnd) = try der_posint(bits, 0, len(bits))
+	if yEnd != len(bits) {
+		fail "seal: trailing data in the DSA public key"
+	}
+	return pb, qb, gb, yb
+}
+
+// ParseDSASignatureBytes reads a DER SEQUENCE{r, s} DSA signature, the form certificates carry, and returns the
+// magnitudes of r and s.
+fn ParseDSASignatureBytes(sig []u8) !([]u8, []u8) {
+	let (from, to) = try der_expect(sig, 0, len(sig), derSequence, "a DSA signature")
+	if to != len(sig) {
+		fail "seal: trailing data after the DSA signature"
+	}
+	let (rb, next) = try der_posint(sig, from, to)
+	let (sb, end) = try der_posint(sig, next, to)
+	if end != to {
+		fail "seal: trailing data in the DSA signature"
+	}
+	return rb, sb
+}

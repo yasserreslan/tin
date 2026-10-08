@@ -1,0 +1,181 @@
+// Package nist has the NIST curves P-224, P-256, P-384 and P-521 as Go's crypto/elliptic Curve (affine abacus
+// points, with (0, 0) for the point at infinity), legacy DSA signature verification as Go's crypto/dsa does it
+// (no DSA signer: Go deprecates DSA and FIPS 186-5 does not approve it for signing), and Tin's FIPS 140-3 status
+// as Go's crypto/fips140 reports it. Tin is not a validated module, so FIPS mode is never enabled.
+package nist
+
+import "abacus"
+import "seal"
+
+// ---- crypto/elliptic: the Curve shape and the NIST curves P-224, P-256, P-384 and P-521 (#927) ----
+// The curves are y^2 = x^3 - 3x + b over a prime field (a = -3 for all four), computed by seal's PrimeCurve
+// on big-endian bytes. This file is Go's shape: points are affine abacus integers, (0, 0) is the point at
+// infinity, and a negative coordinate fails, as Go's does. Scalars are big-endian bytes of any length.
+
+// Curve is the operations of Go's crypto/elliptic.Curve that crypto/ecdsa uses. A point (x, y)
+// is affine, and (0, 0) is the point at infinity. Add, Double and ScalarMult fail where Go
+// panics: on a point that is off the curve or has a coordinate out of range.
+shape Curve {
+	IsOnCurve(x abacus.Int, y abacus.Int) bool
+	Add(x1 abacus.Int, y1 abacus.Int, x2 abacus.Int, y2 abacus.Int) !(abacus.Int, abacus.Int)
+	Double(x1 abacus.Int, y1 abacus.Int) !(abacus.Int, abacus.Int)
+	ScalarMult(x1 abacus.Int, y1 abacus.Int, k []u8) !(abacus.Int, abacus.Int)
+	ScalarBaseMult(k []u8) (abacus.Int, abacus.Int)
+}
+
+// ellipticCurve is one of the NIST curves as a Curve: its name for the faults, and its curve.
+type ellipticCurve struct {
+	name str
+	c seal.PrimeCurve
+}
+
+// Constants of the NIST curves, as hex (big-endian): P, N, B, Gx and Gy. Each curve is built on first use.
+mut p224cache ?seal.PrimeCurve
+mut p256cache ?seal.PrimeCurve
+mut p384cache ?seal.PrimeCurve
+mut p521cache ?seal.PrimeCurve
+
+// p224_curve is P-224, built on first use.
+fn p224_curve() !seal.PrimeCurve {
+	let c = p224cache
+	if c != nil {
+		return c
+	}
+	let built = try seal.NewPrimeCurve("P-224",
+		"ffffffffffffffffffffffffffffffff000000000000000000000001",
+		"ffffffffffffffffffffffffffff16a2e0b8f03e13dd29455c5c2a3d",
+		"b4050a850c04b3abf54132565044b0b7d7bfd8ba270b39432355ffb4",
+		"b70e0cbd6bb4bf7f321390b94a03c1d356c21122343280d6115c1d21",
+		"bd376388b5f723fb4c22dfe6cd4375a05a07476444d5819985007e34")
+	p224cache = keep(built)
+	return built
+}
+
+// p256_curve is P-256 (the constants seal's p256.tin uses), built on first use.
+fn p256_curve() !seal.PrimeCurve {
+	let c = p256cache
+	if c != nil {
+		return c
+	}
+	let built = try seal.NewPrimeCurve("P-256",
+		"ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+		"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+		"5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
+		"6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+		"4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
+	p256cache = keep(built)
+	return built
+}
+
+// p384_curve is P-384, built on first use.
+fn p384_curve() !seal.PrimeCurve {
+	let c = p384cache
+	if c != nil {
+		return c
+	}
+	let built = try seal.NewPrimeCurve("P-384",
+		"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
+		"ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+		"b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef",
+		"aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
+		"3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f")
+	p384cache = keep(built)
+	return built
+}
+
+// p521_curve is P-521, built on first use.
+fn p521_curve() !seal.PrimeCurve {
+	let c = p521cache
+	if c != nil {
+		return c
+	}
+	let built = try seal.NewPrimeCurve("P-521",
+		"01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409",
+		"51953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00",
+		"c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66",
+		"011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650")
+	p521cache = keep(built)
+	return built
+}
+
+// P224 is the NIST curve P-224 as a Curve. Its constants are fixed, so building it cannot fail.
+fn P224() dyn Curve {
+	let (c, err) = p224_curve()
+	if err != nil {
+		panic("nist: the P-224 constants are invalid")
+	}
+	return ellipticCurve{name: "P-224", c: c}
+}
+
+// P256 is the NIST curve P-256 as a Curve.
+fn P256() dyn Curve {
+	let (c, err) = p256_curve()
+	if err != nil {
+		panic("nist: the P-256 constants are invalid")
+	}
+	return ellipticCurve{name: "P-256", c: c}
+}
+
+// P384 is the NIST curve P-384 as a Curve.
+fn P384() dyn Curve {
+	let (c, err) = p384_curve()
+	if err != nil {
+		panic("nist: the P-384 constants are invalid")
+	}
+	return ellipticCurve{name: "P-384", c: c}
+}
+
+// P521 is the NIST curve P-521 as a Curve.
+fn P521() dyn Curve {
+	let (c, err) = p521_curve()
+	if err != nil {
+		panic("nist: the P-521 constants are invalid")
+	}
+	return ellipticCurve{name: "P-521", c: c}
+}
+
+// IsOnCurve reports whether (x, y) is a point of the curve, not the point at infinity (0, 0).
+fn (e ellipticCurve) IsOnCurve(x abacus.Int, y abacus.Int) bool {
+	if (x.IsZero() && y.IsZero()) || x.Sign() < 0 || y.Sign() < 0 {
+		return false
+	}
+	return e.c.OnCurve(x.Bytes(), y.Bytes())
+}
+
+// Add returns (x1, y1) + (x2, y2), and fails when either point is not on the curve.
+fn (e ellipticCurve) Add(x1 abacus.Int, y1 abacus.Int, x2 abacus.Int, y2 abacus.Int) !(abacus.Int, abacus.Int) {
+	let (px, py) = try e.affine(x1, y1) wrap "nist: Add was called on an invalid point"
+	let (qx, qy) = try e.affine(x2, y2) wrap "nist: Add was called on an invalid point"
+	let (rx, ry) = try e.c.Add(px, py, qx, qy) wrap "nist: Add was called on an invalid point"
+	return abacus.FromBytes(rx), abacus.FromBytes(ry)
+}
+
+// Double returns 2*(x, y), and fails when the point is not on the curve.
+fn (e ellipticCurve) Double(x abacus.Int, y abacus.Int) !(abacus.Int, abacus.Int) {
+	let (px, py) = try e.affine(x, y) wrap "nist: Double was called on an invalid point"
+	let (rx, ry) = try e.c.Double(px, py) wrap "nist: Double was called on an invalid point"
+	return abacus.FromBytes(rx), abacus.FromBytes(ry)
+}
+
+// ScalarMult returns k*(x, y) for a big-endian scalar k of any length, and fails when the point is
+// not on the curve. The time depends on the lengths of k and the curve, not on its bits.
+fn (e ellipticCurve) ScalarMult(x abacus.Int, y abacus.Int, k []u8) !(abacus.Int, abacus.Int) {
+	let (px, py) = try e.affine(x, y) wrap "nist: ScalarMult was called on an invalid point"
+	let (rx, ry) = try e.c.ScalarMult(px, py, k) wrap "nist: ScalarMult was called on an invalid point"
+	return abacus.FromBytes(rx), abacus.FromBytes(ry)
+}
+
+// ScalarBaseMult returns k*G for the curve's generator G and a big-endian scalar k of any length.
+fn (e ellipticCurve) ScalarBaseMult(k []u8) (abacus.Int, abacus.Int) {
+	let (rx, ry) = e.c.ScalarBaseMult(k)
+	return abacus.FromBytes(rx), abacus.FromBytes(ry)
+}
+
+// affine is the magnitudes of the coordinates (x, y) for seal, which takes no sign: a negative one fails.
+fn (e ellipticCurve) affine(x abacus.Int, y abacus.Int) !([]u8, []u8) {
+	if x.Sign() < 0 || y.Sign() < 0 {
+		fail "nist: " + e.name + " negative coordinate"
+	}
+	return x.Bytes(), y.Bytes()
+}

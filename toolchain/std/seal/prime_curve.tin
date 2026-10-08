@@ -1,0 +1,132 @@
+package seal
+
+// ---- PrimeCurve: the curve arithmetic on big-endian bytes that package nist builds crypto/elliptic on (#927) ----
+// A curve y^2 = x^3 - 3x + b over a prime field, with points as affine big-endian coordinates: (0, 0), or
+// empty coordinates, is the point at infinity, as in Go. A coordinate longer than the field fails, and so
+// does a point that is not on the curve. The arithmetic is the complete formulas of ecdsa_sign.tin (ec_add,
+// ec_double and ec_mul_ct), which use every bit of a scalar: k*P is Go's (k mod N)*P, because every point
+// has order dividing N. Each method builds its own scratch, so no two calls share it.
+
+// PrimeCurve is a curve built by NewPrimeCurve.
+type PrimeCurve struct {
+	c ecCurve
+}
+
+// NewPrimeCurve builds the curve name from big-endian hex p, n, b, Gx and Gy, and fails on bad constants.
+fn NewPrimeCurve(name str, ph str, nh str, bh str, gxh str, gyh str) !PrimeCurve {
+	let c = try ec_new(name, ph, nh, bh, gxh, gyh)
+	return PrimeCurve{c: c}
+}
+
+// OnCurve reports whether (x, y) is a point of the curve, not the point at infinity.
+fn (p PrimeCurve) OnCurve(x []u8, y []u8) bool {
+	if ec_zero_bytes(x) && ec_zero_bytes(y) {
+		return false
+	}
+	let c = ec_scratch(p.c)
+	let (_, err) = ec_point(mut c, x, y)
+	return err == nil
+}
+
+// Add returns (x1, y1) + (x2, y2) as big-endian coordinates, and fails when either point is not on the curve.
+fn (p PrimeCurve) Add(x1 []u8, y1 []u8, x2 []u8, y2 []u8) !([]u8, []u8) {
+	let c = ec_scratch(p.c)
+	let a = try ec_point(mut c, x1, y1)
+	let b = try ec_point(mut c, x2, y2)
+	mut r = ec_identity(c)
+	ec_add(mut c, mut r, a, b)
+	let (x, y) = ec_out(mut c, r)
+	return x, y
+}
+
+// Double returns 2*(x, y) as big-endian coordinates, and fails when the point is not on the curve.
+fn (p PrimeCurve) Double(x []u8, y []u8) !([]u8, []u8) {
+	let c = ec_scratch(p.c)
+	let a = try ec_point(mut c, x, y)
+	mut r = ec_identity(c)
+	ec_double(mut c, mut r, a)
+	let (x, y) = ec_out(mut c, r)
+	return x, y
+}
+
+// ScalarMult returns k*(x, y) for a big-endian scalar k of any length, and fails when the point is not on the curve.
+fn (p PrimeCurve) ScalarMult(x []u8, y []u8, k []u8) !([]u8, []u8) {
+	let c = ec_scratch(p.c)
+	let a = try ec_point(mut c, x, y)
+	let r = ec_mul_ct(mut c, a, k)
+	let (x, y) = ec_out(mut c, r)
+	return x, y
+}
+
+// ScalarBaseMult returns k*G for the curve's generator G and a big-endian scalar k of any length.
+fn (p PrimeCurve) ScalarBaseMult(k []u8) ([]u8, []u8) {
+	let c = ec_scratch(p.c)
+	let r = ec_mul_ct(mut c, ec_generator(c), k)
+	return ec_out(mut c, r)
+}
+
+// ec_scratch is c with scratch buffers of its own, so a method call never shares them with another.
+fn ec_scratch(c ecCurve) ecCurve {
+	mut d = ecCurve{name: c.name, size: c.size, f: c.f, n: c.n, b: c.b, gx: c.gx, gy: c.gy}
+	for i in 0..8 {
+		d.t = append(d.t, c.f.elem())
+	}
+	return d
+}
+
+// ec_point reads the affine point (x, y) of c: empty or zero coordinates are the point at infinity, and a
+// coordinate longer than the field, or a point off the curve, fails.
+fn ec_point(c mut ecCurve, x []u8, y []u8) !ecpt {
+	if ec_zero_bytes(x) && ec_zero_bytes(y) {
+		return ec_identity(c)
+	}
+	if len(x) > c.size || len(y) > c.size {
+		fail "seal: " + c.name + " coordinate overflows"
+	}
+	mut buf = make([]u8, 0, 1+2*c.size)
+	buf = append(buf, 4)
+	buf = append(buf, fixed_be(x, c.size)...)
+	buf = append(buf, fixed_be(y, c.size)...)
+	return try ec_decode(mut c, buf)
+}
+
+// ec_out is p's affine (x, y) as c.size big-endian bytes each, zeros for the point at infinity.
+fn ec_out(c mut ecCurve, p ecpt) ([]u8, []u8) {
+	let (xb, yb, finite) = ec_affine(mut c, p)
+	if finite == 0 {
+		return make([]u8, c.size), make([]u8, c.size)
+	}
+	return xb, yb
+}
+
+// ec_affine is p's affine x and y as c.size big-endian bytes each, and 1 unless p is the point at infinity.
+fn ec_affine(c mut ecCurve, p ecpt) ([]u8, []u8, u64) {
+	let zi = c.f.elem()
+	c.f.inv(mut zi, p.z)
+	let x = c.f.elem()
+	let y = c.f.elem()
+	c.f.mul(mut x, p.x, zi)
+	c.f.mul(mut y, p.y, zi)
+	let xb = c.f.to_bytes(x)
+	let yb = c.f.to_bytes(y)
+	return xb[len(xb)-c.size:], yb[len(yb)-c.size:], 1 ^ c.f.is_zero(p.z)
+}
+
+// ec_zero_bytes reports whether every byte of b is zero, and an empty b is zero.
+fn ec_zero_bytes(b []u8) bool {
+	for v in b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// fixed_be left-pads the big-endian b with zeros to size bytes; b must fit.
+fn fixed_be(b []u8, size i64) []u8 {
+	mut out = make([]u8, size)
+	for i in 0..len(b) {
+		out[size-len(b)+i] = b[i]
+	}
+	return out
+}

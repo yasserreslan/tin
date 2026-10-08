@@ -50,6 +50,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [ledger](#ledger) | CSV reading and writing (encoding/csv) |
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
+| [nist](#nist) | NIST curves P-224 to P-521, DSA signature verification and FIPS 140-3 status (crypto/elliptic, crypto/dsa, crypto/fips140) |
 | [herald](#herald) | logging (log/slog) |
 | [expvar](#expvar) | published variables and their JSON handler (expvar) |
 | [crucible](#crucible) | testing helpers (testing) |
@@ -1962,10 +1963,8 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `(d DES) Decrypt(dst mut []u8, src []u8)`: Decrypt decrypts the first 8 bytes of src into dst (dst may be src).
 - `(d DES) EncryptBlocks(dst mut []u8, src []u8)`: EncryptBlocks encrypts every 8-byte block of src on its own into dst (the modes' batch form).
 - `(d DES) DecryptBlocks(dst mut []u8, src []u8)`: DecryptBlocks decrypts every 8-byte block of src on its own into dst (the modes' batch form).
-- `type DSAPublicKey struct`: DSAPublicKey is a DSA public key: the parameters p, q and g, and the public value y.
-- `DSAVerify(pub DSAPublicKey, hash []u8, r abacus.Int, s abacus.Int) !`: DSAVerify checks the legacy DSA signature (r, s) over hash by pub, as Go's dsa.Verify does. Parameters no signature can verify under (P zero, Q at most 1 or not a whole number of bytes long) fail with ErrDSAParameters; a signature that does not verify fails with a plain fault.
-- `DSAVerifyDER(pub DSAPublicKey, hash []u8, sig []u8) !`: DSAVerifyDER checks a DER SEQUENCE{r, s} DSA signature, the form X.509 certificates carry, over hash by pub.
-- `ParseDSAPublicKeyDER(der []u8) !DSAPublicKey`: ParseDSAPublicKeyDER reads a DSA SubjectPublicKeyInfo as certificates carry it: the algorithm's parameters (p, q, g) and the public value y. Like Go's x509, it fails on a zero or negative value.
+- `ParseDSAPublicKeyBytes(der []u8) !([]u8, []u8, []u8, []u8)`: ParseDSAPublicKeyBytes reads a DSA SubjectPublicKeyInfo as certificates carry it and returns the magnitudes of its parameters p, q and g and of the public value y.
+- `ParseDSASignatureBytes(sig []u8) !([]u8, []u8)`: ParseDSASignatureBytes reads a DER SEQUENCE{r, s} DSA signature, the form certificates carry, and returns the magnitudes of r and s.
 - `VerifyECDSA(curve str, pub []u8, digest []u8, sig []u8) !`: VerifyECDSA checks a DER-encoded ECDSA signature over digest (a hash of the message) by the public key pub, an uncompressed point on curve ("P-256" or "P-384"). A digest longer than the curve's order is truncated to its leftmost bytes, as FIPS 186-5 says.
 - `SignECDSA(k ECPrivateKey, h Hash, digest []u8) ![]u8`: SignECDSA signs digest (a hash of the message, made with h) with k and returns a DER ECDSA-Sig-Value. The nonce is RFC 6979's, derived with HMAC over h, so equal inputs give equal signatures.
 - `(k PrivateKey) SignTLS12(scheme i64, msg []u8) ![]u8`: SignTLS12 signs msg for TLS 1.2 (ServerKeyExchange, CertificateVerify; #473) with scheme: also RSA PKCS #1 v1.5 (0x0401, 0x0501, 0x0601) and ECDSA with the scheme's hash on either curve.
@@ -1974,20 +1973,6 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `type Ed25519PrivateKey struct`: Ed25519PrivateKey is an Ed25519 key: the 32-byte seed and the public key it gives.
 - `Ed25519PublicKey(seed secret []u8) ![]u8`: Ed25519PublicKey is the 32-byte public key of a 32-byte Ed25519 seed.
 - `SignEd25519(seed secret []u8, msg []u8) ![]u8`: SignEd25519 is the 64-byte Ed25519 signature of msg by the key with the 32-byte seed (pure Ed25519: msg is not hashed first).
-- `shape Curve`: Curve is the operations of Go's crypto/elliptic.Curve that crypto/ecdsa uses. A point (x, y) is affine, and (0, 0) is the point at infinity. Add, Double and ScalarMult fail where Go panics: on a point that is off the curve or has a coordinate out of range.
-- `P224() dyn Curve`: P224 is the NIST curve P-224 as a Curve. Its constants are fixed, so building it cannot fail.
-- `P256() dyn Curve`: P256 is the NIST curve P-256 as a Curve.
-- `P384() dyn Curve`: P384 is the NIST curve P-384 as a Curve.
-- `P521() dyn Curve`: P521 is the NIST curve P-521 as a Curve.
-- `(e ellipticCurve) IsOnCurve(x abacus.Int, y abacus.Int) bool`: IsOnCurve reports whether (x, y) is a point of the curve, not the point at infinity (0, 0).
-- `(e ellipticCurve) Add(x1 abacus.Int, y1 abacus.Int, x2 abacus.Int, y2 abacus.Int) !(abacus.Int, abacus.Int)`: Add returns (x1, y1) + (x2, y2), and fails when either point is not on the curve.
-- `(e ellipticCurve) Double(x abacus.Int, y abacus.Int) !(abacus.Int, abacus.Int)`: Double returns 2*(x, y), and fails when the point is not on the curve.
-- `(e ellipticCurve) ScalarMult(x abacus.Int, y abacus.Int, k []u8) !(abacus.Int, abacus.Int)`: ScalarMult returns k*(x, y) for a big-endian scalar k of any length, and fails when the point is not on the curve. The time depends on the lengths of k and the curve, not on its bits.
-- `(e ellipticCurve) ScalarBaseMult(k []u8) (abacus.Int, abacus.Int)`: ScalarBaseMult returns k*G for the curve's generator G and a big-endian scalar k of any length.
-- `FIPS140Enabled() bool`: FIPS140Enabled reports whether FIPS 140-3 mode is on. Tin's verdict is always false.
-- `FIPS140Enforced() bool`: FIPS140Enforced reports whether FIPS 140-3 rules are enforced (Go's Enforced, the only-mode switch). Tin's verdict is always false.
-- `FIPS140Version() str`: FIPS140Version is the version of a frozen FIPS 140-3 module: "" because Tin has none (Go reports "latest" for its unfrozen module).
-- `FIPS140WithoutEnforcement(f fn())`: FIPS140WithoutEnforcement runs f. Tin never enforces FIPS 140-3 rules, so there is nothing to switch off.
 - `type Hasher struct`: Hasher is an incremental SHA-256, SHA-1 or MD5; it satisfies io.Writer.
 - `NewSha256() Hasher`: NewSha256 is an incremental SHA-256.
 - `NewSha1() Hasher`: NewSha1 is an incremental SHA-1; use it only where a protocol requires SHA-1.
@@ -2046,6 +2031,13 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `P256NewPrivateKey() []u8`: P256NewPrivateKey returns a random P-256 private key: 32 big-endian bytes in [1, n-1].
 - `P256PublicKey(priv secret []u8) ![]u8`: P256PublicKey is the uncompressed public key (65 bytes) of a P-256 private key; it fails unless priv is 32 bytes in [1, n-1]. Constant-time in priv.
 - `P256ECDH(priv secret []u8, peer []u8) ![]u8`: P256ECDH is the P-256 Diffie-Hellman shared secret (the 32-byte x coordinate of priv*peer). peer is an uncompressed or compressed public key; it fails for an invalid private key, a point not on the curve, or a result at infinity. Constant-time in priv.
+- `type PrimeCurve struct`: PrimeCurve is a curve built by NewPrimeCurve.
+- `NewPrimeCurve(name str, ph str, nh str, bh str, gxh str, gyh str) !PrimeCurve`: NewPrimeCurve builds the curve name from big-endian hex p, n, b, Gx and Gy, and fails on bad constants.
+- `(p PrimeCurve) OnCurve(x []u8, y []u8) bool`: OnCurve reports whether (x, y) is a point of the curve, not the point at infinity.
+- `(p PrimeCurve) Add(x1 []u8, y1 []u8, x2 []u8, y2 []u8) !([]u8, []u8)`: Add returns (x1, y1) + (x2, y2) as big-endian coordinates, and fails when either point is not on the curve.
+- `(p PrimeCurve) Double(x []u8, y []u8) !([]u8, []u8)`: Double returns 2*(x, y) as big-endian coordinates, and fails when the point is not on the curve.
+- `(p PrimeCurve) ScalarMult(x []u8, y []u8, k []u8) !([]u8, []u8)`: ScalarMult returns k*(x, y) for a big-endian scalar k of any length, and fails when the point is not on the curve.
+- `(p PrimeCurve) ScalarBaseMult(k []u8) ([]u8, []u8)`: ScalarBaseMult returns k*G for the curve's generator G and a big-endian scalar k of any length.
 - `type RC4 struct`: RC4 is an RC4 keystream with its state, as Go's rc4.Cipher; it satisfies Stream. Broken: legacy protocols only.
 - `NewRC4(key secret []u8) !RC4`: NewRC4 is RC4 keyed with 1 to 256 bytes, as Go's rc4.NewCipher; another length fails as Go's KeySizeError does.
 - `(c mut RC4) Reset()`: Reset zeroes the key state; the RC4 is unusable afterwards (Go's deprecated Reset).
@@ -2127,6 +2119,29 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `(c Certificate) Verify(opts VerifyOptions) ![]Certificate`: Verify builds a chain from c through opts.Intermediates to a trusted root and checks it: validity periods, CA and key-usage rules, path lengths, name constraints, signatures (no SHA-1), the chain length and the host name. The chain is returned leaf first, root last.
 - `ParseIP(s str) ?[]u8`: ParseIP parses dotted IPv4 (4 bytes) or IPv6 text (16 bytes), optionally in brackets; nil if invalid.
 - `(c Certificate) VerifyHostname(host str) !`: VerifyHostname checks that c is valid for host: an IP address against the IP SANs, otherwise a DNS name against the DNS SANs (case-insensitive, one leftmost "*" label followed by at least two labels; a host containing "*" never matches). The common name is not used.
+
+## nist
+
+Package nist has the NIST curves P-224, P-256, P-384 and P-521 as Go's crypto/elliptic Curve (affine abacus points, with (0, 0) for the point at infinity), legacy DSA signature verification as Go's crypto/dsa does it (no DSA signer: Go deprecates DSA and FIPS 186-5 does not approve it for signing), and Tin's FIPS 140-3 status as Go's crypto/fips140 reports it. Tin is not a validated module, so FIPS mode is never enabled.
+
+- `type DSAPublicKey struct`: DSAPublicKey is a DSA public key: the parameters p, q and g, and the public value y.
+- `DSAVerify(pub DSAPublicKey, hash []u8, r abacus.Int, s abacus.Int) !`: DSAVerify checks the legacy DSA signature (r, s) over hash by pub, as Go's dsa.Verify does. Parameters no signature can verify under (P zero, Q at most 1 or not a whole number of bytes long) fail with ErrDSAParameters; a signature that does not verify fails with a plain fault.
+- `DSAVerifyDER(pub DSAPublicKey, hash []u8, sig []u8) !`: DSAVerifyDER checks a DER SEQUENCE{r, s} DSA signature, the form X.509 certificates carry, over hash by pub.
+- `ParseDSAPublicKeyDER(der []u8) !DSAPublicKey`: ParseDSAPublicKeyDER reads a DSA SubjectPublicKeyInfo as certificates carry it: the algorithm's parameters (p, q, g) and the public value y. Like Go's x509, it fails on a zero or negative value.
+- `shape Curve`: Curve is the operations of Go's crypto/elliptic.Curve that crypto/ecdsa uses. A point (x, y) is affine, and (0, 0) is the point at infinity. Add, Double and ScalarMult fail where Go panics: on a point that is off the curve or has a coordinate out of range.
+- `P224() dyn Curve`: P224 is the NIST curve P-224 as a Curve. Its constants are fixed, so building it cannot fail.
+- `P256() dyn Curve`: P256 is the NIST curve P-256 as a Curve.
+- `P384() dyn Curve`: P384 is the NIST curve P-384 as a Curve.
+- `P521() dyn Curve`: P521 is the NIST curve P-521 as a Curve.
+- `(e ellipticCurve) IsOnCurve(x abacus.Int, y abacus.Int) bool`: IsOnCurve reports whether (x, y) is a point of the curve, not the point at infinity (0, 0).
+- `(e ellipticCurve) Add(x1 abacus.Int, y1 abacus.Int, x2 abacus.Int, y2 abacus.Int) !(abacus.Int, abacus.Int)`: Add returns (x1, y1) + (x2, y2), and fails when either point is not on the curve.
+- `(e ellipticCurve) Double(x abacus.Int, y abacus.Int) !(abacus.Int, abacus.Int)`: Double returns 2*(x, y), and fails when the point is not on the curve.
+- `(e ellipticCurve) ScalarMult(x abacus.Int, y abacus.Int, k []u8) !(abacus.Int, abacus.Int)`: ScalarMult returns k*(x, y) for a big-endian scalar k of any length, and fails when the point is not on the curve. The time depends on the lengths of k and the curve, not on its bits.
+- `(e ellipticCurve) ScalarBaseMult(k []u8) (abacus.Int, abacus.Int)`: ScalarBaseMult returns k*G for the curve's generator G and a big-endian scalar k of any length.
+- `FIPS140Enabled() bool`: FIPS140Enabled reports whether FIPS 140-3 mode is on. Tin's verdict is always false.
+- `FIPS140Enforced() bool`: FIPS140Enforced reports whether FIPS 140-3 rules are enforced (Go's Enforced, the only-mode switch). Tin's verdict is always false.
+- `FIPS140Version() str`: FIPS140Version is the version of a frozen FIPS 140-3 module: "" because Tin has none (Go reports "latest" for its unfrozen module).
+- `FIPS140WithoutEnforcement(f fn())`: FIPS140WithoutEnforcement runs f. Tin never enforces FIPS 140-3 rules, so there is nothing to switch off.
 
 ## herald
 

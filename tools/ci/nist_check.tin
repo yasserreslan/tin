@@ -4,15 +4,15 @@ import "./ci"
 import "abacus"
 import "dice"
 import "mint"
+import "nist"
 import "say"
-import "seal"
 import "twine"
 
-// Compare seal's crypto/elliptic curves, crypto/dsa verification and crypto/fips140 status with Go's crypto/elliptic,
+// Compare nist's crypto/elliptic curves, crypto/dsa verification and crypto/fips140 status with Go's crypto/elliptic,
 // crypto/dsa, crypto/x509 and crypto/fips140 (#927).
 //
-// A corpus is generated from a fixed seed, so both sides see the same cases, and fed to bench/ref/elliptic and to
-// tools/ci/fixtures/elliptic.tin. For P-224, P-256, P-384 and P-521: IsOnCurve on the generator, the identity, a point
+// A corpus is generated from a fixed seed, so both sides see the same cases, and fed to bench/ref/nist and to
+// tools/ci/fixtures/nist.tin. For P-224, P-256, P-384 and P-521: IsOnCurve on the generator, the identity, a point
 // reflected through the x axis, off-curve and out-of-range coordinates; Add, Double and ScalarMult on random points, on
 // identities, on P+(-P), and on invalid points (Go panics, Tin fails); ScalarMult by empty, short, long, all-ones, the
 // order n, n-1 and n+1 scalars; ScalarBaseMult by random scalars and n. DSA: legacy signatures made here with fixed
@@ -46,17 +46,17 @@ fn curvePrimes() []abacus.Int {
 	return []abacus.Int{p224, p256, p384, p521}
 }
 
-fn curveOf(name str) dyn seal.Curve {
+fn curveOf(name str) dyn nist.Curve {
 	if name == "P-224" {
-		return seal.P224()
+		return nist.P224()
 	}
 	if name == "P-256" {
-		return seal.P256()
+		return nist.P256()
 	}
 	if name == "P-384" {
-		return seal.P384()
+		return nist.P384()
 	}
-	return seal.P521()
+	return nist.P521()
 }
 
 fn hexInt(s str) abacus.Int {
@@ -370,13 +370,13 @@ fn compare(what str, lines []str, want []str, got []str) {
 fn main() {
 	let lines = corpus()
 	let data = twine.Join(lines, "\n") + "\n"
-	let directory = ci.Join(ci.Root(), "bin/ci/elliptic")
+	let directory = ci.Join(ci.Root(), "bin/ci/nist")
 	ci.Mkdirs(directory)
-	let work = ci.TempDir(directory, "elliptic-")
-	let tin = ci.Join(work, "elliptic-tin")
-	ci.BuildTin("tools/ci/fixtures/elliptic.tin", tin, "", []str{})
-	let goexe = ci.Join(work, "elliptic-go")
-	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/elliptic"}, ci.Root(), 300), "go build elliptic")
+	let work = ci.TempDir(directory, "nist-")
+	let tin = ci.Join(work, "nist-tin")
+	ci.BuildTin("tools/ci/fixtures/nist.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "nist-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/nist"}, ci.Root(), 300), "go build nist")
 	let want = run([]str{goexe}, data, []str{"GODEBUG="})
 	mut verified = 0
 	mut faults = 0

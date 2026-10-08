@@ -1,4 +1,3 @@
-abacus
 anvil net files
 argo
 atomic
@@ -11,7 +10,6 @@ crash
 diff
 fault
 flume files
-gauge
 git files
 glyph
 hearth

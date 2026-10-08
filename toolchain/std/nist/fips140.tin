@@ -1,4 +1,4 @@
-package seal
+package nist
 
 // ---- crypto/fips140: Tin's own FIPS 140-3 status (#927) ----
 // Tin is not a FIPS 140-3 validated cryptographic module and has no FIPS mode, so its verdict is

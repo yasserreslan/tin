@@ -1,5 +1,5 @@
-// The elliptic twin, Go side: read the corpus of tools/ci/elliptic_check.tin on stdin and print one
-// line per case, "KEY result", so the check can compare them with tools/ci/fixtures/elliptic.tin
+// The nist twin, Go side: read the corpus of tools/ci/nist_check.tin on stdin and print one
+// line per case, "KEY result", so the check can compare them with tools/ci/fixtures/nist.tin
 // (#927). Go's crypto/elliptic and crypto/dsa, and crypto/x509 for certificate keys, are the
 // oracle. A Go panic is the "fault" a Tin fault stands for; a DSA case whose parameters no signature
 // can verify under is "bad parameters", as ErrDSAParameters.

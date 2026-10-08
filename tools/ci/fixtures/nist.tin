@@ -1,11 +1,12 @@
 package main
 
-// The elliptic twin, Tin side: read the corpus of tools/ci/elliptic_check.tin on stdin and print the
-// same lines as bench/ref/elliptic (Go's crypto/elliptic, crypto/dsa and crypto/fips140), so the
-// check can compare them (#927). The line forms are in bench/ref/elliptic/main.go.
+// The nist twin, Tin side: read the corpus of tools/ci/nist_check.tin on stdin and print the
+// same lines as bench/ref/nist (Go's crypto/elliptic, crypto/dsa and crypto/fips140), so the
+// check can compare them (#927). The line forms are in bench/ref/nist/main.go.
 
 import "abacus"
 import "fault"
+import "nist"
 import "quarry"
 import "say"
 import "seal"
@@ -76,11 +77,11 @@ fn dispatch(f []str) !str {
 		let q = try num(f[2])
 		let g = try num(f[3])
 		let y = try num(f[4])
-		let pub = seal.DSAPublicKey{P: p, Q: q, G: g, Y: y}
+		let pub = nist.DSAPublicKey{P: p, Q: q, G: g, Y: y}
 		let hash = try bytesOf(f[5])
 		let r = try num(f[6])
 		let s = try num(f[7])
-		seal.DSAVerify(pub, hash, r, s) catch err {
+		nist.DSAVerify(pub, hash, r, s) catch err {
 			return verdict(err)
 		}
 		return "verified"
@@ -89,38 +90,38 @@ fn dispatch(f []str) !str {
 		let der = try bytesOf(f[1])
 		let hash = try bytesOf(f[2])
 		let sig = try bytesOf(f[3])
-		let (pub, keyErr) = seal.ParseDSAPublicKeyDER(der)
+		let (pub, keyErr) = nist.ParseDSAPublicKeyDER(der)
 		if keyErr != nil {
 			return "bad key"
 		}
-		seal.DSAVerifyDER(pub, hash, sig) catch err {
+		nist.DSAVerifyDER(pub, hash, sig) catch err {
 			return verdict(err)
 		}
 		return "verified"
 	}
 	if k == "FIPS" {
-		return "enabled=" + yesno(seal.FIPS140Enabled()) + " enforced=" + yesno(seal.FIPS140Enforced())
+		return "enabled=" + yesno(nist.FIPS140Enabled()) + " enforced=" + yesno(nist.FIPS140Enforced())
 	}
 	return "unknown case " + k
 }
 
 // curveOf is the named NIST curve.
-fn curveOf(name str) dyn seal.Curve {
+fn curveOf(name str) dyn nist.Curve {
 	if name == "P-224" {
-		return seal.P224()
+		return nist.P224()
 	}
 	if name == "P-256" {
-		return seal.P256()
+		return nist.P256()
 	}
 	if name == "P-384" {
-		return seal.P384()
+		return nist.P384()
 	}
-	return seal.P521()
+	return nist.P521()
 }
 
 // verdict is the class of a DSA fault: bad parameters, or a signature that does not verify.
 fn verdict(err fault) str {
-	if fault.Is(err, seal.ErrDSAParameters) {
+	if fault.Is(err, nist.ErrDSAParameters) {
 		return "bad parameters"
 	}
 	return "rejected"

@@ -1,0 +1,23 @@
+package main
+
+// seal must not reach gauge (#927): abacus imports gauge, and gauge declares round, floor, ceil, trunc and rint
+// as extern functions, so a program that imports seal may declare names of its own such as these.
+
+import "say"
+import "seal"
+
+mut round i64 = 0
+mut floor i64 = 0
+mut ceil i64 = 0
+mut trunc i64 = 0
+mut rint i64 = 0
+
+fn main() {
+	round += 1
+	floor += 2
+	ceil += 3
+	trunc += 4
+	rint += 5
+	say.Line("round", round, "floor", floor, "ceil", ceil, "trunc", trunc, "rint", rint)
+	say.Line("seal", seal.Hex([]u8{0xab, 0x01}))
+}
