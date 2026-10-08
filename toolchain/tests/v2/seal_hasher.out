@@ -1,0 +1,8 @@
+sha256 splits: 45451 mismatches: 0
+sha256 random pieces mismatches: 0 true
+sha1 splits: 45451 mismatches: 0
+sha1 random pieces mismatches: 0 true
+sum mid-stream: true true
+reset: true 32 20
+64 MiB sha256: 6b0c0792af725baa2f9df54306d5e1afac5d0c41ebb7ed08b3ddc073a7adecd0
+64 MiB sha1: a296bbaf8ebb4de20ddd5abe211a975cf43542fa
