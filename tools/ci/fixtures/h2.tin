@@ -24,6 +24,7 @@ import "tide"
 //   /abort            one streamed write, then Abort
 //   /endless          writes 16 KiB pieces until one fails (herald logs "endless stopped")
 //   /hijack           Hijack, which an HTTP/2 stream refuses
+//   /servefile?name=  ServeFile of a file in FILES_DIR: validators and ranges (#823)
 //   /cookies          the sid cookie and how many cookies came, and two Set-Cookie fields (#823)
 // With TLS_CERT and TLS_KEY (paths) it serves HTTPS, where ALPN chooses h2 or HTTP/1.1.
 
@@ -134,6 +135,14 @@ fn file(q anvil.Req, w mut anvil.Out) {
 	w.SendFile(path, num(q, "off", 0), num(q, "n", -1)) catch err {
 		w.Status(404)
 		w.Text("cannot send: {err}")
+	}
+}
+
+fn servefile(q anvil.Req, w mut anvil.Out) {
+	let path = quarry.Getenv("FILES_DIR") + "/" + q.Param("name")
+	w.ServeFile(q, path) catch err {
+		w.Status(404)
+		w.Text("cannot serve: {err}")
 	}
 }
 
@@ -250,6 +259,7 @@ fn main() {
 	r.Get("/length", length)
 	r.Get("/short", short)
 	r.Get("/file", file)
+	r.Get("/servefile", servefile)
 	r.Get("/trailers", trailers)
 	r.Get("/streamtrailers", streamtrailers)
 	r.Get("/headers", headers)

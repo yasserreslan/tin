@@ -1,0 +1,22 @@
+package main
+
+// The ServeFile twin, Tin side, for tools/ci/servefile_check.tin (#823): GET /f?path=FILE serves the file with ServeFile; the port is PORT.
+
+import "anvil"
+import "quarry"
+import "say"
+
+fn file(q anvil.Req, w mut anvil.Out) {
+	w.ServeFile(q, q.Param("path")) catch err {
+		w.Status(404)
+		w.Text("nope: {err}")
+	}
+}
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Any("/f", file)
+	r.Serve(":" + quarry.Getenv("PORT")) catch err {
+		say.Line(err)
+	}
+}

@@ -519,7 +519,7 @@ fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname str) {
 		if len(gname) != 0 {
 			err_code_quoted(pos, "E310 REQUEST_ESCAPE", "request memory stored into global ", gname, ", which outlives the request: wrap the value in keep()")
 		} else if cast(Fn, rg_fn).escapes != 0 && rg_cell_note >= 0 && cast(i64, cast(Fn, rg_fn).captures[rg_cell_note]) != 0 {
-			err_code_quoted(pos, "E310 REQUEST_ESCAPE", "request memory stored into ", cast(Fn, rg_fn).captures[rg_cell_note].name, ", a captured variable of a closure that may outlive the request (it is not passed only to functions that call it, and keep() copies its variables into long-lived memory): wrap the value in keep()")
+			err_code_quoted(pos, "E310 REQUEST_ESCAPE", "request memory stored into ", cast(Fn, rg_fn).captures[rg_cell_note].name, ", a captured variable of a closure that may outlive the request (" + rg_why() + "): wrap the value in keep()")
 		} else {
 			err_code_at(pos, "E310 REQUEST_ESCAPE", "request memory stored into long-lived memory (it may be reachable from a global): wrap the value in keep()")
 		}
@@ -639,6 +639,15 @@ fn rg_cell_index(e i64) i64 {
 	return cast(MemExpr, e).off / 8 - 2
 }
 
+// rg_why says why the running closure may outlive the request: where it was passed, when that is known.
+fn rg_why() str {
+	let why = co_why_of(rg_fn)
+	if len(why) == 0 {
+		return "keep() copies its variables into long-lived memory"
+	}
+	return why + "; keep() copies its variables into long-lived memory"
+}
+
 shared mut rg_cell_note i64 = -1 // the captured variable of a closure that may be kept read last (E310 names it)
 
 // rg_cell_bits is what captured variable i may hold. A closure that is only passed to functions
@@ -676,7 +685,7 @@ fn rg_cell_store(i i64, v_in i64, t i64, pos i64) {
 			if cast(i64, os) != 0 {
 				name = os.name
 			}
-			err_code_quoted(pos, "E311 CAPTURE_ESCAPE", "request memory stored into ", name, ", a captured variable of a closure that may outlive the request (keep() copies its variables into long-lived memory): wrap the value in keep(), or pass the closure only to functions that call it")
+			err_code_quoted(pos, "E311 CAPTURE_ESCAPE", "request memory stored into ", name, ", a captured variable of a closure that may outlive the request (" + rg_why() + "): wrap the value in keep(), or pass the closure only to functions that call it")
 		}
 		return
 	}

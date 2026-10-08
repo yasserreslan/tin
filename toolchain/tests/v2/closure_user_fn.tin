@@ -1,0 +1,128 @@
+package main
+
+import "say"
+import "constraints"
+
+type R struct {
+	n i64
+}
+
+type Store struct {
+	items []R
+}
+
+fn (s Store) each(f fn(i64, R)) {
+	for i, x in s.items {
+		f(i, x)
+	}
+}
+
+type Tree[T constraints.Any] struct {
+	val T
+	left ?Tree[T]
+	right ?Tree[T]
+}
+
+fn walk[T constraints.Any](t ?Tree[T], f fn(T)) {
+	if t == nil {
+		return
+	}
+	let n = t
+	walk(n.left, f)
+	f(n.val)
+	walk(n.right, f)
+}
+
+type Tx struct {
+	log []str
+}
+
+fn tx(f fn(t Tx) !) ! {
+	let t = Tx{log: []str{}}
+	try f(t)
+}
+
+fn each(xs []R, f fn(R)) {
+	for x in xs {
+		f(x)
+	}
+}
+
+// forwards the function to another function that only calls it
+fn twice(xs []R, f fn(R)) {
+	each(xs, f)
+	each(xs, f)
+}
+
+fn retry(n i64, f fn() !) ! {
+	for i in 0..n {
+		f() catch err {
+			if i == n - 1 {
+				fail err
+			}
+			continue
+		}
+		return
+	}
+}
+
+fn collect[T constraints.Any](xs []T) []T {
+	mut out = []T{}
+	eachOf(xs, fn(x T) {
+		out = append(out, x)
+	})
+	return out
+}
+
+fn eachOf[T constraints.Any](xs []T, f fn(T)) {
+	for x in xs {
+		f(x)
+	}
+}
+
+fn run() ! {
+	let src = []R{R{n: 1}, R{n: 2}}
+	mut all = []R{}
+	each(src, fn(r R) {
+		all = append(all, r)
+	})
+	say.Line("each", len(all))
+	let st = Store{items: src}
+	mut seen = []str{}
+	st.each(fn(i i64, r R) {
+		seen = append(seen, "{i}:{r.n}")
+	})
+	say.Line("method", seen)
+	let t = Tree[i64]{val: 2, left: Tree[i64]{val: 1, left: nil, right: nil}, right: Tree[i64]{val: 3, left: nil, right: nil}}
+	mut order = []i64{}
+	walk(t, fn(x i64) {
+		order = append(order, x)
+	})
+	say.Line("walk", order)
+	mut lines = []str{}
+	try tx(fn(t Tx) ! {
+		lines = append(lines, "inside {len(t.log)}")
+	})
+	say.Line("tx", lines)
+	mut twiceAll = []R{}
+	twice(src, fn(r R) {
+		twiceAll = append(twiceAll, r)
+	})
+	say.Line("twice", len(twiceAll))
+	mut attempts = 0
+	try retry(3, fn() ! {
+		attempts += 1
+		if attempts < 3 {
+			fail "again"
+		}
+	})
+	say.Line("retry", attempts)
+	let got = collect(src)
+	say.Line("generic", len(got), got[1].n)
+}
+
+fn main() {
+	run() catch err {
+		say.Line("failed", err)
+	}
+}

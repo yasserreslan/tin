@@ -488,20 +488,30 @@ fn main() {
 - **Where the closure lives.** A function literal that is called at once, or passed to one
   of the library functions that only call what they are given (`sift.Each`, `Map`,
   `Filter`, `Reduce` and the `*Func` functions of `sift`, `atlas` and `twine`, a `with`
-  policy's `Run`), keeps its captured variables on the caller's stack frame: no pool
-  allocation. Every other closure (returned, stored in a slice, a struct or a map, passed
-  to your own function, deferred) allocates its descriptor and cells in the current
-  request pool and lives as long as that pool.
+  policy's `Run`) or to a function of your own whose parameter only calls it or hands it
+  on to such a parameter (the compiler reads your functions to tell, see below), keeps its
+  captured variables on the caller's stack frame: no pool allocation. Every other closure
+  (returned, stored in a slice, a struct or a map, passed to a function that may keep it,
+  deferred) allocates its descriptor and cells in the current request pool and lives as
+  long as that pool.
 - **Long-lived closures.** Storing a closure that captures request memory in a global, or
   anywhere long-lived, without `keep` is a compile error naming the global. `keep(f)`
   deep-copies the descriptor and every captured variable into the long-lived heap.
 - **What a closure may store in its captured variables.** A closure passed only to
-  functions that call it (`sift.Each` and the others above) is part of its parent's frame,
-  so its body may store request memory in a captured local, for example
-  `out = append(out, s)` to collect results. Any other closure may be kept, after which its
-  captured variables are long-lived, so its body storing request memory in a captured
-  variable is a compile error naming the variable: store `keep(v)`, or pass the closure
-  only to functions that call it.
+  functions that call it (`sift.Each` and the others above, and your own functions such as
+  `fn each(xs []R, f fn(R)) { for x in xs { f(x) } }`, a method `s.each(f)`, a generic
+  `walk(t, f)` that recurses with `f`, a `tx(f)` or retry helper) is part of its parent's
+  frame, so its body may store request memory in a captured local, for example
+  `out = append(out, s)` to collect results. Your function qualifies when each use of the
+  parameter is a call or an argument of a call to a function that qualifies in that position
+  (read from the syntax of the program as a whole, before its bodies are checked: a parameter
+  that is stored, returned, compared, used inside a function literal, a `detach` or `go`, or
+  passed to something the compiler cannot match by name does not qualify; a method call
+  `x.m(f)` qualifies only if every method called `m` does, and no struct has a field `m`).
+  Any other closure may be kept, after which its captured variables are long-lived, so its
+  body storing request memory in a captured variable is a compile error naming the variable
+  and the call that may keep the closure: store `keep(v)`, or pass the closure only to
+  functions that call it.
 - **Captured `mut` parameters are rejected**: a function literal cannot capture a `mut`
   parameter (the parameter is the caller's variable, not a cell); copy it into a local, or
   pass it as an argument.
