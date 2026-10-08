@@ -1,0 +1,15 @@
+package main
+
+import "./ci"
+import "say"
+
+fn main() {
+	let root = ci.Root()
+	let exe = ci.Join(root, "bin/ci/tar-strict")
+	ci.BuildTin("toolchain/tests/v2/tar.tin", exe, "", []str{})
+	let result = ci.Exec([]str{exe}, root, 30)
+	ci.Must(result, "tar strict test")
+	let want = ci.Read(ci.Join(root, "toolchain/tests/v2/tar.out"))
+	ci.Check(result.Stdout == want, "tar strict output differs from toolchain/tests/v2/tar.out")
+	say.Line("PASS tar: ustar round trip and archive limit")
+}

@@ -1,0 +1,11 @@
+written 5 2048
+header hello.txt 416 12 34 5 1700000000 Regular
+data 5 hello
+end true
+limit true
+checksum true
+truncated true
+kind Directory dir 
+kind Symlink sym target
+kind HardLink hard dir
+long-name true

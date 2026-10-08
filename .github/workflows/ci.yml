@@ -116,6 +116,8 @@ jobs:
         run: sh tools/ci/tin.sh scan_check
       - name: Testing helpers against Go's testing/iotest, testing/quick, testing/fstest and crypto/subtle
         run: sh tools/ci/tin.sh crucible_check
+      - name: Tar archive reader and writer strict regression
+        run: sh tools/ci/tin.sh tar_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: Operating system signals (dispositions, task delivery and per-core listeners)

@@ -1,11 +1,14 @@
 package tar
 
-// Package tar reads and writes bounded ustar archives, including regular files and directories.
-// Reader owns a copy of its input, bounded by the limit passed to NewReader; Writer buffers its output.
+// Package tar reads and writes bounded ustar archive records.
+// Writer stores names up to 100 bytes directly or splits paths at a slash into the 155-byte prefix and 100-byte name fields; longer names need PAX or GNU records, which Writer does not synthesize. Sparse formats are not supported.
+// Reader uses the supplied archive bytes; Writer buffers at most MaxArchiveSize bytes.
 
 import "say"
 
+// BlockSize is the size of a tar header and data-alignment block.
 const BlockSize = 512
+// MaxArchiveSize bounds archives built by Writer and accepted by the default examples.
 const MaxArchiveSize = 67108864
 
 // TypeFlag identifies the kind of an archive entry.
@@ -36,19 +39,19 @@ type Reader struct {
 	data []u8
 	at i64
 	left i64
-	limit i64
+	maxBytes i64
 	ended bool
 }
 
 // NewReader creates a reader over an archive, rejecting inputs above limit bytes.
-fn NewReader(data []u8, limit i64) !Reader {
-	if limit < 0 {
+fn NewReader(data []u8, maxBytes i64) !Reader {
+	if maxBytes < 0 {
 		fail "tar: negative archive limit"
 	}
-	if i64(len(data)) > limit {
+	if i64(len(data)) > maxBytes {
 		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
 	}
-	return Reader{data: data, at: 0, left: 0, limit: limit, ended: false}
+	return Reader{data: data, at: 0, left: 0, maxBytes: maxBytes, ended: false}
 }
 
 // Next advances to the next header, returning nil at the end of the archive.
@@ -85,24 +88,30 @@ fn (r mut Reader) Next() !?Header {
 		fail "tar: invalid header checksum"
 	}
 	let size = octal(b, 124, 12)
-	if size < 0 || size > r.limit {
+	if size < 0 || size > r.maxBytes {
 		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: file size exceeds limit"))
 	}
 	let name = cstring(b, 0, 100)
 	let prefix = cstring(b, 345, 155)
-	let fullName = if prefix != "" { prefix + "/" + name } else { name }
+	mut fullName = name
+	if prefix != "" { fullName = prefix + "/" + name }
 	let f = b[156]
-	let ty = match f {
-		0, u8('0') => TypeFlag.Regular
-		u8('5') => TypeFlag.Directory
-		u8('2') => TypeFlag.Symlink
-		u8('1') => TypeFlag.HardLink
-		u8('x') => TypeFlag.PAX
-		u8('L') => TypeFlag.GNULongName
-		u8('K') => TypeFlag.GNULongLink
-		_ => TypeFlag.Regular
+	mut ty = TypeFlag.Regular
+	if f == u8('5') { ty = TypeFlag.Directory }
+	if f == u8('2') { ty = TypeFlag.Symlink }
+	if f == u8('1') { ty = TypeFlag.HardLink }
+	if f == u8('x') { ty = TypeFlag.PAX }
+	if f == u8('L') { ty = TypeFlag.GNULongName }
+	if f == u8('K') { ty = TypeFlag.GNULongLink }
+	let mode = octal(b, 100, 8)
+	let uid = octal(b, 108, 8)
+	let gid = octal(b, 116, 8)
+	let mtime = octal(b, 136, 12)
+	if mode < 0 || uid < 0 || gid < 0 || mtime < 0 { fail "tar: invalid octal header field" }
+	if f != 0 && f != u8('0') && f != u8('5') && f != u8('2') && f != u8('1') && f != u8('x') && f != u8('L') && f != u8('K') && f != u8('7') {
+		fail "tar: unsupported type flag"
 	}
-	let h = Header{Name: fullName, Mode: octal(b, 100, 8), Uid: octal(b, 108, 8), Gid: octal(b, 116, 8), Size: size, Mtime: octal(b, 136, 12), Type: ty, Linkname: cstring(b, 157, 100)}
+	let h = Header{Name: fullName, Mode: mode, Uid: uid, Gid: gid, Size: size, Mtime: mtime, Type: ty, Linkname: cstring(b, 157, 100)}
 	r.at += BlockSize
 	r.left = size
 	return h
@@ -129,20 +138,35 @@ fn (r mut Reader) Read(buf mut []u8) !i64 {
 type Writer struct {
 	data []u8
 	closed bool
+	pending i64
 }
 
 // NewWriter creates an empty archive writer.
 fn NewWriter() Writer {
-	return Writer{data: []u8{}, closed: false}
+	return Writer{data: []u8{}, closed: false, pending: 0}
 }
 
 // WriteHeader appends a ustar header; the following Write calls must provide Size bytes.
 fn (w mut Writer) WriteHeader(h Header) ! {
-	if w.closed || len(w.data) % BlockSize != 0 {
+	if w.closed || w.pending > 0 {
 		fail "tar: invalid writer state"
 	}
-	if len(h.Name) == 0 || len(h.Name) > 100 || h.Size < 0 || h.Size > 0o77777777777 || h.Mode < 0 || h.Uid < 0 || h.Gid < 0 || h.Mtime < 0 {
+	if len(w.data) % BlockSize != 0 {
+		fail "tar: invalid writer alignment"
+	}
+	if len(h.Name) == 0 || len(h.Name) > 256 || h.Size < 0 || h.Size > 0o77777777777 || h.Mode < 0 || h.Mode > 0o7777777 || h.Uid < 0 || h.Uid > 0o7777777 || h.Gid < 0 || h.Gid > 0o7777777 || h.Mtime < 0 || h.Mtime > 0o77777777777 {
 		fail "tar: header field is outside ustar limits"
+	}
+	if h.Type == TypeFlag.PAX || h.Type == TypeFlag.GNULongName || h.Type == TypeFlag.GNULongLink {
+		fail "tar: extension records are read-only"
+	}
+	if h.Type != TypeFlag.Regular && h.Type != TypeFlag.Directory && h.Type != TypeFlag.Symlink && h.Type != TypeFlag.HardLink {
+		fail "tar: unsupported writer type flag"
+	}
+	let split = splitName(h.Name)
+	if split == nil { fail "tar: name is too long for ustar" }
+	if i64(len(w.data)) + BlockSize > MaxArchiveSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
 	}
 	if h.Type == TypeFlag.Symlink || h.Type == TypeFlag.HardLink {
 		if h.Size != 0 || len(h.Linkname) > 100 {
@@ -150,7 +174,7 @@ fn (w mut Writer) WriteHeader(h Header) ! {
 		}
 	}
 	mut b = make([]u8, BlockSize)
-	putString(mut b, 0, 100, h.Name)
+	putString(mut b, 0, 100, split.name)
 	putOctal(mut b, 100, 8, h.Mode)
 	putOctal(mut b, 108, 8, h.Uid)
 	putOctal(mut b, 116, 8, h.Gid)
@@ -165,6 +189,7 @@ fn (w mut Writer) WriteHeader(h Header) ! {
 		_ => u8('0')
 	}
 	putString(mut b, 157, 100, h.Linkname)
+	putString(mut b, 345, 155, split.prefix)
 	putString(mut b, 257, 6, "ustar")
 	b[262] = 0
 	putString(mut b, 263, 2, "00")
@@ -173,22 +198,33 @@ fn (w mut Writer) WriteHeader(h Header) ! {
 	putOctal(mut b, 148, 7, sum)
 	b[155] = 0
 	w.data = append(w.data, b...)
+	w.pending = h.Size
 	return
 }
 
 // Write appends file content and returns its byte count.
 fn (w mut Writer) Write(data []u8) !i64 {
-	if w.closed || i64(len(w.data)) + i64(len(data)) > MaxArchiveSize {
+	if w.closed || i64(len(data)) > w.pending {
+		fail "tar: invalid writer state"
+	}
+	if i64(len(w.data)) + i64(len(data)) > MaxArchiveSize {
 		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
 	}
 	w.data = append(w.data, data...)
+	w.pending -= i64(len(data))
 	return i64(len(data))
 }
 
 // Close pads the final entry and writes the two zero blocks ending the archive.
 fn (w mut Writer) Close() ! {
 	if w.closed { return }
+	if w.pending != 0 { fail "tar: file data is shorter than header size" }
 	let rem = len(w.data) % BlockSize
+	mut padded = i64(0)
+	if rem > 0 { padded = BlockSize - rem }
+	if i64(len(w.data)) + padded + BlockSize * 2 > MaxArchiveSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
 	if rem > 0 {
 		for i in rem..BlockSize { w.data = append(w.data, 0) }
 	}
@@ -230,6 +266,24 @@ fn octal(b []u8, at i64, n i64) i64 {
 
 fn putString(b mut []u8, at i64, n i64, s str) {
 	for i in 0..min(n, i64(len(s))) { b[at+i] = s[i] }
+}
+
+// splitName finds the ustar prefix/name split or returns nil when the path does not fit.
+fn splitName(name str) ?nameParts {
+	if len(name) <= 100 { return nameParts{name: name, prefix: ""} }
+	mut i = len(name) - 1
+	for i > 0 {
+		if name[i] == '/' && i <= 155 && len(name) - i - 1 <= 100 {
+			return nameParts{name: name[i+1:], prefix: name[0:i]}
+		}
+		i -= 1
+	}
+	return nil
+}
+
+type nameParts value struct {
+	name str
+	prefix str
 }
 
 fn putOctal(b mut []u8, at i64, n i64, value i64) {
