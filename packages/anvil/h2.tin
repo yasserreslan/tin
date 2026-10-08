@@ -1648,6 +1648,8 @@ fn h2_run_request(c i64) {
 	if gRoutes != 0 {
 		dispatch(cast(rtable, gRoutes), mut q, mut w)
 	} else {
+		w.meth = q.Method
+		w.rpath = q.Path
 		gHandler(q, mut w)
 	}
 	if gRecord {
