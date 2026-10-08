@@ -1,0 +1,257 @@
+package main
+
+import "./ci"
+import "gauge"
+import "mint"
+import "say"
+import "twine"
+
+// Compare exact number bits and text with Go and a pinned hard parsing corpus.
+
+// gauge: the functions of #575, how many results each one prints, and the allowed difference from Go in ulps of the result bits
+// (0 = bit-identical). dump mode prints "<name> <i> <input bits...> <result bits>" lines; both sides generate the inputs from the
+// same seed, GAUGE_N random values plus the edge cases.
+//
+// expm1's, the inverse hyperbolics' and sincos' arithmetic is Go's, but the compilers fuse multiply-adds differently (arm64 fuses,
+// x86-64 does not, and Go and Tin do not fuse the same products: design/stdlib_verified.md, "gauge: the corpus check"), so these
+// five are allowed exactly one ulp, and never more. FMA is exact everywhere (the software port). #575's second half: erf, erfc,
+// erfcinv and gamma are bit-identical; erfinv uses Log and lgamma uses Log and Sin, so they inherit the documented one-ulp log
+// difference.
+const GAUGE_INPUTS = 120000
+
+fn funcNames() []str {
+	return []str{"expm1", "asinh", "acosh", "atanh", "sincos", "logb", "f32bits", "f32frombits", "dim", "remainder", "nextafter", "nextafter32", "fma", "erf", "erfc", "erfcinv", "gamma", "erfinv"}
+}
+
+fn funcResults(name str) i64 {
+	if name == "sincos" {
+		return 2
+	}
+	return 1
+}
+
+fn funcAllowed(name str) i64 {
+	if name == "expm1" || name == "asinh" || name == "acosh" || name == "atanh" || name == "sincos" || name == "erfinv" {
+		return 1
+	}
+	return 0
+}
+
+fn bits(hex str) u64 {
+	return mint.ParseUint(hex, 16) catch _ {
+		0
+	}
+}
+
+fn isNaN(x f64) bool {
+	return x != x
+}
+
+// ulps is the distance in ulps between two f64 bit patterns, or -1 if incomparable. NaNs compare equal (their payloads are not part
+// of a function's contract), equal values are zero apart, and values of different signs only match when both are zero.
+fn ulps(a u64, b u64) i64 {
+	let xa = mint.F64frombits(a)
+	let xb = mint.F64frombits(b)
+	if isNaN(xa) && isNaN(xb) {
+		return 0
+	}
+	if isNaN(xa) || isNaN(xb) {
+		return -1
+	}
+	if xa == xb {
+		return 0
+	}
+	if (xa < 0.0) != (xb < 0.0) {
+		return -1
+	}
+	if a > b {
+		return i64(a - b)
+	}
+	return i64(b - a)
+}
+
+fn dump(exe str, name str) [][]str {
+	let set = []str{"TIN_ROOT=" + ci.Root(), "GAUGE_N=" + mint.Itoa(GAUGE_INPUTS), "GAUGE_FUNC=" + name}
+	let o = ci.ExecEnv([]str{exe, "dump"}, ci.Root(), 300, set, []str{})
+	ci.Must(o, exe + " dump " + name)
+	mut rows = [][]str{}
+	for line in ci.Lines(o.Stdout) {
+		rows = append(rows, twine.Fields(line))
+	}
+	return rows
+}
+
+fn sameInputs(name str, i i64, a []str, b []str, results i64) {
+	mut ok = len(a) == len(b)
+	if ok {
+		for k in 0..len(a) - results {
+			if a[k] != b[k] {
+				ok = false
+			}
+		}
+	}
+	ci.Check(ok, "gauge " + name + " case " + mint.Itoa(i) + ": inputs differ")
+}
+
+// gaugeRelative checks lgamma, whose result can lose precision through cancellation (nadj - lgamma near its zero crossings), which
+// turns the inherited one-ulp Log difference into a few ulps of the result; it is checked with a relative tolerance instead, and
+// the sign (the last field) must match exactly.
+fn gaugeRelative(goexe str, tin str, name str, results i64, abs f64, rel f64) i64 {
+	mut differing = 0
+	mut bad = 0
+	mut worst = 0.0
+	mut count = 0
+	arena {
+		let want = dump(goexe, name)
+		let got = dump(tin, name)
+		ci.Check(len(got) == len(want) && len(got) > GAUGE_INPUTS, "gauge " + name + ": line counts differ")
+		count = len(got)
+		for i in 0..len(got) {
+			let a = want[i]
+			let b = got[i]
+			sameInputs(name, i, a, b, results)
+			let g = mint.F64frombits(bits(a[len(a) - 2]))
+			let t = mint.F64frombits(bits(b[len(b) - 2]))
+			if a[len(a) - 1] != b[len(b) - 1] {
+				bad += 1
+			}
+			if isNaN(g) && isNaN(t) {
+				continue
+			}
+			if g == t {
+				continue
+			}
+			mut absolute = t - g
+			if absolute < 0.0 {
+				absolute = -absolute
+			}
+			mut ag = g
+			if ag < 0.0 {
+				ag = -ag
+			}
+			mut relative = 0.0
+			if g != 0.0 {
+				relative = absolute / ag
+			}
+			if absolute != 0.0 {
+				differing += 1
+				if relative > worst {
+					worst = relative
+				}
+			}
+			if isNaN(g) || isNaN(t) || absolute > abs + rel * ag {
+				bad += 1
+			}
+		}
+	}
+	ci.Check(bad == 0, "gauge " + name + ": " + mint.Itoa(bad) + " of " + mint.Itoa(count) + " results outside the tolerance")
+	ci.Pass("gauge " + name + ": " + mint.Itoa(count) + " inputs, " + mint.Itoa(count - differing) + " bit-identical, worst relative difference " + mint.FormatFloat(worst, 'e', 2))
+	return count * results
+}
+
+// gaugeAll checks every #575 function against Go over 120,000 inputs.
+fn gaugeAll(work str) {
+	let tin = ci.Join(work, "gauge-tin")
+	ci.BuildTin("bench/ref/gauge/corpus.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "gauge-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/gauge"}, ci.Root(), 120), "go build gauge")
+	mut total = 0
+	let names = funcNames()
+	for name in names {
+		let results = funcResults(name)
+		let allowed = funcAllowed(name)
+		mut bad = 0
+		mut near = 0
+		mut count = 0
+		arena {
+			let want = dump(goexe, name)
+			let got = dump(tin, name)
+			ci.Check(len(got) == len(want) && len(got) > GAUGE_INPUTS, "gauge " + name + ": " + mint.Itoa(len(got)) + " tin and " + mint.Itoa(len(want)) + " go lines, want more than " + mint.Itoa(GAUGE_INPUTS))
+			count = len(got)
+			for i in 0..len(got) {
+				let a = want[i]
+				let b = got[i]
+				sameInputs(name, i, a, b, results)
+				for k in 0..results {
+					let ha = a[len(a) - results + k]
+					let hb = b[len(b) - results + k]
+					let d = ulps(bits(ha), bits(hb))
+					if d < 0 || d > allowed {
+						bad += 1
+						if bad < 4 {
+							say.Line("  gauge " + name + " case " + mint.Itoa(i) + ": Go " + ha + ", Tin " + hb)
+						}
+					} else if d > 0 {
+						near += 1
+					}
+				}
+			}
+		}
+		ci.Check(bad == 0, "gauge " + name + ": " + mint.Itoa(bad) + " of " + mint.Itoa(count) + " results beyond " + mint.Itoa(allowed) + " ulp of Go")
+		total += count * results
+		ci.Pass("gauge " + name + ": " + mint.Itoa(count) + " inputs, " + mint.Itoa(count * results - near) + " bit-identical, " + mint.Itoa(near) + " within " + mint.Itoa(allowed) + " ulp")
+	}
+	total += gaugeRelative(goexe, tin, "lgamma", 2, 0.00000000000001, 0.0000000000001)
+	ci.Pass("gauge: " + mint.Itoa(total) + " results, " + mint.Itoa(len(names) + 1) + " functions, at least " + mint.Itoa(GAUGE_INPUTS) + " inputs each")
+}
+
+// compare feeds the inputs (lines) to the program in batches of 10,000 and compares its output lines with the expected ones.
+fn compare(exe str, inputs []str, expected []str, directory str, label str) {
+	ci.Check(len(inputs) == len(expected) && len(inputs) > 0, "empty or incomplete number corpus")
+	// Bounded batches keep the request pool small without exposing private reset helpers.
+	mut start = 0
+	for start < len(inputs) {
+		mut end = start + 10000
+		if end > len(inputs) {
+			end = len(inputs)
+		}
+		let o = ci.ExecIn([]str{exe}, ci.Root(), 60, twine.Join(inputs[start:end], "\n") + "\n", []str{})
+		ci.Write(ci.Join(directory, label + ".stderr.log"), o.Stderr)
+		ci.Must(o, label)
+		let actual = ci.Lines(o.Stdout)
+		if len(actual) != end - start {
+			ci.Write(ci.Join(directory, label + ".actual.log"), o.Stdout)
+		}
+		for i in 0..len(actual) {
+			if i < end - start && actual[i] != expected[start + i] {
+				ci.Write(ci.Join(directory, label + ".actual.log"), o.Stdout)
+				ci.Fail(label + " case " + mint.Itoa(start + i) + ": " + inputs[start + i] + ": got " + actual[i] + ", want " + expected[start + i])
+			}
+		}
+		ci.Check(len(actual) == end - start, label + ": " + mint.Itoa(len(actual)) + " output lines, want " + mint.Itoa(end - start))
+		start = end
+	}
+	ci.Pass(label + ": " + mint.Itoa(len(inputs)) + " exact results")
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/number")
+	ci.Mkdirs(directory)
+	ci.Must(ci.Exec([]str{"sh", "tools/ci/tin.sh", "tools/gen/number_powers.tin", "--check"}, ci.Root(), 120), "number powers")
+	let work = ci.TempDir(directory, "number-")
+	let exe = ci.Join(work, "number")
+	ci.BuildTin("tools/ci/fixtures/number.tin", exe, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "run", "./bench/ref/number", work}, ci.Root(), 60), "go run number")
+	gaugeAll(work)
+	// mint's faults read like strconv's under mint's own name (#521).
+	mut expectedGo = []str{}
+	for line in ci.Lines(ci.Read(ci.Join(work, "expected.txt"))) {
+		expectedGo = append(expectedGo, twine.Replace(line, "ERR strconv.", "ERR mint.", 1))
+	}
+	let inputLines = ci.Lines(ci.Read(ci.Join(work, "input.txt")))
+	compare(exe, inputLines, expectedGo, directory, "Go-strconv-fmt")
+	let rows = ci.Exec([]str{"gzip", "-dc", ci.Join(ci.Root(), "tools/ci/data/parse-number-f64.txt.gz")}, "", 60)
+	ci.Must(rows, "gzip")
+	mut inputs = []str{}
+	mut expected = []str{}
+	for row in ci.Lines(rows.Stdout) {
+		let space = twine.IndexByte(row, ' ')
+		let hexBits = row[0:space]
+		let number = row[space + 1:]
+		inputs = append(inputs, "P\t" + number)
+		expected = append(expected, mint.FormatUint(bits(hexBits), 10))
+	}
+	compare(exe, inputs, expected, directory, "parse-number-fxx")
+	ci.Write(ci.Join(directory, "results.json"), "{{\n  \"passed\": true,\n  \"go_cases\": " + mint.Itoa(len(inputLines)) + ",\n  \"hard_cases\": " + mint.Itoa(len(inputs)) + "\n}}\n")
+	ci.Remove(work)
+}

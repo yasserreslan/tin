@@ -1,0 +1,431 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "twine"
+
+// Compare lasso with Go's regexp over a generated corpus and the ported test tables.
+//
+// Three phases:
+//
+// 1. A generated corpus of pattern/input pairs from a small pattern grammar and a deterministic PRNG (so both sides see exactly the
+//    same pairs). Both sides print one line per pair (bench/ref/lasso and tools/ci/fixtures/lasso.tin): whether the pattern compiles,
+//    whether it matches, the leftmost match, the submatch offsets and every match with its submatches; the check compares the lines.
+// 2. Go's regexp find_test.go table (ported to toolchain/tests/data/lasso/find_test.txt): each case's FindAllStringSubmatchIndex,
+//    against the table's own expectations.
+// 3. Go's RE2 re2-search.txt (ported, BSD-licensed, licences in licenses/regexp.txt): for each pattern and string the anchored match
+//    (`\A(?:pattern)\z`) and, when it matches, the search result must be the file's.
+//
+// Phase 1 also compares Replace, ReplaceFunc and Split (hex-encoded) with Go's (#717).
+//
+// The inputs use code points whose Unicode category and script tables agree between the glyph tables (Unicode 15) and the Go
+// toolchain's (a newer Unicode), so a table version difference is not reported as a lasso bug; the Unicode classes themselves are
+// covered.
+
+const SEED = 571
+const PAIRS = 12000
+
+fn alphabet() []str {
+	return []str{"a", "b", "c", "A", "B", "C", "0", "1", "2", " ", "_", "-", ".", ",", ";", "\t", "\n", "α", "β", "γ", "é", "中"}
+}
+
+fn literals() []str {
+	return []str{"a", "b", "c", "A", "B", "C", "0", "1", "2", " ", "_", "-", ".", ",", ";"}
+}
+
+fn classes() []str {
+	return []str{"[abc]", "[^abc]", "[a-c]", "[0-9]", "[^0-9]", "[a-zA-Z0-9_]", "[α-γ]", "[^ ]", `[\d]`, `[\w\s]`, `[\p{L}]`, "[[:alpha:]]", "[[:^digit:]]"}
+}
+
+fn perls() []str {
+	return []str{`\d`, `\D`, `\w`, `\W`, `\s`, `\S`, `\p{L}`, `\pL`, `\p{Greek}`, `\P{L}`, `\p{Nd}`}
+}
+
+fn anchors() []str {
+	return []str{"^", "$", `\b`, `\B`, `\A`, `\z`}
+}
+
+fn quants() []str {
+	return []str{"*", "+", "?", `{2}`, `{1,3}`, `{0,2}`, `{2,}`, "*?", "+?", "??", `{1,2}?`}
+}
+
+fn flags() []str {
+	return []str{"", "(?i)", "(?s)", "(?m)", "(?U)", "(?is)", "(?i:)", "(?m:)", "(?s:)"}
+}
+
+fn names() []str {
+	return []str{"a", "b", "g1", "x_y"}
+}
+
+fn escapes() []str {
+	return []str{`\x41`, `\x{3B1}`, `\Qa+b\E`, `\.`, `\+`}
+}
+
+fn choose(rng dice.Rand, xs []str) str {
+	return xs[rng.I64n(len(xs))]
+}
+
+fn atom(rng dice.Rand, depth i64) str {
+	let r = rng.F64()
+	if r < 0.30 {
+		return choose(rng, literals())
+	}
+	if r < 0.40 {
+		return "."
+	}
+	if r < 0.55 {
+		return choose(rng, classes())
+	}
+	if r < 0.68 {
+		return choose(rng, perls())
+	}
+	if r < 0.75 {
+		return choose(rng, anchors())
+	}
+	if depth > 0 && r < 0.85 {
+		let inner = alt(rng, depth - 1)
+		let kind = rng.F64()
+		if kind < 0.5 {
+			return "(" + inner + ")"
+		}
+		if kind < 0.8 {
+			return "(?:" + inner + ")"
+		}
+		return "(?P<" + choose(rng, names()) + ">" + inner + ")"
+	}
+	if r < 0.90 {
+		return choose(rng, escapes())
+	}
+	return choose(rng, literals())
+}
+
+fn concat(rng dice.Rand, depth i64) str {
+	let n = rng.Range(1, 4)
+	mut out = ""
+	for i in 0..n {
+		mut a = atom(rng, depth)
+		if rng.F64() < 0.35 {
+			a += choose(rng, quants())
+		}
+		out += a
+	}
+	return out
+}
+
+fn alt(rng dice.Rand, depth i64) str {
+	let n = rng.Range(1, 3)
+	mut parts = []str{}
+	for i in 0..n {
+		parts = append(parts, concat(rng, depth))
+	}
+	return twine.Join(parts, "|")
+}
+
+fn inputString(rng dice.Rand) str {
+	let n = rng.Range(0, 17)
+	mut out = ""
+	for i in 0..n {
+		out += choose(rng, alphabet())
+	}
+	return out
+}
+
+// Pair is a pattern and an input, and the n of FindAll (-1 when the line has none).
+type Pair struct {
+	P str
+	S str
+	N i64
+}
+
+fn fixed() []Pair {
+	let rows = [][]str{
+		{`(?P<key>\w+)=(?P<val>[^&]*)`, "a=b&c=d"}, {`(\w+),(\w+)`, "one,two three,four"}, {`a{2,3}`, "aaaa"}, {`(a*)*b`, "aaaab"}, {`(a|b)+`, "xabbay"},
+		{`^abc$`, "abc"}, {`(?m)^b`, "a\nb"}, {`(?s).`, "\n"}, {`(?i)Σ`, "σ"}, {`\bword\b`, "a word here"}, {`[[:alpha:]]+`, "12ab34"},
+		{`\p{Greek}+`, "xαβγ"}, {`\Qa+b\E`, "xa+b"}, {`a+?b`, "aaab"}, {`(?:ab)+`, "ababab"}, {`x|`, "x"}, {`()`, "ab"}, {`(a)?b`, "b"},
+		{`a$`, "a\n"}, {`\B`, "ab"}}
+	mut out = []Pair{}
+	for r in rows {
+		out = append(out, Pair{P: r[0], S: r[1], N: -1})
+	}
+	return out
+}
+
+fn generated() []Pair {
+	let rng = dice.New(SEED)
+	mut pairs = fixed()
+	for len(pairs) < PAIRS {
+		let p = flags()[rng.I64n(len(flags()))] + alt(rng, 2)
+		for k in 0..3 {
+			pairs = append(pairs, Pair{P: p, S: inputString(rng), N: -1})
+		}
+	}
+	return pairs[0:PAIRS]
+}
+
+fn hex(s str) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, digits[s[i] >> 4])
+		out = append(out, digits[s[i] & 15])
+	}
+	return str(out)
+}
+
+fn unhex(s str) str {
+	mut out = []u8{}
+	mut i = 0
+	for i + 1 < len(s) {
+		let v = mint.ParseUint(s[i:i + 2], 16) catch _ {
+			0
+		}
+		out = append(out, u8(v))
+		i += 2
+	}
+	return str(out)
+}
+
+fn encode(pairs []Pair) str {
+	mut lines = []str{}
+	for p in pairs {
+		mut line = hex(p.P) + "\t" + hex(p.S)
+		if p.N != -1 {
+			line += "\t" + mint.Itoa(p.N)
+		}
+		lines = append(lines, line)
+	}
+	return twine.Join(lines, "\n") + "\n"
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 1800, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn compare(want []str, got []str, pairs []Pair, label str) i64 {
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line(label + " line " + mint.Itoa(i + 1) + ": pattern " + pairs[i].P + " input " + pairs[i].S + " n " + mint.Itoa(pairs[i].N))
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, label + ": " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	return len(want)
+}
+
+fn ints(words []str) []i64 {
+	mut out = []i64{}
+	for w in words {
+		let v = mint.Atoi(w) catch _ {
+			0
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+fn indexOf(words []str, word str) i64 {
+	for i in 0..len(words) {
+		if words[i] == word {
+			return i
+		}
+	}
+	return -1
+}
+
+// subsOf is the values of the subs field of one output line.
+fn subsOf(line str) []i64 {
+	let toks = twine.Fields(line)
+	return ints(toks[indexOf(toks, "subs") + 1:indexOf(toks, "all")])
+}
+
+// allsubsOf is the values of the allsubs field of one output line.
+fn allsubsOf(line str) []i64 {
+	let toks = twine.Fields(line)
+	mut end = len(toks)
+	if indexOf(toks, "repl") >= 0 {
+		end = indexOf(toks, "repl")
+	}
+	return ints(toks[indexOf(toks, "allsubs") + 1:end])
+}
+
+fn equalInts(a []i64, b []i64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i in 0..len(a) {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+fn show(xs []i64) str {
+	mut parts = []str{}
+	for x in xs {
+		parts = append(parts, mint.Itoa(x))
+	}
+	return "[" + twine.Join(parts, " ") + "]"
+}
+
+// expectedSubs is one re2-search result part as offsets: "-" is no match (ok false), else space-separated start-end.
+fn expectedSubs(res str) ([]i64, bool) {
+	if res == "-" {
+		return []i64{}, false
+	}
+	mut out = []i64{}
+	for pair in twine.Fields(res) {
+		if pair == "-" {
+			out = append(out, -1)
+			out = append(out, -1)
+		} else {
+			let dash = twine.IndexByte(pair, '-')
+			out = append(out, ci.Num(pair[0:dash]))
+			out = append(out, ci.Num(pair[dash + 1:]))
+		}
+	}
+	return out, true
+}
+
+fn singleBytes(s str) bool {
+	for i in 0..len(s) {
+		if s[i] >= 128 {
+			return false
+		}
+	}
+	return true
+}
+
+// Re2Case is one pattern and string of Go's RE2 search tests with the four variant results.
+type Re2Case struct {
+	P str
+	S str
+	Parts []str
+}
+
+fn unquote(line str) str {
+	return mint.Unquote(line) catch _ {
+		line
+	}
+}
+
+fn loadRe2(text str) []Re2Case {
+	mut cases = []Re2Case{}
+	mut strings = []str{}
+	mut pending = []str{}
+	mut pattern = ""
+	mut inStrings = false
+	for line in twine.Split(text, "\n") {
+		if len(line) == 0 || line[0] == '#' || (line[0] >= 'A' && line[0] <= 'Z') {
+			continue
+		}
+		if line == "strings" {
+			inStrings = true
+			strings = []str{}
+			continue
+		}
+		if line == "regexps" {
+			inStrings = false
+			continue
+		}
+		if line[0] == '"' {
+			let q = unquote(line)
+			if inStrings {
+				strings = append(strings, q)
+			} else {
+				pattern = q
+				pending = strings
+			}
+			continue
+		}
+		if line[0] == '-' || (line[0] >= '0' && line[0] <= '9') {
+			let s = pending[0]
+			pending = pending[1:]
+			cases = append(cases, Re2Case{P: pattern, S: s, Parts: twine.Split(line, ";")})
+		}
+	}
+	return cases
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/lasso")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "lasso-")
+	let tin = ci.Join(work, "lasso-tin")
+	ci.BuildTin("tools/ci/fixtures/lasso.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "lasso-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/lasso"}, ci.Root(), 300), "go build lasso")
+	let data = ci.Join(ci.Root(), "toolchain/tests/data/lasso")
+
+	// 1. The generated corpus.
+	let pairs = generated()
+	let want = run(goexe, encode(pairs))
+	let got = run(tin, encode(pairs))
+	ci.Check(len(got) == len(want), "lasso: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	compare(want, got, pairs, "corpus")
+	ci.Pass("lasso: " + mint.Itoa(len(pairs)) + " generated pattern/input pairs match Go's regexp")
+
+	// 2. Go's find_test.go table, against its own expectations.
+	let rows = ci.Lines(ci.Read(ci.Join(data, "find_test.txt")))
+	mut findPairs = []Pair{}
+	mut findWant = [][]i64{}
+	for row in rows {
+		let f = twine.Split(row, "\t")
+		findPairs = append(findPairs, Pair{P: unhex(f[0]), S: unhex(f[1]), N: ci.Num(f[2])})
+		findWant = append(findWant, ints(twine.Fields(f[3])))
+	}
+	let findGot = run(tin, encode(findPairs))
+	ci.Check(len(findGot) == len(rows), "lasso: " + mint.Itoa(len(findGot)) + " find_test lines")
+	for i in 0..len(rows) {
+		ci.Check(findGot[i] != "compile", "find_test " + mint.Itoa(i + 1) + ": " + findPairs[i].P + " does not compile")
+		let have = allsubsOf(findGot[i])
+		ci.Check(equalInts(have, findWant[i]), "find_test " + mint.Itoa(i + 1) + ": " + findPairs[i].P + " on " + findPairs[i].S + " n " + mint.Itoa(findPairs[i].N) + ": got " + show(have) + ", want " + show(findWant[i]))
+	}
+	ci.Pass("lasso: " + mint.Itoa(len(rows)) + " find_test.go cases match their table")
+
+	// 3. The RE2 search tests, against the file's expectations.
+	let cases = loadRe2(ci.Read(ci.Join(data, "re2-search.txt")))
+	mut re2Pairs = []Pair{}
+	for c in cases {
+		re2Pairs = append(re2Pairs, Pair{P: `\A(?:` + c.P + `)\z`, S: c.S, N: -1})
+		re2Pairs = append(re2Pairs, Pair{P: c.P, S: c.S, N: -1})
+	}
+	let lines = run(tin, encode(re2Pairs))
+	ci.Check(len(lines) == len(re2Pairs), "re2: " + mint.Itoa(len(lines)) + " lines for " + mint.Itoa(len(re2Pairs)))
+	mut checked = 0
+	mut skipped = 0
+	for k in 0..len(cases) {
+		let c = cases[k]
+		if twine.Contains(c.P, `\B`) && !singleBytes(c.S) {
+			skipped += 1
+			continue
+		}
+		if lines[2 * k] == "compile" {
+			// A pattern the parser refuses (Go skips \C the same way); the acceptance parity is covered by the edge cases in
+			// lasso_bad.tin.
+			skipped += 1
+			continue
+		}
+		let (wantFull, fullMatches) = expectedSubs(c.Parts[0])
+		let (wantPartial, _) = expectedSubs(c.Parts[1])
+		let haveFull = subsOf(lines[2 * k])
+		ci.Check(equalInts(haveFull, wantFull), "re2 full " + c.P + " on " + c.S + ": got " + show(haveFull) + ", want " + show(wantFull))
+		if fullMatches {
+			let havePartial = subsOf(lines[2 * k + 1])
+			ci.Check(equalInts(havePartial, wantPartial), "re2 partial " + c.P + " on " + c.S + ": got " + show(havePartial) + ", want " + show(wantPartial))
+		}
+		checked += 1
+	}
+	ci.Remove(work)
+	ci.Pass("lasso: " + mint.Itoa(checked) + " RE2 search cases match re2-search.txt (" + mint.Itoa(skipped) + " skipped: \\C and the \\B byte-position cases)")
+}

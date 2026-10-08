@@ -1,7 +1,7 @@
 name: Auto release
 
 # Every merge into main is released once its CI passes: the commit is tagged with the next
-# version (tools/ci/next_version.py: VERSION, then the next patch of its major.minor) and
+# version (tools/ci/next_version.tin: VERSION, then the next patch of its major.minor) and
 # release.yml builds, tests and publishes it. Bump VERSION's major or minor in a PR to start
 # a new series.
 on:
@@ -43,7 +43,7 @@ jobs:
           if git tag --points-at "$SHA" | grep -q '^v'; then
             echo "$SHA is already released as $(git tag --points-at "$SHA" | grep '^v')"; exit 0
           fi
-          tag=$(python3 tools/ci/next_version.py next VERSION $(git tag -l 'v*'))
+          tag=$(sh tools/ci/tin.sh next_version next VERSION $(git tag -l 'v*'))
           if [ -z "$tag" ]; then
             echo "VERSION $(cat VERSION) is a prerelease that is already released: bump it to release again"; exit 0
           fi

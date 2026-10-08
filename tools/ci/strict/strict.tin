@@ -1,0 +1,382 @@
+// The strict test suite: every program in toolchain/tests/v2 is compiled and run, and its output compared with the expected
+// output next to it (NAME.out, or NAME.err for the diagnostics a NAME_bad program must be rejected with). A NAME_asm program is
+// compiled to assembly and matched against NAME.check. A green run must mean the programs really passed: a compile failure never
+// runs a stale binary, a crash or a timeout fails even after the right output, a missing expected file is a failure.
+package strict
+
+import "../ci"
+import "../pyre"
+import "mint"
+import "quarry"
+import "say"
+import "sift"
+import "twine"
+
+// Exec runs a program the way the suite needs it: argv, directory, seconds, then environment entries to set.
+type Exec fn([]str, str, i64, []str) ci.Out
+
+// RealExec runs programs for real.
+fn RealExec(argv []str, dir str, seconds i64, env []str) ci.Out {
+	return ci.ExecEnv(argv, dir, seconds, env, []str{})
+}
+
+// Directive is one line of a .check file: CHECK or CHECK-NOT and its pattern.
+type Directive struct {
+	Kind str
+	Pattern str
+}
+
+// AsmArch is the architecture whose section of a .check file applies: the target's if given, else the machine's.
+fn AsmArch(target str, machine str) str {
+	if len(target) > 0 {
+		let parts = twine.Split(target, "-")
+		return parts[len(parts) - 1]
+	}
+	let lower = lowerText(machine)
+	if lower == "arm64" || lower == "aarch64" {
+		return "arm64"
+	}
+	if lower == "x86_64" || lower == "amd64" {
+		return "amd64"
+	}
+	return lower
+}
+
+fn lowerText(s str) str {
+	mut b = twine.NewBuilder(len(s))
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 'A' && c <= 'Z' {
+			b.Byte(c + 32)
+		} else {
+			b.Byte(c)
+		}
+	}
+	return b.String()
+}
+
+// ParseChecks reads a .check file into the directives that apply to arch. A [arch] line starts a section for that architecture;
+// lines before any section apply to all. A bad line is a fault naming the file and line.
+fn ParseChecks(path str, arch str) ![]Directive {
+	let text = ci.Read(path)
+	mut out = []Directive{}
+	mut section = ""
+	mut inSection = false
+	let lines = twine.Split(text, "\n")
+	for n in 0..len(lines) {
+		let line = twine.TrimSpace(lines[n])
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		if line[0] == '[' && line[len(line) - 1] == ']' && len(line) > 2 {
+			section = line[1:len(line) - 1]
+			inSection = true
+			continue
+		}
+		mut kind = ""
+		mut pattern = ""
+		if twine.HasPrefix(line, "CHECK-NOT:") {
+			kind = "CHECK-NOT"
+			pattern = twine.TrimSpace(line[10:])
+		} else if twine.HasPrefix(line, "CHECK:") {
+			kind = "CHECK"
+			pattern = twine.TrimSpace(line[6:])
+		} else {
+			fail say.Fault("%s:%d: not a CHECK, CHECK-NOT or [arch] line: %s", path, n + 1, line)
+		}
+		if len(pattern) == 0 {
+			fail say.Fault("%s:%d: %s with an empty pattern", path, n + 1, kind)
+		}
+		if !inSection || section == arch {
+			out = append(out, Directive{Kind: kind, Pattern: pattern})
+		}
+	}
+	return out
+}
+
+// find is the first match of the pattern in the text: where it starts and ends, and whether there is one; a fault for a pattern
+// that is not a regular expression.
+fn find(pattern str, text str) !(i64, i64, bool) {
+	let re = try pyre.Compile(pattern)
+	let (a, b, ok) = re.Search(text, 0)
+	return a, b, ok
+}
+
+// CheckAsm matches lit style directives in order and says whether they hold, and which directive failed when not. A CHECK-NOT must
+// not match between the previous CHECK's match and the next CHECK's match (or the end of the listing), lit's scope, so a later
+// part of the file that legitimately contains the pattern does not fail an earlier assertion.
+fn CheckAsm(text str, directives []Directive) (bool, str) {
+	mut position = 0
+	for index in 0..len(directives) {
+		let d = directives[index]
+		if d.Kind == "CHECK-NOT" {
+			mut stop = len(text)
+			for k in index + 1..len(directives) {
+				if directives[k].Kind == "CHECK" {
+					let (a, b, ok) = find(directives[k].Pattern, text[position:]) catch _ {
+						return false, "invalid pattern: " + directives[k].Pattern
+					}
+					if ok {
+						stop = position + a
+					}
+					break
+				}
+			}
+			let (a, b, ok) = find(d.Pattern, text[position:stop]) catch _ {
+				return false, "invalid pattern: " + d.Pattern
+			}
+			if ok {
+				return false, "CHECK-NOT: " + d.Pattern
+			}
+		} else {
+			let (a, b, ok) = find(d.Pattern, text[position:]) catch _ {
+				return false, "invalid pattern: " + d.Pattern
+			}
+			if !ok {
+				return false, "CHECK: " + d.Pattern
+			}
+			position += b
+		}
+	}
+	return true, ""
+}
+
+// runOutput is the stdout a strict test is judged by (#626): exactly as printed, so a test fails on order (map iteration, defer,
+// select, scope, a loop's lines). A test whose order may vary (cores finishing in any order) opts in with NAME.sorted, a file saying
+// why; only its lines are sorted before the comparison.
+fn runOutput(source str, stdout str) str {
+	if !quarry.Exists(twine.TrimSuffix(source, ".tin") + ".sorted") {
+		return stdout
+	}
+	mut lines = []str{}
+	mut start = 0
+	for i in 0..len(stdout) {
+		if stdout[i] == '\n' {
+			lines = append(lines, stdout[start:i + 1])
+			start = i + 1
+		}
+	}
+	if start < len(stdout) {
+		lines = append(lines, stdout[start:])
+	}
+	sift.Strs(mut lines)
+	return twine.Join(lines, "")
+}
+
+// compare is true for equal texts; otherwise it prints what differs (the start of it) and is false.
+fn compare(name str, expected str, actual str) bool {
+	if expected == actual {
+		return true
+	}
+	let d = ci.Diff(name + ".expected", expected, name + ".actual", actual)
+	if len(d) > 6000 {
+		say.Line(d[0:6000])
+	} else {
+		say.Line(d)
+	}
+	return false
+}
+
+// shorten is the first n bytes of s.
+fn shorten(s str, n i64) str {
+	if len(s) <= n {
+		return s
+	}
+	return s[0:n]
+}
+
+// jsonString quotes a string for the results file.
+fn jsonString(s str) str {
+	return mint.Quote(s)
+}
+
+// Run runs the whole suite with the compiler at the path from the tree at root (target and docker image optional, as the command
+// line has them) and says whether every case passed. exec is how programs are run; the unit tests give it a script.
+fn Run(compiler str, target str, docker str, root str, exec Exec, asmOnly bool) bool {
+	let dir = ci.Join(root, "toolchain/tests/v2")
+	mut cases = []str{}
+	mut asmCases = []str{}
+	for name in ci.Names(dir, ".tin") {
+		if twine.HasSuffix(name, "_asm.tin") {
+			asmCases = append(asmCases, name)
+		} else {
+			cases = append(cases, name)
+		}
+	}
+	if len(cases) == 0 && len(asmCases) == 0 {
+		quarry.Eprintln("No strict tests discovered")
+		return false
+	}
+	let output = ci.Join(root, "bin/ci")
+	ci.Mkdirs(output)
+	let rootEnv = ci.Env("TIN_ROOT")
+	mut tinRoot = root
+	if len(rootEnv) > 0 {
+		tinRoot = rootEnv
+	}
+	let env = []str{"TIN_ROOT=" + tinRoot, "LC_ALL=C"}
+	let work = ci.TempDir(output, "strict-")
+	mut names = []str{}
+	mut passedAll = []bool{}
+	mut exits = []i64{}
+	mut allOk = true
+	for file in cases {
+		if asmOnly {
+			break
+		}
+		let name = twine.TrimSuffix(file, ".tin")
+		let source = ci.Join(dir, file)
+		let negative = twine.HasSuffix(name, "_bad")
+		mut golden = twine.TrimSuffix(source, ".tin") + ".out"
+		if negative {
+			golden = twine.TrimSuffix(source, ".tin") + ".err"
+		}
+		if !quarry.Exists(golden) {
+			say.Line("FAIL", name, "missing expected output:", golden)
+			names = append(names, name)
+			passedAll = append(passedAll, false)
+			exits = append(exits, -999)
+			allOk = false
+			continue
+		}
+		let exe = ci.Join(work, name)
+		mut command = []str{compiler}
+		if len(target) > 0 {
+			command = append(command, "-target")
+			command = append(command, target)
+		}
+		command = append(command, "-o")
+		command = append(command, exe)
+		command = append(command, "toolchain/tests/v2/" + file)
+		let c = exec(command, root, 60, env)
+		ci.Write(ci.Join(output, name + ".compile.log"), c.Stdout + c.Stderr)
+		mut passed = false
+		mut code = c.Code
+		mut stderr = c.Stderr
+		if negative {
+			passed = c.Code == 1 && compare(name, ci.Read(golden), c.Stderr)
+		} else if c.Code != 0 {
+			passed = false
+		} else {
+			mut run = []str{exe}
+			mut seconds = 60
+			if len(docker) > 0 {
+				let platform = twine.ReplaceAll(target, "-", "/")
+				run = []str{"docker", "run", "--rm", "--platform", platform, "-v", work + ":/work", "-w", "/work", docker, "timeout", "60", "/work/" + name}
+				seconds = 75
+			}
+			let r = exec(run, root, seconds, []str{})
+			ci.Write(ci.Join(output, name + ".run.log"), r.Stdout + r.Stderr)
+			code = r.Code
+			stderr = r.Stderr
+			passed = r.Code == 0 && compare(name, ci.Read(golden), runOutput(source, r.Stdout))
+		}
+		if !passed {
+			say.Line("FAIL " + name + ": exit " + mint.Itoa(code) + "\n" + shorten(stderr, 4000))
+			allOk = false
+		} else {
+			say.Line("PASS", name)
+		}
+		names = append(names, name)
+		passedAll = append(passedAll, passed)
+		exits = append(exits, code)
+	}
+	let arch = AsmArch(target, ci.Arch())
+	for file in asmCases {
+		let name = twine.TrimSuffix(file, ".tin")
+		let check = ci.Join(dir, name + ".check")
+		if !quarry.Exists(check) {
+			say.Line("FAIL", name, "missing check file:", check)
+			names = append(names, name)
+			passedAll = append(passedAll, false)
+			exits = append(exits, -999)
+			allOk = false
+			continue
+		}
+		mut command = []str{compiler}
+		if len(target) > 0 {
+			command = append(command, "-target")
+			command = append(command, target)
+		}
+		command = append(command, "-S")
+		command = append(command, "-o")
+		command = append(command, ci.Join(work, name))
+		command = append(command, "toolchain/tests/v2/" + file)
+		let c = exec(command, root, 60, env)
+		ci.Write(ci.Join(output, name + ".asm.log"), c.Stdout + c.Stderr)
+		mut passed = true
+		mut why = ""
+		if c.Code != 0 {
+			passed = false
+			why = "compiler exit " + mint.Itoa(c.Code)
+		} else {
+			let directives = ParseChecks(check, arch) catch err {
+				passed = false
+				why = say.Str(err)
+				[]Directive{}
+			}
+			if passed {
+				if len(directives) == 0 {
+					passed = false
+					why = "no directives for " + arch
+				} else {
+					let (ok, reason) = CheckAsm(c.Stdout, directives)
+					passed = ok
+					why = reason
+				}
+			}
+		}
+		if !passed {
+			say.Line("FAIL " + name + " [" + arch + "]: " + why + "\n" + shorten(c.Stderr, 4000))
+			allOk = false
+		} else {
+			say.Line("PASS", name)
+		}
+		names = append(names, name)
+		passedAll = append(passedAll, passed)
+		exits = append(exits, c.Code)
+	}
+	// A .sorted marker must name a test and say why its order may vary (#626).
+	for marker in ci.Names(dir, ".sorted") {
+		let stem = twine.TrimSuffix(marker, ".sorted")
+		if !quarry.Exists(ci.Join(dir, stem + ".tin")) || len(twine.TrimSpace(ci.Read(ci.Join(dir, marker)))) == 0 {
+			say.Line("FAIL", stem, "a .sorted marker needs its test and a reason:", ci.Join(dir, marker))
+			names = append(names, stem)
+			passedAll = append(passedAll, false)
+			exits = append(exits, -999)
+			allOk = false
+		}
+	}
+	// A check file whose test is missing (a typo in the name) would check nothing.
+	for check in ci.Names(dir, "_asm.check") {
+		let stem = twine.TrimSuffix(check, ".check")
+		if !quarry.Exists(ci.Join(dir, stem + ".tin")) {
+			say.Line("FAIL", stem, "check file without a test:", ci.Join(dir, check))
+			names = append(names, stem)
+			passedAll = append(passedAll, false)
+			exits = append(exits, -999)
+			allOk = false
+		}
+	}
+	// the results, as JSON
+	mut json = "[\n"
+	for i in 0..len(names) {
+		mut exitText = "null"
+		if exits[i] != -999 {
+			exitText = mint.Itoa(exits[i])
+		}
+		mut passText = "false"
+		if passedAll[i] {
+			passText = "true"
+		}
+		json = json + "  {{\n    \"name\": " + jsonString(names[i]) + ",\n    \"passed\": " + passText + ",\n    \"exit\": " + exitText + "\n  }}"
+		if i + 1 < len(names) {
+			json = json + ","
+		}
+		json = json + "\n"
+	}
+	json = json + "]\n"
+	ci.Write(ci.Join(output, "strict-results.json"), json)
+	ci.Remove(work)
+	return allOk
+}

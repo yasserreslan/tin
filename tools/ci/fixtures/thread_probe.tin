@@ -4,61 +4,61 @@ shared mut probeOK i64
 
 // child checks what a new core inherits and owns: a signal stack and the blocked SIGTERM.
 fn child(arg i64) {
-    mut ok = rt_altstack_ready()
-    let set = calloc(1, 8)
-    rt_sys_pthread_sigmask(0, 0, set)
-    ok = ok && set[0]&(1<<14) != 0
-    free(set)
-    if rt_sys_close(-1) >= 0 || rt_errno() == 0 {
-        ok = false
-    }
-    if ok {
-        __atomic_add(&probeOK, 1)
-    }
+	mut ok = rt_altstack_ready()
+	let set = calloc(1, 8)
+	rt_sys_pthread_sigmask(0, 0, set)
+	ok = ok && set[0]&(1<<14) != 0
+	free(set)
+	if rt_sys_close(-1) >= 0 || rt_errno() == 0 {
+		ok = false
+	}
+	if ok {
+		__atomic_add(&probeOK, 1)
+	}
 }
 
 // Cycle starts n cores one after another, waits for each to return and reaps its stacks.
 fn Cycle(n i64) i64 {
-    rt_sig_block_term()
-    for i in i64(0)..n {
-        let done = __atomic_load(&rtCoresDone)
-        rt_spawn_core(child, i)
-        for __atomic_load(&rtCoresDone) == done {
-            rt_sleep_ns(50000)
-        }
-        rt_threads_reap()
-    }
-    return __atomic_load(&probeOK)
+	rt_sig_block_term()
+	for i in i64(0)..n {
+		let done = __atomic_load(&rtCoresDone)
+		rt_spawn_core(child, i)
+		for __atomic_load(&rtCoresDone) == done {
+			rt_sleep_ns(50000)
+		}
+		rt_threads_reap()
+	}
+	return __atomic_load(&probeOK)
 }
 
 // Live is the number of thread records still held (threads not yet reaped).
 fn Live() i64 {
-    mut n = i64(0)
-    {
-    	mut r = rtThreads
-    	for r != 0 {
-	        n += 1
-	    	r = r[thrNext]
-    	}
-    }
-    return n
+	mut n = i64(0)
+	{
+		mut r = rtThreads
+		for r != 0 {
+			n += 1
+			r = r[thrNext]
+		}
+	}
+	return n
 }
 
 fn deep(n i64) i64 {
-    if n < 0 {
-        return 0
-    }
-    return deep(n+1) + 1
+	if n < 0 {
+		return 0
+	}
+	return deep(n+1) + 1
 }
 
 fn overflow(arg i64) {
-    deep(arg)
+	deep(arg)
 }
 
 // Overflow runs unbounded recursion on a core thread; the fault report ends the process.
 fn Overflow() {
-    rt_spawn_core(overflow, 0)
-    for {
-        rt_sleep_ns(1000000)
-    }
+	rt_spawn_core(overflow, 0)
+	for {
+		rt_sleep_ns(1000000)
+	}
 }

@@ -1,0 +1,46 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Memory primitives, cross-core returns, and deterministic allocation failure (#178).
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/memory")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "memory-")
+	ci.CopyLib(ci.Root(), ci.Join(work, "lib"))
+	let probe = ci.Join(work, "lib/memoryprobe")
+	ci.Mkdirs(probe)
+	ci.Write(ci.Join(probe, "probe.tin"), ci.Read(ci.Join(ci.Root(), "tools/ci/fixtures/memory_probe.tin")))
+	let exe = ci.Join(work, "memory")
+	let root = "TIN_ROOT=" + work
+	ci.BuildTin("tools/ci/fixtures/memory.tin", exe, work, []str{})
+	let reference = ci.Exec([]str{"go", "run", "./bench/ref/memory"}, ci.Root(), 60)
+	ci.Must(reference, "go run memory")
+	let result = ci.ExecEnv([]str{exe}, ci.Root(), 30, []str{root}, []str{})
+	ci.Write(ci.Join(out, "memory.log"), result.Stdout + result.Stderr)
+	ci.Check(result.Code == 0 && result.Stdout == reference.Stdout, "memory: exit " + mint.Itoa(result.Code) + "\n" + result.Stdout + result.Stderr)
+	let scalar = ci.ExecEnv([]str{exe}, ci.Root(), 30, []str{root, "TIN_ALLOC_TEST=1", "TIN_MEMORY_SCALAR=1"}, []str{})
+	ci.Check(scalar.Code == 0 && scalar.Stdout == reference.Stdout, "memory scalar: exit " + mint.Itoa(scalar.Code) + "\n" + scalar.Stderr)
+	// Injection is process-wide and counts allocations/mappings, including startup. It is enabled only by the explicit test flag;
+	// ordinary environments ignore it.
+	mut failures = []i64{}
+	for i in 0..41 {
+		failures = append(failures, i)
+	}
+	for extra in []i64{64, 128, 512, 1024, 4096} {
+		failures = append(failures, extra)
+	}
+	for after in failures {
+		let r = ci.ExecEnv([]str{exe}, ci.Root(), 10, []str{root, "TIN_ALLOC_TEST=1", "TIN_FAIL_ALLOC_AFTER=" + mint.Itoa(after)}, []str{})
+		ci.Check(r.Code == 2, "memory: failure after " + mint.Itoa(after) + ": exit " + mint.Itoa(r.Code) + "\n" + r.Stderr)
+		ci.Check(twine.Contains(r.Stderr, "out of memory (") && twine.Contains(r.Stderr, " bytes)\n"), "memory: failure after " + mint.Itoa(after) + ": " + r.Stderr)
+	}
+	let off = ci.ExecEnv([]str{exe}, ci.Root(), 30, []str{root, "TIN_ALLOC_TEST=0", "TIN_FAIL_ALLOC_AFTER=0"}, []str{})
+	ci.Check(off.Code == 0 && off.Stdout == reference.Stdout, "memory: injection off: exit " + mint.Itoa(off.Code))
+	ci.Remove(work)
+	ci.Pass("memory: alignments, overlap, guard pages, zeroing, realloc, 1000 cross-core returns")
+	ci.Pass("#178: " + mint.Itoa(len(failures)) + " deterministic allocation/mapping failures; test flag gates injection")
+}

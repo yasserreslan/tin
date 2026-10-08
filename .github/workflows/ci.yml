@@ -47,7 +47,9 @@ jobs:
           case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) arch=unknown ;; esac
           test "$arch" = "$EXPECTED_ARCH" || { echo "Expected native $EXPECTED_ARCH, got $(uname -m)"; exit 1; }
       - name: Test the test harness
-        run: python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
+        run: |
+          python3 -m unittest discover -s tools/ci -p 'test_*.py' -v
+          for t in tools/ci/test_*.tin; do sh tools/ci/tin.sh $t; done
       - name: Build from seed and verify self-hosting fixed point
         run: make bootstrap
       - name: Strict language and standard library suite
@@ -55,31 +57,31 @@ jobs:
       - name: Docs and examples are edition 1, and every docs code block compiles
         run: python3 tools/ci/docs_check.py bin/tinc
       - name: Exact number conversion (Go reference and hard parsing corpus)
-        run: python3 tools/ci/number_check.py
+        run: sh tools/ci/tin.sh number_check
       - name: Arbitrary-precision integers against Go's math/big (100,000 pairs)
-        run: python3 tools/ci/abacus_check.py
+        run: sh tools/ci/tin.sh abacus_check
       - name: XML token streams against Go's encoding/xml (RSS, SOAP, S3, SVG)
-        run: python3 tools/ci/scroll_check.py
+        run: sh tools/ci/tin.sh scroll_check
       - name: Regular expressions against Go's regexp (12,000 pairs and the ported tables)
-        run: python3 tools/ci/lasso_check.py
+        run: sh tools/ci/tin.sh lasso_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
-        run: python3 tools/ci/pack_check.py
+        run: sh tools/ci/tin.sh pack_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: python3 tools/ci/spawn_check.py
       - name: DEFLATE against Go (every length and distance code, both directions)
-        run: python3 tools/ci/squash_twin_check.py
+        run: sh tools/ci/tin.sh squash_twin_check
       - name: Memory primitives and deterministic allocation failure
-        run: python3 tools/ci/memory_check.py
+        run: sh tools/ci/tin.sh memory_check
       - name: Task memory after a 300-request heavy burst
-        run: python3 tools/ci/task_memory_check.py
+        run: sh tools/ci/tin.sh task_memory_check
       - name: Long-lived blocks above 4 KiB (slab classes to 256 KiB, kept mappings, mappings after deletes)
-        run: python3 tools/ci/heap_check.py
+        run: sh tools/ci/tin.sh heap_check
       - name: shared let and atomic (one copy of a 100 MB table for 1 and 8 cores, an exact atomic count)
-        run: python3 tools/ci/shared_check.py
+        run: sh tools/ci/tin.sh shared_check
       - name: Map growth (no insert into a growing long-lived map takes a millisecond)
-        run: python3 tools/ci/map_growth_check.py
+        run: sh tools/ci/tin.sh map_growth_check
       - name: Reclamation with long-lived tasks (a parked WebSocket does not pin dropped blocks)
-        run: python3 tools/ci/limbo_check.py
+        run: sh tools/ci/tin.sh limbo_check
       - name: Arena blocks and CSV streaming (flat peak RSS; a 1 GiB file in a 64 KiB window)
         run: python3 tools/ci/arena_check.py
       - name: Replay tapes (record, replay, divergence)
@@ -88,23 +90,23 @@ jobs:
         run: python3 tools/ci/sched_check.py
       - name: Raw Linux syscall ABI, signals, errors and directory iteration
         if: runner.os == 'Linux'
-        run: python3 tools/ci/syscall_check.py
+        run: sh tools/ci/tin.sh syscall_check
       - name: Linux clone threads (returning cores, stack reaping, masks, child faults)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/thread_check.py
+        run: sh tools/ci/tin.sh thread_check
       - name: Static Linux executables (no interpreter, Tin _start, empty root)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/static_check.py
+        run: sh tools/ci/tin.sh static_check
       - name: Exact calendar, errno, hostname, TTY and Linux symbol helpers
-        run: python3 tools/ci/helpers_check.py
+        run: sh tools/ci/tin.sh helpers_check
       - name: Float map keys against Go (-0 and +0 one key, NaN never found)
-        run: python3 tools/ci/float_keys_check.py
+        run: sh tools/ci/tin.sh float_keys_check
       - name: Compiler path discovery and canonicalization
-        run: python3 tools/ci/compiler_paths_check.py
+        run: sh tools/ci/tin.sh compiler_paths_check
       - name: Compile time of long expression chains (#713)
-        run: python3 tools/ci/compile_time_check.py
+        run: sh tools/ci/tin.sh compile_time_check
       - name: Packages (tin vendor, offline builds from vendor/, tin.lock hashes)
-        run: python3 tools/ci/packages_check.py
+        run: sh tools/ci/tin.sh packages_check
       - name: Linux DNS contract, transport and request deadlines
         if: runner.os == 'Linux'
         run: python3 tools/ci/dns_check.py
@@ -121,7 +123,7 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 tools/ci/tls_server_check.py
       - name: Memory safety and issue-linked regressions
-        run: python3 tools/ci/regressions.py
+        run: sh tools/ci/tin.sh regressions
       - name: Request tasks (waits overlap, deadlines, pipelined order)
         run: python3 tools/ci/task_check.py
       - name: Router (parameters, middleware, 404/405 and waits under concurrent requests)
@@ -129,7 +131,7 @@ jobs:
       - name: Runtime lifetimes (formatting, helper deadlines, WebSocket memory)
         run: python3 tools/ci/lifetime_check.py
       - name: Guards (defers and cleanup callbacks before the panic's fault)
-        run: python3 tools/ci/guard_check.py
+        run: sh tools/ci/tin.sh guard_check
       - name: Boundary cancellation (every client wakes; cancels flow down only)
         run: python3 tools/ci/cancel_check.py
       - name: Structured concurrency in requests (scope, spawn, first-fault cancellation)
@@ -138,10 +140,10 @@ jobs:
         run: python3 tools/ci/memory_bounds_check.py
       - name: Format memory (say.Line and interpolation in a plain program run in constant memory)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/format_memory_check.py
+        run: sh tools/ci/tin.sh format_memory_check
       - name: Dyn memory (a dyn value replaced in long-lived memory is released)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/dyn_memory_check.py
+        run: sh tools/ci/tin.sh dyn_memory_check
       - name: Loop memory (binary-trees within 3x of Go's peak; a plain loop of temporaries under 16 MiB)
         if: runner.os == 'Linux'
         run: python3 tools/ci/loop_memory_check.py
@@ -220,7 +222,7 @@ jobs:
       - name: No closed issue may retain a known-failure exemption
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/ci/regressions.py --audit
+        run: sh tools/ci/tin.sh regressions --audit
 
   gate:
     name: CI

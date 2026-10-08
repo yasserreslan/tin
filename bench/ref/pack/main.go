@@ -1,6 +1,6 @@
 // Command pack reads a hex corpus on stdin and prints, for each case, what Go's encoding/binary,
 // encoding/base32 and encoding/ascii85 say. tools/ci/fixtures/pack.tin prints the same lines and
-// tools/ci/pack_check.py compares them (#740).
+// tools/ci/pack_check.tin compares them (#740).
 //
 // Lines:
 //

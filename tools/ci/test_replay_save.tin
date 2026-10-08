@@ -1,0 +1,109 @@
+package main
+
+import "./capsule"
+import "./ci"
+import "./regress"
+import "quarry"
+import "say"
+import "seal"
+import "tinjson"
+import "twine"
+
+// Tests for tin replay --save-test (tools/dev/replay_save.tin, #242) and replay cases in the regressions runner.
+
+fn key() str {
+	let b = make([]u8, 32)
+	for i in 0..32 {
+		b[i] = u8(i)
+	}
+	return str(b)
+}
+
+fn failsWith(name str, text str, want str) {
+	ci.Test(name, twine.Contains(text, want))
+}
+
+fn save(root str, name str, issue str) str {
+	let work = root + "/work"
+	ci.Mkdirs(work)
+	ci.Write(work + "/cap.tcap", capsule.Seal("body", key()))
+	ci.Write(work + "/main.tin", "package main\n")
+	ci.Write(work + "/out", "replay: status 200 (recorded 500)\nok\n")
+	let hex = seal.Hex([]u8(key()))
+	return capsule.Save(root, name, issue, work + "/cap.tcap", work + "/main.tin", work + "/out", hex) catch err {
+		"ERR " + say.Str(err)
+	}
+}
+
+fn main() {
+	// the envelope round trip
+	let sealed = capsule.Seal(twine.Repeat("x", 100), key())
+	ci.Test("envelope header", sealed[0:8] == "TINCAP\x01\x00")
+	ci.Test("envelope length", len(sealed) == 8 + 16 + 100 + 32)
+	let opened = capsule.Unseal(sealed, key()) catch _ {
+		"FAILED"
+	}
+	ci.Test("envelope round trip", opened == twine.Repeat("x", 100))
+	let wrong = capsule.Unseal(sealed, str(make([]u8, 32))) catch err {
+		say.Str(err)
+	}
+	failsWith("wrong key", wrong, "wrong key or damaged")
+	let damaged = make([]u8, len(sealed))
+	for i in 0..len(sealed) {
+		damaged[i] = sealed[i]
+	}
+	damaged[30] ^= 1
+	let bad = capsule.Unseal(str(damaged), key()) catch err {
+		say.Str(err)
+	}
+	failsWith("damaged capsule", bad, "wrong key or damaged")
+	let notCapsule = capsule.Unseal("GET / HTTP/1.1\r\n\r\n", key()) catch err {
+		say.Str(err)
+	}
+	failsWith("not a capsule", notCapsule, "not a capsule")
+
+	// saving a case
+	let root = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "replay-save-")
+	ci.Mkdirs(root + "/toolchain/tests/regressions")
+	ci.Write(root + "/toolchain/tests/regressions/cases.json", "[]\n")
+	let first = save(root, "replay-x", "242")
+	ci.Test("save works", !twine.HasPrefix(first, "ERR"))
+	let dest = root + "/toolchain/tests/regressions"
+	ci.Same("saved program", ci.Read(dest + "/replay-x.tin"), "package main\n")
+	let (cases, ok) = tinjson.Parse(ci.Read(dest + "/cases.json"))
+	ci.Test("manifest parses", ok)
+	let item = cases.Items()[0]
+	ci.Same("case key", item.Get("replay").Get("key").Text(), capsule.TestKey())
+	ci.Same("case stdout", item.Get("expected").Get("stdout").Text(), "replay: status 200 (recorded 500)\nok\n")
+	ci.Same("case phase", item.Get("expected").Get("phase").Text(), "run")
+	let testKey = capsule.TestKeyBytes()
+	let body = capsule.Unseal(ci.Read(dest + "/replay-x.tcap"), testKey) catch _ {
+		"FAILED"
+	}
+	ci.Same("rekeyed capsule", body, "body")
+	failsWith("duplicate", save(root, "replay-x", "242"), "exists already")
+	failsWith("bad name", save(root, "Replay X", "242"), "lower-case")
+	failsWith("bad issue", save(root, "replay-y", "abc"), "issue number")
+	let second = save(root, "replay-z", "243")
+	ci.Test("a second case is appended", !twine.HasPrefix(second, "ERR"))
+	let (both, ok2) = tinjson.Parse(ci.Read(dest + "/cases.json"))
+	ci.Test("manifest with two cases parses", ok2 && both.Len() == 2)
+
+	// the regressions runner needs the capsule of a replay case
+	let dir = root + "/loader"
+	ci.Mkdirs(dir)
+	ci.Write(dir + "/a.tin", "package main\n")
+	ci.Write(dir + "/cases.json", `[{"source": "a.tin", "issue": 242, "replay": {"capsule": "a.tcap", "key": "k"}, "expected": {"phase": "run", "exit": 0}}]`)
+	ci.Test("a replay case without its capsule is refused", !loadable(dir))
+	ci.Write(dir + "/a.tcap", "")
+	ci.Test("a replay case with its capsule loads", loadable(dir))
+	ci.Remove(root)
+	ci.Finish()
+}
+
+fn loadable(dir str) bool {
+	let cases = regress.LoadCases(dir) catch _ {
+		return false
+	}
+	return len(cases) == 1
+}

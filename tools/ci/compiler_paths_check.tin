@@ -1,0 +1,93 @@
+package main
+
+import "./ci"
+import "mint"
+import "quarry"
+import "twine"
+
+// Compiler root discovery through spaced/unicode trees and symlink launchers.
+
+fn main() {
+	let root = ci.Root()
+	mut compiler = ci.Tinc()
+	let args = quarry.Args()
+	if len(args) > 2 && args[1] == "--compiler" {
+		compiler = args[2]
+	}
+	if !twine.HasPrefix(compiler, "/") {
+		compiler = ci.Join(root, compiler)
+	}
+	let out = ci.Join(root, "bin/ci/paths")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "paths-")
+	let tree = ci.Join(work, "Tin tree with spaces λ")
+	ci.Mkdirs(ci.Join(tree, "bin"))
+	ci.CopyTree(root, tree)
+	ci.Copy(compiler, ci.Join(tree, "bin/tinc"))
+	ci.Link("Tin tree with spaces λ", ci.Join(work, "tree link"))
+	ci.Link("tree link/bin/tinc", ci.Join(work, "launcher"))
+	ci.Link("launcher", ci.Join(work, "launcher chain"))
+	let source = ci.Join(work, "hello.tin")
+	ci.Write(source, "package main\nimport \"say\"\nfn main() {{ say.Line(\"path discovery λ\") }}\n")
+	let unrelated = ci.Join(work, "unrelated")
+	ci.Mkdirs(unrelated)
+	let launchers = []str{ci.Join(tree, "bin/tinc"), ci.Join(work, "launcher"), ci.Join(work, "launcher chain"), ci.Join(work, "tree link/bin/../bin/tinc")}
+	for i in 0..len(launchers) {
+		let exe = ci.Join(work, "hello" + mint.Itoa(i))
+		let built = ci.ExecEnv([]str{launchers[i], "-o", exe, source}, unrelated, 60, []str{}, []str{"TIN_ROOT"})
+		ci.Must(built, "compile through " + launchers[i])
+		let got = ci.Exec([]str{exe}, "", 10)
+		ci.Check(got.Code == 0 && got.Stdout == "path discovery λ\n", "path discovery through " + launchers[i] + ": " + got.Stdout + got.Stderr)
+	}
+	// Check canonicalization itself, including .. after a symlink and a loop.
+	ci.Link("loop", ci.Join(work, "loop"))
+	ci.Link("missing", ci.Join(work, "broken"))
+	ci.Write(ci.Join(work, "file"), "x")
+	let probe = ci.Join(work, "path-probe")
+	mut osname = "darwin"
+	if ci.OS() == "linux" {
+		osname = "linux"
+	}
+	// The probe is a strict program whose files sit in the tree's toolchain/compiler/, which is read trusted.
+	ci.Remove(ci.Join(tree, "toolchain/compiler"))
+	ci.Copy(ci.Join(root, "toolchain/compiler"), ci.Join(tree, "toolchain/compiler"))
+	ci.Write(ci.Join(tree, "toolchain/compiler/path_probe.tin"), ci.Read(ci.Join(root, "tools/ci/fixtures/path_probe.tin")))
+	let compilerDir = ci.Join(tree, "toolchain/compiler")
+	let sources = []str{ci.Join(compilerDir, "records.tin"), ci.Join(compilerDir, "util.tin"), ci.Join(compilerDir, "host_" + osname + ".tin"), ci.Join(compilerDir, "path_probe.tin")}
+	mut argv = []str{compiler, "-o", probe}
+	for s in sources {
+		argv = append(argv, s)
+	}
+	ci.Must(ci.ExecEnv(argv, root, 60, []str{"TIN_ROOT=" + tree}, []str{}), "compile the path probe")
+	let paths = []str{ci.Join(tree, "bin/tinc"), ci.Join(work, "tree link/../file"), ci.Join(work, "tree link/bin/../../file"), ".", ci.Join(work, "launcher chain"), ci.Join(work, "loop"), ci.Join(work, "broken"), ci.Join(work, "file") + "/", ci.Join(work, "missing"), "", ci.Join(work, "file/../file")}
+	mut probeArgs = []str{probe}
+	mut oracleArgs = []str{}
+	for p in paths {
+		probeArgs = append(probeArgs, p)
+	}
+	let got = ci.Exec(probeArgs, work, 10)
+	let cexe = ci.Join(work, "libc_oracle")
+	ci.Must(ci.Exec([]str{"cc", "-o", cexe, ci.Join(root, "tools/ci/fixtures/libc_oracle.c")}, root, 120), "cc libc_oracle")
+	oracleArgs = append(oracleArgs, cexe)
+	oracleArgs = append(oracleArgs, "realpath")
+	mut goArgs = []str{"go", "run", ci.Join(root, "bench/ref/realpath/main.go")}
+	for p in paths {
+		oracleArgs = append(oracleArgs, p)
+		goArgs = append(goArgs, p)
+	}
+	let expected = ci.Exec(oracleArgs, work, 10)
+	ci.Must(expected, "libc realpath")
+	ci.Check(got.Code == 0 && got.Stdout == expected.Stdout, "realpath: exit " + mint.Itoa(got.Code) + "\ngot:\n" + got.Stdout + got.Stderr + "want:\n" + expected.Stdout)
+	// Darwin retains libSystem's realpath semantics for file/../file. Linux is production and agrees with Go's component-by-component
+	// symlink traversal.
+	if osname == "linux" {
+		let oracle = ci.Exec(goArgs, work, 60)
+		ci.Must(oracle, "go realpath")
+		ci.Check(oracle.Stdout == expected.Stdout, "Go realpath differs:\n" + oracle.Stdout + "want:\n" + expected.Stdout)
+	}
+	// Missing compiler inputs keep the exact diagnostic instead of a crash.
+	let missing = ci.ExecEnv([]str{ci.Join(tree, "bin/tinc"), ci.Join(work, "missing.tin")}, unrelated, 10, []str{}, []str{"TIN_ROOT"})
+	ci.Check(missing.Code != 0 && twine.Contains(missing.Stderr, "cannot open") && twine.Contains(missing.Stderr, "missing.tin"), "missing source diagnostic: " + missing.Stderr)
+	ci.Remove(work)
+	ci.Pass("compiler root discovery: copied installation, spaces/Unicode, relative symlink chain, directory symlink and missing source diagnostic")
+}

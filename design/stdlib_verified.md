@@ -57,7 +57,7 @@ that use it rather than rounded once; Tin's compiler has no `x*y - a` form, fuse
 of an add, and rounds a product that has two uses once.
 Neither is wrong, and Go's own results differ between its arm64 and amd64 builds for the same reason.
 
-`tools/ci/number_check.py` runs the same functions from `bench/ref/gauge` over 120,000 inputs each
+`tools/ci/number_check.tin` runs the same functions from `bench/ref/gauge` over 120,000 inputs each
 (GAUGE_N, one function at a time) and compares every result bit for bit: logb, ilogb, sincos,
 f32bits, f32frombits, dim, remainder, nextafter, nextafter32, fma, erf, erfc, erfcinv and gamma are
 bit-identical, and expm1, asinh, acosh, atanh and erfinv stay within one ulp (on macOS arm64: 224,

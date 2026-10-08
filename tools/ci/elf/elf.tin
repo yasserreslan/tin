@@ -1,0 +1,125 @@
+// A reader of 64-bit little-endian ELF files, for the checks that look at the symbols and the code a build produced.
+package elf
+
+import "quarry"
+import "say"
+
+type Section struct {
+	Name i64
+	Kind i64
+	Offset i64
+	Size i64
+	Link i64
+	Entsize i64
+}
+
+// File is an ELF file in memory.
+type File struct {
+	Data str
+	Sections []Section
+}
+
+fn rd16(d str, at i64) i64 {
+	return i64(d[at]) | (i64(d[at + 1]) << 8)
+}
+
+fn rd32(d str, at i64) i64 {
+	return rd16(d, at) | (rd16(d, at + 2) << 16)
+}
+
+fn rd64(d str, at i64) i64 {
+	return rd32(d, at) | (rd32(d, at + 4) << 32)
+}
+
+// Read parses the section table of a 64-bit ELF file.
+fn Read(path str) !File {
+	let data = try quarry.ReadFile(path)
+	if len(data) < 64 || data[0:5] != "\x7fELF\x02" {
+		fail say.Fault("%s", path + ": not a 64-bit ELF file")
+	}
+	let shoff = rd64(data, 40)
+	let size = rd16(data, 58)
+	let count = rd16(data, 60)
+	mut sections = []Section{}
+	for i in 0..count {
+		let at = shoff + i * size
+		sections = append(sections, Section{Name: rd32(data, at), Kind: rd32(data, at + 4), Offset: rd64(data, at + 24), Size: rd64(data, at + 32), Link: rd32(data, at + 40), Entsize: rd64(data, at + 56)})
+	}
+	return File{Data: data, Sections: sections}
+}
+
+// cstr is the NUL-terminated string at offset at of the section.
+fn (f File) cstr(s Section, at i64) str {
+	let start = s.Offset + at
+	mut end = start
+	for f.Data[end] != 0 {
+		end += 1
+	}
+	return f.Data[start:end]
+}
+
+// Relocations is the number of relocation entries (sections of kind REL or RELA with contents).
+fn (f File) HasRelocations() bool {
+	for s in f.Sections {
+		if (s.Kind == 4 || s.Kind == 9) && s.Size > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Undefined are the names of the symbols the file imports (the dynamic symbol table's undefined entries).
+fn (f File) Undefined() []str {
+	mut names = []str{}
+	for s in f.Sections {
+		if s.Kind != 11 {
+			continue
+		}
+		let strings = f.Sections[s.Link]
+		mut pos = s.Offset
+		for pos < s.Offset + s.Size {
+			let name = rd32(f.Data, pos)
+			let index = rd16(f.Data, pos + 6)
+			if name != 0 && index == 0 {
+				names = append(names, f.cstr(strings, name))
+			}
+			pos += s.Entsize
+		}
+	}
+	return names
+}
+
+// Function is the machine code of the named function symbol of a relocatable object (its section contents), "" when it is absent.
+fn (f File) Function(want str) str {
+	for s in f.Sections {
+		if s.Kind != 2 {
+			continue
+		}
+		let strings = f.Sections[s.Link]
+		mut pos = s.Offset
+		for pos < s.Offset + s.Size {
+			let name = rd32(f.Data, pos)
+			let section = rd16(f.Data, pos + 6)
+			let value = rd64(f.Data, pos + 8)
+			let length = rd64(f.Data, pos + 16)
+			if f.cstr(strings, name) == want {
+				let start = f.Sections[section].Offset + value
+				return f.Data[start:start + length]
+			}
+			pos += s.Entsize
+		}
+	}
+	return ""
+}
+
+// SegmentKinds are the types (PT_*) of the program headers of the file: 2 is PT_DYNAMIC and 3 is PT_INTERP.
+fn (f File) SegmentKinds() []i64 {
+	let phoff = rd64(f.Data, 32)
+	let size = rd16(f.Data, 54)
+	let count = rd16(f.Data, 56)
+	mut kinds = []i64{}
+	for i in 0..count {
+		kinds = append(kinds, rd32(f.Data, phoff + i * size))
+	}
+	return kinds
+}

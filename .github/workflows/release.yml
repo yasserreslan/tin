@@ -41,8 +41,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 -c 'import re,os; assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?",os.environ["TAG"])'
-          # The tag is VERSION, or a later patch of its major.minor (tools/ci/next_version.py).
-          python3 tools/ci/next_version.py check VERSION "$TAG"
+          # The tag is VERSION, or a later patch of its major.minor (tools/ci/next_version.tin).
+          sh tools/ci/tin.sh next_version check VERSION "$TAG"
           version=${TAG#v}
           sha=$(git rev-parse HEAD)
           test "$(git rev-parse "$TAG^{commit}")" = "$sha"

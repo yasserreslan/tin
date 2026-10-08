@@ -4,7 +4,7 @@
 // else is an error. The tokenizer resolves namespaces into Name.Space and bounds nesting, the
 // attribute count and the token size (fault.LimitExceeded). Writer writes tokens or direct calls
 // with text and attribute escaping and optional indentation; the Go twin (bench/ref/scroll and
-// tools/ci/scroll_check.py) compares the token streams with encoding/xml over an RSS, SOAP, S3 and
+// tools/ci/scroll_check.tin) compares the token streams with encoding/xml over an RSS, SOAP, S3 and
 // SVG corpus.
 package scroll
 

@@ -1,0 +1,127 @@
+// The rules of release versions (tools/ci/next_version.tin is the command that applies them).
+package release
+
+import "mint"
+import "say"
+import "twine"
+
+// Ver is a version: MAJOR.MINOR.PATCH and a prerelease suffix ("" for a stable one).
+type Ver struct {
+	Major i64
+	Minor i64
+	Patch i64
+	Pre str
+}
+
+// parse reads "v0.4.1" or "0.4.1-rc.1"; it reports false for anything else.
+fn Parse(text str) (Ver, bool) {
+	mut s = twine.TrimSpace(text)
+	if twine.HasPrefix(s, "v") {
+		s = s[1:]
+	}
+	mut pre = ""
+	let dash = twine.IndexByte(s, '-')
+	if dash >= 0 {
+		pre = s[dash:]
+		s = s[0:dash]
+		if len(pre) < 2 {
+			return Ver{}, false
+		}
+		for i in 1..len(pre) {
+			let c = pre[i]
+			let ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '-'
+			if !ok {
+				return Ver{}, false
+			}
+		}
+	}
+	let parts = twine.Split(s, ".")
+	if len(parts) != 3 {
+		return Ver{}, false
+	}
+	mut nums = []i64{}
+	for p in parts {
+		if len(p) == 0 {
+			return Ver{}, false
+		}
+		for i in 0..len(p) {
+			if p[i] < '0' || p[i] > '9' {
+				return Ver{}, false
+			}
+		}
+		let n = mint.Atoi(p) catch _ {
+			0
+		}
+		nums = append(nums, n)
+	}
+	return Ver{Major: nums[0], Minor: nums[1], Patch: nums[2], Pre: pre}, true
+}
+
+fn (v Ver) Text() str {
+	return "v" + mint.Itoa(v.Major) + "." + mint.Itoa(v.Minor) + "." + mint.Itoa(v.Patch) + v.Pre
+}
+
+fn equal(a Ver, b Ver) bool {
+	return a.Major == b.Major && a.Minor == b.Minor && a.Patch == b.Patch && a.Pre == b.Pre
+}
+
+// NextTag is the tag the next merge is released as ("" when there is nothing to release); a fault when VERSION is behind the
+// latest release.
+fn NextTag(base str, tags []str) !str {
+	let (b, ok) = Parse(base)
+	if !ok {
+		fail say.Fault("not a release version: %s", base)
+	}
+	mut released = []Ver{}
+	for t in tags {
+		let (v, good) = Parse(t)
+		if good {
+			released = append(released, v)
+		}
+	}
+	mut newest = Ver{Major: -1}
+	mut haveNewest = false
+	for r in released {
+		if r.Pre != "" {
+			continue
+		}
+		if !haveNewest || r.Major > newest.Major || (r.Major == newest.Major && (r.Minor > newest.Minor || (r.Minor == newest.Minor && r.Patch > newest.Patch))) {
+			newest = r
+			haveNewest = true
+		}
+	}
+	if haveNewest && (newest.Major > b.Major || (newest.Major == b.Major && newest.Minor > b.Minor)) {
+		fail say.Fault("VERSION %s is behind the latest release %s", twine.TrimSpace(base), newest.Text())
+	}
+	if b.Pre != "" {
+		for r in released {
+			if equal(r, b) {
+				return ""
+			}
+		}
+		return b.Text()
+	}
+	mut top = -1
+	for r in released {
+		if r.Pre == "" && r.Major == b.Major && r.Minor == b.Minor && r.Patch > top {
+			top = r.Patch
+		}
+	}
+	if top < 0 || top < b.Patch {
+		return Ver{Major: b.Major, Minor: b.Minor, Patch: b.Patch}.Text()
+	}
+	return Ver{Major: b.Major, Minor: b.Minor, Patch: top + 1}.Text()
+}
+
+// ValidRelease reports whether the tag may be released from a tree whose VERSION is base.
+fn ValidRelease(base str, tag str) bool {
+	let (b, ok) = Parse(base)
+	let (t, good) = Parse(tag)
+	if !ok || !good || !twine.HasPrefix(tag, "v") {
+		return false
+	}
+	if b.Pre != "" || t.Pre != "" {
+		return equal(t, b)
+	}
+	return t.Major == b.Major && t.Minor == b.Minor && t.Patch >= b.Patch
+}

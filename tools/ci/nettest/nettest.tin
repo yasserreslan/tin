@@ -1,0 +1,240 @@
+// What the server checks share: a free port, a server program started and stopped, a TCP client that speaks plain HTTP/1.1, and
+// the waiting loops around them.
+package nettest
+
+import "../ci"
+import "dice"
+import "fault"
+import "mint"
+import "say"
+import "spawn"
+import "tide"
+import "twine"
+import "wire"
+
+// Port is a port below the ephemeral ranges (Linux 32768+, macOS 49152+) that nothing listens on: a port the kernel picks for
+// bind(0) is an ephemeral one, which a client connection can take as its source port before the server binds it ("cannot bind the
+// address" under load).
+fn Port() i64 {
+	for i in 0..500 {
+		let port = dice.Range(20000, 30000)
+		let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 200000000) catch _ {
+			return port
+		}
+		c.Close()
+	}
+	ci.Fail("no free port below the ephemeral range")
+	return 0
+}
+
+// Server is a running program with its output going to a log file.
+type Server struct {
+	Pid i64
+	Port i64
+	Log str
+}
+
+// Start runs the program with extra environment entries (NAME=value), its output in the log file, and PORT set when port is not 0.
+fn Start(exe str, args []str, set []str, log str, port i64) Server {
+	mut argv = []str{"env"}
+	for e in set {
+		argv = append(argv, e)
+	}
+	if port != 0 {
+		argv = append(argv, "PORT=" + mint.Itoa(port))
+	}
+	argv = append(argv, exe)
+	for a in args {
+		argv = append(argv, a)
+	}
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.File(log), Stderr: spawn.Stdio.File(log), MaxOutput: 0}
+	let p = spawn.Start(c) catch err {
+		ci.Fail("cannot start " + exe + ": " + say.Str(err))
+		panic("unreachable")
+	}
+	return Server{Pid: p.Pid(), Port: port, Log: log}
+}
+
+// Stop ends the server (SIGTERM, then SIGKILL after five seconds).
+fn (s Server) Stop() {
+	ci.Exec([]str{"kill", mint.Itoa(s.Pid)}, "", 5)
+	let end = tide.Now() + 5000000000
+	for tide.Now() < end {
+		if !s.Running() {
+			return
+		}
+		tide.Sleep(20000000)
+	}
+	ci.Exec([]str{"kill", "-9", mint.Itoa(s.Pid)}, "", 5)
+}
+
+// Running reports whether the process is alive (a process that has exited but is not reaped yet is not).
+fn (s Server) Running() bool {
+	let o = ci.Exec([]str{"ps", "-o", "stat=", "-p", mint.Itoa(s.Pid)}, "", 5)
+	let state = twine.TrimSpace(o.Stdout)
+	return len(state) > 0 && state[0] != 'Z'
+}
+
+// Ready waits until the server accepts connections on its port (up to seconds).
+fn (s Server) Ready(seconds i64) {
+	let end = tide.Now() + seconds * 1000000000
+	for tide.Now() < end {
+		let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(s.Port), 100000000) catch _ {
+			tide.Sleep(50000000)
+			continue
+		}
+		c.Close()
+		return
+	}
+	ci.Fail("the server did not start listening on port " + mint.Itoa(s.Port) + "\n" + ci.Read(s.Log))
+}
+
+// Reply is an HTTP response.
+type Reply struct {
+	Status i64
+	Head str
+	Body str
+	Ok bool
+}
+
+// Header is the value of the named response header ("" when absent), compared without regard to case.
+fn (r Reply) Header(name str) str {
+	let want = twine.ToLower(name) + ":"
+	for line in twine.Split(r.Head, "\r\n") {
+		if twine.HasPrefix(twine.ToLower(line), want) {
+			return twine.TrimSpace(line[len(want):])
+		}
+	}
+	return ""
+}
+
+// drain reads the connection until the server closes it.
+fn drain(c wire.Conn, buf mut []u8) !bool {
+	for {
+		let n = c.Read(mut buf, 65536) catch err {
+			if wire.IsEOF(err) {
+				return true
+			}
+			fail err
+		}
+		if n < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Raw sends the bytes on a new connection and reads until the server closes it (or seconds pass), returning what came back.
+fn Raw(port i64, request str, seconds i64) str {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		return ""
+	}
+	defer c.Close()
+	c.Write(request) catch _ {
+		return ""
+	}
+	mut buf = []u8{}
+	let finished = within seconds * 1000000000 {
+		try drain(c, mut buf)
+	} catch _ {
+		false
+	}
+	if !finished {
+		return str(buf)
+	}
+	return str(buf)
+}
+
+// Parse splits a raw response into status, head and body.
+fn Parse(raw str) Reply {
+	let split = twine.Index(raw, "\r\n\r\n")
+	if split < 0 {
+		return Reply{Status: 0, Head: raw, Body: "", Ok: false}
+	}
+	let head = raw[0:split]
+	let words = twine.Fields(twine.Split(head, "\r\n")[0])
+	mut status = 0
+	if len(words) > 1 {
+		status = ci.Num(words[1])
+	}
+	return Reply{Status: status, Head: head, Body: raw[split + 4:], Ok: true}
+}
+
+// Do is one request with Connection: close. headers are "Name: value" lines.
+fn Do(port i64, method str, path str, headers []str, body str) Reply {
+	mut text = method + " " + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+	for h in headers {
+		text += h + "\r\n"
+	}
+	if len(body) > 0 {
+		text += "Content-Length: " + mint.Itoa(len(body)) + "\r\n"
+	}
+	text += "\r\n" + body
+	return Parse(Raw(port, text, 30))
+}
+
+// Get is a GET that must answer 200; it returns the body.
+fn Get(port i64, path str) str {
+	let r = Do(port, "GET", path, []str{}, "")
+	ci.Check(r.Status == 200, "GET " + path + ": status " + mint.Itoa(r.Status) + "\n" + r.Body)
+	return r.Body
+}
+
+// Eventually calls check until it returns true, for up to seconds.
+fn Eventually(seconds f64, check fn() bool) {
+	let end = tide.Now() + i64(seconds * 1000000000.0)
+	for tide.Now() < end {
+		if check() {
+			return
+		}
+		tide.Sleep(10000000)
+	}
+	ci.Check(check(), "condition did not become true")
+}
+
+// RssKiB is the resident memory of the process in KiB: VmRSS of /proc on Linux (no process is started, which matters while many connections
+// are open), ps elsewhere.
+fn RssKiB(pid i64) i64 {
+	for line in ci.Lines(ci.Read("/proc/" + mint.Itoa(pid) + "/status")) {
+		if twine.HasPrefix(line, "VmRSS:") {
+			return ci.Num(twine.Fields(line)[1])
+		}
+	}
+	let o = ci.Exec([]str{"ps", "-o", "rss=", "-p", mint.Itoa(pid)}, "", 10)
+	return ci.Num(twine.TrimSpace(o.Stdout))
+}
+
+// Send opens a connection and writes the request without reading the answer yet (so many requests can wait on the server together).
+fn Send(port i64, request str) wire.Conn {
+	let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 5000000000) catch _ {
+		ci.Fail("cannot connect to port " + mint.Itoa(port))
+		panic("unreachable")
+	}
+	c.Write(request) catch _ {
+		ci.Fail("cannot send a request to port " + mint.Itoa(port))
+	}
+	return c
+}
+
+// Finish reads the answer on a connection Send opened, until the server closes it, and closes it.
+fn Finish(c mut wire.Conn, seconds i64) Reply {
+	mut buf = []u8{}
+	let reader = c
+	mut why = ""
+	let finished = within seconds * 1000000000 {
+		try drain(reader, mut buf)
+	} catch err {
+		why = say.Str(err)
+		false
+	}
+	c.Close()
+	if !finished {
+		return Reply{Status: 0, Head: why, Body: str(buf), Ok: false}
+	}
+	return Parse(str(buf))
+}
+
+// GetRequest is the text of a GET with Connection: close.
+fn GetRequest(path str) str {
+	return "GET " + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+}

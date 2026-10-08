@@ -1,0 +1,77 @@
+package main
+
+import "../ci/ci"
+import "abacus"
+import "quarry"
+import "say"
+import "twine"
+
+// Regenerate the packed, rounded-down 128-bit Eisel-Lemire powers using integers. With --check it only compares.
+
+const HEAD = "fn num_power(exp i64) i64 {{\n\tlet p = (cast(i64, \""
+const TAIL = "\") + 8)"
+
+fn one() abacus.Int {
+	return abacus.FromI64(1)
+}
+
+fn pow10(n i64) abacus.Int {
+	mut v = one()
+	let ten = abacus.FromI64(10)
+	for i in 0..n {
+		v = v.Mul(ten)
+	}
+	return v
+}
+
+// table is the 696 powers as the escaped bytes the source holds (each 128 bit value little-endian).
+fn table() str {
+	let hex = "0123456789abcdef"
+	mut out = []u8{}
+	for exponent in -348..348 {
+		mut value = one()
+		if exponent < 0 {
+			let denominator = pow10(-exponent)
+			let (q, _) = one().Lsh(127 + denominator.BitLen()).QuoRem(denominator)
+			value = q
+		} else {
+			value = pow10(exponent)
+			let shift = value.BitLen() - 128
+			if shift >= 0 {
+				value = value.Rsh(shift)
+			} else {
+				value = value.Lsh(-shift)
+			}
+		}
+		let be = value.Bytes()
+		let le = make([]u8, 16)
+		for i in 0..len(be) {
+			le[i] = be[len(be) - 1 - i]
+		}
+		for b in le {
+			out = append(out, '\\')
+			out = append(out, 'x')
+			out = append(out, hex[b >> 4])
+			out = append(out, hex[b & 15])
+		}
+	}
+	return str(out)
+}
+
+fn main() {
+	let args = quarry.Args()
+	let check = len(args) > 1 && args[1] == "--check"
+	let path = ci.Join(ci.Root(), "toolchain/runtime/number.tin")
+	let text = ci.Read(path)
+	let start = twine.Index(text, HEAD)
+	ci.Check(start >= 0, "packed power table not found")
+	let from = start + len(HEAD)
+	let end = from + twine.Index(text[from:], TAIL)
+	let want = table()
+	if check {
+		ci.Check(text[from:end] == want, "number power table differs from exact integer regeneration")
+		return
+	}
+	ci.Write(path, text[0:from] + want + text[end:])
+	say.Line("number powers regenerated")
+}

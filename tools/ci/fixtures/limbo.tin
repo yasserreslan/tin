@@ -10,7 +10,7 @@ import "websocket"
 
 // #358: /ws parks a WebSocket task on the core; /put?n=N overwrites a cache entry with a kept
 // value N times; /stats answers hearth.RcStats (counted blocks, their bytes, the limbo).
-// limbo_check.py runs it on one core.
+// limbo_check.tin runs it on one core.
 
 mut cache = map[str]str{}
 mut round i64 = 0

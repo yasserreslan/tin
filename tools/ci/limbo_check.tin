@@ -1,0 +1,66 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "tide"
+import "twine"
+
+// A parked WebSocket task does not hold back reclamation (#358): with one WebSocket connection waiting on the only core, 10 million
+// overwrites of a cache entry (spread over requests) leave the counted blocks, their bytes and the limbo small. Before, the
+// connection's task kept every dropped block in the limbo until it ended, and past 2^20 queued blocks the core pinned (leaked) what
+// it dropped. Fixture limbo.tin.
+
+// stats are the counted blocks, their bytes and the limbo.
+fn stats(port i64) (i64, i64, i64) {
+	let words = twine.Fields(nettest.Get(port, "/stats"))
+	return ci.Num(words[1]), ci.Num(words[3]), ci.Num(words[5])
+}
+
+fn puts(port i64, times i64) {
+	for i in 0..times {
+		arena {
+			nettest.Get(port, "/put?n=100000")
+		}
+	}
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/limbo")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "limbo")
+	ci.BuildTin("tools/ci/fixtures/limbo.tin", exe, "", []str{})
+	let port = nettest.Port()
+	let log = ci.Join(out, "server.log")
+	let server = nettest.Start(exe, []str{}, []str{"TIN_CORES=1"}, log, port)
+	server.Ready(10)
+	mut c = nettest.Connect(port, "/ws")
+	c.Text("hello")
+	let hello = c.Recv()
+	ci.Check(hello.Op == 1 && hello.Data == "echo: hello", "limbo: echo answered " + hello.Data)
+	let (baseBlocks, baseBytes, baseLimbo) = stats(port)
+	let t0 = tide.Now()
+	puts(port, 100)
+	let (blocks, nbytes, limbo) = stats(port)
+	ci.Pass("parked WebSocket + 10000000 overwrites in " + mint.Itoa((tide.Now() - t0) / 1000000000) + " s: counted blocks " + mint.Itoa(blocks) + " (" + mint.Itoa(baseBlocks) + " at the start), " + mint.Itoa(nbytes) + " bytes, limbo " + mint.Itoa(limbo))
+	ci.Check(limbo < 200000 && blocks < 1000 && nbytes < 4 * 1048576, "limbo: blocks " + mint.Itoa(blocks) + " bytes " + mint.Itoa(nbytes) + " limbo " + mint.Itoa(limbo) + " (start " + mint.Itoa(baseBlocks) + " " + mint.Itoa(baseBytes) + " " + mint.Itoa(baseLimbo) + ")")
+	// The connection still works, and what it reads is intact.
+	c.Text("again")
+	let again = c.Recv()
+	ci.Check(again.Op == 1 && again.Data == "echo: again", "limbo: echo answered " + again.Data)
+	// A detached loop that waits inside hearth.Quiet holds back nothing either...
+	nettest.Get(port, "/spawn")
+	tide.Sleep(200000000)
+	puts(port, 20)
+	let (b2, n2, l2) = stats(port)
+	ci.Pass("a detached hearth.Quiet loop and 2000000 more overwrites: counted blocks " + mint.Itoa(b2) + ", limbo " + mint.Itoa(l2))
+	ci.Check(l2 < 200000 && b2 < 1000, "limbo: after the quiet loop blocks " + mint.Itoa(b2) + " bytes " + mint.Itoa(n2) + " limbo " + mint.Itoa(l2))
+	// ...and one that waits plainly holds back everything dropped meanwhile.
+	nettest.Get(port, "/spawnloud")
+	tide.Sleep(200000000)
+	puts(port, 20)
+	let (b3, _, l3) = stats(port)
+	ci.Pass("a detached loop with a plain wait and 2000000 more: counted blocks " + mint.Itoa(b3) + ", limbo " + mint.Itoa(l3) + " (the rule hearth.Quiet exists for)")
+	server.Stop()
+	ci.Check(!twine.Contains(ci.Read(log), "panic"), "limbo: the server panicked:\n" + ci.Read(log))
+}

@@ -1,0 +1,26 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Float map keys against Go (#643): toolchain/tests/v2/map_float_keys.tin and its Go twin bench/ref/map_float_keys print the same
+// lines, which are the test's expected output. +0 and -0 are one key, and a NaN key is never found, deleted or overwritten, for
+// f64 keys and for struct keys holding an f64.
+
+fn main() {
+	let want = ci.Read(ci.Join(ci.Root(), "toolchain/tests/v2/map_float_keys.out"))
+	let goout = ci.Exec([]str{"go", "run", "./bench/ref/map_float_keys"}, ci.Root(), 180)
+	ci.Must(goout, "go run map_float_keys")
+	ci.Check(goout.Stdout == want, "Go twin differs from map_float_keys.out:\n" + goout.Stdout)
+	let dir = ci.Join(ci.Root(), "bin/ci")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "float-keys-")
+	let exe = ci.Join(work, "map_float_keys")
+	ci.BuildTin("toolchain/tests/v2/map_float_keys.tin", exe, "", []str{})
+	let tin = ci.Exec([]str{exe}, ci.Root(), 60)
+	ci.Remove(work)
+	ci.Must(tin, "map_float_keys")
+	ci.Check(tin.Stdout == goout.Stdout, "Tin differs from Go:\n" + tin.Stdout)
+	ci.Pass("float keys: Tin and Go agree on " + mint.Itoa(len(twine.Split(twine.TrimSuffix(goout.Stdout, "\n"), "\n"))) + " lines (-0, NaN, struct keys, chunked map)")
+}

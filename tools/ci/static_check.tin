@@ -1,0 +1,335 @@
+package main
+
+import "./ci"
+import "./elf"
+import "mint"
+import "say"
+import "twine"
+
+// Linux static executables: no PT_INTERP or PT_DYNAMIC, a Tin _start, and an empty root.
+
+const PT_DYNAMIC = 2
+const PT_INTERP = 3
+
+// The exit status is argc * 10 plus the first byte of $X, less 64: it proves that argv and the environment reach a program that
+// links no libc and starts at Tin's own _start.
+const PROBE = "package main\nimport \"quarry\"\nfn main() {{\n\tquarry.Exit(len(quarry.Args()) * 10 + i64(quarry.Getenv(\"X\")[0]) - 64)\n}}\n"
+
+const ENV_PROGRAM = `package main
+
+import "quarry"
+import "say"
+
+fn main() {
+	say.Line("a", quarry.Getenv("STATIC_A"))
+	mut err = quarry.Setenv("STATIC_B", "two")
+	mut (v, ok) = quarry.LookupEnv("STATIC_B")
+	say.Line("b", v, ok, err)
+	err = quarry.Unsetenv("STATIC_A")
+	v, ok = quarry.LookupEnv("STATIC_A")
+	say.Line("unset", v == "", ok, err)
+}
+`
+
+const ENV_WANT = "a one\nb two true <nil>\nunset true false <nil>\n"
+
+// #573: without tide/tzdata an empty root has no zone; with the import the embedded database answers. The instant 1700000000 s is
+// 2023-11-14T22:13:20Z, 23:13:20 in Paris (UTC+1).
+const ZONE_PROGRAM = `package main
+
+import "fault"
+import "say"
+import "tide"
+
+fn main() {
+	let (z, err) = tide.LoadZone("Europe/Paris")
+	if err != nil {
+		say.Line("zone unknown", fault.Is(err, tide.ErrUnknownZone))
+		return
+	}
+	say.Line("zone", z.Name())
+}
+`
+
+const ZONE_WANT = "zone unknown true\n"
+
+const ZONE_EMBED_PROGRAM = `package main
+
+import "say"
+import "tide"
+import "tide/tzdata"
+
+fn main() {
+	let (z, err) = tide.LoadZone("Europe/Paris")
+	if err != nil {
+		say.Line("zone error", err)
+		return
+	}
+	let c = tide.In(1700000000000000000, z)
+	say.Line("zone", z.Name(), c.Year, c.Month, c.Day, c.Hour, c.Offset)
+	let (k, kerr) = tide.LoadZone("Asia/Kathmandu")
+	if kerr != nil {
+		say.Line("kathmandu error", kerr)
+		return
+	}
+	let kc = tide.In(1700000000000000000, k)
+	say.Line("kathmandu", k.Name(), kc.Hour, kc.Min, kc.Offset)
+}
+`
+
+const ZONE_EMBED_WANT = "zone Europe/Paris 2023 11 14 23 3600\nkathmandu Asia/Kathmandu 3 58 20700\n"
+
+fn assertStatic(path str) {
+	let f = elf.Read(path) catch err {
+		ci.Fail(say.Str(err))
+		return
+	}
+	for kind in f.SegmentKinds() {
+		ci.Check(kind != PT_INTERP && kind != PT_DYNAMIC, path + " is not static")
+	}
+}
+
+fn tinc(target str, source str, exe str, extra []str) {
+	mut argv = []str{ci.Tinc()}
+	for a in extra {
+		argv = append(argv, a)
+	}
+	argv = append(argv, "-target")
+	argv = append(argv, target)
+	argv = append(argv, "-o")
+	argv = append(argv, exe)
+	argv = append(argv, source)
+	ci.Must(ci.ExecEnv(argv, ci.Root(), 120, []str{"TIN_ROOT=" + ci.Root()}, []str{}), "compile " + source + " for " + target)
+}
+
+fn hostMachine() str {
+	return "linux-" + ci.Arch()
+}
+
+// runIn runs the program inside an otherwise empty root directory when chroot is available; ok is false when it is not.
+fn runIn(root str, exe str, args []str, env []str) (ci.Out, bool) {
+	ci.Copy(exe, ci.Join(root, "prog"))
+	mut argv = []str{}
+	let uid = twine.TrimSpace(ci.Exec([]str{"id", "-u"}, "", 5).Stdout)
+	if uid != "0" {
+		let sudo = ci.Exec([]str{"sudo", "-n", "true"}, "", 10)
+		if sudo.Code != 0 {
+			return ci.Out{Code: 0, Stdout: "", Stderr: ""}, false
+		}
+		argv = []str{"sudo", "-n", "env", "-i"}
+		for e in env {
+			argv = append(argv, e)
+		}
+	} else {
+		argv = []str{"env", "-i"}
+		for e in env {
+			argv = append(argv, e)
+		}
+	}
+	mut chroot = twine.TrimSpace(ci.Sh("command -v chroot", "", 5).Stdout)
+	if len(chroot) == 0 {
+		chroot = "/usr/sbin/chroot"
+	}
+	argv = append(argv, chroot)
+	argv = append(argv, root)
+	argv = append(argv, "/prog")
+	for a in args {
+		argv = append(argv, a)
+	}
+	return ci.Exec(argv, "", 30), true
+}
+
+fn haveDocker() bool {
+	let o = ci.Exec([]str{"docker", "info"}, "", 60)
+	if o.Code == 0 {
+		return true
+	}
+	ci.Check(ci.Env("CI") != "true", "CI needs docker for the Alpine and FROM scratch runs")
+	return false
+}
+
+// scratchImage builds an image of just the program and returns its tag.
+fn scratchImage(work str, exe str, name str) str {
+	let image = ci.Join(work, name + "-image")
+	ci.Mkdirs(image)
+	ci.Copy(exe, ci.Join(image, "prog"))
+	ci.Write(ci.Join(image, "Dockerfile"), "FROM scratch\nCOPY prog /prog\nENTRYPOINT [\"/prog\"]\n")
+	let tag = "tin-static-check:" + name
+	ci.Must(ci.Exec([]str{"docker", "build", "-q", "-t", tag, image}, "", 300), "docker build")
+	return tag
+}
+
+// containers runs exe in Alpine (musl, no glibc) and in an image built FROM scratch (no files at all).
+fn containers(work str, exe str, name str) bool {
+	if !haveDocker() {
+		return false
+	}
+	let tag = scratchImage(work, exe, name)
+	let image = ci.Join(work, name + "-image")
+	let scratch = ci.Exec([]str{"docker", "run", "--rm", "-e", "STATIC_A=one", tag}, "", 300)
+	ci.Check(scratch.Code == 0 && scratch.Stdout == ENV_WANT, "scratch: exit " + mint.Itoa(scratch.Code) + " " + scratch.Stdout + scratch.Stderr)
+	let alpine = ci.Exec([]str{"docker", "run", "--rm", "-e", "STATIC_A=one", "-v", image + ":/w:ro", "alpine:3.20", "/w/prog"}, "", 300)
+	ci.Check(alpine.Code == 0 && alpine.Stdout == ENV_WANT, "alpine: exit " + mint.Itoa(alpine.Code) + " " + alpine.Stdout + alpine.Stderr)
+	ci.Exec([]str{"docker", "rmi", "-f", tag}, "", 60)
+	return true
+}
+
+// symbols (#351): a Linux executable carries a symbol table that nm and addr2line read (so perf and gdb name its functions); -strip
+// leaves it and the section headers out.
+fn symbols(work str, envprog str, machine str) bool {
+	let have = ci.Exec([]str{"sh", "-c", "command -v nm && command -v addr2line"}, "", 5)
+	if have.Code != 0 {
+		ci.Check(ci.Env("CI") != "true", "CI needs binutils for the symbol check")
+		return false
+	}
+	let exe = ci.Join(work, "symbols")
+	let bare = ci.Join(work, "symbols-stripped")
+	tinc("linux-" + machine, envprog, exe, []str{})
+	tinc("linux-" + machine, envprog, bare, []str{"-strip"})
+	let listed = ci.Exec([]str{"nm", exe}, "", 30)
+	mut main = ""
+	mut getenv = false
+	for line in ci.Lines(listed.Stdout) {
+		let words = twine.Fields(line)
+		if len(words) == 3 && words[1] == "T" {
+			if words[2] == "main.main" {
+				main = words[0]
+			}
+			if words[2] == "quarry.Getenv" {
+				getenv = true
+			}
+		}
+	}
+	ci.Check(len(main) > 0 && getenv, "nm does not list main.main and quarry.Getenv")
+	let found = ci.Exec([]str{"addr2line", "-f", "-e", exe, "0x" + main}, "", 30)
+	ci.Check(ci.Lines(found.Stdout)[0] == "main.main", "addr2line: " + found.Stdout)
+	let gone = ci.Exec([]str{"nm", bare}, "", 30)
+	ci.Check(gone.Stdout == "" && twine.Contains(gone.Stderr, "no symbols"), "stripped executable still has symbols: " + gone.Stdout + gone.Stderr)
+	let size = ci.Exec([]str{"sh", "-c", "test $(wc -c < " + bare + ") -lt $(wc -c < " + exe + ")"}, "", 10)
+	ci.Check(size.Code == 0, "-strip did not make the executable smaller")
+	return true
+}
+
+// zones (#573): tide.LoadZone in an empty root. Without tide/tzdata the name is unknown (tide.ErrUnknownZone); with the import the
+// embedded database answers. The two Linux executables run in an empty root directory (chroot) and in an image built FROM scratch (no
+// files at all).
+fn zones(work str, machine str) (bool, bool) {
+	let names = []str{"zone", "zone-embed"}
+	let programs = []str{ZONE_PROGRAM, ZONE_EMBED_PROGRAM}
+	let wanted = []str{ZONE_WANT, ZONE_EMBED_WANT}
+	mut exes = []str{}
+	for i in 0..2 {
+		let source = ci.Join(work, names[i] + ".tin")
+		ci.Write(source, programs[i])
+		let exe = ci.Join(work, names[i])
+		tinc("linux-" + machine, source, exe, []str{})
+		assertStatic(exe)
+		exes = append(exes, exe)
+	}
+	mut jailed = false
+	for i in 0..2 {
+		let root = ci.Join(work, names[i] + "-root")
+		ci.Mkdirs(root)
+		let (got, ok) = runIn(root, exes[i], []str{}, []str{})
+		if !ok {
+			break
+		}
+		ci.Check(got.Code == 0 && got.Stdout == wanted[i], names[i] + " in an empty root: " + got.Stdout + got.Stderr)
+		jailed = true
+	}
+	if !haveDocker() {
+		return jailed, false
+	}
+	for i in 0..2 {
+		let tag = scratchImage(work, exes[i], names[i])
+		let got = ci.Exec([]str{"docker", "run", "--rm", tag}, "", 300)
+		ci.Exec([]str{"docker", "rmi", "-f", tag}, "", 60)
+		ci.Check(got.Code == 0 && got.Stdout == wanted[i], names[i] + " FROM scratch: " + got.Stdout + got.Stderr)
+	}
+	return jailed, true
+}
+
+fn main() {
+	let root = ci.Root()
+	let out = ci.Join(root, "bin/ci/static")
+	ci.Mkdirs(out)
+	let work = ci.TempDir(out, "static-")
+	let source = ci.Join(work, "probe.tin")
+	ci.Write(source, PROBE)
+	for target in []str{"linux-arm64", "linux-amd64"} {
+		let exe = ci.Join(work, "probe-" + target)
+		tinc(target, source, exe, []str{})
+		assertStatic(exe)
+	}
+	if ci.OS() != "linux" {
+		// the Linux programs cannot run here: the images were checked, the runs are Linux's
+		let envprog = ci.Join(work, "env.tin")
+		ci.Write(envprog, ENV_PROGRAM)
+		for target in []str{"linux-arm64", "linux-amd64"} {
+			let exe = ci.Join(work, "env-" + target)
+			tinc(target, envprog, exe, []str{})
+			assertStatic(exe)
+		}
+		ci.Remove(work)
+		ci.Pass("static linux-arm64/amd64 images (no PT_INTERP, no PT_DYNAMIC); the runs need Linux")
+		return
+	}
+	let host = hostMachine()
+	let probe = ci.Join(work, "probe-" + host)
+	let ran = ci.Exec([]str{"env", "-i", "X=1", probe, "a", "b"}, "", 30)
+	ci.Check(ran.Code == (30 + 49 - 64) & 255, "probe exit " + mint.Itoa(ran.Code))
+	let rootDir = ci.Join(work, "root")
+	ci.Mkdirs(rootDir)
+	let (jail, jailed) = runIn(rootDir, probe, []str{"a"}, []str{"X=1"})
+	if !jailed {
+		say.Line("NOTE no chroot permission here: the empty-root run is skipped")
+	} else {
+		ci.Check(jail.Code == (20 + 49 - 64) & 255, "empty-root probe exit " + mint.Itoa(jail.Code))
+	}
+	// A strict program that reads and changes its environment, and the compiler itself, link without libc too (#125): getenv, setenv
+	// and getauxval are the runtime's.
+	let envprog = ci.Join(work, "env.tin")
+	ci.Write(envprog, ENV_PROGRAM)
+	for target in []str{"linux-arm64", "linux-amd64"} {
+		let exe = ci.Join(work, "env-" + target)
+		tinc(target, envprog, exe, []str{})
+		assertStatic(exe)
+	}
+	let envExe = ci.Join(work, "env-" + host)
+	let got = ci.Exec([]str{"env", "-i", "STATIC_A=one", envExe}, "", 30)
+	ci.Check(got.Code == 0 && got.Stdout == ENV_WANT, "env program: " + got.Stdout + got.Stderr)
+	mut contained = false
+	mut named = false
+	mut zoneJailed = false
+	mut zoneContained = false
+	if ci.OS() == "linux" {
+		// The compiler is static at every stage: the checked-in seed, the bin/tinc it builds and the compiler that compiled itself
+		// (make bootstrap).
+		let machine = ci.Arch()
+		for compiler in []str{"toolchain/seed/tinc-linux-" + machine, "bin/tinc", "bin/s3/tinc"} {
+			ci.Check(ci.Exists(ci.Join(root, compiler)), compiler + " is missing: run make bootstrap first")
+			assertStatic(ci.Join(root, compiler))
+		}
+		contained = containers(work, envExe, "env")
+		named = symbols(work, envprog, machine)
+		let (zj, zc) = zones(work, machine)
+		zoneJailed = zj
+		zoneContained = zc
+	}
+	ci.Remove(work)
+	mut note = "static linux-arm64/amd64 images (no PT_INTERP, no PT_DYNAMIC); _start passes argc, argv and envp"
+	if jailed {
+		note += "; runs in an empty root"
+	}
+	note += "; a program using getenv/setenv and the compiler (seed, bin/tinc, stage 3) are static"
+	if contained {
+		note += "; the program runs on Alpine and FROM scratch"
+	}
+	if named {
+		note += "; nm and addr2line name its functions, and -strip removes the symbols"
+	}
+	if zoneJailed || zoneContained {
+		note += "; tide.LoadZone finds no zone in an empty root and tide/tzdata answers there"
+	}
+	ci.Pass(note)
+}

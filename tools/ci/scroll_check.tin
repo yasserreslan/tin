@@ -1,0 +1,79 @@
+package main
+
+import "./ci"
+import "mint"
+import "twine"
+
+// Compare scroll's token stream with Go's encoding/xml over a small real-world corpus.
+//
+// Both sides read one document on stdin and print one token per line (bench/ref/scroll and tools/ci/fixtures/scroll_twin.tin); the
+// check compares the lines for an RSS feed, a SOAP envelope, an S3 ListObjects response and an SVG document.
+
+fn docs() []str {
+	return []str{
+		`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Tom &amp; Jerry</title>
+    <link>https://example.com/feed</link>
+    <item><title>One</title><pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate></item>
+    <item><title>Two &#233;</title><guid isPermaLink="false">tag:example.com,2024:2</guid></item>
+  </channel>
+</rss>`,
+		`<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xml:lang="en">
+  <soap:Header><auth xmlns="urn:example"><token>abc&lt;def</token></auth></soap:Header>
+  <soap:Body>
+    <m:GetPrice xmlns:m="urn:example:price"><m:Item>Apple</m:Item></m:GetPrice>
+  </soap:Body>
+</soap:Envelope>`,
+		`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>bucket</Name><Prefix/>
+  <KeyCount>2</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>a&amp;b.txt</Key><LastModified>2024-01-01T00:00:00.000Z</LastModified>
+    <ETag>&quot;d41d8cd98f00b204e9800998ecf8427e&quot;</ETag><Size>0</Size>
+  </Contents>
+  <Contents><Key>c d.txt</Key><Size>42</Size></Contents>
+</ListBucketResult>`,
+		`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <!-- a comment -->
+  <title>Shapes</title>
+  <rect x="1" y="2" width="3" height="4" fill="#fff"/>
+  <text x="5" y="6">a &lt; b &amp;&amp; c &gt; d</text>
+  <path d="M0 0 L10 10"/>
+</svg>`}
+}
+
+fn run(exe str, doc str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 60, doc, []str{"TIN_ROOT=" + ci.Root()})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let dir = ci.Join(ci.Root(), "bin/ci/scroll")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "scroll-")
+	let tin = ci.Join(work, "scroll-tin")
+	ci.BuildTin("tools/ci/fixtures/scroll_twin.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "scroll-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/scroll"}, ci.Root(), 120), "go build")
+	let names = []str{"rss", "soap", "s3", "svg"}
+	let all = docs()
+	mut total = 0
+	for k in 0..len(all) {
+		let want = run(goexe, all[k])
+		let got = run(tin, all[k])
+		mut i = 0
+		for i < len(want) && i < len(got) {
+			ci.Check(want[i] == got[i], "scroll " + names[k] + " line " + mint.Itoa(i + 1) + ": Go " + want[i] + ", Tin " + got[i])
+			i += 1
+		}
+		ci.Check(len(got) == len(want), "scroll " + names[k] + ": " + mint.Itoa(len(got)) + " lines against " + mint.Itoa(len(want)))
+		total += len(got)
+	}
+	ci.Remove(work)
+	ci.Pass("scroll: " + mint.Itoa(total) + " tokens over 4 documents match Go's encoding/xml (" + twine.Join(names, ", ") + ")")
+}

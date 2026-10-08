@@ -8,7 +8,7 @@ import "say"
 
 // #344: a 100 MB table in a shared let (one copy for every core) and an atomic counter that
 // every core bumps. /sum answers a checksum of the table, /hit bumps the counter, /count reads it.
-// shared_check.py runs it with 1 and with 8 cores.
+// shared_check.tin runs it with 1 and with 8 cores.
 
 shared let table = build(12500000)
 shared let hits = atomic.NewInt(0)

@@ -353,3 +353,16 @@ fn (j J) IsNumber() bool {
 fn (j J) Items() []J {
 	return j.items
 }
+
+// Keys are the keys of an object, in the order they were written (none for another kind of value).
+fn (j J) Keys() []str {
+	if j.kind != kObject {
+		return []str{}
+	}
+	return j.keys
+}
+
+// IsObject reports whether the value is an object.
+fn (j J) IsObject() bool {
+	return j.kind == kObject
+}

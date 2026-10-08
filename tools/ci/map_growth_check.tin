@@ -1,0 +1,49 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Maps grow without stalling the core (#346): inserting 4 million integer keys, or a million str keys, into a long-lived map
+// never makes one insert take a millisecond (before, the rehash at 2^21 entries took 50 to 100 ms). The slowest insert of a run
+// is noise-prone on a shared runner (a descheduled thread), so the best of five runs is checked (a real stall repeats in every
+// run, at the same insert). Fixture mapgrow.tin; the semantics (order, deletes, rebuilds) are
+// toolchain/tests/edition1/run/map_growth.tin.
+
+fn check(exe str, count i64, kind str) {
+	mut worst = -1
+	mut all = []str{}
+	mut total = ""
+	mut lookup = ""
+	for i in 0..5 {
+		let o = ci.Exec([]str{exe, mint.Itoa(count), kind}, "", 600)
+		ci.Must(o, "mapgrow " + kind)
+		let r = ci.Words(o.Stdout)
+		ci.Check(r["found"] == mint.Itoa(count), "map growth " + kind + ": found " + r["found"])
+		let us = ci.Num(r["worst_us"])
+		if worst < 0 || us < worst {
+			worst = us
+		}
+		all = append(all, r["worst_us"])
+		total = r["total_ms"]
+		lookup = r["lookup_ms"]
+	}
+	say.Line(mint.Itoa(count) + " " + kind + " keys: slowest insert " + mint.Itoa(worst) + " us (best of 5 runs; all runs: " + twine.Join(all, ", ") + "), total " + total + " ms, lookups " + lookup + " ms")
+	// A shared macOS runner stalls any thread for milliseconds now and then; the old rehash took 50 ms there.
+	mut cap = 15000
+	if ci.Linux() {
+		cap = 1000
+	}
+	ci.Check(worst < cap, "map growth " + kind + ": slowest insert " + mint.Itoa(worst) + " us")
+}
+
+fn main() {
+	let work = ci.Join(ci.Root(), "bin/ci/mapgrow")
+	ci.Mkdirs(work)
+	let exe = ci.Join(work, "mapgrow")
+	ci.BuildTin("tools/ci/fixtures/mapgrow.tin", exe, "", []str{})
+	check(exe, 4000000, "int")
+	check(exe, 1000000, "str")
+	ci.Pass("map growth: no insert stalls the core")
+}

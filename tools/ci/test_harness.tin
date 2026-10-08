@@ -1,0 +1,178 @@
+package main
+
+import "./ci"
+import "./regress"
+import "./strict"
+import "quarry"
+import "say"
+import "tinjson"
+import "twine"
+
+// Test failure propagation itself: a green CI must mean the programs really passed. The suite runs against a scripted Exec, so no
+// real compiler is involved.
+
+mut outcomes = []ci.Out{}
+mut taken i64
+
+// fake gives the suite the next scripted outcome.
+fn fake(argv []str, dir str, seconds i64, env []str) ci.Out {
+	if taken >= len(outcomes) {
+		return ci.Out{Code: 0, Stdout: "", Stderr: ""}
+	}
+	let o = outcomes[taken]
+	taken += 1
+	return o
+}
+
+fn out(code i64, stdout str, stderr str) ci.Out {
+	return ci.Out{Code: code, Stdout: stdout, Stderr: stderr}
+}
+
+// scenario runs the suite over one test program with the scripted outcomes (compile, then run) and says whether it passed.
+fn scenario(negative bool, golden bool, scripted []ci.Out, expected str, marker str, hasMarker bool) bool {
+	let root = ci.TempDir(quarry.TempDir(), "harness-")
+	let tests = ci.Join(root, "toolchain/tests/v2")
+	ci.Mkdirs(tests)
+	mut name = "sample"
+	if negative {
+		name = "sample_bad"
+	}
+	ci.Write(ci.Join(tests, name + ".tin"), "package main\n")
+	if golden {
+		mut ext = ".out"
+		if negative {
+			ext = ".err"
+		}
+		ci.Write(ci.Join(tests, name + ext), expected)
+	}
+	if hasMarker {
+		ci.Write(ci.Join(tests, name + ".sorted"), marker)
+	}
+	outcomes = scripted
+	taken = 0
+	let ok = strict.Run("/compiler", "", "", root, fake, false)
+	ci.Remove(root)
+	return ok
+}
+
+fn pass(scripted []ci.Out) bool {
+	return scenario(false, true, scripted, "expected\n", "", false)
+}
+
+// asmScenario runs the suite with one assembly case.
+fn asmScenario(check str, hasCheck bool, hasTin bool) bool {
+	let root = ci.TempDir(quarry.TempDir(), "harness-")
+	let tests = ci.Join(root, "toolchain/tests/v2")
+	ci.Mkdirs(tests)
+	// run() insists on finding the ordinary suite too; one tiny passing case
+	ci.Write(ci.Join(tests, "sample.tin"), "package main\n")
+	ci.Write(ci.Join(tests, "sample.out"), "bl X\n")
+	if hasTin {
+		ci.Write(ci.Join(tests, "sample_asm.tin"), "package main\n")
+	}
+	if hasCheck {
+		ci.Write(ci.Join(tests, "sample_asm.check"), check)
+	}
+	// every call answers with the listing
+	outcomes = []ci.Out{out(0, "bl X\n", ""), out(0, "bl X\n", ""), out(0, "bl X\n", ""), out(0, "bl X\n", "")}
+	taken = 0
+	let ok = strict.Run("/compiler", "", "", root, fake, false)
+	ci.Remove(root)
+	return ok
+}
+
+// checks parses a .check text for an architecture; the second result is the error text ("" when fine).
+fn checks(text str, arch str) ([]strict.Directive, str) {
+	let dir = ci.TempDir(quarry.TempDir(), "harness-")
+	ci.Write(ci.Join(dir, "x_asm.check"), text)
+	let d = strict.ParseChecks(ci.Join(dir, "x_asm.check"), arch) catch err {
+		ci.Remove(dir)
+		return []strict.Directive{}, say.Str(err)
+	}
+	ci.Remove(dir)
+	return d, ""
+}
+
+fn asm(text str, directives []strict.Directive) bool {
+	let (ok, why) = strict.CheckAsm(text, directives)
+	return ok
+}
+
+fn d(kind str, pattern str) strict.Directive {
+	return strict.Directive{Kind: kind, Pattern: pattern}
+}
+
+fn contract(text str) tinjson.J {
+	let (j, ok) = tinjson.Parse(text)
+	return j
+}
+
+fn main() {
+	// the suite
+	ci.Test("positive pass", pass([]ci.Out{out(0, "", ""), out(0, "expected\n", "")}))
+	ci.Test("output then crash is failure", !pass([]ci.Out{out(0, "", ""), out(-1, "expected\n", "")}))
+	ci.Test("timeout is failure even with expected output", !pass([]ci.Out{out(0, "", ""), out(124, "expected\n", "")}))
+	ci.Test("missing golden is failure", !scenario(false, false, []ci.Out{}, "", "", false))
+	ci.Test("compile failure cannot run a stale binary", !pass([]ci.Out{out(1, "", "compile failed")}))
+	ci.Test("negative must reject", !scenario(true, true, []ci.Out{out(0, "", "expected\n")}, "expected\n", "", false))
+	ci.Test("negative crash does not count as rejection", !scenario(true, true, []ci.Out{out(-1, "", "expected\n")}, "expected\n", "", false))
+	ci.Test("negative diagnostics must match", !scenario(true, true, []ci.Out{out(1, "", "wrong\n")}, "expected\n", "", false))
+	ci.Test("negative with the right diagnostics passes", scenario(true, true, []ci.Out{out(1, "", "expected\n")}, "expected\n", "", false))
+	ci.Test("output order matters: in order", scenario(false, true, []ci.Out{out(0, "", ""), out(0, "a\nb\n", "")}, "a\nb\n", "", false))
+	ci.Test("output order matters: out of order fails", !scenario(false, true, []ci.Out{out(0, "", ""), out(0, "b\na\n", "")}, "a\nb\n", "", false))
+	let why = "cores print in the order they finish\n"
+	ci.Test("a .sorted marker compares sorted lines", scenario(false, true, []ci.Out{out(0, "", ""), out(0, "b\na\n", "")}, "a\nb\n", why, true))
+	ci.Test("a .sorted marker still compares the lines", !scenario(false, true, []ci.Out{out(0, "", ""), out(0, "b\nc\n", "")}, "a\nb\n", why, true))
+	ci.Test("a .sorted marker must give a reason", !scenario(false, true, []ci.Out{out(0, "", ""), out(0, "b\na\n", "")}, "a\nb\n", "", true))
+	let slept = ci.Exec([]str{"sleep", "10"}, "", 1)
+	ci.Test("a real process timeout", slept.Code == 124)
+
+	// assembly checks
+	let (sections, e1) = checks("# comment\n[arm64]\nCHECK: bl A\n[amd64]\nCHECK: call B\n", "arm64")
+	ci.Test("sections select one arch", len(sections) == 1 && sections[0].Pattern == "bl A")
+	let (everywhere, e2) = checks("CHECK: prologue\n[amd64]\nCHECK: call B\n", "arm64")
+	ci.Test("lines before a section apply everywhere", len(everywhere) == 1 && everywhere[0].Pattern == "prologue")
+	ci.Test("ordered CHECK and scoped CHECK-NOT", asm("a\nbl X\nc\nd", []strict.Directive{d("CHECK", "bl X"), d("CHECK-NOT", "blr")}))
+	ci.Test("CHECK-NOT only looks after the previous CHECK", asm("blr\na\nbl X\nc", []strict.Directive{d("CHECK", "bl X"), d("CHECK-NOT", "blr")}))
+	let (ok3, why3) = strict.CheckAsm("bl X\nblr x16\n", []strict.Directive{d("CHECK", "bl X"), d("CHECK-NOT", "blr")})
+	ci.Test("a CHECK-NOT that matches fails and says which", !ok3 && twine.Contains(why3, "blr"))
+	ci.Test("CHECK-NOT is bounded by the next CHECK", asm("A\nB\nX\n", []strict.Directive{d("CHECK", "A"), d("CHECK-NOT", "X"), d("CHECK", "B")}))
+	ci.Test("a CHECK-NOT before the next CHECK fails", !asm("A\nX\nB\n", []strict.Directive{d("CHECK", "A"), d("CHECK-NOT", "X"), d("CHECK", "B")}))
+	ci.Test("CHECK order is required", !asm("second first", []strict.Directive{d("CHECK", "first"), d("CHECK", "second")}))
+	ci.Same("the arch comes from the target (amd64)", strict.AsmArch("linux-amd64", "arm64"), "amd64")
+	ci.Same("the arch comes from the target (arm64)", strict.AsmArch("linux-arm64", "x86_64"), "arm64")
+	ci.Same("the arch from the host: aarch64", strict.AsmArch("", "aarch64"), "arm64")
+	ci.Same("the arch from the host: arm64", strict.AsmArch("", "arm64"), "arm64")
+	ci.Same("the arch from the host: x86_64", strict.AsmArch("", "x86_64"), "amd64")
+	ci.Same("the arch from the host: AMD64", strict.AsmArch("", "AMD64"), "amd64")
+	let (bad1, e3) = checks("CHEC: oops\n", "arm64")
+	ci.Test("a bad line is an error", twine.Contains(e3, "not a CHECK"))
+	let (bad2, e4) = checks("CHECK:\n", "arm64")
+	ci.Test("an empty pattern is an error", twine.Contains(e4, "empty pattern"))
+	ci.Test("a matching check passes", asmScenario("[arm64]\nCHECK: bl X\n[amd64]\nCHECK: bl X\n", true, true))
+	ci.Test("a missing check fails", !asmScenario("", false, true))
+	ci.Test("no directive for this arch fails", !asmScenario("[otherarch]\nCHECK: bl X\n", true, true))
+	ci.Test("an invalid regex fails without crashing the suite", !asmScenario("[arm64]\nCHECK: (unclosed\n[amd64]\nCHECK: x\n", true, true))
+	ci.Test("a check without a test fails", !asmScenario("[arm64]\nCHECK: bl X\n[amd64]\nCHECK: bl X\n", true, false))
+
+	// regressions
+	let known = contract("{{\"phase\": \"run\", \"exit\": 3, \"stdout\": \"\"}}")
+	let expected = contract("{{\"phase\": \"run\", \"exit\": 0, \"stdout\": \"ok\\n\"}}")
+	let c = regress.Case{Source: "x.tin", Issue: 1, Expected: expected, Known: known, HasKnown: true}
+	ci.Same("a known failure is XFAIL", regress.Classify(c, regress.Actual{Phase: "run", Exit: 3, Stdout: ""}), "XFAIL")
+	ci.Same("a known failure is narrow: another exit", regress.Classify(c, regress.Actual{Phase: "run", Exit: 124, Stdout: ""}), "FAIL")
+	ci.Same("a known failure is narrow: another phase", regress.Classify(c, regress.Actual{Phase: "compile", Exit: 3, Stdout: ""}), "FAIL")
+	ci.Same("a fix is XPASS", regress.Classify(c, regress.Actual{Phase: "run", Exit: 0, Stdout: "ok\n"}), "XPASS")
+	let promoted = regress.Case{Source: "x.tin", Issue: 1, Expected: expected, Known: known, HasKnown: false}
+	ci.Same("after promotion it is PASS", regress.Classify(promoted, regress.Actual{Phase: "run", Exit: 0, Stdout: "ok\n"}), "PASS")
+	ci.Same("and stays required", regress.Classify(promoted, regress.Actual{Phase: "run", Exit: 3, Stdout: ""}), "FAIL")
+	let sub = contract("{{\"phase\": \"run\", \"exit\": 2, \"stderr_contains\": \"panic:\"}}")
+	let substr = regress.Case{Source: "y.tin", Issue: 2, Expected: sub, Known: known, HasKnown: false}
+	ci.Same("stderr_contains is a substring", regress.Classify(substr, regress.Actual{Phase: "run", Exit: 2, Stderr: "x panic: boom"}), "PASS")
+	let loaded = regress.LoadCases("toolchain/tests/regressions") catch _ {
+		[]regress.Case{}
+	}
+	ci.Test("the manifest discovers all the tests", len(loaded) > 0)
+	say.Line()
+	ci.Finish()
+}

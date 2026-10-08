@@ -2,7 +2,7 @@ package main
 
 // The pack twin, Tin side: read the hex corpus of bench/ref/pack (Go's encoding/binary,
 // encoding/base32 and encoding/ascii85) on stdin and print the same lines, so
-// tools/ci/pack_check.py can compare them (#740).
+// tools/ci/pack_check.tin can compare them (#740).
 //
 // Lines:
 //

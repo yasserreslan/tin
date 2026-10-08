@@ -1,0 +1,371 @@
+// The audit of the Linux foreign declarations and linker-added imports against the removal plan in design/libc_inventory.md
+// (issue #125): new and reintroduced imports stay visible, including legacy compiler syntax.
+package libinv
+
+import "../ci"
+import "say"
+import "sift"
+import "twine"
+
+// Row is a line of the inventory table.
+type Row struct {
+	Name str
+	Sources []str
+	Phase str
+	Status str
+}
+
+fn isIdent(c u8) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// mask blanks comments and string literals (keeping newlines); with strings false the contents of "" and `` literals stay.
+fn mask(text str, strings bool) str {
+	let out = make([]u8, len(text))
+	for i in 0..len(text) {
+		out[i] = text[i]
+	}
+	mut i = 0
+	for i < len(text) {
+		let c = text[i]
+		mut end = -1
+		mut kept = false
+		if c == '"' {
+			mut j = i + 1
+			for j < len(text) && text[j] != '"' {
+				if text[j] == '\\' {
+					j += 1
+				}
+				j += 1
+			}
+			end = j + 1
+			kept = !strings
+		} else if c == '`' {
+			mut j = i + 1
+			for j < len(text) && text[j] != '`' {
+				j += 1
+			}
+			end = j + 1
+			kept = !strings
+		} else if c == '/' && i + 1 < len(text) && text[i + 1] == '/' {
+			mut j = i
+			for j < len(text) && text[j] != '\n' {
+				j += 1
+			}
+			end = j
+		} else if c == '/' && i + 1 < len(text) && text[i + 1] == '*' {
+			mut j = i + 2
+			for j + 1 < len(text) && !(text[j] == '*' && text[j + 1] == '/') {
+				j += 1
+			}
+			end = j + 2
+		}
+		if end < 0 {
+			i += 1
+			continue
+		}
+		if end > len(text) {
+			end = len(text)
+		}
+		if !kept {
+			for k in i..end {
+				if text[k] != '\n' {
+					out[k] = ' '
+				}
+			}
+		}
+		i = end
+	}
+	return str(out)
+}
+
+fn spaceAt(t str, i i64) bool {
+	return i < len(t) && (t[i] == ' ' || t[i] == '\t' || t[i] == '\n' || t[i] == '\r')
+}
+
+fn skipSpace(t str, i i64) i64 {
+	mut j = i
+	for spaceAt(t, j) {
+		j += 1
+	}
+	return j
+}
+
+// word reads an identifier at i ("" when there is none).
+fn word(t str, i i64) str {
+	mut j = i
+	for j < len(t) && isIdent(t[j]) {
+		j += 1
+	}
+	return t[i:j]
+}
+
+fn wordStart(t str, i i64) bool {
+	return i == 0 || !isIdent(t[i - 1])
+}
+
+// externs are the names declared with `extern fn NAME(` or `extern func NAME(`.
+fn externs(text str) []str {
+	mut names = []str{}
+	mut from = 0
+	for {
+		let at = twine.Index(text[from:], "extern")
+		if at < 0 {
+			break
+		}
+		let i = from + at
+		from = i + 6
+		if !wordStart(text, i) || !spaceAt(text, i + 6) {
+			continue
+		}
+		mut j = skipSpace(text, i + 6)
+		let kw = word(text, j)
+		if kw != "fn" && kw != "func" {
+			continue
+		}
+		j = j + len(kw)
+		if !spaceAt(text, j) {
+			continue
+		}
+		j = skipSpace(text, j)
+		let name = word(text, j)
+		if len(name) == 0 || (name[0] >= '0' && name[0] <= '9') {
+			continue
+		}
+		j = skipSpace(text, j + len(name))
+		if j < len(text) && text[j] == '(' {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// imports are the names in el_import("NAME") or el_import(cstr("NAME")) (string contents kept by the mask).
+fn imports(text str) []str {
+	mut names = []str{}
+	mut from = 0
+	for {
+		let at = twine.Index(text[from:], "el_import")
+		if at < 0 {
+			break
+		}
+		let i = from + at
+		from = i + 9
+		if !wordStart(text, i) {
+			continue
+		}
+		mut j = skipSpace(text, i + 9)
+		if j >= len(text) || text[j] != '(' {
+			continue
+		}
+		j = skipSpace(text, j + 1)
+		if word(text, j) == "cstr" {
+			j = skipSpace(text, j + 4)
+			if j >= len(text) || text[j] != '(' {
+				continue
+			}
+			j = skipSpace(text, j + 1)
+		}
+		if j >= len(text) || text[j] != '"' {
+			continue
+		}
+		let name = word(text, j + 1)
+		if len(name) > 0 && j + 1 + len(name) < len(text) && text[j + 1 + len(name)] == '"' {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+fn linuxFile(name str, target str) bool {
+	if twine.HasSuffix(name, "_test.tin") || twine.HasSuffix(name, "_darwin.tin") || twine.HasSuffix(name, "_darwin_arm64.tin") || twine.HasSuffix(name, "_darwin_amd64.tin") {
+		return false
+	}
+	if twine.HasSuffix(name, "_linux_arm64.tin") && target != "linux-arm64" {
+		return false
+	}
+	if twine.HasSuffix(name, "_linux_amd64.tin") && target != "linux-amd64" {
+		return false
+	}
+	return true
+}
+
+fn baseName(path str) str {
+	return path[twine.LastIndex(path, "/") + 1:]
+}
+
+fn addUnique(xs []str, x str) []str {
+	mut out = []str{}
+	for y in xs {
+		if y == x {
+			return xs
+		}
+		out = append(out, y)
+	}
+	return append(out, x)
+}
+
+// Found are the symbols the sources declare for the target, each with the files (relative to root) that declare it.
+type Found struct {
+	Names []str
+	Files [][]str
+}
+
+fn (f mut Found) add(name str, file str) {
+	for i in 0..len(f.Names) {
+		if f.Names[i] == name {
+			f.Files[i] = addUnique(f.Files[i], file)
+			return
+		}
+	}
+	f.Names = append(f.Names, name)
+	f.Files = append(f.Files, []str{file})
+}
+
+fn (f Found) Files_(name str) []str {
+	for i in 0..len(f.Names) {
+		if f.Names[i] == name {
+			return f.Files[i]
+		}
+	}
+	return []str{}
+}
+
+fn (f Found) Has(name str) bool {
+	for n in f.Names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Discover lists the Linux symbols of the tree at root for the target ("linux-arm64" or "linux-amd64").
+fn Discover(root str, target str) Found {
+	mut found = Found{Names: []str{}, Files: [][]str{}}
+	for folder in []str{"toolchain/runtime", "toolchain/std", "packages", "toolchain/compiler"} {
+		let dir = ci.Join(root, folder)
+		for path in ci.Files(dir, ".tin") {
+			let name = baseName(path)
+			if !linuxFile(name, target) {
+				continue
+			}
+			let text = ci.Read(path)
+			let rel = twine.TrimPrefix(path, root + "/")
+			for n in externs(mask(text, true)) {
+				found.add(n, rel)
+			}
+			if name == "elf.tin" || name == "elf_x64.tin" {
+				for n in imports(mask(text, false)) {
+					found.add(n, rel)
+				}
+			}
+		}
+	}
+	return found
+}
+
+fn sorted(xs []str) []str {
+	mut out = []str{}
+	for x in xs {
+		out = append(out, x)
+	}
+	sift.Sort(mut out)
+	return out
+}
+
+// backticked are the `quoted` parts of a table cell.
+fn backticked(cell str) []str {
+	mut out = []str{}
+	let parts = twine.Split(cell, "`")
+	mut i = 1
+	for i < len(parts) {
+		if len(parts[i]) > 0 {
+			out = append(out, parts[i])
+		}
+		i += 2
+	}
+	return out
+}
+
+// ReadInventory reads the table of the inventory file; a malformed row fails with the reason.
+fn ReadInventory(path str) ![]Row {
+	mut rows = []Row{}
+	for line in twine.Split(ci.Read(path), "\n") {
+		if !twine.HasPrefix(line, "| `") {
+			continue
+		}
+		let cells = twine.Split(twine.Trim(line, "|"), "|")
+		if len(cells) != 6 {
+			fail say.Fault("%s", "inventory row must have six columns: " + line)
+		}
+		let name = twine.Trim(twine.TrimSpace(cells[0]), "`")
+		for r in rows {
+			if r.Name == name {
+				fail say.Fault("%s", "duplicate inventory symbol: " + name)
+			}
+		}
+		let phase = twine.TrimSpace(cells[2])
+		let status = twine.TrimSpace(cells[3])
+		if phase != "0" && phase != "1" && phase != "2" && phase != "3" && phase != "4" && phase != "5" {
+			fail say.Fault("%s", "unassigned phase for " + name)
+		}
+		if status != "active" && status != "intrinsic" && status != "removed" {
+			fail say.Fault("%s", "invalid inventory status for " + name)
+		}
+		if len(twine.TrimSpace(cells[4])) == 0 || len(twine.TrimSpace(cells[5])) == 0 {
+			fail say.Fault("%s", "missing replacement or verification for " + name)
+		}
+		rows = append(rows, Row{Name: name, Sources: backticked(cells[1]), Phase: phase, Status: status})
+	}
+	if len(rows) == 0 {
+		fail say.Fault("%s", "empty libc inventory")
+	}
+	return rows
+}
+
+fn find(rows []Row, name str) i64 {
+	for i in 0..len(rows) {
+		if rows[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// Audit compares the inventory with the sources of the tree and returns what disagrees, one line each.
+fn Audit(root str) ![]str {
+	let rows = try ReadInventory(ci.Join(root, "design/libc_inventory.md"))
+	mut found = Found{Names: []str{}, Files: [][]str{}}
+	for target in []str{"linux-arm64", "linux-amd64"} {
+		let d = Discover(root, target)
+		for i in 0..len(d.Names) {
+			for f in d.Files[i] {
+				found.add(d.Names[i], f)
+			}
+		}
+	}
+	mut errors = []str{}
+	for name in sorted(found.Names) {
+		if find(rows, name) < 0 {
+			errors = append(errors, "unassigned Linux symbol: " + name)
+		}
+	}
+	mut names = []str{}
+	for r in rows {
+		names = append(names, r.Name)
+	}
+	for name in names {
+		let row = rows[find(rows, name)]
+		if row.Status == "removed" {
+			if found.Has(name) {
+				errors = append(errors, "removed Linux symbol reappeared: " + name)
+			}
+		} else if !found.Has(name) {
+			errors = append(errors, "mark absent symbol removed: " + name)
+		} else if twine.Join(sorted(row.Sources), ",") != twine.Join(sorted(found.Files_(name)), ",") {
+			errors = append(errors, "update call-site files for " + name + ": " + twine.Join(sorted(found.Files_(name)), ", "))
+		}
+	}
+	return errors
+}

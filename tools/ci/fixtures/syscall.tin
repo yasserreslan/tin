@@ -5,7 +5,7 @@ import "hearth"
 import "syscallprobe"
 
 fn main() {
-    let args = quarry.Args()
-    syscallprobe.Run(args[1])
-    hearth.Run(2,syscallprobe.Core)
+	let args = quarry.Args()
+	syscallprobe.Run(args[1])
+	hearth.Run(2, syscallprobe.Core)
 }

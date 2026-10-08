@@ -1,0 +1,42 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// DEFLATE against Go's compress/flate (#448): Go inflates Tin's raw DEFLATE and Tin inflates Go's, of an input that uses every
+// length and distance code at levels 1, 6 and 9. Tin's encoder and decoder share their length and distance tables, so a round
+// trip through Tin alone cannot catch a wrong entry; Go can.
+
+fn main() {
+	let dir = ci.Join(ci.Root(), "bin/ci/squash_twin")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "squash-")
+	let exe = ci.Join(work, "squash_twin")
+	ci.BuildTin("tools/ci/fixtures/squash_twin.tin", exe, "", []str{})
+	mut lines = []str{}
+	let commands = [][]str{[]str{exe, "enc", work}, []str{"go", "run", "./bench/ref/squash_twin", work}, []str{exe, "dec", work}}
+	for command in commands {
+		let o = ci.Exec(command, ci.Root(), 120)
+		ci.Must(o, command[0])
+		for line in twine.Split(twine.TrimSuffix(o.Stdout, "\n"), "\n") {
+			lines = append(lines, line)
+		}
+	}
+	ci.Remove(work)
+	say.Line(twine.Join(lines, "\n"))
+	let size = twine.Fields(lines[0])[1]
+	mut checked = 0
+	mut bad = []str{}
+	for line in lines[1:] {
+		if twine.Contains(line, "inflates") {
+			checked += 1
+			if !twine.Contains(line, " ok " + size + " ") {
+				bad = append(bad, line)
+			}
+		}
+	}
+	ci.Check(checked == 6, "want 6 checks, got " + say.Str(checked))
+	ci.Check(len(bad) == 0, "DEFLATE disagrees with Go:\n" + twine.Join(bad, "\n"))
+	ci.Pass("squash: Go inflates Tin's DEFLATE and Tin inflates Go's, every length and distance code")
+}

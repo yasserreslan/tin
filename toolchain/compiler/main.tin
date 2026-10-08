@@ -487,8 +487,9 @@ fn package_files(base str) i64 {
 	return cast(i64, out)
 }
 
-// clean_dots removes "name/.." pairs from a path (products/app/ui/../ui becomes products/app/ui), so a package reached by two
-// relative paths is one directory with one name, not two copies of its files. Other "." and ".." segments stay as they are.
+// clean_dots removes "name/.." pairs and inner "." segments from a path (products/app/ui/../ui becomes products/app/ui, a/./b becomes
+// a/b), so a package reached by two relative paths is one directory with one name, not two copies of its files. A leading "." and
+// other ".." segments stay as they are.
 fn clean_dots(path str) str {
 	mut segs = []str{}
 	mut start = 0
@@ -498,6 +499,8 @@ fn clean_dots(path str) str {
 			let seg = path[start:i]
 			if seg == ".." && len(segs) > 0 && segs[len(segs) - 1] != ".." && segs[len(segs) - 1] != "." && segs[len(segs) - 1] != "" {
 				segs = segs[0:len(segs) - 1]
+			} else if seg == "." && len(segs) > 0 {
+				// a "." after the first segment is nothing: ./ci/./x is ./ci/x
 			} else {
 				segs = append(segs, seg)
 			}

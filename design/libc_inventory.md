@@ -14,14 +14,14 @@ it is not a Linux dynamic import. Retain `removed` rows as tombstones to catch r
 Verification entries describe the required acceptance coverage, including tests to add
 in the assigned phase; they do not claim that future coverage already exists.
 
-Run `python3 tools/ci/libc_inventory.py` or the automatically discovered
-`tools/ci/test_libc_inventory.py`. Update the source files when an owner moves, and mark
+Run `sh tools/ci/tin.sh libc_inventory` or the automatically discovered
+`tools/ci/test_libc_inventory.tin`. Update the source files when an owner moves, and mark
 an entry removed only when no Linux declaration or linker-added import remains.
 
 | Symbol | Call-site files | Phase | Status | Replacement | Verification |
 |---|---|---:|---|---|---|
-| `__errno_location` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | The syscall leaf returns -errno; the seed refresh (#339) made the libc fallback dead | syscall_check.py forbids syscall imports; static_check.py: `bin/tinc` and every program are static |
-| `__libc_start_main` | `toolchain/compiler/elf.tin`, `toolchain/compiler/elf_x64.tin` | 5 | removed | Tin _start reads argc/argv/envp/auxv; the ELF writers emit only static executables and stop the link if a program would import anything | Bootstrap fixed point in an empty root; static_check.py (no PT_INTERP/PT_DYNAMIC, `FROM scratch`) |
+| `__errno_location` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | The syscall leaf returns -errno; the seed refresh (#339) made the libc fallback dead | syscall_check.tin forbids syscall imports; static_check.tin: `bin/tinc` and every program are static |
+| `__libc_start_main` | `toolchain/compiler/elf.tin`, `toolchain/compiler/elf_x64.tin` | 5 | removed | Tin _start reads argc/argv/envp/auxv; the ELF writers emit only static executables and stop the link if a program would import anything | Bootstrap fixed point in an empty root; static_check.tin (no PT_INTERP/PT_DYNAMIC, `FROM scratch`) |
 | `accept` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | accept raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `atoi` | `packages/anvil/anvil.tin` | 1 | removed | Tin decimal integer parser | Anvil environment integer parsing cases (phase 1) |
 | `bind` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | bind raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
@@ -91,7 +91,7 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `setsockopt` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | setsockopt raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `signal` | `packages/anvil/anvil.tin`, `toolchain/runtime/runtime_linux.tin` | 3 | removed | rt_sigaction and per-architecture signal return | Broken-pipe behavior; signal return; issue #175 handler (phases 3/5) |
 | `signalfd` | `toolchain/runtime/runtime_linux.tin` | 3 | removed | signalfd4 | tools/ci/http_check.py shutdown (phase 3) |
-| `snprintf` | `toolchain/runtime/runtime.tin` | 1 | removed | Tin precision float formatting and diagnostic text | tools/ci/number_check.py; existing bounds/core diagnostics |
+| `snprintf` | `toolchain/runtime/runtime.tin` | 1 | removed | Tin precision float formatting and diagnostic text | tools/ci/number_check.tin; existing bounds/core diagnostics |
 | `socket` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | socket raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `sqrt` | `toolchain/std/dice/dice.tin`, `toolchain/std/gauge/gauge.tin` | 0 | intrinsic | Hardware float intrinsic | toolchain/tests/v2/gauge.tin and gauge_math.tin; both backend instruction checks |
 | `stat` | `toolchain/std/quarry/quarry.tin` | 3 | removed | newfstatat pathname lookup | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
@@ -99,7 +99,7 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `strerror` | `toolchain/std/flume/flume.tin`, `packages/mysql/mysql.tin`, `packages/postgres/postgres.tin`, `toolchain/std/quarry/quarry.tin`, `packages/redis/redis.tin`, `packages/websocket/websocket.tin`, `packages/wire/wire.tin` | 4 | removed | Per-OS Tin errno message table | toolchain/tests/v2/quarry.tin; exact network/file error messages (phase 4) |
 | `strftime` | `packages/anvil/anvil.tin` | 4 | removed | Tin time formatting | UTC calendar boundary Go twin; HTTP Date (phase 4) |
 | `strlen` | `toolchain/std/quarry/quarry.tin`, `toolchain/runtime/runtime.tin` | 2 | removed | Tin mmap allocator or byte/word operations | Memory/OOM injection; overlap/alignment/microbenchmarks; bootstrap (phase 2) |
-| `strtod` | `toolchain/runtime/runtime.tin`, `toolchain/compiler/lex.tin` | 1 | removed | Correctly rounded Tin float parser | tools/ci/number_check.py; toolchain/tests/v2/mint.tin; bootstrap fixed point |
+| `strtod` | `toolchain/runtime/runtime.tin`, `toolchain/compiler/lex.tin` | 1 | removed | Correctly rounded Tin float parser | tools/ci/number_check.tin; toolchain/tests/v2/mint.tin; bootstrap fixed point |
 | `sysconf` | `toolchain/runtime/runtime_linux.tin`, `toolchain/compiler/host_linux.tin` | 4 | removed | Affinity mask and cgroup CPU limits; page size via auxv | CPU quota/affinity tests; page-size kernels (phases 4/5) |
 | `time` | `packages/anvil/anvil.tin` | 4 | removed | clock_gettime CLOCK_REALTIME | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 4) |
 | `timerfd_create` | `packages/anvil/anvil_linux.tin` | 3 | removed | timerfd_create raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
@@ -114,6 +114,6 @@ an entry removed only when no Linux declaration or linker-added import remains.
 | `shutdown` | `packages/anvil/anvil.tin` | 3 | removed | shutdown raw syscall | HTTP conformance and graceful shutdown |
 | `sigaction` | `toolchain/runtime/runtime.tin` | 3 | removed | rt_sigaction and per-architecture restorer | Existing native stack-overflow/bad-access probes; signal-return tests (phase 3) |
 | `sigaltstack` | `toolchain/runtime/runtime.tin` | 3 | removed | sigaltstack raw syscall | Existing native per-thread stack-overflow probes (issue #175) |
-| `munmap` | `toolchain/runtime/memory.tin` | 3 | removed | munmap raw syscall | memory_check.py; task_memory_check.py |
-| `madvise` | `toolchain/runtime/runtime.tin` | 3 | removed | madvise raw syscall | task_memory_check.py after heavy burst |
-| `syscall` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | Generated leaf uses svc/syscall directly; the fallback went with the seed refresh (#339) | syscall_check.py dynamic-import assertion; bootstrap |
+| `munmap` | `toolchain/runtime/memory.tin` | 3 | removed | munmap raw syscall | memory_check.py; task_memory_check.tin |
+| `madvise` | `toolchain/runtime/runtime.tin` | 3 | removed | madvise raw syscall | task_memory_check.tin after heavy burst |
+| `syscall` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | Generated leaf uses svc/syscall directly; the fallback went with the seed refresh (#339) | syscall_check.tin dynamic-import assertion; bootstrap |
