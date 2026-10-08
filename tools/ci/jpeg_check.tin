@@ -1,0 +1,51 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Compare Go-generated baseline JPEGs decoded by Tin to Go's decoder; tolerance 4/channel covers independent IDCT rounding and chroma conversion.
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci/jpeg"), "jpeg-")
+	let tin = ci.Join(work, "jpeg-tin")
+	let goexe = ci.Join(work, "jpeg-go")
+	ci.BuildTin("tools/ci/fixtures/jpeg.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/jpeg"}, root, 300), "go build JPEG oracle")
+	let generated = ci.Exec([]str{goexe}, root, 300)
+	ci.Must(generated, "Go JPEG corpus")
+	let expected = ci.Lines(generated.Stdout)
+	mut input = ""
+	for line in expected {
+		let fields = twine.Split(line, "|")
+		ci.Check(len(fields) == 2, "malformed Go JPEG corpus record")
+		input += fields[0] + "\n"
+	}
+	let output = ci.ExecIn([]str{tin}, root, 300, input, []str{})
+	ci.Must(output, "Tin JPEG decoder")
+	let actual = ci.Lines(output.Stdout)
+	ci.Check(len(actual) == len(expected), "JPEG corpus line count differs")
+	mut mismatches = i64(0)
+	for i in 0..len(expected) {
+		let wantFields = twine.Split(expected[i], "|")
+		let want = twine.Split(wantFields[1], ",")
+		let got = twine.Split(actual[i], ",")
+		if len(want) != len(got) {
+			mismatches += 1
+			continue
+		}
+		for j in 0..len(want) {
+			let a = mint.Atoi(got[j]) catch _ { -1000 }
+			let b = mint.Atoi(want[j]) catch _ { -1000 }
+			if a-b > 4 || b-a > 4 {
+				say.Line("JPEG pixel channel mismatch", i, j, a, b)
+				mismatches += 1
+				break
+			}
+		}
+	}
+	ci.Check(mismatches == 0, "JPEG channels exceed tolerance 4 in " + mint.Itoa(mismatches) + " images")
+	ci.Remove(work)
+	ci.Pass("JPEG baseline decode: " + mint.Itoa(len(expected)) + " Go images within 4/channel (IDCT and chroma conversion rounding)")
+}

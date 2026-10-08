@@ -76,6 +76,8 @@ jobs:
         run: sh tools/ci/tin.sh multipart_check
       - name: PNG and image/draw pixel interoperability against Go
         run: sh tools/ci/tin.sh png_check
+      - name: Baseline JPEG decode against Go's image/jpeg
+        run: sh tools/ci/tin.sh jpeg_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: sh tools/ci/tin.sh pack_check
       - name: Stream helpers against Go's io (a generated chunk corpus)
