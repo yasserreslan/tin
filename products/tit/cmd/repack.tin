@@ -6,7 +6,7 @@ import "../packfile"
 import "quarry"
 import "twine"
 
-// tit repack (#778): every pack into two (commits, trees and tags in one, blobs in the other), its deltas searched again and its entries compressed on every core. adopt
+// tit repack (#778): every pack into three (commits and tags, trees, blobs), its deltas searched again and its entries compressed on every core. adopt
 // leaves a pack for each batch it converts, and each pack is one more index to search for every object read. Loose
 // objects stay as they are (large files among them are kept in chunks). The new pack is in place before the old ones
 // go, so a crash leaves objects twice, never missing.
@@ -24,21 +24,28 @@ fn doRepack(g Global, o mut Out) ! {
 			}
 		}
 	}
-	if len(old) < 3 {
+	if len(old) < 4 {
 		o.Line("Nothing to repack: {len(old)} packs.")
 		return
 	}
-	// commits, trees and tags in one pack, blobs in another: a log or a walk then reads only the first
-	mut meta = []object.Id{}
+	// commits and tags in one pack, trees in another, blobs in a third: a log then reads only the first
+	mut commits = []object.Id{}
+	mut trees = []object.Id{}
 	mut blobs = []object.Id{}
 	for p in r.ids.packs {
 		for i in 0..p.Count {
 			let id = p.IdAt(i)
 			let (kind, _) = try r.Store.GetRaw(id)
-			if kind == object.Kind.Blob {
-				blobs = append(blobs, id)
-			} else {
-				meta = append(meta, id)
+			match kind {
+				Commit, Tag => {
+					commits = append(commits, id)
+				}
+				Tree => {
+					trees = append(trees, id)
+				}
+				Blob => {
+					blobs = append(blobs, id)
+				}
 			}
 		}
 	}
@@ -46,7 +53,7 @@ fn doRepack(g Global, o mut Out) ! {
 	mut count = 0
 	mut size = 0
 	mut deltas = 0
-	for part in [][]object.Id{meta, blobs} {
+	for part in [][]object.Id{commits, trees, blobs} {
 		if len(part) == 0 {
 			continue
 		}
@@ -70,5 +77,5 @@ fn doRepack(g Global, o mut Out) ! {
 		try quarry.Remove(dir + "/" + n + ".idx")
 		try quarry.Remove(dir + "/" + n + ".pack")
 	}
-	o.Line("Packed {count} objects from {len(old)} packs into {len(made)}, commits and trees apart from blobs ({size / 1048576} MiB, {deltas} deltas).")
+	o.Line("Packed {count} objects from {len(old)} packs into {len(made)}: commits, trees and blobs apart ({size / 1048576} MiB, {deltas} deltas).")
 }

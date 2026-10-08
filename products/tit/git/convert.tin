@@ -351,20 +351,27 @@ fn ConvertBatch(r Repo, packDir str, known Ids, order []str, start i64, budget i
 	let (gs, ts) = local.Pairs()
 	mut out = Batch{Git: gs, Tit: ts, Next: k, Pack: ""}
 	if len(ts) > 0 {
-		// commits, trees and tags in a pack of their own, blobs in another: a log or a walk then reads only the
-		// first (a pack is read whole the first time one of its objects is)
-		mut meta = []object.Id{}
+		// commits and tags in a pack of their own, trees in another, blobs in a third: a log then reads only the
+		// first, a checkout the second and what it writes (a pack is read whole the first time one of its objects is)
+		mut commits = []object.Id{}
+		mut trees = []object.Id{}
 		mut blobs = []object.Id{}
 		for t in ts {
 			let id = try object.IdOf(t)
 			let (kind, _) = try mem.GetRaw(id)
-			if kind == object.Kind.Blob {
-				blobs = append(blobs, id)
-			} else {
-				meta = append(meta, id)
+			match kind {
+				Commit, Tag => {
+					commits = append(commits, id)
+				}
+				Tree => {
+					trees = append(trees, id)
+				}
+				Blob => {
+					blobs = append(blobs, id)
+				}
 			}
 		}
-		for part in [][]object.Id{meta, blobs} {
+		for part in [][]object.Id{commits, trees, blobs} {
 			if len(part) > 0 {
 				mut p = try packfile.Write(mut mem, part, packDir)
 				try p.Verify()
