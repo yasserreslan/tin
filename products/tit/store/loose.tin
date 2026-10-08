@@ -1,5 +1,6 @@
 package store
 
+import "../crash"
 import "../object"
 import "fault"
 import "flume"
@@ -71,6 +72,7 @@ fn (l mut Loose) PutRaw(kind object.Kind, body str) !object.Id {
 	try quarry.MkdirAll(sub)
 	use tmp = newTemp(l.dir)
 	try tmp.write(squash.Zlib("{object.KindName(kind)} {len(body)}\x00{body}", 6))
+	crash.Point()
 	try quarry.Rename(tmp.path, p)
 	tmp.done[0] = true
 	try quarry.Sync(sub)

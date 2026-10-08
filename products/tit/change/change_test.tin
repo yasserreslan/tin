@@ -133,7 +133,16 @@ fn TestVersions(t mut crucible.T) {
 	}
 	t.True("no version yet", none == nil)
 	for i in 1..4 {
+		// a version counts once its operation is recorded
+		quarry.MkdirAll(d + "/oplog") catch _ {
+		}
+		quarry.WriteFile(opFile(d, i), "{{}}") catch _ {
+		}
 		t.NoFault("add", AddVersion(d, c, NewVersion(i, object.Hash(object.Kind.Blob, "v{i}"), 1000 * i)))
+	}
+	// an operation that never reached its commit point (no record), and a line cut short by a crash
+	t.NoFault("add uncommitted", AddVersion(d, c, NewVersion(9, object.Hash(object.Kind.Blob, "v9"), 9000)))
+	quarry.AppendFile(changePath(d, c), "10 abc") catch _ {
 	}
 	let vs = Versions(d, c) catch _ {
 		[]Version{}

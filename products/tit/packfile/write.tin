@@ -1,5 +1,6 @@
 package packfile
 
+import "../crash"
 import "../object"
 import "../store"
 import "fault"
@@ -146,7 +147,9 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 	try writeSynced(tmp + ".pack", str(out))
 	try writeSynced(tmp + ".idx", str(idx))
 	let final = dir + "/" + hex
+	crash.Point()
 	try quarry.Rename(tmp + ".idx", final + ".idx")
+	crash.Point()
 	try quarry.Rename(tmp + ".pack", final + ".pack")
 	try quarry.Sync(dir)
 	return try Open(final + ".pack")

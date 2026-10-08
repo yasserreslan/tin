@@ -4,6 +4,7 @@ import "../change"
 import "../identity"
 import "../index"
 import "../object"
+import "../oplog"
 import "../packfile"
 import "../revwalk"
 import "../store"
@@ -51,6 +52,10 @@ fn open(g Global) !Repo {
 		dir = try quarry.Getwd()
 	}
 	let ws = try worktree.Find(dir)
+	// an operation a crash cut short is rolled back before anything reads the repository (design section 9)
+	if quarry.Exists(ws.Store + "/oplog/pending.op") {
+		try recoverPending(ws.Store)
+	}
 	let loose = store.NewLoose(ws.Store + "/objects")
 	mut layers = []dyn store.ObjectStore{loose}
 	mut packs = []packfile.Pack{}
@@ -58,7 +63,7 @@ fn open(g Global) !Repo {
 	if quarry.IsDir(pdir) {
 		let names = try quarry.ReadDir(pdir)
 		for n in names {
-			if twine.HasSuffix(n, ".pack") {
+			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
 				let p = try packfile.Open(pdir + "/" + n)
 				packs = append(packs, p)
 				layers = append(layers, p)
@@ -66,6 +71,21 @@ fn open(g Global) !Repo {
 		}
 	}
 	return Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}, layers: layers}
+}
+
+fn recoverPending(store str) ! {
+	// this process's own operation, between its record and its commit point, is not a crash
+	let lockFile = store + "/lock"
+	if quarry.Exists(lockFile) {
+		let text = quarry.ReadFile(lockFile) catch _ {
+			""
+		}
+		if twine.HasPrefix(text, "{quarry.Pid()} ") {
+			return
+		}
+	}
+	use lock = change.Lock(store)
+	_ = try oplog.Recover(store)
 }
 
 // scratch is the repository's store with an in-memory layer in front that takes the writes: for objects a command

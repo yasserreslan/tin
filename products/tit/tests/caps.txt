@@ -1,0 +1,49 @@
+anvil net files
+argo
+atomic
+bits
+cairn
+change files
+cmd net files spawn
+cores files
+crash
+diff
+fault
+flume files
+git files
+glyph
+hearth
+herald
+hpack
+identity files
+ignore files
+index files
+link
+main net files spawn
+merge
+mint
+object
+oplog files
+pack
+packfile files
+policy
+quarry files
+relay
+replay files
+revwalk files
+seal files
+semantic
+sift
+spawn files spawn
+squash
+stack
+stamp
+store files
+tide files
+tls net files
+trail
+transport net files
+tty files
+twine
+wire net files
+worktree files

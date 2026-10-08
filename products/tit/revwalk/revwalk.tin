@@ -187,7 +187,7 @@ fn GitIds(dir str, prefix str) ![]object.Id {
 		fail fault.Wrap(ErrBadRev, "{path}: not a git-ids table")
 	}
 	let count = i64(pack.LE.U64([]u8(t[12:20])))
-	if count < 0 || 20 + count * 52 > len(t) {
+	if count < 0 || count > len(t) / 52 || 20 + count * 52 > len(t) {
 		fail fault.Wrap(ErrBadRev, "{path}: cut off")
 	}
 	for i in 0..count {

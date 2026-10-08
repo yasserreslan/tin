@@ -1,5 +1,6 @@
 package change
 
+import "../crash"
 import "fault"
 import "quarry"
 import "sift"
@@ -187,6 +188,7 @@ fn (r mut Refs) swap(name str, path str, lock str, old ?Target, next ?Target) ! 
 	if err != nil {
 		fail err
 	}
+	crash.Point()
 	try quarry.Rename(tmp, path)
 	try quarry.Sync(dirOf(path))
 }
@@ -275,6 +277,7 @@ fn WriteHead(wsDir str, h Head) ! {
 	if err != nil {
 		fail err
 	}
+	crash.Point()
 	try quarry.Rename(tmp, wsDir + "/HEAD")
 	try quarry.Sync(wsDir)
 }

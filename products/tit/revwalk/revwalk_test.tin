@@ -59,6 +59,11 @@ fn build() graph {
 	}
 	change.WriteHead(dir + "/workspaces/default", change.Head.Branch("refs/heads/main")) catch _ {
 	}
+	// a version counts once its operation is recorded
+	quarry.MkdirAll(dir + "/oplog") catch _ {
+	}
+	quarry.WriteFile(dir + "/oplog/0000000000000001.op", "{{}}") catch _ {
+	}
 	change.AddVersion(dir, object.AdoptedChangeId("b2"), change.NewVersion(1, g.ids["b2"], 5)) catch _ {
 	}
 	return g

@@ -92,7 +92,7 @@ fn ReadIds(path str) !Ids {
 		fail fault.Wrap(ErrBadObject, "{path}: not a git-ids table")
 	}
 	let count = i64(pack.LE.U64([]u8(t[12:20])))
-	if count < 0 || 20 + count * 56 + 32 != len(t) {
+	if count < 0 || count > len(t) / 56 || 20 + count * 56 + 32 != len(t) {
 		fail fault.Wrap(ErrBadObject, "{path}: cut off")
 	}
 	if str(seal.Sha256(t[0:len(t) - 32])) != t[len(t) - 32:] {

@@ -1,5 +1,6 @@
 package index
 
+import "../crash"
 import "../object"
 import "../store"
 import "fault"
@@ -274,6 +275,7 @@ fn (idx Index) Write(path str) ! {
 	if err != nil {
 		fail err
 	}
+	crash.Point()
 	try quarry.Rename(tmp, path)
 }
 
