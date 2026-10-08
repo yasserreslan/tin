@@ -21,6 +21,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [gauge](#gauge) | math (math) |
 | [bits](#bits) | bit counting and manipulation (math/bits) |
 | [link](#link) | URLs and their escaping (net/url) |
+| [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
 | [ore](#ore) | byte slices (bytes) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
@@ -787,6 +788,93 @@ Package link parses, builds and resolves URLs, and escapes and unescapes their p
 - `(v Values) Len() i64`: Len returns the number of keys.
 - `ParseQuery(query str) !Values`: ParseQuery parses a URL query ("a=1&b=2&a=3") into Values. It faults on the first malformed parameter (a bad escape, or a semicolon separator); URL.Query keeps the good ones instead.
 - `(v Values) Encode() str`: Encode returns the values URL-encoded ("a=1&a=3&b=2"), sorted by key.
+
+## netip
+
+Package netip holds IP addresses, address/port pairs and prefixes as small value types, like Go's net/netip. An Addr is a value struct of 16 bytes, a zone and a kind byte: it is copied by every store, compares with == and is a map key by value. Comparing, classifying, Contains, Overlaps and AppendTo allocate nothing.
+
+```tin body
+let a = try netip.ParseAddr("192.168.1.10")
+let p = try netip.ParsePrefix("192.168.0.0/16")
+p.Contains(a)                                   // true
+a.IsPrivate()                                   // true
+let ap = try netip.ParseAddrPort("[fe80::1%eth0]:8080")
+ap.Port()                                       // 8080
+ap.Addr().Zone()                                // "eth0"
+```
+
+Parsing, formatting, the fault messages and every classification follow net/netip exactly: an IPv4 address is stored as its IPv4-mapped IPv6 form with the IPv4 kind, IPv4 fields with leading zeros are refused, an IPv6 address may end in an embedded IPv4 address and carry a zone after %, and the zero Addr is invalid.
+
+- `type Addr value struct`: Addr is an IPv4 or IPv6 address, with an IPv6 zone or none; the zero Addr is not a valid address.
+- `type AddrPort value struct`: AddrPort is an IP address and a port number.
+- `type Prefix value struct`: Prefix is an IP network: an address and the number of leading bits that name the network.
+- `AddrFrom4(b []u8) Addr`: AddrFrom4 is the IPv4 address of the four bytes b (it panics unless len(b) is 4).
+- `AddrFrom16(b []u8) Addr`: AddrFrom16 is the IPv6 address of the sixteen bytes b (it panics unless len(b) is 16); a mapped IPv4 address stays IPv6.
+- `AddrFromSlice(b []u8) (Addr, bool)`: AddrFromSlice is the IPv4 address of 4 bytes or the IPv6 address of 16, and false for any other length.
+- `IPv4Unspecified() Addr`: IPv4Unspecified is 0.0.0.0.
+- `IPv6Unspecified() Addr`: IPv6Unspecified is ::.
+- `IPv6Loopback() Addr`: IPv6Loopback is ::1.
+- `IPv6LinkLocalAllNodes() Addr`: IPv6LinkLocalAllNodes is ff02::1.
+- `IPv6LinkLocalAllRouters() Addr`: IPv6LinkLocalAllRouters is ff02::2.
+- `ParseAddr(s str) !Addr`: ParseAddr parses an IPv4 address ("192.0.2.1"), an IPv6 address ("2001:db8::68") or one with a zone ("fe80::1%eth0").
+- `MustParseAddr(s str) Addr`: MustParseAddr is ParseAddr that panics with the fault's message.
+- `(a Addr) IsValid() bool`: IsValid reports whether a is an address, not the zero Addr (0.0.0.0 and :: are valid).
+- `(a Addr) BitLen() i64`: BitLen is 32 for IPv4, 128 for IPv6 (mapped IPv4 included) and 0 for the zero Addr.
+- `(a Addr) Zone() str`: Zone is a's IPv6 zone, or "".
+- `(a Addr) Is4() bool`: Is4 reports whether a is an IPv4 address (not an IPv4-mapped IPv6 one).
+- `(a Addr) Is6() bool`: Is6 reports whether a is an IPv6 address, IPv4-mapped ones included.
+- `(a Addr) Is4In6() bool`: Is4In6 reports whether a is an IPv4-mapped IPv6 address (in ::ffff:0:0/96).
+- `(a Addr) Unmap() Addr`: Unmap is a without its IPv4-mapped prefix: the IPv4 address of ::ffff:a.b.c.d, else a unchanged.
+- `(a Addr) WithZone(zone str) Addr`: WithZone is a with the given IPv6 zone ("" removes it); an IPv4 or zero Addr is returned unchanged.
+- `(a Addr) IsLoopback() bool`: IsLoopback reports whether a is a loopback address: 127.0.0.0/8 or ::1.
+- `(a Addr) IsMulticast() bool`: IsMulticast reports whether a is a multicast address: 224.0.0.0/4 or ff00::/8.
+- `(a Addr) IsInterfaceLocalMulticast() bool`: IsInterfaceLocalMulticast reports whether a is an IPv6 interface-local multicast address (ff01::/16 and its flags).
+- `(a Addr) IsLinkLocalMulticast() bool`: IsLinkLocalMulticast reports whether a is a link-local multicast address: 224.0.0.0/24 or ff02::/16 and its flags.
+- `(a Addr) IsLinkLocalUnicast() bool`: IsLinkLocalUnicast reports whether a is a link-local unicast address: 169.254.0.0/16 or fe80::/10.
+- `(a Addr) IsGlobalUnicast() bool`: IsGlobalUnicast reports whether a is a global unicast address, as Go's net.IP.IsGlobalUnicast (private ranges included).
+- `(a Addr) IsPrivate() bool`: IsPrivate reports whether a is in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or fc00::/7 (RFC 1918, RFC 4193).
+- `(a Addr) IsUnspecified() bool`: IsUnspecified reports whether a is 0.0.0.0 or :: (with no zone).
+- `(a Addr) Compare(b Addr) i64`: Compare is -1, 0 or +1 as a sorts before, with or after b: by bit length, then address, then zone.
+- `(a Addr) Less(b Addr) bool`: Less reports whether a sorts before b: by bit length, then address, then zone (a zone sorts after none).
+- `(a Addr) As16() []u8`: As16 is a's 16 bytes (an IPv4 address in its IPv4-mapped IPv6 form).
+- `(a Addr) As4() []u8`: As4 is the 4 bytes of an IPv4 or IPv4-mapped address; it panics for another IPv6 address or the zero Addr.
+- `(a Addr) AsSlice() []u8`: AsSlice is a's 4 bytes (IPv4) or 16 bytes (IPv6), or an empty slice for the zero Addr.
+- `(a Addr) Next() Addr`: Next is the address after a (same zone), or the zero Addr past the last address of its family.
+- `(a Addr) Prev() Addr`: Prev is the address before a (same zone), or the zero Addr before the first address of its family.
+- `(a Addr) Prefix(bits i64) !Prefix`: Prefix is the network of a's first bits bits, the rest cleared and the zone dropped; the zero Addr gives the zero Prefix.
+- `(a Addr) AppendTo(b mut []u8) []u8`: AppendTo appends a's text form (String) to b, nothing for the zero Addr, and returns b.
+- `(a Addr) String() str`: String is a's text form: dotted IPv4, ::ffff:a.b.c.d, RFC 5952 IPv6 with %zone, or "invalid IP".
+- `(a Addr) StringExpanded() str`: StringExpanded is String with every IPv6 group written as four hex digits and no :: shortening.
+- `(a Addr) MarshalText() []u8`: MarshalText is a's text form as bytes, empty for the zero Addr.
+- `(a mut Addr) UnmarshalText(text []u8) !`: UnmarshalText sets a from its text form; empty text gives the zero Addr.
+- `(a Addr) MarshalBinary() []u8`: MarshalBinary is 4 bytes for IPv4, 16 bytes and the zone for IPv6, and none for the zero Addr.
+- `(a mut Addr) UnmarshalBinary(b []u8) !`: UnmarshalBinary sets a from MarshalBinary's bytes: 0 (zero Addr), 4, 16, or more than 16 (the rest is the zone).
+- `AddrPortFrom(ip Addr, port u16) AddrPort`: AddrPortFrom is the pair of an address and a port.
+- `(p AddrPort) Addr() Addr`: Addr is p's address.
+- `(p AddrPort) Port() u16`: Port is p's port.
+- `(p AddrPort) IsValid() bool`: IsValid reports whether p's address is valid.
+- `ParseAddrPort(s str) !AddrPort`: ParseAddrPort parses "1.2.3.4:80" or "[2001:db8::1%eth0]:80"; an IPv6 address must be bracketed and an IPv4 one must not.
+- `MustParseAddrPort(s str) AddrPort`: MustParseAddrPort is ParseAddrPort that panics with the fault's message.
+- `(p AddrPort) Compare(q AddrPort) i64`: Compare is -1, 0 or +1 as p sorts before, with or after q: by address, then port.
+- `(p AddrPort) AppendTo(b mut []u8) []u8`: AppendTo appends p's text form (String) to b, nothing when p's address is the zero Addr, and returns b.
+- `(p AddrPort) String() str`: String is "1.2.3.4:80", "[2001:db8::1]:80" or "invalid AddrPort".
+- `(p AddrPort) MarshalText() []u8`: MarshalText is p's text form as bytes, empty when p's address is the zero Addr.
+- `(p mut AddrPort) UnmarshalText(text []u8) !`: UnmarshalText sets p from its text form; empty text gives the zero AddrPort.
+- `PrefixFrom(ip Addr, bits i64) Prefix`: PrefixFrom is the prefix of ip's first bits bits, with ip's zone dropped and its other bits kept (see Masked); bits out of range for ip, or the zero Addr, give an invalid Prefix.
+- `ParsePrefix(s str) !Prefix`: ParsePrefix parses "192.168.0.0/16" or "2001:db8::/32"; the address bits after the prefix are kept (see Masked).
+- `MustParsePrefix(s str) Prefix`: MustParsePrefix is ParsePrefix that panics with the fault's message.
+- `(p Prefix) Addr() Addr`: Addr is p's address, with the bits after the prefix as given (see Masked).
+- `(p Prefix) Bits() i64`: Bits is p's prefix length, or -1 for an invalid Prefix.
+- `(p Prefix) IsValid() bool`: IsValid reports whether p has a valid address and a length in range for it.
+- `(p Prefix) IsSingleIP() bool`: IsSingleIP reports whether p holds exactly one address (/32 for IPv4, /128 for IPv6).
+- `(p Prefix) Masked() Prefix`: Masked is p in canonical form: the address bits after the prefix cleared; an invalid p gives the zero Prefix.
+- `(p Prefix) Contains(ip Addr) bool`: Contains reports whether ip is in p; an address with a zone, or of another family, never is.
+- `(p Prefix) Overlaps(o Prefix) bool`: Overlaps reports whether p and o share an address; prefixes of different families never do.
+- `(p Prefix) Compare(o Prefix) i64`: Compare is -1, 0 or +1 as p sorts before, with or after o: by masked address, then length, then address.
+- `(p Prefix) AppendTo(b mut []u8) []u8`: AppendTo appends p's text form (String) to b, nothing for the zero Prefix, and returns b.
+- `(p Prefix) String() str`: String is "192.168.0.0/16", "2001:db8::/32", "::ffff:1.2.3.0/120" or "invalid Prefix".
+- `(p Prefix) MarshalText() []u8`: MarshalText is p's text form as bytes, empty for the zero Prefix.
+- `(p mut Prefix) UnmarshalText(text []u8) !`: UnmarshalText sets p from its text form; empty text gives the zero Prefix.
 
 ## ore
 

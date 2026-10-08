@@ -89,6 +89,8 @@ jobs:
         run: sh tools/ci/tin.sh path_check
       - name: MIME, quoted-printable and multipart against Go
         run: sh tools/ci/tin.sh mime_check
+      - name: IP addresses, ports and prefixes against Go's net/netip (38,094 generated and edge cases)
+        run: sh tools/ci/tin.sh netip_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: DEFLATE against Go (every length and distance code, both directions)
