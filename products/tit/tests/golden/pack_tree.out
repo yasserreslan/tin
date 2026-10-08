@@ -1,0 +1,4 @@
+more than 100 files: true
+objects read back wrong: 0
+the edited versions are deltas: true
+verifies: true
