@@ -4,9 +4,9 @@ import "./ci"
 import "say"
 import "twine"
 
-// Streaming zlib against Go's compress/zlib (#772). Tin writes streams of 32 sizes from 0 to 1 MiB with
-// NewZlibWriter, in random pieces, and Go inflates them; Go writes the same inputs and Tin reads them with
-// NewZlibReader, in random read sizes. Then 4 GiB each way through a pipe (Tin's writer into Go's reader, Go's
+// Streaming zlib against Go's compress/zlib (#772). Tin writes streams of 32 sizes from 0 to 1 MiB and of three of
+// the repository's own files with NewZlibWriter, in random pieces, and Go inflates them; Go writes the same inputs
+// and Tin reads them with NewZlibReader, in random read sizes. Then 4 GiB each way through a pipe (Tin's writer into Go's reader, Go's
 // writer into Tin's reader), a 4 GiB stream read under limit memory 1mb, and every byte of a stream damaged and
 // every cut of it: a fault each time, never a panic, never a wrong result.
 
@@ -41,11 +41,11 @@ fn main() {
 	say.Line(twine.Join(lines, "\n"))
 	let all = twine.Join(lines, "\n")
 	ci.Check(!twine.Contains(all, "FAIL"), "zlib streams disagree with Go:\n" + all)
-	ci.Check(twine.Contains(all, "go inflates tin: 32 ok, 0 failed"), "Go did not inflate every Tin stream")
-	ci.Check(twine.Contains(all, "tin reads go: 32 ok, 0 failed"), "Tin did not read every Go stream")
+	ci.Check(twine.Contains(all, "go inflates tin: 35 ok, 0 failed"), "Go did not inflate every Tin stream")
+	ci.Check(twine.Contains(all, "tin reads go: 35 ok, 0 failed"), "Tin did not read every Go stream")
 	ci.Check(twine.Contains(all, "go reads tin's stream of " + size4g + " bytes ok"), "Go did not read Tin's 4 GiB stream")
 	ci.Check(twine.Contains(all, "tin reads go's stream of " + size4g + " bytes ok"), "Tin did not read Go's 4 GiB stream")
 	ci.Check(twine.Contains(all, "tin reads " + size4g + " bytes of " + size4g + " under limit memory 1mb"), "the 4 GiB stream did not stay under 1 MiB")
 	ci.Check(twine.Contains(all, " 0 panics, 0 decoded to something else"), "a damaged stream panicked or decoded wrong")
-	ci.Pass("squash: streaming zlib against Go's compress/zlib, 32 sizes and 4 GiB each way; 4 GiB read in 1 MiB; damaged streams fault")
+	ci.Pass("squash: streaming zlib against Go's compress/zlib, 32 sizes, 3 real files and 4 GiB each way; 4 GiB read in 1 MiB; damaged streams fault")
 }

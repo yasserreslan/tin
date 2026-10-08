@@ -150,6 +150,9 @@ fn (z mut Zeros) Read(buf mut []u8) !i64 {
 
 let sizes = []i64{0, 1, 2, 3, 7, 31, 100, 255, 256, 1000, 4095, 4096, 4097, 16383, 16384, 16385, 32767, 32768, 32769, 65534, 65535, 65536, 65537, 100000, 131072, 262143, 262144, 262145, 500000, 777777, 1048575, 1048576}
 
+// realFiles are inputs from the repository itself (the check runs at its root).
+let realFiles = []str{"toolchain/docs/LANGUAGE.md", "toolchain/compiler/check.tin", "README.md"}
+
 fn atoi(s str) i64 {
 	mut v = 0
 	for i in 0..len(s) {
@@ -182,9 +185,25 @@ fn main() {
 	mut r = rng{x: 7}
 	if mode == "files" {
 		let dir = args[2]
+		// real inputs as well: the repository's own text, up to 1 MiB
+		mut inputs = [][]u8{}
+		mut names = []str{}
 		for n in sizes {
-			let data = sample(mut r, n)
-			quarry.WriteFile("{dir}/in-{n}.bin", str(data)) catch e {
+			inputs = append(inputs, sample(mut r, n))
+			names = append(names, "{n}")
+		}
+		for k in 0..len(realFiles) {
+			let text = quarry.ReadFile(realFiles[k]) catch e {
+				panic(e)
+			}
+			inputs = append(inputs, []u8(text[0:min(len(text), 1 << 20)]))
+			names = append(names, "real{k}")
+		}
+		for x in 0..len(inputs) {
+			let data = inputs[x]
+			let n = len(data)
+			let name = names[x]
+			quarry.WriteFile("{dir}/in-{name}.bin", str(data)) catch e {
 				panic(e)
 			}
 			let sink = Buf{data: []u8{}}
@@ -202,18 +221,25 @@ fn main() {
 			w.Close() catch e {
 				panic(e)
 			}
-			quarry.WriteFile("{dir}/tin-{n}.zlib", str(sink.data)) catch e {
+			quarry.WriteFile("{dir}/tin-{name}.zlib", str(sink.data)) catch e {
 				panic(e)
 			}
 		}
-		say.Line("tin wrote", len(sizes), "streams")
+		say.Line("tin wrote", len(inputs), "streams")
 		return
 	}
 	if mode == "check" {
 		let dir = args[2]
 		mut ok = 0
 		mut bad = 0
+		mut names = []str{}
 		for n in sizes {
+			names = append(names, "{n}")
+		}
+		for k in 0..len(realFiles) {
+			names = append(names, "real{k}")
+		}
+		for n in names {
 			let want = quarry.ReadFile("{dir}/in-{n}.bin") catch e {
 				panic(e)
 			}
