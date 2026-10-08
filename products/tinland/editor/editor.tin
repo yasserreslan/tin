@@ -109,6 +109,8 @@ type Editor struct {
 	MarksSaves i64
 	Saves    i64
 	dragging bool
+	// mapDrag is true while the mouse drags in the minimap.
+	mapDrag bool
 	clicks   i64
 	lastClick f64
 }
@@ -343,11 +345,35 @@ fn (ed Editor) rows() i64 {
 
 // cols is how many columns of text fit beside the line numbers.
 fn (ed Editor) cols() i64 {
-	let n = i64((ed.AreaW - ed.gutterW() - ed.CharW) / ed.CharW)
+	let n = i64((ed.AreaW - ed.gutterW() - ed.CharW - ed.mapW()) / ed.CharW)
 	if n < 1 {
 		return 1
 	}
 	return n
+}
+
+// minimapWidth is the width in points of the minimap, and minimapRow the height of one line in it.
+const minimapWidth = 84.0
+const minimapRow = 2.0
+
+// mapW is the width the minimap takes at the right of the text: none in a narrow editor.
+fn (ed Editor) mapW() f64 {
+	if ed.AreaW < 640.0 {
+		return 0.0
+	}
+	return minimapWidth
+}
+
+// mapStart is the first line the minimap shows: all of a short file, and for a longer one the part that keeps the window's place
+// in the file.
+fn (ed Editor) mapStart() i64 {
+	let total = len(ed.Buf.Lines)
+	let cap = i64(ed.AreaH / minimapRow)
+	let rows = ed.rows()
+	if total <= cap || total <= rows {
+		return 0
+	}
+	return i64(f64(total - cap) * f64(ed.Scroll) / f64(total - rows))
 }
 
 // gutterW is the width in points of the line numbers.
