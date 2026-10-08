@@ -134,6 +134,18 @@ fn mergeDir[S store.ObjectStore](s mut S, path str, base object.Id, ours object.
 			pick = object.Entry{Mode: object.Mode.Dir, Name: name, Id: sub}
 		} else if oe != nil && te != nil && !isDir(oe) && !isDir(te) {
 			pick = try mergeFile(mut s, full, be, oe, te, mut conflicts)
+		} else if (oe == nil || isDir(oe)) && (te == nil || isDir(te)) && (be == nil || isDir(be)) {
+			// a directory one side deleted and the other changed: merged file by file, as git does, so each file
+			// the other side changed is a conflict of its own (its version kept) and the rest goes
+			mut bsub = object.NoId
+			if isDir(be) {
+				bsub = idOf(be)
+			}
+			let sub = try mergeDir(mut s, full + "/", bsub, idOf(oe), idOf(te), mut conflicts)
+			let left = try entries(mut s, sub)
+			if len(left) > 0 {
+				pick = object.Entry{Mode: object.Mode.Dir, Name: name, Id: sub}
+			}
 		} else {
 			// deleted on one side and changed on the other, or a file against a directory
 			conflicts = append(conflicts, NewConflict(full, idOf(be), idOf(oe), idOf(te)))

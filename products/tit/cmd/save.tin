@@ -151,8 +151,9 @@ fn removeMissing(root str, dir str, idx mut index.Index, focus []str) {
 	mut gone = []str{}
 	for e in idx.Entries {
 		if under(e.Path, dir) && worktree.InFocus(focus, e.Path) {
-			let (_, err) = quarry.Lstat(root + "/" + e.Path)
-			if err != nil {
+			let (info, err) = quarry.Lstat(root + "/" + e.Path)
+			// gone, or a directory now where the file was (its files are staged on their own)
+			if err != nil || info.Type == quarry.FileType.Dir {
 				gone = append(gone, e.Path)
 			}
 		}
@@ -364,8 +365,8 @@ fn stageTracked(r Repo, idx mut index.Index, s mut store.Loose) ! {
 		if e == nil {
 			continue
 		}
-		let (_, err) = quarry.Lstat(r.Ws.Root + "/" + p)
-		if err != nil {
+		let (info, err) = quarry.Lstat(r.Ws.Root + "/" + p)
+		if err != nil || info.Type == quarry.FileType.Dir {
 			idx.Remove(p)
 			continue
 		}

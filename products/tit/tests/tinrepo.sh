@@ -162,7 +162,9 @@ echo "ok #783 staged, the rename shows as git shows it"
 cd "$d/repo"
 m=0
 for br in $(git branch --format='%(refname:short)' | grep -v '^main$' | head -40); do
-	gtree=$(git merge-tree --write-tree main "$br" 2> /dev/null | head -1) || continue
+	# only the merges git makes cleanly (merge-tree exits 1 on a conflict)
+	out=$(git merge-tree --write-tree main "$br" 2> /dev/null) || continue
+	gtree=$(echo "$out" | head -1)
 	[ "$(git merge-base main "$br")" = "$(git rev-parse "$br")" ] && continue
 	[ "$(git merge-base main "$br")" = "$(git rev-parse main)" ] && continue
 	t switch main > /dev/null

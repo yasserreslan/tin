@@ -240,3 +240,47 @@ fn TestRenameAgainstEdit(t mut crucible.T) {
 		t.True("nothing at the old name ({k})", entryOf(mut s, r.Tree, "old.txt") == nil)
 	}
 }
+
+// A directory one side deleted and the other changed merges file by file, as git does (found merging real Tin
+// branches into main, #791): the changed file is a conflict of its own with its version kept, the unchanged one goes,
+// and nothing is recorded at the directory itself.
+fn TestDirectoryDeletedAgainstEdit(t mut crucible.T) {
+	mut s = store.NewMem()
+	let a = blobId(mut s, "a\n")
+	let b = blobId(mut s, "b\n")
+	let a2 = blobId(mut s, "a, edited\n")
+	let kept = file("keep.txt", blobId(mut s, "k\n"))
+	let dirBase = treeOf(mut s, []object.Entry{file("a.txt", a), file("b.txt", b)})
+	let dirEdit = treeOf(mut s, []object.Entry{file("a.txt", a2), file("b.txt", b)})
+	let base = treeOf(mut s, []object.Entry{kept, object.Entry{Mode: object.Mode.Dir, Name: "docs", Id: dirBase}})
+	let gone = treeOf(mut s, []object.Entry{kept})
+	let edit = treeOf(mut s, []object.Entry{kept, object.Entry{Mode: object.Mode.Dir, Name: "docs", Id: dirEdit}})
+	for k in 0..2 {
+		mut ours = gone
+		mut theirs = edit
+		if k == 1 {
+			ours = edit
+			theirs = gone
+		}
+		let r = MergeTrees(mut s, base, ours, theirs) catch e {
+			t.Error("merge: {e}")
+			return
+		}
+		crucible.Equal(mut t, "one conflict ({k})", len(r.Conflicts), 1)
+		crucible.Equal(mut t, "at the changed file ({k})", r.Conflicts[0].Path, "docs/a.txt")
+		let d = entryOf(mut s, r.Tree, "docs")
+		t.True("docs kept for the changed file ({k})", d != nil && d.Mode == object.Mode.Dir)
+		if d != nil {
+			let inner = entryOf(mut s, d.Id, "a.txt")
+			t.True("the changed version kept ({k})", inner != nil && inner.Id == a2)
+			t.True("the unchanged file gone ({k})", entryOf(mut s, d.Id, "b.txt") == nil)
+		}
+	}
+	// a directory deleted on one side and left alone on the other simply goes
+	let r2 = MergeTrees(mut s, base, gone, base) catch e {
+		t.Error("merge 2: {e}")
+		return
+	}
+	crucible.Equal(mut t, "no conflict", len(r2.Conflicts), 0)
+	t.True("docs gone", entryOf(mut s, r2.Tree, "docs") == nil)
+}

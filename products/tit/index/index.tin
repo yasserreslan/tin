@@ -125,17 +125,59 @@ fn (idx Index) Find(path str) ?Entry {
 	return nil
 }
 
-// Set adds or replaces the stage-0 entry for e.Path, dropping any conflict stages of that path.
-fn (idx mut Index) Set(e Entry) {
-	mut out = make([]Entry, 0, len(idx.Entries) + 1)
-	for x in idx.Entries {
-		if x.Path != e.Path {
-			out = append(out, x)
+// lowerBound is the first position whose path is not before path.
+fn (idx Index) lowerBound(path str) i64 {
+	mut lo = 0
+	mut hi = len(idx.Entries)
+	for lo < hi {
+		let mid = (lo + hi) / 2
+		if idx.Entries[mid].Path < path {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
+	return lo
+}
+
+// Set adds or replaces the stage-0 entry for e.Path, dropping any conflict stages of that path. A path cannot be a
+// file and a directory at once (git's rule): a file entry at a directory above it, and every entry below it, give way.
+fn (idx mut Index) Set(e Entry) {
+	for i in 0..len(e.Path) {
+		if e.Path[i] == '/' {
+			let above = e.Path[0:i]
+			let at = idx.lowerBound(above)
+			if at < len(idx.Entries) && idx.Entries[at].Path == above {
+				idx.Remove(above)
+			}
+		}
+	}
+	let below = e.Path + "/"
+	let first = idx.lowerBound(below)
+	if first < len(idx.Entries) && twine.HasPrefix(idx.Entries[first].Path, below) {
+		mut left = make([]Entry, 0, len(idx.Entries))
+		for x in idx.Entries {
+			if !twine.HasPrefix(x.Path, below) {
+				left = append(left, x)
+			}
+		}
+		idx.Entries = left
+	}
+	// in place, in order: the entries of this path are one run
+	let lo = idx.lowerBound(e.Path)
+	mut hi = lo
+	for hi < len(idx.Entries) && idx.Entries[hi].Path == e.Path {
+		hi += 1
+	}
+	if hi == lo + 1 {
+		idx.Entries[lo] = e
+		return
+	}
+	mut out = make([]Entry, 0, len(idx.Entries) + 1)
+	out = append(out, idx.Entries[0:lo]...)
 	out = append(out, e)
+	out = append(out, idx.Entries[hi:]...)
 	idx.Entries = out
-	idx.sortEntries()
 }
 
 // SetConflict records a conflicted path in place of any entry it had: the base's, our and their versions (blob ids
