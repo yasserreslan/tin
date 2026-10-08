@@ -1,0 +1,89 @@
+package main
+
+import "./ci"
+import "dice"
+import "glyph"
+import "mint"
+import "say"
+import "seal"
+import "twine"
+
+// Compare argo.Str with Go's encoding/json (#943).
+//
+// A generated corpus (a fixed seed, so both sides see the same cases) of strings is fed as hex to bench/ref/argo_string (Go's
+// json.Marshal) and tools/ci/fixtures/argo_string.tin (argo.Str); the check compares each output line: every ASCII byte on its own, the HTML escapes, control bytes, \b and \f, U+2028 and U+2029, the boundary code points, and random strings
+// whose special bytes sit at every offset of the 8-byte fast path.
+
+const SEED = 943
+
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut strs = []str{}
+	for i in 0..128 {
+		strs = append(strs, str([]u8{u8(i)}))
+	}
+	// Each special byte at every offset of strings up to 24 bytes long, so the 8-byte fast path sees it in each lane.
+	let specials = []str{"<", ">", "&", "\"", "\\", "\b", "\f", "\n", "\x01", "\x7f", "é", " ", " "}
+	for n in 0..25 {
+		for sp in specials {
+			for pos in 0..n {
+				let s = twine.Repeat("a", pos) + sp + twine.Repeat("z", n - pos - 1)
+				strs = append(strs, s)
+			}
+		}
+	}
+	for s in []str{"", "<script>alert(\"x&y\")</script>", "a b c", glyph.RuneStr(0x7f), glyph.RuneStr(0x80), glyph.RuneStr(0x7ff),
+		glyph.RuneStr(0x800), glyph.RuneStr(0xfffd), glyph.RuneStr(0xffff), glyph.RuneStr(0x10000), glyph.RuneStr(0x10ffff),
+		"日本語 & ✓ <tag>", "\x00\x08\x0c\x1f"} {
+		strs = append(strs, s)
+	}
+	let pool = []str{"<", ">", "&", "\"", "\\", "\b", "\f", "\n", "\t", "\x01", "\x1f", "a", "Z", " ", "é", "€", "😀", " ", "/"}
+	for i in 0..300 {
+		mut s = ""
+		for k in 0..rng.Intn(40) {
+			s += pool[rng.Intn(len(pool))]
+		}
+		strs = append(strs, s)
+	}
+	return strs
+}
+
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let strs = corpus()
+	mut lines = []str{}
+	for s in strs {
+		lines = append(lines, seal.Hex([]u8(s)))
+	}
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/argo_string")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "argo-string-")
+	let tin = ci.Join(work, "argo-string-tin")
+	ci.BuildTin("tools/ci/fixtures/argo_string.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "argo-string-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/argo_string"}, ci.Root(), 300), "go build argo_string")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "argo_string: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "argo_string: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("argo_string: " + mint.Itoa(len(want)) + " strings match Go's encoding/json")
+}
