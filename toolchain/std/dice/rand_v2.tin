@@ -1,0 +1,406 @@
+package dice
+
+import "gauge"
+
+// SourceV2 is the 64-bit stream a RandV2 draws from: a PCG, a ChaCha8, or a Rand.
+shape SourceV2 {
+	mut Uint64() u64
+}
+
+// PCG is Go math/rand/v2's 128-bit PCG-DXSM generator.
+type PCG struct {
+	hi u64
+	lo u64
+}
+
+// NewPCG returns a PCG stream initialized with the two seed words (Go's NewPCG).
+fn NewPCG(d1 u64, d2 u64) PCG {
+	return PCG{hi: d1, lo: d2}
+}
+
+// Uint64 returns the next Go-compatible PCG-DXSM value.
+@wrap fn (p mut PCG) Uint64() u64 {
+	let (hi0, lo0) = mul64(p.lo, 4865540595714422341)
+	mut hi = hi0 +% p.hi*4865540595714422341 +% p.lo*2549297995355413924
+	let lo = lo0 +% 1442695040888963407
+	if lo < lo0 {
+		hi = hi +% 1
+	}
+	hi = hi +% 6364136223846793005
+	p.hi = hi
+	p.lo = lo
+	hi ^= hi >> 32
+	hi *%= 0xda942042e4dd58b5
+	hi ^= hi >> 48
+	hi *%= lo | 1
+	return hi
+}
+
+// Uint64 returns the next value of the legacy generator, so a Rand is a v2 source too.
+fn (r mut Rand) Uint64() u64 {
+	return r.U64()
+}
+
+// ChaCha8 is Go math/rand/v2's ChaCha8 stream: four interleaved blocks per generation, reseeded from the last four words.
+type ChaCha8 struct {
+	seed [4]u64
+	c u32
+	buf [32]u64
+	i i64
+	n i64
+}
+
+// NewChaCha8 returns a ChaCha8 stream seeded with the 32 bytes of seed (Go's NewChaCha8).
+fn NewChaCha8(seed [32]u8) ChaCha8 {
+	mut c = ChaCha8{}
+	for k in 0..4 {
+		mut w u64 = 0
+		for j in 0..8 {
+			w |= u64(seed[k*8+j]) << (8*j)
+		}
+		c.seed[k] = w
+	}
+	chachaBlock(c.seed, 0, mut c.buf)
+	c.c = 0
+	c.i = 0
+	c.n = 32
+	return c
+}
+
+// chachaBlock fills out with the 32 words of Go's block for counters ctr to ctr+3 (chacha8_generic.go).
+fn chachaBlock(key [4]u64, ctr u32, out mut [32]u64) {
+	// start[w][lane] is state word w of the four interleaved blocks.
+	mut start = [16][4]u32{}
+	for lane in 0..4 {
+		start[0][lane] = 0x61707865
+		start[1][lane] = 0x3320646e
+		start[2][lane] = 0x79622d32
+		start[3][lane] = 0x6b206574
+		for k in 0..4 {
+			start[4+2*k][lane] = u32(key[k])
+			start[5+2*k][lane] = u32(key[k] >> 32)
+		}
+		start[12][lane] = ctr +% u32(lane)
+	}
+	mut res = [16][4]u32{}
+	for lane in 0..4 {
+		// Each lane works on its own array: Tin arrays assigned from a variable share storage.
+		mut x = [16]u32{}
+		for w in 0..16 {
+			x[w] = start[w][lane]
+		}
+		for round in 0..4 {
+			quarter(mut x, 0, 4, 8, 12)
+			quarter(mut x, 1, 5, 9, 13)
+			quarter(mut x, 2, 6, 10, 14)
+			quarter(mut x, 3, 7, 11, 15)
+			quarter(mut x, 0, 5, 10, 15)
+			quarter(mut x, 1, 6, 11, 12)
+			quarter(mut x, 2, 7, 8, 13)
+			quarter(mut x, 3, 4, 9, 14)
+		}
+		for w in 0..16 {
+			res[w][lane] = x[w]
+			if w >= 4 && w <= 11 {
+				res[w][lane] = x[w] +% start[w][lane]
+			}
+		}
+	}
+	for w in 0..16 {
+		out[2*w] = u64(res[w][0]) | (u64(res[w][1]) << 32)
+		out[2*w+1] = u64(res[w][2]) | (u64(res[w][3]) << 32)
+	}
+}
+
+// rotl32 rotates a word left by k bits.
+fn rotl32(x u32, k i64) u32 {
+	return (x << k) | (x >> (32-k))
+}
+
+// quarter applies one ChaCha quarter round to the state words a, b, c and d.
+fn quarter(x mut [16]u32, a i64, b i64, c i64, d i64) {
+	x[a] = x[a] +% x[b]
+	x[d] = rotl32(x[d]^x[a], 16)
+	x[c] = x[c] +% x[d]
+	x[b] = rotl32(x[b]^x[c], 12)
+	x[a] = x[a] +% x[b]
+	x[d] = rotl32(x[d]^x[a], 8)
+	x[c] = x[c] +% x[d]
+	x[b] = rotl32(x[b]^x[c], 7)
+}
+
+// refill computes the next block, reseeding from the last four words once the counter reaches 16 (Go's Refill).
+fn (c mut ChaCha8) refill() {
+	c.c += 4
+	if c.c == 16 {
+		c.seed[0] = c.buf[28]
+		c.seed[1] = c.buf[29]
+		c.seed[2] = c.buf[30]
+		c.seed[3] = c.buf[31]
+		c.c = 0
+	}
+	chachaBlock(c.seed, c.c, mut c.buf)
+	c.i = 0
+	c.n = 32
+	// The last four words of the fourth block are the next seed, so they are not output.
+	if c.c == 12 {
+		c.n = 28
+	}
+}
+
+// Uint64 returns the next word of the stream (Go's ChaCha8.Uint64).
+fn (c mut ChaCha8) Uint64() u64 {
+	for c.i >= c.n {
+		c.refill()
+	}
+	let v = c.buf[c.i]
+	c.i += 1
+	return v
+}
+
+// RandV2 draws Go math/rand/v2-style values from a 64-bit source (Go's Rand).
+type RandV2 struct {
+	source dyn SourceV2
+}
+
+// NewV2 returns a RandV2 that draws from source, a PCG, a ChaCha8 or a Rand (Go's New).
+fn NewV2(source dyn SourceV2) RandV2 {
+	return RandV2{source: source}
+}
+
+// Uint64 returns the next value of the source.
+fn (r mut RandV2) Uint64() u64 {
+	return r.source.Uint64()
+}
+
+// Int64 returns a non-negative 63-bit value (Go's Int64).
+fn (r mut RandV2) Int64() i64 {
+	return i64(r.Uint64() & 0x7fffffffffffffff)
+}
+
+// Int returns a non-negative 63-bit value (Tin's int is i64; Go's Int).
+fn (r mut RandV2) Int() i64 {
+	return r.Int64()
+}
+
+// Uint returns a uniform 64-bit unsigned value (Go's Uint).
+fn (r mut RandV2) Uint() u64 {
+	return r.Uint64()
+}
+
+// Int32N returns a uniform value in [0, n); it panics when n <= 0.
+fn (r mut RandV2) Int32N(n i32) i32 {
+	if n <= 0 {
+		panic("invalid argument to Int32N")
+	}
+	return i32(r.uint64n(u64(n)))
+}
+
+// Int64N returns a uniform value in [0, n); it panics when n <= 0.
+fn (r mut RandV2) Int64N(n i64) i64 {
+	if n <= 0 {
+		panic("invalid argument to Int64N")
+	}
+	return i64(r.uint64n(u64(n)))
+}
+
+// uint64n returns a uniform value in [0, n) for n > 0, by Go's multiply-and-reject method.
+fn (r mut RandV2) uint64n(n u64) u64 {
+	if n&(n-%1) == 0 {
+		return r.Uint64() & (n-%1)
+	}
+	mut (hi, lo) = mul64(r.Uint64(), n)
+	if lo < n {
+		let thresh = (0-%n) % n
+		for lo < thresh {
+			hi, lo = mul64(r.Uint64(), n)
+		}
+	}
+	return hi
+}
+
+// Float64 returns a uniform value in [0, 1) from the low 53 bits of a source word (Go's Float64).
+fn (r mut RandV2) Float64() f64 {
+	return f64(r.Uint64()<<11>>11) / 9007199254740992.0
+}
+
+// absI32 returns |j| as a uint32; the most negative value keeps its bit pattern, as in Go.
+fn absI32(j i32) u32 {
+	if j < 0 {
+		return u32(0 -% j)
+	}
+	return u32(j)
+}
+
+// NormFloat64 returns a standard normal value by Marsaglia and Tsang's ziggurat, as Go's NormFloat64.
+fn (r mut RandV2) NormFloat64() f64 {
+	for {
+		let u = r.Uint64()
+		let j = i32(u)
+		let i = i64((u >> 32) & 0x7f)
+		mut x = f64(j) * f64(zigWn[i])
+		if absI32(j) < zigKn[i] {
+			return x
+		}
+		if i == 0 {
+			for {
+				x = -gauge.Log(r.Float64()) * (1.0 / zigRn)
+				let y = -gauge.Log(r.Float64())
+				if y+y >= x*x {
+					break
+				}
+			}
+			if j > 0 {
+				return zigRn + x
+			}
+			return -zigRn - x
+		}
+		if zigFn[i]+f32(r.Float64())*(zigFn[i-1]-zigFn[i]) < f32(gauge.Exp(-0.5*x*x)) {
+			return x
+		}
+	}
+}
+
+// ExpFloat64 returns an exponential value with rate 1 by Marsaglia and Tsang's ziggurat, as Go's ExpFloat64.
+fn (r mut RandV2) ExpFloat64() f64 {
+	for {
+		let u = r.Uint64()
+		let j = u32(u)
+		let i = i64((u >> 32) & 0xff)
+		let x = f64(j) * f64(zigWe[i])
+		if j < zigKe[i] {
+			return x
+		}
+		if i == 0 {
+			return zigRe - gauge.Log(r.Float64())
+		}
+		if zigFe[i]+f32(r.Float64())*(zigFe[i-1]-zigFe[i]) < f32(gauge.Exp(-x)) {
+			return x
+		}
+	}
+}
+
+// Shuffle calls swap(i, j) for the pairs of Go's Fisher-Yates shuffle of n elements; it panics when n < 0.
+fn (r mut RandV2) Shuffle(n i64, swap fn(i64, i64)) {
+	if n < 0 {
+		panic("invalid argument to Shuffle")
+	}
+	mut i = n - 1
+	for i > 0 {
+		let j = i64(r.uint64n(u64(i + 1)))
+		swap(i, j)
+		i -= 1
+	}
+}
+
+// Perm returns a uniform permutation of 0 through n-1 (Go's Perm); it panics when n < 0.
+fn (r mut RandV2) Perm(n i64) []i64 {
+	if n < 0 {
+		panic("invalid argument to Perm")
+	}
+	mut p = make([]i64, n)
+	for i in 0..n {
+		p[i] = i
+	}
+	r.Shuffle(n, fn(i i64, j i64) {
+		let t = p[i]
+		p[i] = p[j]
+		p[j] = t
+	})
+	return p
+}
+
+// v2Global is this core's v2 stream behind the global functions: a PCG-DXSM seeded on first use.
+mut v2Global = NewV2(NewPCG(0, 0))
+mut v2GlobalSeeded bool
+
+// seedV2 seeds this core's v2 stream from the legacy generator, which is seeded from the clocks and the core id.
+fn seedV2() {
+	if !gSeeded {
+		seedCore()
+	}
+	v2Global = NewV2(NewPCG(g.U64(), g.U64()))
+	v2GlobalSeeded = true
+}
+
+// globalV2 returns the generator of the global functions: this core's stream, or the replay tape's generator (#241).
+fn globalV2() RandV2 {
+	let tp = rt_tape()
+	if tp != 0 {
+		return NewV2(taped(tp))
+	}
+	if !v2GlobalSeeded {
+		seedV2()
+	}
+	return v2Global
+}
+
+// Int32N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0.
+fn Int32N(n i32) i32 {
+	let r = globalV2()
+	return r.Int32N(n)
+}
+
+// Int64N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0.
+fn Int64N(n i64) i64 {
+	let r = globalV2()
+	return r.Int64N(n)
+}
+
+// N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0 (i64 only: Tin has no generic conversion).
+fn N(n i64) i64 {
+	let r = globalV2()
+	return r.Int64N(n)
+}
+
+// Int64 returns a non-negative 63-bit value from this core's v2 stream.
+fn Int64() i64 {
+	let r = globalV2()
+	return r.Int64()
+}
+
+// Int returns a non-negative 63-bit value from this core's v2 stream.
+fn Int() i64 {
+	let r = globalV2()
+	return r.Int()
+}
+
+// Uint returns a uniform 64-bit unsigned value from this core's v2 stream.
+fn Uint() u64 {
+	let r = globalV2()
+	return r.Uint()
+}
+
+// Float64 returns a uniform value in [0, 1) from this core's v2 stream.
+fn Float64() f64 {
+	let r = globalV2()
+	return r.Float64()
+}
+
+// NormFloat64 returns a standard normal value from this core's v2 stream.
+fn NormFloat64() f64 {
+	let r = globalV2()
+	return r.NormFloat64()
+}
+
+// ExpFloat64 returns an exponential value with rate 1 from this core's v2 stream.
+fn ExpFloat64() f64 {
+	let r = globalV2()
+	return r.ExpFloat64()
+}
+
+// ShuffleV2 calls swap for the pairs of a Fisher-Yates shuffle of n elements from this core's v2 stream.
+fn ShuffleV2(n i64, swap fn(i64, i64)) {
+	let r = globalV2()
+	r.Shuffle(n, swap)
+}
+
+// PermV2 returns a uniform permutation of 0 through n-1 from this core's v2 stream; it panics when n < 0.
+fn PermV2(n i64) []i64 {
+	let r = globalV2()
+	return r.Perm(n)
+}
+
+// zigRn and zigRe are where the tails of the normal and exponential ziggurats start (Go's rn and re).
+const zigRn = 3.442619855899
+const zigRe = 7.69711747013104972

@@ -1404,7 +1404,7 @@ Package tide is clocks, durations, civil (calendar) time and time zones, like Go
 
 ## dice
 
-Package dice is fast pseudo-random numbers (like Go's math/rand): xoshiro256** generators and a lazily seeded per-core one.
+Package dice is fast pseudo-random numbers: xoshiro256** generators with a lazily seeded per-core one, and math/rand/v2's PCG-DXSM and ChaCha8 behind RandV2 (V2 names where a legacy name exists).
 
 - `type Rand struct`: Rand is a xoshiro256** generator; make one with New or FromState, or call the package functions for this core's generator.
 - `(r mut Rand) Seed(s u64)`: Seed resets r to the sequence for seed s (expanded with splitmix64, so every seed gives a good state).
@@ -1440,6 +1440,38 @@ Package dice is fast pseudo-random numbers (like Go's math/rand): xoshiro256** g
 - `Fill(b mut []u8)`: Fill overwrites b with random bytes from this core's generator.
 - `Bytes(n i64) []u8`: Bytes returns n random bytes from this core's generator.
 - `Str(n i64, alphabet str) str`: Str returns n random characters of alphabet from this core's generator.
+- `shape SourceV2`: SourceV2 is the 64-bit stream a RandV2 draws from: a PCG, a ChaCha8, or a Rand.
+- `type PCG struct`: PCG is Go math/rand/v2's 128-bit PCG-DXSM generator.
+- `NewPCG(d1 u64, d2 u64) PCG`: NewPCG returns a PCG stream initialized with the two seed words (Go's NewPCG).
+- `(p mut PCG) Uint64() u64`: Uint64 returns the next Go-compatible PCG-DXSM value.
+- `(r mut Rand) Uint64() u64`: Uint64 returns the next value of the legacy generator, so a Rand is a v2 source too.
+- `type ChaCha8 struct`: ChaCha8 is Go math/rand/v2's ChaCha8 stream: four interleaved blocks per generation, reseeded from the last four words.
+- `NewChaCha8(seed [32]u8) ChaCha8`: NewChaCha8 returns a ChaCha8 stream seeded with the 32 bytes of seed (Go's NewChaCha8).
+- `(c mut ChaCha8) Uint64() u64`: Uint64 returns the next word of the stream (Go's ChaCha8.Uint64).
+- `type RandV2 struct`: RandV2 draws Go math/rand/v2-style values from a 64-bit source (Go's Rand).
+- `NewV2(source dyn SourceV2) RandV2`: NewV2 returns a RandV2 that draws from source, a PCG, a ChaCha8 or a Rand (Go's New).
+- `(r mut RandV2) Uint64() u64`: Uint64 returns the next value of the source.
+- `(r mut RandV2) Int64() i64`: Int64 returns a non-negative 63-bit value (Go's Int64).
+- `(r mut RandV2) Int() i64`: Int returns a non-negative 63-bit value (Tin's int is i64; Go's Int).
+- `(r mut RandV2) Uint() u64`: Uint returns a uniform 64-bit unsigned value (Go's Uint).
+- `(r mut RandV2) Int32N(n i32) i32`: Int32N returns a uniform value in [0, n); it panics when n <= 0.
+- `(r mut RandV2) Int64N(n i64) i64`: Int64N returns a uniform value in [0, n); it panics when n <= 0.
+- `(r mut RandV2) Float64() f64`: Float64 returns a uniform value in [0, 1) from the low 53 bits of a source word (Go's Float64).
+- `(r mut RandV2) NormFloat64() f64`: NormFloat64 returns a standard normal value by Marsaglia and Tsang's ziggurat, as Go's NormFloat64.
+- `(r mut RandV2) ExpFloat64() f64`: ExpFloat64 returns an exponential value with rate 1 by Marsaglia and Tsang's ziggurat, as Go's ExpFloat64.
+- `(r mut RandV2) Shuffle(n i64, swap fn(i64, i64))`: Shuffle calls swap(i, j) for the pairs of Go's Fisher-Yates shuffle of n elements; it panics when n < 0.
+- `(r mut RandV2) Perm(n i64) []i64`: Perm returns a uniform permutation of 0 through n-1 (Go's Perm); it panics when n < 0.
+- `Int32N(n i32) i32`: Int32N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0.
+- `Int64N(n i64) i64`: Int64N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0.
+- `N(n i64) i64`: N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0 (i64 only: Tin has no generic conversion).
+- `Int64() i64`: Int64 returns a non-negative 63-bit value from this core's v2 stream.
+- `Int() i64`: Int returns a non-negative 63-bit value from this core's v2 stream.
+- `Uint() u64`: Uint returns a uniform 64-bit unsigned value from this core's v2 stream.
+- `Float64() f64`: Float64 returns a uniform value in [0, 1) from this core's v2 stream.
+- `NormFloat64() f64`: NormFloat64 returns a standard normal value from this core's v2 stream.
+- `ExpFloat64() f64`: ExpFloat64 returns an exponential value with rate 1 from this core's v2 stream.
+- `ShuffleV2(n i64, swap fn(i64, i64))`: ShuffleV2 calls swap for the pairs of a Fisher-Yates shuffle of n elements from this core's v2 stream.
+- `PermV2(n i64) []i64`: PermV2 returns a uniform permutation of 0 through n-1 from this core's v2 stream; it panics when n < 0.
 
 ## sift
 
