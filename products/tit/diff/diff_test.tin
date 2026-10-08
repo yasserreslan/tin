@@ -153,3 +153,11 @@ fn TestLines(t mut crucible.T) {
 	crucible.Equal(mut t, "span one", span(4, 1), "5")
 	crucible.Equal(mut t, "span many", span(4, 3), "5,3")
 }
+
+fn TestSimilarity(t mut crucible.T) {
+	crucible.Equal(mut t, "identical", Similarity("a\nb\nc\n", "a\nb\nc\n"), 100)
+	crucible.Equal(mut t, "nothing shared", Similarity("a\nb\n", "x\ny\n"), 0)
+	let half = Similarity("aaaa\nbbbb\n", "aaaa\ncccc\n")
+	crucible.Equal(mut t, "half shared", half, 50)
+	crucible.Equal(mut t, "both empty", Similarity("", ""), 100)
+}
