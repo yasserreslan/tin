@@ -3,6 +3,7 @@
 // entries and matches out.
 package project
 
+import "../../tit/ignore"
 import "quarry"
 import "say"
 import "trail"
@@ -34,7 +35,7 @@ type Project struct {
 	// Rows are the entries a panel shows now, in order: the open folders' children follow them.
 	Rows []i64
 	Selected i64
-	patterns []str
+	rules ?ignore.Rules
 }
 
 // hidden names are never listed: they are not the user's files.
@@ -50,7 +51,7 @@ fn Open(root str) !Project {
 	let clean = trail.Clean(root)
 	let p = Project{Root: clean, Name: trail.Base(clean), Selected: -1}
 	p.Branch = Branch(clean)
-	p.patterns = loadIgnore(clean)
+	p.rules = loadRules(clean)
 	p.Entries = []Entry{Entry{Path: clean, Name: trail.Base(clean), Dir: true, Open: true, Parent: -1}}
 	p.load(0)
 	p.rebuild()
@@ -62,6 +63,11 @@ fn (p mut Project) load(i i64) {
 	let dir = p.Entries[i]
 	dir.Loaded = true
 	dir.Children = []i64{}
+	mut rules = p.rules
+	if rules != nil && dir.Path != p.Root {
+		rules.Enter(twine.TrimPrefix(dir.Path, p.Root + "/")) catch _ {
+		}
+	}
 	let names = quarry.ReadDir(dir.Path) catch _ {
 		return
 	}
@@ -196,7 +202,7 @@ fn (p mut Project) Refresh() {
 		}
 	}
 	let selected = p.selectedPath()
-	p.patterns = loadIgnore(p.Root)
+	p.rules = loadRules(p.Root)
 	p.Entries = []Entry{Entry{Path: p.Root, Name: p.Name, Dir: true, Open: true, Parent: -1}}
 	p.load(0)
 	// reopen what was open, shallowest first (the paths are in the order of the old entries, which is parents before children)

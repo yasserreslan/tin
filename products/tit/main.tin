@@ -54,7 +54,7 @@ fn sentinels() []str {
 // linked keeps the packages without sentinels in the build, so the command checks against all of them.
 fn linked() i64 {
 	let edits = diff.Diff[i64]([]i64{}, []i64{})
-	let rules = ignore.Rules{}
+	let rules = ignore.New("")
 	let idx = index.Index{}
 	let m = merge.Conflict{}
 	mut n = len(edits) + len(idx.Entries) + len(m.Path)
