@@ -1,0 +1,19 @@
+package merge
+
+import "../object"
+
+// Three-way merge of trees and lines (#786).
+
+// Conflict is one path both sides changed in ways that do not combine.
+type Conflict struct {
+	Path   str
+	Base   object.Id
+	Ours   object.Id
+	Theirs object.Id
+}
+
+// Result is a merge's outcome: a clean tree, or a tree with recorded conflicts.
+type Result enum {
+	Clean(object.Id)
+	Conflicts(object.Id, []Conflict)
+}

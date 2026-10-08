@@ -1,0 +1,20 @@
+package worktree
+
+import "fault"
+
+// Checkout, switch and workspaces (design/tit.md sections 4 and 10; #784).
+
+// ErrDirty is the fault of a switch that would overwrite uncommitted changes.
+let ErrDirty = fault("uncommitted changes would be overwritten")
+
+// Workspace is a working directory and its state in the shared store.
+type Workspace struct {
+	Name  str
+	Root  str
+	Store str
+}
+
+// Find is the workspace containing dir: the nearest .tit directory or .tit file above it (#784).
+fn Find(dir str) !Workspace {
+	fail "worktree.Find: not implemented yet (#784)"
+}

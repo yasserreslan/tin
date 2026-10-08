@@ -1,0 +1,17 @@
+package diff
+
+import "constraints"
+
+// The generic diff (#785).
+
+// Edit is one step from a to b: keep, insert or delete n elements.
+type Edit enum {
+	Keep(i64)
+	Insert(i64)
+	Delete(i64)
+}
+
+// Diff is a shortest edit script from a to b (#785).
+fn Diff[T constraints.Comparable](a []T, b []T) []Edit {
+	return []Edit{}
+}

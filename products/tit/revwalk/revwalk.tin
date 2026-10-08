@@ -1,0 +1,35 @@
+package revwalk
+
+import "../object"
+import "fault"
+
+// Revisions, walks and merge-base (#781).
+
+// ErrAmbiguous is the fault of a short id or change id that matches more than one.
+let ErrAmbiguous = fault("ambiguous revision")
+
+// ErrBadRev is the fault of a revision that does not parse or resolve.
+let ErrBadRev = fault("bad revision")
+
+// Rev is a parsed revision.
+type Rev enum {
+	Head
+	Name(str)
+	Short(str)
+	Change(str)
+	Git(str)
+	Ancestor(Rev, i64)
+	Parent(Rev, i64)
+	Range(Rev, Rev)
+	Symmetric(Rev, Rev)
+}
+
+// Parse reads a revision (#781).
+fn Parse(s str) !Rev {
+	fail fault.Wrap(ErrBadRev, "revwalk.Parse: not implemented yet (#781)")
+}
+
+// MergeBase is the best common ancestor of two commits, or nil (#781).
+fn MergeBase(a object.Id, b object.Id) ?object.Id {
+	return nil
+}

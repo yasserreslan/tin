@@ -1,0 +1,18 @@
+package ignore
+
+// Ignore rules, as git's .gitignore (#782).
+
+// Rules are the ignore rules of a working directory.
+type Rules struct {
+	root str
+}
+
+// Load reads the rules for the working directory root (#782).
+fn Load(root str) !Rules {
+	return Rules{root: root}
+}
+
+// Ignored reports whether the path (relative to the root) is ignored (#782).
+fn (r Rules) Ignored(path str, isDir bool) bool {
+	return false
+}

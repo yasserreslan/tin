@@ -1,0 +1,41 @@
+package identity
+
+import "fault"
+import "tide"
+
+// Config, names, keys, signing and the clock (design/tit.md sections 11 and 13; #787).
+
+// ErrNoIdentity is the fault of a missing user.name, user.email or key.
+let ErrNoIdentity = fault("no identity")
+
+// ErrBadSignature is the fault of a signature that does not verify against the signers file.
+let ErrBadSignature = fault("bad signature")
+
+// Clock is where tit reads the time; tests freeze it.
+shape Clock {
+	Now() i64
+}
+
+// SystemClock reads the wall clock.
+type SystemClock struct {
+	unused i64
+}
+
+// Now is the wall clock in unix nanoseconds.
+fn (c SystemClock) Now() i64 {
+	return tide.Wall()
+}
+
+// Config is the merged repository and user configuration.
+type Config struct {
+	values map[str]str
+}
+
+// Get is the value of a key, or nil.
+fn (c Config) Get(key str) ?str {
+	let (v, ok) = c.values[key]
+	if !ok {
+		return nil
+	}
+	return v
+}
