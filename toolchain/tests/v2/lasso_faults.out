@@ -19,7 +19,7 @@ bad \C lasso: pattern: at byte 2: invalid escape sequence
 bad *a lasso: pattern: at byte 0: missing argument to repetition operator
 bad +a lasso: pattern: at byte 0: missing argument to repetition operator
 bad ?a lasso: pattern: at byte 0: missing argument to repetition operator
-bad a** lasso: pattern: at byte 2: missing argument to repetition operator
+bad a** lasso: pattern: at byte 1: invalid nested repetition operator: **
 bad a{2,1} lasso: pattern: at byte 1: invalid repeat count
 bad a{1001} lasso: pattern: at byte 1: invalid repeat count
 bad (?P<name>a lasso: pattern: at byte 10: missing closing )
