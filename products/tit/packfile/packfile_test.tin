@@ -307,3 +307,46 @@ fn TestLargeCompressible(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// A pack's bytes alone, with no index, unpack into another store with every object (#796); damage is refused.
+fn TestUnpack(t mut crucible.T) {
+	mut s = store.NewMem()
+	mut ids = []object.Id{}
+	mut text = ""
+	for i in 0..200 {
+		text = text + "line {i}\n"
+	}
+	for i in 0..20 {
+		text = text[0:i * 9] + "edit {i}\n" + text[i * 9:]
+		let id = s.PutRaw(object.Kind.Blob, text) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	let d = fresh("unpack")
+	let p = Write(mut s, ids, d) catch e {
+		t.Error("write: {e}")
+		return
+	}
+	t.True("deltas were made", p.Deltas() > 0)
+	let data = quarry.ReadFile(p.Path) catch _ {
+		""
+	}
+	mut other = store.NewMem()
+	let got = Unpack(data, mut other, 1 << 20) catch e {
+		t.Error("unpack: {e}")
+		return
+	}
+	crucible.Equal(mut t, "every object", len(got), len(ids))
+	for id in ids {
+		t.True("present: " + id.Hex(), other.Has(id))
+	}
+	mut cut = store.NewMem()
+	let (_, err) = Unpack(data[0:len(data) - 40] + data[len(data) - 32:], mut cut, 1 << 20)
+	t.True("a cut pack", err != nil)
+	mut small = store.NewMem()
+	let (_, lerr) = Unpack(data, mut small, 100)
+	t.True("objects over the limit", lerr != nil && fault.Is(lerr, fault.LimitExceeded))
+	quarry.RemoveAll(d) catch _ {
+	}
+}

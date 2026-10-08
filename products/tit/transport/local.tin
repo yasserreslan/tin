@@ -1,0 +1,88 @@
+package transport
+
+import "argo"
+import "fault"
+import "seal"
+import "tide"
+
+// Local is a Transport to a Server in the same process: the requests are framed, signed and answered exactly as
+// over HTTP, with no socket. Tests use it, and so can tools that hold both repositories.
+
+// Local reaches server, signing as email with the key whose seed is given ("" email: unsigned).
+type Local struct {
+	server Server
+	email  str
+	seed   secret []u8
+	nonce  str
+	path   str
+}
+
+// NewLocal is a Local to server, signing as email with seed.
+fn NewLocal(server Server, email str, seed secret []u8) Local {
+	return Local{server: server, email: email, seed: seed, nonce: "", path: ""}
+}
+
+fn (l mut Local) call(method str, path str, body str) !str {
+	mut r = try l.send(method, path, body)
+	if r.Status == 401 && len(l.email) > 0 {
+		// a challenge: sign with the nonce it carries, once
+		let (k, header, _, ferr) = ReadFrame(r.Body)
+		if ferr == nil && k == Kind.Error {
+			mut e = ErrorAnswer{Code: "", Message: "", Ref: "", Nonce: ""}
+			let derr = argo.Get(header, mut e)
+			if derr == nil && len(e.Nonce) > 0 {
+				l.nonce = e.Nonce
+				r = try l.send(method, path, body)
+			}
+		}
+	}
+	if r.Status != 200 {
+		let (k, header, _, ferr) = ReadFrame(r.Body)
+		if ferr != nil || k != Kind.Error {
+			fail fault.Wrap(ErrRefused, "Internal: status {r.Status}")
+		}
+		mut e = ErrorAnswer{Code: "", Message: "", Ref: "", Nonce: ""}
+		argo.Get(header, mut e) catch _ {
+			fail fault.Wrap(ErrRefused, "Internal: status {r.Status}")
+		}
+		try Refused(e)
+	}
+	return r.Body
+}
+
+fn (l mut Local) send(method str, path str, body str) !Reply {
+	mut sig = ""
+	if len(l.email) > 0 && len(l.nonce) > 0 {
+		let s = try seal.SignEd25519(l.seed, []u8(SigningPayload(method, path, l.nonce, body)))
+		sig = SignatureHeader(l.email, l.nonce, s)
+	}
+	return l.server.Handle(method, path, sig, body, tide.Wall() / 1000000000)
+}
+
+// Heads asks for the server's refs, and keeps the nonce for the next requests.
+fn (l mut Local) Heads() !Heads {
+	let body = try l.call("GET", "/tit/v1/heads", "")
+	let (_, header, _) = try ReadFrame(body)
+	mut h = Heads{Refs: []RefHead{}, Changes: []ChangeHead{}, Nonce: "", Server: "", Limits: Limits{Pack: 0, Refs: 0}}
+	try argo.Get(header, mut h)
+	l.nonce = h.Nonce
+	return h
+}
+
+// Fetch asks for what req wants: the answer's header and the pack.
+fn (l mut Local) Fetch(req FetchRequest) !(FetchAnswer, str) {
+	let body = try l.call("POST", "/tit/v1/fetch", Frame(Kind.FetchRequest, Encode(req), ""))
+	let (_, header, data) = try ReadFrame(body)
+	mut a = FetchAnswer{Objects: 0}
+	try argo.Get(header, mut a)
+	return a, data
+}
+
+// Push sends req and its pack, signed with the nonce of the last heads or challenge.
+fn (l mut Local) Push(req PushRequest, pack str) !PushAnswer {
+	let body = try l.call("POST", "/tit/v1/push", Frame(Kind.PushRequest, Encode(req), pack))
+	let (_, header, _) = try ReadFrame(body)
+	mut a = PushAnswer{Refs: []str{}}
+	try argo.Get(header, mut a)
+	return a
+}
