@@ -539,13 +539,13 @@ r.Get("/{path...}", p.ServeHTTP)
 r.Serve(":8080") catch err { say.Line(err) }
 ```
 
-Director rewrites a request to a complete upstream URL. ModifyResponse can edit the upstream status and fields before they are written; ErrorHandler replaces the default 502 response. The proxy removes hop-by-hop fields and appends the caller's address to X-Forwarded-For. Register request-body routes with Router.Stream.
+Set Director to rewrite a request to a complete upstream URL. ModifyResponse can edit the upstream status and fields and fail or reject them before they are written; ErrorHandler replaces the default 502 response. The proxy removes hop-by-hop fields and appends the caller's address to X-Forwarded-For. Register request-body routes with Router.Stream.
 
 - `type Response struct`: Response is the upstream status and headers before they are copied to the client.
-- `type Proxy struct`: Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set, returns the complete upstream URL for each request. Use New to get default hooks.
+- `type Proxy struct`: Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set, returns the complete upstream URL for each request, or an empty string to use Target. Use New to get default hooks.
 - `New(target str) Proxy`: New returns a proxy with default hook functions. Set hooks before registering ServeHTTP.
 - `DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault)`: DefaultErrorHandler writes Go ReverseProxy's default 502 body.
-- `(p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out)`: ServeHTTP handles a request and can be registered with anvil.Router.Stream. Requests and responses are copied in 32 KiB pieces; neither body is accumulated.
+- `(p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out)`: ServeHTTP handles a request and can be registered with anvil.Router.Stream. Requests and responses reuse one 32 KiB buffer in each direction; neither body is accumulated.
 
 ## assay
 

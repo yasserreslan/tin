@@ -1,0 +1,69 @@
+package main
+
+import "anvil"
+import "fault"
+import "mint"
+import "proxy"
+import "quarry"
+import "say"
+
+fn echo(q anvil.Req, w mut anvil.Out) {
+	let reader = q.BodyStream()
+	mut count = 0
+	mut buf = make([]u8, 32768)
+	for {
+		let (n, err) = reader.Read(mut buf)
+		if err != nil { w.Status(400)
+			return }
+		if n == 0 { break }
+		count += n
+	}
+	w.Text("len=" + mint.Itoa(count))
+}
+
+fn large(q anvil.Req, w mut anvil.Out) {
+	w.Head("X-Seen-Forwarded-For", q.Header("X-Forwarded-For"))
+	w.Head("X-Seen-Secret", q.Header("X-Secret"))
+	w.Head("X-Seen-Proxy-Hop", q.Header("Proxy-Hop"))
+	w.Stream() catch _ { return }
+	mut piece = make([]u8, 32768)
+	for i in 0..len(piece) { piece[i] = u8('x') }
+	for i in 0..128 {
+		w.Write(piece) catch _ { return }
+	}
+}
+
+fn repeated(n i64) str {
+	mut b = make([]u8, n)
+	for i in 0..n { b[i] = u8(i % 251) }
+	return str(b)
+}
+
+fn metadata(q anvil.Req, w mut anvil.Out) {
+	w.Head("X-Seen-Forwarded-For", q.Header("X-Forwarded-For"))
+	w.Head("X-Seen-Secret", q.Header("X-Secret"))
+	w.Head("X-Seen-Proxy-Hop", q.Header("Proxy-Hop"))
+	w.Text("ok")
+}
+
+fn main() {
+	let role = quarry.Getenv("PROXY_ROLE")
+	let port = quarry.Getenv("PORT")
+	let r = anvil.NewRouter()
+	if role == "backend" {
+		r.Stream("POST", "/echo", echo)
+		r.Get("/meta", metadata)
+		r.Get("/large", large)
+		r.Serve(":" + port) catch err { say.Line(err) }
+		return
+	}
+	mut p = proxy.New(quarry.Getenv("UPSTREAM"))
+	p.ErrorHandler = fn(q anvil.Req, w mut anvil.Out, err fault) {
+		say.Line("proxy error: " + say.Str(err))
+		proxy.DefaultErrorHandler(q, mut w, err)
+	}
+	r.Stream("POST", "/echo", p.ServeHTTP)
+	r.Get("/meta", p.ServeHTTP)
+	r.Get("/large", p.ServeHTTP)
+	r.Serve(":" + port) catch err { say.Line(err) }
+}

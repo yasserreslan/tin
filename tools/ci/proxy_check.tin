@@ -1,21 +1,90 @@
 package main
 
 import "./ci"
+import "./nettest"
+import "./rawconn"
 import "mint"
-import "quarry"
+import "say"
 import "twine"
+import "wire"
 
-// proxy_check compiles and runs the strict ReverseProxy test against its checked-in output.
+// proxy_check compares Tin and Go headers, streams request and response bodies, and runs the strict error test.
 fn main() {
 	let root = ci.Root()
 	let out = ci.Join(root, "bin/ci/proxy")
 	ci.Mkdirs(out)
 	let exe = ci.Join(out, "proxy")
-	ci.BuildTin("toolchain/tests/v2/proxy.tin", exe, "", []str{})
-	let got = ci.Exec([]str{exe}, root, 30)
-	ci.Must(got, "run strict proxy test")
+	ci.BuildTin("tools/ci/fixtures/proxy.tin", exe, "", []str{})
+	let strict = ci.Join(out, "strict")
+	ci.BuildTin("toolchain/tests/v2/proxy.tin", strict, "", []str{})
+	let backendPort = nettest.Port()
+	let frontPort = nettest.Port()
+	let goPort = nettest.Port()
+	let backend = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "PROXY_ROLE=backend"}, ci.Join(out, "backend.log"), backendPort)
+	backend.Ready(10)
+	let front = nettest.Start(exe, []str{}, []str{"TIN_CORES=2", "UPSTREAM=http://127.0.0.1:" + mint.Itoa(backendPort)}, ci.Join(out, "front.log"), frontPort)
+	front.Ready(10)
+	let goExe = ci.Join(out, "proxy-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goExe, "tools/ci/fixtures/proxy_go.go"}, root, 120), "build Go ReverseProxy oracle")
+	let goProxy = nettest.Start(goExe, []str{}, []str{"UPSTREAM=http://127.0.0.1:" + mint.Itoa(backendPort)}, ci.Join(out, "go.log"), goPort)
+	goProxy.Ready(10)
+	let (metaStatus, metaHeaders, metaBody) = metaRequest(frontPort)
+	let (goStatus, goHeaders, goBody) = metaRequest(goPort)
+	ci.Check(metaStatus == 200 && metaBody == "ok", "proxy metadata route: " + mint.Itoa(metaStatus) + " body=" + say.Fmt("%q", metaBody) + " head=" + say.Fmt("%q", metaHeaders["transfer-encoding"]))
+	ci.Check(metaStatus == goStatus && metaBody == goBody, "Tin and Go ReverseProxy metadata responses differ")
+	ci.Check(metaHeaders["x-seen-secret"] == goHeaders["x-seen-secret"] && metaHeaders["x-seen-secret"] == "", "Tin and Go ReverseProxy differed on Connection-nominated headers")
+	ci.Check(metaHeaders["x-seen-proxy-hop"] == goHeaders["x-seen-proxy-hop"] && metaHeaders["x-seen-proxy-hop"] == "", "Tin and Go ReverseProxy differed on Proxy-* hop headers")
+	ci.Check(twine.HasPrefix(metaHeaders["x-seen-forwarded-for"], "203.0.113.9, 127.0.0.1"), "proxy did not append the peer to X-Forwarded-For")
+	ci.Check(metaHeaders["x-seen-forwarded-for"] == goHeaders["x-seen-forwarded-for"], "Tin and Go ReverseProxy differed on X-Forwarded-For")
+	mut chunked = rawconn.Open(frontPort, 10)
+	chunked.Send("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n")
+	let (chunkStatus, chunkHeaders) = chunked.Head()
+	let chunks = chunked.Chunked()
+	ci.Check(chunkStatus == 200 && twine.Join(chunks, "") == "len=7", "proxy passed a chunked request and streamed response")
+	chunked.Close()
+	let size = 4 * 1024 * 1024
+	let body = repeated(size)
+	let echoed = wire.Post("http://127.0.0.1:" + mint.Itoa(frontPort) + "/echo", "application/octet-stream", body) catch err {
+		front.Stop()
+		backend.Stop()
+		ci.Fail("proxy streaming upload failed: " + say.Str(err))
+		return
+	}
+	ci.Check(echoed.Status == 200 && echoed.Body == "len=" + mint.Itoa(size), "proxy streamed a 4 MiB request")
+	let large = wire.Get("http://127.0.0.1:" + mint.Itoa(frontPort) + "/large") catch err {
+		front.Stop()
+		backend.Stop()
+		ci.Fail("proxy streaming response failed: " + say.Str(err))
+		return
+	}
+	ci.Check(large.Status == 200 && len(large.Body) == size && large.Body[0] == 'x' && large.Body[size-1] == 'x', "proxy streamed a 4 MiB response")
+	front.Stop()
+	goProxy.Stop()
+	backend.Stop()
+	let got = ci.Exec([]str{strict}, root, 30)
+	ci.Must(got, "run strict proxy error test")
 	let expected = ci.Read(ci.Join(root, "toolchain/tests/v2/proxy.out"))
 	let actual = twine.TrimSpace(got.Stdout)
 	ci.Check(actual == twine.TrimSpace(expected), "strict proxy output differs: " + actual)
-	ci.Pass("proxy: strict test passed (" + mint.Itoa(len(actual)) + " output bytes)")
+	ci.Pass("proxy: Go header comparison, chunked request, 4 MiB streaming, and strict 502 check passed")
+}
+
+fn metaRequest(port i64) (i64, map[str]str, str) {
+	mut c = rawconn.Open(port, 10)
+	c.Send("GET /meta HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9\r\nX-Secret: private\r\nConnection: X-Secret, keep-alive\r\nConnection: Proxy-Hop\r\nProxy-Hop: private\r\n\r\n")
+	let (status, headers) = c.Head()
+	mut body = ""
+	if headers["transfer-encoding"] == "chunked" {
+		body = twine.Join(c.Chunked(), "")
+	} else {
+		body = c.Body(headers)
+	}
+	c.Close()
+	return status, headers, body
+}
+
+fn repeated(n i64) str {
+	mut b = make([]u8, n)
+	for i in 0..n { b[i] = u8(i % 251) }
+	return str(b)
 }

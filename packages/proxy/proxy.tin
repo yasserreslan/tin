@@ -9,14 +9,15 @@
 //	r.Get("/{path...}", p.ServeHTTP)
 //	r.Serve(":8080") catch err { say.Line(err) }
 //
-// Director rewrites a request to a complete upstream URL. ModifyResponse can edit
-// the upstream status and fields before they are written; ErrorHandler replaces the
+// Set Director to rewrite a request to a complete upstream URL. ModifyResponse can edit
+// the upstream status and fields and fail or reject them before they are written; ErrorHandler replaces the
 // default 502 response. The proxy removes hop-by-hop fields and appends the caller's
 // address to X-Forwarded-For. Register request-body routes with Router.Stream.
 package proxy
 
 import "anvil"
 import "wire"
+import "say"
 
 // Response is the upstream status and headers before they are copied to the client.
 type Response struct {
@@ -25,7 +26,7 @@ type Response struct {
 }
 
 // Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set,
-// returns the complete upstream URL for each request. Use New to get default hooks.
+// returns the complete upstream URL for each request, or an empty string to use Target. Use New to get default hooks.
 type Proxy struct {
 	Target        str
 	Director      fn(anvil.Req) str
@@ -50,7 +51,7 @@ fn DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault) {
 }
 
 // ServeHTTP handles a request and can be registered with anvil.Router.Stream.
-// Requests and responses are copied in 32 KiB pieces; neither body is accumulated.
+// Requests and responses reuse one 32 KiB buffer in each direction; neither body is accumulated.
 fn (p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out) {
 	mut target = p.Director(q)
 	if len(target) == 0 { target = p.Target + q.Path + query(q.Query) }
@@ -75,7 +76,9 @@ fn forward(q anvil.Req, w mut anvil.Out, target str, modify fn(mut Response) !bo
 	let fields = request_fields(q, authority)
 	mut head = q.Method + " " + path + " HTTP/1.1\r\nHost: " + authority + "\r\n"
 	for f in fields { head += f + "\r\n" }
-	head += "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+	let streamsBody = q.Method != "GET" && q.Method != "HEAD" && q.Method != "OPTIONS"
+	if streamsBody { head += "Transfer-Encoding: chunked\r\n" }
+	head += "Connection: close\r\n\r\n"
 	let e = c.Write(head)
 	if e != nil { fail e }
 	let reader = q.BodyStream()
@@ -84,23 +87,32 @@ fn forward(q anvil.Req, w mut anvil.Out, target str, modify fn(mut Response) !bo
 		let (n, re) = reader.Read(mut buf)
 		if re != nil { fail re }
 		if n == 0 { break }
-		let chunk = hex_size(n) + "\r\n"
-		let we = c.Write(chunk)
-		if we != nil { fail we }
+		if streamsBody {
+			let chunk = hex_size(n) + "\r\n"
+			let we = c.Write(chunk)
+			if we != nil { fail we }
+		}
 		let we2 = c.WriteBytes(buf[:n])
 		if we2 != nil { fail we2 }
-		let we3 = c.Write("\r\n")
-		if we3 != nil { fail we3 }
+		if streamsBody {
+			let we3 = c.Write("\r\n")
+			if we3 != nil { fail we3 }
+		}
 	}
-	let end = c.Write("0\r\n\r\n")
-	if end != nil { fail end }
-	let statusLine = read_line(c) catch e { fail e }
+	if streamsBody {
+		let end = c.Write("0\r\n\r\n")
+		if end != nil { fail end }
+	}
+	let statusLine = read_line(c) catch e { fail "proxy: upstream status: " + say.Str(e) }
 	let status = parse_status(statusLine)
 	if status < 100 { fail "proxy: malformed upstream status" }
 	mut response = Response{Status: status, Fields: []str{}}
+	mut headerBytes = 0
 	for {
-		let line = read_line(c) catch e { fail e }
+		let line = read_line(c) catch e { fail "proxy: upstream header: " + say.Str(e) }
 		if len(line) == 0 { break }
+		headerBytes += len(line) + 2
+		if headerBytes > 65536 { fail "proxy: upstream headers too large" }
 		response.Fields = append(response.Fields, line)
 	}
 	let allowed = try modify(mut response)
@@ -115,51 +127,61 @@ fn forward(q anvil.Req, w mut anvil.Out, target str, modify fn(mut Response) !bo
 	let transfer = header_value(response.Fields, "transfer-encoding")
 	let length = parse_length(header_value(response.Fields, "content-length"))
 	if has_token(transfer, "chunked") {
-		try copy_chunked(c, mut w, mut buf)
+		try copy_chunked(c, mut w)
 		return nil
 	}
-	if length >= 0 { try copy_length(c, mut w, mut buf, length)
+	if length >= 0 { try copy_length(c, mut w, length)
 		return nil }
+	mut chunk = make([]u8, 0, 32768)
 	for {
-		let (n, re) = c.Read(mut buf, len(buf))
+		chunk = chunk[:0]
+		let (n, re) = c.Read(mut chunk, 32768)
 		if re != nil {
 			if wire.IsEOF(re) { return nil }
 			w.Abort()
 			fail re
 		}
 		if n == 0 { return nil }
-		let we = w.Write(buf[:n])
+		let we = w.Write(chunk[:n])
 		if we != nil { fail we }
 	}
 }
 
-fn copy_length(c wire.Conn, w mut anvil.Out, buf mut []u8, remaining i64) ! {
+fn copy_length(c wire.Conn, w mut anvil.Out, remaining i64) ! {
 	mut left = remaining
+	mut chunk = make([]u8, 0, 32768)
 	for left > 0 {
-		let n = try c.Read(mut buf, min(left, len(buf)))
-		let e = w.Write(buf[:n])
+		chunk = chunk[:0]
+		let n = try c.Read(mut chunk, min(left, 32768))
+		let e = w.Write(chunk[:n])
 		if e != nil { fail e }
 		left -= n
 	}
 }
 
-fn copy_chunked(c wire.Conn, w mut anvil.Out, buf mut []u8) ! {
+fn copy_chunked(c wire.Conn, w mut anvil.Out) ! {
+	mut chunk = make([]u8, 0, 32768)
 	for {
 		let line = try read_line(c)
+		if len(line) == 0 { fail "proxy: empty chunk size" }
 		let size = parse_hex(line)
 		if size < 0 { fail "proxy: malformed chunk size" }
 		if size == 0 {
+			mut trailerBytes = 0
 			for {
 				let trailer = try read_line(c)
 				if len(trailer) == 0 { return }
+				trailerBytes += len(trailer) + 2
+				if trailerBytes > 65536 { fail "proxy: upstream trailers too large" }
 				let k = colon(trailer)
 				if k > 0 { w.Trailer(trailer[:k], trim(trailer[k+1:])) }
 			}
 		}
 		mut left = size
 		for left > 0 {
-			let n = try c.Read(mut buf, min(left, len(buf)))
-			try w.Write(buf[:n])
+			chunk = chunk[:0]
+			let n = try c.Read(mut chunk, min(left, 32768))
+			try w.Write(chunk[:n])
 			left -= n
 		}
 		_ = try c.ReadFull(2)
@@ -239,7 +261,7 @@ fn colon(s str) i64 { for i in 0..len(s) { if s[i] == ':' { return i } }
 fn trim(s str) str { mut a = 0
 	mut b = len(s)
 	for a<b && (s[a] == ' ' || s[a] == '	') { a += 1 }
-	for b>a && (s[b-1] == ' ' || s[b-1] == '	' || s[b-1] == '\r') { b -= 1 }
+	for b>a && (s[b-1] == ' ' || s[b-1] == '	' || s[b-1] == '\r' || s[b-1] == '\n') { b -= 1 }
 	return s[a:b] }
 fn lower(s str) str { mut b = make([]u8, len(s))
 	for i in 0..len(s) { let c = s[i]
