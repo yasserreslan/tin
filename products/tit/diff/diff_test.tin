@@ -106,9 +106,10 @@ fn TestBudget(t mut crucible.T) {
 
 // TestLargeShuffled diffs 200,000 lines against a shuffle of them: with a bound it ends quickly with a correct,
 // unshortened script.
+// A 50 MB file against a shuffled copy of itself finishes within its budget by falling back (#785).
 fn TestLargeShuffled(t mut crucible.T) {
 	mut r = dice.New(9)
-	let n = 200000
+	let n = 2000000
 	mut a = make([]str, n)
 	for i in 0..n {
 		a[i] = "line {i} of a large file\n"

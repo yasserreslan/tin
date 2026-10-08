@@ -38,6 +38,7 @@ type CommitArgs struct {
 
 // DiffArgs are tit diff's arguments.
 type DiffArgs struct {
+	Word     bool
 	Semantic bool
 	Staged bool
 	Stat   bool
@@ -636,7 +637,7 @@ fn doDiff(g Global, a DiffArgs, o mut Out) ! {
 		}
 		return
 	}
-	try writePatch(g, mut s, changes, mut o)
+	try writePatchWith(g, mut s, changes, a.Word, mut o)
 }
 
 fn jsonStr(s str) str {
@@ -687,6 +688,11 @@ fn blobText(s mut store.Layered, hash str) !str {
 // writePatch writes the changes as git's patch format: the diff --git line, the mode, rename and index lines, then
 // the unified diff (or "Binary files ... differ").
 fn writePatch(g Global, s mut store.Layered, changes []diff.FileChange, o mut Out) ! {
+	try writePatchWith(g, mut s, changes, false, mut o)
+}
+
+// writePatchWith is writePatch, with words marked inside the lines (as git diff --word-diff=plain) when words.
+fn writePatchWith(g Global, s mut store.Layered, changes []diff.FileChange, words bool, o mut Out) ! {
 	for c in changes {
 		mut oldPath = c.OldPath
 		if len(oldPath) == 0 {
@@ -728,6 +734,10 @@ fn writePatch(g Global, s mut store.Layered, changes []diff.FileChange, o mut Ou
 		}
 		if hasNul(a) || hasNul(b) {
 			o.Line("Binary files " + aName + " and " + bName + " differ")
+			continue
+		}
+		if words {
+			o.Text(diff.WordDiff(aName, bName, a, b, 3))
 			continue
 		}
 		let text = diff.Unified(aName, bName, a, b, 3)

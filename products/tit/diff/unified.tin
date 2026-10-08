@@ -34,7 +34,37 @@ fn Unified(oldName str, newName str, a str, b str, context i64) str {
 
 // UnifiedLines is Unified for lines already split and diffed (with Diff or DiffLimit).
 fn UnifiedLines(oldName str, newName str, la []str, lb []str, es []Edit, context i64) str {
-	mut ops = make([]op, 0, len(la) + len(lb))
+	let ops = opsOf(es)
+	mut out = []u8{}
+	mut x = 0
+	for x < len(ops) {
+		if ops[x].kind == kindKeep {
+			x += 1
+			continue
+		}
+		let (first, end) = hunkAt(ops, x, context)
+		if len(out) == 0 {
+			appendText(mut out, "--- {oldName}\n+++ {newName}\n")
+		}
+		appendText(mut out, hunkHeader(ops, first, end))
+		for k in first..end {
+			let o = ops[k]
+			if o.kind == kindKeep {
+				line(mut out, " ", la[o.ai])
+			} else if o.kind == kindDelete {
+				line(mut out, "-", la[o.ai])
+			} else {
+				line(mut out, "+", lb[o.bi])
+			}
+		}
+		x = end
+	}
+	return str(out)
+}
+
+// opsOf is an edit script as one op per line: kept, deleted (from a) or inserted (from b).
+fn opsOf(es []Edit) []op {
+	mut ops = make([]op, 0, 64)
 	mut i = 0
 	mut j = 0
 	for e in es {
@@ -60,60 +90,45 @@ fn UnifiedLines(oldName str, newName str, la []str, lb []str, es []Edit, context
 			}
 		}
 	}
-	mut out = []u8{}
-	mut x = 0
-	for x < len(ops) {
-		if ops[x].kind == kindKeep {
-			x += 1
+	return ops
+}
+
+// hunkAt is the hunk around the change at ops[x]: from context lines before it to context lines after the last
+// change within reach.
+fn hunkAt(ops []op, x i64, context i64) (i64, i64) {
+	let first = max(0, x - context)
+	mut last = x
+	mut y = x
+	for y < len(ops) {
+		if ops[y].kind != kindKeep {
+			last = y
+			y += 1
 			continue
 		}
-		// a hunk: from context lines before this change to context lines after the last change within reach
-		let first = max(0, x - context)
-		mut last = x
-		mut y = x
-		for y < len(ops) {
-			if ops[y].kind != kindKeep {
-				last = y
-				y += 1
-				continue
-			}
-			mut run = y
-			for run < len(ops) && ops[run].kind == kindKeep {
-				run += 1
-			}
-			if run == len(ops) || run - y > 2 * context {
-				break
-			}
-			y = run
+		mut run = y
+		for run < len(ops) && ops[run].kind == kindKeep {
+			run += 1
 		}
-		let end = min(len(ops), last + 1 + context)
-		if len(out) == 0 {
-			appendText(mut out, "--- {oldName}\n+++ {newName}\n")
+		if run == len(ops) || run - y > 2 * context {
+			break
 		}
-		mut acount = 0
-		mut bcount = 0
-		for k in first..end {
-			if ops[k].kind != kindInsert {
-				acount += 1
-			}
-			if ops[k].kind != kindDelete {
-				bcount += 1
-			}
-		}
-		appendText(mut out, "@@ -{span(ops[first].ai, acount)} +{span(ops[first].bi, bcount)} @@\n")
-		for k in first..end {
-			let o = ops[k]
-			if o.kind == kindKeep {
-				line(mut out, " ", la[o.ai])
-			} else if o.kind == kindDelete {
-				line(mut out, "-", la[o.ai])
-			} else {
-				line(mut out, "+", lb[o.bi])
-			}
-		}
-		x = end
+		y = run
 	}
-	return str(out)
+	return first, min(len(ops), last + 1 + context)
+}
+
+fn hunkHeader(ops []op, first i64, end i64) str {
+	mut acount = 0
+	mut bcount = 0
+	for k in first..end {
+		if ops[k].kind != kindInsert {
+			acount += 1
+		}
+		if ops[k].kind != kindDelete {
+			bcount += 1
+		}
+	}
+	return "@@ -{span(ops[first].ai, acount)} +{span(ops[first].bi, bcount)} @@\n"
 }
 
 // span is a hunk range: the 1-based first line and the count, the count left out when it is 1, and the line

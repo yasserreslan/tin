@@ -154,7 +154,7 @@ commands:
   commit [-m msg]... [-a] [--amend]
                              record the staged files (-a stages every tracked change first; without -m,
                              $EDITOR asks for the message; --amend makes a new version of the last change)
-  diff [--staged] [--stat] [--semantic] [A B] [paths]
+  diff [--staged] [--stat] [--word] [--semantic] [A B] [paths]
                              changes not staged yet, the staged ones, or between two revisions
   log [rev] [-n N] [--oneline] [--first-parent] [--topo] [--format=id|change|subject|git-id]
                              the history from rev (HEAD by default)
@@ -324,7 +324,7 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Commit(ca)
 	}
 	if name == "diff" {
-		mut da = DiffArgs{Semantic: false, Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
+		mut da = DiffArgs{Word: false, Semantic: false, Staged: false, Stat: false, Revs: []str{}, Paths: []str{}}
 		mut paths = false
 		for a in rest {
 			if paths {
@@ -337,6 +337,8 @@ fn Parse(args []str) !(Global, Command) {
 				da.Stat = true
 			} else if a == "--semantic" {
 				da.Semantic = true
+			} else if a == "--word" || a == "--word-diff" || a == "--word-diff=plain" {
+				da.Word = true
 			} else if len(a) > 1 && a[0] == '-' {
 				fail fault.Wrap(ErrUsage, "diff: unknown option {a}")
 			} else if isPath(g, a) {
