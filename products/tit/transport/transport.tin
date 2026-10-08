@@ -115,11 +115,12 @@ type PushAnswer struct {
 	Refs []str
 }
 
-// ErrorAnswer is the header of an error frame.
+// ErrorAnswer is the header of an error frame. Unauthorized and NonceExpired carry a fresh nonce to sign with.
 type ErrorAnswer struct {
 	Code    str
 	Message str
 	Ref     str
+	Nonce   str
 }
 
 // Transport is a way to reach a tit repository: the HTTP client (#795) or an in-process server in tests.

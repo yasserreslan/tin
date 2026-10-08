@@ -448,7 +448,8 @@ push request:   {"changes": [{"change": "<letters>", "replaces": "<hex> | \"\"",
                  "refs": [{"name": "refs/heads/main", "old": "<target text> | \"\"", "new": "<target text> | \"\""}]}
                                                                        then the pack
 push answer:    {"refs": ["refs/heads/main"]}
-error:          {"code": "<Code>", "message": "<text for a person>", "ref": "<name, when one is to blame>"}
+error:          {"code": "<Code>", "message": "<text for a person>", "ref": "<name, when one is to blame>",
+                 "nonce": "<base64, on Unauthorized and NonceExpired>"}
 ```
 
 Fetch is one round: the client names as haves the tips it has (every local ref), the server ignores those it
@@ -482,8 +483,8 @@ The server keeps each user's ed25519 public keys (the same keys `tit key` makes)
 "tit v1 " + method + " " + path + "\n" + nonce + "\n" + hex(SHA-256(body)) + "\n"
 ```
 
-where the nonce is the one the last heads answer gave (a client signs a heads request with the nonce of the one
-before, or not at all). Fetch and heads may go unsigned where the repository is
+where the nonce is the one the last heads answer gave. An `Unauthorized` or `NonceExpired` error carries a fresh
+nonce, so a client with no nonce yet (or an old one) signs with it and sends the request once more. Fetch and heads may go unsigned where the repository is
 public; push is always signed. The nonce is `base64(u64 big-endian unix seconds, 16 random bytes,
 HMAC-SHA256(server secret, the first 24 bytes))`: the server checks the HMAC and that the time is less than 60 s
 old, so any node of a service checks it with no shared store, and a signed request cannot be sent again after a

@@ -30,7 +30,7 @@ fn TestCodes(t mut crucible.T) {
 	t.True("parse", ParseCode("RefChanged") == Code.RefChanged)
 	t.True("unknown is Internal", ParseCode("FromTheFuture") == Code.Internal)
 	crucible.Equal(mut t, "status", Status(Code.TooLarge), 413)
-	let err = Refused(ErrorAnswer{Code: "Moved", Message: "kkzz has a newer version", Ref: ""})
+	let err = Refused(ErrorAnswer{Code: "Moved", Message: "kkzz has a newer version", Ref: "", Nonce: ""})
 	t.True("refused", err != nil && fault.Is(err, ErrRefused) && twine.Contains(fault.Message(err), "Moved: kkzz"))
 }
 
