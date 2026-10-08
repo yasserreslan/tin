@@ -1,0 +1,733 @@
+// Package scan is a scanner and tokenizer for UTF-8 text, Go's text/scanner: it reads Go-style
+// identifiers, numbers, char, string and raw string literals and comments, with Go's white space
+// and position rules, for tokenizing source code, configuration files and small languages.
+//
+//	mut s = scan.New(src)
+//	s.Filename = "example"
+//	for {
+//		let tok = s.Scan()
+//		if tok == scan.EOF {
+//			break
+//		}
+//		say.Line(s.Position(), scan.TokenString(tok), s.TokenText())
+//	}
+//
+// The Scanner reads a whole str (a stream is read with io.ReadAll first), so a token's text is a
+// slice of the source and positions are byte offsets into it. Scan returns a token kind (EOF,
+// Ident, Int, Float, Char, String, RawString, Comment, all negative) or the rune itself for any
+// other character. Mode selects the tokens recognized (GoTokens by default: comments are skipped),
+// Whitespace the characters skipped, and SetIdentRune the identifier characters. Errors (a literal
+// not terminated, a bad escape, invalid UTF-8, a NUL) do not stop the scan: they are counted in
+// ErrorCount and the first maxErrors are kept with their positions, read with Errors and Err.
+// Lines and columns are 1-based, a column counts characters, and a leading byte order mark is
+// skipped; the Go twin (bench/ref/scan and tools/ci/scan_check.tin) checks every token, position
+// and error against Go's.
+package scan
+
+import "glyph"
+import "mint"
+
+// The token kinds Scan returns; any other result is the Unicode character itself.
+const EOF = -1
+
+// Ident is an identifier.
+const Ident = -2
+
+// Int is an integer literal.
+const Int = -3
+
+// Float is a floating-point literal.
+const Float = -4
+
+// Char is a character literal.
+const Char = -5
+
+// String is an interpreted string literal.
+const String = -6
+
+// RawString is a raw (backquoted) string literal.
+const RawString = -7
+
+// Comment is a comment, returned when ScanComments is set without SkipComments.
+const Comment = -8
+
+// ScanIdents recognizes identifiers (the Mode bit 1 << -Ident).
+const ScanIdents = 4
+
+// ScanInts recognizes integer literals.
+const ScanInts = 8
+
+// ScanFloats recognizes floating-point literals, integers and hexadecimal floats included.
+const ScanFloats = 16
+
+// ScanChars recognizes character literals.
+const ScanChars = 32
+
+// ScanStrings recognizes interpreted string literals.
+const ScanStrings = 64
+
+// ScanRawStrings recognizes raw string literals.
+const ScanRawStrings = 128
+
+// ScanComments recognizes comments.
+const ScanComments = 256
+
+// SkipComments, with ScanComments, makes comments white space instead of Comment tokens.
+const SkipComments = 512
+
+// GoTokens is every Go literal token with comments skipped: the Mode Init sets.
+const GoTokens = ScanIdents | ScanFloats | ScanChars | ScanStrings | ScanRawStrings | ScanComments | SkipComments
+
+// GoWhitespace is the Whitespace Init sets: tab, newline, carriage return and space.
+const GoWhitespace = 1<<9 | 1<<10 | 1<<13 | 1<<32
+
+// maxErrors is the number of errors a Scanner keeps; ErrorCount counts every one.
+const maxErrors = 1000
+
+// notRead is the look-ahead before the first character is read.
+const notRead = -2
+
+// Position is a place in the source: valid when Line > 0.
+type Position value struct {
+	Filename str
+	Offset   i64
+	Line     i64
+	Column   i64
+}
+
+// IsValid reports whether the position is valid (Line > 0).
+fn (p Position) IsValid() bool {
+	return p.Line > 0
+}
+
+// String is "file:line:column", with "<input>" for an empty file name and no numbers when invalid.
+fn (p Position) String() str {
+	mut s = p.Filename
+	if s == "" {
+		s = "<input>"
+	}
+	if p.Line > 0 {
+		s = s + ":" + mint.Itoa(p.Line) + ":" + mint.Itoa(p.Column)
+	}
+	return s
+}
+
+// Error is one error the scanner met: where, as Go reports it, and what.
+type Error value struct {
+	Pos Position
+	Msg str
+}
+
+// String is "position: message", the line Go prints when no Error function is set.
+fn (e Error) String() str {
+	return e.Pos.String() + ": " + e.Msg
+}
+
+// Scanner reads the characters and tokens of a source text; make one with New.
+type Scanner struct {
+	// Mode selects the tokens Scan recognizes (the Scan* bits); it may change at any time.
+	Mode u64
+	// Whitespace has bit c set for each character c <= ' ' Scan skips; it may change at any time.
+	Whitespace u64
+	// Filename is the file name in every position; Init leaves it as it is.
+	Filename str
+	// ErrorCount is the number of errors met since Init.
+	ErrorCount i64
+
+	src         str
+	srcPos      i64
+	line        i64
+	column      i64
+	lastLineLen i64
+	lastCharLen i64
+	tokPos      i64
+	tokEnd      i64
+	ch          i32
+	offset      i64
+	tokLine     i64
+	tokColumn   i64
+	identFn     fn(i32, i64) bool
+	customIdent bool
+	errors      []Error
+}
+
+// New returns a Scanner over src, initialized as Init does.
+fn New(src str) Scanner {
+	mut s = Scanner{Mode: GoTokens, Whitespace: GoWhitespace, Filename: "", ErrorCount: 0, src: src, srcPos: 0, line: 1, column: 0, lastLineLen: 0, lastCharLen: 0, tokPos: -1, tokEnd: 0, ch: notRead, offset: 0, tokLine: 0, tokColumn: 0, identFn: goIdentRune, customIdent: false, errors: []Error{}}
+	return s
+}
+
+// Init restarts s on src: no errors, Mode GoTokens, Whitespace GoWhitespace and no token position;
+// Filename and the identifier predicate stay.
+fn (s mut Scanner) Init(src str) {
+	s.src = src
+	s.srcPos = 0
+	s.line = 1
+	s.column = 0
+	s.lastLineLen = 0
+	s.lastCharLen = 0
+	s.tokPos = -1
+	s.tokEnd = 0
+	s.ch = notRead
+	s.ErrorCount = 0
+	s.errors = []Error{}
+	s.Mode = GoTokens
+	s.Whitespace = GoWhitespace
+	s.tokLine = 0
+}
+
+// SetIdentRune makes f decide the characters of identifiers: f(ch, i) accepts ch as the i-th rune
+// (from 0) of one. It must not accept white space characters.
+fn (s mut Scanner) SetIdentRune(f fn(i32, i64) bool) {
+	s.identFn = f
+	s.customIdent = true
+}
+
+// ResetIdentRune goes back to Go identifiers: a letter or '_', then letters, digits and '_'.
+fn (s mut Scanner) ResetIdentRune() {
+	s.identFn = goIdentRune
+	s.customIdent = false
+}
+
+// goIdentRune is Go's identifier rule.
+fn goIdentRune(ch i32, i i64) bool {
+	return ch == '_' || glyph.IsLetter(ch) || glyph.IsDigit(ch) && i > 0
+}
+
+// next reads the next character and advances the position; EOF at the end.
+fn (s mut Scanner) next() i32 {
+	if s.srcPos >= len(s.src) {
+		if s.lastCharLen > 0 {
+			// The previous character was not EOF.
+			s.column += 1
+		}
+		s.lastCharLen = 0
+		return EOF
+	}
+	mut ch = i32(s.src[s.srcPos])
+	mut width = i64(1)
+	if ch >= 0x80 {
+		let (r, w) = glyph.DecodeRune(s.src, s.srcPos)
+		if r == glyph.RuneError && w == 1 {
+			// Advance first, for the error's position.
+			s.srcPos += 1
+			s.lastCharLen = 1
+			s.column += 1
+			s.error("invalid UTF-8 encoding")
+			return r
+		}
+		ch = r
+		width = w
+	}
+	s.srcPos += width
+	s.lastCharLen = width
+	s.column += 1
+	if ch == 0 {
+		s.error("invalid character NUL")
+	} else if ch == '\n' {
+		s.line += 1
+		s.lastLineLen = s.column
+		s.column = 0
+	}
+	return ch
+}
+
+// Next reads and returns the next character (EOF at the end) and makes Position invalid; Pos is
+// the position after it.
+fn (s mut Scanner) Next() i32 {
+	s.tokPos = -1
+	s.tokLine = 0
+	let ch = s.Peek()
+	if ch != EOF {
+		s.ch = s.next()
+	}
+	return ch
+}
+
+// Peek returns the next character without advancing (EOF at the end).
+fn (s mut Scanner) Peek() i32 {
+	if s.ch == notRead {
+		// Only for the very first character: a byte order mark is skipped.
+		s.ch = s.next()
+		if s.ch == 0xfeff {
+			s.ch = s.next()
+		}
+	}
+	return s.ch
+}
+
+// error counts and keeps an error, at the token's position or else at Pos.
+fn (s mut Scanner) error(msg str) {
+	s.tokEnd = s.srcPos - s.lastCharLen
+	s.ErrorCount += 1
+	if len(s.errors) >= maxErrors {
+		return
+	}
+	mut pos = s.Position()
+	if pos.Line <= 0 {
+		pos = s.Pos()
+	}
+	s.errors = append(s.errors, Error{Pos: pos, Msg: msg})
+}
+
+// Errors returns the errors met since Init, at most the first thousand (ErrorCount counts them all).
+fn (s Scanner) Errors() []Error {
+	return s.errors
+}
+
+// Err fails with the first error ("position: message") when there was one.
+fn (s Scanner) Err() ! {
+	if len(s.errors) > 0 {
+		fail s.errors[0].String()
+	}
+}
+
+// isIdentRune reports whether ch may be the i-th rune of an identifier.
+fn (s Scanner) isIdentRune(ch i32, i i64) bool {
+	if s.customIdent {
+		return ch != EOF && s.identFn(ch, i)
+	}
+	return ch == '_' || glyph.IsLetter(ch) || glyph.IsDigit(ch) && i > 0
+}
+
+// scanIdentifier reads the rest of an identifier whose first rune was accepted.
+fn (s mut Scanner) scanIdentifier() i32 {
+	mut ch = s.next()
+	mut i = i64(1)
+	for s.isIdentRune(ch, i) {
+		ch = s.next()
+		i += 1
+	}
+	return ch
+}
+
+// lower is the lower case of an ASCII letter (and ch | 0x20 for anything else).
+fn lower(ch i32) i32 {
+	return ('a' - 'A') | ch
+}
+
+fn isDecimal(ch i32) bool {
+	return '0' <= ch && ch <= '9'
+}
+
+fn isHex(ch i32) bool {
+	return '0' <= ch && ch <= '9' || 'a' <= lower(ch) && lower(ch) <= 'f'
+}
+
+// digits reads { digit | '_' } from ch0. For base <= 10 every decimal digit is read and the first
+// one >= base is returned as invalid (when invalid is still 0). It returns the first rune after the
+// sequence, a set of what it held (bit 0 a digit, bit 1 a '_') and invalid.
+fn (s mut Scanner) digits(ch0 i32, base i64, invalid0 i32) (i32, i64, i32) {
+	mut ch = ch0
+	mut digsep = i64(0)
+	mut invalid = invalid0
+	if base <= 10 {
+		let max = i32('0' + base)
+		for isDecimal(ch) || ch == '_' {
+			mut ds = i64(1)
+			if ch == '_' {
+				ds = 2
+			} else if ch >= max && invalid == 0 {
+				invalid = ch
+			}
+			digsep |= ds
+			ch = s.next()
+		}
+	} else {
+		for isHex(ch) || ch == '_' {
+			mut ds = i64(1)
+			if ch == '_' {
+				ds = 2
+			}
+			digsep |= ds
+			ch = s.next()
+		}
+	}
+	return ch, digsep, invalid
+}
+
+// scanNumber reads a number from ch (its first digit, or the one after a '.' when seenDot) and
+// returns its kind and the rune after it.
+fn (s mut Scanner) scanNumber(ch0 i32, seenDot0 bool) (i32, i32) {
+	mut ch = ch0
+	mut seenDot = seenDot0
+	mut base = i64(10)
+	mut prefix = i32(0) // 0 (decimal), '0' (0-octal), 'x', 'o' or 'b'
+	mut digsep = i64(0)
+	mut invalid = i32(0)
+	mut tok = i32(0)
+	// The integer part.
+	if !seenDot {
+		tok = Int
+		if ch == '0' {
+			ch = s.next()
+			let l = lower(ch)
+			if l == 'x' {
+				ch = s.next()
+				base = 16
+				prefix = 'x'
+			} else if l == 'o' {
+				ch = s.next()
+				base = 8
+				prefix = 'o'
+			} else if l == 'b' {
+				ch = s.next()
+				base = 2
+				prefix = 'b'
+			} else {
+				base = 8
+				prefix = '0'
+				digsep = 1 // the leading 0
+			}
+		}
+		let (c1, ds1, inv1) = s.digits(ch, base, invalid)
+		ch = c1
+		digsep |= ds1
+		invalid = inv1
+		if ch == '.' && s.Mode & ScanFloats != 0 {
+			ch = s.next()
+			seenDot = true
+		}
+	}
+	// The fractional part.
+	if seenDot {
+		tok = Float
+		if prefix == 'o' || prefix == 'b' {
+			s.error("invalid radix point in " + litname(prefix))
+		}
+		let (c2, ds2, inv2) = s.digits(ch, base, invalid)
+		ch = c2
+		digsep |= ds2
+		invalid = inv2
+	}
+	if digsep & 1 == 0 {
+		s.error(litname(prefix) + " has no digits")
+	}
+	// The exponent.
+	let e = lower(ch)
+	if (e == 'e' || e == 'p') && s.Mode & ScanFloats != 0 {
+		if e == 'e' && prefix != 0 && prefix != '0' {
+			s.error(mint.QuoteRune(ch) + " exponent requires decimal mantissa")
+		} else if e == 'p' && prefix != 'x' {
+			s.error(mint.QuoteRune(ch) + " exponent requires hexadecimal mantissa")
+		}
+		ch = s.next()
+		tok = Float
+		if ch == '+' || ch == '-' {
+			ch = s.next()
+		}
+		let (c3, ds3, _) = s.digits(ch, 10, 0)
+		ch = c3
+		digsep |= ds3
+		if ds3 & 1 == 0 {
+			s.error("exponent has no digits")
+		}
+	} else if prefix == 'x' && tok == Float {
+		s.error("hexadecimal mantissa requires a 'p' exponent")
+	}
+	if tok == Int && invalid != 0 {
+		s.error("invalid digit " + mint.QuoteRune(invalid) + " in " + litname(prefix))
+	}
+	if digsep & 2 != 0 {
+		s.tokEnd = s.srcPos - s.lastCharLen
+		if invalidSep(s.TokenText()) >= 0 {
+			s.error("'_' must separate successive digits")
+		}
+	}
+	return tok, ch
+}
+
+// litname names a literal by its prefix, as Go's messages do.
+fn litname(prefix i32) str {
+	return match prefix {
+		'x' => "hexadecimal literal"
+		'o', '0' => "octal literal"
+		'b' => "binary literal"
+		_ => "decimal literal"
+	}
+}
+
+// invalidSep returns the index of the first '_' in x that does not separate two digits, or -1.
+fn invalidSep(x str) i64 {
+	mut x1 = i32(' ') // the prefix letter; only 'x' matters
+	mut d = i32('.') // '_', '0' (a digit) or '.' (anything else)
+	mut i = i64(0)
+	// A prefix counts as a digit.
+	if len(x) >= 2 && x[0] == '0' {
+		x1 = lower(i32(x[1]))
+		if x1 == 'x' || x1 == 'o' || x1 == 'b' {
+			d = '0'
+			i = 2
+		}
+	}
+	// The mantissa and the exponent.
+	for i < len(x) {
+		let p = d // the previous digit
+		d = i32(x[i])
+		if d == '_' {
+			if p != '0' {
+				return i
+			}
+		} else if isDecimal(d) || x1 == 'x' && isHex(d) {
+			d = '0'
+		} else {
+			if p == '_' {
+				return i - 1
+			}
+			d = '.'
+		}
+		i += 1
+	}
+	if d == '_' {
+		return len(x) - 1
+	}
+	return -1
+}
+
+// digitVal is the value of a hex digit, 16 for anything else.
+fn digitVal(ch i32) i64 {
+	if '0' <= ch && ch <= '9' {
+		return i64(ch - '0')
+	}
+	let l = lower(ch)
+	if 'a' <= l && l <= 'f' {
+		return i64(l - 'a' + 10)
+	}
+	return 16
+}
+
+// scanDigits reads n digits of base from ch.
+fn (s mut Scanner) scanDigits(ch0 i32, base i64, n0 i64) i32 {
+	mut ch = ch0
+	mut n = n0
+	for n > 0 && digitVal(ch) < base {
+		ch = s.next()
+		n -= 1
+	}
+	if n > 0 {
+		s.error("invalid char escape")
+	}
+	return ch
+}
+
+// scanEscape reads an escape after its backslash.
+fn (s mut Scanner) scanEscape(quote i32) i32 {
+	mut ch = s.next()
+	if ch == 'a' || ch == 'b' || ch == 'f' || ch == 'n' || ch == 'r' || ch == 't' || ch == 'v' || ch == '\\' || ch == quote {
+		ch = s.next()
+	} else if ch >= '0' && ch <= '7' {
+		ch = s.scanDigits(ch, 8, 3)
+	} else if ch == 'x' {
+		ch = s.scanDigits(s.next(), 16, 2)
+	} else if ch == 'u' {
+		ch = s.scanDigits(s.next(), 16, 4)
+	} else if ch == 'U' {
+		ch = s.scanDigits(s.next(), 16, 8)
+	} else {
+		s.error("invalid char escape")
+	}
+	return ch
+}
+
+// scanString reads a quoted literal after its opening quote and returns its character count.
+fn (s mut Scanner) scanString(quote i32) i64 {
+	mut ch = s.next()
+	mut n = i64(0)
+	for ch != quote {
+		if ch == '\n' || ch < 0 {
+			s.error("literal not terminated")
+			return n
+		}
+		if ch == '\\' {
+			ch = s.scanEscape(quote)
+		} else {
+			ch = s.next()
+		}
+		n += 1
+	}
+	return n
+}
+
+// scanRawString reads a raw string after its opening backquote.
+fn (s mut Scanner) scanRawString() {
+	mut ch = s.next()
+	for ch != '`' {
+		if ch < 0 {
+			s.error("literal not terminated")
+			return
+		}
+		ch = s.next()
+	}
+}
+
+// scanChar reads a character literal after its opening quote.
+fn (s mut Scanner) scanChar() {
+	if s.scanString('\'') != 1 {
+		s.error("invalid char literal")
+	}
+}
+
+// scanComment reads a comment from the '/' or '*' after its first '/' and returns the rune after it.
+fn (s mut Scanner) scanComment(ch0 i32) i32 {
+	mut ch = ch0
+	if ch == '/' {
+		// A line comment.
+		ch = s.next()
+		for ch != '\n' && ch >= 0 {
+			ch = s.next()
+		}
+		return ch
+	}
+	// A general comment.
+	ch = s.next()
+	for {
+		if ch < 0 {
+			s.error("comment not terminated")
+			break
+		}
+		let ch1 = ch
+		ch = s.next()
+		if ch1 == '*' && ch == '/' {
+			ch = s.next()
+			break
+		}
+	}
+	return ch
+}
+
+// isWhite reports whether Whitespace has ch.
+fn (s Scanner) isWhite(ch i32) bool {
+	return ch >= 0 && ch < 64 && s.Whitespace & (u64(1) << u64(ch)) != 0
+}
+
+// Scan reads the next token or character and returns it: a token kind for a token Mode recognizes,
+// EOF at the end, or else the character itself. Position is where it starts, TokenText its text.
+fn (s mut Scanner) Scan() i32 {
+	mut ch = s.Peek()
+	s.tokPos = -1
+	s.tokLine = 0
+	for {
+		// Skip white space.
+		for s.isWhite(ch) {
+			ch = s.next()
+		}
+		// Start the token's text and position.
+		s.tokPos = s.srcPos - s.lastCharLen
+		s.offset = s.tokPos
+		if s.column > 0 {
+			s.tokLine = s.line
+			s.tokColumn = s.column
+		} else {
+			// The last character was a newline.
+			s.tokLine = s.line - 1
+			s.tokColumn = s.lastLineLen
+		}
+		mut tok = ch
+		if s.isIdentRune(ch, 0) {
+			if s.Mode & ScanIdents != 0 {
+				tok = Ident
+				ch = s.scanIdentifier()
+			} else {
+				ch = s.next()
+			}
+		} else if isDecimal(ch) {
+			if s.Mode & (ScanInts | ScanFloats) != 0 {
+				let (t, c) = s.scanNumber(ch, false)
+				tok = t
+				ch = c
+			} else {
+				ch = s.next()
+			}
+		} else if ch == EOF {
+			// Nothing to read.
+		} else if ch == '"' {
+			if s.Mode & ScanStrings != 0 {
+				s.scanString('"')
+				tok = String
+			}
+			ch = s.next()
+		} else if ch == '\'' {
+			if s.Mode & ScanChars != 0 {
+				s.scanChar()
+				tok = Char
+			}
+			ch = s.next()
+		} else if ch == '.' {
+			ch = s.next()
+			if isDecimal(ch) && s.Mode & ScanFloats != 0 {
+				let (t, c) = s.scanNumber(ch, true)
+				tok = t
+				ch = c
+			}
+		} else if ch == '/' {
+			ch = s.next()
+			if (ch == '/' || ch == '*') && s.Mode & ScanComments != 0 {
+				if s.Mode & SkipComments != 0 {
+					s.tokPos = -1
+					ch = s.scanComment(ch)
+					continue
+				}
+				ch = s.scanComment(ch)
+				tok = Comment
+			}
+		} else if ch == '`' {
+			if s.Mode & ScanRawStrings != 0 {
+				s.scanRawString()
+				tok = RawString
+			}
+			ch = s.next()
+		} else {
+			ch = s.next()
+		}
+		s.tokEnd = s.srcPos - s.lastCharLen
+		s.ch = ch
+		return tok
+	}
+	return EOF
+}
+
+// Position is where the token Scan last returned starts; Init and Next make it invalid.
+fn (s Scanner) Position() Position {
+	return Position{Filename: s.Filename, Offset: s.offset, Line: s.tokLine, Column: s.tokColumn}
+}
+
+// Pos is the position just after the character or token Next or Scan last returned.
+fn (s Scanner) Pos() Position {
+	let off = s.srcPos - s.lastCharLen
+	if s.column > 0 {
+		return Position{Filename: s.Filename, Offset: off, Line: s.line, Column: s.column}
+	}
+	if s.lastLineLen > 0 {
+		// The last character was a newline.
+		return Position{Filename: s.Filename, Offset: off, Line: s.line - 1, Column: s.lastLineLen}
+	}
+	// At the start of the source.
+	return Position{Filename: s.Filename, Offset: off, Line: 1, Column: 1}
+}
+
+// TokenText is the text of the token Scan last returned ("" after Next).
+fn (s Scanner) TokenText() str {
+	if s.tokPos < 0 {
+		return ""
+	}
+	mut end = s.tokEnd
+	if end < s.tokPos {
+		end = s.tokPos
+	}
+	return s.src[s.tokPos:end]
+}
+
+// TokenString is a printable form of a token kind ("EOF", "Ident", ...) or character (Go-quoted).
+fn TokenString(tok i32) str {
+	return match tok {
+		EOF => "EOF"
+		Ident => "Ident"
+		Int => "Int"
+		Float => "Float"
+		Char => "Char"
+		String => "String"
+		RawString => "RawString"
+		Comment => "Comment"
+		_ => mint.Quote(glyph.RuneStr(tok))
+	}
+}
