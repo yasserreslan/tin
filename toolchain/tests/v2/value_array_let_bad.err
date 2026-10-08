@@ -1,0 +1,1 @@
+toolchain/tests/v2/value_array_let_bad.tin:9:2: error E711 LET_ASSIGN: cannot change z: it is a value struct declared with let (declare it with mut to change it)
