@@ -915,3 +915,31 @@ fn (ed Editor) insidePair() bool {
 fn (ed Editor) Empty() bool {
 	return len(ed.Tabs) == 1 && len(ed.Buf.Path) == 0 && !ed.Buf.Dirty && len(ed.Buf.Lines) == 1 && len(ed.Buf.Lines[0]) == 0
 }
+
+// ReloadClean reads again the files of the open tabs that have no unsaved changes (after something else changed them on disk),
+// keeping the caret where it was as far as the new text allows.
+fn (ed mut Editor) ReloadClean() {
+	ed.stash()
+	for i in 0..len(ed.Tabs) {
+		let t = ed.Tabs[i]
+		if len(t.Buf.Path) == 0 || t.Buf.Dirty {
+			continue
+		}
+		let text = quarry.ReadFile(t.Buf.Path) catch _ {
+			continue
+		}
+		if text == t.Buf.Text() {
+			continue
+		}
+		let row = t.Buf.Row
+		let col = t.Buf.Col
+		t.Buf.SetText(text)
+		t.Buf.Dirty = false
+		t.Buf.MoveTo(row, col, false)
+		if i == ed.Active {
+			ed.Buf = t.Buf
+		}
+	}
+	ed.rawFor = -1
+	ed.Redraw = true
+}

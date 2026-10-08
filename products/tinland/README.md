@@ -24,7 +24,7 @@ For an application with its own Dock icon and name in the menu bar, `tools/dev/t
 | Cmd+B, Cmd+J, Ctrl+` | show or hide the project panel, the output panel, the terminal (a shell in the project folder: colors, history, arrows, Cmd+V pastes) |
 | Cmd+\ , Cmd+Shift+\ | split the editor to the right, close the split (each pane has its own tabs) |
 | Cmd+= , Cmd+- , Cmd+0 | zoom in, out, reset the code font |
-| Cmd+Shift+F | search in the project (Return runs it; Aa, ab and .* switch case, whole word and regular expression) |
+| Cmd+Shift+F | search in the project (Return runs it; Aa, ab and .* switch case, whole word and regular expression; Tab goes to the replace box, Return there replaces every match in the project) |
 | Cmd+Alt+N, Cmd+Alt+Shift+N | new file, new folder in the selected folder (the File menu also has Rename and Delete) |
 | Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
 | Cmd+1 to 9, Ctrl+Tab | switch tabs |
