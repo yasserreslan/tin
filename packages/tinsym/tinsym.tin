@@ -25,6 +25,10 @@ type Sym struct {
 	Fn       str // a local: the function it is in (the outermost, for a closure)
 	FnLine   i64 // and the line that function starts on
 	Type     str // a local: its type, as the compiler writes it ("Point", "mut Point", "[]str")
+	// DeclEndLine and DeclEndCol are where the whole declaration ends (0 for a local); DocLine is where its comment starts.
+	DeclEndLine i64
+	DeclEndCol  i64
+	DocLine     i64
 }
 
 // Member is a line of a struct, enum or shape body: a field and its type, a variant and its payload.
@@ -73,7 +77,7 @@ fn Parse(out str) ([]Sym, []Diag) {
 		for k in 0..mem.Len() {
 			members = append(members, Member{Name: mem.At(k).Get("name").Text(), Detail: mem.At(k).Get("detail").Text()})
 		}
-		syms = append(syms, Sym{Kind: j.Get("kind").Text(), Name: j.Get("name").Text(), Pkg: j.Get("pkg").Text(), File: j.Get("file").Text(), Line: j.Get("line").Int(), Col: j.Get("col").Int(), EndCol: j.Get("endCol").Int(), Recv: j.Get("recv").Text(), Exported: j.Get("exported").Bool(), Sig: j.Get("sig").Text(), Doc: j.Get("doc").Text(), Members: members, Fn: j.Get("fn").Text(), FnLine: j.Get("fnLine").Int(), Type: j.Get("type").Text()})
+		syms = append(syms, Sym{Kind: j.Get("kind").Text(), Name: j.Get("name").Text(), Pkg: j.Get("pkg").Text(), File: j.Get("file").Text(), Line: j.Get("line").Int(), Col: j.Get("col").Int(), EndCol: j.Get("endCol").Int(), Recv: j.Get("recv").Text(), Exported: j.Get("exported").Bool(), Sig: j.Get("sig").Text(), Doc: j.Get("doc").Text(), Members: members, Fn: j.Get("fn").Text(), FnLine: j.Get("fnLine").Int(), Type: j.Get("type").Text(), DeclEndLine: j.Get("declEndLine").Int(), DeclEndCol: j.Get("declEndCol").Int(), DocLine: j.Get("docLine").Int()})
 	}
 	return syms, diags
 }

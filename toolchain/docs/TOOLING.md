@@ -166,6 +166,8 @@ locals and parameters of the functions in the files named on the command line:
 | `kind` | `fn`, `method`, `type` (struct, enum and named types), `shape`, `const`, `var` (a package-level `let` or `shared`) or `local` (a local variable or parameter) |
 | `name`, `pkg` | the name and its package (`""` for `main`) |
 | `file`, `line`, `col`, `endCol` | where the name is: the path as loaded, 1-based line and byte column, the column just past the name |
+| `declEndLine`, `declEndCol` | where the whole declaration ends (not for a `local`): the line and the column just past its last token, which is a block's closing brace, or the last token of the line where its brackets close; comments, strings and character literals are skipped |
+| `docLine` | the first line of the `//` comment directly above the declaration, or `line` when there is none; a declaration with its comment spans `docLine` to `declEndLine` |
 | `recv` | a method's receiver type (without type arguments), else `""` |
 | `exported` | the name starts with a capital letter |
 | `sig` | the declaration's first line without its indentation and opening brace: `fn (p Point) Dist() i64`, `type Point struct` |

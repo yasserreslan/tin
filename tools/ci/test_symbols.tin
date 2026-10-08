@@ -75,6 +75,67 @@ fn memberNames(s tinjson.J) str {
 	return twine.Join(names, ",")
 }
 
+// rangesHold checks the range of every declaration that a few suite programs load (their packages included): a
+// block ends at a closing brace on a line of its own, at the declaration's indentation; anything else ends at the
+// last token of its last line, with only spaces or a comment after it.
+fn rangesHold() {
+	mut checked = 0
+	mut bad = []str{}
+	mut seen = map[str]bool{}
+	mut texts = map[str][]str{}
+	for prog in []str{"twine", "seal", "quarry", "lasso"} {
+		let o = ci.ExecEnv([]str{ci.Tinc(), "-symbols", ci.Join(ci.Root(), "toolchain/tests/v2/" + prog + ".tin")}, "", 120, []str{"TIN_ROOT=" + ci.Root()}, []str{})
+		for line in ci.Lines(o.Stdout) {
+			let (j, ok) = tinjson.Parse(line)
+			if !ok || j.Get("kind").Text() == "local" || j.Get("kind").Text() == "" {
+				continue
+			}
+			let file = j.Get("file").Text()
+			let start = j.Get("line").Int()
+			let key = file + ":" + say.Str(start)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			let (cached, have) = texts[file]
+			mut lines = cached
+			if !have {
+				lines = twine.Split(ci.Read(file), "\n")
+				texts[file] = lines
+			}
+			let endLine = j.Get("declEndLine").Int()
+			let endCol = j.Get("declEndCol").Int()
+			if endLine < start || endLine > len(lines) || endCol < 2 {
+				bad = append(bad, key + " range " + say.Str(endLine) + ":" + say.Str(endCol))
+				continue
+			}
+			let first = lines[start - 1]
+			let last = lines[endLine - 1]
+			if endCol - 1 > len(last) {
+				bad = append(bad, key + " column past the line")
+				continue
+			}
+			let rest = twine.TrimSpace(last[endCol - 1:])
+			if len(rest) > 0 && !twine.HasPrefix(rest, "//") {
+				bad = append(bad, key + " text after the end: " + rest)
+				continue
+			}
+			if twine.HasSuffix(twine.TrimSpace(first), "{{") && endLine > start {
+				let indent = len(first) - len(twine.TrimLeft(first, " \t"))
+				if last[endCol - 2] != '}' || twine.TrimSpace(last[0:endCol - 2]) != "" || len(last) - len(twine.TrimLeft(last, " \t")) != indent {
+					bad = append(bad, key + " block does not end at its own closing brace")
+					continue
+				}
+			}
+			checked += 1
+		}
+	}
+	ci.Test("every declaration's range ends where it should ({checked} checked)", len(bad) == 0 && checked > 1000)
+	for i in 0..min(len(bad), 10) {
+		say.Line("  ", bad[i])
+	}
+}
+
 fn main() {
 	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "symbols-")
 	let path = ci.Join(dir, "prog.tin")
@@ -104,6 +165,13 @@ fn main() {
 		shapeNames = append(shapeNames, m.Get("name").Text())
 	}
 	ci.Same("Shape's members", twine.Join(shapeNames, ","), "Circle,Empty")
+
+	// where each declaration ends, and where its doc comment starts
+	ci.Test("Point's range", point.Get("declEndLine").Int() == 10 && point.Get("declEndCol").Int() == 2 && point.Get("docLine").Int() == 5)
+	ci.Test("Dist's range", dist.Get("declEndLine").Int() == 24 && dist.Get("declEndCol").Int() == 2 && dist.Get("docLine").Int() == 21)
+	ci.Test("Limit's range", lim.Get("declEndLine").Int() == 17 && lim.Get("declEndCol").Int() == 17 && lim.Get("docLine").Int() == 17)
+	ci.Test("counter's range", counter.Get("declEndLine").Int() == 19 && counter.Get("declEndCol").Int() == 20)
+	rangesHold()
 
 	// locals and parameters of the named files
 	mut locals = []str{}
