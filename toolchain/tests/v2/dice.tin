@@ -2,6 +2,7 @@ package main
 
 import "say"
 import "dice"
+import "fault"
 import "hearth"
 
 fn work(id i64) {
@@ -26,6 +27,88 @@ fn main() {
 	mut chrand = dice.NewV2(dice.NewChaCha8(seed))
 	let permv2 = chrand.Perm(5)
 	say.Line("v2 perm", len(permv2), permv2)
+	// The first generation of ChaCha8 holds 124 words, so word 124 (the 125th draw) starts the reseeded one.
+	mut long = dice.NewChaCha8(seed)
+	mut word = u64(0)
+	for i in 0..125 {
+		word = long.Uint64()
+	}
+	say.Line("v2 chacha 125", word)
+	mut normals = dice.NewV2(dice.NewPCG(1, 2))
+	let nrm = normals.NormFloat64()
+	let exp1 = normals.ExpFloat64()
+	say.Line("v2 normal", say.Fmt("%.17g", nrm), say.Fmt("%.17g", exp1))
+	mut ints = dice.NewV2(dice.NewPCG(1, 2))
+	let i64v = ints.Int64()
+	let intv = ints.Int()
+	let uintv = ints.Uint()
+	let i32v = ints.Int32N(7)
+	say.Line("v2 ints", i64v, intv, uintv, i32v)
+	mut deck = []i64{1, 2, 3, 4, 5, 6, 7, 8}
+	mut shuf = dice.NewV2(dice.NewPCG(1, 2))
+	shuf.Shuffle(8, fn(a i64, b i64) {
+		let t = deck[a]
+		deck[a] = deck[b]
+		deck[b] = t
+	})
+	say.Line("v2 shuffle", deck)
+	mut pm = dice.NewV2(dice.NewPCG(1, 2))
+	say.Line("v2 perm6", pm.Perm(6))
+	// The global functions are seeded at runtime, so they are checked by their ranges and by permutation validity.
+	let g1 = dice.N(10)
+	let g2 = dice.Int64N(5)
+	let g3 = dice.Int32N(3)
+	let g4 = dice.Int64()
+	let g5 = dice.Int()
+	let g6 = dice.Float64()
+	let g7 = dice.NormFloat64()
+	let g8 = dice.ExpFloat64()
+	let g9 = dice.Uint()
+	let gp = dice.PermV2(6)
+	mut gseen = make([]bool, 6)
+	mut permOK = len(gp) == 6
+	for _, x in gp {
+		if x < 0 || x >= 6 || gseen[x] {
+			permOK = false
+		} else {
+			gseen[x] = true
+		}
+	}
+	say.Line("v2 global", g1 >= 0 && g1 < 10, g2 >= 0 && g2 < 5, g3 >= 0 && g3 < 3, g4 >= 0, g5 >= 0, g6 >= 0.0 && g6 < 1.0, g7 > -40.0 && g7 < 40.0, g8 >= 0.0, g9 >= 0, permOK)
+	mut bag = []i64{1, 2, 3, 4}
+	dice.ShuffleV2(4, fn(a i64, b i64) {
+		let t = bag[a]
+		bag[a] = bag[b]
+		bag[b] = t
+	})
+	say.Line("v2 shuffle global", bag[0]+bag[1]+bag[2]+bag[3], len(bag))
+	// A non-positive bound, or a negative count, panics.
+	let zv = dice.NewV2(dice.NewPCG(1, 2))
+	let vp1 = guard {
+		zv.Int32N(0)
+		false
+	} catch err {
+		fault.Is(err, fault.Panic)
+	}
+	let vp2 = guard {
+		zv.Int64N(0)
+		false
+	} catch err {
+		fault.Is(err, fault.Panic)
+	}
+	let vp3 = guard {
+		zv.Perm(-1)
+		false
+	} catch err {
+		fault.Is(err, fault.Panic)
+	}
+	let vp4 = guard {
+		dice.N(0)
+		false
+	} catch err {
+		fault.Is(err, fault.Panic)
+	}
+	say.Line("v2 panics", vp1, vp2, vp3, vp4)
 	let v = dice.FromState(1, 2, 3, 4)
 	for i in 0..10 {
 		say.Line("vector", i, v.U64())

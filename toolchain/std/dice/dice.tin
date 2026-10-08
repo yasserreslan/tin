@@ -1,4 +1,4 @@
-// Package dice is fast pseudo-random numbers (like Go's math/rand): xoshiro256** generators and a lazily seeded per-core one.
+// Package dice is fast pseudo-random numbers: xoshiro256** generators with a lazily seeded per-core one, and math/rand/v2's PCG-DXSM and ChaCha8 behind RandV2 (V2 names where a legacy name exists).
 package dice
 
 import "gauge"

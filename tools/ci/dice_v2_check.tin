@@ -1,7 +1,36 @@
 package main
 
 import "./ci"
+import "mint"
 import "say"
+import "twine"
+
+// sameDraw reports whether a Tin line agrees with its Go line: equal, or a normal tail within 1e-15 relative.
+// Go's arm64 compiler fuses the tail's last multiply and add (the spec allows it), so its tail can differ by an ulp.
+fn sameDraw(want str, got str) bool {
+	if want == got {
+		return true
+	}
+	let w = twine.Fields(want)
+	let g = twine.Fields(got)
+	if len(w) != 4 || len(g) != 4 || w[2] != "TNORM" || g[2] != "TNORM" || w[0] != g[0] || w[1] != g[1] {
+		return false
+	}
+	let (a, errA) = mint.ParseFloat(w[3])
+	let (b, errB) = mint.ParseFloat(g[3])
+	if errA != nil || errB != nil {
+		return false
+	}
+	mut d = a - b
+	if d < 0 {
+		d = -d
+	}
+	mut mag = a
+	if mag < 0 {
+		mag = -mag
+	}
+	return d <= 1e-15*mag
+}
 
 fn main() {
 	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "dice-v2-")
@@ -18,7 +47,7 @@ fn main() {
 	ci.Check(len(got) == len(want), "dice v2 corpus line count")
 	mut bad = 0
 	for i in 0..min(len(got), len(want)) {
-		if got[i] != want[i] {
+		if !sameDraw(want[i], got[i]) {
 			say.Line("line", i+1, "Go:", want[i], "Tin:", got[i])
 			bad += 1
 			if bad == 5 { break }
@@ -26,5 +55,5 @@ fn main() {
 	}
 	ci.Check(bad == 0, "dice v2 output matches Go")
 	ci.Remove(dir)
-	ci.Pass("dice v2: 64 PCG seeds, ChaCha8, range API and permutation match Go")
+	ci.Pass("dice v2: PCG and ChaCha8 streams and every RandV2 method match Go (normal tails within 1e-15)")
 }
