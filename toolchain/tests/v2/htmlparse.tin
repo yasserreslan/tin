@@ -1,0 +1,63 @@
+package main
+
+import "html"
+import "say"
+import "twine"
+
+// show prints the tree under node n, two spaces per level, as tools/ci/fixtures/html_parse_twin.tin does.
+fn show(d html.Document, n i64, depth i64) {
+	mut c = d.FirstChild(n)
+	for c != -1 {
+		let indent = twine.Repeat("  ", depth)
+		let typ = d.Type(c)
+		if typ == html.TextNode {
+			say.Line(indent + "\"" + d.Data(c) + "\"")
+		} else if typ == html.CommentNode {
+			say.Line(indent + "<!--" + d.Data(c) + "-->")
+		} else if typ == html.DoctypeNode {
+			mut line = indent + "<!DOCTYPE " + d.Data(c)
+			for a in d.Attrs(c) {
+				line += " " + a.Key + "=\"" + a.Val + "\""
+			}
+			say.Line(line + ">")
+		} else if typ == html.ElementNode {
+			mut name = d.Data(c)
+			if d.Namespace(c) != "" {
+				name = d.Namespace(c) + " " + d.Data(c)
+			}
+			say.Line(indent + "<" + name + ">")
+			for a in d.Attrs(c) {
+				mut key = a.Key
+				if a.Namespace != "" {
+					key = a.Namespace + ":" + a.Key
+				}
+				say.Line(indent + "  " + key + "=\"" + a.Val + "\"")
+			}
+			show(d, c, depth+1)
+		}
+		c = d.NextSibling(c)
+	}
+}
+
+// parse prints the tree of text, or the failure.
+fn parse(label str, text str) {
+	say.Line("==", label)
+	let tree = html.Parse(text) catch err {
+		say.Line("error", err)
+		return
+	}
+	say.Line("root type", tree.Type(tree.Root()))
+	show(tree, tree.Root(), 0)
+}
+
+fn main() {
+	parse("empty", "")
+	parse("doctype and implied elements", "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\"><title>t</title><p>a<b>b</p>c")
+	parse("formatting", "<b><p>one</b>two</p><a href=1><a href=2>both</a><font color=red><i>it</font>tail")
+	parse("table", "<table><tr><td><b>x<td>y</b></table><b>z")
+	parse("select", "<select><option>a<option selected>b<optgroup label=g><option>c</optgroup></select>after")
+	parse("foreign", "<svg viewBox=\"0 0 1 1\"><title><b>t</b></title><path d=M0 xlink:href=u/></svg><math><mi><b>x</b></mi></math>")
+	parse("comments and whitespace", "<!-- top -->  \n<html><!-- in html --><head> <meta charset=utf-8></head>\n<body></body></html><!-- after -->")
+	parse("nested beyond 512", twine.Repeat("<div>", 600))
+	parse("raw text", "<script>if (a<b) x</script><style>p>a{{}}</style><textarea>\nt&amp;</textarea>")
+}

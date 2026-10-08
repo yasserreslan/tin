@@ -54,6 +54,34 @@ fn pages() []str {
 		`a & b &amp c &#; &#x; &#65 &#X41; &#x41; &#128; &#xD800; &#x110000; &#0;`,
 		`&ampx &notin; &NotNestedGreaterGreater; &not; &AMP &amp;amp; &lt&gt`,
 		`<a title="&lt;&eacute&eacute;=&amp;" b=&amp=c d='&notit;' e="&#x41;&#65">`,
+		`<table><tr><td>a<td>b<tr><th>c</table>after<table><caption>cap</caption><colgroup><col span=2><col></colgroup><tbody><tr><td>x</tbody><tfoot><tr><td>f</tfoot></table>`,
+		`<table><form><input type=hidden name=h><input name=v></form><tr><td><table><td>nested</table></table>`,
+		`<b><p>one</b>two</p><a href=1><a href=2>both</a><nobr>n1<nobr>n2</nobr></nobr><font color=red size=7><i>it</font>tail`,
+		`<p>a<div>b</div><p>c<h1>d<h2>e</h1><h3>f</h2><pre>
+line</pre><pre>
+x</pre><listing>l</listing><ul><li>a<li>b<ul><li>c</ul><li>d</ul><dl><dt>t<dd>d<dt>u</dl>`,
+		`<select><option>a<option selected>b<optgroup label=g><option>c</optgroup></select><select><select><option>x</select>after<datalist><option>y</datalist>`,
+		`<button>b1<button>b2</button><button>b3<p>para`,
+		`<html lang=en><head><title>t</title><head><meta charset=x><body class=a><body id=b><p>x</body></body>after`,
+		`<body><p>x</p></body><p>after body</p></html><!-- after html --> trailing`,
+		`<svg><p>breakout<b>bold</svg><svg><foreignObject><div>html in svg</div></foreignObject><desc><p>d</p></desc><title><b>t</b></title></svg>`,
+		`<math><mi><b>mi bold</b></mi><annotation-xml encoding="text/html"><p>html</p></annotation-xml><mo>&lt;</mo></math><svg><font color=c><circle r=1/></svg>`,
+		`<svg viewBox="1" XLINK:HREF="x" xml:lang=en definitionurl=z><linearGradient gradientUnits=u><clipPath id=c></clipPath></linearGradient><textPath>t</textPath></svg>`,
+		`<math definitionURL="d"><mrow><mi>x</mi></mrow></math><svg><![CDATA[c]]><!--c--></svg>`,
+		`<noscript><p>noscript</p></noscript><textarea>
+text</textarea><textarea>
+</textarea><xmp>
+<b>x</xmp><plaintext>after</plaintext>`,
+		`<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><p>quirks?</p>`,
+		`<!DOCTYPE html SYSTEM "about:legacy-compat"><p>x</p>`,
+		`<!doctype HTML public="x"><title>x</title><?php echo 1 ?><p>after pi`,
+		`<!DOCTYPE foo><p><img src=a alt=b><br><hr><input><wbr><area><embed><source><track><param>text`,
+		`<a><b><a><i><p>deep</a>misnest</i></b>x</a>`,
+		`<p><b><i><u>1</p>2</i>3</b>4`,
+		`<table><tr><td><b>x<td>y</b></table><b>z`,
+		`<frameset-like><div>not frameset</div></frameset-like>`,
+		twine.Repeat("<div>", 600),
+		twine.Repeat("<div>", 300) + "tail",
 		"CR\r\nLF\nlone\rCR\r\rend\r\n<p>\r\n</p>",
 		"nul\x00byte <a\x00b=\x00c>\x00</a\x00>",
 		`<DIV CLASS="X" Class="dup" id=Q ID=R><P>Upper</P></DIV>`,
@@ -78,7 +106,7 @@ fn pages() []str {
 
 // fragments are the pieces the generated documents are built from.
 fn fragments() []str {
-	return []str{"<", ">", "</", "/>", "<!--", "-->", "--!>", "<!", "<!DOCTYPE ", "<![CDATA[", "]]>", "<?", "?>", "=", "\"", "'", " ", "\n", "\r", "\t", "\f", "\x00", "&", "&amp;", "&amp", "&lt;", "&#", "&#x", ";", "a", "b", "Z", "p", "div", "script", "SCRIPT", "style", "title", "textarea", "xmp", "iframe", "plaintext", "noscript", "</script", "</title", "<!--<script>", "</scr", "-", "!", "x=", "href", "svg", "<svg>", "<math>", "é", "\xff", "&notin;", "&#128;", "&#xD800;", "<a ", "</a>"}
+	return []str{"<", ">", "</", "/>", "<!--", "-->", "--!>", "<!", "<!DOCTYPE ", "<![CDATA[", "]]>", "<?", "?>", "=", "\"", "'", " ", "\n", "\r", "\t", "\f", "\x00", "&", "&amp;", "&amp", "&lt;", "&#", "&#x", ";", "a", "b", "Z", "p", "div", "script", "SCRIPT", "style", "title", "textarea", "xmp", "iframe", "plaintext", "noscript", "</script", "</title", "<!--<script>", "</scr", "-", "!", "x=", "href", "svg", "<svg>", "<math>", "é", "\xff", "&notin;", "&#128;", "&#xD800;", "<a ", "</a>", "<table>", "<tr>", "<td>", "<th>", "<tbody>", "</table>", "</td>", "</tr>", "<caption>", "<colgroup>", "<col>", "<select>", "<option>", "</select>", "<li>", "<ul>", "</ul>", "<p>", "</p>", "<b>", "</b>", "<i>", "</i>", "<em>", "<h1>", "</h1>", "<h2>", "<div>", "</div>", "<pre>", "<body>", "<html>", "</body>", "<head>", "</head>", "<br>", "<img src=x>", "<input type=hidden>", "<form>", "</form>", "<button>", "<dd>", "<dt>", "<nobr>", "<math><mi>", "<foreignObject>", "<annotation-xml encoding=text/html>", "<font color=red>", "</font>", "<textarea>", "<title>", "<style>", "<svg><p>", "</svg>", "<li value=1>", "<a href=q>", "</a >", "<dl>", "</dl>", "<hr>", "<!DOCTYPE html>", "<meta charset=x>", "<link>", "<noscript>", "</noscript>"}
 }
 
 // generated returns n documents of up to 40 pieces, a piece being a fragment or a random byte.
@@ -143,16 +171,28 @@ fn main() {
 	ci.BuildTin("tools/ci/fixtures/html_twin.tin", tin, "", []str{})
 	let goexe = ci.Join(work, "html-go")
 	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "."}, ci.Join(ci.Root(), "bench/ref/html"), 300), "go build bench/ref/html")
+	let parseTin = ci.Join(work, "html-parse-tin")
+	ci.BuildTin("tools/ci/fixtures/html_parse_twin.tin", parseTin, "", []str{})
+	let parseGo = ci.Join(work, "html-parse-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", parseGo, "./parse"}, ci.Join(ci.Root(), "bench/ref/html"), 300), "go build bench/ref/html/parse")
 	let pageCount = len(pages())
 	let input = frame(append(append(pages(), generated(800)...), references()...))
 	let want = run(goexe, input)
 	let got = run(tin, input)
+	compareLines("html", want, got)
+	let wantTree = run(parseGo, input)
+	let gotTree = run(parseTin, input)
+	compareLines("html parse", wantTree, gotTree)
+	ci.Remove(work)
+	ci.Pass("html: " + mint.Itoa(len(want)) + " token lines and " + mint.Itoa(len(wantTree)) + " tree lines over " + mint.Itoa(pageCount) + " pages, 800 generated documents and the references of the table match golang.org/x/net/html")
+}
+
+// compareLines checks that got equals want, line by line.
+fn compareLines(name str, want []str, got []str) {
 	mut i = 0
 	for i < len(want) && i < len(got) {
-		ci.Check(want[i] == got[i], "html line " + mint.Itoa(i+1) + ": Go " + want[i] + ", Tin " + got[i])
+		ci.Check(want[i] == got[i], name + " line " + mint.Itoa(i+1) + ": Go " + want[i] + ", Tin " + got[i])
 		i += 1
 	}
-	ci.Check(len(got) == len(want), "html: " + mint.Itoa(len(got)) + " lines against " + mint.Itoa(len(want)))
-	ci.Remove(work)
-	ci.Pass("html: " + mint.Itoa(len(want)) + " token lines over " + mint.Itoa(pageCount) + " pages, 800 generated documents and the references of the table match golang.org/x/net/html")
+	ci.Check(len(got) == len(want), name + ": " + mint.Itoa(len(got)) + " lines against " + mint.Itoa(len(want)))
 }

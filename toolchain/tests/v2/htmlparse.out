@@ -1,0 +1,114 @@
+== empty
+root type 2
+<html>
+  <head>
+  <body>
+== doctype and implied elements
+root type 2
+<!DOCTYPE html public="-//W3C//DTD HTML 4.01//EN">
+<html>
+  <head>
+    <title>
+      "t"
+  <body>
+    <p>
+      "a"
+      <b>
+        "b"
+    <b>
+      "c"
+== formatting
+root type 2
+<html>
+  <head>
+  <body>
+    <b>
+    <p>
+      <b>
+        "one"
+      "two"
+    <a>
+      href="1"
+    <a>
+      href="2"
+      "both"
+    <font>
+      color="red"
+      <i>
+        "it"
+    <i>
+      "tail"
+== table
+root type 2
+<html>
+  <head>
+  <body>
+    <table>
+      <tbody>
+        <tr>
+          <td>
+            <b>
+              "x"
+          <td>
+            "y"
+    <b>
+      "z"
+== select
+root type 2
+<html>
+  <head>
+  <body>
+    <select>
+      <option>
+        "a"
+      <option>
+        selected=""
+        "b"
+      <optgroup>
+        label="g"
+        <option>
+          "c"
+    "after"
+== foreign
+root type 2
+<html>
+  <head>
+  <body>
+    <svg svg>
+      viewBox="0 0 1 1"
+      <svg title>
+        <b>
+          "t"
+      <svg path>
+        d="M0"
+        xlink:href="u/"
+    <math math>
+      <math mi>
+        <b>
+          "x"
+== comments and whitespace
+root type 2
+<!-- top -->
+<html>
+  <!-- in html -->
+  <head>
+    " "
+    <meta>
+      charset="utf-8"
+  "
+"
+  <body>
+<!-- after -->
+== nested beyond 512
+error html: open stack of elements exceeds 512 nodes
+== raw text
+root type 2
+<html>
+  <head>
+    <script>
+      "if (a<b) x"
+    <style>
+      "p>a{}"
+  <body>
+    <textarea>
+      "t&"

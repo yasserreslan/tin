@@ -1,0 +1,98 @@
+package main
+
+import "html"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// The html parse twin, Tin side: read documents from stdin (framed as in tools/ci/fixtures/html_twin.tin) and print the tree that
+// html.Parse builds, one node per line, indented two spaces per level, in the same format as bench/ref/html/parse (Go's
+// golang.org/x/net/html). A document that fails to parse prints "error".
+
+// enc writes s with printable ASCII (and no backslash) as is and every other byte as \xHH.
+fn enc(s str) str {
+	let hex = "0123456789abcdef"
+	mut out = twine.NewBuilder(len(s) + 8)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 0x20 && c <= 0x7e && c != '\\' {
+			out.Byte(c)
+		} else {
+			out.Str("\\x")
+			out.Byte(hex[c>>4])
+			out.Byte(hex[c&15])
+		}
+	}
+	return out.String()
+}
+
+// walk prints the children of node n, one level deeper than depth.
+fn walk(d html.Document, n i64, depth i64) {
+	mut c = d.FirstChild(n)
+	for c != -1 {
+		let indent = twine.Repeat("  ", depth)
+		let typ = d.Type(c)
+		if typ == html.TextNode {
+			say.Line(indent + "\"" + enc(d.Data(c)) + "\"")
+		} else if typ == html.CommentNode {
+			say.Line(indent + "<!--" + enc(d.Data(c)) + "-->")
+		} else if typ == html.DoctypeNode {
+			mut line = indent + "<!DOCTYPE " + enc(d.Data(c))
+			for a in d.Attrs(c) {
+				line += " " + a.Key + "=\"" + enc(a.Val) + "\""
+			}
+			say.Line(line + ">")
+		} else if typ == html.ElementNode {
+			mut name = d.Data(c)
+			if d.Namespace(c) != "" {
+				name = d.Namespace(c) + " " + d.Data(c)
+			}
+			say.Line(indent + "<" + enc(name) + ">")
+			for a in d.Attrs(c) {
+				mut key = a.Key
+				if a.Namespace != "" {
+					key = a.Namespace + ":" + a.Key
+				}
+				say.Line(indent + "  " + enc(key) + "=\"" + enc(a.Val) + "\"")
+			}
+			walk(d, c, depth+1)
+		}
+		c = d.NextSibling(c)
+	}
+}
+
+fn main() {
+	let input = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut pos = 0
+	mut doc = 0
+	mut total = 0
+	for pos < len(input) {
+		let nl = twine.IndexByte(input[pos:], '\n')
+		let n = mint.Atoi(input[pos:pos+nl]) catch _ {
+			say.Line("frame: bad length")
+			return
+		}
+		pos += nl + 1
+		let text = input[pos:pos+n]
+		pos += n
+		say.Line("doc", doc)
+		total += arena {
+			parseOne(text)
+		}
+		doc += 1
+	}
+}
+
+// parseOne prints the tree of one document (or "error") and returns 0; it runs in an arena, so each document's nodes are freed.
+fn parseOne(text str) i64 {
+	let tree = html.Parse(text) catch _ {
+		say.Line("error")
+		return 0
+	}
+	walk(tree, tree.Root(), 0)
+	return 0
+}
