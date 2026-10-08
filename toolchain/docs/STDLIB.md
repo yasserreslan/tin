@@ -87,7 +87,9 @@ Package argo writes JSON. argo.Put(b, v) appends v to the []u8 buffer b; the com
 
 ## io
 
-Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or Seeker by having the methods, with no declaration, and compositions like ReadWriteCloser by satisfying every listed shape. The helpers (Copy, ReadAll, Pipe, MultiWriter, ...) and EOF as a sentinel fault land with the io port (roadmap #141); the byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...) and Go's ReaderFrom and WriterTo (which need dyn) are not declared yet. Reading, writing, closing and seeking change the stream, so those methods are mut (#644): a type's method may take its receiver mut, and a call through a dyn value needs a mut one (w mut dyn io.Writer).
+Package io declares the streaming shapes: a type satisfies Reader, Writer, Closer or Seeker by having the methods, with no declaration, and compositions like ReadWriteCloser by satisfying every listed shape. The helpers read and write over any reader or writer: ReadAll, ReadFull, ReadAtLeast, Copy, CopyN, CopyBuffer, LimitReader, TeeReader, MultiReader, MultiWriter, WriteString and Discard. A stream ends when Read returns 0 (flume's and ledger's readers do), not with a sentinel fault.
+
+The byte, rune and string shapes (ByteReader, RuneReader, StringWriter, ...), Go's ReaderFrom and WriterTo, and Pipe and the file system interface (io/fs) are the next steps of #736. Reading, writing, closing and seeking change the stream, so those methods are mut (#644): a type's method may take its receiver mut, and a call through a dyn value needs a mut one (w mut dyn io.Writer).
 
 - `shape Reader { mut Read(buf mut []u8) !i64 }`: Reader is anything with Read: it fills buf and returns how many bytes it wrote.
 - `shape Writer { mut Write(data []u8) !i64 }`: Writer is anything with Write: it takes data and returns how many bytes it took.
@@ -103,6 +105,29 @@ Package io declares the streaming shapes: a type satisfies Reader, Writer, Close
 - `shape ReadWriteCloser`: ReadWriteCloser reads, writes and closes.
 - `shape ReadSeeker`: ReadSeeker reads and seeks.
 - `shape ReadWriteSeeker`: ReadWriteSeeker reads, writes and seeks.
+- `ReadAll[R Reader](src R) !str`: ReadAll reads until the stream ends and returns what it read.
+- `ReadFull[R Reader](src R, buf mut []u8) !i64`: ReadFull reads exactly len(buf) bytes; a stream that ends first fails with "unexpected end of stream". A zero-length buffer reads nothing.
+- `ReadAtLeast[R Reader](src R, buf mut []u8, min i64) !i64`: ReadAtLeast reads at least min bytes (or until the stream ends) into buf; fewer than min bytes is the "unexpected end of stream" fault.
+- `Copy[W Writer, R Reader](dst W, src R) !i64`: Copy reads from src and writes every chunk to dst until the stream ends, and returns how many bytes it copied. The scratch buffer is 32 KiB, as Go's is.
+- `CopyBuffer[W Writer, R Reader](dst W, src R, buf mut []u8) !i64`: CopyBuffer is Copy with the caller's scratch buffer, which must not be empty.
+- `CopyN[W Writer, R Reader](dst W, src R, n i64) !i64`: CopyN copies exactly n bytes; fewer means the stream ended first, which is the "unexpected end of stream" fault.
+- `WriteString[W Writer](dst W, s str) !i64`: WriteString writes s to dst.
+- `type LimitedReader[R Reader] struct`: LimitedReader reads at most n bytes from r; it is what LimitReader returns.
+- `LimitReader[R Reader](src R, n i64) LimitedReader[R]`: LimitReader returns a reader that yields at most n bytes of src and then ends.
+- `(l LimitedReader[R]) Left() i64`: Left returns how many bytes the limit has left.
+- `(l mut LimitedReader[R]) Read(buf mut []u8) !i64`: Read reads at most what the limit has left; it returns 0 once the limit is reached.
+- `type TeeReader[R Reader, W Writer] struct`: TeeReader reads from r and writes what it read to w, like Go's TeeReader.
+- `NewTeeReader[R Reader, W Writer](src R, dst W) TeeReader[R, W]`: NewTeeReader returns a reader that writes everything it reads from src to dst.
+- `(t mut TeeReader[R, W]) Read(buf mut []u8) !i64`: Read reads from the underlying reader and writes the same bytes to the tee.
+- `type MultiReader struct`: MultiReader reads several readers in turn, as one stream; it is what NewMultiReader returns and takes dyn values, so the readers may have different types.
+- `NewMultiReader(rs []dyn Reader) MultiReader`: NewMultiReader reads the readers in order.
+- `(m mut MultiReader) Read(buf mut []u8) !i64`: Read reads from the current reader; when one ends, the next is used, and the last one's end is the stream's end.
+- `type MultiWriter struct`: MultiWriter writes to every writer in turn; it is what NewMultiWriter returns and takes dyn values, so the writers may have different types.
+- `NewMultiWriter(ws []dyn Writer) MultiWriter`: NewMultiWriter writes each chunk to every writer, and fails when one takes less than all of it.
+- `(m mut MultiWriter) Write(data []u8) !i64`: Write writes data to every writer.
+- `type DiscardWriter struct{}`: DiscardWriter is a writer that throws everything away, like Go's io.Discard.
+- `Discard() DiscardWriter`: Discard returns the writer that throws everything away.
+- `(d mut DiscardWriter) Write(data []u8) !i64`: Write takes data and reports all of it written.
 
 ## anvil
 

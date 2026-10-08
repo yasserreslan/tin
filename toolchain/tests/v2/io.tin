@@ -1,0 +1,166 @@
+package main
+
+// io: the helpers over any reader and writer — ReadAll, ReadFull, ReadAtLeast, Copy, CopyN,
+// CopyBuffer, LimitReader, TeeReader, MultiReader, MultiWriter, WriteString and Discard. The
+// stream ends when Read returns 0, and a stream that ends early is the "unexpected end of
+// stream" fault.
+
+import "say"
+import "io"
+import "fault"
+
+// chunked is a reader that returns its chunks, and can be told to return one byte at a time.
+type chunked struct {
+	chunks []str
+	at     i64
+	one    bool
+}
+
+fn (c mut chunked) Read(buf mut []u8) !i64 {
+	if c.at >= i64(len(c.chunks)) {
+		return 0
+	}
+	let chunk = c.chunks[c.at]
+	mut n = i64(len(chunk))
+	if c.one {
+		n = 1
+	}
+	if n > i64(len(buf)) {
+		n = i64(len(buf))
+	}
+	mut i = i64(0)
+	for i < n {
+		buf[i] = chunk[i]
+		i += 1
+	}
+	if n == i64(len(chunk)) {
+		c.at += 1
+	} else {
+		c.chunks[c.at] = chunk[n:i64(len(chunk))]
+	}
+	return n
+}
+
+// sink is a writer that keeps what it is given.
+type sink struct {
+	b []u8
+}
+
+fn (s mut sink) Write(data []u8) !i64 {
+	s.b = append(s.b, data...)
+	return i64(len(data))
+}
+
+fn main() {
+	// ReadAll reads every chunk, one byte at a time too.
+	mut r = chunked{chunks: []str{"hello ", "world", "!"}, at: 0, one: false}
+	let all = io.ReadAll(r) catch err {
+		say.Line("readall failed", err)
+		return
+	}
+	mut r1 = chunked{chunks: []str{"hello ", "world", "!"}, at: 0, one: true}
+	let all1 = io.ReadAll(r1) catch err {
+		say.Line("readall failed", err)
+		return
+	}
+	say.Line("readall", all, all1)
+
+	// Copy moves every byte and reports the count; the buffer size does not matter.
+	mut r2 = chunked{chunks: []str{"hello ", "world", "!"}, at: 0, one: true}
+	mut d = sink{}
+	let n = io.Copy(d, r2) catch err {
+		say.Line("copy failed", err)
+		return
+	}
+	say.Line("copy", n, stringOf(d.b))
+
+	// ReadFull wants the whole buffer, ReadAtLeast at least min.
+	mut r3 = chunked{chunks: []str{"abc", "def"}, at: 0, one: false}
+	mut buf = make([]u8, 6)
+	let full = io.ReadFull(r3, mut buf) catch err {
+		say.Line("readfull failed", err)
+		return
+	}
+	say.Line("readfull", full, stringOf(buf))
+	mut r4 = chunked{chunks: []str{"abc"}, at: 0, one: false}
+	mut b2 = make([]u8, 6)
+	mut shortMsg = ""
+	let short = io.ReadFull(r4, mut b2) catch err {
+		shortMsg = say.Fmt("%s", err)
+		-1
+	}
+	say.Line("readfull short", short, shortMsg)
+	mut r5 = chunked{chunks: []str{"abc", "def"}, at: 0, one: true}
+	mut b3 = make([]u8, 6)
+	let least = io.ReadAtLeast(r5, mut b3, 4) catch err {
+		say.Line("readatleast failed", err)
+		return
+	}
+	say.Line("readatleast", least, stringOf(b3[0:least]))
+
+	// LimitReader yields at most n bytes; CopyN wants exactly n and fails when the stream is
+	// shorter.
+	mut r6 = chunked{chunks: []str{"abcdefgh"}, at: 0, one: false}
+	let limited = io.LimitReader(r6, 3)
+	let first = io.ReadAll(limited) catch err {
+		say.Line("limit failed", err)
+		return
+	}
+	say.Line("limit", first)
+	mut r7 = chunked{chunks: []str{"abcdefgh"}, at: 0, one: false}
+	mut d2 = sink{}
+	let cn = io.CopyN(d2, r7, 5) catch err {
+		say.Line("copyn failed", err)
+		return
+	}
+	say.Line("copyn", cn, stringOf(d2.b))
+	mut r8 = chunked{chunks: []str{"abc"}, at: 0, one: false}
+	mut d3 = sink{}
+	let cnf = io.CopyN(d3, r8, 5) catch _ {
+		say.Line("copyn fault", stringOf(d3.b))
+		-1
+	}
+	say.Line("copyn short", cnf)
+
+	// TeeReader writes what it read; MultiReader chains readers; MultiWriter fans out;
+	// WriteString and Discard are the small ones.
+	mut r9 = chunked{chunks: []str{"ab", "cd"}, at: 0, one: false}
+	mut tee = sink{}
+	let tr = io.NewTeeReader(r9, tee)
+	let teed = io.ReadAll(tr) catch err {
+		say.Line("tee failed", err)
+		return
+	}
+	say.Line("tee", teed, stringOf(tee.b))
+	mut r10 = chunked{chunks: []str{"one"}, at: 0, one: false}
+	mut r11 = chunked{chunks: []str{"two"}, at: 0, one: false}
+	let multi = io.NewMultiReader([]dyn io.Reader{r10, r11})
+	let both = io.ReadAll(multi) catch err {
+		say.Line("multi failed", err)
+		return
+	}
+	say.Line("multireader", both)
+	mut d4 = sink{}
+	mut d5 = sink{}
+	let mw = io.NewMultiWriter([]dyn io.Writer{d4, d5})
+	let written = mw.Write([]u8{'x', 'y'}) catch err {
+		say.Line("multiwriter failed", err)
+		return
+	}
+	say.Line("multiwriter", written, stringOf(d4.b), stringOf(d5.b))
+	let ws = io.WriteString(d5, "z") catch err {
+		say.Line("writestring failed", err)
+		return
+	}
+	mut disc = io.Discard()
+	let discarded = disc.Write([]u8{'q'}) catch err {
+		say.Line("discard failed", err)
+		return
+	}
+	say.Line("small", ws, stringOf(d5.b), discarded)
+}
+
+// stringOf renders bytes as a string.
+fn stringOf(b []u8) str {
+	return str(b)
+}
