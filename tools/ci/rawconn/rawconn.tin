@@ -31,11 +31,11 @@ fn (c mut Conn) Send(data str) {
 	}
 }
 
-// poll waits up to seconds for data: 1 when some came (it is in Buf), 0 at the end of the stream (or a reset), -1 at the timeout.
-fn (c mut Conn) poll(seconds i64) i64 {
+// poll waits up to ns nanoseconds for data: 1 when some came (it is in Buf), 0 at the end of the stream (or a reset), -1 at the timeout.
+fn (c mut Conn) poll(ns i64) i64 {
 	let reader = c.C
 	mut buf = []u8{}
-	let got = within seconds * 1000000000 {
+	let got = within ns {
 		try reader.Read(mut buf, 1048576)
 	} catch err {
 		mut r = 0
@@ -55,7 +55,7 @@ fn (c mut Conn) poll(seconds i64) i64 {
 }
 
 fn (c mut Conn) fill() {
-	let r = c.poll(c.Seconds)
+	let r = c.poll(c.Seconds * 1000000000)
 	if r == 0 {
 		ci.Fail("the connection ended early (read so far: " + mint.Itoa(len(c.Buf)) + " bytes)")
 	}
@@ -146,7 +146,7 @@ fn (c mut Conn) Chunked() []str {
 // Rest is everything up to the end of the connection.
 fn (c mut Conn) Rest() str {
 	for {
-		let r = c.poll(c.Seconds)
+		let r = c.poll(c.Seconds * 1000000000)
 		if r == 0 {
 			break
 		}
@@ -161,7 +161,7 @@ fn (c mut Conn) Rest() str {
 
 // Closed is whether the server closes the connection within seconds (nothing more to read).
 fn (c mut Conn) Closed(seconds i64) bool {
-	return c.poll(seconds) == 0
+	return c.poll(seconds * 1000000000) == 0
 }
 
 // Body is the next response's body of its Content-Length.
@@ -196,4 +196,41 @@ fn Pattern(n i64, start i64) str {
 fn Has(headers map[str]str, name str) bool {
 	let (_, ok) = headers[name]
 	return ok
+}
+
+// Wait waits up to ms milliseconds for data: 1 when some came (it is in Buf), 0 at the end of the stream (or a reset), -1 at the timeout.
+fn (c mut Conn) Wait(ms i64) i64 {
+	return c.poll(ms * 1000000)
+}
+
+// TrySend writes the bytes and reports whether the connection took them (a server that refused the request may have closed it).
+fn (c mut Conn) TrySend(data str) bool {
+	c.C.Write(data) catch _ {
+		return false
+	}
+	return true
+}
+
+// HalfClose says this end sends no more; it still reads.
+fn (c mut Conn) HalfClose() {
+	c.C.CloseWrite()
+}
+
+// Drain reads until the end of the connection or a pause of ms milliseconds without data; it returns what came and whether the
+// connection ended.
+fn (c mut Conn) Drain(ms i64) (str, bool) {
+	for {
+		let r = c.Wait(ms)
+		if r == 0 {
+			let out = c.Buf
+			c.Buf = ""
+			return out, true
+		}
+		if r < 0 {
+			let out = c.Buf
+			c.Buf = ""
+			return out, false
+		}
+	}
+	return "", false
 }

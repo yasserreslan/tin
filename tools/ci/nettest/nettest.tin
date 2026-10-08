@@ -436,3 +436,23 @@ fn StartStdin(exe str, stdinFile str, set []str, log str, port i64) Server {
 	ci.Fail("the shell did not report the process of " + exe)
 	panic("unreachable")
 }
+
+// CpuSeconds is the CPU time (user and system) a process has used so far, from ps.
+fn CpuSeconds(pid i64) f64 {
+	let o = ci.Exec([]str{"ps", "-o", "time=", "-p", mint.Itoa(pid)}, "", 5)
+	mut text = twine.TrimSpace(o.Stdout)
+	mut days = 0.0
+	let dash = twine.IndexByte(text, '-')
+	if dash >= 0 {
+		days = f64(ci.Num(text[0:dash]))
+		text = text[dash + 1:]
+	}
+	mut secs = 0.0
+	for piece in twine.Split(text, ":") {
+		let part = mint.ParseFloat(piece) catch _ {
+			0.0
+		}
+		secs = secs * 60.0 + part
+	}
+	return secs + days * 86400.0
+}

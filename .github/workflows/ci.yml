@@ -135,7 +135,7 @@ jobs:
       - name: Request tasks (waits overlap, deadlines, pipelined order)
         run: sh tools/ci/tin.sh task_check
       - name: Router (parameters, middleware, 404/405 and waits under concurrent requests)
-        run: python3 tools/ci/router_check.py
+        run: sh tools/ci/tin.sh router_check
       - name: Runtime lifetimes (formatting, helper deadlines, WebSocket memory)
         run: sh tools/ci/tin.sh lifetime_check
       - name: Guards (defers and cleanup callbacks before the panic's fault)

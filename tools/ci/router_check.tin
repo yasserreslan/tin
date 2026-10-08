@@ -1,0 +1,961 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./rawconn"
+import "dice"
+import "mint"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// A routed anvil server (tools/ci/fixtures/router.tin) under concurrent requests: every response carries its own path parameter and
+// middleware trace although middleware and handlers wait, on one core and on two; waits through the router overlap on one core; 404,
+// 405 with Allow, HEAD, bodies and pipelined order work through the router; and a routed handler takes WebSocket connections.
+
+mut failures = []str{}
+
+fn flag(message str) {
+	failures = append(failures, message)
+}
+
+fn count(text str, part str) i64 {
+	return len(twine.Split(text, part)) - 1
+}
+
+fn seconds(since i64) f64 {
+	return f64(tide.Now() - since) / 1000000000.0
+}
+
+fn secondsText(v f64, places i64) str {
+	mut scale = 1
+	for i in 0..places {
+		scale = scale * 10
+	}
+	let n = i64(v * f64(scale) + 0.5)
+	if places == 0 {
+		return mint.Itoa(n)
+	}
+	mut frac = mint.Itoa(n % scale)
+	for len(frac) < places {
+		frac = "0" + frac
+	}
+	return mint.Itoa(n / scale) + "." + frac
+}
+
+// Resp is one response.
+type Resp struct {
+	Status i64
+	H map[str]str
+	Body str
+}
+
+fn bodyOf(c mut rawconn.Conn, h map[str]str) str {
+	if rawconn.Has(h, "content-length") {
+		return c.Body(h)
+	}
+	return ""
+}
+
+fn readResp(c mut rawconn.Conn) Resp {
+	let (status, h) = c.Head()
+	return Resp{Status: status, H: h, Body: bodyOf(mut c, h)}
+}
+
+// request sends one request with a body and Connection: close and reads the response (a HEAD response has no body).
+fn request(port i64, method str, path str, body str) Resp {
+	mut c = rawconn.Open(port, 10)
+	c.Send(method + " " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + mint.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+	let (status, h) = c.Head()
+	mut rest = ""
+	if method == "HEAD" {
+		rest = c.Rest()
+	} else {
+		rest = bodyOf(mut c, h)
+	}
+	c.Close()
+	return Resp{Status: status, H: h, Body: rest}
+}
+
+fn startServer(exe str, cores i64, out str, name str, extra []str) nettest.Server {
+	let port = nettest.Port()
+	mut env = []str{"TIN_CORES=" + mint.Itoa(cores)}
+	for e in extra {
+		env = append(env, e)
+	}
+	let server = nettest.StartCoded(exe, []str{}, env, ci.Join(out, name + ".log"), port)
+	server.Ready(10)
+	return server
+}
+
+// mixedLoad: keep-alive clients send interleaved routes with random waits in middleware and handlers; each answer must name its own id
+// and the middleware that ran. Every connection has one request out at a time; a wave sends one on each, then reads every answer.
+fn mixedLoad(port i64) {
+	let threads = 48
+	let per = 25
+	mut conns = []rawconn.Conn{}
+	for k in 0..threads {
+		conns = append(conns, rawconn.Open(port, 10))
+	}
+	mut errors = []str{}
+	let t0 = tide.Now()
+	for i in 0..per {
+		mut paths = []str{}
+		mut wants = []str{}
+		for k in 0..threads {
+			let n = dice.Range(0, 1000000)
+			mut path = ""
+			mut want = ""
+			if i % 3 == 2 {
+				path = "/api/items/" + mint.Itoa(n) + "?mw=" + mint.Itoa(dice.Range(0, 8)) + "&ms=" + mint.Itoa(dice.Range(0, 8))
+				want = "item " + mint.Itoa(n) + " stamp>tag>api"
+			} else {
+				path = "/users/" + mint.Itoa(n) + "?ms=" + mint.Itoa(dice.Range(0, 12))
+				want = "user " + mint.Itoa(n) + " stamp>tag /users/{{id}}"
+			}
+			paths = append(paths, path)
+			wants = append(wants, want)
+			mut c = conns[k]
+			c.Send("GET " + path + " HTTP/1.1\r\nHost: x\r\n\r\n")
+			conns[k] = c
+		}
+		for k in 0..threads {
+			mut c = conns[k]
+			let r = readResp(mut c)
+			conns[k] = c
+			if r.Status != 200 || r.Body != wants[k] || r.H["x-status"] != "200" {
+				errors = append(errors, paths[k] + " -> " + mint.Itoa(r.Status) + " " + r.Body + " " + r.H["x-status"])
+			}
+		}
+	}
+	for k in 0..threads {
+		mut c = conns[k]
+		c.Close()
+	}
+	say.Line(mint.Itoa(threads * per) + " routed requests from " + mint.Itoa(threads) + " connections in " + secondsText(seconds(t0), 2) + " s, " + mint.Itoa(len(errors)) + " wrong")
+	if len(errors) > 0 {
+		flag("mixed load: " + mint.Itoa(len(errors)) + " wrong answers, first " + errors[0])
+	}
+}
+
+// overlap: on one core, requests that wait in a routed handler or in middleware do not hold up others.
+fn overlap(port i64) {
+	let names = []str{"handler", "middleware"}
+	let paths = []str{"/users/1?ms=300", "/api/items/1?mw=300"}
+	for p in 0..2 {
+		mut slow = []wire.Conn{}
+		let t0 = tide.Now()
+		for i in 0..8 {
+			slow = append(slow, nettest.Send(port, nettest.GetRequest(paths[p])))
+		}
+		tide.Sleep(50000000)
+		mut worst = 0.0
+		for i in 0..30 {
+			let f0 = tide.Now()
+			let r = request(port, "GET", "/fast", "")
+			let took = seconds(f0)
+			if took > worst {
+				worst = took
+			}
+			if r.Status != 200 || r.Body != "fast" {
+				flag("fast request behind " + names[p] + " waits: " + mint.Itoa(r.Status) + " " + r.Body)
+			}
+		}
+		for i in 0..8 {
+			mut c = slow[i]
+			let r = nettest.Finish(mut c, 20)
+			if r.Status != 200 {
+				flag("slow " + names[p] + " answer: " + mint.Itoa(r.Status))
+			}
+		}
+		let total = seconds(t0)
+		say.Line("8 x 300 ms waits in a routed " + names[p] + ": " + secondsText(total, 3) + " s; fast meanwhile: max " + secondsText(worst * 1000.0, 1) + " ms")
+		if total > 1.2 {
+			flag("waits in a routed " + names[p] + " did not overlap (" + secondsText(total, 3) + " s)")
+		}
+		if worst > 0.1 {
+			flag("a fast request waited " + secondsText(worst * 1000.0, 1) + " ms behind a routed " + names[p])
+		}
+	}
+}
+
+fn hasHeader(r Resp, name str, value str) bool {
+	return r.H[name] == value
+}
+
+// protocol: 404, 405 with Allow, HEAD, a body, a catch-all and pipelined order, through the router.
+fn protocol(port i64) {
+	let methods = []str{"GET", "GET", "POST", "DELETE", "POST", "GET", "GET"}
+	let paths = []str{"/nope", "/api/nope", "/users/7", "/users", "/users", "/files/a/b%20c.txt", "/users/"}
+	let statuses = []i64{404, 404, 405, 405, 201, 200, 404}
+	let bodies = []str{"Not Found", "Not Found", "Method Not Allowed", "Method Not Allowed", "created 5", "file a/b c.txt", "Not Found"}
+	let hnames = []str{"x-status", "x-status", "allow", "allow", "", "", ""}
+	let hvalues = []str{"404", "404", "GET, HEAD", "POST", "", "", ""}
+	for i in 0..len(methods) {
+		mut body = ""
+		if methods[i] == "POST" {
+			body = "hello"
+		}
+		let r = request(port, methods[i], paths[i], body)
+		mut bad = r.Status != statuses[i] || r.Body != bodies[i]
+		if len(hnames[i]) > 0 && r.H[hnames[i]] != hvalues[i] {
+			bad = true
+		}
+		if i == 2 && r.H["x-status"] != "405" {
+			bad = true
+		}
+		if bad {
+			flag(methods[i] + " " + paths[i] + " -> " + mint.Itoa(r.Status) + " " + r.Body)
+		}
+	}
+	let head = request(port, "HEAD", "/users/42", "")
+	if head.Status != 200 || head.H["content-length"] != mint.Itoa(len("user 42 stamp>tag /users/{{id}}")) || len(head.Body) > 0 {
+		flag("HEAD /users/42 -> " + mint.Itoa(head.Status) + " " + head.H["content-length"] + " " + head.Body)
+	}
+	mut c = rawconn.Open(port, 10)
+	c.Send("GET /users/1?ms=80 HTTP/1.1\r\nHost: x\r\n\r\nGET /fast HTTP/1.1\r\nHost: x\r\n\r\nGET /nope HTTP/1.1\r\nHost: x\r\n\r\nGET /api/items/2?mw=30 HTTP/1.1\r\nHost: x\r\n\r\nPOST /users/3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	mut order = []str{}
+	for i in 0..5 {
+		order = append(order, readResp(mut c).Body)
+	}
+	c.Close()
+	say.Line("pipelined through the router: " + twine.Join(order, ", "))
+	let want = []str{"user 1 stamp>tag /users/{{id}}", "fast", "Not Found", "item 2 stamp>tag>api", "Method Not Allowed"}
+	if twine.Join(order, "|") != twine.Join(want, "|") {
+		flag("pipelined order: " + twine.Join(order, "|"))
+	}
+}
+
+fn raw(port i64, data str) str {
+	return nettest.Raw(port, data, 10)
+}
+
+fn headLines(got str) []str {
+	return twine.Split(twine.Split(got, "\r\n\r\n")[0], "\r\n")
+}
+
+fn hasLine(lines []str, line str) bool {
+	for l in lines {
+		if l == line {
+			return true
+		}
+	}
+	return false
+}
+
+// responseHeaders (#172): header values from the request cannot add header lines or a body, framing headers set by a handler are
+// ignored, and 204/304 responses carry no body.
+fn responseHeaders(port i64) {
+	let before = len(failures)
+	let got = raw(port, "GET /echo-head?v=a%0d%0aSet-Cookie:%20x=1%0d%0a%0d%0aINJECTED&t=text/x%0d%0aX-Evil:%201 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	let split = twine.Index(got, "\r\n\r\n")
+	let body = got[split + 4:]
+	let lines = headLines(got)
+	mut names = []str{}
+	for i in 1..len(lines) {
+		names = append(names, twine.ToLower(twine.Split(lines[i], ":")[0]))
+	}
+	say.Line("response header names: " + twine.Join(names, " "))
+	mut contentLengths = 0
+	mut connections = 0
+	for n in names {
+		if n == "set-cookie" || n == "x-evil" || n == "bad name" {
+			flag("a header line was injected: " + got)
+		}
+		if n == "content-length" {
+			contentLengths += 1
+		}
+		if n == "connection" {
+			connections += 1
+		}
+	}
+	// The handler's "connection: close" is dropped; the one Connection line is anvil's, which says the connection closes because the
+	// request asked it to (RFC 9112 9.6).
+	if contentLengths != 1 || connections != 1 || !hasLine(lines, "Connection: close") || body != "echoed" {
+		flag("framing headers from the handler were sent: " + got)
+	}
+	if !hasLine(lines, "X-Echo: a  Set-Cookie: x=1    INJECTED") || !hasLine(lines, "Content-Type: text/x  X-Evil: 1") {
+		flag("CR/LF in values were not replaced by spaces: " + got)
+	}
+	// #748: every other control byte but HTAB, and DEL, becomes a space too.
+	let got2 = raw(port, "GET /echo-head?v=a%01b%7fc%09d&t=text/%1bx HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	let lines2 = headLines(got2)
+	if !hasLine(lines2, "X-Echo: a b c\td") || !hasLine(lines2, "Content-Type: text/ x") {
+		flag("control bytes in values were not replaced by spaces: " + got2)
+	}
+	for code in []str{"204", "304"} {
+		let g = raw(port, "GET /status/" + code + " HTTP/1.1\r\nHost: x\r\n\r\nGET /fast HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+		let at = twine.Index(g, "\r\n\r\n")
+		let first = g[0:at]
+		let rest = g[at + 4:]
+		if twine.Contains(twine.ToLower(first), "content-length") || !twine.HasPrefix(rest, "HTTP/1.1 200 OK\r\n") || !twine.HasSuffix(rest, "\r\n\r\nfast") {
+			flag(code + " response framing: " + g)
+		}
+	}
+	say.Line("204/304 without a body, header injection refused: " + boolText(len(failures) == before))
+}
+
+fn boolText(b bool) str {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// first sends the bytes and reads what comes back for up to waitMs without data; closed says the server closed the connection.
+fn first(port i64, data str, waitMs i64, shut bool) (str, bool) {
+	mut c = rawconn.Open(port, 10)
+	c.TrySend(data)
+	if shut {
+		c.HalfClose()
+	}
+	let (out, closed) = c.Drain(waitMs)
+	c.Close()
+	return out, closed
+}
+
+// conformance (#183): bare CR, NUL and control bytes are rejected, HTTP/1.1 needs one Host, absolute-form targets route on their path,
+// HTTP/1.0 keep-alive is echoed, "close" anywhere in Connection wins, and a client that half-closes still gets the answer to a request
+// that waits.
+fn conformance(port i64) {
+	let before = len(failures)
+	let h = "GET /fast HTTP/1.1\r\n"
+	let datas = []str{h + "Host: x\r\nX-A: a\rb\r\n\r\n", h + "Host: x\r\nX-A: a\x00b\r\n\r\n", "GET /fa\x01st HTTP/1.1\r\nHost: x\r\n\r\n", h + "\r\n", h + "Host: a\r\nHost: b\r\n\r\n", "GET /fast HTTP/1.x\r\nHost: x\r\n\r\n", "GET /fast HTTP/1.0\r\n\r\n", h + "Host: x\r\nX-Foo: a\x01b\x7f\r\nConnection: close\r\n\r\n", h + "Host: x\r\nX-Foo: a\x1bb\r\nConnection: close\r\n\r\n", h + "Host: x\r\nX-Foo: ab\x7f\r\nConnection: close\r\n\r\n", h + "Host: a b\r\nConnection: close\r\n\r\n", h + "Host: x/y\r\nConnection: close\r\n\r\n", h + "Host: x\r\nX-Foo: a\tb\r\nConnection: close\r\n\r\n", h + "Host: [::1]:8080\r\nConnection: close\r\n\r\n", "GET http://other.example/files/a/b?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"}
+	let wants = []str{"HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 200 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 400 ", "HTTP/1.1 200 ", "HTTP/1.1 200 ", "HTTP/1.1 200 "}
+	for i in 0..len(datas) {
+		let (got, _) = first(port, datas[i], 2000, false)
+		if !twine.HasPrefix(got, wants[i]) {
+			flag(mint.Itoa(i) + ": " + datas[i] + " -> " + got[0:min(len(got), 60)])
+		}
+	}
+	let (abs, _) = first(port, "GET http://other.example/files/a/b?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 2000, false)
+	if !twine.HasSuffix(abs, "file a/b") {
+		flag("absolute-form target: " + abs)
+	}
+	// #749: the authority of an absolute-form target replaces Host (RFC 9112 3.2.2); a bad one is 400.
+	let (evil, _) = first(port, "GET http://evil.example:8080/host HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 2000, false)
+	if !twine.HasSuffix(evil, "host evil.example:8080") {
+		flag("absolute-form authority as Host: " + evil)
+	}
+	let (origin, _) = first(port, "GET /host HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 2000, false)
+	if !twine.HasSuffix(origin, "host x") {
+		flag("Host of an origin-form target: " + origin)
+	}
+	for target in []str{"http:///host", "http://a<b/host", "https://a\"b/host"} {
+		let (bad, _) = first(port, "GET " + target + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 2000, false)
+		if !twine.HasPrefix(bad, "HTTP/1.1 400 ") {
+			flag("absolute-form target " + target + " with a bad authority: " + bad[0:min(len(bad), 60)])
+		}
+	}
+	let (old, oldClosed) = first(port, "GET /fast HTTP/1.0\r\nConnection: keep-alive\r\n\r\n", 500, false)
+	if !twine.Contains(old, "\r\nConnection: keep-alive\r\n") || oldClosed {
+		flag("HTTP/1.0 keep-alive: " + old + " closed=" + boolText(oldClosed))
+	}
+	let (both, bothClosed) = first(port, "GET /fast HTTP/1.1\r\nHost: x\r\nConnection: keep-alive, close\r\n\r\n", 2000, false)
+	if !twine.HasSuffix(both, "fast") || !bothClosed {
+		flag("Connection: keep-alive, close: " + both + " closed=" + boolText(bothClosed))
+	}
+	let (half, halfClosed) = first(port, "GET /users/9?ms=200 HTTP/1.1\r\nHost: x\r\n\r\n", 5000, true)
+	if !twine.HasPrefix(half, "HTTP/1.1 200 ") || !twine.HasSuffix(half, "user 9 stamp>tag /users/{{id}}") || !halfClosed {
+		flag("half-closed client with a waiting request: " + half + " closed=" + boolText(halfClosed))
+	}
+	// #103: a client that sends Expect: 100-continue waits for 100 Continue before its body.
+	mut c = rawconn.Open(port, 10)
+	c.Send("POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n")
+	mut interim = "(nothing within 1 s)"
+	if c.Wait(1000) == 1 {
+		interim = c.Buf
+		c.Buf = ""
+	}
+	c.Send("hello")
+	let (rest, _) = c.Drain(10000)
+	c.Close()
+	if interim != "HTTP/1.1 100 Continue\r\n\r\n" || !twine.HasPrefix(rest, "HTTP/1.1 201 ") || !twine.HasSuffix(rest, "created 5") {
+		flag("Expect: 100-continue: " + interim + " then " + rest)
+	}
+	say.Line("request conformance (#183): " + boolText(len(failures) == before))
+}
+
+// websockets: a routed handler upgrades: its path parameter, an echo, and 20 at once on the core.
+fn websockets(port i64) {
+	mut ok = true
+	mut conns = []nettest.Socket{}
+	for i in 0..20 {
+		conns = append(conns, nettest.Connect(port, "/ws/room" + mint.Itoa(i)))
+	}
+	for i in 0..20 {
+		mut c = conns[i]
+		let f = c.Recv()
+		ok = ok && f.Op == 1 && f.Data == "room room" + mint.Itoa(i)
+		conns[i] = c
+	}
+	for i in 0..20 {
+		mut c = conns[i]
+		c.Text("hi " + mint.Itoa(i))
+		conns[i] = c
+	}
+	for i in 0..20 {
+		mut c = conns[i]
+		let f = c.Recv()
+		ok = ok && f.Op == 1 && f.Data == "echo: hi " + mint.Itoa(i)
+		conns[i] = c
+	}
+	for i in 0..20 {
+		mut c = conns[i]
+		c.Send(8, "\x03\xe8", true, true)
+		let f = c.Recv()
+		ok = ok && f.Op == 8 && f.Data == "\x03\xe8"
+		c.Close()
+	}
+	say.Line("20 WebSocket connections through a routed handler: " + boolText(ok))
+	if !ok {
+		flag("websocket through the router")
+	}
+}
+
+// closedAfter waits for the server to end the connection: the seconds it took, or -1.0 when it did not within the limit.
+fn closedAfter(c mut rawconn.Conn, limitMs i64) f64 {
+	let t = tide.Now()
+	for {
+		let r = c.Wait(limitMs)
+		if r == 0 {
+			return seconds(t)
+		}
+		if r < 0 {
+			return -1.0
+		}
+	}
+	return -1.0
+}
+
+// limits (#173/#174): header, read and idle timeouts close stalled connections, a body over TIN_MAX_BODY gets 413, partial requests
+// past the per-core budget get 503, connections past TIN_MAX_CONNS are closed at accept, and a waiting handler outlives the header
+// timeout.
+fn limits(exe str, out str) {
+	let server = startServer(exe, 1, out, "limits", []str{"TIN_DEADLINE_MS=5000", "TIN_GRACE=1", "TIN_HEADER_TIMEOUT_MS=1000", "TIN_READ_TIMEOUT_MS=2000", "TIN_IDLE_TIMEOUT_MS=1500", "TIN_MAX_BODY=1000000", "TIN_MAX_BUFFERED=3000000", "TIN_MAX_CONNS=40", "TIN_POOL_WARN_MB=1"})
+	let port = server.Port
+	let names = []str{"partial headers", "nothing sent", "unfinished body"}
+	let datas = []str{"GET /fast HTTP/1.1\r\nHost: x\r\nX-a: ", "", "POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n0123456789"}
+	let lows = []f64{0.5, 0.5, 1.5}
+	let highs = []f64{4.0, 4.0, 5.0}
+	for i in 0..3 {
+		mut s = rawconn.Open(port, 10)
+		if len(datas[i]) > 0 {
+			s.Send(datas[i])
+		}
+		let took = closedAfter(mut s, i64(highs[i] + 2.0) * 1000)
+		s.Close()
+		say.Line(names[i] + ": closed after " + secondsText(took, 2) + " s")
+		if took < 0.0 || took < lows[i] || took > highs[i] {
+			flag(names[i] + ": closed after " + secondsText(took, 2) + " s, want " + secondsText(lows[i], 1) + " to " + secondsText(highs[i], 1))
+		}
+	}
+	mut idle = rawconn.Open(port, 10)
+	idle.Send("GET /fast HTTP/1.1\r\nHost: x\r\n\r\n")
+	tide.Sleep(200000000)
+	idle.Wait(1000)
+	idle.Buf = ""
+	let idleTook = closedAfter(mut idle, 6000)
+	idle.Close()
+	say.Line("idle keep-alive: closed after " + secondsText(idleTook, 2) + " s")
+	if idleTook < 1.0 || idleTook > 4.0 {
+		flag("idle keep-alive closed after " + secondsText(idleTook, 2) + " s")
+	}
+	mut big = rawconn.Open(port, 10)
+	big.Send("POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 2000000\r\n\r\n")
+	big.Wait(10000)
+	if !twine.HasPrefix(big.Buf, "HTTP/1.1 413 ") {
+		flag("body over TIN_MAX_BODY: " + big.Buf)
+	}
+	big.Close()
+	// A client still sending the body of a refused request must read the refusal: the server lingers instead of closing with unread
+	// input (which would reset the connection).
+	mut lingering = rawconn.Open(port, 10)
+	lingering.TrySend("POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 1500000\r\n\r\n" + twine.Repeat("b", 1500000))
+	lingering.Wait(10000)
+	if !twine.HasPrefix(lingering.Buf, "HTTP/1.1 413 ") {
+		flag("413 while the client sends its body: " + lingering.Buf)
+	}
+	lingering.Close()
+	mut held = []rawconn.Conn{}
+	for i in 0..4 {
+		mut c = rawconn.Open(port, 10)
+		c.TrySend("POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 900000\r\n\r\n" + twine.Repeat("a", 800000))
+		held = append(held, c)
+		tide.Sleep(200000000)
+	}
+	mut refused = 0
+	for i in 0..4 {
+		mut c = held[i]
+		c.Wait(300)
+		if twine.HasPrefix(c.Buf, "HTTP/1.1 503 ") {
+			refused += 1
+		}
+		c.Close()
+	}
+	say.Line("partial 900 kB bodies past a 3 MB budget: " + mint.Itoa(refused) + " of 4 refused")
+	if refused != 1 {
+		flag("buffer budget: " + mint.Itoa(refused) + " of 4 partial bodies refused, want 1")
+	}
+	// #749: past TIN_MAX_CONNS a connection is kept to answer its first request with 503, Retry-After and Connection: close (a reset
+	// reads as a dead backend); only past 64 more is it closed at accept.
+	tide.Sleep(300000000)
+	let (oks1, refused1, reset1) = capRound(port, 45)
+	say.Line("45 connections with TIN_MAX_CONNS=40: " + mint.Itoa(oks1) + " answered, " + mint.Itoa(refused1) + " got 503, " + mint.Itoa(reset1) + " reset")
+	if oks1 != 40 || refused1 != 5 || reset1 != 0 {
+		flag("connection cap: " + mint.Itoa(oks1) + " answered, " + mint.Itoa(refused1) + " 503, " + mint.Itoa(reset1) + " reset; want 40, 5, 0")
+	}
+	tide.Sleep(1500000000)
+	let (oks2, refused2, shut2) = capRound(port, 40 + 64 + 5)
+	say.Line("109 connections with TIN_MAX_CONNS=40: " + mint.Itoa(oks2) + " answered, " + mint.Itoa(refused2) + " got 503, " + mint.Itoa(shut2) + " closed at accept")
+	if oks2 != 40 || refused2 != 64 || shut2 != 5 {
+		flag("connection cap: " + mint.Itoa(oks2) + " answered, " + mint.Itoa(refused2) + " 503, " + mint.Itoa(shut2) + " closed at accept; want 40, 64, 5")
+	}
+	// #749: a chunked body past TIN_MAX_BODY (its length is not known up front) gets a 413 the client can read while it is still
+	// sending, as a Content-Length one does.
+	mut chunky = rawconn.Open(port, 10)
+	chunky.TrySend("POST /users HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+	let chunk = "10000\r\n" + twine.Repeat("z", 65536) + "\r\n"
+	for i in 0..40 {
+		if !chunky.TrySend(chunk) {
+			break
+		}
+	}
+	chunky.Wait(10000)
+	if !twine.HasPrefix(chunky.Buf, "HTTP/1.1 413 ") {
+		flag("chunked body over TIN_MAX_BODY: " + chunky.Buf[0:min(len(chunky.Buf), 100)])
+	}
+	chunky.Close()
+	// #749: a server's file reads grow pools past TIN_POOL_WARN_MB=1, and the warning meant for a plain program's main loop does not
+	// fire (checked in the server's log below).
+	let bigFile = ci.Join(out, "pool-file.bin")
+	ci.Write(bigFile, twine.Repeat("p", 20000000))
+	for i in 0..3 {
+		let r = request(port, "GET", "/readf?path=" + bigFile, "")
+		if r.Status != 200 || r.Body != "read 20000000" {
+			flag("a 20 MB ReadFile under the pool warning: " + mint.Itoa(r.Status) + " " + r.Body[0:min(len(r.Body), 200)])
+		}
+	}
+	ci.Remove(bigFile)
+	tide.Sleep(300000000)
+	let waited = request(port, "GET", "/users/7?ms=1500", "")
+	if waited.Status != 200 || !twine.HasPrefix(waited.Body, "user 7") {
+		flag("a handler waiting past the header timeout: " + mint.Itoa(waited.Status) + " " + waited.Body)
+	}
+	if !server.Running() {
+		flag("the server exited during the limit checks")
+	}
+	server.Stop()
+	let err = ci.Read(server.Log)
+	if twine.Contains(err, "memory pool") {
+		flag("a server printed the plain-program pool warning: " + err[max(0, len(err) - 600):])
+	}
+}
+
+// capRound opens n connections at once, sends a GET /fast on each and counts the 200s, the 503s (with Retry-After and Connection: close)
+// and the rest (reset or closed).
+fn capRound(port i64, n i64) (i64, i64, i64) {
+	mut many = []rawconn.Conn{}
+	for i in 0..n {
+		many = append(many, rawconn.Open(port, 10))
+	}
+	tide.Sleep(300000000)
+	mut oks = 0
+	mut refused = 0
+	mut other = 0
+	for i in 0..n {
+		mut c = many[i]
+		if !c.TrySend("GET /fast HTTP/1.1\r\nHost: x\r\n\r\n") {
+			other += 1
+		} else if c.Wait(2000) != 1 {
+			other += 1
+		} else if twine.HasPrefix(c.Buf, "HTTP/1.1 200 ") {
+			oks += 1
+		} else if twine.HasPrefix(c.Buf, "HTTP/1.1 503 ") && twine.Contains(c.Buf, "Retry-After: 1\r\n") && twine.Contains(c.Buf, "Connection: close\r\n") {
+			refused += 1
+		} else if twine.HasPrefix(c.Buf, "HTTP/1.1 503 ") {
+			refused += 1
+		} else {
+			other += 1
+		}
+		c.Close()
+	}
+	return oks, refused, other
+}
+
+// finish stops a server with SIGTERM and returns its exit status (-1 when it did not end).
+fn finish(server nettest.Server) i64 {
+	server.Signal("TERM")
+	let (code, done) = server.ExitCode(10.0)
+	if !done {
+		server.Signal("KILL")
+		return -1
+	}
+	return code
+}
+
+// overflow (#175, #342): a handler that overflows its task stack is a panic of that request: it answers 500 with the panic and a
+// backtrace on stderr, and the server, its other requests and the next overflow are unaffected.
+fn overflow(exe str, out str) {
+	let stacks = []str{"", "1048576"}
+	let depths = []i64{1000, 20000}
+	for k in 0..2 {
+		let stack = stacks[k]
+		let depth = depths[k]
+		mut extra = []str{}
+		if len(stack) > 0 {
+			extra = append(extra, "TIN_TASK_STACK=" + stack)
+		}
+		let server = startServer(exe, 2, out, "overflow" + mint.Itoa(k), extra)
+		let port = server.Port
+		let shallow = request(port, "GET", "/recurse?n=" + mint.Itoa(depth), "")
+		if shallow.Status != 200 || shallow.Body != "depth " + mint.Itoa(depth) {
+			flag("shallow recursion (stack " + stack + "): " + mint.Itoa(shallow.Status) + " " + shallow.Body)
+		}
+		if len(stack) == 0 {
+			// 20000 levels do not fit 256 KiB, but fit TIN_TASK_STACK=1 MiB
+			let deep = request(port, "GET", "/recurse?n=20000", "")
+			if deep.Status != 500 {
+				flag("20000 levels in the default stack: " + mint.Itoa(deep.Status))
+			}
+		}
+		mut statuses = []str{}
+		mut allFive = true
+		for i in 0..6 {
+			let s = request(port, "GET", "/recurse?n=100000000", "").Status
+			statuses = append(statuses, mint.Itoa(s))
+			if s != 500 {
+				allFive = false
+			}
+			let ok = request(port, "GET", "/recurse?n=10", "")
+			if ok.Status != 200 {
+				flag("a request after an overflow: " + mint.Itoa(ok.Status))
+			}
+		}
+		let alive = server.Running()
+		let code = finish(server)
+		let err = ci.Read(server.Log)
+		let panics = count(err, "panic: stack overflow")
+		var_label(stack, statuses, panics, alive, code)
+		mut wantPanics = 7
+		if len(stack) > 0 {
+			wantPanics = 6
+		}
+		if !allFive || panics != wantPanics || !alive || code != 0 {
+			flag("stack overflow (stack " + stack + "): " + twine.Join(statuses, ",") + " panics " + mint.Itoa(panics) + " alive " + boolText(alive) + " exit " + mint.Itoa(code))
+		}
+		if !twine.Contains(err, "\tdeep\n") {
+			flag("the backtrace of an overflow names deep: " + err[0:min(len(err), 400)])
+		}
+	}
+}
+
+fn var_label(stack str, statuses []str, panics i64, alive bool, code i64) {
+	mut shown = stack
+	if len(shown) == 0 {
+		shown = "default"
+	}
+	say.Line("stack overflow in a handler (stack " + shown + "): statuses " + twine.Join(statuses, " ") + ", " + mint.Itoa(panics) + " panics logged, server alive " + boolText(alive) + ", exit " + mint.Itoa(code))
+}
+
+// overflowGuards (#342): a stack overflow in a detached task, a spawned child, an explicit guard, a tick and a relay handler is that
+// one's panic, as in a request.
+fn overflowGuards(exe str, out str) {
+	let server = startServer(exe, 1, out, "guards_overflow", []str{})
+	let port = server.Port
+	let child = request(port, "GET", "/childdeep", "").Body
+	let guarded = request(port, "GET", "/guarded", "").Body
+	request(port, "GET", "/laterdeep", "")
+	request(port, "GET", "/ticknext", "")
+	request(port, "GET", "/send?m=deep", "")
+	mut body = ""
+	for i in 0..100 {
+		body = request(port, "GET", "/overflows", "").Body
+		if body == "tick 1 relay 1 detach 1" {
+			break
+		}
+		tide.Sleep(20000000)
+	}
+	say.Line("stack overflows in a child, a guard, a detached task, a tick and a relay handler: " + child[0:min(len(child), 60)] + " " + guarded[0:min(len(guarded), 60)] + " " + body)
+	if !twine.HasPrefix(child, "child fault: panic: stack overflow") || !twine.HasPrefix(guarded, "guard: panic: stack overflow") {
+		flag("overflow faults: " + child + " " + guarded)
+	}
+	if body != "tick 1 relay 1 detach 1" {
+		flag("overflow in a tick, relay handler or detached task: " + body)
+	}
+	if !server.Running() {
+		flag("the server exited after an overflow in a guarded context")
+	}
+	let code = finish(server)
+	let err = ci.Read(server.Log)
+	if count(err, "panic: stack overflow") != 5 || code != 0 {
+		flag("overflow panics on stderr " + mint.Itoa(count(err, "panic: stack overflow")) + ", exit " + mint.Itoa(code) + ": " + err[max(0, len(err) - 600):])
+	}
+}
+
+// panics (#142): a handler that panics, at once or after a wait, answers 500 and closes its connection; the panic and its backtrace
+// go to stderr; other requests, including one waiting on the same core at the time, are served and the server keeps running. An
+// integer overflow on request data (#362) is such a panic.
+fn panics(exe str, out str) {
+	let server = startServer(exe, 1, out, "panics", []str{})
+	let port = server.Port
+	let waiting = nettest.Send(port, nettest.GetRequest("/users/5?ms=400"))
+	tide.Sleep(100000000)
+	mut got = []i64{}
+	for p in []str{"/boom", "/boom?ms=100", "/fast", "/boom", "/fast"} {
+		got = append(got, request(port, "GET", p, "").Status)
+	}
+	mut wc = waiting
+	let slow = nettest.Finish(mut wc, 20)
+	say.Line("panicking handlers and others: " + mint.Itoa(got[0]) + " " + mint.Itoa(got[1]) + " " + mint.Itoa(got[2]) + " " + mint.Itoa(got[3]) + " " + mint.Itoa(got[4]) + " waiting request: " + mint.Itoa(slow.Status))
+	if got[0] != 500 || got[1] != 500 || got[2] != 200 || got[3] != 500 || got[4] != 200 || slow.Status != 200 {
+		flag("panics: " + mint.Itoa(got[0]) + " " + mint.Itoa(got[1]) + " " + mint.Itoa(got[2]) + " " + mint.Itoa(got[3]) + " " + mint.Itoa(got[4]) + ", waiting request " + mint.Itoa(slow.Status))
+	}
+	// #362: an integer overflow on request data is that request's panic.
+	let a = request(port, "GET", "/add?a=2&b=3", "")
+	let b = request(port, "GET", "/add?a=9223372036854775807&b=1", "")
+	let c = request(port, "GET", "/add?a=-9223372036854775808&b=-1", "")
+	let d = request(port, "GET", "/add?a=40&b=2", "")
+	say.Line("sums: " + mint.Itoa(a.Status) + " " + a.Body + ", " + mint.Itoa(b.Status) + ", " + mint.Itoa(c.Status) + ", " + mint.Itoa(d.Status) + " " + d.Body)
+	if a.Status != 200 || b.Status != 500 || c.Status != 500 || d.Status != 200 || a.Body != "sum 5" || d.Body != "sum 42" {
+		flag("overflow in a handler: " + mint.Itoa(a.Status) + " " + mint.Itoa(b.Status) + " " + mint.Itoa(c.Status) + " " + mint.Itoa(d.Status))
+	}
+	if !server.Running() {
+		flag("the server exited after a handler panicked")
+	}
+	// #230: each panic ran the deferred calls of the frames it left, innermost first.
+	let unwinds = request(port, "GET", "/unwinds", "").Body
+	say.Line("deferred calls run by the panics: " + unwinds)
+	if unwinds != twine.Repeat("inner;handler;", 3) {
+		flag("defers during panics: " + unwinds)
+	}
+	// A panic inside a deferred call while unwinding ends the process.
+	mut dc = rawconn.Open(port, 10)
+	dc.TrySend("GET /double HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	dc.Drain(2000)
+	dc.Close()
+	let (code, ended) = server.ExitCode(5.0)
+	say.Line("panic while unwinding: exit " + mint.Itoa(code))
+	if !ended || code != 2 {
+		flag("a panic during unwinding did not end the process: " + mint.Itoa(code))
+		server.Signal("KILL")
+	}
+	let err = ci.Read(server.Log)
+	if count(err, "panic: index out of range [5] with length 3") != 3 {
+		flag("panic messages on stderr: " + err[0:min(len(err), 2000)])
+	}
+	if !twine.Contains(err, "panic: first") || !twine.Contains(err, "panic: second") {
+		flag("a panic during unwinding must print both messages: " + err[max(0, len(err) - 2000):])
+	}
+	if count(err, "panic: integer overflow: +") != 2 {
+		flag("overflow panics on stderr: " + err[0:min(len(err), 2000)])
+	}
+}
+
+// implicitGuards (#230): ticks, relay handlers and detached tasks are guarded implicitly. A tick that panics (the first three), relay
+// messages whose handler panics and a detached task that panics run their deferred calls and are logged; the core keeps ticking,
+// handles the other messages and serves requests.
+fn implicitGuards(guards str, out str) {
+	let server = startServer(guards, 1, out, "guards", []str{})
+	let port = server.Port
+	let want = "ticks true defers true; relay a;boom1;b;boom2;c; defers 5; detach defers 1"
+	let sent = request(port, "GET", "/send?m=a,boom1,b,boom2,c", "")
+	let later = request(port, "GET", "/later", "")
+	mut body = ""
+	for i in 0..100 {
+		body = request(port, "GET", "/state", "").Body
+		if body == want {
+			break
+		}
+		tide.Sleep(20000000)
+	}
+	say.Line("panicking ticks, relay handlers and detached task: " + mint.Itoa(sent.Status) + " " + mint.Itoa(later.Status) + " " + body)
+	if sent.Status != 200 || later.Status != 200 || body != want {
+		flag("implicit guards: " + mint.Itoa(sent.Status) + " " + mint.Itoa(later.Status) + " " + body)
+	}
+	if !server.Running() {
+		flag("the server exited after a tick or relay handler panicked")
+	}
+	let code = finish(server)
+	let err = ci.Read(server.Log)
+	for msg in []str{"tick 1", "tick 2", "tick 3", "relay boom1", "relay boom2", "detached boom"} {
+		if count(err, "panic: " + msg + "\n") != 1 {
+			flag("panic " + msg + " on stderr: " + err[max(0, len(err) - 2000):])
+		}
+	}
+	if code != 0 {
+		flag("guards server exit status " + mint.Itoa(code))
+	}
+}
+
+// sendfileOpen (#744): SendFile opens its file within the request's deadline, off the core thread. A FIFO with no writer (open(2) waits
+// for one) fails by the deadline while /fast answers within 100 ms on both cores; a directory fails before the head goes out, so the
+// handler's 500 arrives; a file is served.
+fn sendfileOpen(exe str, out str) {
+	let server = startServer(exe, 2, out, "sendfile", []str{"TIN_DEADLINE_MS=1500", "TIN_GRACE=1"})
+	let port = server.Port
+	let tmp = ci.TempDir(out, "sendfile-")
+	let fifo = ci.Join(tmp, "fifo")
+	ci.Must(ci.Exec([]str{"mkfifo", fifo}, "", 10), "mkfifo")
+	let plainFile = ci.Join(tmp, "plain")
+	ci.Write(plainFile, twine.Repeat("0123456789", 1000))
+	let begin = tide.Now()
+	let waiting = nettest.Send(port, "GET /send?path=" + fifo + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	tide.Sleep(200000000)
+	mut slowest = 0.0
+	for i in 0..40 {
+		let s0 = tide.Now()
+		let answer = raw(port, "GET /fast HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+		let took = seconds(s0)
+		if took > slowest {
+			slowest = took
+		}
+		if !twine.HasSuffix(answer, "fast") {
+			flag("/fast while SendFile waits on a FIFO: " + answer)
+			break
+		}
+	}
+	mut wc = waiting
+	let reply = nettest.Finish(mut wc, 10)
+	let took = seconds(begin)
+	let r = reply.Head + "\r\n\r\n" + reply.Body
+	let fifoAnswer = reply.Body
+	// On the helper threads the open waits for a writer until the deadline; through io_uring (Linux) the kernel's worker waits the same
+	// way.
+	if !twine.HasPrefix(r, "HTTP/1.1 500 ") || !twine.Contains(r, "sendfile: ") || !(twine.Contains(r, "deadline exceeded") || twine.Contains(r, "not a regular file")) || took > 3.0 {
+		flag("SendFile of a FIFO with no writer: " + r + " after " + secondsText(took, 2) + " s")
+	}
+	if slowest > 0.1 {
+		flag("/fast took " + secondsText(slowest * 1000.0, 0) + " ms while SendFile waited on a FIFO")
+	}
+	// A helper still waiting in open(2) gets its writer and returns; its job closes the descriptor. (No open waiting any more: the
+	// shell's open does not block either.)
+	ci.Exec([]str{"sh", "-c", "exec 3<>\"$0\"", fifo}, "", 10)
+	let dirReply = raw(port, "GET /send?path=" + tmp + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if !twine.HasPrefix(dirReply, "HTTP/1.1 500 ") || !twine.Contains(dirReply, "is a directory") {
+		flag("SendFile of a directory: " + dirReply)
+	}
+	let fileReply = raw(port, "GET /send?path=" + plainFile + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if !twine.HasPrefix(fileReply, "HTTP/1.1 200 ") || !twine.HasSuffix(fileReply, twine.Repeat("0123456789", 1000)) || !twine.Contains(fileReply, "Content-Length: 10000") {
+		flag("SendFile of a file: " + fileReply[0:min(len(fileReply), 200)])
+	}
+	if !server.Running() {
+		flag("the server exited during the SendFile checks")
+	}
+	server.Stop()
+	say.Line("SendFile: a FIFO fails by the deadline (" + secondsText(took, 2) + " s, " + fifoAnswer + ") while /fast answers in " + secondsText(slowest * 1000.0, 0) + " ms at most; a directory gets the handler's 500 (#744)")
+}
+
+// fileReads (#745): ReadFile is bounded (64 MiB by default, fault.LimitExceeded past it, before reading a regular file and read by read
+// from a device), ReadFileBound sets another bound, and a helper read whose request left at its deadline stops at its next read
+// instead of running on.
+fn fileReads(exe str, out str) {
+	let server = startServer(exe, 2, out, "readfile", []str{"TIN_DEADLINE_MS=1000", "TIN_GRACE=1"})
+	let port = server.Port
+	let tmp = ci.TempDir(out, "readfile-")
+	let big = ci.Join(tmp, "big")
+	// 100 MiB of zeros, sparse
+	ci.Must(ci.Exec([]str{"dd", "if=/dev/null", "of=" + big, "bs=1", "count=0", "seek=104857600"}, "", 30), "make the big file")
+	let fifo = ci.Join(tmp, "feed")
+	ci.Must(ci.Exec([]str{"mkfifo", fifo}, "", 10), "mkfifo")
+	// A device that never ends: refused at the bound, within the deadline, and the memory and the processor are free afterwards.
+	for i in 0..3 {
+		let begin = tide.Now()
+		let r = raw(port, "GET /readf?path=/dev/zero HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+		let took = seconds(begin)
+		if !twine.HasPrefix(r, "HTTP/1.1 500 ") || !twine.Contains(r, "limit=true") || took > 1.5 {
+			flag("ReadFile of /dev/zero: " + r[max(0, len(r) - 160):] + " after " + secondsText(took, 2) + " s")
+		}
+	}
+	tide.Sleep(100000000)
+	let c0 = nettest.CpuSeconds(server.Pid)
+	tide.Sleep(300000000)
+	let busy = nettest.CpuSeconds(server.Pid) - c0
+	let rss = nettest.RssKiB(server.Pid) / 1024
+	if busy > 0.1 || rss > 200 {
+		flag("after reading /dev/zero three times: " + secondsText(busy, 2) + " s of CPU in 0.3 s, " + mint.Itoa(rss) + " MB resident")
+	}
+	// A 100 MiB file: refused by default, read with a bound of 128 MiB.
+	let refused = raw(port, "GET /readf?path=" + big + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if !twine.HasPrefix(refused, "HTTP/1.1 500 ") || !twine.Contains(refused, "limit=true") || !twine.Contains(refused, "more than 67108864 bytes") {
+		flag("ReadFile of a 100 MiB file: " + refused[max(0, len(refused) - 200):])
+	}
+	let bounded = raw(port, "GET /readf?path=" + big + "&n=134217728 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if !twine.HasSuffix(bounded, "read 104857600") {
+		flag("ReadFileBound of a 100 MiB file with 128 MiB: " + bounded[max(0, len(bounded) - 200):])
+	}
+	// A pipe that keeps coming: the request ends at its deadline, then the helper reading it stops at its next read and closes the
+	// pipe, so the writer is told nobody reads.
+	let marker = ci.Join(tmp, "writer-closed")
+	ci.Remove(marker)
+	let feeder = nettest.Start("sh", []str{"-c", "trap '' PIPE; exec 3>\"$0\"; while :; do printf '%01024d' 0 >&3 || break; sleep 0.02; done; perl -MTime::HiRes -e 'print Time::HiRes::time()' > \"$1\"", fifo, marker}, []str{}, ci.Join(out, "feeder.log"), 0)
+	let begin = tide.Now()
+	let pipeReply = raw(port, "GET /readf?path=" + fifo + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	let answered = tide.Wall()
+	let answeredIn = seconds(begin)
+	if !twine.HasPrefix(pipeReply, "HTTP/1.1 500 ") || !twine.Contains(pipeReply, "deadline exceeded") || answeredIn > 1.5 {
+		flag("ReadFile of a pipe that never ends: " + pipeReply[max(0, len(pipeReply) - 160):] + " after " + secondsText(answeredIn, 2) + " s")
+	}
+	nettest.Eventually(2.0, fn() bool {
+		return ci.Exists(marker) && len(ci.Read(marker)) > 0
+	})
+	mut closedAfter = -1.0
+	if ci.Exists(marker) && len(ci.Read(marker)) > 0 {
+		let closedAt = mint.ParseFloat(twine.TrimSpace(ci.Read(marker))) catch _ {
+			0.0
+		}
+		closedAfter = closedAt - f64(answered) / 1000000000.0
+	}
+	if closedAfter < 0.0 - 1.0 || closedAfter > 1.0 || !ci.Exists(marker) {
+		flag("the helper went on reading the pipe after its request left (" + secondsText(closedAfter, 2) + " s)")
+	}
+	feeder.Stop()
+	if !server.Running() {
+		flag("the server exited during the ReadFile checks")
+	}
+	server.Stop()
+	say.Line("ReadFile: /dev/zero and a 100 MiB file refused at 64 MiB (LimitExceeded), 128 MiB bound reads it; a helper stops reading " + secondsText(closedAfter, 2) + " s after its request left (#745)")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/router")
+	ci.Mkdirs(out)
+	let exe = ci.Join(out, "router")
+	ci.BuildTin("tools/ci/fixtures/router.tin", exe, "", []str{})
+	for cores in []i64{1, 2} {
+		let server = startServer(exe, cores, out, "router" + mint.Itoa(cores), []str{"TIN_DEADLINE_MS=5000", "TIN_GRACE=1"})
+		let port = server.Port
+		say.Line("-- " + mint.Itoa(cores) + " core(s)")
+		mixedLoad(port)
+		protocol(port)
+		if cores == 1 {
+			responseHeaders(port)
+			conformance(port)
+			overlap(port)
+			websockets(port)
+		}
+		if !server.Running() {
+			flag("the server exited on " + mint.Itoa(cores) + " cores")
+		}
+		server.Stop()
+	}
+	say.Line("-- SendFile opens")
+	sendfileOpen(exe, out)
+	say.Line("-- ReadFile bounds")
+	fileReads(exe, out)
+	say.Line("-- limits")
+	limits(exe, out)
+	say.Line("-- panics")
+	panics(exe, out)
+	say.Line("-- stack overflow")
+	overflow(exe, out)
+	say.Line("-- implicit guards")
+	let guards = ci.Join(out, "guards")
+	ci.BuildTin("tools/ci/fixtures/guards.tin", guards, "", []str{"-edition", "1"})
+	implicitGuards(guards, out)
+	say.Line("-- stack overflow in guarded contexts")
+	overflowGuards(guards, out)
+	ci.Check(len(failures) == 0, twine.Join(failures, "\n"))
+	ci.Pass("router: concurrent routed requests, protocol, conformance, limits, panics, overflow and guards")
+}

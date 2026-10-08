@@ -6,7 +6,7 @@ import "say"
 import "twine"
 
 // Ticks, relay handlers and detached tasks are guarded implicitly (#230): a panic in one runs
-// its deferred calls, is logged, and the core goes on. router_check.py runs this on one core.
+// its deferred calls, is logged, and the core goes on. router_check.tin runs this on one core.
 // deep recurses far past any task stack (#342).
 fn deep(n i64) i64 {
 	if n == 0 {
