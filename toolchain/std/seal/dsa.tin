@@ -1,0 +1,104 @@
+package seal
+
+import "abacus"
+
+// ---- crypto/dsa: verification of legacy DSA signatures (FIPS 186-3 section 4.7), as Go's dsa.Verify ----
+// Verify only: Go's own documentation deprecates DSA and FIPS 186-5 no longer approves it for
+// signing, so there is no DSA signer. The parameters come from a certificate's
+// SubjectPublicKeyInfo (ParseDSAPublicKeyDER). Verification uses public values only, so it is not
+// constant time (abacus is not). The hash is used whole, not truncated, as Go does.
+
+// ErrDSAParameters is the fault DSAVerify fails with when pub's parameters no signature can verify under.
+let ErrDSAParameters = fault("seal: bad DSA parameters")
+
+const oidDSA = "1.2.840.10040.4.1"
+
+// DSAPublicKey is a DSA public key: the parameters p, q and g, and the public value y.
+type DSAPublicKey struct {
+	P abacus.Int
+	Q abacus.Int
+	G abacus.Int
+	Y abacus.Int
+}
+
+// DSAVerify checks the legacy DSA signature (r, s) over hash by pub, as Go's dsa.Verify does. Parameters
+// no signature can verify under (P zero, Q at most 1 or not a whole number of bytes long) fail with
+// ErrDSAParameters; a signature that does not verify fails with a plain fault.
+fn DSAVerify(pub DSAPublicKey, hash []u8, r abacus.Int, s abacus.Int) ! {
+	let one = abacus.FromI64(1)
+	if pub.P.IsZero() || pub.Q.Cmp(one) <= 0 || pub.Q.BitLen()%8 != 0 {
+		fail ErrDSAParameters
+	}
+	if r.Sign() < 1 || r.Cmp(pub.Q) >= 0 || s.Sign() < 1 || s.Cmp(pub.Q) >= 0 {
+		fail "seal: DSA signature does not verify"
+	}
+	let w = s.ModInverse(pub.Q)
+	if w == nil {
+		fail "seal: DSA signature does not verify"
+	}
+	let inv = w
+	let z = abacus.FromBytes(hash)
+	let u1 = z.Mul(inv).Mod(pub.Q)
+	let u2 = r.Mul(inv).Mod(pub.Q)
+	let v = pub.G.Exp(u1, pub.P).Mul(pub.Y.Exp(u2, pub.P)).Mod(pub.P).Mod(pub.Q)
+	if v.Cmp(r) != 0 {
+		fail "seal: DSA signature does not verify"
+	}
+}
+
+// DSAVerifyDER checks a DER SEQUENCE{r, s} DSA signature, the form X.509 certificates carry, over hash by pub.
+fn DSAVerifyDER(pub DSAPublicKey, hash []u8, sig []u8) ! {
+	let (from, to) = try der_expect(sig, 0, len(sig), derSequence, "a DSA signature")
+	if to != len(sig) {
+		fail "seal: trailing data after the DSA signature"
+	}
+	let (rb, next) = try der_posint(sig, from, to)
+	let (sb, end) = try der_posint(sig, next, to)
+	if end != to {
+		fail "seal: trailing data in the DSA signature"
+	}
+	try DSAVerify(pub, hash, abacus.FromBytes(rb), abacus.FromBytes(sb))
+}
+
+// ParseDSAPublicKeyDER reads a DSA SubjectPublicKeyInfo as certificates carry it: the algorithm's
+// parameters (p, q, g) and the public value y. Like Go's x509, it fails on a zero or negative value.
+fn ParseDSAPublicKeyDER(der []u8) !DSAPublicKey {
+	let (from, to) = try der_expect(der, 0, len(der), derSequence, "a public key")
+	if to != len(der) {
+		fail "seal: trailing data after the DSA public key"
+	}
+	let (algFrom, algTo) = try der_expect(der, from, to, derSequence, "an algorithm identifier")
+	let (oid, after) = try der_oid(der, algFrom, algTo)
+	if oid != oidDSA {
+		fail "seal: not a DSA public key (algorithm " + oid + ")"
+	}
+	let (pFrom, pTo) = try der_expect(der, after, algTo, derSequence, "DSA parameters")
+	let (pb, n1) = try der_posint(der, pFrom, pTo)
+	let (qb, n2) = try der_posint(der, n1, pTo)
+	let (gb, last) = try der_posint(der, n2, pTo)
+	if last != pTo {
+		fail "seal: trailing data in the DSA parameters"
+	}
+	let (bits, end) = try der_bits(der, algTo, to)
+	if end != to {
+		fail "seal: trailing data after the DSA public key"
+	}
+	let (yb, yEnd) = try der_posint(bits, 0, len(bits))
+	if yEnd != len(bits) {
+		fail "seal: trailing data in the DSA public key"
+	}
+	let p = try dsa_positive(pb)
+	let q = try dsa_positive(qb)
+	let g = try dsa_positive(gb)
+	let y = try dsa_positive(yb)
+	return DSAPublicKey{P: p, Q: q, G: g, Y: y}
+}
+
+// dsa_positive is the value of the magnitude b, which must be above zero.
+fn dsa_positive(b []u8) !abacus.Int {
+	let v = abacus.FromBytes(b)
+	if v.Sign() <= 0 {
+		fail "seal: zero or negative DSA parameter"
+	}
+	return v
+}

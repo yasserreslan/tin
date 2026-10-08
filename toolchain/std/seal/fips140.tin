@@ -1,0 +1,28 @@
+package seal
+
+// ---- crypto/fips140: Tin's own FIPS 140-3 status (#927) ----
+// Tin is not a FIPS 140-3 validated cryptographic module and has no FIPS mode, so its verdict is
+// fixed: FIPS140Enabled and FIPS140Enforced are false on every target, whatever the environment.
+// Go's crypto/fips140 reads GODEBUG=fips140=on (or only) and reports its own module, which is
+// not Tin's; Tin ignores GODEBUG for this. A program that needs a validated module must use one.
+
+// FIPS140Enabled reports whether FIPS 140-3 mode is on. Tin's verdict is always false.
+fn FIPS140Enabled() bool {
+	return false
+}
+
+// FIPS140Enforced reports whether FIPS 140-3 rules are enforced (Go's Enforced, the only-mode switch).
+// Tin's verdict is always false.
+fn FIPS140Enforced() bool {
+	return false
+}
+
+// FIPS140Version is the version of a frozen FIPS 140-3 module: "" because Tin has none (Go reports "latest" for its unfrozen module).
+fn FIPS140Version() str {
+	return ""
+}
+
+// FIPS140WithoutEnforcement runs f. Tin never enforces FIPS 140-3 rules, so there is nothing to switch off.
+fn FIPS140WithoutEnforcement(f fn()) {
+	f()
+}
