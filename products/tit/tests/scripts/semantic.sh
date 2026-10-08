@@ -11,6 +11,7 @@ fail() {
 	exit 1
 }
 t() { "$tit" "$@"; }
+root=$PWD
 mkdir -p "$d/r/geo"
 cd "$d/r"
 t init . > /dev/null
@@ -68,3 +69,27 @@ echo "$h" | grep -q "moved fn Area" || fail "history of Area: $h"
 echo "$h" | grep -q "added fn Area in geo/a.tin" || fail "history did not follow the move: $h"
 echo "$h" | grep -q "reformat" && fail "history listed the reformat: $h"
 echo "ok history follows renames and moves"
+
+# the same on the real compiler: a function (its doc comment with it) moves from parse.tin to lower.tin while
+# check.tin is reformatted (spacing tin fmt would undo); the moved function is the only change
+mkdir -p "$d/real/compiler"
+cd "$d/real"
+t init . > /dev/null
+t config set user.name Ada
+t config set user.email ada@example.com
+for f in parse lower check; do
+	cp "$root/toolchain/compiler/$f.tin" compiler/
+done
+t add .
+t commit -m "the compiler" > /dev/null
+name=$(grep '^fn [a-z]' compiler/parse.tin | awk 'NR == 40 { print $2 }' | sed 's/(.*//')
+[ -n "$name" ] || fail "no function in parse.tin"
+perl -0ne "print \$1 if /\n\n((?:\/\/[^\n]*\n)*fn $name\(.*?\n}\n)/s" compiler/parse.tin > "$d/moved.tin"
+[ -s "$d/moved.tin" ] || fail "cannot cut $name out of parse.tin"
+perl -0pi -e "s/\n\n(?:\/\/[^\n]*\n)*fn $name\(.*?\n}\n/\n/s" compiler/parse.tin
+printf '\n' >> compiler/lower.tin
+cat "$d/moved.tin" >> compiler/lower.tin
+perl -pi -e 's/$/  / if /^\t/' compiler/check.tin
+out=$(t diff --semantic)
+[ "$out" = "$(printf 'compiler/lower.tin\n  moved fn %s (from compiler/parse.tin)' "$name")" ] || fail "the real move: $out"
+echo "ok on the real compiler, $name moved from parse.tin to lower.tin, and check.tin reformatted is no change"
