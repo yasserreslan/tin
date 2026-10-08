@@ -130,9 +130,17 @@ mut served ?Server = nil
 // is dir: allowFile lists the keys allowed to sign (as .tit-signers does), public lets heads and fetch go unsigned,
 // and dir/serve-secret holds the key nonces are signed with (made on the first run).
 fn Serve(addr str, dir str, allowFile str, public bool) ! {
-	try ServeSecret(dir)
+	// read here, once, and handed to every core through the environment: a core's first request then does no file
+	// effect of its own, so a request recorded by anvil (TIN_REPLAY_DIR) replays with tin replay the same way
+	// whichever request it was on its core
+	let secretKey = try ServeSecret(dir)
+	mut allowed = ""
+	if quarry.Exists(allowFile) {
+		allowed = try flume.ReadFile(allowFile)
+	}
 	try quarry.Setenv("TIT_SERVE_DIR", dir)
-	try quarry.Setenv("TIT_SERVE_ALLOW", allowFile)
+	try quarry.Setenv("TIT_SERVE_SECRET", secretKey)
+	try quarry.Setenv("TIT_SERVE_KEYS", allowed)
 	mut p = "0"
 	if public {
 		p = "1"
@@ -168,9 +176,8 @@ fn AllowedKeys(path str) ![]identity.TrustedKey {
 
 fn serverFromEnv() !Server {
 	let dir = quarry.Getenv("TIT_SERVE_DIR")
-	let secretKey = try ServeSecret(dir)
-	mut s = NewServer(dir, secretKey, quarry.Getenv("TIT_SERVE_PUBLIC") == "1")
-	let keys = try AllowedKeys(quarry.Getenv("TIT_SERVE_ALLOW"))
+	mut s = NewServer(dir, quarry.Getenv("TIT_SERVE_SECRET"), quarry.Getenv("TIT_SERVE_PUBLIC") == "1")
+	let keys = try identity.ParseSigners(quarry.Getenv("TIT_SERVE_KEYS"))
 	for k in keys {
 		s.Allow(k.Email, k.Public)
 	}

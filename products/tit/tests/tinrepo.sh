@@ -191,4 +191,24 @@ gitfiles . main > "$d/git.files"
 cmp -s "$d/cloned.files" "$d/git.files" || fail "a git clone of the mirror has other files"
 echo "ok #805 the mirror's main is git's main ($(git rev-parse --short main)), and a git clone of it checks out the same files"
 
+# #778: the whole adopted history packed by tit serve and unpacked by tit clone gives the same commits and files
+port=$((20000 + $$ % 20000))
+(cd "$d/repo" && exec "$tit" serve --public --addr "127.0.0.1:$port") > "$d/serve.log" 2>&1 &
+server=$!
+trap 'kill $server 2> /dev/null || true' EXIT HUP INT TERM
+n=0
+until t clone "http://127.0.0.1:$port/" "$d/clone" > "$d/clone.txt" 2>&1; do
+	n=$((n + 1))
+	[ $n -lt 100 ] || fail "clone of the adopted repository: $(cat "$d/clone.txt") $(cat "$d/serve.log")"
+	rm -rf "$d/clone"
+	sleep 0.2
+done
+kill $server 2> /dev/null || true
+[ "$(t -C "$d/clone" log --format=id | wc -l)" = "$(t log --format=id main | wc -l)" ] || fail "the clone has another history"
+[ "$(t -C "$d/clone" log --format=id -n 1)" = "$(t log --format=id -n 1 main)" ] || fail "the clone's main is another commit"
+files "$d/clone" > "$d/clone.files"
+gitfiles . main > "$d/git.files"
+cmp -s "$d/clone.files" "$d/git.files" || fail "the clone checks out other files"
+echo "ok #778 tit clone of the adopted repository over tit serve: $(sed -n 's/.*(\([0-9]*\) objects).*/\1/p' "$d/clone.txt") objects packed and unpacked, the same $commits commits and files"
+
 echo "all checks passed in $(($(date +%s) - started)) s on $(uname -sm), $(git --version)"

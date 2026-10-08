@@ -361,3 +361,64 @@ fn TestFetch(t mut crucible.T) {
 	quarry.RemoveAll(dir) catch _ {
 	}
 }
+
+// filesUnder is every file below dir, as paths.
+fn filesUnder(dir str) []str {
+	mut out = []str{}
+	let names = quarry.ReadDir(dir) catch _ {
+		return out
+	}
+	for n in names {
+		let p = dir + "/" + n
+		if quarry.IsDir(p) {
+			for f in filesUnder(p) {
+				out = append(out, f)
+			}
+		} else {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// A push cut off mid-pack (a dropped connection, a killed client) is refused, moves no ref and leaves no pack or
+// object behind; the whole push then goes through (#795, #796).
+fn TestCutPush(t mut crucible.T) {
+	let dir = repo("cut")
+	let (seed, pub) = keyPair()
+	let sign = fn(payload str) ![]u8 {
+		return try seal.SignEd25519(seed, []u8(payload))
+	}
+	mut server = NewServer(dir, "secret", false)
+	server.Allow("ada@example.com", pub)
+	mut client = store.NewMem()
+	mut big = ""
+	for i in 0..2000 {
+		big = big + "line {i} of a file large enough to take several reads\n"
+	}
+	let c1 = commitIn(mut client, "a.txt", big, []object.Id{}, object.NewChangeId(), 1700000000)
+	let pack = packOf(mut client, everything(mut client, c1))
+	let req = PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{RefUpdate{Name: "refs/heads/main", Old: "", New: c1.Hex()}}}
+	let before = filesUnder(dir)
+	mut l = NewLocal(server, "ada@example.com", sign)
+	for k in 1..8 {
+		let cut = len(pack) * k / 8
+		_ = l.Heads() catch _ {
+			Heads{Refs: []RefHead{}, Changes: []ChangeHead{}, Nonce: "", Server: "", Limits: Limits{Pack: 0, Refs: 0}}
+		}
+		let (_, err) = l.Push(req, pack[0:cut])
+		t.True("cut at {cut} of {len(pack)}: refused", err != nil)
+		crucible.Equal(mut t, "cut at {cut}: main unchanged", refOf(dir, "refs/heads/main"), "")
+		crucible.Equal(mut t, "cut at {cut}: no file left", twine.Join(filesUnder(dir), " "), twine.Join(before, " "))
+	}
+	_ = l.Heads() catch _ {
+		Heads{Refs: []RefHead{}, Changes: []ChangeHead{}, Nonce: "", Server: "", Limits: Limits{Pack: 0, Refs: 0}}
+	}
+	_ = l.Push(req, pack) catch e {
+		t.Error("the whole push: {e}")
+		PushAnswer{Refs: []str{}}
+	}
+	crucible.Equal(mut t, "then main moves", refOf(dir, "refs/heads/main"), c1.Hex())
+	quarry.RemoveAll(dir) catch _ {
+	}
+}
