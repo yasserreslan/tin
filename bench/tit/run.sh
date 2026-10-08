@@ -1,17 +1,19 @@
 #!/bin/sh
 # tit against git on the Tin repository (#807): warm status, log and diff, the same working directory for both
 # (tit adopts the clone in place), 7 alternating runs each, medians and the ratio tit/git (lower is faster).
-# Linux only (date +%s%N). Usage: bench/tit/run.sh <tit> <git clone with full history> <scratch dir>
+# Linux only (date +%s%N). Usage: bench/tit/run.sh <tit> <git clone with full history> <scratch dir> [branch]
+# (the branch of that clone to measure, main by default)
 set -eu
 tit=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 src=$2
 d=$3
+branch=${4:-main}
 runs=7
 export HOME="$d/home" XDG_CONFIG_HOME="$d/home" TIT_NO_PAGER=1 GIT_PAGER=cat
 mkdir -p "$HOME"
 git clone -q --no-local "$src" "$d/repo"
 cd "$d/repo"
-git checkout -q -B main origin/main
+git checkout -q -B main "origin/$branch"
 start=$(date +%s%N)
 "$tit" adopt . > /dev/null
 adopt_ms=$((($(date +%s%N) - start) / 1000000))

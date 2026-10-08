@@ -145,7 +145,9 @@ jobs:
         run: |
           ./tin build products/tit/main.tin -o bin/tit
           mkdir -p bin/tit-bench
-          sh bench/tit/run.sh bin/tit "$GITHUB_WORKSPACE" bin/tit-bench | tee bin/bench-tit.txt
+          # the checkout is a detached HEAD: a branch at it, for the script's clone to check out
+          git branch -f tit-bench HEAD
+          sh bench/tit/run.sh bin/tit "$GITHUB_WORKSPACE" bin/tit-bench tit-bench | tee bin/bench-tit.txt
           { echo '### tit against git'; cat bin/bench-tit.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep raw samples and server logs
         if: always()
