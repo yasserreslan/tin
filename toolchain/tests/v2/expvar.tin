@@ -1,8 +1,9 @@
 package main
 
 // expvar: published variables. Each New function registers a name, Add and Set change the value,
-// String renders it as Go's expvar does, Get and Do read the registry in name order, and Handler
-// writes the JSON that /debug/vars serves.
+// String renders it as Go's expvar does, Func computes a value at each read, Publish shares a
+// variable under another name, Get and Do read the registry in name order, and Handler writes the
+// JSON that /debug/vars serves.
 
 import "anvil"
 import "expvar"
@@ -18,6 +19,7 @@ fn main() {
 	maps()
 	registry()
 	panics()
+	funcs()
 	handler()
 }
 
@@ -146,6 +148,43 @@ fn panics() {
 		expvar.NewMap("m")
 	} catch err {
 		say.Line("panic:", fault.Is(err, fault.Panic))
+	}
+}
+
+// funcs covers Func and Publish: a computed value runs at each read, Publish shares a variable
+// under a second name, a Func in a Map is read through it, and a taken name panics.
+fn funcs() {
+	let calls = expvar.NewInt("calls")
+	expvar.Publish("doubled", expvar.Func(fn() i64 { return calls.Value() * 2 }))
+	expvar.Publish("enabled", expvar.Func(fn() bool { return true }))
+	expvar.Publish("label", expvar.Func(fn() str { return "x<y & \"z\"" }))
+	expvar.Publish("nan", expvar.Func(fn() f64 { return gauge.NaN() }))
+	expvar.Publish("ratio", expvar.Func(fn() f64 { return 0.25 }))
+	expvar.Publish("control", expvar.Func(fn() str { return "a\x08b\x0cc\x01\\u0008" }))
+	expvar.Publish("calls2", calls)
+	calls.Add(3)
+	if let d = expvar.Get("doubled") {
+		say.Line("func", d.String())
+	}
+	if let c = expvar.Get("calls2") {
+		say.Line("publish", c.String())
+	}
+	for name in []str{"enabled", "label", "nan", "ratio", "control"} {
+		if let v = expvar.Get(name) {
+			say.Line("func", name, v.String())
+		}
+	}
+
+	let m = expvar.NewMap("fm")
+	m.Set("computed", expvar.Func(fn() i64 { return calls.Value() + 1 }))
+	say.Line("func map", m.String())
+	calls.Add(1)
+	say.Line("func map", m.String())
+
+	guard {
+		expvar.Publish("calls", calls)
+	} catch err {
+		say.Line("panic:", err)
 	}
 }
 

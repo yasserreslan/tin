@@ -1,8 +1,9 @@
 // Package expvar publishes named variables that a running program can read back, as Go's expvar
-// does: integers, floats, strings, flags and maps of them. The registry is process-wide, so a
-// variable made on one core is seen by every core. Integer and float updates are atomic; the
-// lists and string values are changed under a short lock. Handler serves the registry as Go's
-// JSON at /debug/vars.
+// does: integers, floats, strings, flags and maps of them, plus computed values (Func) and
+// variables published under a second name (Publish). The registry is process-wide, so a variable
+// made on one core is seen by every core. Integer and float updates are atomic; the lists and
+// string values are changed under a short lock. Handler serves the registry as Go's JSON at
+// /debug/vars.
 //
 //	let requests = expvar.NewInt("requests")   // made before the cores start, or in a shared let
 //	requests.Add(1)
@@ -13,6 +14,7 @@
 package expvar
 
 import "anvil"
+import "argo"
 import "atomic"
 import "gauge"
 import "mint"
@@ -23,6 +25,7 @@ const kindFloat = 2
 const kindString = 3
 const kindBool = 4
 const kindMap = 5
+const kindFunc = 6
 const hexDigits = "0123456789abcdef"
 
 // regLock guards the registry's lists and the string values; the atomics below need no lock.
@@ -60,13 +63,20 @@ type String struct {
 }
 
 // Bool is a flag variable; the handle is a pointer to its node, so copies share it. Go's
-// expvar has no Bool (it publishes a flag with Func); this package adds it.
+// expvar has no Bool (it publishes a flag with Func over a variable that is read, not shared);
+// this package adds it because a flag that several cores set and read needs an atomic word.
 type Bool struct {
 	n i64
 }
 
 // Map is a map of variables; the handle is a pointer to its node, so copies share it.
 type Map struct {
+	n i64
+}
+
+// funcVar is a computed variable made by Func; the handle is a pointer to its node, whose word 1
+// holds the closure that computes and encodes the value at each read.
+type funcVar struct {
 	n i64
 }
 
@@ -102,6 +112,32 @@ fn NewBool(name str) Bool {
 // NewMap publishes a new, empty map named name. It panics if the name is taken.
 fn NewMap(name str) Map {
 	return Map{n: publish(name, kindMap)}
+}
+
+// Publish publishes v under name, as Go's Publish does. v is shared, not copied: a variable
+// published under two names is one variable, and a later change shows under both. It panics if
+// the name is taken.
+fn Publish(name str, v dyn Var) {
+	publishRef(name, v.ref())
+}
+
+// Func returns a variable whose value is f's result, computed and encoded as JSON at each read,
+// as Go's expvar.Func does: f runs again whenever the variable is served or read. Go's any has no
+// Tin equivalent, so T is bool, i64, f64 or str. A NaN or an infinity has no JSON form and reads
+// as an empty value, as in Go. Publish the result, or Set it in a Map.
+fn Func[T bool | i64 | f64 | str](f fn() T) dyn Var {
+	let render = fn() str {
+		mut buf = []u8{}
+		argo.Put(mut buf, f())
+		let text = str(buf)
+		if text == "null" {
+			return ""
+		}
+		return goJSON(text)
+	}
+	let n = newVar(kindFunc)
+	n[1] = cast(i64, keep(render))
+	return funcVar{n: n}
 }
 
 // Get returns the variable published as name, or nil when there is none.
@@ -223,6 +259,16 @@ fn (v Bool) String() str {
 }
 
 fn (v Bool) ref() i64 {
+	return cell(v.n)
+}
+
+// String computes the value now and returns it as JSON.
+fn (v funcVar) String() str {
+	let render = cast(fn() str, v.n[1])
+	return render()
+}
+
+fn (v funcVar) ref() i64 {
 	return cell(v.n)
 }
 
@@ -357,8 +403,8 @@ fn unlock() {
 	regLock.Store(0)
 }
 
-// newVar allocates a variable node of kind: word 0 kind, 1 value (integer, flag or float bits),
-// 2 string bytes, 3 string length, 4 the first entry of a map.
+// newVar allocates a variable node of kind: word 0 kind, 1 value (integer, flag or float bits,
+// or a computed variable's closure), 2 string bytes, 3 string length, 4 the first entry of a map.
 fn newVar(kind i64) i64 {
 	let v = calloc(5, 8)
 	v[0] = kind
@@ -393,6 +439,12 @@ fn find(head i64, key str) i64 {
 // if the name is taken.
 fn publish(name str, kind i64) i64 {
 	let v = newVar(kind)
+	publishRef(name, v)
+	return v
+}
+
+// publishRef adds the node v to the registry under name. It panics if the name is taken.
+fn publishRef(name str, v i64) {
 	lock()
 	let taken = find(regTop.Load(), name) != 0
 	if !taken {
@@ -402,7 +454,6 @@ fn publish(name str, kind i64) i64 {
 	if taken {
 		panic("Reuse of exported var name: " + name)
 	}
-	return v
 }
 
 // child returns the variable under key in map m. A new key gets a variable of kind. It returns
@@ -488,6 +539,9 @@ fn wrap(v i64) dyn Var {
 	}
 	if k == kindBool {
 		return Bool{n: v}
+	}
+	if k == kindFunc {
+		return funcVar{n: v}
 	}
 	return Map{n: v}
 }
@@ -600,4 +654,53 @@ fn appendU(out []u8, n i64) []u8 {
 	o = append(o, hexDigits[(n>>4)&15])
 	o = append(o, hexDigits[n&15])
 	return o
+}
+
+// goJSON rewrites JSON that argo.Put wrote into the form encoding/json writes, as Func's values
+// are: the bytes <, > and & in a string become \u003c, \u003e and \u0026, and the
+// escapes \u0008 and \u000c become \b and \f. argo writes numbers and booleans with none of
+// those bytes, so they pass unchanged.
+fn goJSON(s str) str {
+	mut out = []u8{}
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c == '\\' && i+1 < len(s) {
+			let short = shortEscape(s, i)
+			if short != 0 {
+				out = append(out, '\\')
+				out = append(out, short)
+				i += 6
+				continue
+			}
+			out = append(out, c, s[i+1])
+			i += 2
+			continue
+		}
+		if c == '<' {
+			out = append(out, "\\u003c"...)
+		} else if c == '>' {
+			out = append(out, "\\u003e"...)
+		} else if c == '&' {
+			out = append(out, "\\u0026"...)
+		} else {
+			out = append(out, c)
+		}
+		i += 1
+	}
+	return str(out)
+}
+
+// shortEscape returns b or f when s holds \u0008 or \u000c at byte i, and 0 otherwise.
+fn shortEscape(s str, i i64) u8 {
+	if i+5 >= len(s) || s[i+1] != 'u' || s[i+2] != '0' || s[i+3] != '0' || s[i+4] != '0' {
+		return 0
+	}
+	if s[i+5] == '8' {
+		return 'b'
+	}
+	if s[i+5] == 'c' {
+		return 'f'
+	}
+	return 0
 }

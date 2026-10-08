@@ -23,7 +23,9 @@ func main() {
 	for i := 0; i < hits; i++ {
 		requests.Add(1)
 	}
-	expvar.NewInt("errors").Set(-7)
+	errs := expvar.NewInt("errors")
+	errs.Set(-7)
+	expvar.Publish("errors_alias", errs)
 	wrap := expvar.NewInt("wrap")
 	wrap.Set(math.MaxInt64)
 	wrap.Add(1)
@@ -44,11 +46,19 @@ func main() {
 	expvar.NewString("invalid").Set("\xff\xfe ok")
 	expvar.NewString("empty").Set("")
 
-	// Go's expvar has no Bool: a flag is published as a Func, which renders its JSON value.
-	ready := true
+	// Go's expvar has no Bool: a flag is published as a Func, which renders its JSON value. A Func
+	// runs each time its variable is served, so ready (set after it is published) is served true.
+	ready := false
 	expvar.Publish("ready", expvar.Func(func() any { return ready }))
+	ready = true
 	flag := false
 	expvar.Publish("flag", expvar.Func(func() any { return flag }))
+	expvar.Publish("hits", expvar.Func(func() any { return requests.Value() }))
+	// Func values are encoded as json.Marshal writes them: HTML characters and \b \f in strings,
+	// a fraction, and a NaN, which has no JSON form and so reads as nothing.
+	expvar.Publish("label", expvar.Func(func() any { return "x<y & \"z\"\b\f" }))
+	expvar.Publish("scale", expvar.Func(func() any { return 1234567.5 }))
+	expvar.Publish("gap", expvar.Func(func() any { return math.NaN() }))
 
 	h := expvar.NewMap("http")
 	h.Add("ok", 120)
