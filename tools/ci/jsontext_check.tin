@@ -1,0 +1,187 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "seal"
+import "twine"
+
+// Compare toolchain/std/jsontext with Go's encoding/json/jsontext (#931).
+//
+// A corpus (a fixed seed, so both sides see the same cases) of documents is fed as one case per line to bench/ref/jsontext (Go) and
+// tools/ci/fixtures/jsontext.tin (Tin): every document's tokens (T) and values (V), and its tokens written with six encoder option
+// sets (W0 to W5). The corpus holds hand-written documents (deep nesting, polymorphic members, the precision boundaries of numbers,
+// escapes and surrogates, invalid UTF-8 and the malformed inputs whose error texts Go gives), generated valid documents and generated
+// mutations of them. Floats (F) and integers (I) are written as tokens: boundary values and random bit patterns (no NaN or infinity).
+
+const SEED = 931
+
+const ESCAPES = "\\\"|\\\\|\\/|\\b|\\f|\\n|\\r|\\t|\\u00e9|\\u4e2d|\\ud83d\\ude00|\\u0000|\\u001f|\\u2028|é|<>&|😀|a|Z| |\\u007f"
+
+const NUMBERS = "0|-0|1|-1|1.5|1e5|1E-5|2.5e+10|9007199254740993|-9223372036854775808|18446744073709551616|1.7976931348623157e308|5e-324|0.000001|123.456e-7|0.1|-0.0|1e400|100000000000000000000000000000000|3.141592653589793238462643"
+
+fn hex(s str) str {
+	return seal.Hex([]u8(s))
+}
+
+// pick returns one of the |-separated items of list, by the generator.
+fn pick(rng mut dice.Rand, list str) str {
+	let items = twine.Split(list, "|")
+	return items[rng.Intn(len(items))]
+}
+
+// str2 is a JSON string of a few generated escapes and characters.
+fn jsonString(rng mut dice.Rand) str {
+	mut s = "\""
+	for k in 0..rng.Intn(6) {
+		s += pick(mut rng, ESCAPES)
+	}
+	return s + "\""
+}
+
+// value is a generated JSON value of at most depth nested containers.
+fn value(rng mut dice.Rand, depth i64) str {
+	let r = rng.Intn(10)
+	if depth > 3 || r < 4 {
+		let k = rng.Intn(4)
+		if k == 0 {
+			return jsonString(mut rng)
+		}
+		if k == 1 {
+			return pick(mut rng, NUMBERS)
+		}
+		if k == 2 {
+			return "true"
+		}
+		return pick(mut rng, "false|null")
+	}
+	mut parts = []str{}
+	if r < 7 {
+		for k in 0..rng.Intn(5) {
+			parts = append(parts, value(mut rng, depth+1))
+		}
+		return "[" + twine.Join(parts, ",") + "]"
+	}
+	for k in 0..rng.Intn(5) {
+		parts = append(parts, jsonString(mut rng) + ":" + value(mut rng, depth+1))
+	}
+	return "{{" + twine.Join(parts, ",") + "}}"
+}
+
+// mutate changes one byte of doc (removed, replaced or inserted) so the result is usually malformed.
+fn mutate(rng mut dice.Rand, doc str) str {
+	let marks = " ,:]}}\"\\x1"
+	if len(doc) == 0 {
+		return marks
+	}
+	let at = rng.Intn(len(doc))
+	let c = marks[rng.Intn(len(marks))]
+	let k = rng.Intn(3)
+	if k == 0 {
+		return doc[0:at] + doc[at+1:]
+	}
+	if k == 1 {
+		return doc[0:at] + str([]u8{c}) + doc[at+1:]
+	}
+	return doc[0:at] + str([]u8{c}) + doc[at:]
+}
+
+// documents are the hand-written cases: each is a text the Go decoder answers for. The escapes are written with a doubled backslash (\\u),
+// so the Tin string holds the JSON escape itself.
+fn documents() []str {
+	return []str{
+		"{{\"a\":[1,2.5,\"x\\u00e9\",true,null]}}", `1 2 "x"`, `[1,]`, `{"a" 1}`, `tru`, `"\x"`, `[1 2]`, `{"a":1,"a":2}`, `{"a" : [1, 2] } 3 "s"`,
+		`{1:2}`, `{"a":1 "b":2}`, `{"a":}`, `[`, `{"a"`, `{"a":`, `"abc`, "\"\\u12\"", "\"\\ud800\"", "\"\\ud800\\u0041\"", "\"\\udc00\"", "\"\\uD83D\\uDE00\"",
+		"\"\\ud83d\\u0041\"", `-`, `01`, `1.`, `1e`, `-a`, `tru e`, "\"\x01\"", `]`, `}`, `:`, `[1]]`, `{"a":1,}`, `{,}`, `[,1]`, "\"\xff\"",
+		`[1,`, `{"a":1`, `nul`, `1.5e+`, `[1 , 2`, `{"a":1]`, `[1}`, `x`, `[,]`, `[0,,]`, `[1,2,]`, `[[1,]]`, `{"a":{"b":]}`, `{"a":[,]}`,
+		`[1,2 3]`, `[0,`, `{"a":[1,`, `{"a":[1 2]}`, `{"a":{}x}`, `{"a":1,"b"}`, `[[]`, `{"x":1,"y":2 3}`, `[{}1]`, `{"a":1,"a":1}`,
+		`{"a":{"a":1},"a":2}`, `[1,2`, `[1] x`, `{"":1,"":2}`, `"\/\\\"\b\f\n\r\t"`, "\"\t\"", "\"\\u0000\"", `[true,false,null]`, `tr`, `falsy`,
+		`nulll`, `""`, `0`, `-0`, `1E+2`, `1e400`, `1.7976931348623157e308`, `5e-324`, `9007199254740993`, `-9223372036854775808`,
+		`18446744073709551615`, `0.1`, `123456789012345678901234567890`, `[]`, `{}`, `[{},[],{"":""}]`, `[{"a":{}},{"a":[]}]`, "\"é\\u2028\\u2029<>&\"",
+		"\"\xe2\x82\"", "\"\xed\xa0\x80\"", "\"\xf0\x9f\x98\"", twine.Repeat("[", 150) + twine.Repeat("]", 150), twine.Repeat(`{"a":`, 100) + "1" + twine.Repeat("}}", 100),
+		`{"b":1,"a":[{"c":true}],"d":{"e":null,"f":"g"}}`, `[1e0, 1E0, -0e-0, 0.0e+0]`, `"` + twine.Repeat("x", 300) + `"`,
+	}
+}
+
+// corpus is the case lines: T, V and W0 to W5 for every document, F and I for the numbers.
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut docs = documents()
+	for i in 0..200 {
+		docs = append(docs, value(mut rng, 0))
+	}
+	let valid = len(docs)
+	for i in 0..120 {
+		docs = append(docs, mutate(mut rng, docs[rng.Intn(valid)]))
+	}
+	mut lines = []str{}
+	for doc in docs {
+		let h = hex(doc)
+		lines = append(lines, "T " + h)
+		lines = append(lines, "V " + h)
+		for n in 0..6 {
+			lines = append(lines, "W" + mint.Itoa(n) + " " + h)
+		}
+	}
+	// Float bit patterns: the boundaries of the exponent and the mantissa, and random patterns; NaN and infinities are not numbers.
+	for bits in []str{"0", "8000000000000000", "3ff0000000000000", "bff0000000000000", "3fb999999999999a", "7fefffffffffffff",
+		"0000000000000001", "4415af1d78b58c40", "3eb0c6f7a0b5ed8d", "4341c37937e08000", "4024000000000000", "3fe0000000000000", "3cb0000000000000"} {
+		lines = append(lines, "F " + bits)
+	}
+	for i in 0..300 {
+		let hi = u64(rng.Intn(1 << 30))
+		let lo = u64(rng.Intn(1 << 30))
+		let bits = (hi << 34) ^ (lo << 4) ^ u64(rng.Intn(16))
+		if (bits >> 52) & 0x7ff == 0x7ff {
+			continue
+		}
+		lines = append(lines, "F " + mint.FormatUint(bits, 16))
+	}
+	for v in []str{"0", "-1", "-9223372036854775808", "9223372036854775807", "1000000000000000000"} {
+		lines = append(lines, "I " + v)
+	}
+	for i in 0..100 {
+		lines = append(lines, "I " + mint.Itoa(i64(rng.Intn(1 << 30))*i64(rng.Intn(1 << 30))))
+	}
+	return lines
+}
+
+// run answers the case lines with the program exe.
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/jsontext")
+	ci.Mkdirs(directory)
+	// The corpus stays under bin/ci, so the same cases can be replayed in another image (the Linux runs).
+	ci.Write(ci.Join(directory, "corpus.txt"), data)
+	let work = ci.TempDir(directory, "jsontext-")
+	let tin = ci.Join(work, "jsontext-tin")
+	ci.BuildTin("tools/ci/fixtures/jsontext.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "jsontext-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "."}, ci.Join(ci.Root(), "bench/ref/jsontext"), 300), "go build jsontext")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "jsontext: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("case " + mint.Itoa(i + 1) + ": " + lines[i])
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "jsontext: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("jsontext: " + mint.Itoa(len(want)) + " cases match Go's encoding/json/jsontext")
+}

@@ -108,6 +108,8 @@ jobs:
         run: sh tools/ci/tin.sh gob_check
       - name: argo string escapes against Go's encoding/json (HTML characters, \b and \f)
         run: sh tools/ci/tin.sh argo_string_check
+      - name: jsontext tokens, values and encoder against Go's encoding/json/jsontext (a generated corpus)
+        run: sh tools/ci/tin.sh jsontext_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
       - name: container/list and container/ring against Go (generated and exhaustive small cases)

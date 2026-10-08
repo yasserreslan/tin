@@ -47,6 +47,7 @@ fn packages() []str {
 		"link", "URLs and their escaping (net/url)",
 		"netip", "IP addresses, address/port pairs and prefixes as value types (net/netip)",
 		"ore", "byte slices (bytes)",
+		"jsontext", "JSON tokens and values, token by token (encoding/json/jsontext)",
 		"flume", "buffered I/O (bufio)",
 		"quarry", "files, environment, process (os)",
 		"user", "users and groups (os/user)",

@@ -63,6 +63,8 @@ fn main() {
 	let data = twine.Join(lines, "\n") + "\n"
 	let directory = ci.Join(ci.Root(), "bin/ci/argo_string")
 	ci.Mkdirs(directory)
+	// The corpus stays under bin/ci, so the same cases can be replayed in another image (the Linux runs).
+	ci.Write(ci.Join(directory, "corpus.txt"), data)
 	let work = ci.TempDir(directory, "argo-string-")
 	let tin = ci.Join(work, "argo-string-tin")
 	ci.BuildTin("tools/ci/fixtures/argo_string.tin", tin, "", []str{})

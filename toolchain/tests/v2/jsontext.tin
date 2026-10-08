@@ -1,0 +1,135 @@
+package main
+
+// The jsontext package: tokens, values, errors, duplicate names, the encoder options and token constructors, as Go's
+// encoding/json/jsontext gives them (#931). The expected output is checked against Go by tools/ci/jsontext_check.tin.
+
+import "fault"
+import "jsontext"
+import "mint"
+import "say"
+
+// tokens prints each token of doc (its kind and text), then the end: EOF or the error.
+fn tokens(doc str, opts jsontext.Options) {
+	mut d = jsontext.NewDecoder(doc, opts)
+	for {
+		let t = d.ReadToken() catch err {
+			if fault.Is(err, jsontext.EOF) {
+				say.Line("end")
+			} else {
+				say.Line("error:", err)
+			}
+			break
+		}
+		say.Line(str(t.Kind()), t.String())
+	}
+}
+
+// values prints the raw text of each value of doc, then the end: EOF or the error.
+fn values(doc str) {
+	mut d = jsontext.NewDecoder(doc, jsontext.Options{})
+	for {
+		let v = d.ReadValue() catch err {
+			if fault.Is(err, jsontext.EOF) {
+				say.Line("end")
+			} else {
+				say.Line("error:", err)
+			}
+			break
+		}
+		say.Line("value:", v)
+	}
+}
+
+// written prints the encoder's output for the tokens of doc, quoted so its newlines show.
+fn written(doc str, opts jsontext.Options) {
+	mut d = jsontext.NewDecoder(doc, jsontext.Options{})
+	mut e = jsontext.NewEncoder(opts)
+	for {
+		let t = d.ReadToken() catch _ {
+			break
+		}
+		e.WriteToken(t) catch err {
+			say.Line("write error:", err)
+			return
+		}
+	}
+	say.Line(mint.Quote(e.Bytes()))
+}
+
+fn main() {
+	// Tokens: a nested document (the \u escape is unescaped by Token.String).
+	tokens("{{\"a\":[1,2.5,\"x\\u00e9\",true,null]}}", jsontext.Options{})
+	// Top-level values need no separator between them.
+	tokens("1 2 \"x\"", jsontext.Options{})
+	// Errors: a comma before a close, a missing colon, a truncated literal and a bad escape.
+	tokens("[1,]", jsontext.Options{})
+	tokens("{{\"a\" 1}}", jsontext.Options{})
+	tokens("tru", jsontext.Options{})
+	tokens("\"\\x\"", jsontext.Options{})
+	// Duplicate names are an error unless AllowDuplicateNames is set.
+	tokens("{{\"a\":1,\"a\":2}}", jsontext.Options{})
+	tokens("{{\"a\":1,\"a\":2}}", jsontext.Options{AllowDuplicateNames: true})
+	// Values: each top-level value's raw text, with the white space inside it kept.
+	values("{{\"a\" : [1, 2] }} 3 \"s\"")
+	values("[1,]")
+	values("\"\xff\"")
+	// Encoder: compact output, then the indentation, the spacing and the escapes of the options.
+	written("{{\"a\":[1,{{\"b\":null}}],\"c\":\"<&>\"}}", jsontext.Options{})
+	written("{{\"a\":[1,{{\"b\":null}}],\"c\":[]}}", jsontext.Options{Indent: "  "})
+	written("{{\"a\":1,\"b\":[true]}}", jsontext.Options{Multiline: true})
+	written("{{\"a\":1,\"b\":[true]}}", jsontext.Options{SpaceAfterColon: true, SpaceAfterComma: true})
+	written("\"<&>\\b\\f\\n\"", jsontext.Options{EscapeForHTML: true})
+	written("\"\xe2\x80\xa8\"", jsontext.Options{})
+	written("\"\xe2\x80\xa8\"", jsontext.Options{EscapeForJS: true})
+	// Token constructors: integers, floats in their shortest form (exponents outside -6 to 20), bools, null and strings.
+	mut e = jsontext.NewEncoder(jsontext.Options{})
+	e.WriteToken(jsontext.BeginArray) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Int(-3)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Uint(18446744073709551615)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Float(1e21)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Float(1e20)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Float(0.000001)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Float(1e-7)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Float(0.1)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Float(123456789.5)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Bool(true)) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.Null) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.String("a\"b")) catch err {
+		say.Line("write error:", err)
+	}
+	e.WriteToken(jsontext.EndArray) catch err {
+		say.Line("write error:", err)
+	}
+	say.Line(mint.Quote(e.Bytes()))
+	// Token accessors: a number's value; any other token reads as zero or false.
+	say.Line(jsontext.Int(42).Int(), jsontext.Float(1.5).Float(), jsontext.Bool(true).Bool())
+	say.Line(jsontext.String("12").Int(), jsontext.Null.Bool())
+	// A value written through WriteValue is validated and formatted with the encoder's options.
+	mut w = jsontext.NewEncoder(jsontext.Options{Indent: "  "})
+	w.WriteValue("{{\"x\": [1, 2]}}") catch err {
+		say.Line("write error:", err)
+	}
+	say.Line(mint.Quote(w.Bytes()))
+}
