@@ -1,0 +1,199 @@
+package quotedprintable
+
+// Package quotedprintable encodes and decodes the quoted-printable transfer encoding of RFC
+// 2045, as Go's mime/quotedprintable does: most bytes are themselves, "=" is written as "=3D",
+// other bytes outside the printable range as "=XX" with uppercase hex, and a line longer than 76
+// bytes is broken with a soft line break (a "=" at the end of the line).
+//
+//	let body = quotedprintable.Decode(part)      // "caf=C3=A9" -> "café"
+//	let wire = quotedprintable.Encode("café")    // "caf=C3=A9"
+//
+// The decoder follows Go's deviations from the RFC: "=\\n" is a soft break as well as "=\\r\\n",
+// a "\\r" or "\\n" not preceded by "=" passes through, a "=" at the end of the message is ignored,
+// a "=" not followed by two hex digits is taken literally, trailing whitespace of a line is
+// dropped, and a byte below 0x20 (or above 0x7e) that is not escaped is an error.
+//
+// The one-shot form covers the bodies MIME carries; a streaming reader and writer for very large
+// bodies are the follow-up noted in #735.
+
+import "say"
+import "twine"
+
+// lineMax is the longest line the encoder makes, Go's 76.
+const lineMax = 76
+
+// Decode returns the decoded bytes of a quoted-printable text.
+fn Decode(s str) !str {
+	mut out = []u8{}
+	mut pos = i64(0)
+	mut done = false
+	for !done {
+		// One line, with its line ending when it has one.
+		mut nl = twine.IndexByte(s[pos:len(s)], '\n')
+		mut whole = ""
+		if nl < 0 {
+			whole = s[pos:len(s)]
+			pos = len(s)
+			done = true
+		} else {
+			whole = s[pos:pos+nl+1]
+			pos += nl + 1
+		}
+		// The line without its trailing whitespace.
+		mut e = i64(len(whole))
+		for e > 0 && (whole[e-1] == '\r' || whole[e-1] == '\n' || whole[e-1] == ' ' || whole[e-1] == '\t') {
+			e -= 1
+		}
+		mut line = whole[0:e]
+		if len(line) > 0 && line[len(line)-1] == '=' {
+			// A soft break: only whitespace and the line ending may follow the "=".
+			let rest = trimLeftWs(whole[len(line):len(whole)])
+			// A soft break may be followed by the line ending, or be the last line of the input
+			// when something precedes the "=" (Go's rule exactly).
+			if !(twine.HasPrefix(rest, "\n") || twine.HasPrefix(rest, "\r\n") ||
+					(len(rest) == 0 && len(line) > 1 && done)) {
+				fail say.Fault("quotedprintable: invalid bytes after the soft break")
+			}
+			line = line[0:len(line)-1]
+		} else if twine.HasSuffix(whole, "\r\n") {
+			line += "\r\n"
+		} else if twine.HasSuffix(whole, "\n") {
+			line += "\n"
+		}
+		// The line's bytes.
+		mut i = i64(0)
+		for i < len(line) {
+			let b = line[i]
+			if b == '=' {
+				if i+1 >= len(line) || line[i+1] == '\r' || line[i+1] == '\n' {
+					fail say.Fault("quotedprintable: unexpected end of stream")
+				}
+				mut decoded = false
+				if i+2 < len(line) {
+					let hi = hexVal(line[i+1])
+					let lo = hexVal(line[i+2])
+					if hi >= 0 && lo >= 0 {
+						out = append(out, u8(hi*16+lo))
+						i += 3
+						decoded = true
+					}
+				}
+				if !decoded {
+					// A "=" not followed by two hex digits is a literal "=".
+					out = append(out, '=')
+					i += 1
+				}
+				continue
+			}
+			if b == '\t' || b == '\r' || b == '\n' || b >= 0x80 {
+				out = append(out, b)
+				i += 1
+				continue
+			}
+			if b < ' ' || b > '~' {
+				fail say.Fault("quotedprintable: invalid unescaped byte 0x%02x in body", i64(b))
+			}
+			out = append(out, b)
+			i += 1
+		}
+	}
+	return str(out)
+}
+
+// Encode returns data as a quoted-printable text, with Go's writer's line breaking and escaping.
+fn Encode(data str) str {
+	mut line = []u8{}
+	mut col = i64(0)
+	mut cr = false
+	mut i = i64(0)
+	for i < len(data) {
+		let b = data[i]
+		if b == '\n' || b == '\r' {
+			if cr && b == '\n' {
+				// The CRLF of a CRLF pair is already written.
+				cr = false
+				i += 1
+				continue
+			}
+			if b == '\r' {
+				cr = true
+			}
+			// A trailing space or tab is escaped before the line ends.
+			if col > 0 && (line[len(line)-1] == ' ' || line[len(line)-1] == '\t') {
+				let last = line[len(line)-1]
+				line = line[0:len(line)-1]
+				col -= 1
+				let enc = say.Fmt("=%02X", i64(last))
+				line = append(line, []u8(enc)...)
+				col += 3
+			}
+			line = append(line, '\r', '\n')
+			col = 0
+			i += 1
+			continue
+		}
+		// "=" and the bytes outside the printable range are escaped; a space or tab is written
+		// as it is (and escaped above if the line ends after it), as Go's writer batches them.
+		if b == ' ' || b == '\t' {
+			if col == lineMax-1 {
+				line = append(line, '=', '\r', '\n')
+				col = 0
+			}
+			line = append(line, b)
+			col += 1
+			cr = false
+			i += 1
+			continue
+		}
+		if b == '=' || b < '!' || b > '~' {
+			if lineMax-1-col < 3 {
+				line = append(line, '=', '\r', '\n')
+				col = 0
+			}
+			let enc = say.Fmt("=%02X", i64(b))
+			line = append(line, []u8(enc)...)
+			col += 3
+			i += 1
+			continue
+		}
+		if col == lineMax-1 {
+			line = append(line, '=', '\r', '\n')
+			col = 0
+		}
+		line = append(line, b)
+		col += 1
+		cr = false
+		i += 1
+	}
+	// A trailing space or tab is escaped, so it survives the trip, as Go's Close does.
+	if col > 0 && (line[len(line)-1] == ' ' || line[len(line)-1] == '\t') {
+		let last = line[len(line)-1]
+		line = line[0:len(line)-1]
+		let enc = say.Fmt("=%02X", i64(last))
+		line = append(line, []u8(enc)...)
+	}
+	return str(line)
+}
+
+// trimLeftWs trims leading whitespace.
+fn trimLeftWs(s str) str {
+	mut a = i64(0)
+	for a < len(s) && (s[a] == ' ' || s[a] == '\t') {
+		a += 1
+	}
+	return s[a:len(s)]
+}
+
+// hexVal is a hex digit's value, or -1.
+fn hexVal(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c-'a') + 10
+	}
+	if c >= 'A' && c <= 'F' {
+		return i64(c-'A') + 10
+	}
+	return -1
+}

@@ -73,6 +73,9 @@ fn Run(paths []str) bool {
 			}
 			// and the compiler looks at the Tin text that changed
 			ws.CheckSources()
+			if cfg.AutoSave {
+				ws.Ed.SaveDirty()
+			}
 			ws.Ed.Blink = !ws.Ed.Blink
 			ws.Ed.Redraw = true
 		}

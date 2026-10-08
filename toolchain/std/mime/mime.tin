@@ -1,0 +1,622 @@
+package mime
+
+// Package mime parses and formats media types and their parameters (RFC 7231, RFC 2045), maps
+// file extensions to media types, and decodes and encodes the RFC 2047 "encoded words" that
+// carry non-ASCII header text. It is Go's mime package, without the reflection.
+//
+//	t, params, err := mime.ParseMediaType("text/html; charset=utf-8")
+//	s := mime.FormatMediaType("text/plain", mime.Params{"charset": "utf-8"})
+//	print(mime.TypeByExtension(".png"))       // image/png
+//
+// A media type is "type/subtype" (both lowercased) with parameters; a parameter value may be a
+// token or a quoted string, and FormatMediaType quotes it again when it has to.
+
+import "say"
+import "twine"
+
+// Params is a media type's parameters, by lowercased name.
+type Params map[str]str
+
+// ---- media types ----
+
+// ParseMediaType parses a media type and its parameters, like Go's mime.ParseMediaType. The
+// media type is lowercased; parameter names are lowercased and their values unquoted; a
+// parameter repeated with the same value is kept once, a different value is an error.
+fn ParseMediaType(v str) !(str, Params) {
+	// The media type ends at the first ';'.
+	mut base = ""
+	mut rest = ""
+	mut i = i64(0)
+	for i < len(v) && v[i] != ';' {
+		i += 1
+	}
+	base = v[0:i]
+	if i < len(v) {
+		rest = v[i+1:len(v)]
+	}
+	let mediatype = try checkMediaType(trimSpace(base))
+	let params = try parseParams(rest)
+	return mediatype, params
+}
+
+// checkMediaType validates and lowercases "type/subtype", following Go's
+// checkMediaTypeDisposition: a lone token with no slash is a media type with no subtype, a slash
+// must be followed by a subtype token and nothing else.
+fn checkMediaType(v str) !str {
+	if len(v) == 0 {
+		fail say.Fault("mime: no media type")
+	}
+	let slash = twine.IndexByte(v, '/')
+	if slash < 0 {
+		if !isToken(v) {
+			fail say.Fault("mime: expected slash after first token")
+		}
+		return lower(v)
+	}
+	let typ = v[0:slash]
+	let rest = v[slash+1:len(v)]
+	if !isToken(typ) {
+		fail say.Fault("mime: expected slash after first token")
+	}
+	if len(rest) == 0 || !isToken(rest) {
+		fail say.Fault("mime: expected token after slash")
+	}
+	return lower(v)
+}
+
+// parseParams parses the ";"-separated parameter assignments of a media type.
+fn parseParams(s str) !Params {
+	mut params = make(Params)
+	mut rest = s
+	for {
+		rest = trimSpace(rest)
+		for len(rest) > 0 && rest[0] == ';' {
+			rest = rest[1:len(rest)]
+			rest = trimSpace(rest)
+		}
+		if len(rest) == 0 {
+			return params
+		}
+		mut i = i64(0)
+		for i < len(rest) && rest[i] != '=' && rest[i] != ';' {
+			i += 1
+		}
+		if i >= len(rest) || rest[i] != '=' {
+			fail say.Fault("mime: invalid media parameter")
+		}
+		let name = trimSpace(rest[0:i])
+		if !isToken(name) {
+			fail say.Fault("mime: invalid media parameter")
+		}
+		let (value, used) = try parseParamValue(rest[i+1:len(rest)])
+		let key = lower(name)
+		let (old, found) = params[key]
+		if found && old != value {
+			fail say.Fault("mime: duplicate parameter name")
+		}
+		params[key] = value
+		rest = rest[i+1+used:len(rest)]
+	}
+}
+
+// parseParamValue parses a parameter value, a token or a quoted string, and returns it with the
+// bytes it took.
+fn parseParamValue(s str) !(str, i64) {
+	mut i = i64(0)
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i += 1
+	}
+	if i >= len(s) {
+		fail say.Fault("mime: invalid media parameter")
+	}
+	if s[i] == '"' {
+		mut out = ""
+		mut j = i + 1
+		for j < len(s) {
+			if s[j] == '\\' {
+				if j+1 >= len(s) {
+					fail say.Fault("mime: invalid quoted string")
+				}
+				out += s[j+1:j+2]
+				j += 2
+			} else if s[j] == '"' {
+				return out, j + 1
+			} else {
+				out += s[j:j+1]
+				j += 1
+			}
+		}
+		fail say.Fault("mime: invalid quoted string")
+	}
+	mut j = i
+	for j < len(s) && s[j] != ';' {
+		j += 1
+	}
+	let tok = trimSpace(s[i:j])
+	if !isToken(tok) {
+		fail say.Fault("mime: invalid media parameter")
+	}
+	return tok, j
+}
+
+// FormatMediaType returns the media type with its parameters, like Go's mime.FormatMediaType:
+// parameters are sorted by name and a value that is not a token is quoted.
+fn FormatMediaType(t str, params Params) str {
+	mut out = t
+	if len(params) == 0 {
+		return out
+	}
+	// Go sorts the parameters by name; a map of str has no stable order, so sort the keys.
+	mut keys = []str{}
+	for k, _ in params {
+		keys = append(keys, k)
+	}
+	keys = sortStrings(keys)
+	for _, k in keys {
+		out += "; " + k + "=" + quoteParam(params[k])
+	}
+	return out
+}
+
+// quoteParam quotes a parameter value when it is not a token.
+fn quoteParam(v str) str {
+	if len(v) > 0 && isToken(v) {
+		return v
+	}
+	mut out = "\""
+	for i in 0..len(v) {
+		if v[i] == '"' || v[i] == '\\' {
+			out += "\\"
+		}
+		out += v[i:i+1]
+	}
+	return out + "\""
+}
+
+// sortStrings sorts a copy of the slice bytewise.
+fn sortStrings(xs []str) []str {
+	mut a = []str{}
+	for _, x in xs {
+		a = append(a, x)
+	}
+	mut i = 1
+	for i < len(a) {
+		let x = a[i]
+		mut j = i - 1
+		for j >= 0 && a[j] > x {
+			a[j+1] = a[j]
+			j -= 1
+		}
+		a[j+1] = x
+		i += 1
+	}
+	return a
+}
+
+// isToken reports whether s is an RFC 7230 token (no separators, no whitespace, no controls).
+fn isToken(s str) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i in 0..len(s) {
+		if !isTokenByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isTokenByte reports whether c may appear in a token.
+fn isTokenByte(c u8) bool {
+	if c <= ' ' || c >= 0x7f {
+		return false
+	}
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' ||
+		c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' ||
+		c == '~'
+}
+
+// ---- extensions ----
+
+// builtinTypes are the common extensions. The table is small and lowercased, as Go's is.
+let builtinTypes = map[str]str{
+	".avif": "image/avif",
+	".bmp":  "image/bmp",
+	".css":  "text/css; charset=utf-8",
+	".csv":  "text/csv",
+	".gif":  "image/gif",
+	".htm":  "text/html; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".ico":  "image/vnd.microsoft.icon",
+	".jpeg": "image/jpeg",
+	".jpg":  "image/jpeg",
+	".js":   "text/javascript; charset=utf-8",
+	".json": "application/json",
+	".mjs":  "text/javascript; charset=utf-8",
+	".pdf":  "application/pdf",
+	".png":  "image/png",
+	".svg":  "image/svg+xml",
+	".tar":  "application/x-tar",
+	".text": "text/plain; charset=utf-8",
+	".toml": "application/toml",
+	".txt":  "text/plain; charset=utf-8",
+	".wasm": "application/wasm",
+	".webp": "image/webp",
+	".xml":  "text/xml; charset=utf-8",
+	".yaml": "application/yaml",
+	".yml":  "application/yaml",
+	".zip":  "application/zip",
+}
+
+// extraTypes are the types AddExtensionType added.
+mut extraTypes map[str]str = map[str]str{}
+
+// TypeByExtension returns the media type for the extension (which must begin with a dot, as in
+// ".png"), lowercased, or "" when it is unknown.
+fn TypeByExtension(ext str) str {
+	let e = lower(ext)
+	let (t, found) = extraTypes[e]
+	if found {
+		return t
+	}
+	let (b, known) = builtinTypes[e]
+	if known {
+		return b
+	}
+	return ""
+}
+
+// ExtensionsByType returns the extensions registered for the media type, sorted, or an empty
+// slice when none is.
+fn ExtensionsByType(mediatype str) []str {
+	let want = lower(mediatype)
+	mut out = []str{}
+	for e, t in extraTypes {
+		if t == want {
+			out = append(out, e)
+		}
+	}
+	for e, t in builtinTypes {
+		if t == want {
+			out = append(out, e)
+		}
+	}
+	return sortStrings(out)
+}
+
+// AddExtensionType registers the media type for an extension, like Go's AddExtensionType: the
+// type must be valid and the extension must begin with a dot.
+fn AddExtensionType(ext str, mediatype str) ! {
+	if len(ext) == 0 || ext[0] != '.' {
+		fail say.Fault("mime: extension %q is missing a leading dot", ext)
+	}
+	try checkMediaType(mediatype)
+	extraTypes[lower(ext)] = mediatype
+}
+
+// ---- RFC 2047 encoded words ----
+
+// WordDecoder decodes RFC 2047 encoded words in header text (the =?utf-8?q?...?= form).
+type WordDecoder struct{}
+
+// Decode decodes one RFC 2047 encoded word, like Go's WordDecoder.Decode: it must be exactly
+// "=?charset?encoding?text?=" with one letter of encoding, and the charset must be one Tin can
+// convert (utf-8, us-ascii or iso-8859-1); anything else is a fault.
+fn (d WordDecoder) Decode(word str) !str {
+	if len(word) < 8 || !twine.HasPrefix(word, "=?") || !twine.HasSuffix(word, "?=") {
+		fail say.Fault("mime: invalid RFC 2047 word")
+	}
+	mut qs = i64(0)
+	for i in 0..len(word) {
+		if word[i] == '?' {
+			qs += 1
+		}
+	}
+	if qs != 4 {
+		fail say.Fault("mime: invalid RFC 2047 word")
+	}
+	let body = word[2:len(word)-2]
+	mut parts = twine.SplitN(body, "?", 3)
+	if len(parts) != 3 {
+		fail say.Fault("mime: invalid RFC 2047 word")
+	}
+	let charset = lower(parts[0])
+	if len(charset) == 0 {
+		fail say.Fault("mime: invalid RFC 2047 word")
+	}
+	let enc = parts[1]
+	if len(enc) != 1 {
+		fail say.Fault("mime: invalid RFC 2047 word")
+	}
+	let text = parts[2]
+	mut raw = ""
+	if enc == "B" || enc == "b" {
+		raw = try decodeB(text)
+	} else if enc == "Q" || enc == "q" {
+		raw = try decodeQ(text)
+	} else {
+		fail say.Fault("mime: invalid RFC 2047 encoding %q", enc)
+	}
+	return try convertCharset(charset, raw)
+}
+
+// DecodeHeader decodes every encoded word in a header value, like Go's DecodeHeader: the plain
+// text around the words is kept, the whitespace between two encoded words is dropped, and a word
+// that cannot be decoded is kept as it was.
+fn (d WordDecoder) DecodeHeader(v str) !str {
+	let first = twine.Index(v, "=?")
+	if first < 0 {
+		return v
+	}
+	mut out = v[0:first]
+	mut rest = v[first:len(v)]
+	mut between = false
+	for {
+		let start = twine.Index(rest, "=?")
+		if start < 0 {
+			break
+		}
+		let (text, end, ok) = try tryDecodeAt(rest, start)
+		if !ok {
+			// Not a word: keep it and go on after the "=?".
+			let head = rest[0:start+2]
+			out += head
+			rest = rest[start+2:len(rest)]
+			between = false
+			continue
+		}
+		if start > 0 && (!between || hasNonSpace(rest[0:start])) {
+			out += rest[0:start]
+		}
+		out += text
+		rest = rest[end:len(rest)]
+		between = true
+	}
+	out += rest
+	return out
+}
+
+// tryDecodeAt decodes the encoded word at rest[at] and reports where it ended; ok is false when
+// the text is not a decodable word (then the caller keeps it as it was).
+fn tryDecodeAt(rest str, at i64) !(str, i64, bool) {
+	mut cur = at + 2
+	let q = twine.Index(rest[cur:len(rest)], "?")
+	if q < 0 {
+		return "", 0, false
+	}
+	let charset = lower(rest[cur:cur+q])
+	cur += q + 1
+	if len(rest) < cur+4 {
+		return "", 0, false
+	}
+	let enc = rest[cur]
+	cur += 1
+	if rest[cur] != '?' {
+		return "", 0, false
+	}
+	cur += 1
+	let j = twine.Index(rest[cur:len(rest)], "?=")
+	if j < 0 {
+		return "", 0, false
+	}
+	let body = rest[cur:cur+j]
+	let end = cur + j + 2
+	mut raw = ""
+	if enc == 'B' || enc == 'b' {
+		raw = decodeB(body) catch _ {
+			return "", 0, false
+		}
+	} else if enc == 'Q' || enc == 'q' {
+		raw = decodeQ(body) catch _ {
+			return "", 0, false
+		}
+	} else {
+		return "", 0, false
+	}
+	let text = convertCharset(charset, raw) catch _ {
+		return "", 0, false
+	}
+	return text, end, true
+}
+
+// hasNonSpace reports whether s has a byte that is not whitespace.
+fn hasNonSpace(s str) bool {
+	for i in 0..len(s) {
+		if s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n' {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeB decodes the base64 body of a B word (base64 with a possibly missing padding).
+fn decodeB(s str) !str {
+	// The body has whitespace removed already in practice; the base64 decoder wants it clean.
+	mut clean = ""
+	for i in 0..len(s) {
+		if s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' {
+			clean += s[i:i+1]
+		}
+	}
+	mut padded = clean
+	for len(padded)%4 != 0 {
+		padded += "="
+	}
+	return try decodeBase64(padded)
+}
+
+// decodeQ decodes the Q body: "_" is a space and =XX is a byte escape.
+fn decodeQ(s str) !str {
+	mut out = []u8{}
+	mut i = i64(0)
+	for i < len(s) {
+		let c = s[i]
+		if c == '_' {
+			out = append(out, ' ')
+			i += 1
+		} else if c == '=' {
+			if i+2 >= len(s) {
+				fail say.Fault("mime: invalid RFC 2047 escape")
+			}
+			let hi = hexVal(s[i+1])
+			let lo = hexVal(s[i+2])
+			if hi < 0 || lo < 0 {
+				fail say.Fault("mime: invalid RFC 2047 escape")
+			}
+			out = append(out, u8(hi*16+lo))
+			i += 3
+		} else {
+			out = append(out, c)
+			i += 1
+		}
+	}
+	return str(out)
+}
+
+// WordEncoder encodes header text as encoded words when it needs to be, like Go's WordEncoder.
+type WordEncoder struct{}
+
+// EncodeWord returns the text as an RFC 2047 encoded word when it has bytes that are not
+// printable ASCII, and the text itself when it does not.
+fn (e WordEncoder) EncodeWord(charset str, s str) str {
+	mut needs = false
+	for i in 0..len(s) {
+		if s[i] < 0x20 || s[i] >= 0x7f {
+			needs = true
+		}
+	}
+	if !needs && len(s) > 0 {
+		return s
+	}
+	mut body = ""
+	for i in 0..len(s) {
+		let c = s[i]
+		if c == ' ' {
+			body += "_"
+		} else if c == '_' || c == '?' || c == '=' || c < 0x20 || c >= 0x7f {
+			body += say.Fmt("=%02X", i64(c))
+		} else {
+			body += s[i:i+1]
+		}
+	}
+	return "=?" + charset + "?Q?" + body + "?="
+}
+
+// ---- small helpers shared with the other mime files ----
+
+// upperLetters is what lower takes its replacements from.
+const upperLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+// lowerLetters is what addExtensionType and the other packages lowercase to.
+const lowerLetters = "abcdefghijklmnopqrstuvwxyz"
+
+// lower lowercases ASCII letters.
+fn lower(s str) str {
+	mut out = ""
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 'A' && c <= 'Z' {
+			let at = i64(c) - 65
+			out += lowerLetters[at:at+1]
+		} else {
+			out += s[i:i+1]
+		}
+	}
+	return out
+}
+
+// trimSpace trims ASCII whitespace.
+fn trimSpace(s str) str {
+	mut a = i64(0)
+	mut b = i64(len(s))
+	for a < b && (s[a] == ' ' || s[a] == '\t') {
+		a += 1
+	}
+	for b > a && (s[b-1] == ' ' || s[b-1] == '\t') {
+		b -= 1
+	}
+	return s[a:b]
+}
+
+// hexVal is a hex digit's value, or -1.
+fn hexVal(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c-'a') + 10
+	}
+	if c >= 'A' && c <= 'F' {
+		return i64(c-'A') + 10
+	}
+	return -1
+}
+
+// convertCharset turns raw bytes in a charset into UTF-8: utf-8 and us-ascii pass through and
+// iso-8859-1 (latin-1) is widened; another charset is refused, as Go refuses one it has no
+// reader for.
+fn convertCharset(charset str, raw str) !str {
+	if charset == "utf-8" || charset == "us-ascii" || charset == "ascii" || len(charset) == 0 {
+		return raw
+	}
+	if charset == "iso-8859-1" || charset == "latin1" || charset == "latin-1" {
+		mut out = ""
+		for i in 0..len(raw) {
+			let c = raw[i]
+			if c < 0x80 {
+				out += raw[i:i+1]
+			} else {
+				// Widen to the UTF-8 encoding of U+0080..U+00FF.
+				out += say.Fmt("%c%c", i64(0xC0 | (c >> 6)), i64(0x80 | (c & 0x3F)))
+			}
+		}
+		return out
+	}
+	fail say.Fault("mime: unhandled charset %q", charset)
+}
+
+// decodeBase64 decodes standard base64 with padding.
+fn decodeBase64(s str) !str {
+	mut out = []u8{}
+	mut acc = i64(0)
+	mut bits = i64(0)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c == '=' {
+			break
+		}
+		let v = b64Val(c)
+		if v < 0 {
+			fail say.Fault("mime: invalid base64 in an encoded word")
+		}
+		acc = acc<<6 | v
+		bits += 6
+		if bits >= 8 {
+			bits -= 8
+			out = append(out, u8((acc>>bits)&0xff))
+		}
+	}
+	return str(out)
+}
+
+// b64Val is a standard base64 character's value, or -1.
+fn b64Val(c u8) i64 {
+	if c >= 'A' && c <= 'Z' {
+		return i64(c - 'A')
+	}
+	if c >= 'a' && c <= 'z' {
+		return i64(c-'a') + 26
+	}
+	if c >= '0' && c <= '9' {
+		return i64(c-'0') + 52
+	}
+	if c == '+' {
+		return 62
+	}
+	if c == '/' {
+		return 63
+	}
+	return -1
+}

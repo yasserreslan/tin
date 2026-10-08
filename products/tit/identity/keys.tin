@@ -92,6 +92,11 @@ fn (s Signer) Sign(payload str) ![]u8 {
 	return try seal.SignEd25519(s.seed, []u8(payload))
 }
 
+// Sign is the ed25519 signature of payload with this key (for requests to a server, transport section 15).
+fn (s Signer) Sign(payload str) ![]u8 {
+	return try seal.SignEd25519(s.seed, []u8(payload))
+}
+
 // SignTag is the tag with its signature set from this key.
 fn (s Signer) SignTag(t object.TagData) !object.TagData {
 	let payload = try object.TagSigningPayload(t)

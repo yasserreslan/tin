@@ -26,6 +26,9 @@ binary true true
 marks [2 9]
 git [ M main.tin]
 restored true true notes.md 4
+dirty before true
+auto-saved 1 false Arewritten elsewhere
+nothing left 0
 shell running true 2 3
 terminal output seen true
 terminal selection pty-ok-42
