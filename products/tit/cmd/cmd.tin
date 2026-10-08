@@ -30,7 +30,7 @@ type Command enum {
 	Switch(SwitchArgs)
 	Merge(MergeArgs)
 	Tag(TagArgs)
-	Undo(i64)
+	Undo(i64, bool)
 	Redo
 	Oplog(OplogArgs)
 	Remote([]str)
@@ -51,6 +51,10 @@ type Command enum {
 	Bench(BenchArgs)
 	History(HistoryArgs)
 	Overlap
+	Timeline(TimelineArgs)
+	Watch(WatchArgs)
+	Park(str)
+	Unpark(str)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -170,7 +174,8 @@ commands:
                              merge a branch in: fast-forward, or a merge commit; conflicts get git's markers
   tag [-a] [-m msg] [-d] [name [rev]]
                              list tags, make one (annotated with -a or -m, signed when you have a key), delete one
-  undo [--op N]              reverse the last operation of this workspace (or operation N)
+  undo [--op N] [--yes]      reverse the last operation of this workspace (or operation N); undoing a push
+                             puts the server's branch back, and asks for --yes first
   redo                       apply again what the last undo reversed
   oplog [show N | restore N [--yes]]
                              the operations, newest first; one in full; every ref as it was after one
@@ -206,6 +211,12 @@ commands:
   overlap                    other branches (and fetched remote ones) changing the declarations this one changes
   mirror [git dir]           write every branch and tag into a git directory, as git objects (mirror.url)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
+  timeline <file> [N]        the versions of a file kept before commands that change files (and by watch); N
+                             puts version N back
+  watch [--every ms] [--for s]
+                             keep each saved version of the changed files for timeline, until interrupted
+  park [name] | unpark <name>
+                             put the uncommitted changes aside under a name (the branch remembered), and back
   version [-v]               the version
   help [command]             this text
 
@@ -500,12 +511,20 @@ fn Parse(args []str) !(Global, Command) {
 	}
 	if name == "undo" {
 		mut n = 0
-		if len(rest) == 2 && rest[0] == "--op" {
-			n = try parseOp(rest[1])
-		} else if len(rest) != 0 {
-			fail fault.Wrap(ErrUsage, "undo takes nothing, or --op N")
+		mut yes = false
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--op" && k + 1 < len(rest) {
+				n = try parseOp(rest[k + 1])
+				k += 2
+			} else if rest[k] == "--yes" {
+				yes = true
+				k += 1
+			} else {
+				fail fault.Wrap(ErrUsage, "undo takes nothing, --op N, or --yes (to undo a push on the server)")
+			}
 		}
-		return g, Command.Undo(n)
+		return g, Command.Undo(n, yes)
 	}
 	if name == "redo" {
 		try noMore(rest, 0, "redo")
@@ -780,6 +799,58 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Bench(ba)
 	}
+	if name == "timeline" {
+		mut ta = TimelineArgs{Path: "", Pick: 0}
+		if len(rest) < 1 || len(rest) > 2 {
+			fail fault.Wrap(ErrUsage, "timeline <file> [N]")
+		}
+		ta.Path = rest[0]
+		if len(rest) == 2 {
+			ta.Pick = parseCount(rest[1]) catch _ {
+				-1
+			}
+			if ta.Pick <= 0 {
+				fail fault.Wrap(ErrUsage, "timeline: N is a version's number in the list")
+			}
+		}
+		return g, Command.Timeline(ta)
+	}
+	if name == "watch" {
+		mut wa = WatchArgs{Every: 1000, For: 0}
+		mut k = 0
+		for k < len(rest) {
+			if (rest[k] == "--every" || rest[k] == "--for") && k + 1 < len(rest) {
+				let n = parseCount(rest[k + 1]) catch _ {
+					-1
+				}
+				if n <= 0 {
+					fail fault.Wrap(ErrUsage, "watch: {rest[k]} takes a number")
+				}
+				if rest[k] == "--every" {
+					wa.Every = n
+				} else {
+					wa.For = n
+				}
+				k += 2
+				continue
+			}
+			fail fault.Wrap(ErrUsage, "watch [--every ms] [--for seconds]")
+		}
+		return g, Command.Watch(wa)
+	}
+	if name == "park" || name == "unpark" {
+		if len(rest) > 1 || (name == "unpark" && len(rest) == 0) {
+			fail fault.Wrap(ErrUsage, "park [name] | unpark <name>")
+		}
+		mut n = ""
+		if len(rest) == 1 {
+			n = rest[0]
+		}
+		if name == "park" {
+			return g, Command.Park(n)
+		}
+		return g, Command.Unpark(n)
+	}
 	if name == "history" {
 		mut ha = HistoryArgs{Name: "", Most: 0}
 		mut k = 0
@@ -889,6 +960,8 @@ fn Main(args []str) i64 {
 }
 
 fn run(g Global, c Command, o mut Out) ! {
+	// files a command may change are kept first, for tit timeline (snapshot.tin)
+	try snapshotFor(g, c)
 	if g.Trace {
 		let name = commandName(c)
 		// the traced block writes to its own buffer: a function literal cannot hold the mut parameter
@@ -922,7 +995,7 @@ fn commandName(c Command) str {
 		Switch(_) => "switch"
 		Merge(_) => "merge"
 		Tag(_) => "tag"
-		Undo(_) => "undo"
+		Undo(_, _) => "undo"
 		Redo => "redo"
 		Oplog(_) => "oplog"
 		Remote(_) => "remote"
@@ -943,6 +1016,10 @@ fn commandName(c Command) str {
 		Bench(_) => "bench"
 		History(_) => "history"
 		Overlap => "overlap"
+		Timeline(_) => "timeline"
+		Watch(_) => "watch"
+		Park(_) => "park"
+		Unpark(_) => "unpark"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -1006,8 +1083,8 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		Tag(ta) => {
 			try doTag(g, ta, mut o)
 		}
-		Undo(n) => {
-			try doUndo(g, n, mut o)
+		Undo(n, yes) => {
+			try doUndo(g, n, yes, mut o)
 		}
 		Redo => {
 			try doRedo(g, mut o)
@@ -1068,6 +1145,18 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Overlap => {
 			try doOverlap(g, mut o)
+		}
+		Timeline(ta) => {
+			try doTimeline(g, ta, mut o)
+		}
+		Watch(wa) => {
+			try doWatch(g, wa, mut o)
+		}
+		Park(name) => {
+			try doPark(g, name, mut o)
+		}
+		Unpark(name) => {
+			try doUnpark(g, name, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)
