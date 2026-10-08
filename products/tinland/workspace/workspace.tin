@@ -57,6 +57,7 @@ const dragNone = 0
 const dragDivider = 1
 const dragText = 2
 const DragTitle = 3
+const dragTerm = 4
 
 // Sizes in points.
 const titleH = 36.0
@@ -109,6 +110,12 @@ type Workspace struct {
 	Pty appkit.Pty
 	TermUp bool
 	TermScroll i64
+	// The selection in the terminal, from (SelCol0, SelLine0) to (SelCol1, SelLine1), lines counted from the oldest history line.
+	TermSel bool
+	SelCol0 i64
+	SelLine0 i64
+	SelCol1 i64
+	SelLine1 i64
 }
 
 const MenuNone = 0

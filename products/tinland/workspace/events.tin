@@ -213,6 +213,7 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.ToggleTerminal()
 	} else if id == idTerminal {
 		ws.Focus = FocusTerminal
+		ws.termPress(x, y)
 	} else if id == idNewFile {
 		ws.Perform(CmdNewFile)
 	} else if id == idRefresh {
@@ -231,6 +232,9 @@ fn (ws mut Workspace) drag(x f64, y f64) {
 			w = 600.0
 		}
 		ws.LeftW = w
+		ws.Dirty = true
+	} else if ws.Drag == dragTerm {
+		ws.termDrag(x, y)
 		ws.Dirty = true
 	} else if ws.Drag == dragText {
 		let (ex, ey, ew, eh) = ws.Hits.Rect(paneId(ws.Active))
@@ -335,6 +339,11 @@ fn (ws mut Workspace) Perform(cmd i64) {
 			ws.Proj.Reveal(ws.Ed.Buf.Path)
 			ws.LeftOpen = true
 			ws.Panel = PanelProject
+		}
+	} else if cmd == editor.CmdCopy && ws.Focus == FocusTerminal {
+		let text = ws.TermSelectedText()
+		if len(text) > 0 {
+			appkit.SetClipboard(text)
 		}
 	} else if cmd == editor.CmdPaste && ws.Picker.Open {
 		ws.Picker.Query = pasteLine(ws.Picker.Query, appkit.ClipboardText())

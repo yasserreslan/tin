@@ -23,7 +23,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 |---|---|
 | Cmd+O, Cmd+Shift+O | open a file, open a folder |
 | Cmd+P, Cmd+Shift+P | go to file (fuzzy), command palette |
-| Cmd+B, Cmd+J, Ctrl+` | show or hide the project panel, the output panel, the terminal (a shell in the project folder: colors, history, arrows, Cmd+V pastes) |
+| Cmd+B, Cmd+J, Ctrl+` | show or hide the project panel, the output panel, the terminal (a shell in the project folder: colors, history, arrows, Cmd+V pastes, drag selects and Cmd+C copies) |
 | Cmd+\ , Cmd+Shift+\ | split the editor to the right, close the split (each pane has its own tabs) |
 | Cmd+= , Cmd+- , Cmd+0 | zoom in, out, reset the code font |
 | Cmd+Shift+F | search in the project (Return runs it; Aa, ab and .* switch case, whole word and regular expression; Tab goes to the replace box, Return there replaces every match in the project) |

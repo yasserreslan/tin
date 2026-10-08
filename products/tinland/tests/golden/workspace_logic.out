@@ -26,4 +26,5 @@ git [ M main.tin]
 restored true true notes.md 4
 shell running true 2 3
 terminal output seen true
+terminal selection pty-ok-42
 shell stopped false

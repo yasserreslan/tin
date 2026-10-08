@@ -171,6 +171,17 @@ added
 		}
 	}
 	say.Line("terminal output seen", found)
+	// select the output line and read it back
+	for y in 0..ws.Term.Rows {
+		if ws.Term.Text(y) == "pty-ok-42" {
+			ws.TermSel = true
+			ws.SelCol0 = 0
+			ws.SelLine0 = ws.Term.HistoryLines() + y
+			ws.SelCol1 = 8
+			ws.SelLine1 = ws.SelLine0
+		}
+	}
+	say.Line("terminal selection", ws.TermSelectedText())
 	ws.StopTerminal()
 	say.Line("shell stopped", ws.TermUp)
 	quarry.RemoveAll(root) catch _ {
