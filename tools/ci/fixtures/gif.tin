@@ -1,0 +1,68 @@
+package main
+
+import "image"
+import "image/color"
+import "image/gif"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	mut start = i64(0)
+	for i in 0..len(body)+1 {
+		if i < len(body) && body[i] != '\n' { continue }
+		let line = body[start:i]
+		start = i+1
+		if len(line) == 0 { continue }
+		if line[0:2] == "E " {
+			let which = mint.Atoi(line[2:]) catch _ { 0 }
+			let g = makeGIF(which)
+			say.Line("E", seal.Hex([]u8(gif.EncodeAll(g))), digest(g))
+			continue
+		}
+		let data = seal.HexDecode(line) catch err {
+			say.Line("bad hex", err)
+			return
+		}
+		let decoded = gif.DecodeAll(str(data)) catch err {
+			say.Line("decode fault", err)
+			return
+		}
+		say.Line(digest(decoded))
+	}
+}
+
+fn digest(g gif.GIF) str {
+	let config = gif.DecodeConfig(gif.EncodeAll(g)) catch _ { image.Config{} }
+	mut out = say.Fmt("%dx%d/%d/%d/", config.Width, config.Height, g.LoopCount, len(g.Image))
+	for i, frame in g.Image {
+		let r = frame.Bounds()
+		out += say.Fmt("%d,%d,%d,%d:%d:%d:", r.Min.X, r.Min.Y, r.Dx(), r.Dy(), g.Delay[i], g.Disposal[i])
+		for y in r.Min.Y..r.Max.Y {
+			for x in r.Min.X..r.Max.X {
+				let c = frame.At(x, y)
+				out += say.Fmt("%04x%04x%04x%04x", c.R, c.G, c.B, c.A)
+			}
+		}
+		out += "/"
+	}
+	return out
+}
+
+fn makeGIF(which i64) gif.GIF {
+	let p color.Palette = []color.NRGBA{{R: 90, G: 130, B: 250, A: 255}, {R: 30, B: 80, A: 255}, {A: 0}}
+	mut a = image.NewPaletted(image.Rect(0, 0, 5, 3), p)
+	for y in 0..3 { for x in 0..5 { a.SetColorIndex(x, y, u8((x*3+y*5+which)%3)) } }
+	mut b = image.NewPaletted(image.Rect(1, 1, 4, 3), p)
+	for y in 1..3 { for x in 1..4 { b.SetColorIndex(x, y, u8((x*3+y*5+1)%3)) } }
+	if which == 0 {
+		return gif.GIF{Image: []image.Paletted{a}, Delay: []i64{0}, Disposal: []u8{0}, LoopCount: -1}
+	}
+	return gif.GIF{Image: []image.Paletted{a, b}, Delay: []i64{7, 19}, Disposal: []u8{2, 3}, LoopCount: 4}
+}

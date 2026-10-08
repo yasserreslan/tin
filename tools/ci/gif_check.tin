@@ -1,0 +1,69 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Compare GIF frames, pixels, delays, disposal, transparency and loop metadata with Go's image/gif.
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci/gif"), "gif-")
+	let tin = ci.Join(work, "gif-tin")
+	let goexe = ci.Join(work, "gif-go")
+	ci.BuildTin("tools/ci/fixtures/gif.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/gif"}, root, 300), "go build gif")
+	let generated = ci.Exec([]str{goexe}, root, 300)
+	ci.Must(generated, "Go GIF corpus")
+	let cases = ci.Lines(generated.Stdout)
+	mut input = ""
+	mut expected = []str{}
+	for line in cases {
+		let fields = twine.Split(line, " ")
+		ci.Check(len(fields) == 2, "malformed Go GIF corpus record")
+		input += fields[0] + "\n"
+		expected = append(expected, fields[1])
+	}
+	let decoded = ci.ExecIn([]str{tin}, root, 300, input, []str{})
+	ci.Must(decoded, "Tin GIF DecodeAll")
+	let actual = ci.Lines(decoded.Stdout)
+	ci.Check(len(actual) == len(expected), "GIF corpus count differs: Tin " + mint.Itoa(len(actual)) + " Go " + mint.Itoa(len(expected)))
+	mut bad = i64(0)
+	for i in 0..len(expected) {
+		if actual[i] != expected[i] {
+			say.Line("GIF mismatch", i+1, "want", expected[i], "got", actual[i])
+			bad += 1
+		}
+	}
+	ci.Check(bad == 0, "GIF decoded frame results differ in " + mint.Itoa(bad) + " cases")
+	mut encInput = "E 0\nE 1\n"
+	let encoded = ci.ExecIn([]str{tin}, root, 300, encInput, []str{})
+	ci.Must(encoded, "Tin GIF EncodeAll")
+	let encLines = ci.Lines(encoded.Stdout)
+	mut verify = ""
+	for line in encLines {
+		let fields = twine.Split(line, " ")
+		ci.Check(len(fields) == 3 && fields[0] == "E", "malformed Tin GIF encoder output")
+		verify += fields[1] + " " + fields[2] + "\n"
+	}
+	let goDecode = ci.ExecIn([]str{goexe, "verify"}, root, 300, verify, []str{})
+	ci.Must(goDecode, "Go GIF decode of Tin output")
+	ci.Check(twine.TrimSpace(goDecode.Stdout) == "OK", "Go GIF decoded pixels or metadata differ")
+	let malformed = ci.Exec([]str{goexe, "malformed"}, root, 300)
+	ci.Must(malformed, "Go malformed GIF corpus")
+	let badCases = ci.Lines(malformed.Stdout)
+	mut badInput = ""
+	for line in badCases {
+		let fields = twine.Split(line, " ")
+		ci.Check(len(fields) == 2, "malformed Go GIF record")
+		badInput += fields[1] + "\n"
+		let result = ci.ExecIn([]str{tin}, root, 30, fields[1] + "\n", []str{})
+		ci.Must(result, "Tin malformed GIF harness")
+		ci.Check(twine.HasPrefix(result.Stdout, "decode fault "), "Tin accepted malformed GIF " + fields[0])
+	}
+	let goBad = ci.ExecIn([]str{goexe, "verifybad"}, root, 300, badInput, []str{})
+	ci.Must(goBad, "Go malformed GIF validation")
+	ci.Check(twine.TrimSpace(goBad.Stdout) == "OK", "Go accepted malformed GIF")
+	ci.Remove(work)
+	ci.Pass("GIF: " + mint.Itoa(len(expected)) + " Go frames match; Tin encodings decode in Go; " + mint.Itoa(len(badCases)) + " malformed streams rejected by both")
+}
