@@ -184,3 +184,92 @@ fn rotl(x u64, r u64) u64 {
 fn Hash(s str) u64 {
 	return Xxh64(s, 0x9e3779b97f4a7c15)
 }
+
+// ---- CRC-64 ----
+
+// crc64_table builds the 256-entry table of a reflected polynomial, as Go's crc64.MakeTable
+// does (the low bits of the running crc are shifted out first).
+fn crc64_table(poly u64) []u64 {
+	let t = make([]u64, 256)
+	for i in 0..256 {
+		mut crc = u64(i)
+		for j in 0..8 {
+			if crc&1 != 0 {
+				crc = (crc >> 1) ^ poly
+			} else {
+				crc >>= 1
+			}
+		}
+		t[i] = crc
+	}
+	return t
+}
+
+// crc64PolyECMA is the ECMA-182 polynomial in Go's reflected form (crc64.ECMA).
+const crc64PolyECMA = 0xc96c5795d7870f42
+// crc64PolyISO is the ISO polynomial (Go's crc64.ISO).
+const crc64PolyISO = 0xd800000000000000
+
+let crc64ECMA []u64 = crc64_table(crc64PolyECMA)
+let crc64ISO []u64 = crc64_table(crc64PolyISO)
+
+// crc64_update continues a CRC-64 over more data, as Go's crc64.Update does.
+fn crc64_update(crc u64, t []u64, s str) u64 {
+	mut c = ^crc
+	let p = cast(i64, s) + 8
+	for i in 0..len(s) {
+		// The index is the low byte of the running crc exclusive-ored with the data byte.
+		c = t[i64((c^u64(load8(p+i)))&255)] ^ (c >> 8)
+	}
+	return ^c
+}
+
+// Crc64ECMA is the ECMA-182 CRC-64 of s (as in XZ and Go's crc64.ECMA).
+fn Crc64ECMA(s str) u64 {
+	return crc64_update(0, crc64ECMA, s)
+}
+
+// Crc64ECMAUpdate continues an ECMA-182 CRC-64 over more data.
+fn Crc64ECMAUpdate(crc u64, s str) u64 {
+	return crc64_update(crc, crc64ECMA, s)
+}
+
+// Crc64ISO is the ISO CRC-64 of s (Go's crc64.ISO).
+fn Crc64ISO(s str) u64 {
+	return crc64_update(0, crc64ISO, s)
+}
+
+// Crc64ISOUpdate continues an ISO CRC-64 over more data.
+fn Crc64ISOUpdate(crc u64, s str) u64 {
+	return crc64_update(crc, crc64ISO, s)
+}
+
+// ---- a seeded hash for map keys ----
+
+// MapHash is a fast seeded 64-bit hash of s, for spreading keys of a table one builds oneself.
+// It is not a cryptographic hash, and it is not Go's hash/maphash (whose algorithm is not
+// specified and whose seed is random): two runs with the same seed and the same bytes agree, and
+// different seeds give unrelated hashes.
+fn MapHash(seed u64, s str) u64 {
+	let mix = u64(0x9e3779b97f4a7c15)
+	mut h = seed ^ (u64(len(s)) *% mix)
+	let p = cast(i64, s) + 8
+	mut i = 0
+	for i+8 <= len(s) {
+		h ^= u64(__ld(p+i, 8))
+		h = (h *% mix) ^ (h >> 29)
+		i += 8
+	}
+	mut tail = u64(0)
+	for i < len(s) {
+		tail = (tail << 8) | u64(load8(p+i))
+		i += 1
+	}
+	h ^= tail
+	h ^= h >> 33
+	h *%= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *%= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return h
+}

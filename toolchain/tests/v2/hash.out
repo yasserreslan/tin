@@ -1,0 +1,27 @@
+crc64 check 11051210869376104954 13333283586479230977
+crc64 empty 0 0
+crc64 hello 5981764153023615706 13388989860809387070
+crc64 chained true true
+crc64 big 17036788464839511630 true
+maphash stable true true
+maphash spread 100 true
+maphash zero 9297814886316923340
+lzw 0 0 3 true
+lzw 1 0 3 true
+lzw 0 1 4 true
+lzw 1 1 4 true
+lzw 0 4 6 true
+lzw 1 4 6 true
+lzw 0 10 9 true
+lzw 1 10 9 true
+lzw 0 29 21 true
+lzw 1 29 21 true
+lzw 0 43 49 true
+lzw 1 43 49 true
+lzw 0 256 291 true
+lzw 1 256 291 true
+lzw long 20000 9140 20000 true
+lzw long lsb 9140 true
+lzw short squash: lzw: unexpected end of stream
+lzw bad code squash: lzw: invalid code
+lzw limit squash: lzw over 5 bytes: limit exceeded

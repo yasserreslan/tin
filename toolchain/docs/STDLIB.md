@@ -1216,6 +1216,11 @@ Package stamp computes non-cryptographic hashes and checksums: FNV-1a, CRC-32 (I
 - `Adler32(s str) u32`: Adler32 is the Adler-32 checksum of s (as in zlib).
 - `Xxh64(s str, seed u64) u64`: Xxh64 is the xxHash64 of s with seed.
 - `Hash(s str) u64`: Hash is a fast, well-mixed 64-bit hash for hash tables (not stable across versions).
+- `Crc64ECMA(s str) u64`: Crc64ECMA is the ECMA-182 CRC-64 of s (as in XZ and Go's crc64.ECMA).
+- `Crc64ECMAUpdate(crc u64, s str) u64`: Crc64ECMAUpdate continues an ECMA-182 CRC-64 over more data.
+- `Crc64ISO(s str) u64`: Crc64ISO is the ISO CRC-64 of s (Go's crc64.ISO).
+- `Crc64ISOUpdate(crc u64, s str) u64`: Crc64ISOUpdate continues an ISO CRC-64 over more data.
+- `MapHash(seed u64, s str) u64`: MapHash is a fast seeded 64-bit hash of s, for spreading keys of a table one builds oneself. It is not a cryptographic hash, and it is not Go's hash/maphash (whose algorithm is not specified and whose seed is random): two runs with the same seed and the same bytes agree, and different seeds give unrelated hashes.
 
 ## squash
 
@@ -1241,6 +1246,10 @@ let back = try squash.Gunzip(z, 64mb)
 - `Unlz4(data str, max i64) !str`: Unlz4 decompresses LZ4 frames (one or several, and skippable frames), producing at most max bytes.
 - `Lz4BlockOf(data str) str`: Lz4BlockOf compresses data as one bare LZ4 block (no frame).
 - `UnLz4Block(b str, max i64) !str`: UnLz4Block decompresses one bare LZ4 block, producing at most max bytes.
+- `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
+- `const LSB = 1`
+- `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
