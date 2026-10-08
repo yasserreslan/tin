@@ -1,0 +1,99 @@
+package main
+
+import "say"
+import "seal"
+
+fn hx(s str) ![]u8 {
+	return try seal.HexDecode(s)
+}
+
+fn vector(kem seal.HPKEKEM, aead seal.HPKEAEAD, sk str, enc str, ct str) ! {
+	let info = try hx("4f6465206f6e2061204772656369616e2055726e")
+	let aad = try hx("436f756e742d30")
+	let cipher = try hx(ct)
+	let privateKey = try hx(sk)
+	let encapsulated = try hx(enc)
+	let got = try seal.HPKEOpen(kem, aead, privateKey, encapsulated, info, aad, cipher)
+	say.Line(seal.Hex(got))
+}
+
+fn expectFault(kem seal.HPKEKEM, aead seal.HPKEAEAD, sk str, enc str, info str, aad str, ct str) ! {
+	let privateKey = try hx(sk)
+	let encapsulated = try hx(enc)
+	let setupInfo = try hx(info)
+	let associatedData = try hx(aad)
+	let ciphertext = try hx(ct)
+	let (_, err) = seal.HPKEOpen(kem, aead, privateKey, encapsulated, setupInfo, associatedData, ciphertext)
+	if err == nil {
+		panic("HPKE accepted an invalid input")
+	}
+	say.Line("fault")
+}
+
+fn generated(kem seal.HPKEKEM, aead seal.HPKEAEAD, skHex str) ! {
+	let sk = try hx(skHex)
+	let pk = match kem {
+		seal.HPKEKEM.HPKEX25519 => try seal.X25519PublicKey(sk)
+		seal.HPKEKEM.HPKEP256 => try seal.P256PublicKey(sk)
+	}
+	for n in 0..8 {
+		let info = []u8{u8(n), 0x49, 0x4e, 0x46, 0x4f}
+		let aad = []u8{u8(n), 0x41, 0x41, 0x44}
+		mut msg = []u8{}
+		for i in 0..n * 3 {
+			msg = append(msg, u8(i * 37 + n))
+		}
+		let (enc, ct) = try seal.HPKESeal(kem, aead, pk, info, aad, msg)
+		let opened = try seal.HPKEOpen(kem, aead, sk, enc, info, aad, ct)
+		if len(opened) != len(msg) { panic("HPKE round trip length mismatch") }
+		for i in 0..len(msg) {
+			if opened[i] != msg[i] { panic("HPKE round trip content mismatch") }
+		}
+		let (_, infoErr) = seal.HPKEOpen(kem, aead, sk, enc, []u8{0}, aad, ct)
+		if infoErr == nil { panic("HPKE accepted wrong info") }
+		let (_, aadErr) = seal.HPKEOpen(kem, aead, sk, enc, info, []u8{0}, ct)
+		if aadErr == nil { panic("HPKE accepted wrong aad") }
+		let (_, keyErr) = seal.HPKEOpen(kem, aead, []u8{1}, enc, info, aad, ct)
+		if keyErr == nil { panic("HPKE accepted wrong key") }
+		mut badCT = ct
+		badCT[0] ^= 1
+		let (_, ctErr) = seal.HPKEOpen(kem, aead, sk, enc, info, aad, badCT)
+		if ctErr == nil { panic("HPKE accepted tampered ciphertext") }
+		// A changed encapsulated key derives a different shared secret and base nonce.
+		let (_, nonceErr) = seal.HPKEOpen(kem, aead, sk, []u8{0}, info, aad, ct)
+		if nonceErr == nil { panic("HPKE accepted a ciphertext under the wrong derived nonce") }
+	}
+	say.Line("roundtrip")
+}
+
+fn main() ! {
+	// RFC 9180 Appendix A.1.1, X25519 / HKDF-SHA256 / AES-128-GCM.
+	let xsk = "4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8"
+	let xenc = "37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431"
+	let xct = "f938558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae8218a355a96d8770ac83d07bea87e13c512a"
+	try vector(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEAES128GCM, xsk, xenc, xct)
+	// RFC 9180 Appendix A.2.1, X25519 / HKDF-SHA256 / ChaCha20-Poly1305.
+	let xsk2 = "8057991eef8f1f1af18f4a9491d16a1ce333f695d4db8e38da75975c4478e0fb"
+	let xenc2 = "1afa08d3dec047a643885163f1180476fa7ddb54c6a8029ea33f95796bf2ac4a"
+	let xct2 = "1c5250d8034ec2b784ba2cfd69dbdb8af406cfe3ff938e131f0def8c8b60b4db21993c62ce81883d2dd1b51a28"
+	try vector(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEChaCha20Poly1305, xsk2, xenc2, xct2)
+	// RFC 9180 Appendix A.3.1, P-256 / HKDF-SHA256 / AES-128-GCM.
+	let psk = "f3ce7fdae57e1a310d87f1ebbde6f328be0a99cdbcadf4d6589cf29de4b8ffd2"
+	let penc = "04a92719c6195d5085104f469a8b9814d5838ff72b60501e2c4466e5e67b325ac98536d7b61a1af4b78e5b7f951c0900be863c403ce65c9bfcb9382657222d18c4"
+	let pct = "5ad590bb8baa577f8619db35a36311226a896e7342a6d836d8b7bcd2f20b6c7f9076ac232e3ab2523f39513434"
+	try vector(seal.HPKEKEM.HPKEP256, seal.HPKEAEAD.HPKEAES128GCM, psk, penc, pct)
+	// RFC 9180 Appendix A.5.1, P-256 / HKDF-SHA256 / ChaCha20-Poly1305.
+	let psk2 = "a4d1c55836aa30f9b3fbb6ac98d338c877c2867dd3a77396d13f68d3ab150d3b"
+	let penc2 = "04c07836a0206e04e31d8ae99bfd549380b072a1b1b82e563c935c095827824fc1559eac6fb9e3c70cd3193968994e7fe9781aa103f5b50e934b5b2f387e381291"
+	let pct2 = "6469c41c5c81d3aa85432531ecf6460ec945bde1eb428cb2fedf7a29f5a685b4ccb0d057f03ea2952a27bb458b"
+	try vector(seal.HPKEKEM.HPKEP256, seal.HPKEAEAD.HPKEChaCha20Poly1305, psk2, penc2, pct2)
+	try generated(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEAES128GCM, xsk)
+	try generated(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEAES256GCM, xsk)
+	try generated(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEChaCha20Poly1305, xsk)
+	try generated(seal.HPKEKEM.HPKEP256, seal.HPKEAEAD.HPKEAES128GCM, psk)
+	try generated(seal.HPKEKEM.HPKEP256, seal.HPKEAEAD.HPKEAES256GCM, psk)
+	try generated(seal.HPKEKEM.HPKEP256, seal.HPKEAEAD.HPKEChaCha20Poly1305, psk)
+	try expectFault(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEAES128GCM, xsk, xenc, "4f6465206f6e2061204772656369616e2055726e", "436f756e742d31", xct)
+	try expectFault(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEAES128GCM, xsk, xenc, "00", "436f756e742d30", xct)
+	try expectFault(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEAES128GCM, xsk, xenc, "4f6465206f6e2061204772656369616e2055726e", "436f756e742d30", "0038558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae8218a355a96d8770ac83d07bea87e13c512a")
+}
