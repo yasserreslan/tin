@@ -133,6 +133,7 @@ fn (ed mut Editor) acceptCompletion() {
 	let label = ed.Comp[ed.CompSel].Label
 	let typed = len(ed.prefix())
 	ed.CompOpen = false
+	ed.External = []tinsym.Item{}
 	if typed > 0 {
 		ed.Buf.MoveTo(ed.Buf.Row, ed.Buf.Col - typed, false)
 		ed.Buf.MoveTo(ed.Buf.Row, ed.Buf.Col + typed, true)
@@ -160,6 +161,7 @@ fn (ed mut Editor) completionKey(k Key) bool {
 	}
 	if k.Code == keyEscape {
 		ed.CompOpen = false
+		ed.External = []tinsym.Item{}
 		return true
 	}
 	return false
@@ -169,6 +171,9 @@ fn (ed mut Editor) completionKey(k Key) bool {
 // every other file, the words that occur in the open files (three letters or more), in alphabetical order.
 fn (ed Editor) candidates() []tinsym.Item {
 	let lang = textedit.LanguageOf(ed.Buf.Path)
+	if len(ed.External) > 0 && lang != textedit.LangTin {
+		return ed.External
+	}
 	if lang == textedit.LangTin {
 		return tinsym.Complete(ed.Syms, ed.Buf.Path, ed.Buf.Text(), ed.Buf.Row, ed.Buf.Col)
 	}
@@ -212,4 +217,23 @@ fn (ed Editor) candidates() []tinsym.Item {
 		items = append(items, tinsym.Item{Label: w, Kind: "word"})
 	}
 	return items
+}
+
+// OpenExternal shows the completions a language server gave, narrowed to the word typed so far.
+fn (ed mut Editor) OpenExternal(items []tinsym.Item) {
+	ed.External = items
+	ed.CompSel = 0
+	ed.CompOpen = true
+	ed.refilter()
+	if !ed.CompOpen {
+		ed.External = []tinsym.Item{}
+	}
+	ed.Redraw = true
+}
+
+// SetDiagnostics replaces the problems shown with those a language server reported for this file.
+fn (ed mut Editor) SetDiagnostics(diags []tinsym.Diag) {
+	ed.Diags = diags
+	ed.DiagFor = ed.Buf.Version
+	ed.Redraw = true
 }

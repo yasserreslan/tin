@@ -48,8 +48,14 @@ fn Run(paths []str) bool {
 		if ws.TermUp {
 			wait = 0.05
 		}
+		if ws.LspActive() && wait > 0.1 {
+			wait = 0.1
+		}
 		mut got = gpuwin.Pump(win, wait)
 		if ws.PollTerminal() {
+			got = true
+		}
+		if ws.PollLsp() {
 			got = true
 		}
 		idle += 1
@@ -65,6 +71,8 @@ fn Run(paths []str) bool {
 			if idle % every == 0 {
 				ws.CheckDisk()
 			}
+			// and the compiler looks at the Tin text that changed
+			ws.CheckSources()
 			ws.Ed.Blink = !ws.Ed.Blink
 			ws.Ed.Redraw = true
 		}
@@ -99,6 +107,7 @@ fn Run(paths []str) bool {
 		appkit.PoolPop(pool)
 	}
 	ws.SaveSession()
+	ws.StopLsp()
 	ws.StopTerminal()
 	ws.Ed.Cleanup()
 	return true
