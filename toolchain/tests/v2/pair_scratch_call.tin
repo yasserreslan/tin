@@ -1,0 +1,97 @@
+package main
+
+import "say"
+
+// A value computed past the temp registers (a - b2i(...) inside a deep expression) sat in the register the call returns in,
+// and the difference was a - a: the left side of a binary operation is saved across a call in the right side (#811).
+
+fn clampf(x f64) f64 {
+	if x != x {
+		return 0.5
+	}
+	if x > 1e12 {
+		return 1e12
+	}
+	if x < -1e12 {
+		return -1e12
+	}
+	return x
+}
+
+fn clampi(x f64) i64 {
+	let y = clampf(x)
+	return i64(y)
+}
+
+fn b2i(b bool) i64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+fn h0(a i64, b i64, c i64, x f64, y f64, z f64) i64 {
+	return ((a +% c) +% (clampi(f64(a)) | (c +% 147)))
+}
+
+fn h1(a i64, b i64, c i64, x f64, y f64, z f64) i64 {
+	if (c >= (1 -% c)) {
+		return b2i((((b +% c) > 1) && (x > z)))
+	}
+	return h0(b2i((h0(b, 142, a, y, z, x) == (c << u64(b & 15)))), b2i(((a +% 31) != 4611686018427387905)), ((a +% a) ^ (b << u64(a & 15))), (f64(a) + f64(b)), (f64(((a +% b) % 1000)) + f64(f64(a) * y)), f64(y * z))
+}
+
+fn h2(a i64, b i64, c i64, x f64, y f64, z f64) i64 {
+	return (b2i((y < (z + x))) -% h0((a -% 0), c, clampi(z), (z + z), (y + z), (f64(b) - y)))
+}
+
+fn h3(a i64, b i64, c i64, x f64, y f64, z f64) i64 {
+	if (f64(f64(b) * x) <= (z - f64(b))) {
+		return ((c *% c) *% (b >> u64(c & 15)))
+	}
+	return (((a << u64(b & 15)) +% (b << u64(b & 15))) *% (clampi(f64(b)) +% b2i((x > x))))
+}
+
+fn h4(a i64, b i64, c i64, x f64, y f64, z f64) i64 {
+	return b2i(((b2i((((31 -% a) -% clampi(f64(a))) <= (c >> u64(c & 15)))) *% ((b -% b) +% clampi(x))) > h0((b *% a), (c >> u64(b & 15)), (1 ^ a), (f64(a) - x), f64(((a +% b) % 1000)), f64(x * z))))
+}
+
+fn fh0(a i64, x f64, y f64) f64 {
+	return clampf(((f64(a) + y) + f64(f64(((a +% a) % 1000)) * (y + f64(a)))))
+}
+
+fn fh1(a i64, x f64, y f64) f64 {
+	return clampf(f64(((a +% ((49 +% a) -% b2i((clampi(y) > a)))) % 1000)))
+}
+
+fn run30(seed i64) {
+	mut i0 = seed *% 3 +% 1
+	mut i1 = seed *% 4 +% 8
+	mut i2 = seed *% 5 +% 15
+	mut i3 = seed *% 6 +% 22
+	mut i4 = seed *% 7 +% 29
+	mut i5 = seed *% 8 +% 36
+	mut i6 = seed *% 9 +% 43
+	mut i7 = seed *% 10 +% 50
+	mut f0 = f64(f64(seed % 1000) * 0.1) + 0.25
+	mut f1 = f64(f64(seed % 1000) * 0.2) + 1.25
+	mut f2 = f64(f64(seed % 1000) * 0.3) + 2.25
+	mut f3 = f64(f64(seed % 1000) * 0.4) + 3.25
+	mut f4 = f64(f64(seed % 1000) * 0.5) + 4.25
+	mut f5 = f64(f64(seed % 1000) * 0.6) + 5.25
+	mut f6 = f64(f64(seed % 1000) * 0.7) + 6.25
+	mut f7 = f64(f64(seed % 1000) * 0.8) + 7.25
+	mut f8 = f64(f64(seed % 1000) * 0.9) + 8.25
+	mut s = make([]i64, 8)
+	for q in 0..8 {
+		s[q] = seed +% i64(q * 3)
+	}
+	s[1 & 7] = h2(b2i(true), b2i(true), s[1 & 7], fh1(1, 1.5, 1.5), f64(s[1 & 7]), f64(1.5 * fh1(1, 1.5, 1.5)))
+	say.Line("run30", i0, i1, i2, i3, i4, i5, i6, i7, f0, f1, f2, f3, f4, f5, f6, f7, f8, s)
+}
+
+fn main() {
+	run30(0)
+	run30(7)
+	run30(123456789)
+}
