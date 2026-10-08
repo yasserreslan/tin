@@ -186,6 +186,128 @@ fn (r mut Reader) Read(buf mut []u8) !i64 {
 	return n
 }
 
+// ReadByte returns the next byte; ok is false at the end. It makes a flume.Reader an
+// io.ByteReader.
+fn (r mut Reader) ReadByte() !(u8, bool) {
+	if r.pos >= r.fill && !r.more() {
+		if r.err != nil {
+			fail r.err
+		}
+		return 0, false
+	}
+	let c = r.buf[r.pos]
+	r.pos += 1
+	return c, true
+}
+
+// ReadRune returns the next UTF-8 encoded rune and its size in bytes: size 0 at the end, and
+// U+FFFD of size 1 for an invalid encoding, as Go's bufio.Reader does. It makes a flume.Reader an
+// io.RuneReader.
+fn (r mut Reader) ReadRune() !(i32, i64) {
+	for !fullRune(r.buf, r.pos, r.fill) && r.more() {
+	}
+	if r.pos >= r.fill {
+		if r.err != nil {
+			fail r.err
+		}
+		return 0, 0
+	}
+	let (c, size) = decodeRune(r.buf, r.pos, r.fill)
+	r.pos += size
+	return c, size
+}
+
+// fullRune reports whether b[i:end] starts with a whole encoding, valid or not (Go's
+// utf8.FullRune), so ReadRune reads more only for a rune that is cut off.
+fn fullRune(b []u8, i i64, end i64) bool {
+	let n = end - i
+	if n <= 0 {
+		return false
+	}
+	let c = b[i]
+	mut need = i64(1)
+	mut lo = u8(0x80)
+	mut hi = u8(0xbf)
+	if c >= 0xc2 && c <= 0xdf {
+		need = 2
+	} else if c >= 0xe0 && c <= 0xef {
+		need = 3
+		if c == 0xe0 {
+			lo = 0xa0
+		} else if c == 0xed {
+			hi = 0x9f
+		}
+	} else if c >= 0xf0 && c <= 0xf4 {
+		need = 4
+		if c == 0xf0 {
+			lo = 0x90
+		} else if c == 0xf4 {
+			hi = 0x8f
+		}
+	}
+	if n >= need {
+		return true
+	}
+	if n > 1 && (b[i+1] < lo || b[i+1] > hi) {
+		return true
+	}
+	if n > 2 && (b[i+2] < 0x80 || b[i+2] > 0xbf) {
+		return true
+	}
+	return false
+}
+
+// decodeRune decodes the rune at b[i:end] like Go's utf8.DecodeRune: (U+FFFD, 1) for an invalid,
+// overlong, surrogate or cut-off encoding.
+fn decodeRune(b []u8, i i64, end i64) (i32, i64) {
+	let c = b[i]
+	if c < 0x80 {
+		return i32(c), 1
+	}
+	mut size = i64(0)
+	mut lo = u8(0x80)
+	mut hi = u8(0xbf)
+	mut v = i32(0)
+	if c >= 0xc2 && c <= 0xdf {
+		size = 2
+		v = i32(c & 0x1f)
+	} else if c >= 0xe0 && c <= 0xef {
+		size = 3
+		v = i32(c & 0x0f)
+		if c == 0xe0 {
+			lo = 0xa0
+		} else if c == 0xed {
+			hi = 0x9f
+		}
+	} else if c >= 0xf0 && c <= 0xf4 {
+		size = 4
+		v = i32(c & 0x07)
+		if c == 0xf0 {
+			lo = 0x90
+		} else if c == 0xf4 {
+			hi = 0x8f
+		}
+	} else {
+		return 0xfffd, 1
+	}
+	if i+size > end {
+		return 0xfffd, 1
+	}
+	let c1 = b[i+1]
+	if c1 < lo || c1 > hi {
+		return 0xfffd, 1
+	}
+	v = (v << 6) | i32(c1&0x3f)
+	for j in 2..size {
+		let cj = b[i+j]
+		if cj < 0x80 || cj > 0xbf {
+			return 0xfffd, 1
+		}
+		v = (v << 6) | i32(cj&0x3f)
+	}
+	return v, size
+}
+
 // ReadAll returns everything left.
 fn (r mut Reader) ReadAll() !str {
 	for r.more() {
@@ -259,6 +381,43 @@ fn (w mut Writer) Str(s str) {
 fn (w mut Writer) Byte(c u8) {
 	if len(w.buf)+1 > bufSize && w.Flush() != nil {
 		return
+	}
+	w.buf = append(w.buf, c)
+}
+
+// Write appends data, flushing first when the buffer would pass 64 KiB, and returns len(data);
+// it fails with the writer's fault (a failed flush, or a closed writer). It makes a flume.Writer
+// an io.Writer.
+fn (w mut Writer) Write(data []u8) !i64 {
+	if !w.open {
+		fail "flume: write: writer is closed"
+	}
+	if len(w.buf)+len(data) > bufSize {
+		try w.Flush()
+	}
+	w.buf = append(w.buf, data...)
+	return i64(len(data))
+}
+
+// WriteString is Write for a str (an io.StringWriter).
+fn (w mut Writer) WriteString(s str) !i64 {
+	if !w.open {
+		fail "flume: write: writer is closed"
+	}
+	if len(w.buf)+len(s) > bufSize {
+		try w.Flush()
+	}
+	w.buf = append(w.buf, s...)
+	return i64(len(s))
+}
+
+// WriteByte is Write for one byte (an io.ByteWriter).
+fn (w mut Writer) WriteByte(c u8) ! {
+	if !w.open {
+		fail "flume: write: writer is closed"
+	}
+	if len(w.buf)+1 > bufSize {
+		try w.Flush()
 	}
 	w.buf = append(w.buf, c)
 }

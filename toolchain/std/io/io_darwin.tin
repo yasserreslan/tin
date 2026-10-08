@@ -1,0 +1,10 @@
+package io
+
+// macOS side of pipe.tin: the broken-pipe errno and the signal a pipe ignores.
+
+const ePIPE = 32
+
+// ignoreSigpipe makes a write to a pipe whose reader closed fail with EPIPE instead of SIGPIPE.
+fn ignoreSigpipe() {
+	rt_sys_signal(13, 1)
+}

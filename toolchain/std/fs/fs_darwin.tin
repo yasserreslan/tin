@@ -1,0 +1,15 @@
+package fs
+
+// macOS side of fs.tin: the errno values Go's PathError faults name, and the operation Go's
+// os.ReadDir names when the path is not a directory.
+
+const eNOENT = 2
+const ePERM = 1
+const eACCES = 13
+const eEXIST = 17
+const eNOTEMPTY = 66
+const eISDIR = 21
+const eNOTDIR = 20
+
+// readDirOp is the operation of a listing fault on macOS (Go's fdopendir path).
+const readDirOp = "fdopendir"
