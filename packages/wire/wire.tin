@@ -1432,6 +1432,63 @@ fn (r Resp) Trailer(name str) str {
 	return field_of(r.trail, name)
 }
 
+// Fields returns every header field of the response as "Name: value", in the order they came, the name as sent and the value
+// without the blanks around it: all the Set-Cookie fields, for a cookie jar, and the whole head, for a dump (#739).
+fn (r Resp) Fields() []str {
+	mut out = []str{}
+	let h = r.head
+	mut i = 0
+	for i < len(h) {
+		mut j = i
+		for j < len(h) && h[j] != '\n' {
+			j += 1
+		}
+		let line = h[i:j]
+		i = j + 1
+		mut c = 0
+		for c < len(line) && line[c] != ':' {
+			c += 1
+		}
+		if c == 0 || c == len(line) {
+			continue // the status line, the empty line that ends the head
+		}
+		mut a = c + 1
+		for a < len(line) && (line[a] == ' ' || line[a] == '\t') {
+			a += 1
+		}
+		mut b = len(line)
+		for b > a && (line[b-1] == '\r' || line[b-1] == ' ' || line[b-1] == '\t') {
+			b -= 1
+		}
+		out = append(out, line[:c] + ": " + line[a:b])
+	}
+	return out
+}
+
+// Proto is the protocol of the response: "HTTP/1.1" or "HTTP/1.0" as its status line says, "HTTP/2.0" for HTTP/2.
+fn (r Resp) Proto() str {
+	if len(r.head) >= 8 && r.head[:5] == "HTTP/" {
+		return r.head[:8]
+	}
+	return "HTTP/2.0"
+}
+
+// Reason is the reason phrase of the status line ("OK" in "HTTP/1.1 200 OK"), "" when there is none (HTTP/2 has none).
+fn (r Resp) Reason() str {
+	let h = r.head
+	if len(h) < 12 || h[:5] != "HTTP/" {
+		return ""
+	}
+	mut e = 12
+	for e < len(h) && h[e] != '\r' && h[e] != '\n' {
+		e += 1
+	}
+	if e <= 13 {
+		return ""
+	}
+	return h[13:e]
+}
+
 // field_of is field name's value in header lines h, or "".
 fn field_of(h str, name str) str {
 	mut i = 0

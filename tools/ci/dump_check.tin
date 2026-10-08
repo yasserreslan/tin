@@ -1,0 +1,48 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "tide"
+import "wire"
+
+// dump_check compares Tin's HTTP dumps byte for byte with Go's net/http/httputil.
+fn main() {
+	let root = ci.Root()
+	let dir = ci.Join(root, "bin/ci/dump")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "dump-")
+	let tin = ci.Join(work, "dump-tin")
+	let goexe = ci.Join(work, "dump-go")
+	ci.BuildTin("tools/ci/fixtures/dump.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/dump"}, root, 120), "build Go dump reference")
+	let oracle = ci.Exec([]str{goexe}, root, 30)
+	ci.Must(oracle, "run Go dump reference")
+	let port = nettest.Port()
+	let server = nettest.Start(goexe, []str{"server", "127.0.0.1:" + mint.Itoa(port)}, []str{}, ci.Join(work, "server.log"), 0)
+	// Server mode takes its address as an argument; wait for the selected port to accept connections.
+	mut ready = false
+	for attempt in 0..100 {
+		let conn = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 50000000) catch _ {
+			tide.Sleep(50000000)
+			continue
+		}
+		conn.Close()
+		ready = true
+		break
+	}
+	ci.Check(ready, "Go dump server did not become ready")
+	let got = ci.ExecEnv([]str{tin}, root, 30, []str{"DUMP_ADDR=127.0.0.1:" + mint.Itoa(port)}, []str{})
+	server.Stop()
+	ci.Remove(work)
+	ci.Must(got, "run Tin dumps")
+	let wantLines = ci.Lines(oracle.Stdout)
+	let gotLines = ci.Lines(got.Stdout)
+	mut i = 0
+	for i < len(wantLines) && i < len(gotLines) {
+		ci.Check(wantLines[i] == gotLines[i], "dump line " + mint.Itoa(i + 1) + ": Go " + wantLines[i] + ", Tin " + gotLines[i])
+		i += 1
+	}
+	ci.Check(len(wantLines) == len(gotLines), "dump output lines: Go " + mint.Itoa(len(wantLines)) + ", Tin " + mint.Itoa(len(gotLines)))
+	ci.Pass("dump: request/response dumps including chunked and no-body cases match Go line by line")
+}

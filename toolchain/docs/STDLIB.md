@@ -14,6 +14,9 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [relay](#relay) | messages between cores (channels) |
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
+| [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
+| [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
+| [assay](#assay) | HTTP test requests, recorders and local test servers (net/http/httptest) |
 | [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
 | [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
 | [twine](#twine) | strings (strings) |
@@ -288,6 +291,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `Limits(maxBody i64, maxBuffered i64, maxConns i64)`: Limits sets the largest request body in bytes (413 past it), the bytes of requests still arriving that one core may buffer (a new partial request past it gets 503 and close), and the connections per core (0: no limit). Past maxConns a core still accepts up to 64 more connections and answers each request on them 503 with Retry-After and Connection: close, so a load balancer reads an answer instead of a reset; only past that margin is a new connection closed at accept. Defaults 64 MiB, 256 MiB and 16384; TIN_MAX_BODY, TIN_MAX_BUFFERED and TIN_MAX_CONNS override them. Call before Serve.
 - `Deadline(ms i64)`: Deadline makes every request's waits (tide.Wait, client calls) fail with "deadline exceeded" once ms have passed since the request started (0: no deadline; call before Serve). TIN_DEADLINE_MS sets it too; the default is 30000.
 - `(q Req) Header(name str) str`: Header returns the value of the request header name (any case), or "". A chunked request's trailer fields are read after the header block's, whether or not a Trailer field announced them: a field of the header block wins, and the framing fields (Host, Content-Length, Transfer-Encoding) are never taken from trailers. Go keeps trailers apart, in Request.Trailer. For an absolute-form target ("GET http://host/path", as proxies send), "host" is the target's authority, which replaces the Host field (RFC 9112 3.2.2, #749).
+- `(q Req) Fields() []str`: Fields returns every field of the request's header block as "Name: value", in the order they came, the name as sent and the value without the blanks around it: for dumps and proxies (#739). Trailer fields are not among them.
 - `(q Req) Proto() str`: Proto is the protocol the request came in: "HTTP/2.0" (h2c, or h2 over TLS), "HTTP/1.1" or "HTTP/1.0". A request made with Router.Run is "HTTP/1.1".
 - `(q Req) Hijack() !i64`: Hijack takes the request's connection out of HTTP for a protocol of its own (the websocket package uses it): the responses before this request are written, the core stops reading the connection and the request's deadline no longer applies. It returns the non-blocking descriptor, for the caller's I/O until the handler returns; then anvil closes it. The handler's Out is not sent. An HTTP/2 stream cannot be hijacked: Hijack fails there.
 - `(w mut Out) Stream() !`: Stream switches the response to streaming. The status, content type and headers set so far are sent with the first Write or Flush (set them before). The body is then written with Write and Flush, in chunks (Transfer-Encoding: chunked), or as a plain body of the size Length gave; an HTTP/1.0 client, which cannot read chunks, gets the body up to the end of the connection. Each write waits for a slow client within the write timeout (TIN_WRITE_TIMEOUT_MS), and the request deadline (TIN_DEADLINE_MS) counts from the last write, so a stream lives as long as it keeps writing. Calling Stream again does nothing. On HTTP/2 the body goes in DATA frames within the client's flow-control windows, and Length sets content-length.
@@ -311,6 +315,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `(w mut Out) Json()`: Json sets the JSON content type; the body is then written with argo.Put(mut w.Body, v).
 - `(w Out) Code() i64`: Code returns the response status set so far (200 unless Status changed it).
 - `(w Out) Header(k str) str`: Header returns response header k as set so far (Type sets Content-Type, Head the rest), or "".
+- `(w Out) Fields() []str`: Fields returns every header field Head (and SetCookie) added so far as "Name: value", in order: Content-Type, which Type sets, is read with Header (#739).
 - `(w mut Out) SetValue(key str, value str)`: SetValue stores value under key for the rest of the request: middleware hand data (a user id, a request id) to the handlers after them this way. Value reads it back.
 - `(w Out) Value(key str) str`: Value returns what SetValue stored under key in this request, or "".
 - `OnRelay(h fn(i64, str))`: OnRelay makes every core run h(from, msg) for each relay message it receives (call before Serve). Handlers run between requests, with their own request pool.
@@ -337,6 +342,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `(r Router) ServeN(addr str, n i64) !`: ServeN is Serve on exactly n cores.
 - `(r Router) Run(method str, target str, body str) Out`: Run sends one request through r on this thread, as Serve would (middleware, 404, 405), and returns the response: for tests. target is the path and query ("/users/7?full=1"), the request has no headers, and a HEAD response keeps its body. Run panics if r has an error (see Check).
 - `(r Router) RunWith(method str, target str, headers []str, body str) Out`: RunWith is Run with request header fields, each written "Name: value" (Cookie, Content-Type ...): for tests of handlers that read headers, cookies or forms.
+- `NewRequest(method str, target str, headers []str, body str) Req`: NewRequest builds an in-process request for test helpers; headers are "Name: value" lines and body is the decoded body.
 - `(r Router) Match(method str, path str) str`: Match returns the pattern of the route that would serve method and path ("/users/{id}"), or "" when the request would get 404 or 405. Like Run, it panics if r has an error (see Check).
 - `type Cookie struct`: Cookie is a Set-Cookie: the name, the value and the attributes. Expires is in Unix seconds and left out when 0; MaxAge in seconds is left out when 0 and, when negative, is written as Max-Age=0 (delete the cookie). SameSite is "", "Lax", "Strict" or "None".
 - `(q Req) Cookie(name str) str`: Cookie returns the value of the request's cookie name, or "" when there is none (or it is not well formed): see Cookies.
@@ -463,6 +469,70 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `DoWith(method str, url str, headers []str, body str, opt Options) !Resp`: DoWith is Do with options: an overall timeout and a response size limit.
 - `(r Resp) Header(name str) str`: Header returns the response header name (any case), or "".
 - `(r Resp) Trailer(name str) str`: Trailer returns the response trailer name (any case), or "": HTTP/2 responses carry trailers (gRPC's grpc-status, for one; #480).
+- `(r Resp) Fields() []str`: Fields returns every header field of the response as "Name: value", in the order they came, the name as sent and the value without the blanks around it: all the Set-Cookie fields, for a cookie jar, and the whole head, for a dump (#739).
+- `(r Resp) Proto() str`: Proto is the protocol of the response: "HTTP/1.1" or "HTTP/1.0" as its status line says, "HTTP/2.0" for HTTP/2.
+- `(r Resp) Reason() str`: Reason is the reason phrase of the status line ("OK" in "HTTP/1.1 200 OK"), "" when there is none (HTTP/2 has none).
+
+## jar
+
+Package jar is a cookie jar for HTTP clients, as Go's net/http/cookiejar is (#739): it keeps the cookies servers set (RFC 6265 parsing, domain and path matching, Secure, expiry by Max-Age and Expires, HttpOnly) and gives each request the ones it should carry. Do sends a wire request with the jar's cookies and keeps the cookies of its response.
+
+```tin body
+mut j = jar.New()
+let r = try j.Do("GET", "http://127.0.0.1:8080/login", []str{}, "")
+let r2 = try j.Do("GET", "http://127.0.0.1:8080/account", []str{}, "") // sends the session cookie
+```
+
+Public suffixes: like Go's cookiejar.New(nil), New has no public suffix list, so a host may set a cookie for its parent domain whatever it is (a server at a.co.uk may set Domain=co.uk). The list is not in the standard library (Go keeps it in golang.org/x/net/publicsuffix); a program that talks to hosts it does not trust passes one to WithSuffixes, a function that returns a domain's public suffix as Go's PublicSuffixList.PublicSuffix does.
+
+Cookies are anvil.Cookie values, the type anvil's SetCookie writes: Expires is in Unix seconds and 0 means none, so an Expires at the Unix epoch itself is read as -1 (also in the past). Host names must be ASCII (Go turns others into punycode first: here they get no cookies). The jar is not written to a file, as Go's is not.
+
+- `type Jar struct`: Jar holds cookies. The zero value is not usable: make one with New or WithSuffixes.
+- `New() Jar`: New returns an empty jar with no public suffix list.
+- `WithSuffixes(suffix fn(str) str) Jar`: WithSuffixes returns an empty jar that asks suffix for a domain's public suffix ("co.uk" for "a.b.co.uk", "" when it has none), as Go's cookiejar.Options.PublicSuffixList: a cookie's Domain may not be a public suffix but for the host itself.
+- `(j mut Jar) SetClock(now fn() i64)`: SetClock makes the jar read the time from now (Unix nanoseconds) instead of the wall clock: for tests of expiry.
+- `(j Jar) Len() i64`: Len is the number of cookies held, expired ones that no request has looked at yet included.
+- `ParseSetCookie(line str) !anvil.Cookie`: ParseSetCookie parses a Set-Cookie field value as Go's http.ParseSetCookie does: the name and value (a value in double quotes is unquoted and marked Quoted), then the attributes Path, Domain, Expires (RFC 1123, or with dashes in the date), Max-Age (0 or less becomes -1: delete), Secure, HttpOnly, SameSite and Partitioned, in any case. An attribute with a bad value or an unknown one is ignored. It fails on an empty line, a missing "=", a bad name or a bad value.
+- `ParseSetCookies(fields []str) []anvil.Cookie`: ParseSetCookies parses every Set-Cookie field of a response (header field lines "Name: value", as wire.Resp.Fields gives them) and returns the cookies that parse, in order.
+- `(j mut Jar) SetCookies(url str, cookies []anvil.Cookie)`: SetCookies keeps the cookies a response from url set, as Go's Jar.SetCookies: a cookie without a Path gets the URL's directory, one without a Domain is a host-only cookie, a Domain the host is not in (or, with a list, a public suffix) is refused, and a Max-Age of 0 or less or an Expires in the past deletes the cookie of that name, domain and path. url must be http:// or https://; another URL sets nothing.
+- `(j mut Jar) Cookies(url str) []anvil.Cookie`: Cookies returns the cookies to send in a request to url, as Go's Jar.Cookies: those whose domain and path match it and that have not expired (a Secure cookie only over https://), longest path first, then the oldest first. Each has only its Name, Value and Quoted set. Expired cookies are dropped from the jar on the way.
+- `(j mut Jar) Header(url str) str`: Header is the Cookie field value a request to url carries ("a=1; b=2", as Go's Request.AddCookie writes each cookie), or "" when the jar has none for it.
+- `(j mut Jar) Do(method str, url str, headers []str, body str) !wire.Resp`: Do sends a request with wire.Do, carrying the jar's cookies for url (added to a Cookie field in headers, if there is one, as Go's client does), and keeps the cookies the response sets. headers is a list of name, value pairs.
+- `(j mut Jar) DoWith(method str, url str, headers []str, body str, opt wire.Options) !wire.Resp`: DoWith is Do with wire's options.
+
+## dump
+
+Package dump writes HTTP requests and responses out as text, byte for byte as Go's httputil.DumpRequest and httputil.DumpResponse do (#739): for logs, for debugging a client or a handler, and for tests that compare what went over the wire.
+
+```tin
+fn handle(q anvil.Req, w mut anvil.Out) {
+	herald.Info(dump.Request(q, false))
+}
+```
+
+Dumping the response a client got:
+
+```tin body
+let r = try wire.Get("http://127.0.0.1:8080/")
+say.Text(dump.Response(r, true))
+```
+
+Request takes the request a handler serves (Go's server-side Request); Response takes the response a wire call returned. The header fields are written as Go writes them: names in canonical form ("content-type" becomes "Content-Type"), sorted by name, the values of one name in the order they came. Bodies are written as they were framed: a chunked body as one chunk and the last chunk, any other as it is. tools/ci/dump_check.tin compares both with Go's over a corpus.
+
+Not reproduced: an absolute-form request target ("GET http://host/x") is written as its path with a Host field (Go keeps the URL and writes no Host); a status line without a reason phrase ("HTTP/1.1 200") is written "HTTP/1.1 200 " (Go writes "HTTP/1.1 200 200"); the trailers of an HTTP/1.1 chunked response, which wire does not keep.
+
+- `Request(q anvil.Req, body bool) str`: Request returns the request q as text, as Go's httputil.DumpRequest(req, body): the request line, the Host field, a Transfer-Encoding: chunked field for a chunked request, the other fields (Cache-Control: no-cache added after a Pragma: no-cache, as Go's server does), an empty line and, when body is true, the body (chunked again when it came chunked). A request on a Router.Stream route has no body here: its body is read with BodyStream.
+- `Response(r wire.Resp, body bool) str`: Response returns the response r as text, as Go's httputil.DumpResponse(resp, body): the status line, a Connection: close field when the connection ends after it (HTTP/1.0 without keep-alive, a body read to the end of the connection), the framing (Content-Length, or Transfer-Encoding: chunked), the other fields, an empty line and, when body is true, the body.
+
+## assay
+
+Package assay provides small HTTP test helpers for anvil handlers, like net/http/httptest (#739).
+
+- `type Server value struct`: Server is a local HTTP/1.1 test server. Close stops its listener and waits for the accept loop.
+- `NewRecorder() anvil.Out`: NewRecorder returns an empty anvil response recorder.
+- `NewRequest(method str, target str, headers []str, body str) anvil.Req`: NewRequest builds a request for a handler test; headers are "Name: value" lines.
+- `NewServer(router anvil.Router) !Server`: NewServer starts an HTTP/1.1 server for router on a random loopback port.
+- `(s Server) Close()`: Close stops accepting requests and waits for the accept loop. A request already accepted may finish before Close returns.
 
 ## tls
 

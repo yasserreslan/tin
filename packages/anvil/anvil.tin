@@ -2435,6 +2435,34 @@ fn (q Req) Header(name str) str {
 	return v
 }
 
+// Fields returns every field of the request's header block as "Name: value", in the order they came, the name as sent and
+// the value without the blanks around it: for dumps and proxies (#739). Trailer fields are not among them.
+fn (q Req) Fields() []str {
+	mut out = []str{}
+	mut p = q.hp
+	let end = q.hp + q.hn
+	for p < end {
+		mut e = memchr(p, '\n', end-p)
+		if e == 0 {
+			e = end
+		}
+		let k = memchr(p, ':', e-p)
+		if k != 0 && k > p {
+			mut v = k + 1
+			for v < e && (load8(v) == ' ' || load8(v) == '\t') {
+				v += 1
+			}
+			mut ve = e
+			for ve > v && (load8(ve-1) == '\r' || load8(ve-1) == ' ' || load8(ve-1) == '\t') {
+				ve -= 1
+			}
+			out = append(out, rt_str_from_raw(p, k-p) + ": " + rt_str_from_raw(v, ve-v))
+		}
+		p = e + 1
+	}
+	return out
+}
+
 // Proto is the protocol the request came in: "HTTP/2.0" (h2c, or h2 over TLS), "HTTP/1.1" or
 // "HTTP/1.0". A request made with Router.Run is "HTTP/1.1".
 fn (q Req) Proto() str {
@@ -3461,6 +3489,29 @@ fn (w Out) Header(k str) str {
 	return ""
 }
 
+// Fields returns every header field Head (and SetCookie) added so far as "Name: value", in order: Content-Type, which Type
+// sets, is read with Header (#739).
+fn (w Out) Fields() []str {
+	mut out = []str{}
+	let e = w.extra
+	mut i = 0
+	for i < len(e) {
+		mut j = i
+		for j < len(e) && e[j] != '\n' {
+			j += 1
+		}
+		mut le = j
+		if le > i && e[le-1] == '\r' {
+			le -= 1
+		}
+		if le > i {
+			out = append(out, str(e[i:le]))
+		}
+		i = j + 1
+	}
+	return out
+}
+
 // SetValue stores value under key for the rest of the request: middleware hand data (a user
 // id, a request id) to the handlers after them this way. Value reads it back.
 fn (w mut Out) SetValue(key str, value str) {
@@ -3778,6 +3829,23 @@ fn (r Router) RunWith(method str, target str, headers []str, body str) Out {
 	let w = Out{Body: b, code: 200, ctype: "text/plain; charset=utf-8", extra: make([]u8, 0, 64), own: b}
 	dispatch(t, mut q, mut w)
 	return w
+}
+
+// NewRequest builds an in-process request for test helpers; headers are "Name: value" lines and body is the decoded body.
+fn NewRequest(method str, target str, headers []str, body str) Req {
+	mut block = ""
+	for h in headers {
+		block += h + "\r\n"
+	}
+	mut q = Req{Method: method, Path: target, Query: "", hp: cast(i64, block) + 8, hn: len(block), bp: cast(i64, body) + 8, bn: len(body)}
+	for i in 0..len(target) {
+		if target[i] == '?' {
+			q.Path = target[:i]
+			q.Query = target[i+1:]
+			break
+		}
+	}
+	return q
 }
 
 // Match returns the pattern of the route that would serve method and path ("/users/{id}"),

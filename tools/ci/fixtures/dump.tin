@@ -1,0 +1,26 @@
+package main
+
+import "anvil"
+import "dump"
+import "quarry"
+import "seal"
+import "say"
+import "wire"
+
+fn emit(text str) {
+	say.Line(seal.Hex([]u8(text)))
+}
+
+fn main() ! {
+	let a = anvil.NewRequest("GET", "/a?q=1", []str{"Host: example.test", "X-z: one", "X-z: two"}, "")
+	emit(dump.Request(a, true))
+	let b = anvil.NewRequest("POST", "/chunk", []str{"Host: example.test", "Transfer-Encoding: chunked", "Pragma: no-cache"}, "abc")
+	emit(dump.Request(b, true))
+	let port = quarry.Getenv("DUMP_ADDR")
+	let plain = try wire.Get("http://" + port + "/plain")
+	emit(dump.Response(plain, true))
+	let chunked = try wire.Get("http://" + port + "/chunked")
+	emit(dump.Response(chunked, true))
+	let nobody = try wire.Get("http://" + port + "/nobody")
+	emit(dump.Response(nobody, true))
+}
