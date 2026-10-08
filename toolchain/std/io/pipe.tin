@@ -1,0 +1,244 @@
+package io
+
+import "say"
+
+// ErrClosedPipe is the fault of a read or write on a pipe end that is closed: a Read after the
+// reader's own Close, a Write after the writer's, and a Write once the reader has closed (Go's
+// io.ErrClosedPipe).
+let ErrClosedPipe = fault("io: read/write on closed pipe")
+
+// A pipe is the system's pipe with both descriptors non-blocking, so a Read or Write that cannot
+// go on waits through the scheduler (the task's deadline and cancellation apply, the core runs
+// other tasks) and the two ends may be on different tasks and cores. Its state is one block of
+// process memory, not of a core's pool, shared by both ends (words):
+//
+//	0 read fd, 1 write fd, 2 closed bits (1 reader, 2 writer), 3 ends still open,
+//	4 the reader's CloseWithError text, 5 the writer's (a malloc'd [len][bytes] record, 0: none)
+const pRfd = 0
+const pWfd = 1
+const pClosed = 2
+const pOpen = 3
+const pRerr = 4
+const pWerr = 5
+
+// PipeReader is the read end of a Pipe: an io.Reader whose stream ends when the writer closes.
+type PipeReader struct {
+	b i64
+}
+
+// PipeWriter is the write end of a Pipe: an io.Writer that waits while the pipe is full.
+type PipeWriter struct {
+	b i64
+}
+
+// Pipe makes a pipe: what is written to the PipeWriter is read from the PipeReader, in order.
+// Unlike Go's, which hands each Write to a Read, the pipe holds what the system's pipe buffer holds
+// (64 KiB on Linux): a Write returns once its bytes are in the pipe, and waits while it is full,
+// so a writer is held back by a slow reader. Close the writer to end the reader's stream; close
+// both ends to give back the descriptors. Making a pipe ignores SIGPIPE in the process (as Go's
+// runtime does for every descriptor but the standard ones), so a write to a pipe whose reader
+// closed fails instead of ending the program.
+fn Pipe() !(PipeReader, PipeWriter) {
+	let fds = calloc(2, 4)
+	let r = rt_sys_pipe(fds)
+	if i64(i32(r)) < 0 {
+		let e = rt_errno()
+		free(fds)
+		fail say.Fault("io: pipe: %s", errnoText(e))
+	}
+	let rfd = i64(i32(__ld(fds, 2)))
+	let wfd = i64(i32(__ld(fds+4, 2)))
+	free(fds)
+	rt_sys_fcntl(rfd, F_SETFL, O_NONBLOCK)
+	rt_sys_fcntl(wfd, F_SETFL, O_NONBLOCK)
+	ignoreSigpipe()
+	let b = calloc(8, 8)
+	b[pRfd] = rfd
+	b[pWfd] = wfd
+	b[pOpen] = 2
+	return PipeReader{b: b}, PipeWriter{b: b}
+}
+
+// Read reads what the writer wrote into buf, waiting until some is there, and returns how many
+// bytes came: 0 once the writer closed and everything was read. A writer's CloseWithError makes
+// the end of the stream that fault (its text) instead; a Read after this end's Close fails with
+// ErrClosedPipe.
+fn (p PipeReader) Read(buf mut []u8) !i64 {
+	let b = p.b
+	if b == 0 {
+		fail ErrClosedPipe
+	}
+	if len(buf) == 0 {
+		return 0
+	}
+	let fd = b[pRfd]
+	for {
+		let n = rt_sys_read(fd, cast(i64, buf)[2], len(buf))
+		if n > 0 {
+			return n
+		}
+		if n == 0 {
+			let msg = __atomic_load(b+8*pWerr)
+			if msg != 0 {
+				fail say.Fault("%s", recordText(msg))
+			}
+			return 0
+		}
+		let e = rt_errno()
+		if e == EAGAIN {
+			try pipeWait(fd, 1)
+			if p.b == 0 {
+				fail ErrClosedPipe
+			}
+		} else if e != EINTR {
+			fail say.Fault("io: pipe read: %s", errnoText(e))
+		}
+	}
+	return 0
+}
+
+// Close closes the read end: the writer's next Write fails with ErrClosedPipe. A second Close does
+// nothing.
+fn (p mut PipeReader) Close() ! {
+	try p.CloseWithError(nil)
+}
+
+// CloseWithError closes the read end; the writer's next Write fails with err's text (ErrClosedPipe
+// for nil). Only the first close of an end counts.
+fn (p mut PipeReader) CloseWithError(err fault) ! {
+	if p.b != 0 {
+		closeEnd(p.b, 1, pRerr, pRfd, err)
+		p.b = 0
+	}
+}
+
+// Write writes all of data to the pipe, waiting while it is full, and returns len(data). Once the
+// reader has closed it fails with ErrClosedPipe (or the reader's CloseWithError text) and the
+// count of bytes that went in is lost with the fault, as a short write is; after this end's own
+// Close it fails with ErrClosedPipe.
+fn (p PipeWriter) Write(data []u8) !i64 {
+	let b = p.b
+	if b == 0 {
+		fail ErrClosedPipe
+	}
+	let fd = b[pWfd]
+	let base = cast(i64, data)[2]
+	let n = i64(len(data))
+	mut off = i64(0)
+	for off < n {
+		let k = rt_sys_write(fd, base+off, n-off)
+		if k > 0 {
+			off += k
+			continue
+		}
+		let e = rt_errno()
+		if k < 0 && e == EAGAIN {
+			try pipeWait(fd, 2)
+			if p.b == 0 {
+				fail ErrClosedPipe
+			}
+		} else if k < 0 && e == ePIPE {
+			let msg = __atomic_load(b+8*pRerr)
+			if msg != 0 {
+				fail say.Fault("%s", recordText(msg))
+			}
+			fail ErrClosedPipe
+		} else if k < 0 && e != EINTR {
+			fail say.Fault("io: pipe write: %s", errnoText(e))
+		}
+	}
+	return n
+}
+
+// WriteString writes s to the pipe, as Write does.
+fn (p PipeWriter) WriteString(s str) !i64 {
+	return try p.Write([]u8(s))
+}
+
+// Close closes the write end: the reader reads what is left and then its stream ends (Read
+// returns 0). A second Close does nothing.
+fn (p mut PipeWriter) Close() ! {
+	try p.CloseWithError(nil)
+}
+
+// CloseWithError closes the write end; once the reader has read what is left, its Read fails
+// with err's text instead of returning 0 (nil: the plain end). Only the first close counts.
+fn (p mut PipeWriter) CloseWithError(err fault) ! {
+	if p.b != 0 {
+		closeEnd(p.b, 2, pWerr, pWfd, err)
+		p.b = 0
+	}
+}
+
+// closeEnd closes one end of the pipe block b: it records err's text (before the descriptor is
+// closed, so the other end sees it with the end), closes the descriptor once, and frees the block
+// when it was the last open end.
+fn closeEnd(b i64, bit i64, errWord i64, fdWord i64, err fault) {
+	for {
+		let old = __atomic_load(b+8*pClosed)
+		if old&bit != 0 {
+			return
+		}
+		if __atomic_cas(b+8*pClosed, old, old|bit) == old {
+			break
+		}
+	}
+	if err != nil {
+		let text = say.Str(err)
+		let rec = malloc(8 + len(text))
+		rec[0] = len(text)
+		memcpy(rec+8, cast(i64, text)+8, len(text))
+		__atomic_store(b+8*errWord, rec)
+	}
+	rt_sys_close(b[fdWord])
+	if __atomic_add(b+8*pOpen, -1) == 1 {
+		free(b[pRerr])
+		free(b[pWerr])
+		free(b)
+	}
+}
+
+// recordText is the text of a [len][bytes] record, copied into this core's memory.
+fn recordText(rec i64) str {
+	return rt_str_from_raw(rec+8, rec[0])
+}
+
+// pipeWait waits until fd is readable (want 1) or writable (2). A task waits through the scheduler.
+// main (the core's own stack) cannot be woken by a task, so it lets the core's tasks run a step
+// at a time, polling fd between steps: the other end may be one of those tasks or on another core.
+fn pipeWait(fd i64, want i64) ! {
+	if rt_task_current() != 0 {
+		if rt_task_wait(fd, want, 0) == waitDeadline {
+			fail cast(fault, rt_wait_fault())
+		}
+		return
+	}
+	if rt_bnd_stopped() {
+		fail cast(fault, rt_wait_fault())
+	}
+	if rt_task_any_ready() {
+		rt_core_step_until(rt_bnd_deadline(rt_bnd_current()))
+	} else {
+		let r = rt_task_wait(fd, want, 1000000)
+		if r == waitDeadline {
+			fail cast(fault, rt_wait_fault())
+		}
+		if r != waitReady {
+			mut until = rt_mono_ns() + 1000000
+			let dl = rt_bnd_deadline(rt_bnd_current())
+			if dl > 0 && dl < until {
+				until = dl
+			}
+			rt_core_step_until(until)
+		}
+	}
+	if rt_bnd_stopped() {
+		fail cast(fault, rt_wait_fault())
+	}
+}
+
+// errnoText is the system's text for an errno.
+fn errnoText(e i64) str {
+	let p = rt_sys_strerror(e)
+	return rt_str_from_raw(p, strlen(p))
+}
