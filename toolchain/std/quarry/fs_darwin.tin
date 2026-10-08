@@ -1,0 +1,45 @@
+package quarry
+
+// macOS side of fs.tin: libSystem calls and struct stat's fields (64-bit inodes).
+
+extern fn chmod(path i64, mode i64) i64
+extern fn symlink(target i64, link i64) i64
+extern fn readlink(path i64, buf i64, n i64) i64
+extern fn fsync(fd i64) i64
+
+fn sysChmod(path i64, perm i64) i64 {
+	return chmod(path, perm)
+}
+
+fn sysSymlink(target i64, link i64) i64 {
+	return symlink(target, link)
+}
+
+fn sysReadlink(path i64, buf i64, n i64) i64 {
+	return c32(readlink(path, buf, n))
+}
+
+// sysFsync is F_FULLFSYNC (51), which also flushes the drive's cache; fsync where the file system lacks it.
+fn sysFsync(fd i64) i64 {
+	if c32(rt_sys_fcntl(fd, 51, 0)) == 0 {
+		return 0
+	}
+	return fsync(fd)
+}
+
+fn statMtimeNs(st i64) i64 {
+	return (st + 48)[0] * 1000000000 + (st + 56)[0]
+}
+
+fn statCtimeNs(st i64) i64 {
+	return (st + 64)[0] * 1000000000 + (st + 72)[0]
+}
+
+fn statLinks(st i64) i64 {
+	return __ld(st + 6, 1) & 0xffff
+}
+
+// direntType is d_type of a struct dirent (64-bit inodes).
+fn direntType(ent i64) i64 {
+	return i64(load8(ent + 20))
+}

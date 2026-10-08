@@ -1,0 +1,9 @@
+package flume
+
+// fsync on Linux (system call numbers in sync_linux_<cpu>.tin); O_WRONLY | O_CREAT | O_EXCL.
+
+const O_WRITE_EXCL = 0xc1
+
+fn sysFsync(fd i64) i64 {
+	return linux_result(linux_raw(sysFsyncNr, fd, 0, 0, 0, 0, 0))
+}

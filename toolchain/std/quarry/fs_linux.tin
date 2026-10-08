@@ -1,0 +1,32 @@
+package quarry
+
+// Linux side of fs.tin: raw system calls (numbers in fs_linux_<cpu>.tin) and struct stat's time fields.
+
+fn sysChmod(path i64, perm i64) i64 {
+	return linux_result(linux_raw(sysFchmodat, -100, path, perm, 0, 0, 0))
+}
+
+fn sysSymlink(target i64, link i64) i64 {
+	return linux_result(linux_raw(sysSymlinkat, target, -100, link, 0, 0, 0))
+}
+
+fn sysReadlink(path i64, buf i64, n i64) i64 {
+	return rt_sys_readlink(path, buf, n)
+}
+
+fn sysFsync(fd i64) i64 {
+	return linux_result(linux_raw(sysFsyncNr, fd, 0, 0, 0, 0, 0))
+}
+
+fn statMtimeNs(st i64) i64 {
+	return (st + 88)[0] * 1000000000 + (st + 96)[0]
+}
+
+fn statCtimeNs(st i64) i64 {
+	return (st + 104)[0] * 1000000000 + (st + 112)[0]
+}
+
+// direntType is d_type of a struct linux_dirent64.
+fn direntType(ent i64) i64 {
+	return i64(load8(ent + 18))
+}

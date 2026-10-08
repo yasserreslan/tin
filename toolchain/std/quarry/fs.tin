@@ -1,0 +1,200 @@
+package quarry
+
+import "say"
+
+// File details for programs that keep data safe on disk (#771): lstat and stat with every field a stat cache
+// needs, permission bits, symlinks, fsync, and directory reads that give each entry's type. Like the rest of
+// quarry outside the recorded effects, these calls run live under a replay tape (#241 has no rows for them).
+
+// FileType is what a path is.
+type FileType enum {
+	Regular
+	Dir
+	Symlink
+	Fifo
+	Socket
+	Device
+}
+
+// FileInfo is what stat and lstat report about a path. Times are unix nanoseconds.
+type FileInfo struct {
+	Type   FileType
+	Perm   i64
+	Size   i64
+	Mtime  i64
+	Ctime  i64
+	Inode  i64
+	Device i64
+	Links  i64
+}
+
+// DirEntry is a name in a directory with its type.
+type DirEntry struct {
+	Name str
+	Type FileType
+}
+
+fn fileType(m i64) FileType {
+	let t = m & 0xf000
+	if t == 0x4000 {
+		return FileType.Dir
+	}
+	if t == 0xa000 {
+		return FileType.Symlink
+	}
+	if t == 0x1000 {
+		return FileType.Fifo
+	}
+	if t == 0xc000 {
+		return FileType.Socket
+	}
+	if t == 0x2000 || t == 0x6000 {
+		return FileType.Device
+	}
+	return FileType.Regular
+}
+
+fn infoOf(st i64) FileInfo {
+	let m = mode(st)
+	return FileInfo{Type: fileType(m), Perm: m & 0xfff, Size: rt_stat_size(st), Mtime: statMtimeNs(st), Ctime: statCtimeNs(st), Inode: rt_stat_ino(st), Device: rt_stat_dev(st), Links: statLinks(st)}
+}
+
+// Stat describes the file at path, following symlinks.
+fn Stat(path str) !FileInfo {
+	if badPath(path) {
+		fail invalidFault("stat", path)
+	}
+	if c32(rt_sys_stat(rt_cstr(path), stbuf)) != 0 {
+		fail pathFault("stat", path)
+	}
+	return infoOf(stbuf)
+}
+
+// Lstat describes the file at path; a symlink is described itself, not followed.
+fn Lstat(path str) !FileInfo {
+	if badPath(path) {
+		fail invalidFault("lstat", path)
+	}
+	if c32(rt_sys_lstat(rt_cstr(path), stbuf)) != 0 {
+		fail pathFault("lstat", path)
+	}
+	return infoOf(stbuf)
+}
+
+// Chmod sets the permission bits (the low 12 bits of perm) of the file at path, following symlinks.
+fn Chmod(path str, perm i64) ! {
+	if badPath(path) {
+		fail invalidFault("chmod", path)
+	}
+	if c32(sysChmod(rt_cstr(path), perm & 0xfff)) != 0 {
+		fail pathFault("chmod", path)
+	}
+}
+
+// Symlink makes link a symlink to target.
+fn Symlink(target str, link str) ! {
+	if badPath(target) || badPath(link) {
+		fail invalidFault("symlink", link)
+	}
+	let t = rt_cstr(target)
+	let l = rt_cstr(link)
+	if c32(sysSymlink(t, l)) != 0 {
+		fail say.Fault("symlink %s %s: %s", target, link, errnoText(errno()))
+	}
+}
+
+// Readlink is the target of the symlink at path.
+fn Readlink(path str) !str {
+	if badPath(path) {
+		fail invalidFault("readlink", path)
+	}
+	let n = sysReadlink(rt_cstr(path), pathbuf, 4096)
+	if n < 0 {
+		fail pathFault("readlink", path)
+	}
+	return rt_str_from_raw(pathbuf, n)
+}
+
+// Sync waits until the file or directory at path is on stable storage (fsync; on macOS F_FULLFSYNC, which
+// also flushes the drive's cache). Sync a directory after creating or renaming in it.
+fn Sync(path str) ! {
+	if badPath(path) {
+		fail invalidFault("open", path)
+	}
+	let fd = c32(rt_sys_open(rt_cstr(path), oRdonly, 0))
+	if fd < 0 {
+		fail pathFault("open", path)
+	}
+	let r = sysFsync(fd)
+	let e = errno()
+	rt_sys_close(fd)
+	if c32(r) != 0 {
+		fail pathFaultCode("fsync", path, e)
+	}
+}
+
+// ReadDirEntries lists the directory at path, sorted by name, with each entry's type. The type comes from the
+// directory itself where the file system records it, and from lstat where it does not.
+fn ReadDirEntries(path str) ![]DirEntry {
+	if badPath(path) {
+		fail invalidFault("open", path)
+	}
+	let d = rt_sys_opendir(rt_cstr(path))
+	if d == 0 {
+		if errno() == eNOTDIR {
+			fail pathFault("fdopendir", path)
+		}
+		fail pathFault("open", path)
+	}
+	mut out = make([]DirEntry, 0, 16)
+	mut unknown = make([]i64, 0, 4)
+	for {
+		let ent = rt_sys_readdir(d)
+		if ent == 0 {
+			break
+		}
+		let name = rt_dirent_name(ent)
+		if name == "." || name == ".." {
+			continue
+		}
+		let dt = direntType(ent)
+		mut ty = FileType.Regular
+		if dt == 4 {
+			ty = FileType.Dir
+		} else if dt == 10 {
+			ty = FileType.Symlink
+		} else if dt == 1 {
+			ty = FileType.Fifo
+		} else if dt == 12 {
+			ty = FileType.Socket
+		} else if dt == 2 || dt == 6 {
+			ty = FileType.Device
+		} else if dt != 8 {
+			unknown = append(unknown, len(out))
+		}
+		out = append(out, DirEntry{Name: name, Type: ty})
+	}
+	let direrr = rt_dir_error(d)
+	rt_sys_closedir(d)
+	if direrr != 0 {
+		fail say.Fault("readdir %s: %s", path, errnoText(direrr))
+	}
+	for i in unknown {
+		let info = try Lstat(path + "/" + out[i].Name)
+		out[i].Type = info.Type
+	}
+	sortEntries(mut out)
+	return out
+}
+
+fn sortEntries(xs mut []DirEntry) {
+	for i in 1..len(xs) {
+		let x = xs[i]
+		mut j = i
+		for j > 0 && xs[j - 1].Name > x.Name {
+			xs[j] = xs[j - 1]
+			j -= 1
+		}
+		xs[j] = x
+	}
+}
