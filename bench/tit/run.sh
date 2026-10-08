@@ -6,7 +6,8 @@
 set -eu
 tit=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 src=$2
-d=$3
+mkdir -p "$3"
+d=$(cd "$3" && pwd)
 branch=${4:-main}
 runs=7
 export HOME="$d/home" XDG_CONFIG_HOME="$d/home" TIT_NO_PAGER=1 GIT_PAGER=cat
