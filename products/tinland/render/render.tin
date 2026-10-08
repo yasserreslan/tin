@@ -97,7 +97,7 @@ fn Pen(scene mut metal.Scene, font i64, x f64, y f64, text str, c ui.Color) f64 
 	if font == FontCode {
 		cell = f.Advance
 	}
-	let end = cv.Atlas.Text(mut scene, font, x * s, y * s + f.Ascent, text, cell, c.R, c.G, c.B, c.A)
+	let end = cv.Atlas.Text(mut scene, font, x * s, y * s + f.Ascent, text, cell, ui.R(c), ui.G(c), ui.B(c), ui.A(c))
 	return end / s
 }
 
@@ -107,17 +107,17 @@ fn Draw(cmds []ui.Cmd, texts []str, scene mut metal.Scene, custom fn(i64, f64, f
 	let s = cv.Scale
 	for c in cmds {
 		if c.Kind == ui.CmdRect {
-			scene.Rect(c.X * s, c.Y * s, c.W * s, c.H * s, c.Color.R, c.Color.G, c.Color.B, c.Color.A, c.Radius * s)
+			scene.Rect(c.X * s, c.Y * s, c.W * s, c.H * s, ui.R(c.Col), ui.G(c.Col), ui.B(c.Col), ui.A(c.Col), c.Radius * s)
 		} else if c.Kind == ui.CmdBorder {
-			scene.Outline(c.X * s, c.Y * s, c.W * s, c.H * s, c.Color.R, c.Color.G, c.Color.B, c.Color.A, c.Radius * s, c.Border * s)
+			scene.Outline(c.X * s, c.Y * s, c.W * s, c.H * s, ui.R(c.Col), ui.G(c.Col), ui.B(c.Col), ui.A(c.Col), c.Radius * s, c.Border * s)
 		} else if c.Kind == ui.CmdText {
 			let f = cv.Atlas.Fonts[c.Font]
 			let top = c.Y + (c.H - f.Line / s) / 2.0
-			Pen(mut scene, c.Font, c.X, top, texts[c.Arg], c.Color)
+			Pen(mut scene, c.Font, c.X, top, texts[c.Arg], c.Col)
 		} else if c.Kind == ui.CmdIcon {
 			let px = i64(c.W * s + 0.5)
 			let g = cv.Atlas.Icon(c.Arg, px)
-			scene.Sprite(f64(i64(c.X * s + 0.5)) - 1.0, f64(i64(c.Y * s + 0.5)) - 1.0, f64(g.W), f64(g.H), f64(g.X), f64(g.Y), c.Color.R, c.Color.G, c.Color.B, c.Color.A)
+			scene.Sprite(f64(i64(c.X * s + 0.5)) - 1.0, f64(i64(c.Y * s + 0.5)) - 1.0, f64(g.W), f64(g.H), f64(g.X), f64(g.Y), ui.R(c.Col), ui.G(c.Col), ui.B(c.Col), ui.A(c.Col))
 		} else if c.Kind == ui.CmdClip {
 			scene.PushClip(c.X * s, c.Y * s, c.W * s, c.H * s)
 		} else if c.Kind == ui.CmdUnclip {
@@ -135,5 +135,5 @@ fn Upload() {
 
 // Present draws the scene into the layer, w by h pixels, over the color.
 fn Present(layer i64, w i64, h i64, scene metal.Scene, bg ui.Color) {
-	metal.DrawLayer(cv.Gpu, layer, w, h, scene, cv.Atlas, bg.R, bg.G, bg.B, bg.A)
+	metal.DrawLayer(cv.Gpu, layer, w, h, scene, cv.Atlas, ui.R(bg), ui.G(bg), ui.B(bg), ui.A(bg))
 }

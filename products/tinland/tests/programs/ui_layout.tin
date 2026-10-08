@@ -80,4 +80,5 @@ fn main() {
 		kinds[c.Kind] += 1
 	}
 	say.Line("commands", len(cmds), kinds)
+	say.Line("first", cmds[0].Kind, cmds[0].W, ui.R(cmds[0].Col), ui.G(cmds[0].Col), ui.A(cmds[0].Col), "text", cmds[1].Kind, ui.R(cmds[1].Col))
 }

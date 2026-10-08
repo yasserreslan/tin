@@ -24,7 +24,7 @@ type Node value struct {
 	Text i64
 	Font i64
 	// Color is the color of text and icons; Icon is the icon's number in the program's icon table, Size its size in points.
-	Color Color
+	Col i64
 	Icon i64
 	Size f64
 	// What Layout works out: the size the content asks for, and the rectangle the node gets.
@@ -141,12 +141,12 @@ fn (t mut Tree) Custom(style Style, id i64) i64 {
 // Text adds one line of text.
 fn (t mut Tree) Text(text str, font i64, color Color, style Style) i64 {
 	t.Texts = append(t.Texts, text)
-	return t.add(Node{Style: style, Kind: KindText, Text: len(t.Texts) - 1, Font: font, Color: color})
+	return t.add(Node{Style: style, Kind: KindText, Text: len(t.Texts) - 1, Font: font, Col: color})
 }
 
 // Icon adds an icon (a number in the program's icon table) size points square.
 fn (t mut Tree) Icon(icon i64, size f64, color Color, style Style) i64 {
-	return t.add(Node{Style: style, Kind: KindIcon, Icon: icon, Size: size, Color: color})
+	return t.add(Node{Style: style, Kind: KindIcon, Icon: icon, Size: size, Col: color})
 }
 
 // Find is the index of the node with the id (-1 when there is none).

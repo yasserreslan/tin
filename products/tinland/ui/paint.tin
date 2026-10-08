@@ -18,7 +18,7 @@ type Cmd value struct {
 	Y f64
 	W f64
 	H f64
-	Color Color
+	Col i64
 	Radius f64
 	Border f64
 	Arg i64
@@ -37,23 +37,23 @@ fn (t Tree) Paint() []Cmd {
 fn (t Tree) paintNode(i i64, out mut []Cmd) {
 	let n = t.Nodes[i]
 	if n.Kind == KindText {
-		out = append(out, Cmd{Kind: CmdText, X: n.X, Y: n.Y, W: n.W, H: n.H, Color: n.Color, Arg: n.Text, Font: n.Font})
+		out = append(out, Cmd{Kind: CmdText, X: n.X, Y: n.Y, W: n.W, H: n.H, Col: n.Col, Arg: n.Text, Font: n.Font})
 		return
 	}
 	if n.Kind == KindIcon {
-		out = append(out, Cmd{Kind: CmdIcon, X: n.X, Y: n.Y, W: n.W, H: n.H, Color: n.Color, Arg: n.Icon})
+		out = append(out, Cmd{Kind: CmdIcon, X: n.X, Y: n.Y, W: n.W, H: n.H, Col: n.Col, Arg: n.Icon})
 		return
 	}
 	let s = n.Style
 	mut bg = s.Bg
-	if n.Id != 0 && n.Id == t.Hover && s.HoverBg.A > 0.0 {
+	if n.Id != 0 && n.Id == t.Hover && A(s.HoverBg) > 0.0 {
 		bg = s.HoverBg
 	}
-	if bg.A > 0.0 {
-		out = append(out, Cmd{Kind: CmdRect, X: n.X, Y: n.Y, W: n.W, H: n.H, Color: bg, Radius: s.Radius})
+	if A(bg) > 0.0 {
+		out = append(out, Cmd{Kind: CmdRect, X: n.X, Y: n.Y, W: n.W, H: n.H, Col: bg, Radius: s.Radius})
 	}
 	if s.BorderW > 0.0 {
-		out = append(out, Cmd{Kind: CmdBorder, X: n.X, Y: n.Y, W: n.W, H: n.H, Color: s.Border, Radius: s.Radius, Border: s.BorderW})
+		out = append(out, Cmd{Kind: CmdBorder, X: n.X, Y: n.Y, W: n.W, H: n.H, Col: s.Border, Radius: s.Radius, Border: s.BorderW})
 	}
 	if n.Kind == KindCustom {
 		out = append(out, Cmd{Kind: CmdCustom, X: n.X, Y: n.Y, W: n.W, H: n.H, Arg: n.Id})

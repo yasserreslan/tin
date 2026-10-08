@@ -12,3 +12,4 @@ after 100 100 -100 280
 after 1100 300 -300 80
 back 0
 commands 28 [2 0 23 0 1 1 1]
+first 0 800 0.2 0.2 1 text 2 1

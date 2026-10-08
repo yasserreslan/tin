@@ -1,27 +1,38 @@
 package ui
 
-// Color is a straight (not premultiplied) RGBA color, components 0 to 1.
-type Color value struct {
-	R f64
-	G f64
-	B f64
-	A f64
-}
+// Color is a straight (not premultiplied) RGBA color packed into one integer as 0xRRGGBBAA, so a style, a node and a drawing
+// command hold it as one word. R, G, B and A unpack the components as numbers from 0 to 1.
+type Color = i64
 
 // Hex is the opaque color 0xRRGGBB.
 fn Hex(rgb i64) Color {
-	return Color{R: f64((rgb >> 16) & 255) / 255.0, G: f64((rgb >> 8) & 255) / 255.0, B: f64(rgb & 255) / 255.0, A: 1.0}
+	return (rgb << 8) | 255
 }
 
-// HexA is the color 0xRRGGBB with alpha a.
+// HexA is the color 0xRRGGBB with alpha a (0 to 1).
 fn HexA(rgb i64, a f64) Color {
-	let c = Hex(rgb)
-	return Color{R: c.R, G: c.G, B: c.B, A: a}
+	return (rgb << 8) | i64(a * 255.0 + 0.5)
 }
 
 // None is the transparent color: a style whose Bg is None draws no background.
 fn None() Color {
-	return Color{}
+	return 0
+}
+
+fn R(c Color) f64 {
+	return f64((c >> 24) & 255) / 255.0
+}
+
+fn G(c Color) f64 {
+	return f64((c >> 16) & 255) / 255.0
+}
+
+fn B(c Color) f64 {
+	return f64((c >> 8) & 255) / 255.0
+}
+
+fn A(c Color) f64 {
+	return f64(c & 255) / 255.0
 }
 
 // Directions a box lays its children out in.
@@ -56,10 +67,10 @@ type Style value struct {
 	Gap f64
 	Align i64
 	Justify i64
-	Bg Color
-	HoverBg Color
+	Bg i64
+	HoverBg i64
 	BorderW f64
-	Border Color
+	Border i64
 	Radius f64
 	// Abs takes the box out of the flow: it sits at (X, Y) from the top left of its parent, or, when Right or Bottom is set,
 	// that far from the parent's right or bottom edge.
