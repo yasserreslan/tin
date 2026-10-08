@@ -12,7 +12,7 @@ import "wire"
 // wire's HTTP/2 client (#480) against an upstream, from request handlers so that calls overlap
 // on the core. GET /go?base=URL[&h2c=1] runs the checks for Go's net/http upstream
 // (tools/ci/fixtures/h2upstream.go), /anvil?base=URL[&h2c=1] those for anvil's h2 fixture, and
-// /goaway?base=URL those for the GOAWAY server of wire_h2_check.py. Each answers one "ok" or
+// /goaway?base=URL those for the GOAWAY server of wire_h2_check.tin. Each answers one "ok" or
 // "FAIL" line per check. CA (a path) is the upstreams' certificate.
 
 fn opts(q anvil.Req) wire.Options {

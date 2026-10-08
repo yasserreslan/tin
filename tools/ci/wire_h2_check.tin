@@ -1,0 +1,79 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "twine"
+
+// wire speaks HTTP/2 (#480): the fixture tools/ci/fixtures/wire_h2.tin calls upstreams from its request handlers, one core, so that
+// calls overlap as streams of one connection.
+//
+// - Go's net/http (tools/ci/fixtures/h2upstream.go), over TLS (h2 by ALPN) and cleartext (h2c by prior knowledge): 100 calls in a row
+//   and 50 at once on one connection, 5 MB up and 12 MB down through the flow-control windows, trailers, a deadline that resets its
+//   stream and leaves the connection, MaxBody, and HTTP/1.1 with NoH2.
+// - anvil's h2 fixture (tools/ci/fixtures/h2.tin), over TLS and h2c: a 3 MB upload, trailers, 20 calls at once.
+// - A server (tools/ci/fixtures/goaway_server.go) that sends GOAWAY: the next call takes a new connection, and a stream past the
+//   GOAWAY's last one is sent again on a new connection.
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/wire_h2")
+	ci.Mkdirs(out)
+	mut openssl = tlsutil.Openssl3()
+	if len(openssl) == 0 {
+		openssl = "openssl"
+	}
+	let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+	let cert = tlsutil.Of(certs, "ecdsa")
+	ci.BuildTin("tools/ci/fixtures/wire_h2.tin", ci.Join(out, "client"), "", []str{})
+	ci.BuildTin("tools/ci/fixtures/h2.tin", ci.Join(out, "anvil_h2"), "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(out, "h2upstream"), "tools/ci/fixtures/h2upstream.go"}, ci.Root(), 300), "go build h2upstream.go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(out, "goaway_server"), "tools/ci/fixtures/goaway_server.go"}, ci.Root(), 300), "go build goaway_server.go")
+	let gtls = nettest.Port()
+	let gh2c = nettest.Port()
+	let gp = nettest.Start(ci.Join(out, "h2upstream"), []str{mint.Itoa(gtls), mint.Itoa(gh2c), cert.Cert, cert.Key}, []str{}, ci.Join(out, "go.log"), 0)
+	let atls = nettest.Port()
+	let ap1 = nettest.Start(ci.Join(out, "anvil_h2"), []str{}, []str{"TIN_CORES=1", "TLS_CERT=" + cert.Cert, "TLS_KEY=" + cert.Key}, ci.Join(out, "anvil_tls.log"), atls)
+	let ah2c = nettest.Port()
+	let ap2 = nettest.Start(ci.Join(out, "anvil_h2"), []str{}, []str{"TIN_CORES=1"}, ci.Join(out, "anvil_h2c.log"), ah2c)
+	let cport = nettest.Port()
+	let cp = nettest.Start(ci.Join(out, "client"), []str{}, []str{"TIN_CORES=1", "CA=" + cert.Cert}, ci.Join(out, "client.log"), cport)
+	for port in []i64{gtls, gh2c, atls, ah2c, cport} {
+		let probe = nettest.Server{Pid: 0, Port: port, Log: ""}
+		probe.Ready(10)
+	}
+	let gaPort = nettest.Port()
+	let countFile = ci.Join(out, "goaway.count")
+	ci.Remove(countFile)
+	let gs = nettest.Start(ci.Join(out, "goaway_server"), []str{countFile}, []str{}, ci.Join(out, "goaway.log"), gaPort)
+	gs.Ready(10)
+	let paths = []str{"/go?base=https://localhost:" + mint.Itoa(gtls), "/go?base=http://127.0.0.1:" + mint.Itoa(gh2c) + "&h2c=1", "/anvil?base=https://localhost:" + mint.Itoa(atls), "/anvil?base=http://127.0.0.1:" + mint.Itoa(ah2c) + "&h2c=1", "/goaway?base=http://127.0.0.1:" + mint.Itoa(gaPort)}
+	mut total = 0
+	mut bad = []str{}
+	for path in paths {
+		let r = nettest.Parse(nettest.Raw(cport, nettest.GetRequest(path), 180))
+		ci.Check(r.Status == 200, path + " answered " + mint.Itoa(r.Status) + " " + r.Body)
+		mut kind = "tls"
+		if twine.Contains(path, "h2c") || twine.Contains(path, "goaway") {
+			kind = "h2c"
+		}
+		let name = twine.Split(path[1:], "?")[0]
+		for l in ci.Lines(r.Body) {
+			say.Line(l + "  (" + name + " " + kind + ")")
+			total += 1
+			if !twine.HasPrefix(l, "ok ") {
+				bad = append(bad, l)
+			}
+		}
+	}
+	ci.Check(total > 0 && len(bad) == 0, "failed checks: " + twine.Join(bad, "; "))
+	let accepted = ci.Num(twine.TrimSpace(ci.Read(countFile)))
+	ci.Check(accepted == 4, "the GOAWAY server accepted " + mint.Itoa(accepted) + " connections, not 4")
+	for s in []nettest.Server{gp, ap1, ap2, cp, gs} {
+		if s.Pid != 0 {
+			s.Stop()
+		}
+	}
+	ci.Pass("wire HTTP/2: " + mint.Itoa(total) + " checks against Go, anvil and a GOAWAY server")
+}

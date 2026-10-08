@@ -173,7 +173,7 @@ jobs:
       - name: HTTP client keep-alive pool (connections reused, stale ones replaced, MaxIdle, https on one handshake)
         run: sh tools/ci/tin.sh wire_pool_check
       - name: HTTP/2 client (wire against Go's net/http and anvil over TLS and h2c, GOAWAY)
-        run: python3 tools/ci/wire_h2_check.py
+        run: sh tools/ci/tin.sh wire_h2_check
       - name: Held cores (stuck-core counters; SIGTERM while core 0 is held, Linux)
         if: runner.os == 'Linux'
         run: sh tools/ci/tin.sh wedge_check
