@@ -1,0 +1,123 @@
+package store
+
+import "../object"
+import "fault"
+
+// Layered and cached stores (#777): reads try several stores in order, writes go to the first; a cache keeps
+// recently decoded trees and commits.
+
+// Layered is an ObjectStore over several: a read tries each in order, a write goes to the first.
+type Layered struct {
+	stores []dyn ObjectStore
+}
+
+// NewLayered is a layered store over stores (at least one), the first taking the writes.
+fn NewLayered(stores []dyn ObjectStore) Layered {
+	return Layered{stores: stores}
+}
+
+// Has reports whether any layer holds the object.
+fn (l Layered) Has(id object.Id) bool {
+	for s in l.stores {
+		if s.Has(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetRaw is the object's kind and body from the first layer that holds it.
+fn (l mut Layered) GetRaw(id object.Id) !(object.Kind, str) {
+	for i in 0..len(l.stores) {
+		mut s = l.stores[i]
+		if s.Has(id) {
+			return try s.GetRaw(id)
+		}
+	}
+	fail fault.Wrap(ErrNotFound, id.Hex())
+}
+
+// Get is the decoded object from the first layer that holds it.
+fn (l mut Layered) Get(id object.Id) !object.Object {
+	let (kind, body) = try l.GetRaw(id)
+	return try object.Decode(kind, body)
+}
+
+// PutRaw writes to the first layer.
+fn (l mut Layered) PutRaw(kind object.Kind, body str) !object.Id {
+	mut first = l.stores[0]
+	return try first.PutRaw(kind, body)
+}
+
+// Put writes to the first layer.
+fn (l mut Layered) Put(o object.Object) !object.Id {
+	mut first = l.stores[0]
+	return try first.Put(o)
+}
+
+// Cached is an ObjectStore that keeps the most recently decoded trees and commits of another, up to a number of
+// bytes of their bodies; blobs pass through, since they are read once and can be large. Its maps are keyed by the
+// id's bytes (#841).
+type Cached[S ObjectStore] struct {
+	inner S
+	objs  map[str]object.Object
+	order []str
+	sizes map[str]i64
+	bytes i64
+	cap   i64
+}
+
+// NewCached is a cache of up to maxBytes bytes of decoded trees and commits over inner.
+fn NewCached[S ObjectStore](inner S, maxBytes i64) Cached[S] {
+	return Cached[S]{inner: inner, objs: map[str]object.Object{}, order: []str{}, sizes: map[str]i64{}, bytes: 0, cap: maxBytes}
+}
+
+// Has reports whether the inner store holds the object.
+fn (c Cached[S]) Has(id object.Id) bool {
+	let (_, ok) = c.objs[id.Bytes()]
+	return ok || c.inner.Has(id)
+}
+
+// GetRaw reads through to the inner store.
+fn (c mut Cached[S]) GetRaw(id object.Id) !(object.Kind, str) {
+	return try c.inner.GetRaw(id)
+}
+
+// Get is the decoded object, from the cache when it is there.
+fn (c mut Cached[S]) Get(id object.Id) !object.Object {
+	let key = id.Bytes()
+	let (hit, ok) = c.objs[key]
+	if ok {
+		return hit
+	}
+	let (kind, body) = try c.inner.GetRaw(id)
+	let o = try object.Decode(kind, body)
+	if kind != object.Kind.Blob && len(body) <= c.cap {
+		c.objs[key] = o
+		c.sizes[key] = len(body)
+		c.order = append(c.order, key)
+		c.bytes += len(body)
+		mut drop = 0
+		for c.bytes > c.cap && drop < len(c.order) {
+			let old = c.order[drop]
+			c.bytes -= c.sizes[old]
+			delete(c.objs, old)
+			delete(c.sizes, old)
+			drop += 1
+		}
+		if drop > 0 {
+			c.order = c.order[drop:]
+		}
+	}
+	return o
+}
+
+// PutRaw writes through to the inner store.
+fn (c mut Cached[S]) PutRaw(kind object.Kind, body str) !object.Id {
+	return try c.inner.PutRaw(kind, body)
+}
+
+// Put writes through to the inner store.
+fn (c mut Cached[S]) Put(o object.Object) !object.Id {
+	return try c.inner.Put(o)
+}
