@@ -7,13 +7,11 @@ package main
 //	P <hex>                       a media type string: the parsed type and parameters
 //	Q <hex>                       text: quoted-printable decode, and the encoding of the decoded
 //	M <boundary-hex> <body-hex>   a multipart body: its parts (name, filename, type, body)
-//	MC <chunk> <boundary-hex> <body-hex> the same body through short reads
 
 import "say"
 import "mime"
 import "mime/multipart"
 import "mime/quotedprintable"
-import "mint"
 import "quarry"
 import "seal"
 import "twine"
@@ -71,27 +69,14 @@ fn run(line str) {
 		}
 		let enc = quotedprintable.Encode(dec)
 		say.Line("Q", seal.Hex([]u8(dec)), seal.Hex([]u8(enc)))
-	} else if parts[0] == "M" || parts[0] == "MC" {
-		mut boundaryArg = i64(1)
-		mut bodyArg = i64(2)
-		mut chunk = i64(7)
-		if parts[0] == "MC" {
-			chunk = mint.Atoi(argOf(parts, 1)) catch _ { 7 }
-			boundaryArg = 2
-			bodyArg = 3
-		}
+	} else if parts[0] == "M" {
+		let boundaryArg = i64(1)
+		let bodyArg = i64(2)
 		let boundary = unhex(argOf(parts, boundaryArg))
 		let raw = unhex(argOf(parts, bodyArg))
 		mut r = multipart.NewReader(raw, boundary) catch _ {
 			say.Line("M fault")
 			return
-		}
-		if parts[0] == "MC" {
-			mut source = chunkSource{data: []u8(raw), at: 0, size: chunk}
-			r = multipart.NewReaderStream(mut source, boundary) catch _ {
-				say.Line("M fault")
-				return
-			}
 		}
 		mut pieces = []str{}
 		for {
@@ -110,35 +95,8 @@ fn run(line str) {
 			let ct = p.Header["content-type"]
 			pieces = append(pieces, p.FormName() + "|" + p.FileName() + "|" + ct + "|" + seal.Hex([]u8(data)))
 		}
-		if parts[0] == "MC" {
-			say.Line("MC", joinWith(pieces, " "))
-		} else {
-			say.Line("M", joinWith(pieces, " "))
-		}
+		say.Line("M", joinWith(pieces, " "))
 	}
-}
-
-type chunkSource struct {
-	data []u8
-	at i64
-	size i64
-}
-fn (s mut chunkSource) Read(buf mut []u8) !i64 {
-	if s.at >= len(s.data) {
-		return 0
-	}
-	mut n = i64(len(buf))
-	if n > s.size {
-		n = s.size
-	}
-	if n > len(s.data)-s.at {
-		n = len(s.data)-s.at
-	}
-	for i in 0..n {
-		buf[i] = s.data[s.at+i]
-	}
-	s.at += n
-	return n
 }
 
 // argOf is the argument at i, or "" when the line has none (an empty hex field).

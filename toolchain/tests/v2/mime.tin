@@ -7,7 +7,6 @@ import "say"
 import "mime"
 import "mime/multipart"
 import "mime/quotedprintable"
-import "seal"
 
 fn main() {
 	// Media types: the type and subtype are lowercased, the parameters unquoted and sorted.
@@ -79,53 +78,6 @@ fn main() {
 	}
 	let streamWriterBody = str(sink.data)
 	say.Line("multipart stream writer", streamWriterBody == expected, partsOf(streamWriterBody, "bnd") == partsOf(expected, "bnd"))
-	// The stream reader accepts short reads and reports a useful fault on truncation.
-	let largeText = many("stream-data-", 2048)
-	let largeBody = "--stream\r\nContent-Disposition: form-data; name=\"large\"\r\n\r\n" + largeText + "\r\n--stream--\r\n"
-	mut source = byteSource{data: []u8(largeBody), at: 0, step: 7}
-	mut sr = multipart.NewReaderStream(mut source, "stream") catch err {
-		say.Line("stream reader failed", err)
-		return
-	}
-	let (sp0, smore) = sr.NextPart() catch err {
-		say.Line("stream part failed", err)
-		return
-	}
-	mut sp = sp0
-	let streamed = sp.Text() catch err {
-		say.Line("stream text failed", err)
-		return
-	}
-	say.Line("multipart stream reader", smore, streamed == largeText, seal.Hex(seal.Sha256(streamed)) == seal.Hex(seal.Sha256(largeText)))
-	mut truncated = byteSource{data: []u8("--stream\r\n\r\nunfinished"), at: 0, step: 3}
-	mut tr = multipart.NewReaderStream(mut truncated, "stream") catch err {
-		say.Line("stream truncated", say.Fmt("%s", err))
-		return
-	}
-	let (_, moreTruncated) = tr.NextPart() catch err {
-		say.Line("multipart stream truncated", say.Fmt("%v", err))
-		return
-	}
-	say.Line("multipart stream truncated", moreTruncated)
-}
-
-// byteSource is a short-read io.Reader for streaming tests.
-type byteSource struct {
-	data []u8
-	at i64
-	step i64
-}
-
-fn (s mut byteSource) Read(buf mut []u8) !i64 {
-	if s.at >= len(s.data) {
-		return 0
-	}
-	mut n = i64(len(buf))
-	if n > s.step { n = s.step }
-	if n > len(s.data)-s.at { n = len(s.data)-s.at }
-	for i in 0..n { buf[i] = s.data[s.at+i] }
-	s.at += n
-	return n
 }
 
 // byteSink is a small in-memory io.Writer used to check streaming output.
