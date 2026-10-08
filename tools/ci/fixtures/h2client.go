@@ -189,6 +189,19 @@ func main() {
 		fail("servefile If-Range: %v %v", serr, sr)
 	}
 	sr.Body.Close()
+	// A client that cancels a file response mid-send, again and again, on one connection: a task cancelled while
+	// a helper thread reads for it must not be resumed twice.
+	for i := 0; i < 40; i++ {
+		sreq, _ = http.NewRequest("GET", base+"/servefile?name=big", nil)
+		sr, serr = client.Do(sreq)
+		if serr != nil || sr.StatusCode != 200 {
+			fail("servefile cancel %d: %v %v", i, serr, sr)
+		}
+		sr.Body.Close()
+		if _, cb := get("/trailers?n=10"); len(cb) != 10 {
+			fail("after cancel %d: %d bytes", i, len(cb))
+		}
+	}
 	fmt.Println("PASS ServeFile over h2: validators, 304, a byte range and a stale If-Range")
 
 	resp, body := get("/trailers?n=1000")
