@@ -4,7 +4,7 @@ package main
 // and print what lasso says for each, in the same format as bench/ref/lasso (Go's regexp):
 // "compile" for a pattern that does not compile, else "match ... find ... subs ... all ...
 // allsubs ... repl ... func ... split ...".
-// tools/ci/lasso_check.py feeds both sides the same corpus and compares the lines (#571).
+// tools/ci/lasso_check.tin feeds both sides the same corpus and compares the lines (#571).
 
 import "say"
 import "seal"

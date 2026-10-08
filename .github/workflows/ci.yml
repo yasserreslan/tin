@@ -63,7 +63,7 @@ jobs:
       - name: XML token streams against Go's encoding/xml (RSS, SOAP, S3, SVG)
         run: sh tools/ci/tin.sh scroll_check
       - name: Regular expressions against Go's regexp (12,000 pairs and the ported tables)
-        run: python3 tools/ci/lasso_check.py
+        run: sh tools/ci/tin.sh lasso_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: python3 tools/ci/pack_check.py
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
@@ -96,7 +96,7 @@ jobs:
         run: sh tools/ci/tin.sh thread_check
       - name: Static Linux executables (no interpreter, Tin _start, empty root)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/static_check.py
+        run: sh tools/ci/tin.sh static_check
       - name: Exact calendar, errno, hostname, TTY and Linux symbol helpers
         run: sh tools/ci/tin.sh helpers_check
       - name: Float map keys against Go (-0 and +0 one key, NaN never found)

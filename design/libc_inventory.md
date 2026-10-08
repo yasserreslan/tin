@@ -20,8 +20,8 @@ an entry removed only when no Linux declaration or linker-added import remains.
 
 | Symbol | Call-site files | Phase | Status | Replacement | Verification |
 |---|---|---:|---|---|---|
-| `__errno_location` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | The syscall leaf returns -errno; the seed refresh (#339) made the libc fallback dead | syscall_check.tin forbids syscall imports; static_check.py: `bin/tinc` and every program are static |
-| `__libc_start_main` | `toolchain/compiler/elf.tin`, `toolchain/compiler/elf_x64.tin` | 5 | removed | Tin _start reads argc/argv/envp/auxv; the ELF writers emit only static executables and stop the link if a program would import anything | Bootstrap fixed point in an empty root; static_check.py (no PT_INTERP/PT_DYNAMIC, `FROM scratch`) |
+| `__errno_location` | `toolchain/runtime/syscalls_linux.tin` | 5 | removed | The syscall leaf returns -errno; the seed refresh (#339) made the libc fallback dead | syscall_check.tin forbids syscall imports; static_check.tin: `bin/tinc` and every program are static |
+| `__libc_start_main` | `toolchain/compiler/elf.tin`, `toolchain/compiler/elf_x64.tin` | 5 | removed | Tin _start reads argc/argv/envp/auxv; the ELF writers emit only static executables and stop the link if a program would import anything | Bootstrap fixed point in an empty root; static_check.tin (no PT_INTERP/PT_DYNAMIC, `FROM scratch`) |
 | `accept` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | accept raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |
 | `atoi` | `packages/anvil/anvil.tin` | 1 | removed | Tin decimal integer parser | Anvil environment integer parsing cases (phase 1) |
 | `bind` | `packages/anvil/anvil.tin`, `packages/wire/wire.tin` | 3 | removed | bind raw syscall (per-architecture ABI) | Existing strict/runtime/protocol suites plus syscall edge-case Go twin (phase 3) |

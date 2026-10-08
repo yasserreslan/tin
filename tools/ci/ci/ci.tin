@@ -394,3 +394,8 @@ fn Lines(text str) []str {
 	}
 	return twine.Split(twine.TrimSuffix(text, "\n"), "\n")
 }
+
+// Exists reports whether the path exists.
+fn Exists(path str) bool {
+	return quarry.Exists(path)
+}

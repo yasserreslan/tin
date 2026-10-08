@@ -111,3 +111,15 @@ fn (f File) Function(want str) str {
 	}
 	return ""
 }
+
+// SegmentKinds are the types (PT_*) of the program headers of the file: 2 is PT_DYNAMIC and 3 is PT_INTERP.
+fn (f File) SegmentKinds() []i64 {
+	let phoff = rd64(f.Data, 32)
+	let size = rd16(f.Data, 54)
+	let count = rd16(f.Data, 56)
+	mut kinds = []i64{}
+	for i in 0..count {
+		kinds = append(kinds, rd32(f.Data, phoff + i * size))
+	}
+	return kinds
+}

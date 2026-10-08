@@ -1,7 +1,7 @@
 // Command lasso reads pattern/input pairs on stdin (hex-encoded, one pair per line) and prints,
 // for each, what Go's regexp says: whether it matches, the leftmost match, the submatch offsets,
 // every match, and what Replace, ReplaceFunc and Split give. tools/ci/fixtures/lasso.tin prints
-// the same lines and tools/ci/lasso_check.py compares them (#571, #717).
+// the same lines and tools/ci/lasso_check.tin compares them (#571, #717).
 package main
 
 import (
