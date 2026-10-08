@@ -534,12 +534,14 @@ A basic proxy:
 ```tin body
 let p = proxy.New("http://127.0.0.1:8081")
 let r = anvil.NewRouter()
-r.Stream("POST", "/{path...}", p.ServeHTTP)
-r.Get("/{path...}", p.ServeHTTP)
+r.Stream("POST", `/{path...}`, p.ServeHTTP)
+r.Get(`/{path...}`, p.ServeHTTP)
 r.Serve(":8080") catch err { say.Line(err) }
 ```
 
 Set Director to rewrite a request to a complete upstream URL. ModifyResponse can edit the upstream status and fields and fail or reject them before they are written; ErrorHandler replaces the default 502 response. The proxy removes hop-by-hop fields and appends the caller's address to X-Forwarded-For. Register request-body routes with Router.Stream.
+
+Once the response head is sent its status cannot change, so a failure in the upstream body is not handed to ErrorHandler. The proxy logs it once with herald and aborts the response: the client sees the response end early instead of a body that looks complete, as Go's ReverseProxy aborts the handler.
 
 - `type Response struct`: Response is the upstream status and headers before they are copied to the client.
 - `type Proxy struct`: Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set, returns the complete upstream URL for each request, or an empty string to use Target. Use New to get default hooks.

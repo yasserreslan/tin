@@ -5,17 +5,22 @@
 //
 //	let p = proxy.New("http://127.0.0.1:8081")
 //	let r = anvil.NewRouter()
-//	r.Stream("POST", "/{path...}", p.ServeHTTP)
-//	r.Get("/{path...}", p.ServeHTTP)
+//	r.Stream("POST", `/{path...}`, p.ServeHTTP)
+//	r.Get(`/{path...}`, p.ServeHTTP)
 //	r.Serve(":8080") catch err { say.Line(err) }
 //
 // Set Director to rewrite a request to a complete upstream URL. ModifyResponse can edit
 // the upstream status and fields and fail or reject them before they are written; ErrorHandler replaces the
 // default 502 response. The proxy removes hop-by-hop fields and appends the caller's
 // address to X-Forwarded-For. Register request-body routes with Router.Stream.
+//
+// Once the response head is sent its status cannot change, so a failure in the upstream body is not
+// handed to ErrorHandler. The proxy logs it once with herald and aborts the response: the client sees
+// the response end early instead of a body that looks complete, as Go's ReverseProxy aborts the handler.
 package proxy
 
 import "anvil"
+import "herald"
 import "wire"
 import "say"
 
@@ -116,63 +121,88 @@ fn forward(q anvil.Req, w mut anvil.Out, target str, modify fn(mut Response) !bo
 	if !allowed { fail "proxy: response rejected" }
 	w.Status(response.Status)
 	let clean = strip_hop(response.Fields)
+	mut typed = false
 	for f in clean {
 		let k = colon(f)
-		if k > 0 { w.Head(f[:k], trim(f[k+1:])) }
+		if k <= 0 { continue }
+		// anvil writes its default Content-Type itself: the upstream's replaces it, since a Head line would add a second one (#739)
+		if lower(f[:k]) == "content-type" {
+			if !typed { w.Type(trim(f[k+1:])) }
+			typed = true
+			continue
+		}
+		w.Head(f[:k], trim(f[k+1:]))
 	}
-	w.Stream() catch e { fail e }
-	let transfer = header_value(response.Fields, "transfer-encoding")
+	let chunked = has_token(header_value(response.Fields, "transfer-encoding"), "chunked")
 	let length = parse_length(header_value(response.Fields, "content-length"))
-	if has_token(transfer, "chunked") {
-		try copy_chunked(c, mut w)
-		return nil
-	}
-	if length >= 0 { try copy_length(c, mut w, length)
-		return nil }
-	mut chunk = make([]u8, 0, 32768)
-	for {
-		chunk = chunk[:0]
-		let (n, re) = c.Read(mut chunk, 32768)
-		if re != nil {
-			if wire.IsEOF(re) { return nil }
-			w.Abort()
-			return nil
+	w.Stream() catch e { fail e }
+	// A body of known length keeps its Content-Length, as Go's ReverseProxy copies that header; any other body is chunked.
+	if !chunked && length >= 0 { w.Length(length) catch e { fail e } }
+	// The head goes out before the body is read, so a failure in the body finds a response that has started and can be aborted.
+	w.Flush() catch e { fail e }
+	if q.Method == "HEAD" { return nil }
+	let (copyErr, fromUpstream) = copy_body(c, mut w, chunked, length)
+	if copyErr != nil {
+		if fromUpstream {
+			herald.Error2("proxy: upstream read error during body copy", "error", upstream_reason(copyErr))
 		}
-		if n == 0 { return nil }
-		let we = w.Write(chunk[:n])
-		if we != nil {
-			w.Abort()
-			return nil
-		}
+		w.Abort()
 	}
+	return nil
 }
 
-fn copy_length(c wire.Conn, w mut anvil.Out, remaining i64) ! {
+// copy_body copies the upstream body to the client. It returns the fault that stopped the copy (nil when the body ended
+// whole) and whether the upstream caused it: a client that went away does not.
+fn copy_body(c wire.Conn, w mut anvil.Out, chunked bool, length i64) (fault, bool) {
+	if chunked {
+		let (ferr, up) = copy_chunked(c, mut w)
+		return ferr, up
+	}
+	if length >= 0 {
+		let (ferr, up) = copy_length(c, mut w, length)
+		return ferr, up
+	}
+	let (ferr, up) = copy_close(c, mut w)
+	return ferr, up
+}
+
+// copy_length copies the length bytes of a body with a Content-Length.
+fn copy_length(c wire.Conn, w mut anvil.Out, remaining i64) (fault, bool) {
 	mut left = remaining
 	mut chunk = make([]u8, 0, 32768)
 	for left > 0 {
 		chunk = chunk[:0]
-		let n = try c.Read(mut chunk, min(left, 32768))
-		let e = w.Write(chunk[:n])
-		if e != nil { fail e }
+		let (n, re) = c.Read(mut chunk, min(left, 32768))
+		if re != nil { return re, true }
+		let we = w.Write(chunk[:n])
+		if we != nil { return we, false }
 		left -= n
 	}
+	return nil, false
 }
 
-fn copy_chunked(c wire.Conn, w mut anvil.Out) ! {
+// Framing faults of an upstream chunked body (#739).
+let errEmptyChunk = fault("proxy: empty chunk size")
+let errChunkSize = fault("proxy: malformed chunk size")
+let errTrailers = fault("proxy: upstream trailers too large")
+
+// copy_chunked copies a chunked body chunk by chunk, and its trailer fields.
+fn copy_chunked(c wire.Conn, w mut anvil.Out) (fault, bool) {
 	mut chunk = make([]u8, 0, 32768)
 	for {
-		let line = try read_line(c)
-		if len(line) == 0 { fail "proxy: empty chunk size" }
+		let (line, le) = read_line(c)
+		if le != nil { return le, true }
+		if len(line) == 0 { return errEmptyChunk, true }
 		let size = parse_hex(line)
-		if size < 0 { fail "proxy: malformed chunk size" }
+		if size < 0 { return errChunkSize, true }
 		if size == 0 {
 			mut trailerBytes = 0
 			for {
-				let trailer = try read_line(c)
-				if len(trailer) == 0 { return }
+				let (trailer, te) = read_line(c)
+				if te != nil { return te, true }
+				if len(trailer) == 0 { return nil, false }
 				trailerBytes += len(trailer) + 2
-				if trailerBytes > 65536 { fail "proxy: upstream trailers too large" }
+				if trailerBytes > 65536 { return errTrailers, true }
 				let k = colon(trailer)
 				if k > 0 { w.Trailer(trailer[:k], trim(trailer[k+1:])) }
 			}
@@ -180,12 +210,37 @@ fn copy_chunked(c wire.Conn, w mut anvil.Out) ! {
 		mut left = size
 		for left > 0 {
 			chunk = chunk[:0]
-			let n = try c.Read(mut chunk, min(left, 32768))
-			try w.Write(chunk[:n])
+			let (n, re) = c.Read(mut chunk, min(left, 32768))
+			if re != nil { return re, true }
+			let we = w.Write(chunk[:n])
+			if we != nil { return we, false }
 			left -= n
 		}
-		_ = try c.ReadFull(2)
+		let (_, ce) = c.ReadFull(2)
+		if ce != nil { return ce, true }
 	}
+}
+
+// copy_close copies a body that ends where the upstream closes the connection.
+fn copy_close(c wire.Conn, w mut anvil.Out) (fault, bool) {
+	mut chunk = make([]u8, 0, 32768)
+	for {
+		chunk = chunk[:0]
+		let (n, re) = c.Read(mut chunk, 32768)
+		if re != nil {
+			if wire.IsEOF(re) { return nil, false }
+			return re, true
+		}
+		if n == 0 { return nil, false }
+		let we = w.Write(chunk[:n])
+		if we != nil { return we, false }
+	}
+}
+
+// upstream_reason words a body read error as Go's log does: the upstream closing inside a body is unexpected.
+fn upstream_reason(err fault) str {
+	if wire.IsEOF(err) { return "unexpected EOF" }
+	return say.Str(err)
 }
 
 fn request_fields(q anvil.Req, authority str) []str {
