@@ -66,6 +66,10 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	appkit.AddSeparator(edit)
 	item(m, edit, "Toggle Comment", "/", cmd, editor.CmdComment)
 	item(m, edit, "Format Document", "i", cmd | shift, editor.CmdFormat)
+	appkit.AddSeparator(edit)
+	item(m, edit, "Fold", "[", cmd | alt, editor.CmdFold)
+	item(m, edit, "Unfold", "]", cmd | alt, editor.CmdUnfold)
+	item(m, edit, "Unfold All", "", 0, editor.CmdUnfoldAll)
 
 	let sel = appkit.AddMenu(m, "Selection")
 	item(m, sel, "Add Cursor Below", "\xef\x9c\x81", cmd | alt, editor.CmdCursorBelow)
