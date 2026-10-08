@@ -286,6 +286,31 @@ def per_core_data(out):
     print('per-core data: examples/percore.tin builds its table in on core.start; 2 and 4 cores all answer 1000 1000 (#343)')
 
 
+def bad_cores(exe, out):
+    # #746: TIN_CORES=-1 used to ask for 4294967295 cores, loop on pipe() at 100% CPU, never
+    # listen and ignore SIGTERM. A value that is not a core count from 1 to 1024 is named on
+    # stderr and the CPU count is used; the server answers and stops on SIGTERM.
+    for value in ('-1', '99999999999', '0', 'abc'):
+        port = ws.free_port()
+        path = out / 'cores.log'
+        with path.open('wb') as log:
+            server = subprocess.Popen([str(exe)], stdout=log, stderr=subprocess.STDOUT,
+                                      env=dict(os.environ, PORT=str(port), TIN_CORES=value, TIN_GRACE='1'))
+            try:
+                eventually(lambda: server_ready(port, server), seconds=1)
+                assert response(request(port, '/hello'))[0] == 200
+                server.send_signal(signal.SIGTERM)
+                code = server.wait(timeout=3)
+                assert code == 0, 'exit %d' % code
+            finally:
+                if server.poll() is None:
+                    server.kill()
+                    server.wait()
+        text = path.read_text(errors='replace')
+        assert 'anvil: TIN_CORES=%s is not a core count from 1 to 1024; serving on ' % value in text, text
+    print('TIN_CORES=-1, 99999999999, 0, abc: named on stderr, served on the CPU count, exit 0 on SIGTERM (#746)')
+
+
 def main():
     out = ROOT / 'bin/ci/lifecycle'
     out.mkdir(parents=True, exist_ok=True)
@@ -300,6 +325,7 @@ def main():
     serve_in_say(out)
     client_addr(out)
     per_core_data(out)
+    bad_cores(exe, out)
 
 
 if __name__ == '__main__':
