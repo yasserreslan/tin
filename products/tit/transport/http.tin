@@ -2,8 +2,11 @@ package transport
 
 import "anvil"
 import "wire"
+import "../identity"
 import "argo"
 import "fault"
+import "flume"
+import "quarry"
 import "seal"
 import "twine"
 import "tide"
@@ -119,13 +122,77 @@ fn (h mut Http) Push(req PushRequest, pack str) !PushAnswer {
 	return a
 }
 
-// Serve answers the protocol for server on addr, on every core, until the process ends.
-fn Serve(addr str, server Server) ! {
-	mut srv = server
-	try anvil.Serve(addr, fn(q anvil.Req, w mut anvil.Out) {
-		let r = srv.Handle(q.Method, q.Path, q.Header("tit-signature"), q.Body(), tide.Wall() / 1000000000)
-		w.Status(r.Status)
-		w.Type("application/x-tit")
-		w.Body = []u8(r.Body)
-	})
+// served is the server this core answers with, made on the core's first request from what Serve recorded in the
+// environment (globals are per core: one assigned in main would exist on core 0 alone, E131).
+mut served ?Server = nil
+
+// Serve answers the protocol on addr, on every core, until the process ends, for the repository whose .tit directory
+// is dir: allowFile lists the keys allowed to sign (as .tit-signers does), public lets heads and fetch go unsigned,
+// and dir/serve-secret holds the key nonces are signed with (made on the first run).
+fn Serve(addr str, dir str, allowFile str, public bool) ! {
+	try ServeSecret(dir)
+	try quarry.Setenv("TIT_SERVE_DIR", dir)
+	try quarry.Setenv("TIT_SERVE_ALLOW", allowFile)
+	mut p = "0"
+	if public {
+		p = "1"
+	}
+	try quarry.Setenv("TIT_SERVE_PUBLIC", p)
+	try anvil.Serve(addr, handle)
+}
+
+// ServeSecret is the key a repository's server signs nonces with, from dir/serve-secret (made when missing), so every
+// process and node serving it takes the others' nonces.
+fn ServeSecret(dir str) !str {
+	let path = dir + "/serve-secret"
+	if quarry.Exists(path) {
+		let text = try flume.ReadFile(path)
+		return twine.TrimSpace(text)
+	}
+	let key = seal.Hex(seal.RandomBytes(32))
+	mut w = try flume.CreateExcl(path)
+	w.Str(key + "\n")
+	try w.Close()
+	try quarry.Chmod(path, 384)
+	return key
+}
+
+// AllowedKeys reads a file of allowed keys (the .tit-signers format); a missing file allows none.
+fn AllowedKeys(path str) ![]identity.TrustedKey {
+	if !quarry.Exists(path) {
+		return []identity.TrustedKey{}
+	}
+	let text = try flume.ReadFile(path)
+	return try identity.ParseSigners(text)
+}
+
+fn serverFromEnv() !Server {
+	let dir = quarry.Getenv("TIT_SERVE_DIR")
+	let secretKey = try ServeSecret(dir)
+	mut s = NewServer(dir, secretKey, quarry.Getenv("TIT_SERVE_PUBLIC") == "1")
+	let keys = try AllowedKeys(quarry.Getenv("TIT_SERVE_ALLOW"))
+	for k in keys {
+		s.Allow(k.Email, k.Public)
+	}
+	return s
+}
+
+fn handle(q anvil.Req, w mut anvil.Out) {
+	if served == nil {
+		let made = serverFromEnv() catch e {
+			w.Status(500)
+			w.Body = []u8(Frame(Kind.Error, Encode(ErrorAnswer{Code: "Internal", Message: fault.Message(e), Ref: "", Nonce: ""}), ""))
+			return
+		}
+		served = keep(made)
+	}
+	let cur = served
+	if cur == nil {
+		return
+	}
+	mut srv = cur
+	let r = srv.Handle(q.Method, q.Path, q.Header("tit-signature"), q.Body(), tide.Wall() / 1000000000)
+	w.Status(r.Status)
+	w.Type("application/x-tit")
+	w.Body = []u8(r.Body)
 }

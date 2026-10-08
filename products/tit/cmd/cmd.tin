@@ -33,6 +33,12 @@ type Command enum {
 	Undo(i64)
 	Redo
 	Oplog(OplogArgs)
+	Remote([]str)
+	Clone(ShareArgs)
+	Fetch(ShareArgs)
+	Push(ShareArgs)
+	Pull(ShareArgs)
+	Serve(ServeArgs)
 	Log(LogArgs)
 	Show(str)
 	Cat(str)
@@ -156,6 +162,13 @@ commands:
   redo                       apply again what the last undo reversed
   oplog [show N | restore N [--yes]]
                              the operations, newest first; one in full; every ref as it was after one
+  remote [add <name> <url>]  the remotes, or add one
+  clone <url> [dir]          copy a repository from a tit server
+  fetch [remote]             bring a remote's new commits in (refs/remotes/<remote>/...)
+  push [remote] [branch]     send a branch to a remote (origin and the current branch by default)
+  pull [remote]              fetch, then merge the remote's copy of the current branch
+  serve [--addr host:port] [--public] [--allow file]
+                             serve this repository over the tit protocol (keys: .tit/allowed-keys)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
   version [-v]               the version
   help [command]             this text
@@ -477,6 +490,62 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Oplog(oa)
 	}
+	if name == "remote" {
+		mut ra = []str{}
+		for a in rest {
+			ra = append(ra, a)
+		}
+		return g, Command.Remote(ra)
+	}
+	if name == "clone" {
+		if len(rest) == 0 || len(rest) > 2 {
+			fail fault.Wrap(ErrUsage, "clone takes a URL and, if you like, a directory")
+		}
+		mut dir = ""
+		if len(rest) == 2 {
+			dir = rest[1]
+		}
+		return g, Command.Clone(ShareArgs{Remote: rest[0], Branch: "", Dir: dir})
+	}
+	if name == "fetch" || name == "pull" || name == "push" {
+		mut sa = ShareArgs{Remote: "origin", Branch: "", Dir: ""}
+		if len(rest) > 0 {
+			sa.Remote = rest[0]
+		}
+		if len(rest) > 1 && name == "push" {
+			sa.Branch = rest[1]
+		}
+		if len(rest) > 2 || (len(rest) > 1 && name != "push") {
+			fail fault.Wrap(ErrUsage, "{name}: unexpected {rest[len(rest) - 1]}")
+		}
+		if name == "fetch" {
+			return g, Command.Fetch(sa)
+		}
+		if name == "pull" {
+			return g, Command.Pull(sa)
+		}
+		return g, Command.Push(sa)
+	}
+	if name == "serve" {
+		mut va = ServeArgs{Addr: "127.0.0.1:8740", Public: false, Allow: ""}
+		mut k = 0
+		for k < len(rest) {
+			let a = rest[k]
+			if a == "--addr" && k + 1 < len(rest) {
+				k += 1
+				va.Addr = rest[k]
+			} else if a == "--public" {
+				va.Public = true
+			} else if a == "--allow" && k + 1 < len(rest) {
+				k += 1
+				va.Allow = rest[k]
+			} else {
+				fail fault.Wrap(ErrUsage, "serve: unexpected {a}")
+			}
+			k += 1
+		}
+		return g, Command.Serve(va)
+	}
 	if name == "adopt" {
 		mut path = ""
 		if len(rest) > 0 {
@@ -585,6 +654,12 @@ fn commandName(c Command) str {
 		Undo(_) => "undo"
 		Redo => "redo"
 		Oplog(_) => "oplog"
+		Remote(_) => "remote"
+		Clone(_) => "clone"
+		Fetch(_) => "fetch"
+		Push(_) => "push"
+		Pull(_) => "pull"
+		Serve(_) => "serve"
 		Log(_) => "log"
 		Show(_) => "show"
 		Cat(_) => "cat"
@@ -656,6 +731,24 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Oplog(oa) => {
 			try doOplog(g, oa, mut o)
+		}
+		Remote(ra) => {
+			try doRemote(g, ra, mut o)
+		}
+		Clone(sa) => {
+			try doClone(g, sa, mut o)
+		}
+		Fetch(sa) => {
+			try doFetch(g, sa, mut o)
+		}
+		Push(sa) => {
+			try doPush(g, sa, mut o)
+		}
+		Pull(sa) => {
+			try doPull(g, sa, mut o)
+		}
+		Serve(va) => {
+			try doServe(g, va, mut o)
 		}
 		Log(la) => {
 			try doLog(g, la, mut o)

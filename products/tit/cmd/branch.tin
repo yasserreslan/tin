@@ -324,10 +324,9 @@ fn doMerge(g Global, a MergeArgs, o mut Out) ! {
 	if base != nil {
 		baseTree = try r.treeOf(base)
 	}
+	// the repository's store reads the loose objects and every pack, and writes the merged ones loose
+	let res = try merge.MergeTrees(mut r.Store, baseTree, oursTree, theirsTree)
 	mut loose = store.NewLoose(r.Ws.Store + "/objects")
-	let res = try merge.MergeTrees(mut loose, baseTree, oursTree, theirsTree)
-	// the store now holds the merged objects: reopen it to read them
-	r = try open(g)
 	mut message = a.Message
 	if len(message) == 0 {
 		message = mergeMessage(r, a.Rev)

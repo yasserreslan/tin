@@ -42,6 +42,10 @@ fn (w Workspace) IndexPath() str {
 // workspace, naming the shared store and its name) at or above it.
 fn Find(dir str) !Workspace {
 	mut d = trail.Clean(dir)
+	if len(d) == 0 || d[0] != '/' {
+		let wd = try quarry.Getwd()
+		d = trail.Clean(wd + "/" + d)
+	}
 	for {
 		let p = d + "/.tit"
 		if quarry.IsDir(p) {
@@ -63,10 +67,11 @@ fn Find(dir str) !Workspace {
 			}
 			return Workspace{Name: name, Root: d, Store: storeDir}
 		}
-		if d == "/" || len(d) == 0 {
+		let up = trail.Dir(d)
+		if d == "/" || len(d) == 0 || up == d {
 			fail fault.Wrap(ErrNoWorkspace, dir)
 		}
-		d = trail.Dir(d)
+		d = up
 	}
 }
 

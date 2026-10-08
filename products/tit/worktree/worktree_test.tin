@@ -163,3 +163,11 @@ fn TestFileBecomesDirectory(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// A relative directory, and one that does not exist, end the search instead of looping (#795).
+fn TestFindEnds(t mut crucible.T) {
+	let (_, e1) = Find("../no-such-directory-here/at-all")
+	t.True("relative", e1 != nil && fault.Is(e1, ErrNoWorkspace))
+	let (_, e2) = Find("/no-such-directory-here/at-all")
+	t.True("absolute", e2 != nil && fault.Is(e2, ErrNoWorkspace))
+}
