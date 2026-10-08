@@ -1,0 +1,106 @@
+package main
+
+import "quarry"
+import "say"
+import "seal"
+import "zip"
+
+const modified = 1700000000000000000
+
+type archiveBuffer struct { data []u8 }
+
+fn (b mut archiveBuffer) Write(data []u8) !i64 {
+	b.data = append(b.data, data...)
+	return len(data)
+}
+
+fn centralHeader(data []u8) i64 {
+	for i in 0..len(data) - 3 {
+		if data[i] == 0x50 && data[i + 1] == 0x4b && data[i + 2] == 1 && data[i + 3] == 2 {
+			return i
+		}
+	}
+	return -1
+}
+
+fn classify(data str) str {
+	let r = zip.NewReader(data) catch err {
+		return zip.FaultKind(err)
+	}
+	for f in r.File {
+		let _ = f.ReadAll(16mb) catch err {
+			return zip.FaultKind(err)
+		}
+	}
+	return "ok"
+}
+
+fn main() ! {
+	let args = quarry.Args()
+	if len(args) < 3 {
+		fail "usage: zip-tin write|read path"
+	}
+	if args[1] == "write" {
+		if len(args) != 3 { fail "usage: zip-tin write path" }
+		mut b = archiveBuffer{data: []u8{}}
+		mut w = zip.NewWriter(b)
+		try w.SetComment("zip twin")
+		for h in []zip.FileHeader{
+			zip.FileHeader{Name: "hello.txt", Method: zip.Deflate},
+			zip.FileHeader{Name: "raw.txt", Method: zip.Store},
+			zip.FileHeader{Name: "café.txt", Method: zip.Deflate},
+			zip.FileHeader{Name: "link", Method: zip.Store},
+			zip.FileHeader{Name: "folder/", Method: zip.Store},
+		} {
+			mut header = h
+			header.Comment = "file comment"
+			header.SetModTime(modified)
+			if h.Name == "hello.txt" { header.SetMode(0o644) }
+			if h.Name == "raw.txt" { header.SetMode(0o640) }
+			if h.Name == "café.txt" { header.SetMode(0o600) }
+			if h.Name == "link" { header.SetMode(zip.ModeSymlink | 0o777) }
+			if h.Name == "folder/" { header.SetMode(zip.ModeDir | 0o755) }
+			try w.CreateHeader(header)
+			let body = match h.Name {
+				"hello.txt" => "hello, zip"
+				"raw.txt" => "stored"
+				"café.txt" => "unicode"
+				"link" => "target"
+				_ => ""
+			}
+			_ = try w.WriteString(body)
+		}
+		try w.Close()
+		try quarry.WriteFile(args[2], str(b.data))
+		return
+	}
+	if args[1] == "damage-crc" || args[1] == "truncate" {
+		if len(args) != 4 { fail "usage: zip-tin damage-crc|truncate source target" }
+		let source = try quarry.ReadFile(args[2])
+		mut data = []u8(source)
+		if args[1] == "damage-crc" {
+			let p = centralHeader(data)
+			if p < 0 { fail "zip: no central header" }
+			data[p + 16] = data[p + 16] ^ 1
+		} else {
+			if len(data) < 8 { fail "zip: archive too short" }
+			data = data[0:len(data) - 8]
+		}
+		try quarry.WriteFile(args[3], str(data))
+		return
+	}
+	if args[1] != "read" && args[1] != "classify" { fail "unknown operation" }
+	if len(args) != 3 { fail "usage: zip-tin read|classify path" }
+	let data = try quarry.ReadFile(args[2])
+	if args[1] == "classify" {
+		say.Line(classify(data))
+		return
+	}
+	let r = try zip.NewReader(data)
+	say.Line(len(r.File), r.Comment)
+	for f in r.File {
+		let body = try f.ReadAll(16mb)
+		say.Line(f.Header.Name, "|", f.Header.Comment, "|", f.Header.NonUTF8, "|", f.Header.CreatorVersion, "|", f.Header.ReaderVersion, "|", f.Header.Flags, "|", f.Header.Method, "|", f.Header.Modified, "|", f.Header.ModifiedOffset, "|", f.Header.ModifiedTime, "|", f.Header.ModifiedDate, "|", f.Header.CRC32, "|", f.Header.CompressedSize, "|", f.Header.UncompressedSize, "|", f.Header.CompressedSize64, "|", f.Header.UncompressedSize64, "|", f.Header.ExternalAttrs, "|", seal.Hex([]u8(f.Header.Extra)), "|", f.Header.Mode())
+		say.Line(body)
+	}
+}

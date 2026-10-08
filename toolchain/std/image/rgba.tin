@@ -1,0 +1,407 @@
+package image
+
+import "image/color"
+
+// RGBA is an image of 8-bit premultiplied colors: R, G, B, A per pixel.
+type RGBA struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewRGBA is a transparent black RGBA image of r.
+fn NewRGBA(r Rectangle) RGBA {
+	return RGBA{Pix: make([]u8, pixelBufferLength(4, r, "RGBA")), Stride: 4 * r.Dx(), Rect: r}
+}
+
+// ColorModel is RGBAModel.
+fn (p RGBA) ColorModel() color.Model {
+	return color.RGBAModel
+}
+
+// Bounds is the image's rectangle.
+fn (p RGBA) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p RGBA) Layout() Layout {
+	return Layout{Kind: KindRGBA, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of the first byte of pixel (x, y).
+fn (p RGBA) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*4
+}
+
+// At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+fn (p RGBA) At(x i64, y i64) color.RGBA64 {
+	if !Pt(x, y).In(p.Rect) {
+		return color.RGBA64{}
+	}
+	let i = p.PixOffset(x, y)
+	return color.RGBA64{R: u16(p.Pix[i]) * 0x101, G: u16(p.Pix[i+1]) * 0x101, B: u16(p.Pix[i+2]) * 0x101, A: u16(p.Pix[i+3]) * 0x101}
+}
+
+// RGBAAt is the pixel at (x, y) (zero outside the bounds).
+fn (p RGBA) RGBAAt(x i64, y i64) color.RGBA {
+	if !Pt(x, y).In(p.Rect) {
+		return color.RGBA{}
+	}
+	let i = p.PixOffset(x, y)
+	return color.RGBA{R: p.Pix[i], G: p.Pix[i+1], B: p.Pix[i+2], A: p.Pix[i+3]}
+}
+
+// Set stores c at (x, y) (nothing outside the bounds).
+fn (p mut RGBA) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	let i = p.PixOffset(x, y)
+	p.Pix[i] = u8(c.R >> 8)
+	p.Pix[i+1] = u8(c.G >> 8)
+	p.Pix[i+2] = u8(c.B >> 8)
+	p.Pix[i+3] = u8(c.A >> 8)
+}
+
+// SetRGBA stores c at (x, y) (nothing outside the bounds).
+fn (p mut RGBA) SetRGBA(x i64, y i64, c color.RGBA) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	let i = p.PixOffset(x, y)
+	p.Pix[i] = c.R
+	p.Pix[i+1] = c.G
+	p.Pix[i+2] = c.B
+	p.Pix[i+3] = c.A
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p RGBA) SubImage(r Rectangle) RGBA {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return RGBA{}
+	}
+	return RGBA{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque reports whether every pixel is fully opaque.
+fn (p RGBA) Opaque() bool {
+	return opaque8(p.Pix, p.Stride, p.Rect, 4, 3)
+}
+
+// opaque8 reports whether the byte at offset off of every n-byte pixel is 0xff.
+fn opaque8(pix []u8, stride i64, r Rectangle, n i64, off i64) bool {
+	if r.Empty() {
+		return true
+	}
+	mut i0 = off
+	mut i1 = r.Dx() * n
+	for y in r.Min.Y..r.Max.Y {
+		mut i = i0
+		for i < i1 {
+			if pix[i] != 0xff {
+				return false
+			}
+			i += n
+		}
+		i0 += stride
+		i1 += stride
+	}
+	return true
+}
+
+// opaque16 reports whether the 16-bit channel at offset off of every n-byte pixel is 0xffff.
+fn opaque16(pix []u8, stride i64, r Rectangle, n i64, off i64) bool {
+	if r.Empty() {
+		return true
+	}
+	mut i0 = off
+	mut i1 = r.Dx() * n
+	for y in r.Min.Y..r.Max.Y {
+		mut i = i0
+		for i < i1 {
+			if pix[i] != 0xff || pix[i+1] != 0xff {
+				return false
+			}
+			i += n
+		}
+		i0 += stride
+		i1 += stride
+	}
+	return true
+}
+
+// be16 is the big-endian 16-bit value at pix[i].
+fn be16(pix []u8, i i64) u16 {
+	return u16(pix[i])<<8 | u16(pix[i+1])
+}
+
+// put16 stores v big-endian at pix[i].
+fn put16(pix mut []u8, i i64, v u32) {
+	pix[i] = u8(v >> 8)
+	pix[i+1] = u8(v)
+}
+
+// RGBA64 is an image of 16-bit premultiplied colors: R, G, B, A per pixel, each big-endian.
+type RGBA64 struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewRGBA64 is a transparent black RGBA64 image of r.
+fn NewRGBA64(r Rectangle) RGBA64 {
+	return RGBA64{Pix: make([]u8, pixelBufferLength(8, r, "RGBA64")), Stride: 8 * r.Dx(), Rect: r}
+}
+
+// ColorModel is RGBA64Model.
+fn (p RGBA64) ColorModel() color.Model {
+	return color.RGBA64Model
+}
+
+// Bounds is the image's rectangle.
+fn (p RGBA64) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p RGBA64) Layout() Layout {
+	return Layout{Kind: KindRGBA64, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of the first byte of pixel (x, y).
+fn (p RGBA64) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*8
+}
+
+// At is the pixel at (x, y) (zero outside the bounds).
+fn (p RGBA64) At(x i64, y i64) color.RGBA64 {
+	if !Pt(x, y).In(p.Rect) {
+		return color.RGBA64{}
+	}
+	let i = p.PixOffset(x, y)
+	return color.RGBA64{R: be16(p.Pix, i), G: be16(p.Pix, i+2), B: be16(p.Pix, i+4), A: be16(p.Pix, i+6)}
+}
+
+// RGBA64At is At.
+fn (p RGBA64) RGBA64At(x i64, y i64) color.RGBA64 {
+	return p.At(x, y)
+}
+
+// Set stores c at (x, y) (nothing outside the bounds).
+fn (p mut RGBA64) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	let i = p.PixOffset(x, y)
+	put16(mut p.Pix, i, u32(c.R))
+	put16(mut p.Pix, i+2, u32(c.G))
+	put16(mut p.Pix, i+4, u32(c.B))
+	put16(mut p.Pix, i+6, u32(c.A))
+}
+
+// SetRGBA64 is Set.
+fn (p mut RGBA64) SetRGBA64(x i64, y i64, c color.RGBA64) {
+	p.Set(x, y, c)
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p RGBA64) SubImage(r Rectangle) RGBA64 {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return RGBA64{}
+	}
+	return RGBA64{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque reports whether every pixel is fully opaque.
+fn (p RGBA64) Opaque() bool {
+	return opaque16(p.Pix, p.Stride, p.Rect, 8, 6)
+}
+
+// NRGBA is an image of 8-bit colors that are not premultiplied: R, G, B, A per pixel.
+type NRGBA struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewNRGBA is a transparent black NRGBA image of r.
+fn NewNRGBA(r Rectangle) NRGBA {
+	return NRGBA{Pix: make([]u8, pixelBufferLength(4, r, "NRGBA")), Stride: 4 * r.Dx(), Rect: r}
+}
+
+// ColorModel is NRGBAModel.
+fn (p NRGBA) ColorModel() color.Model {
+	return color.NRGBAModel
+}
+
+// Bounds is the image's rectangle.
+fn (p NRGBA) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p NRGBA) Layout() Layout {
+	return Layout{Kind: KindNRGBA, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of the first byte of pixel (x, y).
+fn (p NRGBA) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*4
+}
+
+// At is the pixel at (x, y), premultiplied, in 16 bits (zero outside the bounds).
+fn (p NRGBA) At(x i64, y i64) color.RGBA64 {
+	return color.ToRGBA64(p.NRGBAAt(x, y))
+}
+
+// NRGBAAt is the pixel at (x, y) (zero outside the bounds).
+fn (p NRGBA) NRGBAAt(x i64, y i64) color.NRGBA {
+	if !Pt(x, y).In(p.Rect) {
+		return color.NRGBA{}
+	}
+	let i = p.PixOffset(x, y)
+	return color.NRGBA{R: p.Pix[i], G: p.Pix[i+1], B: p.Pix[i+2], A: p.Pix[i+3]}
+}
+
+// Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+fn (p mut NRGBA) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	mut r = u32(c.R)
+	mut g = u32(c.G)
+	mut b = u32(c.B)
+	let a = u32(c.A)
+	if a != 0 && a != 0xffff {
+		r = r * 0xffff / a
+		g = g * 0xffff / a
+		b = b * 0xffff / a
+	}
+	let i = p.PixOffset(x, y)
+	p.Pix[i] = u8(r >> 8)
+	p.Pix[i+1] = u8(g >> 8)
+	p.Pix[i+2] = u8(b >> 8)
+	p.Pix[i+3] = u8(a >> 8)
+}
+
+// SetNRGBA stores c at (x, y) (nothing outside the bounds).
+fn (p mut NRGBA) SetNRGBA(x i64, y i64, c color.NRGBA) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	let i = p.PixOffset(x, y)
+	p.Pix[i] = c.R
+	p.Pix[i+1] = c.G
+	p.Pix[i+2] = c.B
+	p.Pix[i+3] = c.A
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p NRGBA) SubImage(r Rectangle) NRGBA {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return NRGBA{}
+	}
+	return NRGBA{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque reports whether every pixel is fully opaque.
+fn (p NRGBA) Opaque() bool {
+	return opaque8(p.Pix, p.Stride, p.Rect, 4, 3)
+}
+
+// NRGBA64 is an image of 16-bit colors that are not premultiplied: R, G, B, A per pixel, each big-endian.
+type NRGBA64 struct {
+	Pix    []u8
+	Stride i64
+	Rect   Rectangle
+}
+
+// NewNRGBA64 is a transparent black NRGBA64 image of r.
+fn NewNRGBA64(r Rectangle) NRGBA64 {
+	return NRGBA64{Pix: make([]u8, pixelBufferLength(8, r, "NRGBA64")), Stride: 8 * r.Dx(), Rect: r}
+}
+
+// ColorModel is NRGBA64Model.
+fn (p NRGBA64) ColorModel() color.Model {
+	return color.NRGBA64Model
+}
+
+// Bounds is the image's rectangle.
+fn (p NRGBA64) Bounds() Rectangle {
+	return p.Rect
+}
+
+// Layout is the image's pixel buffer.
+fn (p NRGBA64) Layout() Layout {
+	return Layout{Kind: KindNRGBA64, Pix: p.Pix, Stride: p.Stride, Rect: p.Rect}
+}
+
+// PixOffset is the index in Pix of the first byte of pixel (x, y).
+fn (p NRGBA64) PixOffset(x i64, y i64) i64 {
+	return (y-p.Rect.Min.Y)*p.Stride + (x-p.Rect.Min.X)*8
+}
+
+// At is the pixel at (x, y), premultiplied (zero outside the bounds).
+fn (p NRGBA64) At(x i64, y i64) color.RGBA64 {
+	return color.ToRGBA64(p.NRGBA64At(x, y))
+}
+
+// NRGBA64At is the pixel at (x, y) (zero outside the bounds).
+fn (p NRGBA64) NRGBA64At(x i64, y i64) color.NRGBA64 {
+	if !Pt(x, y).In(p.Rect) {
+		return color.NRGBA64{}
+	}
+	let i = p.PixOffset(x, y)
+	return color.NRGBA64{R: be16(p.Pix, i), G: be16(p.Pix, i+2), B: be16(p.Pix, i+4), A: be16(p.Pix, i+6)}
+}
+
+// Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+fn (p mut NRGBA64) Set(x i64, y i64, c color.RGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	mut r = u32(c.R)
+	mut g = u32(c.G)
+	mut b = u32(c.B)
+	let a = u32(c.A)
+	if a != 0 && a != 0xffff {
+		r = r * 0xffff / a
+		g = g * 0xffff / a
+		b = b * 0xffff / a
+	}
+	let i = p.PixOffset(x, y)
+	put16(mut p.Pix, i, r)
+	put16(mut p.Pix, i+2, g)
+	put16(mut p.Pix, i+4, b)
+	put16(mut p.Pix, i+6, a)
+}
+
+// SetNRGBA64 stores c at (x, y) (nothing outside the bounds).
+fn (p mut NRGBA64) SetNRGBA64(x i64, y i64, c color.NRGBA64) {
+	if !Pt(x, y).In(p.Rect) {
+		return
+	}
+	let i = p.PixOffset(x, y)
+	put16(mut p.Pix, i, u32(c.R))
+	put16(mut p.Pix, i+2, u32(c.G))
+	put16(mut p.Pix, i+4, u32(c.B))
+	put16(mut p.Pix, i+6, u32(c.A))
+}
+
+// SubImage is the part of p inside r, sharing p's pixels.
+fn (p NRGBA64) SubImage(r Rectangle) NRGBA64 {
+	let s = r.Intersect(p.Rect)
+	if s.Empty() {
+		return NRGBA64{}
+	}
+	return NRGBA64{Pix: p.Pix[p.PixOffset(s.Min.X, s.Min.Y):], Stride: p.Stride, Rect: s}
+}
+
+// Opaque reports whether every pixel is fully opaque.
+fn (p NRGBA64) Opaque() bool {
+	return opaque16(p.Pix, p.Stride, p.Rect, 8, 6)
+}

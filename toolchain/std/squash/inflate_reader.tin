@@ -1,0 +1,627 @@
+package squash
+
+// Streaming inflate (#751): InflateReader decompresses a raw DEFLATE stream held in memory as it is read, a window
+// at a time, so a stream of any size costs its 32 KiB of history and the code tables, never its whole output. It
+// follows Go's compress/flate decompressor step for step (its complete-code rule, reading one byte at a time, and
+// where it notices that the data ends), so a damaged stream fails with the same kind of fault at the same point:
+// ErrCorrupt where Go reports a CorruptInputError and ErrUnexpectedEOF where Go reports io.ErrUnexpectedEOF.
+
+import "fault"
+
+// ErrCorrupt is the fault of DEFLATE data that breaks the format; InflateReader wraps it with the input offset.
+let ErrCorrupt = fault("squash: corrupt deflate data")
+
+// ErrUnexpectedEOF is the fault of DEFLATE data that ends before its final block.
+let ErrUnexpectedEOF = fault("squash: deflate data ends early")
+
+const chunkBits = 9
+const numChunks = 512
+const stepBlock = 0
+const stepHuffman = 1
+const stepStored = 2
+const stateInit = 0
+const stateDict = 1
+
+// hdec is Go's huffmanDecoder: a table of chunks (symbol<<4 | length) by the next 9 bits, and for longer codes
+// link tables kept in one flat slice (links[table*numLinks + bits]) that the next block's code reuses.
+type hdec struct {
+	min      i64
+	chunks   []u32
+	links    []u32
+	numLinks i64
+	linkMask u64
+	count    []i64
+	next     []i64
+}
+
+fn newHdec() hdec {
+	return hdec{min: 0, chunks: make([]u32, numChunks), links: []u32{}, numLinks: 0, linkMask: 0, count: make([]i64, 16), next: make([]i64, 16)}
+}
+
+// reverseBits reverses the low n bits of v.
+fn reverseBits(v i64, n i64) i64 {
+	mut r = 0
+	for i in 0..n {
+		r = (r << 1) | ((v >> i) & 1)
+	}
+	return r
+}
+
+// init builds the code for lengths. Like Go, it refuses a code that is over- or under-subscribed, except the
+// single code of length one; an empty code is accepted and fails when used.
+fn (h mut hdec) init(lengths []i64) bool {
+	for i in 0..numChunks {
+		h.chunks[i] = 0
+	}
+	h.min = 0
+	for i in 0..16 {
+		h.count[i] = 0
+		h.next[i] = 0
+	}
+	mut mn = 0
+	mut mx = 0
+	for n in lengths {
+		if n == 0 {
+			continue
+		}
+		if mn == 0 || n < mn {
+			mn = n
+		}
+		if n > mx {
+			mx = n
+		}
+		h.count[n] += 1
+	}
+	if mx == 0 {
+		return true
+	}
+	mut code = 0
+	for i in mn..mx + 1 {
+		code = code << 1
+		h.next[i] = code
+		code += h.count[i]
+	}
+	if code != 1 << mx && !(code == 1 && mx == 1) {
+		return false
+	}
+	h.min = mn
+	if mx > chunkBits {
+		h.numLinks = 1 << (mx - chunkBits)
+		h.linkMask = u64(h.numLinks - 1)
+		let link = h.next[chunkBits + 1] >> 1
+		let need = (numChunks - link) * h.numLinks
+		if len(h.links) < need {
+			h.links = make([]u32, need)
+		} else {
+			for i in 0..need {
+				h.links[i] = 0
+			}
+		}
+		for j in link..numChunks {
+			let off = j - link
+			h.chunks[reverseBits(j, chunkBits)] = u32(off << 4 | (chunkBits + 1))
+		}
+	}
+	for i, n in lengths {
+		if n == 0 {
+			continue
+		}
+		let cd = h.next[n]
+		h.next[n] += 1
+		let chunk = u32(i << 4 | n)
+		mut rev = reverseBits(cd, n)
+		if n <= chunkBits {
+			mut off = rev
+			for off < numChunks {
+				h.chunks[off] = chunk
+				off += 1 << n
+			}
+		} else {
+			let base = i64(h.chunks[rev & (numChunks - 1)] >> 4) * h.numLinks
+			rev = rev >> chunkBits
+			mut off = rev
+			for off < h.numLinks {
+				h.links[base + off] = chunk
+				off += 1 << (n - chunkBits)
+			}
+		}
+	}
+	return true
+}
+
+let fixedDec = fixedHdec()
+
+fn fixedHdec() hdec {
+	mut h = newHdec()
+	let _ = h.init(fixed_lengths())
+	return h
+}
+
+// InflateReader reads the decompressed bytes of a raw DEFLATE stream (RFC 1951) in memory. Read returns 0 once the
+// final block has been read; bytes after it are left alone (Used says where the stream ended).
+type InflateReader struct {
+	data      str
+	start     i64
+	pos       i64
+	end       i64
+	b         u64
+	nb        i64
+	h1        hdec
+	h2        hdec
+	fixed     bool
+	bits      []i64
+	codebits  []i64
+	hist      []u8
+	wrPos     i64
+	rdPos     i64
+	full      bool
+	toStart   i64
+	toLen     i64
+	step      i64
+	stepState i64
+	final     bool
+	done      bool
+	err       fault
+	copyLen   i64
+	copyDist  i64
+	ready     bool
+}
+
+// NewInflateReader reads the DEFLATE stream in data[from:to]; to past the stream's end costs nothing, and a stream
+// that needs more than data[from:to] fails with ErrUnexpectedEOF. The window and tables are made at the first Read.
+fn NewInflateReader(data str, from i64, to i64) InflateReader {
+	let e = max(from, min(to, len(data)))
+	let s = max(0, min(from, e))
+	return InflateReader{data: data, start: s, pos: s, end: e, b: 0, nb: 0, h1: newHdecEmpty(), h2: newHdecEmpty(), fixed: false, bits: []i64{}, codebits: []i64{}, hist: []u8{}, wrPos: 0, rdPos: 0, full: false, toStart: 0, toLen: 0, step: stepBlock, stepState: stateInit, final: false, done: false, err: nil, copyLen: 0, copyDist: 0, ready: false}
+}
+
+// newHdecEmpty is a decoder with no tables yet, for a reader that may never read.
+fn newHdecEmpty() hdec {
+	return hdec{min: 0, chunks: []u32{}, links: []u32{}, numLinks: 0, linkMask: 0, count: []i64{}, next: []i64{}}
+}
+
+// Used is how many bytes of the input the stream has taken so far: after the end, the stream's length.
+fn (z InflateReader) Used() i64 {
+	return z.pos - z.start
+}
+
+// Read fills buf with the next decompressed bytes and returns how many, 0 at the end of the stream. A damaged
+// stream fails with ErrCorrupt or ErrUnexpectedEOF once the bytes before the damage have been read, and keeps
+// failing.
+fn (z mut InflateReader) Read(buf mut []u8) !i64 {
+	if !z.ready {
+		z.h1 = newHdec()
+		z.h2 = newHdec()
+		z.bits = make([]i64, 286 + 30)
+		z.codebits = make([]i64, 19)
+		z.hist = make([]u8, windowSize)
+		z.ready = true
+	}
+	for {
+		if z.toLen > 0 {
+			let n = min(len(buf), z.toLen)
+			copy(buf[0:n], z.hist[z.toStart:z.toStart + n])
+			z.toStart += n
+			z.toLen -= n
+			return n
+		}
+		if z.err != nil {
+			fail z.err
+		}
+		if z.done {
+			return 0
+		}
+		if z.step == stepBlock {
+			z.nextBlock()
+		} else if z.step == stepHuffman {
+			z.huffmanBlock()
+		} else {
+			z.copyData()
+		}
+		if (z.err != nil || z.done) && z.toLen == 0 {
+			z.readFlush()
+		}
+	}
+	return 0
+}
+
+fn (z mut InflateReader) corrupt() {
+	z.err = fault.Wrap(ErrCorrupt, "squash: before input offset {z.pos - z.start}")
+}
+
+// moreBits reads one more byte into the bit buffer; false (with the fault set) at the end of the input.
+fn (z mut InflateReader) moreBits() bool {
+	if z.pos >= z.end {
+		z.err = ErrUnexpectedEOF
+		return false
+	}
+	z.b = z.b | (u64(z.data[z.pos]) << u64(z.nb))
+	z.pos += 1
+	z.nb += 8
+	return true
+}
+
+// takeBits reads n bits (the caller has made sure they are there).
+fn (z mut InflateReader) takeBits(n i64) i64 {
+	let v = i64(z.b & ((u64(1) << u64(n)) - 1))
+	z.b = z.b >> u64(n)
+	z.nb -= n
+	return v
+}
+
+// needBits makes sure n bits are buffered; false (with the fault set) at the end of the input.
+fn (z mut InflateReader) needBits(n i64) bool {
+	for z.nb < n {
+		if !z.moreBits() {
+			return false
+		}
+	}
+	return true
+}
+
+// huffSym reads the next symbol of h, reading only the bytes the code needs (Go's huffSym); -1 with the fault set.
+fn (z mut InflateReader) huffSym(h hdec) i64 {
+	mut n = h.min
+	mut nb = z.nb
+	mut b = z.b
+	for {
+		for nb < n {
+			if z.pos >= z.end {
+				z.b = b
+				z.nb = nb
+				z.err = ErrUnexpectedEOF
+				return -1
+			}
+			b = b | (u64(z.data[z.pos]) << u64(nb))
+			z.pos += 1
+			nb += 8
+		}
+		mut chunk = h.chunks[i64(b & (numChunks - 1))]
+		n = i64(chunk & 15)
+		if n > chunkBits {
+			chunk = h.links[i64(chunk >> 4) * h.numLinks + i64((b >> chunkBits) & h.linkMask)]
+			n = i64(chunk & 15)
+		}
+		if n <= nb {
+			if n == 0 {
+				z.b = b
+				z.nb = nb
+				z.corrupt()
+				return -1
+			}
+			z.b = b >> u64(n)
+			z.nb = nb - n
+			return i64(chunk >> 4)
+		}
+	}
+	return -1
+}
+
+fn (z mut InflateReader) nextBlock() {
+	if !z.needBits(3) {
+		return
+	}
+	z.final = z.takeBits(1) == 1
+	let kind = z.takeBits(2)
+	if kind == 0 {
+		z.dataBlock()
+	} else if kind == 1 {
+		z.fixed = true
+		z.stepState = stateInit
+		z.huffmanBlock()
+	} else if kind == 2 {
+		if !z.readHuffman() {
+			return
+		}
+		z.fixed = false
+		z.stepState = stateInit
+		z.huffmanBlock()
+	} else {
+		z.corrupt()
+	}
+}
+
+fn (z mut InflateReader) readHuffman() bool {
+	if !z.needBits(14) {
+		return false
+	}
+	let nlit = z.takeBits(5) + 257
+	if nlit > 286 {
+		z.corrupt()
+		return false
+	}
+	let ndist = z.takeBits(5) + 1
+	if ndist > 30 {
+		z.corrupt()
+		return false
+	}
+	let nclen = z.takeBits(4) + 4
+	for i in 0..nclen {
+		if !z.needBits(3) {
+			return false
+		}
+		z.codebits[clOrder[i]] = z.takeBits(3)
+	}
+	for i in nclen..19 {
+		z.codebits[clOrder[i]] = 0
+	}
+	if !z.h1.init(z.codebits) {
+		z.corrupt()
+		return false
+	}
+	let n = nlit + ndist
+	mut i = 0
+	for i < n {
+		let x = z.huffSym(z.h1)
+		if x < 0 {
+			return false
+		}
+		if x < 16 {
+			z.bits[i] = x
+			i += 1
+			continue
+		}
+		mut rep = 3
+		mut nb = 2
+		mut v = 0
+		if x == 16 {
+			if i == 0 {
+				z.corrupt()
+				return false
+			}
+			v = z.bits[i - 1]
+		} else if x == 17 {
+			nb = 3
+		} else {
+			rep = 11
+			nb = 7
+		}
+		if !z.needBits(nb) {
+			return false
+		}
+		rep += z.takeBits(nb)
+		if i + rep > n {
+			z.corrupt()
+			return false
+		}
+		for j in 0..rep {
+			z.bits[i] = v
+			i += 1
+		}
+	}
+	if !z.h1.init(z.bits[0:nlit]) || !z.h2.init(z.bits[nlit:n]) {
+		z.corrupt()
+		return false
+	}
+	if z.h1.min < z.bits[256] {
+		z.h1.min = z.bits[256]
+	}
+	return true
+}
+
+fn (z mut InflateReader) huffmanBlock() {
+	z.step = stepHuffman
+	if z.stepState == stateDict {
+		if !z.copyHistory() {
+			return
+		}
+	}
+	for {
+		mut v = 0
+		if z.fixed {
+			v = z.huffSym(fixedDec)
+		} else {
+			v = z.huffSym(z.h1)
+		}
+		if v < 0 {
+			return
+		}
+		if v < 256 {
+			z.hist[z.wrPos] = u8(v)
+			z.wrPos += 1
+			if z.wrPos == windowSize {
+				z.readFlush()
+				z.stepState = stateInit
+				return
+			}
+			continue
+		}
+		if v == 256 {
+			z.finishBlock()
+			return
+		}
+		mut length = 0
+		mut n = 0
+		if v < 265 {
+			length = v - (257 - 3)
+		} else if v < 269 {
+			length = v * 2 - (265 * 2 - 11)
+			n = 1
+		} else if v < 273 {
+			length = v * 4 - (269 * 4 - 19)
+			n = 2
+		} else if v < 277 {
+			length = v * 8 - (273 * 8 - 35)
+			n = 3
+		} else if v < 281 {
+			length = v * 16 - (277 * 16 - 67)
+			n = 4
+		} else if v < 285 {
+			length = v * 32 - (281 * 32 - 131)
+			n = 5
+		} else if v < 286 {
+			length = 258
+		} else {
+			z.corrupt()
+			return
+		}
+		if n > 0 {
+			if !z.needBits(n) {
+				return
+			}
+			length += z.takeBits(n)
+		}
+		mut dist = 0
+		if z.fixed {
+			if !z.needBits(5) {
+				return
+			}
+			dist = reverseBits(z.takeBits(5), 5)
+		} else {
+			dist = z.huffSym(z.h2)
+			if dist < 0 {
+				return
+			}
+		}
+		if dist < 4 {
+			dist += 1
+		} else if dist < 30 {
+			let nb = (dist - 2) >> 1
+			mut extra = (dist & 1) << nb
+			if !z.needBits(nb) {
+				return
+			}
+			extra = extra | z.takeBits(nb)
+			dist = (1 << (nb + 1)) + 1 + extra
+		} else {
+			z.corrupt()
+			return
+		}
+		mut hist = z.wrPos
+		if z.full {
+			hist = windowSize
+		}
+		if dist > hist {
+			z.corrupt()
+			return
+		}
+		z.copyLen = length
+		z.copyDist = dist
+		if !z.copyHistory() {
+			return
+		}
+	}
+}
+
+// copyHistory copies the pending match into the window; false when the window filled and the reader must pause.
+fn (z mut InflateReader) copyHistory() bool {
+	mut cnt = z.tryWriteCopy(z.copyDist, z.copyLen)
+	if cnt == 0 {
+		cnt = z.writeCopy(z.copyDist, z.copyLen)
+	}
+	z.copyLen -= cnt
+	if z.wrPos == windowSize || z.copyLen > 0 {
+		z.readFlush()
+		z.stepState = stateDict
+		return false
+	}
+	z.stepState = stateInit
+	return true
+}
+
+fn (z mut InflateReader) tryWriteCopy(dist i64, length i64) i64 {
+	mut dst = z.wrPos
+	let endPos = dst + length
+	if dst < dist || endPos > windowSize {
+		return 0
+	}
+	let base = dst
+	let src = dst - dist
+	for dst < endPos {
+		let k = min(endPos - dst, dst - src)
+		copy(z.hist[dst:dst + k], z.hist[src:src + k])
+		dst += k
+	}
+	z.wrPos = dst
+	return dst - base
+}
+
+fn (z mut InflateReader) writeCopy(dist i64, length i64) i64 {
+	let base = z.wrPos
+	mut dst = base
+	mut src = dst - dist
+	let endPos = min(dst + length, windowSize)
+	if src < 0 {
+		src += windowSize
+		let k = min(endPos - dst, windowSize - src)
+		copy(z.hist[dst:dst + k], z.hist[src:src + k])
+		dst += k
+		src = 0
+	}
+	for dst < endPos {
+		let k = min(endPos - dst, dst - src)
+		copy(z.hist[dst:dst + k], z.hist[src:src + k])
+		dst += k
+	}
+	z.wrPos = dst
+	return dst - base
+}
+
+fn (z mut InflateReader) dataBlock() {
+	z.nb = 0
+	z.b = 0
+	if z.end - z.pos < 4 {
+		z.pos = z.end
+		z.err = ErrUnexpectedEOF
+		return
+	}
+	let n = i64(z.data[z.pos]) | i64(z.data[z.pos + 1]) << 8
+	let nn = i64(z.data[z.pos + 2]) | i64(z.data[z.pos + 3]) << 8
+	z.pos += 4
+	if nn != (^n & 0xffff) {
+		z.corrupt()
+		return
+	}
+	if n == 0 {
+		z.readFlush()
+		z.finishBlock()
+		return
+	}
+	z.copyLen = n
+	z.copyData()
+}
+
+fn (z mut InflateReader) copyData() {
+	z.step = stepStored
+	let want = min(windowSize - z.wrPos, z.copyLen)
+	let cnt = min(want, z.end - z.pos)
+	if cnt > 0 {
+		// Straight from the input string into the window: slicing the string would copy it first.
+		let h = cast(i64, z.hist)
+		memcpy(h[2] + z.wrPos, cast(i64, z.data) + 8 + z.pos, cnt)
+	}
+	z.pos += cnt
+	z.copyLen -= cnt
+	z.wrPos += cnt
+	if cnt < want {
+		z.err = ErrUnexpectedEOF
+		return
+	}
+	if z.wrPos == windowSize || z.copyLen > 0 {
+		z.readFlush()
+		return
+	}
+	z.finishBlock()
+}
+
+fn (z mut InflateReader) finishBlock() {
+	if z.final {
+		if z.wrPos > z.rdPos {
+			z.readFlush()
+		}
+		z.done = true
+	}
+	z.step = stepBlock
+}
+
+// readFlush hands the window's unread bytes to Read, and starts the window over once it is full.
+fn (z mut InflateReader) readFlush() {
+	z.toStart = z.rdPos
+	z.toLen = z.wrPos - z.rdPos
+	z.rdPos = z.wrPos
+	if z.wrPos == windowSize {
+		z.wrPos = 0
+		z.rdPos = 0
+		z.full = true
+	}
+}

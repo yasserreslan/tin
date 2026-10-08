@@ -1,0 +1,79 @@
+package main
+
+import "say"
+import "zip"
+
+fn firstContentFault(data str) str {
+	let r = zip.NewReader(data) catch err {
+		return zip.FaultKind(err)
+	}
+	let content = r.File[0].ReadAll(1024) catch err {
+		return zip.FaultKind(err)
+	}
+	_ = content
+	return "ok"
+}
+
+fn centralHeader(data []u8) i64 {
+	for i in 0..len(data) - 3 {
+		if data[i] == 0x50 && data[i + 1] == 0x4b && data[i + 2] == 1 && data[i + 3] == 2 {
+			return i
+		}
+	}
+	return -1
+}
+
+type archiveBuffer struct {
+	data []u8
+}
+
+fn (b mut archiveBuffer) Write(data []u8) !i64 {
+	b.data = append(b.data, data...)
+	return len(data)
+}
+
+fn main() ! {
+	mut b = archiveBuffer{data: []u8{}}
+	mut w = zip.NewWriter(b)
+	try w.SetComment("edition one")
+	try w.Create("hello.txt")
+	_ = try w.WriteString("hello, zip")
+	mut stored = zip.FileHeader{Name: "raw.txt", Method: zip.Store}
+	stored.SetMode(zip.ModePerm | 0o640)
+	try w.CreateHeader(stored)
+	_ = try w.WriteString("stored")
+	mut h = zip.FileHeader{Name: "folder/", Method: zip.Store}
+	h.SetMode(zip.ModeDir | 0o755)
+	try w.CreateHeader(h)
+	try w.Close()
+	let r = try zip.NewReader(str(b.data))
+	say.Line(len(r.File), r.Comment)
+	for f in r.File {
+		say.Line(f.Header.Name, f.Header.Method, f.Header.Size(), f.Header.Mode())
+		let content = try f.ReadAll(1024)
+		say.Line(content)
+		if f.Header.Name == "hello.txt" {
+			let limited = f.ReadAll(4) catch err {
+				zip.FaultKind(err)
+			}
+			say.Line(limited)
+		}
+	}
+	mut corrupt = []u8{}
+	for b in b.data {
+		corrupt = append(corrupt, b)
+	}
+	let dir = centralHeader(corrupt)
+	corrupt[dir + 16] = corrupt[dir + 16] ^ 1
+	say.Line("bad CRC", firstContentFault(str(corrupt)))
+	mut zeroCRC = []u8{}
+	for b in b.data {
+		zeroCRC = append(zeroCRC, b)
+	}
+	let zeroDir = centralHeader(zeroCRC)
+	for i in 0..4 {
+		zeroCRC[zeroDir + 16 + i] = 0
+	}
+	say.Line("zero CRC", firstContentFault(str(zeroCRC)))
+	say.Line("truncated", firstContentFault(str(b.data[0:len(b.data) - 8])))
+}

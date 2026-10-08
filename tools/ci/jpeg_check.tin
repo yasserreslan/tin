@@ -1,0 +1,109 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Differential JPEG check. Go's image/jpeg and Tin's jpeg decode the same streams: the Go corpus (baseline, progressive, restart
+// and every luma sampling factor, bench/ref/jpeg) and the Tin encoder's output (gray and color at six qualities, odd sizes).
+// A valid stream must decode on both sides with every 8-bit RGB channel within 4 of Go's: the tolerance covers the floating IDCT
+// and chroma conversion against Go's integer IDCT. malformed- streams must fail on both sides; lenient-malformed- streams fail in
+// Tin only, because Go accepts a frame without a quantization table and a zero-size frame.
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci/jpeg"), "jpeg-")
+	let decoder = ci.Join(work, "jpeg-tin")
+	let encoder = ci.Join(work, "jpeg-encode")
+	let goexe = ci.Join(work, "jpeg-go")
+	ci.BuildTin("tools/ci/fixtures/jpeg.tin", decoder, "", []str{})
+	ci.BuildTin("tools/ci/fixtures/jpeg_encode.tin", encoder, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/jpeg"}, root, 300), "go build JPEG oracle")
+	let goCorpus = ci.Exec([]str{goexe, "corpus"}, root, 300)
+	ci.Must(goCorpus, "Go JPEG corpus")
+	let tinCorpus = ci.Exec([]str{encoder}, root, 300)
+	ci.Must(tinCorpus, "Tin JPEG encoder")
+	let lines = append(ci.Lines(goCorpus.Stdout), ci.Lines(tinCorpus.Stdout)...)
+	mut input = ""
+	for line in lines {
+		let fields = twine.Split(line, "|")
+		ci.Check(len(fields) == 2, "malformed JPEG corpus record")
+		input += fields[1] + "\n"
+	}
+	let goDecoded = ci.ExecIn([]str{goexe, "decode"}, root, 300, input, []str{})
+	ci.Must(goDecoded, "Go JPEG decoder")
+	let tinDecoded = ci.ExecIn([]str{decoder}, root, 300, input, []str{})
+	ci.Must(tinDecoded, "Tin JPEG decoder")
+	let goOut = ci.Lines(goDecoded.Stdout)
+	let tinOut = ci.Lines(tinDecoded.Stdout)
+	ci.Check(len(goOut) == len(lines) && len(tinOut) == len(lines), "JPEG corpus line count differs")
+	mut goStreams = i64(0)
+	mut tinStreams = i64(0)
+	mut malformed = i64(0)
+	mut lenient = i64(0)
+	mut maxDiff = i64(0)
+	mut failures = i64(0)
+	for i in 0..len(lines) {
+		let label = twine.Split(lines[i], "|")[0]
+		let goFault = goOut[i] == "fault"
+		let tinFault = tinOut[i] == "fault"
+		if twine.HasPrefix(label, "malformed-") {
+			malformed += 1
+			if !goFault || !tinFault {
+				say.Line("malformed JPEG accepted", label, "go fault", goFault, "tin fault", tinFault)
+				failures += 1
+			}
+			continue
+		}
+		if twine.HasPrefix(label, "lenient-malformed-") {
+			lenient += 1
+			if !tinFault {
+				say.Line("malformed JPEG accepted by Tin", label)
+				failures += 1
+			}
+			continue
+		}
+		if goFault || tinFault {
+			say.Line("valid JPEG rejected", label, "go fault", goFault, "tin fault", tinFault)
+			failures += 1
+			continue
+		}
+		let diff = channelDiff(goOut[i], tinOut[i])
+		if diff < 0 {
+			say.Line("JPEG size or shape differs", label)
+			failures += 1
+			continue
+		}
+		if diff > 4 {
+			say.Line("JPEG channels exceed tolerance 4", label, diff)
+			failures += 1
+		}
+		if diff > maxDiff { maxDiff = diff }
+		if twine.HasPrefix(label, "tin-") {
+			tinStreams += 1
+		} else {
+			goStreams += 1
+		}
+	}
+	ci.Check(failures == 0, "JPEG differential check: " + mint.Itoa(failures) + " failures")
+	ci.Remove(work)
+	ci.Pass("JPEG decode: " + mint.Itoa(goStreams) + " Go streams and " + mint.Itoa(tinStreams) + " Tin streams within 4/channel (largest difference " + mint.Itoa(maxDiff) + "), " + mint.Itoa(malformed) + " malformed and " + mint.Itoa(lenient) + " Tin-only malformed rejected")
+}
+
+// channelDiff returns the largest 8-bit channel difference between two "W,H|r,g,b,..." lines, or -1 when their sizes differ.
+fn channelDiff(want str, got str) i64 {
+	let wantParts = twine.Split(want, "|")
+	let gotParts = twine.Split(got, "|")
+	if wantParts[0] != gotParts[0] { return -1 }
+	let w = twine.Split(wantParts[1], ",")
+	let g = twine.Split(gotParts[1], ",")
+	if len(w) != len(g) { return -1 }
+	mut worst = i64(0)
+	for j in 0..len(w) {
+		let a = mint.Atoi(g[j]) catch _ { -1000 }
+		let b = mint.Atoi(w[j]) catch _ { -1000 }
+		let d = max(a-b, b-a)
+		if d > worst { worst = d }
+	}
+	return worst
+}

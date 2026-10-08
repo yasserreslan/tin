@@ -1,0 +1,49 @@
+== catch: SIGINT sent by the parent
+  child: listening
+  child: caught interrupt 2 true
+  exit 0
+== unhandled
+  notified false ignored false
+  raising SIGTERM
+  status 143
+== stop
+  caught terminated
+  stopped: notified false
+  status 143
+== reset
+  both caught alarm clock alarm clock
+  reset: alarm notified false term notified true
+  status 142
+== close
+  both caught terminated terminated
+  after closing a: b caught terminated notified true
+  closed a has a signal: false
+  notify closed: signal: Notify on a closed Chan
+  closed both: notified false
+  status 143
+== ignore
+  ignored true true notified false
+  survived both; the Chan got one: false
+  notify again: ignored false
+  caught terminated
+  status 0
+== inproc
+  task got user defined signal 2 true
+  Recv within 50ms: deadline exceeded
+  value after the deadline 0
+  core 2 got hangup
+  hangup notified after the core closed its Chan false
+  notify all: term true hup true segv false kill false
+  stopped: term false usr2 true
+  notify SIGKILL refused true
+  notify SIGSTOP refused true
+  notify SIGSEGV refused true
+  notify SIGBUS refused true
+  notify SIGILL refused true
+  notify SIGFPE refused true
+  notify SIGTRAP refused true
+  notify 0 refused true
+  notify 64 refused true
+  ignore segv refused true
+  strings interrupt terminated hangup signal 99
+  status 0

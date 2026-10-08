@@ -46,7 +46,9 @@ fn packages() []str {
 		"ore", "byte slices (bytes)",
 		"flume", "buffered I/O (bufio)",
 		"quarry", "files, environment, process (os)",
+		"user", "users and groups (os/user)",
 		"spawn", "starting child processes (os/exec)",
+		"signal", "operating-system signals (os/signal)",
 		"trail", "paths (path, path/filepath on Unix)",
 		"lever", "command-line flags (flag)",
 		"tty", "terminals: size, raw mode, colour (golang.org/x/term)",
@@ -57,6 +59,8 @@ fn packages() []str {
 		"cairn", "containers (container/heap, sets, LRU)",
 		"stamp", "hashes and checksums (hash/*)",
 		"squash", "compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2)",
+		"squash", "compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard (compress/flate, compress/gzip, compress/zlib)",
+		"zip", "ZIP archives (archive/zip)",
 		"ledger", "CSV reading and writing (encoding/csv)",
 		"abacus", "arbitrary-precision integers (math/big)",
 		"seal", "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)",
@@ -78,7 +82,11 @@ fn packages() []str {
 		"lasso", "regular expressions with linear-time matching (regexp)",
 		"pack", "numbers as bytes: byte order and varints (encoding/binary)",
 		"mime", "media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart)",
+		"suffixarray", "byte substring indexing with suffix arrays (index/suffixarray)",
 		"scan", "a scanner and tokenizer for UTF-8 text (text/scanner)",
+		"image", "images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png)",
+		"image", "images, colors, drawing, PNG encoding and baseline JPEG decoding (image, image/color, image/draw, image/png, image/jpeg)",
+		"image", "images, colors, drawing, PNG encoding, baseline JPEG decoding and encoding (image, image/color, image/draw, image/png, image/jpeg)",
 		"appkit", "macOS frameworks for the Tinland editor (Cocoa, WebKit)",
 		"metal", "Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor",
 		"gpuwin", "a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU",
@@ -169,6 +177,9 @@ fn packageFiles(name str) []str {
 		if twine.HasSuffix(f, ".tin") && !twine.HasSuffix(f, "_test.tin") && !isOsFile(f) {
 			files = append(files, directory + "/" + f)
 		}
+	}
+	if name == "image" {
+		files = append(files, "toolchain/std/image/jpeg/jpeg.tin")
 	}
 	return files
 }

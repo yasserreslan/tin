@@ -29,7 +29,9 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [ore](#ore) | byte slices (bytes) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
+| [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
+| [signal](#signal) | operating-system signals (os/signal) |
 | [trail](#trail) | paths (path, path/filepath on Unix) |
 | [lever](#lever) | command-line flags (flag) |
 | [tty](#tty) | terminals: size, raw mode, colour (golang.org/x/term) |
@@ -40,6 +42,8 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [cairn](#cairn) | containers (container/heap, sets, LRU) |
 | [stamp](#stamp) | hashes and checksums (hash/*) |
 | [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2) |
+| [squash](#squash) | compression: DEFLATE, gzip, zlib, Snappy, LZ4, Zstandard, LZW, bzip2 (compress/flate, compress/gzip, compress/zlib, compress/lzw, compress/bzip2) |
+| [zip](#zip) | ZIP archives (archive/zip) |
 | [ledger](#ledger) | CSV reading and writing (encoding/csv) |
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
@@ -61,7 +65,11 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
+| [suffixarray](#suffixarray) | byte substring indexing with suffix arrays (index/suffixarray) |
 | [scan](#scan) | a scanner and tokenizer for UTF-8 text (text/scanner) |
+| [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
+| [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
+| [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
 | [metal](#metal) | Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor |
 | [gpuwin](#gpuwin) | a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU |
@@ -1131,6 +1139,16 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `Eprint(s str)`: Eprint writes s to stderr.
 - `Eprintln(s str)`: Eprintln writes s and a newline to stderr in one write.
 
+## user
+
+- `type User struct`: User is an account from the system user database.
+- `type Group struct`: Group is an account from the system group database.
+- `Current() !User`: Current returns the user identified by the process's real user ID.
+- `LookupId(uid str) !User`: LookupId looks up a user by numeric user ID.
+- `Lookup(username str) !User`: Lookup looks up a user by login name.
+- `LookupGroup(name str) !Group`: LookupGroup looks up a group by name.
+- `(u User) GroupIds() ![]str`: GroupIds returns the IDs of the groups to which u belongs, including its primary group.
+
 ## spawn
 
 Package spawn starts child processes, like Go's os/exec: Run a program and collect its output, or Start it, talk to it through pipes, signal it or kill it. A program is never run through a shell: write []str{"sh", "-c", script} for one. On Linux the child is a clone that execs and waits block on a pidfd; on macOS it is posix_spawn with file actions (POSIX_SPAWN_CLOEXEC_DEFAULT keeps the runtime's descriptors out of it) and the wait sleeps through the scheduler, which carries the task's deadline on both (#576).
@@ -1154,6 +1172,29 @@ Package spawn starts child processes, like Go's os/exec: Run a program and colle
 - `(p Process) Read(buf mut []u8) !i64`: Read reads the child's standard output (Stdio.Pipe on Cmd.Stdout) into buf, up to its length, and returns how many bytes came; 0 is end of file.
 - `(p Process) ReadStderr(buf mut []u8) !i64`: ReadStderr is Read for the child's standard error.
 - `LookPath(name str) !str`: LookPath finds name like Go's exec.LookPath: a name with a slash is used as it is, otherwise each PATH entry is tried in order and the first executable file wins.
+
+## signal
+
+Package signal lets a program handle operating-system signals, like Go's os/signal: Notify sends the chosen signals to a Chan, and a task takes them with Recv (#737). The handler the runtime installs only marks the signal and wakes the Chan (a byte on the Chan's pipe); the signal is taken by the task waiting in Recv, on that task's core, never in the handler. A signal no Chan listens for keeps its default action: Stop and Reset give a signal its first disposition back (usually the default, so the exit status shows the signal) and Ignore discards it. SIGSEGV and SIGBUS stay the runtime's, and SIGKILL and SIGSTOP cannot be caught.
+
+In an anvil server, SIGTERM and SIGINT start the graceful drain as before; a Chan that listens for them gets them as well (anvil hands them on from its event loop), so an application can log or flush while the drain runs. Ignoring them there stops the drain too.
+
+- `type Signal i64`: Signal is an operating-system signal number (Go's os.Signal / syscall.Signal).
+- `const Interrupt Signal = 2`: Interrupt is SIGINT (Go's os.Interrupt), the same on every platform.
+- `const Kill Signal = 9`: Kill is SIGKILL (Go's os.Kill): it cannot be caught or ignored.
+- `type Chan struct`: Chan receives the signals Notify sends it (Go's chan os.Signal); a task takes them with Recv. Its signals wait in a pipe, so none is lost while no task waits (up to the pipe's 64 KiB).
+- `New() !Chan`: New makes a Chan that listens for nothing yet; Notify adds signals. It fails when the process has no descriptor left, or 64 Chans are open at once.
+- `Notify(c Chan, sigs ...Signal) !`: Notify sends sigs to c from now on (Go's signal.Notify); with no sigs, every signal it can catch. Any core may call it. It fails for SIGKILL, SIGSTOP, the fault signals the runtime owns or must not return into (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), a number out of range or a closed Chan.
+- `Stop(c Chan)`: Stop ends every Notify of c (Go's signal.Stop): once it returns, no further signal reaches c. A signal no other Chan listens for gets its first disposition back. Signals already in c stay.
+- `Reset(sigs ...Signal) !`: Reset undoes every Notify and Ignore of sigs (Go's signal.Reset), giving each the disposition it had when the program started (usually the default action); with no sigs, every signal.
+- `Ignore(sigs ...Signal) !`: Ignore makes sigs ignored (Go's signal.Ignore): no Chan gets them and they do nothing; with no sigs, every signal Notify could catch. Reset or a later Notify undoes it.
+- `Ignored(sig Signal) bool`: Ignored reports whether sig is ignored now (Go's signal.Ignored): by Ignore, or inherited ignored from the parent (nohup ignores SIGHUP).
+- `Notified(sig Signal) bool`: Notified reports whether some Chan listens for sig now.
+- `Raise(sig Signal) !`: Raise sends sig to this process (kill(getpid(), sig)): a handled signal reaches the Chans listening for it, an unhandled one takes its default action, which may end the process (its buffered output is lost then: flush first).
+- `(c Chan) Recv() !Signal`: Recv waits for the next signal sent to c and returns it. The wait takes the task's deadline and cancellation like any other (inside `within 5s` it fails with fault.DeadlineExceeded); the core runs its other tasks meanwhile, and in main (outside a task) it blocks.
+- `(c Chan) TryRecv() (Signal, bool)`: TryRecv takes a signal waiting in c without waiting; ok is false when there is none.
+- `(c mut Chan) Close()`: Close stops c and frees its descriptors and slot; signals still in it are dropped. Using c afterwards fails (Notify, Recv) or does nothing (Stop, TryRecv).
+- `(s Signal) String() str`: String is the signal's description, as Go's syscall.Signal prints it ("interrupt", "terminated"), or "signal N" for a number without one.
 
 ## trail
 
@@ -1521,6 +1562,7 @@ Package stamp computes non-cryptographic hashes and checksums: FNV-1a, CRC-32 (I
 
 - `Crc32(s str) u32`: Crc32 is the IEEE CRC-32 of s (as in zip, gzip and PNG).
 - `Crc32Update(crc u32, s str) u32`: Crc32Update continues an IEEE CRC-32 over more data.
+- `Crc32UpdateBytes(crc u32, b []u8) u32`: Crc32UpdateBytes continues an IEEE CRC-32 over the bytes of b, read in place (no string is made).
 - `Crc32C(s str) u32`: Crc32C is the Castagnoli CRC-32 of s (as in iSCSI, ext4 and many databases).
 - `Fnv32a(s str) u32`: Fnv32a is the 32-bit FNV-1a hash of s.
 - `Fnv64a(s str) u64`: Fnv64a is the 64-bit FNV-1a hash of s.
@@ -1553,6 +1595,10 @@ let back = try squash.Gunzip(z, 64mb)
 - `Gunzip(data str, max i64) !str`: Gunzip decompresses gzip data (one member or several back to back), producing at most max bytes. It checks each member's CRC-32 and length, and the header's CRC-16 when there is one.
 - `Zlib(data str, level i64) str`: Zlib compresses data in the zlib format (RFC 1950) at level.
 - `Unzlib(data str, max i64) !str`: Unzlib decompresses zlib data, producing at most max bytes, and checks its Adler-32.
+- `type InflateReader struct`: InflateReader reads the decompressed bytes of a raw DEFLATE stream (RFC 1951) in memory. Read returns 0 once the final block has been read; bytes after it are left alone (Used says where the stream ended).
+- `NewInflateReader(data str, from i64, to i64) InflateReader`: NewInflateReader reads the DEFLATE stream in data[from:to]; to past the stream's end costs nothing, and a stream that needs more than data[from:to] fails with ErrUnexpectedEOF. The window and tables are made at the first Read.
+- `(z InflateReader) Used() i64`: Used is how many bytes of the input the stream has taken so far: after the end, the stream's length.
+- `(z mut InflateReader) Read(buf mut []u8) !i64`: Read fills buf with the next decompressed bytes and returns how many, 0 at the end of the stream. A damaged stream fails with ErrCorrupt or ErrUnexpectedEOF once the bytes before the damage have been read, and keeps failing.
 - `Lz4(data str) str`: Lz4 compresses data as one LZ4 frame: independent 64 KiB blocks, a stored block where compression does not help, and a content checksum.
 - `Lz4NoChecksum(data str) str`: Lz4NoChecksum is Lz4 without the content checksum (the frame Kafka's Java client writes).
 - `Unlz4(data str, max i64) !str`: Unlz4 decompresses LZ4 frames (one or several, and skippable frames), producing at most max bytes.
@@ -1579,6 +1625,124 @@ let back = try squash.Gunzip(z, 64mb)
 - `(r mut InflateReader[R]) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
 - `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
+
+## squash
+
+Package squash compresses and decompresses: DEFLATE (RFC 1951) and its gzip (RFC 1952) and zlib (RFC 1950) wrappers like Go's compress/flate, compress/gzip and compress/zlib, plus Snappy, LZ4, Zstandard (RFC 8878), LZW (compress/lzw) and bzip2 decompression (compress/bzip2). Every decoder takes the most bytes it may produce and fails with fault.LimitExceeded past it, so a small input cannot make a huge output.
+
+```tin body
+let z = squash.Gzip("hello, hello, hello", squash.Default)
+let back = try squash.Gunzip(z, 64mb)
+```
+
+- `Bunzip2(data str, max i64) !str`: Bunzip2 decompresses bzip2 data (one stream or several back to back, as Go's compress/bzip2 reads them), checking every block CRC and stream CRC and failing past max bytes of output.
+- `Deflate(data str, level i64) str`: Deflate compresses data as raw DEFLATE at level (Store to Best).
+- `const Store = 0`: Levels for Deflate, Gzip, Zlib and Zstd: Store writes the data uncompressed (in valid frames), Fastest and Best trade speed against size, Default is between.
+- `const Fastest = 1`
+- `const Default = 6`
+- `const Best = 9`
+- `Inflate(data str, max i64) !str`: Inflate decompresses raw DEFLATE data, producing at most max bytes.
+- `Gzip(data str, level i64) str`: Gzip compresses data as one gzip member (no name, no time, OS unknown) at level.
+- `Gunzip(data str, max i64) !str`: Gunzip decompresses gzip data (one member or several back to back), producing at most max bytes. It checks each member's CRC-32 and length, and the header's CRC-16 when there is one.
+- `Zlib(data str, level i64) str`: Zlib compresses data in the zlib format (RFC 1950) at level.
+- `Unzlib(data str, max i64) !str`: Unzlib decompresses zlib data, producing at most max bytes, and checks its Adler-32.
+- `type InflateReader struct`: InflateReader reads the decompressed bytes of a raw DEFLATE stream (RFC 1951) in memory. Read returns 0 once the final block has been read; bytes after it are left alone (Used says where the stream ended).
+- `NewInflateReader(data str, from i64, to i64) InflateReader`: NewInflateReader reads the DEFLATE stream in data[from:to]; to past the stream's end costs nothing, and a stream that needs more than data[from:to] fails with ErrUnexpectedEOF. The window and tables are made at the first Read.
+- `(z InflateReader) Used() i64`: Used is how many bytes of the input the stream has taken so far: after the end, the stream's length.
+- `(z mut InflateReader) Read(buf mut []u8) !i64`: Read fills buf with the next decompressed bytes and returns how many, 0 at the end of the stream. A damaged stream fails with ErrCorrupt or ErrUnexpectedEOF once the bytes before the damage have been read, and keeps failing.
+- `Lz4(data str) str`: Lz4 compresses data as one LZ4 frame: independent 64 KiB blocks, a stored block where compression does not help, and a content checksum.
+- `Lz4NoChecksum(data str) str`: Lz4NoChecksum is Lz4 without the content checksum (the frame Kafka's Java client writes).
+- `Unlz4(data str, max i64) !str`: Unlz4 decompresses LZ4 frames (one or several, and skippable frames), producing at most max bytes.
+- `Lz4BlockOf(data str) str`: Lz4BlockOf compresses data as one bare LZ4 block (no frame).
+- `UnLz4Block(b str, max i64) !str`: UnLz4Block decompresses one bare LZ4 block, producing at most max bytes.
+- `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
+- `const LSB = 1`
+- `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `Snappy(data str) str`: Snappy compresses data as one Snappy block.
+- `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
+- `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
+- `type DeflateWriter[W Writer] struct`: DeflateWriter compresses raw DEFLATE into another writer, a chunk of up to 256 KiB at a time; Close ends the stream. Each chunk is compressed on its own (matches do not reach into the chunk before), which costs a little ratio and bounds the memory.
+- `NewDeflateWriter[W Writer](out W, level i64) DeflateWriter[W]`: NewDeflateWriter is a raw DEFLATE writer into out at level.
+- `NewZlibWriter[W Writer](out W, level i64) !DeflateWriter[W]`: NewZlibWriter is a zlib (RFC 1950) writer into out at level; Close writes the Adler-32 trailer.
+- `(z mut DeflateWriter[W]) Write(data []u8) !i64`: Write takes data, compressing and writing each full chunk.
+- `(z mut DeflateWriter[W]) Close() !`: Close compresses what is buffered, ends the stream and writes the zlib trailer; it does not close the writer below.
+- `InflatePrefix(data str, max i64) !(str, i64)`: InflatePrefix decompresses the raw DEFLATE stream at the start of data (at most max bytes out) and says how many bytes of data the stream took; what follows is left alone.
+- `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
+- `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
+- `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
+
+## zip
+
+Package zip reads and writes ZIP archives like Go's archive/zip: the central directory (not just the local headers), names and comments, MS-DOS and extended times, Unix and MS-DOS modes, the Store and Deflate methods with their CRC-32, data descriptors, and ZIP64 (sizes, offsets and entry counts past 32 and 16 bits).
+
+```tin body
+let r = try zip.OpenReader("site.zip")
+for f in r.File {
+	let text = try f.ReadAll(16mb)          // fault.LimitExceeded past 16 MiB
+	say.Line(f.Header.Name, f.Header.Mode(), len(text))
+}
+
+let out = try flume.Create("out.zip")
+mut w = zip.NewWriter(out)
+try w.Create("hello.txt")
+_ = try w.Write([]u8("hello, zip"))
+try w.Close()
+```
+
+The reader works over the whole archive in memory (NewReader, or OpenReader for a file) and decompresses an entry as it is read (File.Open), so an entry of any size costs a 32 KiB window. An entry that inflates past its declared size fails with ErrFormat, a damaged one with ErrChecksum, a cut one with ErrUnexpectedEOF, as Go's reader does. Unlike Go, a header is a field of File (f.Header.Name) and the Writer itself takes the entry's bytes (w.Write after w.Create), since Tin has no embedding. Reading follows Go byte for byte; tools/ci/zip_check.tin compares the two.
+
+- `type Reader struct`: Reader is an archive's entries, in the central directory's order, and its comment.
+- `type File struct`: File is one entry: its header, and where its bytes are in the archive.
+- `NewReader(data str) !Reader`: NewReader reads the archive in data (all of it, as Go's NewReader(r, size) reads one of size bytes).
+- `OpenReader(path str) !Reader`: OpenReader reads the archive in the file at path (at most 64 MiB, as quarry.ReadFile; quarry.ReadFileBound and NewReader read a larger one).
+- `(r Reader) CheckPaths() !`: CheckPaths fails with ErrInsecurePath if an entry's name is absolute, climbs out with "..", or has a backslash (Go's NewReader with GODEBUG=zipinsecurepath=0); empty names are allowed. Check before extracting to disk.
+- `(f File) DataOffset() !i64`: DataOffset is where the entry's (possibly compressed) bytes start in the archive.
+- `type FileReader struct`: FileReader reads an entry's bytes: Read, then 0 at the end, where the size and the CRC-32 (and the data descriptor's) are checked.
+- `(f File) Open() !FileReader`: Open opens the entry's bytes for reading, decompressed as they are read. A directory reads nothing (or fails with ErrFormat when it claims a size); an unknown method fails with ErrAlgorithm.
+- `(f File) OpenRaw() !FileReader`: OpenRaw opens the entry's bytes as they are stored, with no decompression and no checks.
+- `(f File) ReadAll(most i64) !str`: ReadAll is the entry's whole content, at most most bytes: past that it fails with fault.LimitExceeded, having held no more than most bytes (an entry that inflates past its declared size fails sooner, with ErrFormat).
+- `(r mut FileReader) Read(buf mut []u8) !i64`: Read fills buf with the entry's next bytes and returns how many, 0 at the end. More bytes than the header's size fail with ErrFormat, fewer with ErrUnexpectedEOF, a CRC-32 that does not match with ErrChecksum; a fault repeats on every later Read.
+- `(r mut FileReader) Close() !i64`: Close ends reading; the archive stays in memory, so there is nothing to release.
+- `(s mut sink[W]) Write(data []u8) !i64`
+- `type Writer[W io.Writer] struct`: Writer writes a zip archive to out. Create or CreateHeader starts an entry, Write gives it its bytes, and Close writes the central directory (it does not close out).
+- `NewWriter[W io.Writer](out W) Writer[W]`: NewWriter writes an archive to out.
+- `(w mut Writer[W]) SetOffset(n i64)`: SetOffset says the archive starts n bytes into out (it follows other data, as in a self-extracting program); it must be called before anything is written.
+- `(w mut Writer[W]) SetComment(comment str) !`: SetComment sets the archive's comment, at most 65535 bytes.
+- `(w mut Writer[W]) Create(name str) !`: Create starts an entry named name, compressed with Deflate (a name ending in a slash is a directory).
+- `(w mut Writer[W]) CreateHeader(fh FileHeader) !`: CreateHeader starts an entry described by fh (the writer works on a copy). It sets the UTF-8 flag for a name or comment that needs it, the versions, the data descriptor flag, the MS-DOS time and an extended timestamp from Modified when that is set; a directory gets Store and no sizes.
+- `(w mut Writer[W]) CreateRaw(fh FileHeader) !`: CreateRaw starts an entry whose bytes Write takes as they are (already compressed, as fh's Method and sizes and CRC-32 say). Without the data descriptor flag in fh, the local header carries the sizes.
+- `(w mut Writer[W]) Copy(f File) !`: Copy copies the entry f of a Reader into the archive as it is stored, with no decompression or checks.
+- `(w mut Writer[W]) Write(data []u8) !i64`: Write gives the entry being written more bytes, compressing them as its method says (as they are for CreateRaw). A directory takes no bytes.
+- `(w mut Writer[W]) WriteString(s str) !i64`: WriteString is Write of the bytes of s.
+- `(w mut Writer[W]) Close() !`: Close ends the last entry and writes the central directory and the end records. It does not close out.
+- `const Store = 0`: Compression methods: Store keeps the bytes as they are, Deflate compresses them (RFC 1951).
+- `const Deflate = 8`
+- `const ModeDir = 0x80000000`: File modes, Go's fs.FileMode bits: Mode returns them and SetMode takes them.
+- `const ModeAppend = 0x40000000`
+- `const ModeExclusive = 0x20000000`
+- `const ModeTemporary = 0x10000000`
+- `const ModeSymlink = 0x8000000`
+- `const ModeDevice = 0x4000000`
+- `const ModeNamedPipe = 0x2000000`
+- `const ModeSocket = 0x1000000`
+- `const ModeSetuid = 0x800000`
+- `const ModeSetgid = 0x400000`
+- `const ModeCharDevice = 0x200000`
+- `const ModeSticky = 0x100000`
+- `const ModeIrregular = 0x80000`
+- `const ModeType = 0x8f280000`: ModeType is the type bits of a mode, ModePerm its permission bits.
+- `const ModePerm = 0o777`
+- `type FileHeader struct`: FileHeader describes an entry, with the fields of Go's zip.FileHeader. Modified is the modification time in Unix nanoseconds and ModifiedOffset the zone the MS-DOS fields are in (seconds east of UTC): reading, Go's estimate from the MS-DOS and extended times when both are there (else 0); writing, a Modified of 0 means "not set", and then the MS-DOS fields are written as they are, with no extended timestamp. The 32-bit sizes are 0xffffffff when either size needs ZIP64; the 64-bit ones are always right.
+- `(h FileHeader) IsDir() bool`: IsDir reports whether the entry is a directory: its name ends in a slash.
+- `(h FileHeader) Size() i64`: Size is the entry's uncompressed size (Go's FileInfo().Size()).
+- `(h FileHeader) Mode() u32`: Mode returns the permission and type bits, from the Unix or MS-DOS attributes the creator wrote.
+- `(h mut FileHeader) SetMode(mode u32)`: SetMode sets the permission and type bits, as Unix attributes and the matching MS-DOS ones.
+- `(h FileHeader) ModTime() i64`: ModTime is the time of the MS-DOS fields, in Unix nanoseconds read as UTC (Go's deprecated ModTime).
+- `(h mut FileHeader) SetModTime(ns i64)`: SetModTime sets Modified (in UTC) and the MS-DOS fields to the time ns.
+- `FileInfoHeader(name str, fi quarry.FileInfo) FileHeader`: FileInfoHeader is a header for the file that fi describes, named name (add a slash for a directory): its size, modification time and mode. Set Method to Deflate to compress it.
+- `IsLocal(name str) bool`: IsLocal is Go's filepath.IsLocal on Unix: name is not empty, not absolute, and does not climb out with "..".
+- `FaultKind(err fault) str`: FaultKind lets a caller tell the faults apart without their text: "format", "algorithm", "checksum", "eof", "flate", "limit", "insecure" or "other".
 
 ## ledger
 
@@ -1699,6 +1863,10 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `HkdfExtract(h Hash, salt str, ikm secret str) []u8`: HkdfExtract is HKDF-Extract(salt, ikm) (RFC 5869): a pseudorandom key of Size(h) bytes. An empty salt means Size(h) zero bytes. ikm may be secret.
 - `HkdfExpand(h Hash, prk secret str, info str, n i64) ![]u8`: HkdfExpand is HKDF-Expand(prk, info, n) (RFC 5869): n bytes, at most 255*Size(h). prk may be secret.
 - `HkdfExpandLabel(h Hash, key secret str, label str, context str, n i64) ![]u8`: HkdfExpandLabel is TLS 1.3's HKDF-Expand-Label(secret, label, context, n) (RFC 8446 section 7.1); label is given without the "tls13 " prefix. key may be secret.
+- `type HPKEKEM enum { HPKEP256, HPKEX25519 }`: HPKEKEM selects the DHKEM curve used by the RFC 9180 base mode.
+- `type HPKEAEAD enum { HPKEAES128GCM, HPKEAES256GCM, HPKEChaCha20Poly1305 }`: HPKEAEAD selects an authenticated encryption algorithm for HPKE.
+- `HPKESeal(kem HPKEKEM, aead HPKEAEAD, recipientPublic []u8, info []u8, aad []u8, plaintext secret []u8) !([]u8, []u8)`: HPKESeal performs one RFC 9180 base-mode encryption with HKDF-SHA256. recipientPublic is the uncompressed 65-byte P-256 or 32-byte X25519 public key. It returns enc and ciphertext||tag.
+- `HPKEOpen(kem HPKEKEM, aead HPKEAEAD, recipientPrivate []u8, enc []u8, info []u8, aad []u8, ciphertext []u8) ![]u8`: HPKEOpen opens one RFC 9180 base-mode ciphertext using the recipient's private key and enc. Authentication failures, invalid keys and malformed enc values return a fault.
 - `type RSAPrivateKey struct`: RSAPrivateKey is an RSA key with its CRT values; the private parts can only be read by seal.
 - `type ECPrivateKey struct`: ECPrivateKey is an ECDSA key on P-256 or P-384: the curve, the scalar and the uncompressed public point.
 - `type PrivateKey struct`: PrivateKey is an RSA, ECDSA or Ed25519 private key, as ParsePrivateKeyPEM reads it.
@@ -2352,6 +2520,17 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `type WordEncoder struct{}`: WordEncoder encodes header text as encoded words when it needs to be, like Go's WordEncoder.
 - `(e WordEncoder) EncodeWord(charset str, s str) str`: EncodeWord returns the text as an RFC 2047 encoded word when it has bytes that are not printable ASCII, and the text itself when it does not.
 
+## suffixarray
+
+Package suffixarray indexes byte substrings. An Index keeps its owned text and one i64 per suffix (~9N steady state, ~25N during construction).
+
+- `type Index struct`: Index stores an owned copy of the indexed bytes and one i64 offset per suffix.
+- `New(data []u8) Index`: New copies data and builds a suffix array using prefix doubling.
+- `(x Index) Bytes() []u8`: Bytes returns the indexed bytes; callers must treat them as read-only.
+- `(x Index) Lookup(s []u8, n i64) []i64`: Lookup returns up to n matching offsets in suffix-array order; n < 0 returns all, and empty s or n == 0 returns none.
+- `(x Index) FindAllIndex(s []u8) []i64`: FindAllIndex returns all matching offsets in ascending text order.
+- `Read[S io.Reader](x mut Index, r mut S) !`: Read loads a Go index/suffixarray binary stream and validates every decoded suffix offset.
+
 ## scan
 
 Package scan is a scanner and tokenizer for UTF-8 text, Go's text/scanner: it reads Go-style identifiers, numbers, char, string and raw string literals and comments, with Go's white space and position rules, for tokenizing source code, configuration files and small languages.
@@ -2407,6 +2586,570 @@ The Scanner reads a whole str (a stream is read with io.ReadAll first), so a tok
 - `(s Scanner) Pos() Position`: Pos is the position just after the character or token Next or Scan last returned.
 - `(s Scanner) TokenText() str`: TokenText is the text of the token Scan last returned ("" after Next).
 - `TokenString(tok i32) str`: TokenString is a printable form of a token kind ("EOF", "Ident", ...) or character (Go-quoted).
+
+## image
+
+Package image is Go's image: points and rectangles, the Image shape, and the images that keep their pixels in one byte slice (RGBA, RGBA64, NRGBA, NRGBA64, Gray, Gray16, Alpha, Alpha16, Paletted) plus Uniform. Pixels are never allocated one by one: an image is a Pix slice, a Stride and a Rect, laid out exactly as in Go.
+
+```tin body
+mut m = image.NewRGBA(image.Rect(0, 0, 640, 480))
+m.Set(10, 20, m.At(0, 0))
+let c = m.At(10, 20)
+```
+
+Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel through the shape allocates nothing; each image also has its own typed accessors (RGBAAt, GrayAt, ColorIndexAt...). Layout tells which concrete image a dyn Image is and gives its pixel buffer: it is how image/draw and image/png take their fast paths, and how a caller gets the concrete image back (AsRGBA, AsNRGBA...). The image/jpeg package decodes 8-bit baseline and progressive JPEG data and encodes baseline JPEG images.
+
+- `type Point value struct`: Point is an (X, Y) pair; X grows to the right and Y downwards.
+- `Pt(x i64, y i64) Point`: Pt is Point{X: x, Y: y}.
+- `(p Point) String() str`: String is "(x,y)".
+- `(p Point) Add(q Point) Point`: Add is p + q.
+- `(p Point) Sub(q Point) Point`: Sub is p - q.
+- `(p Point) Mul(k i64) Point`: Mul is p scaled by k.
+- `(p Point) Div(k i64) Point`: Div is p divided by k (truncated toward zero).
+- `(p Point) In(r Rectangle) bool`: In reports whether p is inside r (Min inclusive, Max exclusive).
+- `(p Point) Mod(r Rectangle) Point`: Mod is the point of r congruent to p modulo r's width and height.
+- `(p Point) Eq(q Point) bool`: Eq reports whether p and q are the same point.
+- `type Rectangle value struct`: Rectangle holds the points with Min.X <= X < Max.X and Min.Y <= Y < Max.Y; it is well-formed when Min <= Max. A Rectangle is also an Image: opaque inside, transparent outside (a mask).
+- `Rect(x0 i64, y0 i64, x1 i64, y1 i64) Rectangle`: Rect is the rectangle with corners (x0, y0) and (x1, y1), swapped as needed to be well-formed.
+- `(r Rectangle) String() str`: String is "(x0,y0)-(x1,y1)".
+- `(r Rectangle) Dx() i64`: Dx is r's width.
+- `(r Rectangle) Dy() i64`: Dy is r's height.
+- `(r Rectangle) Size() Point`: Size is r's width and height as a Point.
+- `(r Rectangle) Add(p Point) Rectangle`: Add is r moved by p.
+- `(r Rectangle) Sub(p Point) Rectangle`: Sub is r moved by -p.
+- `(r Rectangle) Inset(n i64) Rectangle`: Inset is r shrunk by n on each side (negative n grows it); a side too short collapses to its midpoint.
+- `(r Rectangle) Intersect(s Rectangle) Rectangle`: Intersect is the largest rectangle inside both r and s; the zero rectangle when they do not overlap.
+- `(r Rectangle) Union(s Rectangle) Rectangle`: Union is the smallest rectangle holding both r and s (an empty one is ignored).
+- `(r Rectangle) Empty() bool`: Empty reports whether r holds no points.
+- `(r Rectangle) Eq(s Rectangle) bool`: Eq reports whether r and s hold the same points (any two empty rectangles are equal).
+- `(r Rectangle) Overlaps(s Rectangle) bool`: Overlaps reports whether r and s share a point.
+- `(r Rectangle) In(s Rectangle) bool`: In reports whether every point of r is in s.
+- `(r Rectangle) Canon() Rectangle`: Canon is r with its corners swapped as needed to be well-formed.
+- `(r Rectangle) At(x i64, y i64) color.RGBA64`: At is opaque inside r and transparent outside.
+- `(r Rectangle) Bounds() Rectangle`: Bounds is r.
+- `(r Rectangle) ColorModel() color.Model`: ColorModel is Alpha16Model.
+- `(r Rectangle) Layout() Layout`: Layout says a Rectangle has no pixel buffer.
+- `type Gray struct`: Gray is an image of 8-bit grays, one byte per pixel.
+- `NewGray(r Rectangle) Gray`: NewGray is a black Gray image of r.
+- `(p Gray) ColorModel() color.Model`: ColorModel is GrayModel.
+- `(p Gray) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Gray) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Gray) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Gray) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p Gray) GrayAt(x i64, y i64) color.Gray`: GrayAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Gray) Set(x i64, y i64, c color.RGBA64)`: Set stores c's luminance at (x, y) (nothing outside the bounds).
+- `(p mut Gray) SetGray(x i64, y i64, c color.Gray)`: SetGray stores c at (x, y) (nothing outside the bounds).
+- `(p Gray) SubImage(r Rectangle) Gray`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Gray) Opaque() bool`: Opaque is true: a gray image has no alpha.
+- `type Gray16 struct`: Gray16 is an image of 16-bit grays, two big-endian bytes per pixel.
+- `NewGray16(r Rectangle) Gray16`: NewGray16 is a black Gray16 image of r.
+- `(p Gray16) ColorModel() color.Model`: ColorModel is Gray16Model.
+- `(p Gray16) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Gray16) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Gray16) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p Gray16) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p Gray16) Gray16At(x i64, y i64) color.Gray16`: Gray16At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Gray16) Set(x i64, y i64, c color.RGBA64)`: Set stores c's luminance at (x, y) (nothing outside the bounds).
+- `(p mut Gray16) SetGray16(x i64, y i64, c color.Gray16)`: SetGray16 stores c at (x, y) (nothing outside the bounds).
+- `(p Gray16) SubImage(r Rectangle) Gray16`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Gray16) Opaque() bool`: Opaque is true: a gray image has no alpha.
+- `type Alpha struct`: Alpha is an image of 8-bit alphas (a mask), one byte per pixel.
+- `NewAlpha(r Rectangle) Alpha`: NewAlpha is a transparent Alpha image of r.
+- `(p Alpha) ColorModel() color.Model`: ColorModel is AlphaModel.
+- `(p Alpha) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Alpha) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Alpha) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Alpha) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p Alpha) AlphaAt(x i64, y i64) color.Alpha`: AlphaAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Alpha) Set(x i64, y i64, c color.RGBA64)`: Set stores c's alpha at (x, y) (nothing outside the bounds).
+- `(p mut Alpha) SetAlpha(x i64, y i64, c color.Alpha)`: SetAlpha stores c at (x, y) (nothing outside the bounds).
+- `(p Alpha) SubImage(r Rectangle) Alpha`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Alpha) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Alpha16 struct`: Alpha16 is an image of 16-bit alphas, two big-endian bytes per pixel.
+- `NewAlpha16(r Rectangle) Alpha16`: NewAlpha16 is a transparent Alpha16 image of r.
+- `(p Alpha16) ColorModel() color.Model`: ColorModel is Alpha16Model.
+- `(p Alpha16) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Alpha16) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Alpha16) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p Alpha16) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p Alpha16) Alpha16At(x i64, y i64) color.Alpha16`: Alpha16At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Alpha16) Set(x i64, y i64, c color.RGBA64)`: Set stores c's alpha at (x, y) (nothing outside the bounds).
+- `(p mut Alpha16) SetAlpha16(x i64, y i64, c color.Alpha16)`: SetAlpha16 stores c at (x, y) (nothing outside the bounds).
+- `(p Alpha16) SubImage(r Rectangle) Alpha16`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Alpha16) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `shape Image`: Image is a rectangle of colors (Go's image.Image): At is the 16-bit premultiplied color at (x, y) (outside Bounds, the zero color, or a Paletted image's first palette color), and Layout describes the pixel buffer (Custom for an image without one).
+- `type Config value struct`: Config is an image's color model and size, as a decoder reads them from the header.
+- `type Kind i64`: Kind says which concrete image a Layout describes.
+- `const Custom Kind = 0`: Custom is an image of another package, with no pixel buffer the image package knows.
+- `const KindRGBA Kind = 1`: KindRGBA is an RGBA image.
+- `const KindRGBA64 Kind = 2`: KindRGBA64 is an RGBA64 image.
+- `const KindNRGBA Kind = 3`: KindNRGBA is an NRGBA image.
+- `const KindNRGBA64 Kind = 4`: KindNRGBA64 is an NRGBA64 image.
+- `const KindAlpha Kind = 5`: KindAlpha is an Alpha image.
+- `const KindAlpha16 Kind = 6`: KindAlpha16 is an Alpha16 image.
+- `const KindGray Kind = 7`: KindGray is a Gray image.
+- `const KindGray16 Kind = 8`: KindGray16 is a Gray16 image.
+- `const KindPaletted Kind = 9`: KindPaletted is a Paletted image.
+- `const KindUniform Kind = 10`: KindUniform is a Uniform image (no pixel buffer: every pixel is its color).
+- `(k Kind) String() str`: String is the kind's type name, such as "RGBA".
+- `type Layout value struct`: Layout is how an image keeps its pixels: the pixel at (x, y) starts at Pix[(y-Rect.Min.Y)*Stride + (x-Rect.Min.X)*n] with n bytes per pixel (4 for RGBA and NRGBA, 8 for RGBA64 and NRGBA64, 2 for Gray16 and Alpha16, 1 otherwise; 16-bit channels are big-endian). Palette is a Paletted image's.
+- `AsRGBA(m dyn Image) ?RGBA`: AsRGBA is m as the RGBA image it is (sharing its pixels), or nil.
+- `AsRGBA64(m dyn Image) ?RGBA64`: AsRGBA64 is m as the RGBA64 image it is (sharing its pixels), or nil.
+- `AsNRGBA(m dyn Image) ?NRGBA`: AsNRGBA is m as the NRGBA image it is (sharing its pixels), or nil.
+- `AsNRGBA64(m dyn Image) ?NRGBA64`: AsNRGBA64 is m as the NRGBA64 image it is (sharing its pixels), or nil.
+- `AsAlpha(m dyn Image) ?Alpha`: AsAlpha is m as the Alpha image it is (sharing its pixels), or nil.
+- `AsAlpha16(m dyn Image) ?Alpha16`: AsAlpha16 is m as the Alpha16 image it is (sharing its pixels), or nil.
+- `AsGray(m dyn Image) ?Gray`: AsGray is m as the Gray image it is (sharing its pixels), or nil.
+- `AsGray16(m dyn Image) ?Gray16`: AsGray16 is m as the Gray16 image it is (sharing its pixels), or nil.
+- `AsPaletted(m dyn Image) ?Paletted`: AsPaletted is m as the Paletted image it is (sharing its pixels and palette), or nil.
+- `type Paletted struct`: Paletted is an image of palette indices, one byte per pixel, over Palette (a color.Palette held as its slice type).
+- `NewPaletted(r Rectangle, p color.Palette) Paletted`: NewPaletted is a Paletted image of r over palette p, every pixel index 0.
+- `(p Paletted) ColorModel() color.Model`: ColorModel is PaletteModel: the image's Palette.
+- `(p Paletted) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Paletted) Layout() Layout`: Layout is the image's pixel buffer and palette.
+- `(p Paletted) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Paletted) At(x i64, y i64) color.RGBA64`: At is the palette color of the pixel at (x, y), premultiplied (the first palette color outside the bounds, zero for an empty palette).
+- `(p Paletted) ColorIndexAt(x i64, y i64) u8`: ColorIndexAt is the palette index at (x, y) (0 outside the bounds).
+- `(p mut Paletted) Set(x i64, y i64, c color.RGBA64)`: Set stores the index of the palette color nearest to c at (x, y) (nothing outside the bounds).
+- `(p mut Paletted) SetColorIndex(x i64, y i64, index u8)`: SetColorIndex stores index at (x, y) (nothing outside the bounds).
+- `(p Paletted) SubImage(r Rectangle) Paletted`: SubImage is the part of p inside r, sharing p's pixels and palette.
+- `(p Paletted) Opaque() bool`: Opaque reports whether every palette color some pixel uses is fully opaque.
+- `type Uniform struct`: Uniform is an image of one color everywhere (Go's bounds: a square of side 2e9 around the origin); it is also a color.Color.
+- `NewUniform[C color.Color](c C) Uniform`: NewUniform is the image of color c everywhere.
+- `(u Uniform) RGBA() (u32, u32, u32, u32)`: RGBA is the uniform color's 16-bit premultiplied channels.
+- `(u Uniform) ColorModel() color.Model`: ColorModel is RGBA64Model (Go answers the Uniform itself).
+- `(u Uniform) Bounds() Rectangle`: Bounds is (-1e9,-1e9)-(1e9,1e9).
+- `(u Uniform) At(x i64, y i64) color.RGBA64`: At is the color, wherever.
+- `(u Uniform) Layout() Layout`: Layout says a Uniform has no pixel buffer.
+- `(u Uniform) Opaque() bool`: Opaque reports whether the color is fully opaque.
+- `type RGBA struct`: RGBA is an image of 8-bit premultiplied colors: R, G, B, A per pixel.
+- `NewRGBA(r Rectangle) RGBA`: NewRGBA is a transparent black RGBA image of r.
+- `(p RGBA) ColorModel() color.Model`: ColorModel is RGBAModel.
+- `(p RGBA) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p RGBA) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p RGBA) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p RGBA) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p RGBA) RGBAAt(x i64, y i64) color.RGBA`: RGBAAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut RGBA) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y) (nothing outside the bounds).
+- `(p mut RGBA) SetRGBA(x i64, y i64, c color.RGBA)`: SetRGBA stores c at (x, y) (nothing outside the bounds).
+- `(p RGBA) SubImage(r Rectangle) RGBA`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p RGBA) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type RGBA64 struct`: RGBA64 is an image of 16-bit premultiplied colors: R, G, B, A per pixel, each big-endian.
+- `NewRGBA64(r Rectangle) RGBA64`: NewRGBA64 is a transparent black RGBA64 image of r.
+- `(p RGBA64) ColorModel() color.Model`: ColorModel is RGBA64Model.
+- `(p RGBA64) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p RGBA64) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p RGBA64) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p RGBA64) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p RGBA64) RGBA64At(x i64, y i64) color.RGBA64`: RGBA64At is At.
+- `(p mut RGBA64) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y) (nothing outside the bounds).
+- `(p mut RGBA64) SetRGBA64(x i64, y i64, c color.RGBA64)`: SetRGBA64 is Set.
+- `(p RGBA64) SubImage(r Rectangle) RGBA64`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p RGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type NRGBA struct`: NRGBA is an image of 8-bit colors that are not premultiplied: R, G, B, A per pixel.
+- `NewNRGBA(r Rectangle) NRGBA`: NewNRGBA is a transparent black NRGBA image of r.
+- `(p NRGBA) ColorModel() color.Model`: ColorModel is NRGBAModel.
+- `(p NRGBA) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p NRGBA) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p NRGBA) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p NRGBA) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y), premultiplied, in 16 bits (zero outside the bounds).
+- `(p NRGBA) NRGBAAt(x i64, y i64) color.NRGBA`: NRGBAAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut NRGBA) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+- `(p mut NRGBA) SetNRGBA(x i64, y i64, c color.NRGBA)`: SetNRGBA stores c at (x, y) (nothing outside the bounds).
+- `(p NRGBA) SubImage(r Rectangle) NRGBA`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p NRGBA) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type NRGBA64 struct`: NRGBA64 is an image of 16-bit colors that are not premultiplied: R, G, B, A per pixel, each big-endian.
+- `NewNRGBA64(r Rectangle) NRGBA64`: NewNRGBA64 is a transparent black NRGBA64 image of r.
+- `(p NRGBA64) ColorModel() color.Model`: ColorModel is NRGBA64Model.
+- `(p NRGBA64) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p NRGBA64) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p NRGBA64) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p NRGBA64) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y), premultiplied (zero outside the bounds).
+- `(p NRGBA64) NRGBA64At(x i64, y i64) color.NRGBA64`: NRGBA64At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut NRGBA64) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+- `(p mut NRGBA64) SetNRGBA64(x i64, y i64, c color.NRGBA64)`: SetNRGBA64 stores c at (x, y) (nothing outside the bounds).
+- `(p NRGBA64) SubImage(r Rectangle) NRGBA64`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p NRGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Huffman struct`
+- `type Component struct`
+- `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline or progressive JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
+- `type Bits struct`
+
+## image
+
+Package image is Go's image: points and rectangles, the Image shape, and the images that keep their pixels in one byte slice (RGBA, RGBA64, NRGBA, NRGBA64, Gray, Gray16, Alpha, Alpha16, Paletted) plus Uniform. Pixels are never allocated one by one: an image is a Pix slice, a Stride and a Rect, laid out exactly as in Go.
+
+```tin body
+mut m = image.NewRGBA(image.Rect(0, 0, 640, 480))
+m.Set(10, 20, m.At(0, 0))
+let c = m.At(10, 20)
+```
+
+Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel through the shape allocates nothing; each image also has its own typed accessors (RGBAAt, GrayAt, ColorIndexAt...). Layout tells which concrete image a dyn Image is and gives its pixel buffer: it is how image/draw and image/png take their fast paths, and how a caller gets the concrete image back (AsRGBA, AsNRGBA...). The image/jpeg package decodes 8-bit baseline and progressive JPEG data and encodes baseline JPEG images.
+
+- `type Point value struct`: Point is an (X, Y) pair; X grows to the right and Y downwards.
+- `Pt(x i64, y i64) Point`: Pt is Point{X: x, Y: y}.
+- `(p Point) String() str`: String is "(x,y)".
+- `(p Point) Add(q Point) Point`: Add is p + q.
+- `(p Point) Sub(q Point) Point`: Sub is p - q.
+- `(p Point) Mul(k i64) Point`: Mul is p scaled by k.
+- `(p Point) Div(k i64) Point`: Div is p divided by k (truncated toward zero).
+- `(p Point) In(r Rectangle) bool`: In reports whether p is inside r (Min inclusive, Max exclusive).
+- `(p Point) Mod(r Rectangle) Point`: Mod is the point of r congruent to p modulo r's width and height.
+- `(p Point) Eq(q Point) bool`: Eq reports whether p and q are the same point.
+- `type Rectangle value struct`: Rectangle holds the points with Min.X <= X < Max.X and Min.Y <= Y < Max.Y; it is well-formed when Min <= Max. A Rectangle is also an Image: opaque inside, transparent outside (a mask).
+- `Rect(x0 i64, y0 i64, x1 i64, y1 i64) Rectangle`: Rect is the rectangle with corners (x0, y0) and (x1, y1), swapped as needed to be well-formed.
+- `(r Rectangle) String() str`: String is "(x0,y0)-(x1,y1)".
+- `(r Rectangle) Dx() i64`: Dx is r's width.
+- `(r Rectangle) Dy() i64`: Dy is r's height.
+- `(r Rectangle) Size() Point`: Size is r's width and height as a Point.
+- `(r Rectangle) Add(p Point) Rectangle`: Add is r moved by p.
+- `(r Rectangle) Sub(p Point) Rectangle`: Sub is r moved by -p.
+- `(r Rectangle) Inset(n i64) Rectangle`: Inset is r shrunk by n on each side (negative n grows it); a side too short collapses to its midpoint.
+- `(r Rectangle) Intersect(s Rectangle) Rectangle`: Intersect is the largest rectangle inside both r and s; the zero rectangle when they do not overlap.
+- `(r Rectangle) Union(s Rectangle) Rectangle`: Union is the smallest rectangle holding both r and s (an empty one is ignored).
+- `(r Rectangle) Empty() bool`: Empty reports whether r holds no points.
+- `(r Rectangle) Eq(s Rectangle) bool`: Eq reports whether r and s hold the same points (any two empty rectangles are equal).
+- `(r Rectangle) Overlaps(s Rectangle) bool`: Overlaps reports whether r and s share a point.
+- `(r Rectangle) In(s Rectangle) bool`: In reports whether every point of r is in s.
+- `(r Rectangle) Canon() Rectangle`: Canon is r with its corners swapped as needed to be well-formed.
+- `(r Rectangle) At(x i64, y i64) color.RGBA64`: At is opaque inside r and transparent outside.
+- `(r Rectangle) Bounds() Rectangle`: Bounds is r.
+- `(r Rectangle) ColorModel() color.Model`: ColorModel is Alpha16Model.
+- `(r Rectangle) Layout() Layout`: Layout says a Rectangle has no pixel buffer.
+- `type Gray struct`: Gray is an image of 8-bit grays, one byte per pixel.
+- `NewGray(r Rectangle) Gray`: NewGray is a black Gray image of r.
+- `(p Gray) ColorModel() color.Model`: ColorModel is GrayModel.
+- `(p Gray) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Gray) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Gray) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Gray) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p Gray) GrayAt(x i64, y i64) color.Gray`: GrayAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Gray) Set(x i64, y i64, c color.RGBA64)`: Set stores c's luminance at (x, y) (nothing outside the bounds).
+- `(p mut Gray) SetGray(x i64, y i64, c color.Gray)`: SetGray stores c at (x, y) (nothing outside the bounds).
+- `(p Gray) SubImage(r Rectangle) Gray`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Gray) Opaque() bool`: Opaque is true: a gray image has no alpha.
+- `type Gray16 struct`: Gray16 is an image of 16-bit grays, two big-endian bytes per pixel.
+- `NewGray16(r Rectangle) Gray16`: NewGray16 is a black Gray16 image of r.
+- `(p Gray16) ColorModel() color.Model`: ColorModel is Gray16Model.
+- `(p Gray16) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Gray16) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Gray16) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p Gray16) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p Gray16) Gray16At(x i64, y i64) color.Gray16`: Gray16At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Gray16) Set(x i64, y i64, c color.RGBA64)`: Set stores c's luminance at (x, y) (nothing outside the bounds).
+- `(p mut Gray16) SetGray16(x i64, y i64, c color.Gray16)`: SetGray16 stores c at (x, y) (nothing outside the bounds).
+- `(p Gray16) SubImage(r Rectangle) Gray16`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Gray16) Opaque() bool`: Opaque is true: a gray image has no alpha.
+- `type Alpha struct`: Alpha is an image of 8-bit alphas (a mask), one byte per pixel.
+- `NewAlpha(r Rectangle) Alpha`: NewAlpha is a transparent Alpha image of r.
+- `(p Alpha) ColorModel() color.Model`: ColorModel is AlphaModel.
+- `(p Alpha) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Alpha) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Alpha) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Alpha) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p Alpha) AlphaAt(x i64, y i64) color.Alpha`: AlphaAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Alpha) Set(x i64, y i64, c color.RGBA64)`: Set stores c's alpha at (x, y) (nothing outside the bounds).
+- `(p mut Alpha) SetAlpha(x i64, y i64, c color.Alpha)`: SetAlpha stores c at (x, y) (nothing outside the bounds).
+- `(p Alpha) SubImage(r Rectangle) Alpha`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Alpha) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Alpha16 struct`: Alpha16 is an image of 16-bit alphas, two big-endian bytes per pixel.
+- `NewAlpha16(r Rectangle) Alpha16`: NewAlpha16 is a transparent Alpha16 image of r.
+- `(p Alpha16) ColorModel() color.Model`: ColorModel is Alpha16Model.
+- `(p Alpha16) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Alpha16) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Alpha16) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p Alpha16) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p Alpha16) Alpha16At(x i64, y i64) color.Alpha16`: Alpha16At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Alpha16) Set(x i64, y i64, c color.RGBA64)`: Set stores c's alpha at (x, y) (nothing outside the bounds).
+- `(p mut Alpha16) SetAlpha16(x i64, y i64, c color.Alpha16)`: SetAlpha16 stores c at (x, y) (nothing outside the bounds).
+- `(p Alpha16) SubImage(r Rectangle) Alpha16`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Alpha16) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `shape Image`: Image is a rectangle of colors (Go's image.Image): At is the 16-bit premultiplied color at (x, y) (outside Bounds, the zero color, or a Paletted image's first palette color), and Layout describes the pixel buffer (Custom for an image without one).
+- `type Config value struct`: Config is an image's color model and size, as a decoder reads them from the header.
+- `type Kind i64`: Kind says which concrete image a Layout describes.
+- `const Custom Kind = 0`: Custom is an image of another package, with no pixel buffer the image package knows.
+- `const KindRGBA Kind = 1`: KindRGBA is an RGBA image.
+- `const KindRGBA64 Kind = 2`: KindRGBA64 is an RGBA64 image.
+- `const KindNRGBA Kind = 3`: KindNRGBA is an NRGBA image.
+- `const KindNRGBA64 Kind = 4`: KindNRGBA64 is an NRGBA64 image.
+- `const KindAlpha Kind = 5`: KindAlpha is an Alpha image.
+- `const KindAlpha16 Kind = 6`: KindAlpha16 is an Alpha16 image.
+- `const KindGray Kind = 7`: KindGray is a Gray image.
+- `const KindGray16 Kind = 8`: KindGray16 is a Gray16 image.
+- `const KindPaletted Kind = 9`: KindPaletted is a Paletted image.
+- `const KindUniform Kind = 10`: KindUniform is a Uniform image (no pixel buffer: every pixel is its color).
+- `(k Kind) String() str`: String is the kind's type name, such as "RGBA".
+- `type Layout value struct`: Layout is how an image keeps its pixels: the pixel at (x, y) starts at Pix[(y-Rect.Min.Y)*Stride + (x-Rect.Min.X)*n] with n bytes per pixel (4 for RGBA and NRGBA, 8 for RGBA64 and NRGBA64, 2 for Gray16 and Alpha16, 1 otherwise; 16-bit channels are big-endian). Palette is a Paletted image's.
+- `AsRGBA(m dyn Image) ?RGBA`: AsRGBA is m as the RGBA image it is (sharing its pixels), or nil.
+- `AsRGBA64(m dyn Image) ?RGBA64`: AsRGBA64 is m as the RGBA64 image it is (sharing its pixels), or nil.
+- `AsNRGBA(m dyn Image) ?NRGBA`: AsNRGBA is m as the NRGBA image it is (sharing its pixels), or nil.
+- `AsNRGBA64(m dyn Image) ?NRGBA64`: AsNRGBA64 is m as the NRGBA64 image it is (sharing its pixels), or nil.
+- `AsAlpha(m dyn Image) ?Alpha`: AsAlpha is m as the Alpha image it is (sharing its pixels), or nil.
+- `AsAlpha16(m dyn Image) ?Alpha16`: AsAlpha16 is m as the Alpha16 image it is (sharing its pixels), or nil.
+- `AsGray(m dyn Image) ?Gray`: AsGray is m as the Gray image it is (sharing its pixels), or nil.
+- `AsGray16(m dyn Image) ?Gray16`: AsGray16 is m as the Gray16 image it is (sharing its pixels), or nil.
+- `AsPaletted(m dyn Image) ?Paletted`: AsPaletted is m as the Paletted image it is (sharing its pixels and palette), or nil.
+- `type Paletted struct`: Paletted is an image of palette indices, one byte per pixel, over Palette (a color.Palette held as its slice type).
+- `NewPaletted(r Rectangle, p color.Palette) Paletted`: NewPaletted is a Paletted image of r over palette p, every pixel index 0.
+- `(p Paletted) ColorModel() color.Model`: ColorModel is PaletteModel: the image's Palette.
+- `(p Paletted) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Paletted) Layout() Layout`: Layout is the image's pixel buffer and palette.
+- `(p Paletted) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Paletted) At(x i64, y i64) color.RGBA64`: At is the palette color of the pixel at (x, y), premultiplied (the first palette color outside the bounds, zero for an empty palette).
+- `(p Paletted) ColorIndexAt(x i64, y i64) u8`: ColorIndexAt is the palette index at (x, y) (0 outside the bounds).
+- `(p mut Paletted) Set(x i64, y i64, c color.RGBA64)`: Set stores the index of the palette color nearest to c at (x, y) (nothing outside the bounds).
+- `(p mut Paletted) SetColorIndex(x i64, y i64, index u8)`: SetColorIndex stores index at (x, y) (nothing outside the bounds).
+- `(p Paletted) SubImage(r Rectangle) Paletted`: SubImage is the part of p inside r, sharing p's pixels and palette.
+- `(p Paletted) Opaque() bool`: Opaque reports whether every palette color some pixel uses is fully opaque.
+- `type Uniform struct`: Uniform is an image of one color everywhere (Go's bounds: a square of side 2e9 around the origin); it is also a color.Color.
+- `NewUniform[C color.Color](c C) Uniform`: NewUniform is the image of color c everywhere.
+- `(u Uniform) RGBA() (u32, u32, u32, u32)`: RGBA is the uniform color's 16-bit premultiplied channels.
+- `(u Uniform) ColorModel() color.Model`: ColorModel is RGBA64Model (Go answers the Uniform itself).
+- `(u Uniform) Bounds() Rectangle`: Bounds is (-1e9,-1e9)-(1e9,1e9).
+- `(u Uniform) At(x i64, y i64) color.RGBA64`: At is the color, wherever.
+- `(u Uniform) Layout() Layout`: Layout says a Uniform has no pixel buffer.
+- `(u Uniform) Opaque() bool`: Opaque reports whether the color is fully opaque.
+- `type RGBA struct`: RGBA is an image of 8-bit premultiplied colors: R, G, B, A per pixel.
+- `NewRGBA(r Rectangle) RGBA`: NewRGBA is a transparent black RGBA image of r.
+- `(p RGBA) ColorModel() color.Model`: ColorModel is RGBAModel.
+- `(p RGBA) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p RGBA) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p RGBA) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p RGBA) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p RGBA) RGBAAt(x i64, y i64) color.RGBA`: RGBAAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut RGBA) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y) (nothing outside the bounds).
+- `(p mut RGBA) SetRGBA(x i64, y i64, c color.RGBA)`: SetRGBA stores c at (x, y) (nothing outside the bounds).
+- `(p RGBA) SubImage(r Rectangle) RGBA`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p RGBA) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type RGBA64 struct`: RGBA64 is an image of 16-bit premultiplied colors: R, G, B, A per pixel, each big-endian.
+- `NewRGBA64(r Rectangle) RGBA64`: NewRGBA64 is a transparent black RGBA64 image of r.
+- `(p RGBA64) ColorModel() color.Model`: ColorModel is RGBA64Model.
+- `(p RGBA64) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p RGBA64) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p RGBA64) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p RGBA64) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p RGBA64) RGBA64At(x i64, y i64) color.RGBA64`: RGBA64At is At.
+- `(p mut RGBA64) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y) (nothing outside the bounds).
+- `(p mut RGBA64) SetRGBA64(x i64, y i64, c color.RGBA64)`: SetRGBA64 is Set.
+- `(p RGBA64) SubImage(r Rectangle) RGBA64`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p RGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type NRGBA struct`: NRGBA is an image of 8-bit colors that are not premultiplied: R, G, B, A per pixel.
+- `NewNRGBA(r Rectangle) NRGBA`: NewNRGBA is a transparent black NRGBA image of r.
+- `(p NRGBA) ColorModel() color.Model`: ColorModel is NRGBAModel.
+- `(p NRGBA) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p NRGBA) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p NRGBA) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p NRGBA) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y), premultiplied, in 16 bits (zero outside the bounds).
+- `(p NRGBA) NRGBAAt(x i64, y i64) color.NRGBA`: NRGBAAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut NRGBA) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+- `(p mut NRGBA) SetNRGBA(x i64, y i64, c color.NRGBA)`: SetNRGBA stores c at (x, y) (nothing outside the bounds).
+- `(p NRGBA) SubImage(r Rectangle) NRGBA`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p NRGBA) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type NRGBA64 struct`: NRGBA64 is an image of 16-bit colors that are not premultiplied: R, G, B, A per pixel, each big-endian.
+- `NewNRGBA64(r Rectangle) NRGBA64`: NewNRGBA64 is a transparent black NRGBA64 image of r.
+- `(p NRGBA64) ColorModel() color.Model`: ColorModel is NRGBA64Model.
+- `(p NRGBA64) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p NRGBA64) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p NRGBA64) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p NRGBA64) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y), premultiplied (zero outside the bounds).
+- `(p NRGBA64) NRGBA64At(x i64, y i64) color.NRGBA64`: NRGBA64At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut NRGBA64) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+- `(p mut NRGBA64) SetNRGBA64(x i64, y i64, c color.NRGBA64)`: SetNRGBA64 stores c at (x, y) (nothing outside the bounds).
+- `(p NRGBA64) SubImage(r Rectangle) NRGBA64`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p NRGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Huffman struct`
+- `type Component struct`
+- `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline or progressive JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
+- `type Bits struct`
+
+## image
+
+Package image is Go's image: points and rectangles, the Image shape, and the images that keep their pixels in one byte slice (RGBA, RGBA64, NRGBA, NRGBA64, Gray, Gray16, Alpha, Alpha16, Paletted) plus Uniform. Pixels are never allocated one by one: an image is a Pix slice, a Stride and a Rect, laid out exactly as in Go.
+
+```tin body
+mut m = image.NewRGBA(image.Rect(0, 0, 640, 480))
+m.Set(10, 20, m.At(0, 0))
+let c = m.At(10, 20)
+```
+
+Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel through the shape allocates nothing; each image also has its own typed accessors (RGBAAt, GrayAt, ColorIndexAt...). Layout tells which concrete image a dyn Image is and gives its pixel buffer: it is how image/draw and image/png take their fast paths, and how a caller gets the concrete image back (AsRGBA, AsNRGBA...). The image/jpeg package decodes 8-bit baseline and progressive JPEG data and encodes baseline JPEG images.
+
+- `type Point value struct`: Point is an (X, Y) pair; X grows to the right and Y downwards.
+- `Pt(x i64, y i64) Point`: Pt is Point{X: x, Y: y}.
+- `(p Point) String() str`: String is "(x,y)".
+- `(p Point) Add(q Point) Point`: Add is p + q.
+- `(p Point) Sub(q Point) Point`: Sub is p - q.
+- `(p Point) Mul(k i64) Point`: Mul is p scaled by k.
+- `(p Point) Div(k i64) Point`: Div is p divided by k (truncated toward zero).
+- `(p Point) In(r Rectangle) bool`: In reports whether p is inside r (Min inclusive, Max exclusive).
+- `(p Point) Mod(r Rectangle) Point`: Mod is the point of r congruent to p modulo r's width and height.
+- `(p Point) Eq(q Point) bool`: Eq reports whether p and q are the same point.
+- `type Rectangle value struct`: Rectangle holds the points with Min.X <= X < Max.X and Min.Y <= Y < Max.Y; it is well-formed when Min <= Max. A Rectangle is also an Image: opaque inside, transparent outside (a mask).
+- `Rect(x0 i64, y0 i64, x1 i64, y1 i64) Rectangle`: Rect is the rectangle with corners (x0, y0) and (x1, y1), swapped as needed to be well-formed.
+- `(r Rectangle) String() str`: String is "(x0,y0)-(x1,y1)".
+- `(r Rectangle) Dx() i64`: Dx is r's width.
+- `(r Rectangle) Dy() i64`: Dy is r's height.
+- `(r Rectangle) Size() Point`: Size is r's width and height as a Point.
+- `(r Rectangle) Add(p Point) Rectangle`: Add is r moved by p.
+- `(r Rectangle) Sub(p Point) Rectangle`: Sub is r moved by -p.
+- `(r Rectangle) Inset(n i64) Rectangle`: Inset is r shrunk by n on each side (negative n grows it); a side too short collapses to its midpoint.
+- `(r Rectangle) Intersect(s Rectangle) Rectangle`: Intersect is the largest rectangle inside both r and s; the zero rectangle when they do not overlap.
+- `(r Rectangle) Union(s Rectangle) Rectangle`: Union is the smallest rectangle holding both r and s (an empty one is ignored).
+- `(r Rectangle) Empty() bool`: Empty reports whether r holds no points.
+- `(r Rectangle) Eq(s Rectangle) bool`: Eq reports whether r and s hold the same points (any two empty rectangles are equal).
+- `(r Rectangle) Overlaps(s Rectangle) bool`: Overlaps reports whether r and s share a point.
+- `(r Rectangle) In(s Rectangle) bool`: In reports whether every point of r is in s.
+- `(r Rectangle) Canon() Rectangle`: Canon is r with its corners swapped as needed to be well-formed.
+- `(r Rectangle) At(x i64, y i64) color.RGBA64`: At is opaque inside r and transparent outside.
+- `(r Rectangle) Bounds() Rectangle`: Bounds is r.
+- `(r Rectangle) ColorModel() color.Model`: ColorModel is Alpha16Model.
+- `(r Rectangle) Layout() Layout`: Layout says a Rectangle has no pixel buffer.
+- `type Gray struct`: Gray is an image of 8-bit grays, one byte per pixel.
+- `NewGray(r Rectangle) Gray`: NewGray is a black Gray image of r.
+- `(p Gray) ColorModel() color.Model`: ColorModel is GrayModel.
+- `(p Gray) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Gray) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Gray) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Gray) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p Gray) GrayAt(x i64, y i64) color.Gray`: GrayAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Gray) Set(x i64, y i64, c color.RGBA64)`: Set stores c's luminance at (x, y) (nothing outside the bounds).
+- `(p mut Gray) SetGray(x i64, y i64, c color.Gray)`: SetGray stores c at (x, y) (nothing outside the bounds).
+- `(p Gray) SubImage(r Rectangle) Gray`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Gray) Opaque() bool`: Opaque is true: a gray image has no alpha.
+- `type Gray16 struct`: Gray16 is an image of 16-bit grays, two big-endian bytes per pixel.
+- `NewGray16(r Rectangle) Gray16`: NewGray16 is a black Gray16 image of r.
+- `(p Gray16) ColorModel() color.Model`: ColorModel is Gray16Model.
+- `(p Gray16) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Gray16) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Gray16) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p Gray16) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p Gray16) Gray16At(x i64, y i64) color.Gray16`: Gray16At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Gray16) Set(x i64, y i64, c color.RGBA64)`: Set stores c's luminance at (x, y) (nothing outside the bounds).
+- `(p mut Gray16) SetGray16(x i64, y i64, c color.Gray16)`: SetGray16 stores c at (x, y) (nothing outside the bounds).
+- `(p Gray16) SubImage(r Rectangle) Gray16`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Gray16) Opaque() bool`: Opaque is true: a gray image has no alpha.
+- `type Alpha struct`: Alpha is an image of 8-bit alphas (a mask), one byte per pixel.
+- `NewAlpha(r Rectangle) Alpha`: NewAlpha is a transparent Alpha image of r.
+- `(p Alpha) ColorModel() color.Model`: ColorModel is AlphaModel.
+- `(p Alpha) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Alpha) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Alpha) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Alpha) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p Alpha) AlphaAt(x i64, y i64) color.Alpha`: AlphaAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Alpha) Set(x i64, y i64, c color.RGBA64)`: Set stores c's alpha at (x, y) (nothing outside the bounds).
+- `(p mut Alpha) SetAlpha(x i64, y i64, c color.Alpha)`: SetAlpha stores c at (x, y) (nothing outside the bounds).
+- `(p Alpha) SubImage(r Rectangle) Alpha`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Alpha) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Alpha16 struct`: Alpha16 is an image of 16-bit alphas, two big-endian bytes per pixel.
+- `NewAlpha16(r Rectangle) Alpha16`: NewAlpha16 is a transparent Alpha16 image of r.
+- `(p Alpha16) ColorModel() color.Model`: ColorModel is Alpha16Model.
+- `(p Alpha16) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Alpha16) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p Alpha16) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p Alpha16) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p Alpha16) Alpha16At(x i64, y i64) color.Alpha16`: Alpha16At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut Alpha16) Set(x i64, y i64, c color.RGBA64)`: Set stores c's alpha at (x, y) (nothing outside the bounds).
+- `(p mut Alpha16) SetAlpha16(x i64, y i64, c color.Alpha16)`: SetAlpha16 stores c at (x, y) (nothing outside the bounds).
+- `(p Alpha16) SubImage(r Rectangle) Alpha16`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p Alpha16) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `shape Image`: Image is a rectangle of colors (Go's image.Image): At is the 16-bit premultiplied color at (x, y) (outside Bounds, the zero color, or a Paletted image's first palette color), and Layout describes the pixel buffer (Custom for an image without one).
+- `type Config value struct`: Config is an image's color model and size, as a decoder reads them from the header.
+- `type Kind i64`: Kind says which concrete image a Layout describes.
+- `const Custom Kind = 0`: Custom is an image of another package, with no pixel buffer the image package knows.
+- `const KindRGBA Kind = 1`: KindRGBA is an RGBA image.
+- `const KindRGBA64 Kind = 2`: KindRGBA64 is an RGBA64 image.
+- `const KindNRGBA Kind = 3`: KindNRGBA is an NRGBA image.
+- `const KindNRGBA64 Kind = 4`: KindNRGBA64 is an NRGBA64 image.
+- `const KindAlpha Kind = 5`: KindAlpha is an Alpha image.
+- `const KindAlpha16 Kind = 6`: KindAlpha16 is an Alpha16 image.
+- `const KindGray Kind = 7`: KindGray is a Gray image.
+- `const KindGray16 Kind = 8`: KindGray16 is a Gray16 image.
+- `const KindPaletted Kind = 9`: KindPaletted is a Paletted image.
+- `const KindUniform Kind = 10`: KindUniform is a Uniform image (no pixel buffer: every pixel is its color).
+- `(k Kind) String() str`: String is the kind's type name, such as "RGBA".
+- `type Layout value struct`: Layout is how an image keeps its pixels: the pixel at (x, y) starts at Pix[(y-Rect.Min.Y)*Stride + (x-Rect.Min.X)*n] with n bytes per pixel (4 for RGBA and NRGBA, 8 for RGBA64 and NRGBA64, 2 for Gray16 and Alpha16, 1 otherwise; 16-bit channels are big-endian). Palette is a Paletted image's.
+- `AsRGBA(m dyn Image) ?RGBA`: AsRGBA is m as the RGBA image it is (sharing its pixels), or nil.
+- `AsRGBA64(m dyn Image) ?RGBA64`: AsRGBA64 is m as the RGBA64 image it is (sharing its pixels), or nil.
+- `AsNRGBA(m dyn Image) ?NRGBA`: AsNRGBA is m as the NRGBA image it is (sharing its pixels), or nil.
+- `AsNRGBA64(m dyn Image) ?NRGBA64`: AsNRGBA64 is m as the NRGBA64 image it is (sharing its pixels), or nil.
+- `AsAlpha(m dyn Image) ?Alpha`: AsAlpha is m as the Alpha image it is (sharing its pixels), or nil.
+- `AsAlpha16(m dyn Image) ?Alpha16`: AsAlpha16 is m as the Alpha16 image it is (sharing its pixels), or nil.
+- `AsGray(m dyn Image) ?Gray`: AsGray is m as the Gray image it is (sharing its pixels), or nil.
+- `AsGray16(m dyn Image) ?Gray16`: AsGray16 is m as the Gray16 image it is (sharing its pixels), or nil.
+- `AsPaletted(m dyn Image) ?Paletted`: AsPaletted is m as the Paletted image it is (sharing its pixels and palette), or nil.
+- `type Paletted struct`: Paletted is an image of palette indices, one byte per pixel, over Palette (a color.Palette held as its slice type).
+- `NewPaletted(r Rectangle, p color.Palette) Paletted`: NewPaletted is a Paletted image of r over palette p, every pixel index 0.
+- `(p Paletted) ColorModel() color.Model`: ColorModel is PaletteModel: the image's Palette.
+- `(p Paletted) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p Paletted) Layout() Layout`: Layout is the image's pixel buffer and palette.
+- `(p Paletted) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of pixel (x, y).
+- `(p Paletted) At(x i64, y i64) color.RGBA64`: At is the palette color of the pixel at (x, y), premultiplied (the first palette color outside the bounds, zero for an empty palette).
+- `(p Paletted) ColorIndexAt(x i64, y i64) u8`: ColorIndexAt is the palette index at (x, y) (0 outside the bounds).
+- `(p mut Paletted) Set(x i64, y i64, c color.RGBA64)`: Set stores the index of the palette color nearest to c at (x, y) (nothing outside the bounds).
+- `(p mut Paletted) SetColorIndex(x i64, y i64, index u8)`: SetColorIndex stores index at (x, y) (nothing outside the bounds).
+- `(p Paletted) SubImage(r Rectangle) Paletted`: SubImage is the part of p inside r, sharing p's pixels and palette.
+- `(p Paletted) Opaque() bool`: Opaque reports whether every palette color some pixel uses is fully opaque.
+- `type Uniform struct`: Uniform is an image of one color everywhere (Go's bounds: a square of side 2e9 around the origin); it is also a color.Color.
+- `NewUniform[C color.Color](c C) Uniform`: NewUniform is the image of color c everywhere.
+- `(u Uniform) RGBA() (u32, u32, u32, u32)`: RGBA is the uniform color's 16-bit premultiplied channels.
+- `(u Uniform) ColorModel() color.Model`: ColorModel is RGBA64Model (Go answers the Uniform itself).
+- `(u Uniform) Bounds() Rectangle`: Bounds is (-1e9,-1e9)-(1e9,1e9).
+- `(u Uniform) At(x i64, y i64) color.RGBA64`: At is the color, wherever.
+- `(u Uniform) Layout() Layout`: Layout says a Uniform has no pixel buffer.
+- `(u Uniform) Opaque() bool`: Opaque reports whether the color is fully opaque.
+- `type RGBA struct`: RGBA is an image of 8-bit premultiplied colors: R, G, B, A per pixel.
+- `NewRGBA(r Rectangle) RGBA`: NewRGBA is a transparent black RGBA image of r.
+- `(p RGBA) ColorModel() color.Model`: ColorModel is RGBAModel.
+- `(p RGBA) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p RGBA) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p RGBA) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p RGBA) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) in 16 bits (zero outside the bounds).
+- `(p RGBA) RGBAAt(x i64, y i64) color.RGBA`: RGBAAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut RGBA) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y) (nothing outside the bounds).
+- `(p mut RGBA) SetRGBA(x i64, y i64, c color.RGBA)`: SetRGBA stores c at (x, y) (nothing outside the bounds).
+- `(p RGBA) SubImage(r Rectangle) RGBA`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p RGBA) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type RGBA64 struct`: RGBA64 is an image of 16-bit premultiplied colors: R, G, B, A per pixel, each big-endian.
+- `NewRGBA64(r Rectangle) RGBA64`: NewRGBA64 is a transparent black RGBA64 image of r.
+- `(p RGBA64) ColorModel() color.Model`: ColorModel is RGBA64Model.
+- `(p RGBA64) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p RGBA64) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p RGBA64) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p RGBA64) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y) (zero outside the bounds).
+- `(p RGBA64) RGBA64At(x i64, y i64) color.RGBA64`: RGBA64At is At.
+- `(p mut RGBA64) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y) (nothing outside the bounds).
+- `(p mut RGBA64) SetRGBA64(x i64, y i64, c color.RGBA64)`: SetRGBA64 is Set.
+- `(p RGBA64) SubImage(r Rectangle) RGBA64`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p RGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type NRGBA struct`: NRGBA is an image of 8-bit colors that are not premultiplied: R, G, B, A per pixel.
+- `NewNRGBA(r Rectangle) NRGBA`: NewNRGBA is a transparent black NRGBA image of r.
+- `(p NRGBA) ColorModel() color.Model`: ColorModel is NRGBAModel.
+- `(p NRGBA) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p NRGBA) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p NRGBA) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p NRGBA) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y), premultiplied, in 16 bits (zero outside the bounds).
+- `(p NRGBA) NRGBAAt(x i64, y i64) color.NRGBA`: NRGBAAt is the pixel at (x, y) (zero outside the bounds).
+- `(p mut NRGBA) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+- `(p mut NRGBA) SetNRGBA(x i64, y i64, c color.NRGBA)`: SetNRGBA stores c at (x, y) (nothing outside the bounds).
+- `(p NRGBA) SubImage(r Rectangle) NRGBA`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p NRGBA) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type NRGBA64 struct`: NRGBA64 is an image of 16-bit colors that are not premultiplied: R, G, B, A per pixel, each big-endian.
+- `NewNRGBA64(r Rectangle) NRGBA64`: NewNRGBA64 is a transparent black NRGBA64 image of r.
+- `(p NRGBA64) ColorModel() color.Model`: ColorModel is NRGBA64Model.
+- `(p NRGBA64) Bounds() Rectangle`: Bounds is the image's rectangle.
+- `(p NRGBA64) Layout() Layout`: Layout is the image's pixel buffer.
+- `(p NRGBA64) PixOffset(x i64, y i64) i64`: PixOffset is the index in Pix of the first byte of pixel (x, y).
+- `(p NRGBA64) At(x i64, y i64) color.RGBA64`: At is the pixel at (x, y), premultiplied (zero outside the bounds).
+- `(p NRGBA64) NRGBA64At(x i64, y i64) color.NRGBA64`: NRGBA64At is the pixel at (x, y) (zero outside the bounds).
+- `(p mut NRGBA64) Set(x i64, y i64, c color.RGBA64)`: Set stores c at (x, y), premultiplication undone (nothing outside the bounds).
+- `(p mut NRGBA64) SetNRGBA64(x i64, y i64, c color.NRGBA64)`: SetNRGBA64 stores c at (x, y) (nothing outside the bounds).
+- `(p NRGBA64) SubImage(r Rectangle) NRGBA64`: SubImage is the part of p inside r, sharing p's pixels.
+- `(p NRGBA64) Opaque() bool`: Opaque reports whether every pixel is fully opaque.
+- `type Huffman struct`
+- `type Component struct`
+- `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline or progressive JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
+- `type Bits struct`
 
 ## textedit
 

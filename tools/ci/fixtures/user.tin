@@ -1,0 +1,55 @@
+package main
+
+import "quarry"
+import "say"
+import "twine"
+import "user"
+
+fn main() {
+	let input = quarry.ReadStdin() catch _ { return }
+	for line in twine.Split(input, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		let f = twine.Split(line, "\t")
+		if f[0] == "C" {
+			let u = user.Current() catch err {
+				say.Line("E\t" + say.Str(err))
+				continue
+			}
+			printUser(u)
+		} else if f[0] == "I" {
+			let u = user.LookupId(f[1]) catch err {
+				say.Line("E\t" + say.Str(err))
+				continue
+			}
+			printUser(u)
+		} else if f[0] == "N" {
+			let u = user.Lookup(f[1]) catch err {
+				say.Line("E\t" + say.Str(err))
+				continue
+			}
+			printUser(u)
+		} else if f[0] == "G" {
+			let g = user.LookupGroup(f[1]) catch err {
+				say.Line("E\t" + say.Str(err))
+				continue
+			}
+			say.Line("G\t" + g.Name + "\t" + g.Gid)
+		} else if f[0] == "M" {
+			let u = user.LookupId(f[1]) catch err {
+				say.Line("E\t" + say.Str(err))
+				continue
+			}
+			let ids = u.GroupIds() catch err {
+				say.Line("E\t" + say.Str(err))
+				continue
+			}
+			say.Line("M\t" + twine.Join(ids, ","))
+		}
+	}
+}
+
+fn printUser(u user.User) {
+	say.Line("U\t" + u.Username + "\t" + u.Uid + "\t" + u.Gid + "\t" + u.Name + "\t" + u.HomeDir)
+}

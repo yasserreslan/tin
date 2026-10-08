@@ -1,0 +1,22 @@
+package main
+
+import "./ci"
+
+// RFC 9180 Appendix A base-mode vectors and generated HPKE cases agree with Go's crypto/hpke.
+fn main() {
+	let want = ci.Read(ci.Join(ci.Root(), "toolchain/tests/v2/seal_hpke.out"))
+	let goout = ci.Exec([]str{"go", "run", "./bench/ref/seal_hpke"}, ci.Root(), 180)
+	ci.Must(goout, "go run seal_hpke")
+	ci.Check(goout.Stdout == want, "Go HPKE twin differs from seal_hpke.out:\n" + goout.Stdout)
+	let dir = ci.Join(ci.Root(), "bin/ci")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "hpke-")
+	let exe = ci.Join(work, "seal_hpke")
+	ci.BuildTin("toolchain/tests/v2/seal_hpke.tin", exe, "", []str{})
+	let tin = ci.Exec([]str{exe}, ci.Root(), 60)
+	ci.Remove(work)
+	ci.Must(tin, "seal_hpke")
+	ci.Check(tin.Stdout == want, "Tin differs from seal_hpke.out:\n" + tin.Stdout)
+	ci.Check(tin.Stdout == goout.Stdout, "Tin HPKE results differ from Go")
+	ci.Pass("HPKE base mode: RFC 9180 vectors and generated round trips agree with Go across 6 combinations")
+}

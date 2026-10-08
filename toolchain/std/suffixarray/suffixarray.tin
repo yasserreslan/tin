@@ -1,0 +1,209 @@
+// Package suffixarray indexes byte substrings. An Index keeps its owned text and one i64 per suffix (~9N steady state, ~25N during construction).
+package suffixarray
+
+import "io"
+import "pack"
+import "sift"
+import "say"
+
+// Index stores an owned copy of the indexed bytes and one i64 offset per suffix.
+type Index struct {
+	data []u8
+	sa   []i64
+}
+
+// New copies data and builds a suffix array using prefix doubling.
+fn New(data []u8) Index {
+	mut text = make([]u8, len(data))
+	copy(text, data)
+	let n = len(text)
+	mut sa = make([]i64, n)
+	mut rank = make([]i64, n)
+	mut next = make([]i64, n)
+	for i in 0..n {
+		sa[i] = i
+		rank[i] = i64(text[i])
+	}
+	mut width = i64(1)
+	for n > 1 {
+		let step = width
+		sift.SortFunc(mut sa, fn(a i64, b i64) i64 {
+			if rank[a] < rank[b] {
+				return -1
+			}
+			if rank[a] > rank[b] {
+				return 1
+			}
+			let ar = a + step
+			let br = b + step
+			let av = rankAt(rank, ar, n)
+			let bv = rankAt(rank, br, n)
+			if av < bv {
+				return -1
+			}
+			if av > bv {
+				return 1
+			}
+			return 0
+		})
+		next[sa[0]] = 0
+		for i in 1..n {
+			let a = sa[i - 1]
+			let b = sa[i]
+			let ar = a + width
+			let br = b + width
+			let av = rankAt(rank, ar, n)
+			let bv = rankAt(rank, br, n)
+			next[b] = next[a]
+			if rank[a] != rank[b] || av != bv {
+				next[b] += 1
+			}
+		}
+		copy(rank, next)
+		if rank[sa[n - 1]] == n - 1 {
+			break
+		}
+		width *= 2
+	}
+	return Index{data: text, sa: sa}
+}
+
+fn rankAt(rank []i64, pos i64, n i64) i64 {
+	if pos >= n { return -1 }
+	return rank[pos]
+}
+
+// Bytes returns the indexed bytes; callers must treat them as read-only.
+fn (x Index) Bytes() []u8 {
+	return x.data
+}
+
+// Lookup returns up to n matching offsets in suffix-array order; n < 0 returns all, and empty s or n == 0 returns none.
+fn (x Index) Lookup(s []u8, n i64) []i64 {
+	if len(s) == 0 || n == 0 {
+		return []i64{}
+	}
+	let first = x.lower(s)
+	if first >= len(x.sa) || x.compare(x.sa[first], s) != 0 {
+		return []i64{}
+	}
+	mut end = first
+	for end < len(x.sa) && x.hasPrefix(x.sa[end], s) {
+		end += 1
+	}
+	let count = end - first
+	if n < 0 || n > count {
+		n = count
+	}
+	mut out = make([]i64, n)
+	copy(out, x.sa[first:first+n])
+	return out
+}
+
+// FindAllIndex returns all matching offsets in ascending text order.
+fn (x Index) FindAllIndex(s []u8) []i64 {
+	mut out = x.Lookup(s, -1)
+	sift.Sort(mut out)
+	return out
+}
+
+// lower finds the first suffix not lexicographically less than s.
+fn (x Index) lower(s []u8) i64 {
+	mut lo = i64(0)
+	mut hi = len(x.sa)
+	for lo < hi {
+		let mid = lo + (hi - lo) / 2
+		if x.compare(x.sa[mid], s) < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// compare compares the suffix at off with s, treating a shorter equal prefix as less.
+fn (x Index) compare(off i64, s []u8) i64 {
+	let available = len(x.data) - off
+	mut n = available
+	if len(s) < n { n = len(s) }
+	for i in 0..n {
+		if x.data[off+i] < s[i] {
+			return -1
+		}
+		if x.data[off+i] > s[i] {
+			return 1
+		}
+	}
+	if available < len(s) {
+		return -1
+	}
+	return 0
+}
+
+// hasPrefix reports whether the suffix at off begins with s.
+fn (x Index) hasPrefix(off i64, s []u8) bool {
+	if len(x.data)-off < len(s) {
+		return false
+	}
+	for i in 0..len(s) {
+		if x.data[off+i] != s[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Read loads a Go index/suffixarray binary stream and validates every decoded suffix offset.
+fn Read[S io.Reader](x mut Index, r mut S) ! {
+	let length = try readInt(mut r)
+	if length < 0 || length > 9223372036854775807 {
+		fail say.Fault("suffixarray: invalid data length")
+	}
+	let n = length
+	mut data = make([]u8, n)
+	try readFull(mut r, mut data)
+	mut sa = make([]i64, n)
+	mut i = i64(0)
+	for i < n {
+		let size = try readInt(mut r)
+		if size < 10 || size > 16384 {
+			fail say.Fault("suffixarray: invalid index chunk")
+		}
+		mut chunk = make([]u8, size)
+		try readFull(mut r, mut chunk[10:size])
+		mut p = i64(10)
+		for p < size {
+			if i >= n {
+				fail say.Fault("suffixarray: corrupt index")
+			}
+			let (value, used) = try pack.Uvarint(chunk[p:size])
+			if value >= u64(n) {
+				fail say.Fault("suffixarray: corrupt index")
+			}
+			sa[i] = i64(value)
+			i += 1
+			p += used
+		}
+	}
+	x.data = data
+	x.sa = sa
+}
+
+fn readInt[S io.Reader](r mut S) !i64 {
+	mut bytes = make([]u8, 10)
+	try readFull(mut r, mut bytes)
+	let (value, _) = try pack.Varint(bytes)
+	return value
+}
+
+fn readFull[S io.Reader](r mut S, dst mut []u8) ! {
+	mut off = i64(0)
+	for off < len(dst) {
+		let got = try r.Read(mut dst[off:])
+		if got <= 0 {
+			fail say.Fault("suffixarray: unexpected end of input")
+		}
+		off += got
+	}
+}

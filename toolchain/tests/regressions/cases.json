@@ -1113,5 +1113,16 @@
       "stdout": "7\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "spawn-pipe-descriptors.tin",
+    "issue": 926,
+    "platform": "linux",
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "spawn: 300 descriptors held, the output pipe answered and a failed execve named its errno\n",
+      "stderr": ""
+    }
   }
 ]

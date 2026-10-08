@@ -1,0 +1,611 @@
+// Package draw is Go's image/draw: Porter-Duff composition of one image onto another (Over and Src, with an optional
+// mask), clipped to every image's bounds, and Floyd-Steinberg dithering onto a palette. The results are Go's to the
+// byte: the same fast paths for the same image pairs (each rounds as Go's does) and the same 16-bit general path.
+//
+//	mut dst = image.NewRGBA(image.Rect(0, 0, 100, 100))
+//	draw.Draw(mut dst, dst.Bounds(), image.NewUniform(color.RGBA{R: 255, A: 255}), image.Point{}, draw.Src)
+//	draw.DrawMask(mut dst, r, src, sp, mask, mp, draw.Over)
+//
+// An Image's Set is Go's SetRGBA64 and its At is Go's RGBA64At, which is what Go's draw uses for every image of the
+// standard library. A destination and a source are the same image when their Layouts share the pixel slice.
+package draw
+
+import "image"
+import "image/color"
+
+// Image is an image whose pixels can be set (Go's draw.Image): Set stores a 16-bit premultiplied color the way the
+// image keeps colors.
+shape Image {
+	image.Image
+	mut Set(x i64, y i64, c color.RGBA64)
+}
+
+// Op is a Porter-Duff compositing operator.
+type Op i64
+
+// Over is (src in mask) over dst.
+const Over Op = 0
+
+// Src is src in mask: dst is replaced.
+const Src Op = 1
+
+// m is the largest 16-bit channel value.
+const m = 0xffff
+
+// Draw is DrawMask with no mask (an opaque one).
+fn Draw(dst mut dyn Image, r image.Rectangle, src dyn image.Image, sp image.Point, op Op) {
+	DrawMask(mut dst, r, src, sp, nil, image.Point{}, op)
+}
+
+// Draw is the operator as a drawer: Draw(dst, r, src, sp, op).
+fn (op Op) Draw(dst mut dyn Image, r image.Rectangle, src dyn image.Image, sp image.Point) {
+	DrawMask(mut dst, r, src, sp, nil, image.Point{}, op)
+}
+
+// clipped is a drawing rectangle and the source and mask points that go with its corner.
+type clipped value struct {
+	r  image.Rectangle
+	sp image.Point
+	mp image.Point
+}
+
+// clip intersects r with each image's bounds (moved into dst's space) and moves sp and mp as far as r.Min moved.
+fn clip(db image.Rectangle, r0 image.Rectangle, sb image.Rectangle, sp image.Point, hasMask bool, mb image.Rectangle, mp image.Point) clipped {
+	let orig = r0.Min
+	mut r = r0.Intersect(db)
+	r = r.Intersect(sb.Add(orig.Sub(sp)))
+	if hasMask {
+		r = r.Intersect(mb.Add(orig.Sub(mp)))
+	}
+	let d = r.Min.Sub(orig)
+	return clipped{r: r, sp: sp.Add(d), mp: mp.Add(d)}
+}
+
+// sameImage reports whether two layouts are one image (Go compares the image values).
+fn sameImage(a image.Layout, b image.Layout) bool {
+	return a.Kind == b.Kind && a.Kind != image.Custom && a.Kind != image.KindUniform && same(a.Pix, b.Pix) && a.Rect == b.Rect && a.Stride == b.Stride
+}
+
+// processBackward reports whether a copy within one image must run bottom-up, right to left.
+fn processBackward(sameImg bool, r image.Rectangle, sp image.Point) bool {
+	return sameImg && r.Overlaps(r.Add(sp.Sub(r.Min))) && (sp.Y < r.Min.Y || (sp.Y == r.Min.Y && sp.X < r.Min.X))
+}
+
+// DrawMask aligns r.Min in dst with sp in src and mp in mask, and replaces the rectangle r of dst with the Porter-Duff
+// composition of src in mask (nil: opaque) and dst.
+fn DrawMask(dst mut dyn Image, r0 image.Rectangle, src dyn image.Image, sp0 image.Point, mask ?dyn image.Image, mp0 image.Point, op Op) {
+	mut dl = dst.Layout()
+	let sl = src.Layout()
+	mut ml = image.Layout{}
+	mut mb = image.Rectangle{}
+	if mask != nil {
+		ml = mask.Layout()
+		mb = mask.Bounds()
+	}
+	let c = clip(dst.Bounds(), r0, src.Bounds(), sp0, mask != nil, mb, mp0)
+	let r = c.r
+	let sp = c.sp
+	let mp = c.mp
+	if r.Empty() {
+		return
+	}
+	let sameImg = sameImage(dl, sl)
+	if dl.Kind == image.KindRGBA {
+		if op == Over {
+			if mask == nil {
+				if sl.Kind == image.KindUniform {
+					let u = src.At(0, 0)
+					if u.A == 0xffff {
+						drawFillSrc(mut dl, r, u)
+					} else {
+						drawFillOver(mut dl, r, u)
+					}
+					return
+				} else if sl.Kind == image.KindRGBA {
+					drawCopyOver(mut dl, r, sl, sp)
+					return
+				} else if sl.Kind == image.KindNRGBA {
+					drawNRGBA(mut dl, r, sl, sp, true)
+					return
+				} else if sl.Kind == image.KindGray {
+					drawGray(mut dl, r, sl, sp)
+					return
+				}
+			} else if ml.Kind == image.KindAlpha {
+				if sl.Kind == image.KindUniform {
+					drawGlyphOver(mut dl, r, src.At(0, 0), ml, mp)
+				} else if sl.Kind == image.KindRGBA {
+					drawRGBAMaskOver(mut dl, r, sl, sp, ml, mp, sameImg)
+				} else if sl.Kind == image.KindGray {
+					drawGrayMaskOver(mut dl, r, sl, sp, ml, mp)
+				} else {
+					drawImageMaskOver(mut dl, r, src, sp, ml, mp, sameImg)
+				}
+				return
+			}
+		} else if mask == nil {
+			if sl.Kind == image.KindUniform {
+				drawFillSrc(mut dl, r, src.At(0, 0))
+				return
+			} else if sl.Kind == image.KindRGBA {
+				drawCopySrc(mut dl, r, sl, sp, 4)
+				return
+			} else if sl.Kind == image.KindNRGBA {
+				drawNRGBA(mut dl, r, sl, sp, false)
+				return
+			} else if sl.Kind == image.KindGray {
+				drawGray(mut dl, r, sl, sp)
+				return
+			}
+		}
+		drawRGBA(mut dl, r, src, sp, mask, mp, op, sameImg)
+		return
+	} else if dl.Kind == image.KindPaletted {
+		if op == Src && mask == nil {
+			if sl.Kind == image.KindUniform {
+				let pal color.Palette = dl.Palette
+				let index = u8(pal.Index(src.At(0, 0)))
+				for y in r.Min.Y..r.Max.Y {
+					let i0 = offset(dl, r.Min.X, y, 1)
+					for i in i0..i0+r.Dx() {
+						dl.Pix[i] = index
+					}
+				}
+				return
+			} else if !processBackward(sameImg, r, sp) {
+				drawPaletted(mut dst, r, src, sp, false)
+				return
+			}
+		}
+	} else if dl.Kind == image.KindNRGBA {
+		if op == Src && mask == nil && sl.Kind == image.KindNRGBA {
+			drawCopySrc(mut dl, r, sl, sp, 4)
+			return
+		}
+	} else if dl.Kind == image.KindNRGBA64 {
+		if op == Src && mask == nil && sl.Kind == image.KindNRGBA64 {
+			drawCopySrc(mut dl, r, sl, sp, 8)
+			return
+		}
+	}
+	drawGeneral(mut dst, r, src, sp, mask, mp, op, processBackward(sameImg, r, sp))
+}
+
+// offset is the index in l.Pix of the first byte of pixel (x, y), n bytes per pixel.
+fn offset(l image.Layout, x i64, y i64, n i64) i64 {
+	return (y-l.Rect.Min.Y)*l.Stride + (x-l.Rect.Min.X)*n
+}
+
+// drawGeneral is Go's path for any two images that read and write 16-bit colors (its FALLBACK1.17).
+@wrap fn drawGeneral(dst mut dyn Image, r image.Rectangle, src dyn image.Image, sp image.Point, mask ?dyn image.Image, mp image.Point, op Op, backward bool) {
+	mut x0 = r.Min.X
+	mut x1 = r.Max.X
+	mut dx = i64(1)
+	mut y0 = r.Min.Y
+	mut y1 = r.Max.Y
+	mut dy = i64(1)
+	if backward {
+		x0 = r.Max.X - 1
+		x1 = r.Min.X - 1
+		dx = -1
+		y0 = r.Max.Y - 1
+		y1 = r.Min.Y - 1
+		dy = -1
+	}
+	mut sy = sp.Y + y0 - r.Min.Y
+	mut my = mp.Y + y0 - r.Min.Y
+	mut y = y0
+	for y != y1 {
+		mut sx = sp.X + x0 - r.Min.X
+		mut mx = mp.X + x0 - r.Min.X
+		mut x = x0
+		for x != x1 {
+			mut ma = u32(m)
+			if mask != nil {
+				ma = u32(mask.At(mx, my).A)
+			}
+			if mask == nil && op == Src {
+				dst.Set(x, y, src.At(sx, sy))
+			} else if mask == nil {
+				let s = src.At(sx, sy)
+				let a = m - u32(s.A)
+				let d = dst.At(x, y)
+				dst.Set(x, y, color.RGBA64{R: u16((u32(d.R)*a)/m + u32(s.R)), G: u16((u32(d.G)*a)/m + u32(s.G)), B: u16((u32(d.B)*a)/m + u32(s.B)), A: u16((u32(d.A)*a)/m + u32(s.A))})
+			} else if ma == 0 {
+				if op == Src {
+					dst.Set(x, y, color.RGBA64{})
+				}
+			} else if ma == m && op == Src {
+				dst.Set(x, y, src.At(sx, sy))
+			} else {
+				let s = src.At(sx, sy)
+				if op == Over {
+					let d = dst.At(x, y)
+					let a = m - (u32(s.A) * ma / m)
+					dst.Set(x, y, color.RGBA64{R: u16((u32(d.R)*a + u32(s.R)*ma) / m), G: u16((u32(d.G)*a + u32(s.G)*ma) / m), B: u16((u32(d.B)*a + u32(s.B)*ma) / m), A: u16((u32(d.A)*a + u32(s.A)*ma) / m)})
+				} else {
+					dst.Set(x, y, color.RGBA64{R: u16(u32(s.R) * ma / m), G: u16(u32(s.G) * ma / m), B: u16(u32(s.B) * ma / m), A: u16(u32(s.A) * ma / m)})
+				}
+			}
+			x += dx
+			sx += dx
+			mx += dx
+		}
+		y += dy
+		sy += dy
+		my += dy
+	}
+}
+
+// drawFillOver composes the premultiplied color c over the rectangle r of an RGBA image.
+@wrap fn drawFillOver(dst mut image.Layout, r image.Rectangle, c color.RGBA64) {
+	let sr = u32(c.R)
+	let sg = u32(c.G)
+	let sb = u32(c.B)
+	let sa = u32(c.A)
+	let a = (m - sa) * 0x101
+	for y in r.Min.Y..r.Max.Y {
+		let i0 = offset(dst, r.Min.X, y, 4)
+		let i1 = i0 + r.Dx()*4
+		mut i = i0
+		for i < i1 {
+			dst.Pix[i] = u8((u32(dst.Pix[i])*a/m + sr) >> 8)
+			dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a/m + sg) >> 8)
+			dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a/m + sb) >> 8)
+			dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a/m + sa) >> 8)
+			i += 4
+		}
+	}
+}
+
+// drawFillSrc fills the rectangle r of an RGBA image with c's top bytes.
+fn drawFillSrc(dst mut image.Layout, r image.Rectangle, c color.RGBA64) {
+	let sr = u8(c.R >> 8)
+	let sg = u8(c.G >> 8)
+	let sb = u8(c.B >> 8)
+	let sa = u8(c.A >> 8)
+	for y in r.Min.Y..r.Max.Y {
+		let i0 = offset(dst, r.Min.X, y, 4)
+		let i1 = i0 + r.Dx()*4
+		mut i = i0
+		for i < i1 {
+			dst.Pix[i] = sr
+			dst.Pix[i+1] = sg
+			dst.Pix[i+2] = sb
+			dst.Pix[i+3] = sa
+			i += 4
+		}
+	}
+}
+
+// drawCopyOver composes an RGBA image over an RGBA image, row order chosen so that a copy within one image is right.
+@wrap fn drawCopyOver(dst mut image.Layout, r image.Rectangle, src image.Layout, sp image.Point) {
+	let dx = r.Dx()
+	mut dy = r.Dy()
+	mut d0 = offset(dst, r.Min.X, r.Min.Y, 4)
+	mut s0 = offset(src, sp.X, sp.Y, 4)
+	mut ddelta = dst.Stride
+	mut sdelta = src.Stride
+	mut i0 = i64(0)
+	mut i1 = dx * 4
+	mut idelta = i64(4)
+	if !(r.Min.Y < sp.Y || r.Min.Y == sp.Y && r.Min.X <= sp.X) {
+		d0 += (dy - 1) * dst.Stride
+		s0 += (dy - 1) * src.Stride
+		ddelta = -dst.Stride
+		sdelta = -src.Stride
+		i0 = (dx - 1) * 4
+		i1 = -4
+		idelta = -4
+	}
+	for dy > 0 {
+		mut i = i0
+		for i != i1 {
+			let sr = u32(src.Pix[s0+i]) * 0x101
+			let sg = u32(src.Pix[s0+i+1]) * 0x101
+			let sb = u32(src.Pix[s0+i+2]) * 0x101
+			let sa = u32(src.Pix[s0+i+3]) * 0x101
+			let a = (m - sa) * 0x101
+			let d = d0 + i
+			dst.Pix[d] = u8((u32(dst.Pix[d])*a/m + sr) >> 8)
+			dst.Pix[d+1] = u8((u32(dst.Pix[d+1])*a/m + sg) >> 8)
+			dst.Pix[d+2] = u8((u32(dst.Pix[d+2])*a/m + sb) >> 8)
+			dst.Pix[d+3] = u8((u32(dst.Pix[d+3])*a/m + sa) >> 8)
+			i += idelta
+		}
+		d0 += ddelta
+		s0 += sdelta
+		dy -= 1
+	}
+}
+
+// drawCopySrc copies rows of n-byte pixels between images of one layout, bottom-up when the source is above.
+fn drawCopySrc(dst mut image.Layout, r image.Rectangle, src image.Layout, sp image.Point, n i64) {
+	let rowBytes = r.Dx() * n
+	mut dy = r.Dy()
+	mut d0 = offset(dst, r.Min.X, r.Min.Y, n)
+	mut s0 = offset(src, sp.X, sp.Y, n)
+	mut ddelta = dst.Stride
+	mut sdelta = src.Stride
+	if r.Min.Y > sp.Y {
+		d0 += (dy - 1) * dst.Stride
+		s0 += (dy - 1) * src.Stride
+		ddelta = -dst.Stride
+		sdelta = -src.Stride
+	}
+	for dy > 0 {
+		copy(dst.Pix[d0:d0+rowBytes], src.Pix[s0:s0+rowBytes])
+		d0 += ddelta
+		s0 += sdelta
+		dy -= 1
+	}
+}
+
+// drawNRGBA draws an NRGBA image on an RGBA image, premultiplying it: over the destination, or replacing it.
+@wrap fn drawNRGBA(dst mut image.Layout, r image.Rectangle, src image.Layout, sp image.Point, over bool) {
+	mut sy = sp.Y
+	for y in r.Min.Y..r.Max.Y {
+		mut i = offset(dst, r.Min.X, y, 4)
+		let i1 = offset(dst, r.Max.X, y, 4)
+		mut si = offset(src, sp.X, sy, 4)
+		for i < i1 {
+			let sa = u32(src.Pix[si+3]) * 0x101
+			let sr = u32(src.Pix[si]) * sa / 0xff
+			let sg = u32(src.Pix[si+1]) * sa / 0xff
+			let sb = u32(src.Pix[si+2]) * sa / 0xff
+			if over {
+				let a = (m - sa) * 0x101
+				dst.Pix[i] = u8((u32(dst.Pix[i])*a/m + sr) >> 8)
+				dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a/m + sg) >> 8)
+				dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a/m + sb) >> 8)
+				dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a/m + sa) >> 8)
+			} else {
+				dst.Pix[i] = u8(sr >> 8)
+				dst.Pix[i+1] = u8(sg >> 8)
+				dst.Pix[i+2] = u8(sb >> 8)
+				dst.Pix[i+3] = u8(sa >> 8)
+			}
+			i += 4
+			si += 4
+		}
+		sy += 1
+	}
+}
+
+// drawGray copies a Gray image into an RGBA image (gray is opaque, so Over is Src).
+fn drawGray(dst mut image.Layout, r image.Rectangle, src image.Layout, sp image.Point) {
+	mut sy = sp.Y
+	for y in r.Min.Y..r.Max.Y {
+		mut i = offset(dst, r.Min.X, y, 4)
+		let i1 = offset(dst, r.Max.X, y, 4)
+		mut si = offset(src, sp.X, sy, 1)
+		for i < i1 {
+			let p = src.Pix[si]
+			dst.Pix[i] = p
+			dst.Pix[i+1] = p
+			dst.Pix[i+2] = p
+			dst.Pix[i+3] = 255
+			i += 4
+			si += 1
+		}
+		sy += 1
+	}
+}
+
+// drawGlyphOver composes the premultiplied color c through an Alpha mask over an RGBA image.
+@wrap fn drawGlyphOver(dst mut image.Layout, r image.Rectangle, c color.RGBA64, mask image.Layout, mp image.Point) {
+	let sr = u32(c.R)
+	let sg = u32(c.G)
+	let sb = u32(c.B)
+	let sa = u32(c.A)
+	mut my = mp.Y
+	for y in r.Min.Y..r.Max.Y {
+		mut i = offset(dst, r.Min.X, y, 4)
+		let i1 = i + r.Dx()*4
+		mut mi = offset(mask, mp.X, my, 1)
+		for i < i1 {
+			mut ma = u32(mask.Pix[mi])
+			if ma != 0 {
+				ma |= ma << 8
+				let a = (m - (sa * ma / m)) * 0x101
+				dst.Pix[i] = u8((u32(dst.Pix[i])*a + sr*ma) / m >> 8)
+				dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a + sg*ma) / m >> 8)
+				dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a + sb*ma) / m >> 8)
+				dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a + sa*ma) / m >> 8)
+			}
+			i += 4
+			mi += 1
+		}
+		my += 1
+	}
+}
+
+// walk is the order a masked composition visits the pixels in: x0, x1, dx and y0, y1, dy.
+type walk value struct {
+	x0 i64
+	x1 i64
+	dx i64
+	y0 i64
+	y1 i64
+	dy i64
+}
+
+// walkOf is left to right, top-down, or the reverse when backward.
+fn walkOf(r image.Rectangle, backward bool) walk {
+	if backward {
+		return walk{x0: r.Max.X - 1, x1: r.Min.X - 1, dx: -1, y0: r.Max.Y - 1, y1: r.Min.Y - 1, dy: -1}
+	}
+	return walk{x0: r.Min.X, x1: r.Max.X, dx: 1, y0: r.Min.Y, y1: r.Max.Y, dy: 1}
+}
+
+// overlapBackward is Go's reversal test inside the masked fast paths.
+fn overlapBackward(r image.Rectangle, sp image.Point) bool {
+	return r.Overlaps(r.Add(sp.Sub(r.Min))) && (sp.Y < r.Min.Y || sp.Y == r.Min.Y && sp.X < r.Min.X)
+}
+
+// drawGrayMaskOver composes a Gray image through an Alpha mask over an RGBA image.
+@wrap fn drawGrayMaskOver(dst mut image.Layout, r image.Rectangle, src image.Layout, sp image.Point, mask image.Layout, mp image.Point) {
+	let w = walkOf(r, overlapBackward(r, sp))
+	mut sy = sp.Y + w.y0 - r.Min.Y
+	mut my = mp.Y + w.y0 - r.Min.Y
+	let sx0 = sp.X + w.x0 - r.Min.X
+	let mx0 = mp.X + w.x0 - r.Min.X
+	let sx1 = sx0 + (w.x1 - w.x0)
+	mut i0 = offset(dst, w.x0, w.y0, 4)
+	let di = w.dx * 4
+	mut y = w.y0
+	for y != w.y1 {
+		mut i = i0
+		mut sx = sx0
+		mut mx = mx0
+		for sx != sx1 {
+			mut ma = u32(mask.Pix[offset(mask, mx, my, 1)])
+			ma |= ma << 8
+			mut gy = u32(src.Pix[offset(src, sx, sy, 1)])
+			gy |= gy << 8
+			let sa = u32(0xffff)
+			let a = (m - (sa * ma / m)) * 0x101
+			dst.Pix[i] = u8((u32(dst.Pix[i])*a + gy*ma) / m >> 8)
+			dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a + gy*ma) / m >> 8)
+			dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a + gy*ma) / m >> 8)
+			dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a + sa*ma) / m >> 8)
+			i += di
+			sx += w.dx
+			mx += w.dx
+		}
+		i0 += w.dy * dst.Stride
+		y += w.dy
+		sy += w.dy
+		my += w.dy
+	}
+}
+
+// drawRGBAMaskOver composes an RGBA image through an Alpha mask over an RGBA image.
+@wrap fn drawRGBAMaskOver(dst mut image.Layout, r image.Rectangle, src image.Layout, sp image.Point, mask image.Layout, mp image.Point, sameImg bool) {
+	let w = walkOf(r, sameImg && overlapBackward(r, sp))
+	mut sy = sp.Y + w.y0 - r.Min.Y
+	mut my = mp.Y + w.y0 - r.Min.Y
+	let sx0 = sp.X + w.x0 - r.Min.X
+	let mx0 = mp.X + w.x0 - r.Min.X
+	let sx1 = sx0 + (w.x1 - w.x0)
+	mut i0 = offset(dst, w.x0, w.y0, 4)
+	let di = w.dx * 4
+	mut y = w.y0
+	for y != w.y1 {
+		mut i = i0
+		mut sx = sx0
+		mut mx = mx0
+		for sx != sx1 {
+			mut ma = u32(mask.Pix[offset(mask, mx, my, 1)])
+			ma |= ma << 8
+			let si = offset(src, sx, sy, 4)
+			let sr = u32(src.Pix[si]) * 0x101
+			let sg = u32(src.Pix[si+1]) * 0x101
+			let sb = u32(src.Pix[si+2]) * 0x101
+			let sa = u32(src.Pix[si+3]) * 0x101
+			let a = (m - (sa * ma / m)) * 0x101
+			dst.Pix[i] = u8((u32(dst.Pix[i])*a + sr*ma) / m >> 8)
+			dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a + sg*ma) / m >> 8)
+			dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a + sb*ma) / m >> 8)
+			dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a + sa*ma) / m >> 8)
+			i += di
+			sx += w.dx
+			mx += w.dx
+		}
+		i0 += w.dy * dst.Stride
+		y += w.dy
+		sy += w.dy
+		my += w.dy
+	}
+}
+
+// drawImageMaskOver composes any image through an Alpha mask over an RGBA image.
+@wrap fn drawImageMaskOver(dst mut image.Layout, r image.Rectangle, src dyn image.Image, sp image.Point, mask image.Layout, mp image.Point, sameImg bool) {
+	let w = walkOf(r, sameImg && overlapBackward(r, sp))
+	mut sy = sp.Y + w.y0 - r.Min.Y
+	mut my = mp.Y + w.y0 - r.Min.Y
+	let sx0 = sp.X + w.x0 - r.Min.X
+	let mx0 = mp.X + w.x0 - r.Min.X
+	let sx1 = sx0 + (w.x1 - w.x0)
+	mut i0 = offset(dst, w.x0, w.y0, 4)
+	let di = w.dx * 4
+	mut y = w.y0
+	for y != w.y1 {
+		mut i = i0
+		mut sx = sx0
+		mut mx = mx0
+		for sx != sx1 {
+			mut ma = u32(mask.Pix[offset(mask, mx, my, 1)])
+			ma |= ma << 8
+			let s = src.At(sx, sy)
+			let a = (m - (u32(s.A) * ma / m)) * 0x101
+			dst.Pix[i] = u8((u32(dst.Pix[i])*a + u32(s.R)*ma) / m >> 8)
+			dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a + u32(s.G)*ma) / m >> 8)
+			dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a + u32(s.B)*ma) / m >> 8)
+			dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a + u32(s.A)*ma) / m >> 8)
+			i += di
+			sx += w.dx
+			mx += w.dx
+		}
+		i0 += w.dy * dst.Stride
+		y += w.dy
+		sy += w.dy
+		my += w.dy
+	}
+}
+
+// drawRGBA composes any image through any mask (nil: opaque) onto an RGBA image, in 16 bits.
+@wrap fn drawRGBA(dst mut image.Layout, r image.Rectangle, src dyn image.Image, sp image.Point, mask ?dyn image.Image, mp image.Point, op Op, sameImg bool) {
+	let w = walkOf(r, sameImg && overlapBackward(r, sp))
+	mut sy = sp.Y + w.y0 - r.Min.Y
+	mut my = mp.Y + w.y0 - r.Min.Y
+	let sx0 = sp.X + w.x0 - r.Min.X
+	let mx0 = mp.X + w.x0 - r.Min.X
+	let sx1 = sx0 + (w.x1 - w.x0)
+	mut i0 = offset(dst, w.x0, w.y0, 4)
+	let di = w.dx * 4
+	mut y = w.y0
+	for y != w.y1 {
+		mut i = i0
+		mut sx = sx0
+		mut mx = mx0
+		for sx != sx1 {
+			let s = src.At(sx, sy)
+			if mask == nil {
+				if op == Over {
+					let a = (m - u32(s.A)) * 0x101
+					dst.Pix[i] = u8((u32(dst.Pix[i])*a/m + u32(s.R)) >> 8)
+					dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a/m + u32(s.G)) >> 8)
+					dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a/m + u32(s.B)) >> 8)
+					dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a/m + u32(s.A)) >> 8)
+				} else {
+					dst.Pix[i] = u8(s.R >> 8)
+					dst.Pix[i+1] = u8(s.G >> 8)
+					dst.Pix[i+2] = u8(s.B >> 8)
+					dst.Pix[i+3] = u8(s.A >> 8)
+				}
+			} else {
+				let ma = u32(mask.At(mx, my).A)
+				if op == Over {
+					let a = (m - (u32(s.A) * ma / m)) * 0x101
+					dst.Pix[i] = u8((u32(dst.Pix[i])*a + u32(s.R)*ma) / m >> 8)
+					dst.Pix[i+1] = u8((u32(dst.Pix[i+1])*a + u32(s.G)*ma) / m >> 8)
+					dst.Pix[i+2] = u8((u32(dst.Pix[i+2])*a + u32(s.B)*ma) / m >> 8)
+					dst.Pix[i+3] = u8((u32(dst.Pix[i+3])*a + u32(s.A)*ma) / m >> 8)
+				} else {
+					dst.Pix[i] = u8(u32(s.R) * ma / m >> 8)
+					dst.Pix[i+1] = u8(u32(s.G) * ma / m >> 8)
+					dst.Pix[i+2] = u8(u32(s.B) * ma / m >> 8)
+					dst.Pix[i+3] = u8(u32(s.A) * ma / m >> 8)
+				}
+			}
+			i += di
+			sx += w.dx
+			mx += w.dx
+		}
+		i0 += w.dy * dst.Stride
+		y += w.dy
+		sy += w.dy
+		my += w.dy
+	}
+}

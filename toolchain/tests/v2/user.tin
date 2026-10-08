@@ -1,0 +1,40 @@
+package main
+
+import "say"
+import "user"
+
+fn main() {
+	let current = user.Current() catch err {
+		say.Line("current fault", err)
+		return
+	}
+	let byID = user.LookupId(current.Uid) catch err {
+		say.Line("uid fault", err)
+		return
+	}
+	let byName = user.Lookup(current.Username) catch err {
+		say.Line("name fault", err)
+		return
+	}
+	let groups = current.GroupIds() catch err {
+		say.Line("groups fault", err)
+		return
+	}
+	say.Line("current", current.Username == byID.Username, current.Username == byName.Username, len(current.Username) > 0, len(current.Uid) > 0, len(current.Gid) > 0)
+	say.Line("groups", len(groups) > 0, contains(groups, current.Gid))
+	let (_, nameErr) = user.Lookup("tin-no-such-user-911")
+	let (_, uidErr) = user.LookupId("987654321")
+	let (_, groupErr) = user.LookupGroup("tin-no-such-group-911")
+	say.Line("missing user", nameErr)
+	say.Line("missing uid", uidErr)
+	say.Line("missing group", groupErr)
+}
+
+fn contains(xs []str, s str) bool {
+	for x in xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}

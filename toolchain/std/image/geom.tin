@@ -1,0 +1,198 @@
+package image
+
+import "image/color"
+
+// Point is an (X, Y) pair; X grows to the right and Y downwards.
+type Point value struct {
+	X i64
+	Y i64
+}
+
+// Pt is Point{X: x, Y: y}.
+fn Pt(x i64, y i64) Point {
+	return Point{X: x, Y: y}
+}
+
+// String is "(x,y)".
+fn (p Point) String() str {
+	return "({p.X},{p.Y})"
+}
+
+// Add is p + q.
+fn (p Point) Add(q Point) Point {
+	return Point{X: p.X + q.X, Y: p.Y + q.Y}
+}
+
+// Sub is p - q.
+fn (p Point) Sub(q Point) Point {
+	return Point{X: p.X - q.X, Y: p.Y - q.Y}
+}
+
+// Mul is p scaled by k.
+fn (p Point) Mul(k i64) Point {
+	return Point{X: p.X * k, Y: p.Y * k}
+}
+
+// Div is p divided by k (truncated toward zero).
+fn (p Point) Div(k i64) Point {
+	return Point{X: p.X / k, Y: p.Y / k}
+}
+
+// In reports whether p is inside r (Min inclusive, Max exclusive).
+fn (p Point) In(r Rectangle) bool {
+	return r.Min.X <= p.X && p.X < r.Max.X && r.Min.Y <= p.Y && p.Y < r.Max.Y
+}
+
+// Mod is the point of r congruent to p modulo r's width and height.
+fn (p Point) Mod(r Rectangle) Point {
+	let w = r.Dx()
+	let h = r.Dy()
+	mut q = p.Sub(r.Min)
+	q.X = q.X % w
+	if q.X < 0 {
+		q.X += w
+	}
+	q.Y = q.Y % h
+	if q.Y < 0 {
+		q.Y += h
+	}
+	return q.Add(r.Min)
+}
+
+// Eq reports whether p and q are the same point.
+fn (p Point) Eq(q Point) bool {
+	return p == q
+}
+
+// Rectangle holds the points with Min.X <= X < Max.X and Min.Y <= Y < Max.Y; it is well-formed when Min <= Max.
+// A Rectangle is also an Image: opaque inside, transparent outside (a mask).
+type Rectangle value struct {
+	Min Point
+	Max Point
+}
+
+// Rect is the rectangle with corners (x0, y0) and (x1, y1), swapped as needed to be well-formed.
+fn Rect(x0 i64, y0 i64, x1 i64, y1 i64) Rectangle {
+	return Rectangle{Min: Point{X: min(x0, x1), Y: min(y0, y1)}, Max: Point{X: max(x0, x1), Y: max(y0, y1)}}
+}
+
+// String is "(x0,y0)-(x1,y1)".
+fn (r Rectangle) String() str {
+	return r.Min.String() + "-" + r.Max.String()
+}
+
+// Dx is r's width.
+fn (r Rectangle) Dx() i64 {
+	return r.Max.X - r.Min.X
+}
+
+// Dy is r's height.
+fn (r Rectangle) Dy() i64 {
+	return r.Max.Y - r.Min.Y
+}
+
+// Size is r's width and height as a Point.
+fn (r Rectangle) Size() Point {
+	return Point{X: r.Max.X - r.Min.X, Y: r.Max.Y - r.Min.Y}
+}
+
+// Add is r moved by p.
+fn (r Rectangle) Add(p Point) Rectangle {
+	return Rectangle{Min: r.Min.Add(p), Max: r.Max.Add(p)}
+}
+
+// Sub is r moved by -p.
+fn (r Rectangle) Sub(p Point) Rectangle {
+	return Rectangle{Min: r.Min.Sub(p), Max: r.Max.Sub(p)}
+}
+
+// Inset is r shrunk by n on each side (negative n grows it); a side too short collapses to its midpoint.
+fn (r Rectangle) Inset(n i64) Rectangle {
+	mut s = r
+	if r.Dx() < 2*n {
+		s.Min.X = (r.Min.X + r.Max.X) / 2
+		s.Max.X = s.Min.X
+	} else {
+		s.Min.X += n
+		s.Max.X -= n
+	}
+	if r.Dy() < 2*n {
+		s.Min.Y = (r.Min.Y + r.Max.Y) / 2
+		s.Max.Y = s.Min.Y
+	} else {
+		s.Min.Y += n
+		s.Max.Y -= n
+	}
+	return s
+}
+
+// Intersect is the largest rectangle inside both r and s; the zero rectangle when they do not overlap.
+fn (r Rectangle) Intersect(s Rectangle) Rectangle {
+	let out = Rectangle{Min: Point{X: max(r.Min.X, s.Min.X), Y: max(r.Min.Y, s.Min.Y)}, Max: Point{X: min(r.Max.X, s.Max.X), Y: min(r.Max.Y, s.Max.Y)}}
+	if out.Empty() {
+		return Rectangle{}
+	}
+	return out
+}
+
+// Union is the smallest rectangle holding both r and s (an empty one is ignored).
+fn (r Rectangle) Union(s Rectangle) Rectangle {
+	if r.Empty() {
+		return s
+	}
+	if s.Empty() {
+		return r
+	}
+	return Rectangle{Min: Point{X: min(r.Min.X, s.Min.X), Y: min(r.Min.Y, s.Min.Y)}, Max: Point{X: max(r.Max.X, s.Max.X), Y: max(r.Max.Y, s.Max.Y)}}
+}
+
+// Empty reports whether r holds no points.
+fn (r Rectangle) Empty() bool {
+	return r.Min.X >= r.Max.X || r.Min.Y >= r.Max.Y
+}
+
+// Eq reports whether r and s hold the same points (any two empty rectangles are equal).
+fn (r Rectangle) Eq(s Rectangle) bool {
+	return r == s || r.Empty() && s.Empty()
+}
+
+// Overlaps reports whether r and s share a point.
+fn (r Rectangle) Overlaps(s Rectangle) bool {
+	return !r.Empty() && !s.Empty() && r.Min.X < s.Max.X && s.Min.X < r.Max.X && r.Min.Y < s.Max.Y && s.Min.Y < r.Max.Y
+}
+
+// In reports whether every point of r is in s.
+fn (r Rectangle) In(s Rectangle) bool {
+	if r.Empty() {
+		return true
+	}
+	return s.Min.X <= r.Min.X && r.Max.X <= s.Max.X && s.Min.Y <= r.Min.Y && r.Max.Y <= s.Max.Y
+}
+
+// Canon is r with its corners swapped as needed to be well-formed.
+fn (r Rectangle) Canon() Rectangle {
+	return Rect(r.Min.X, r.Min.Y, r.Max.X, r.Max.Y)
+}
+
+// At is opaque inside r and transparent outside.
+fn (r Rectangle) At(x i64, y i64) color.RGBA64 {
+	if Pt(x, y).In(r) {
+		return color.RGBA64{R: 0xffff, G: 0xffff, B: 0xffff, A: 0xffff}
+	}
+	return color.RGBA64{}
+}
+
+// Bounds is r.
+fn (r Rectangle) Bounds() Rectangle {
+	return r
+}
+
+// ColorModel is Alpha16Model.
+fn (r Rectangle) ColorModel() color.Model {
+	return color.Alpha16Model
+}
+
+// Layout says a Rectangle has no pixel buffer.
+fn (r Rectangle) Layout() Layout {
+	return Layout{Kind: Custom, Rect: r}
+}

@@ -1,0 +1,11 @@
+3 edition one
+hello.txt 8 10 438
+hello, zip
+limit
+raw.txt 0 6 511
+stored
+folder/ 0 0 2147484141
+
+bad CRC checksum
+zero CRC checksum
+truncated format

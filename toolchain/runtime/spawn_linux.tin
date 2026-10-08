@@ -49,7 +49,7 @@ fn rt_spawn_free(rec i64) {
 // rt_spawn_fail writes the positive errno to the error pipe and exits 127, as a failed execve
 // must not return into the child. r is the raw syscall result, -errno.
 fn rt_spawn_fail(rec i64, r i64) {
-	__st(rec[spawnErrBuf], 0 - r, 4)
+	__st(rec[spawnErrBuf], 0 - r, 2)
 	rt_sys_write(rec[spawnErrPipe], rec[spawnErrBuf], 4)
 	rt_sys_exit(127)
 }
@@ -100,19 +100,19 @@ fn rt_sys_posix_spawn(rec i64) (i64, i64) {
 		free(errp)
 		return -1, 0 - pr
 	}
-	rec[spawnErrPipe] = i64(i32(__ld(errp+4, 4)))
+	rec[spawnErrPipe] = i64(i32(__ld(errp+4, 2)))
 	let size = 8 * rt_page_size()
 	let stack = mem_map(size, MAP_STACK)
 	let pid = rt_sys_clone(spawnCloneFlags, stack+size, 0, 0, cast(i64, rt_spawn_child), rec)
 	let cloneErrno = rt_errno()
 	// The parent continues here: the child has execd or exited.
-	rt_sys_close(i64(i32(__ld(errp+4, 4))))
+	rt_sys_close(i64(i32(__ld(errp+4, 2))))
 	mut childErrno = i64(0)
-	let n = rt_sys_read(i64(i32(__ld(errp, 4))), rec[spawnErrBuf], 4)
+	let n = rt_sys_read(i64(i32(__ld(errp, 2))), rec[spawnErrBuf], 4)
 	if n == 4 {
-		childErrno = i64(i32(__ld(rec[spawnErrBuf], 4)))
+		childErrno = i64(i32(__ld(rec[spawnErrBuf], 2)))
 	}
-	rt_sys_close(i64(i32(__ld(errp, 4))))
+	rt_sys_close(i64(i32(__ld(errp, 2))))
 	free(errp)
 	rt_sys_munmap(stack, size)
 	if pid < 0 {
@@ -139,9 +139,9 @@ fn rt_spawn_reap(pid i64, pidfd i64, killFirst bool) (i64, i64) {
 		free(info)
 		return -1, 0
 	}
-	let code = i64(i32(__ld(info+8, 4)))  // si_code
+	let code = i64(i32(__ld(info+8, 2)))  // si_code
 	// SIGCHLD's siginfo: si_pid at 16, si_uid at 20, si_status at 24.
-	let status = i64(i32(__ld(info+24, 4))) // si_status
+	let status = i64(i32(__ld(info+24, 2))) // si_status
 	free(info)
 	if code == 1 { // CLD_EXITED
 		return status, 0

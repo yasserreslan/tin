@@ -1,0 +1,62 @@
+package user
+
+// User is an account from the system user database.
+type User struct {
+	// Username is the account's login name.
+	Username str
+	// Uid is the account's numeric user ID in decimal.
+	Uid      str
+	// Gid is the account's primary numeric group ID in decimal.
+	Gid      str
+	// Name is the account's full name.
+	Name     str
+	// HomeDir is the account's home directory.
+	HomeDir  str
+}
+
+// Group is an account from the system group database.
+type Group struct {
+	// Name is the group's name.
+	Name str
+	// Gid is the group's numeric ID in decimal.
+	Gid str
+}
+
+// Current returns the user identified by the process's real user ID.
+fn Current() !User {
+	let uid = try currentUID()
+	return try LookupId(uid)
+}
+
+// LookupId looks up a user by numeric user ID.
+fn LookupId(uid str) !User {
+	return try lookupId(uid)
+}
+
+// Lookup looks up a user by login name.
+fn Lookup(username str) !User {
+	return try lookupName(username)
+}
+
+// LookupGroup looks up a group by name.
+fn LookupGroup(name str) !Group {
+	return try lookupGroupName(name)
+}
+
+// GroupIds returns the IDs of the groups to which u belongs, including its primary group.
+fn (u User) GroupIds() ![]str {
+	if len(u.Username) == 0 {
+		fail "user: list groups: empty username"
+	}
+	return try lookupGroupIds(u)
+}
+
+// contains reports whether xs contains s.
+fn contains(xs []str, s str) bool {
+	for x in xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}

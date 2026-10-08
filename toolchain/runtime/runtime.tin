@@ -199,6 +199,180 @@ fn rt_fault_say(s str) {
 	rt_sys_write(2, cast(i64, s)+8, len(s))
 }
 
+// ---- signals a program listens for (#737, the signal package) ----
+//
+// A listener (signal.Chan) is a slot: a mask of signals and the write end of the listener's
+// non-blocking pipe. rt_sig_deliver writes a signal's number as one byte to the pipe of every
+// slot whose mask has it, and does nothing else; the listener's task waits on the read end
+// through its core's poll (rt_task_wait) and takes the signal there, on a core, as a task.
+// It is called by rt_sig_note, the handler of every listened signal (on whichever thread the
+// kernel picked), and by anvil's core 0 for the SIGTERM and SIGINT it keeps blocked and reads
+// from signalfd or kqueue. A signal no slot listens for gets back the disposition it had
+// before the first change (the default action), and SIGSEGV and SIGBUS stay rt_fault's.
+
+const sigSlots = 64
+const sigMax = 64 // signals 1 to 63: one mask word
+
+shared mut rtSigSlots i64 // sigSlots entries of two words: mask, write descriptor (0: free)
+shared mut rtSigFirst i64 // per signal: its handler before the first change, plus 1 (0: unchanged)
+shared mut rtSigBytes i64 // byte s is s: what a delivery of signal s writes
+shared mut rtSigLock i64
+shared mut rtSigBusy i64  // deliveries running now: a released slot's pipe closes only at 0
+
+// rt_sig_note is the handler of every listened signal: it only delivers (nothing it calls
+// allocates, locks or touches a core).
+fn rt_sig_note(sig i64) {
+	rt_sig_deliver(sig & 0xffffffff)
+}
+
+// rt_sig_deliver writes signal sig's number to the pipe of every slot listening for it. A full
+// pipe drops the byte: a listener that does not keep up loses repeats, as Go's send does.
+fn rt_sig_deliver(sig i64) {
+	if sig <= 0 || sig >= sigMax || rtSigSlots == 0 {
+		return
+	}
+	__atomic_add(&rtSigBusy, 1)
+	mut i = 0
+	for i < sigSlots {
+		let e = rtSigSlots + 16*i
+		if (__atomic_load(e)>>sig)&1 != 0 {
+			rt_sig_write(e[1], rtSigBytes+sig)
+		}
+		i += 1
+	}
+	__atomic_add(&rtSigBusy, -1)
+}
+
+// rt_sig_slot takes a free slot for a listener whose pipe's write end is wfd (non-blocking),
+// listening for nothing yet; -1 when every slot is taken.
+fn rt_sig_slot(wfd i64) i64 {
+	rt_lock(&rtSigLock)
+	rt_sig_tables()
+	mut r = -1
+	mut i = 0
+	for i < sigSlots {
+		let e = rtSigSlots + 16*i
+		if e[1] == 0 {
+			e[1] = wfd
+			r = i
+			break
+		}
+		i += 1
+	}
+	rt_unlock(&rtSigLock)
+	return r
+}
+
+// rt_sig_listen adds mask's signals to slot's and catches each one no slot listened for.
+fn rt_sig_listen(slot i64, mask i64) {
+	rt_lock(&rtSigLock)
+	let had = rt_sig_union()
+	let e = rtSigSlots + 16*slot
+	__atomic_swap(e, e[0]|mask)
+	mut s = 1
+	for s < sigMax {
+		if (mask>>s)&1 != 0 && (had>>s)&1 == 0 {
+			rt_sig_set(s, cast(i64, rt_sig_note))
+		}
+		s += 1
+	}
+	rt_unlock(&rtSigLock)
+}
+
+// rt_sig_unlisten takes mask's signals from slot (from every slot when slot is -1). Each one in
+// mask that no slot listens for any more gets disposition how: 0 its first one (Stop, Reset),
+// 1 ignored (Ignore). With slot -1 every signal in mask gets it, listened for before or not.
+fn rt_sig_unlisten(slot i64, mask i64, how i64) {
+	rt_lock(&rtSigLock)
+	rt_sig_tables()
+	let had = rt_sig_union()
+	mut i = 0
+	for i < sigSlots {
+		let e = rtSigSlots + 16*i
+		if slot < 0 || i == slot {
+			__atomic_swap(e, e[0] & ~mask)
+		}
+		i += 1
+	}
+	let now = rt_sig_union()
+	mut s = 1
+	for s < sigMax {
+		if (mask>>s)&1 != 0 && (now>>s)&1 == 0 && (slot < 0 || (had>>s)&1 != 0) {
+			if how == 1 {
+				rt_sig_set(s, 1)
+			} else if rtSigFirst[s] != 0 {
+				rt_sig_set(s, rtSigFirst[s]-1)
+			}
+		}
+		s += 1
+	}
+	rt_unlock(&rtSigLock)
+}
+
+// rt_sig_release frees slot: it stops listening, and once no delivery is running none will
+// write to its pipe again, so the caller may close it.
+fn rt_sig_release(slot i64) {
+	rt_sig_unlisten(slot, -1, 0)
+	rt_lock(&rtSigLock)
+	for __atomic_load(&rtSigBusy) != 0 {
+		__yield()
+	}
+	let e = rtSigSlots + 16*slot
+	e[1] = 0
+	rt_unlock(&rtSigLock)
+}
+
+// rt_sig_listening reports whether some slot listens for sig.
+fn rt_sig_listening(sig i64) bool {
+	if sig <= 0 || sig >= sigMax || rtSigSlots == 0 {
+		return false
+	}
+	rt_lock(&rtSigLock)
+	let u = rt_sig_union()
+	rt_unlock(&rtSigLock)
+	return (u>>sig)&1 != 0
+}
+
+// rt_sig_ignored reports whether sig is ignored now (SIG_IGN, set by Ignore or inherited).
+fn rt_sig_ignored(sig i64) bool {
+	return rt_sig_action(sig, -1) == 1
+}
+
+// rt_sig_tables makes the tables the first time (rtSigLock held); the slots go last, so a
+// delivery that sees them sees the rest.
+fn rt_sig_tables() {
+	if rtSigSlots != 0 {
+		return
+	}
+	rtSigBytes = calloc(sigMax, 1)
+	mut s = 0
+	for s < sigMax {
+		store8(rtSigBytes+s, s)
+		s += 1
+	}
+	rtSigFirst = calloc(sigMax, 8)
+	rtSigSlots = calloc(sigSlots, 16)
+}
+
+// rt_sig_union is every slot's mask together (rtSigLock held).
+fn rt_sig_union() i64 {
+	mut u = 0
+	mut i = 0
+	for i < sigSlots {
+		u |= rtSigSlots[2*i]
+		i += 1
+	}
+	return u
+}
+
+// rt_sig_set gives signal s handler h, keeping the one it had before the first change.
+fn rt_sig_set(s i64, h i64) {
+	let prev = rt_sig_action(s, h)
+	if prev != -1 && rtSigFirst[s] == 0 {
+		rtSigFirst[s] = prev + 1
+	}
+}
+
 // rt_aligned_alloc returns n zeroed bytes on their own 128-byte cache lines (n is rounded up).
 fn rt_aligned_alloc(n i64) i64 {
     n = (n+127)&-128

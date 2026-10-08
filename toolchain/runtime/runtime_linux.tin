@@ -621,6 +621,34 @@ fn rt_fault_handlers(h i64) {
 	free(act)
 }
 
+// rt_sig_action gives signal sig handler h (0 SIG_DFL, 1 SIG_IGN, else a function of the signal
+// number, run on the signal stack, with interrupted calls restarted: SA_RESTORER | SA_ONSTACK |
+// SA_RESTART); h -1 only asks. It returns the previous handler, -1 when the kernel refuses.
+fn rt_sig_action(sig i64, h i64) i64 {
+	let act = calloc(4, 8)
+	let old = calloc(4, 8)
+	act[0] = h
+	act[1] = 0x1c000000
+	act[2] = linux_restorer_ptr()
+	mut p = act
+	if h == -1 {
+		p = 0
+	}
+	let r = rt_sys_sigaction(sig, p, old)
+	let prev = old[0]
+	free(act)
+	free(old)
+	if r < 0 {
+		return -1
+	}
+	return prev
+}
+
+// rt_sig_write writes the byte at p to fd from a signal handler: a raw call, so errno is untouched.
+fn rt_sig_write(fd i64, p i64) {
+	linux_raw(linux_nr_write(), fd, p, 1, 0, 0, 0)
+}
+
 // rt_fault_addr is siginfo_t's si_addr (after si_signo, si_errno, si_code and padding).
 fn rt_fault_addr(info i64) i64 {
 	return (info + 16)[0]

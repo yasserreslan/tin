@@ -1,0 +1,387 @@
+// Package png decodes and encodes PNG images. Decode validates chunk checksums, bounds the inflated image data, and
+// implements the PNG scanline filters and every PNG color type and bit depth. Interlaced input is refused because
+// Adam7 is not supported.
+package png
+
+import "image"
+import "image/color"
+import "squash"
+import "stamp"
+
+const maxPixels = 64 * 1024 * 1024
+
+// Decode reads a non-interlaced PNG and returns its pixels, preserving all 16-bit channel values.
+fn Decode(data str) !dyn image.Image {
+	if len(data) < 8 || u8(data[0]) != 137 || data[1:8] != "PNG\r\n\x1a\n" {
+		fail "png: invalid signature"
+	}
+	mut at = i64(8)
+	mut width = i64(0)
+	mut height = i64(0)
+	mut depth = i64(0)
+	mut typ = i64(-1)
+	mut interlace = i64(0)
+	mut palette = []color.NRGBA{}
+	mut trans = []u8{}
+	mut transparentGray = i64(-1)
+	mut transparentRed = i64(-1)
+	mut transparentGreen = i64(-1)
+	mut transparentBlue = i64(-1)
+	mut compressed = []u8{}
+	mut ended = false
+	for at < len(data) {
+		if len(data)-at < 12 {
+			fail "png: truncated chunk"
+		}
+		let n = be32(data, at)
+		if n < 0 || n > len(data)-at-12 {
+			fail "png: invalid chunk length"
+		}
+		let name = data[at+4:at+8]
+		let body = data[at+8:at+8+n]
+		let want = be32(data, at+8+n)
+		if want != i64(stamp.Crc32(data[at+4:at+8+n])) {
+			fail "png: invalid checksum {name} {want} {stamp.Crc32(data[at+4:at+8+n])}"
+		}
+		if name == "IHDR" {
+			if n != 13 || width != 0 {
+				fail "png: invalid header"
+			}
+			width = be32(body, 0)
+			height = be32(body, 4)
+			depth = i64(body[8])
+			typ = i64(body[9])
+			if body[10] != 0 || body[11] != 0 {
+				fail "png: unsupported compression or filter method"
+			}
+			interlace = i64(body[12])
+			if interlace != 0 {
+				fail "png: interlaced images are not supported"
+			}
+			if width <= 0 || height <= 0 || width > maxPixels || height > maxPixels || width*height > maxPixels {
+				fail "png: image dimensions exceed limit"
+			}
+			if !validDepth(typ, depth) {
+				fail "png: unsupported color type or bit depth"
+			}
+		} else if name == "PLTE" {
+			if n == 0 || n % 3 != 0 || n > 768 {
+				fail "png: invalid palette"
+			}
+			for i in 0..n/3 {
+				palette = append(palette, color.NRGBA{R: body[3*i], G: body[3*i+1], B: body[3*i+2], A: 0xff})
+			}
+		} else if name == "tRNS" {
+			if typ == 0 && n == 2 {
+				transparentGray = be16(body, 0)
+			} else if typ == 2 && n == 6 {
+				transparentRed = be16(body, 0)
+				transparentGreen = be16(body, 2)
+				transparentBlue = be16(body, 4)
+			} else if typ == 3 {
+				trans = []u8{}
+				for i in 0..len(body) {
+					trans = append(trans, u8(body[i]))
+				}
+			} else {
+				fail "png: invalid transparency chunk"
+			}
+		} else if name == "IDAT" {
+			for i in 0..len(body) {
+				compressed = append(compressed, u8(body[i]))
+			}
+		} else if name == "IEND" {
+			if n != 0 {
+				fail "png: invalid end chunk"
+			}
+			ended = true
+			at += n + 12
+			break
+		} else if name != "gAMA" && name != "sRGB" && name != "cHRM" && name != "sBIT" && name != "bKGD" && name != "pHYs" && name != "tEXt" && name != "zTXt" && name != "iTXt" {
+			if u8(name[0]) & 32 == 0 {
+				fail "png: unknown critical chunk {name}"
+			}
+		}
+		at += n + 12
+	}
+	if width == 0 || !ended {
+		fail "png: missing header or end chunk"
+	}
+	if typ == 3 && len(palette) == 0 {
+		fail "png: indexed image has no palette"
+	}
+	let channels = match typ {
+		0 => 1
+		2 => 3
+		3 => 1
+		4 => 2
+		_ => 4
+	}
+	let bpp = max(1, (channels*depth+7)/8)
+	let rowBytes = (width*channels*depth+7)/8
+	let raw = try squash.Unzlib(str(compressed), height*(rowBytes+1))
+	if len(raw) != height*(rowBytes+1) {
+		fail "png: incorrect image data length"
+	}
+	mut scan = make([]u8, height*rowBytes)
+	for y in 0..height {
+		let f = i64(raw[y*(rowBytes+1)])
+		if f > 4 {
+			fail "png: invalid row filter"
+		}
+		for x in 0..rowBytes {
+			let v = i64(raw[y*(rowBytes+1)+1+x])
+			mut left = i64(0)
+			mut up = i64(0)
+			mut ul = i64(0)
+			if x >= bpp {
+				left = i64(scan[y*rowBytes+x-bpp])
+			}
+			if y > 0 {
+				up = i64(scan[(y-1)*rowBytes+x])
+			}
+			if y > 0 && x >= bpp {
+				ul = i64(scan[(y-1)*rowBytes+x-bpp])
+			}
+			let add = match f {
+				0 => 0
+				1 => left
+				2 => up
+				3 => (left+up)/2
+				_ => paeth(left, up, ul)
+			}
+			scan[y*rowBytes+x] = u8(v+add)
+		}
+	}
+	mut out = image.NewNRGBA64(image.Rect(0, 0, width, height))
+	for y in 0..height {
+		for x in 0..width {
+			let base = y*rowBytes
+			let i = x*channels
+			mut c = color.NRGBA64{}
+			if typ == 0 {
+				let gray = sample(scan, base, i, depth)
+				mut alpha = u16(0xffff)
+				if i64(gray) == transparentGray {
+					alpha = 0
+				}
+				let v = scaleSample(gray, depth)
+				c = color.NRGBA64{R: v, G: v, B: v, A: alpha}
+			} else if typ == 2 {
+				let red = sample(scan, base, i, depth)
+				let green = sample(scan, base, i+1, depth)
+				let blue = sample(scan, base, i+2, depth)
+				mut alpha = u16(0xffff)
+				if i64(red) == transparentRed && i64(green) == transparentGreen && i64(blue) == transparentBlue {
+					alpha = 0
+				}
+				c = color.NRGBA64{R: scaleSample(red, depth), G: scaleSample(green, depth), B: scaleSample(blue, depth), A: alpha}
+			} else if typ == 3 {
+				let k = i64(sample(scan, base, x, depth))
+				if k >= len(palette) {
+					fail "png: palette index out of range"
+				}
+				let p = palette[k]
+				c = color.NRGBA64{R: u16(p.R)*0x101, G: u16(p.G)*0x101, B: u16(p.B)*0x101, A: u16(p.A)*0x101}
+				if k < len(trans) {
+					c.A = u16(trans[k])*0x101
+				}
+			} else if typ == 4 {
+				let gray = scaleSample(sample(scan, base, i, depth), depth)
+				let alpha = scaleSample(sample(scan, base, i+1, depth), depth)
+				c = color.NRGBA64{R: gray, G: gray, B: gray, A: alpha}
+			} else {
+				c = color.NRGBA64{R: scaleSample(sample(scan, base, i, depth), depth), G: scaleSample(sample(scan, base, i+1, depth), depth), B: scaleSample(sample(scan, base, i+2, depth), depth), A: scaleSample(sample(scan, base, i+3, depth), depth)}
+			}
+			out.SetNRGBA64(x, y, c)
+		}
+	}
+	return out
+}
+
+// Encode writes Gray, Gray16, Paletted, RGBA, RGBA64, NRGBA and NRGBA64 images using their PNG color type and bit depth.
+// Other image types are refused, as by Go's image/png encoder.
+fn Encode(src dyn image.Image) str {
+	let r = src.Bounds()
+	let w = r.Dx()
+	let h = r.Dy()
+	if w <= 0 || h <= 0 || w*h > maxPixels {
+		panic("png: image dimensions exceed limit")
+	}
+	let layout = src.Layout()
+	mut typ = i64(6)
+	if layout.Kind == image.KindGray || layout.Kind == image.KindGray16 {
+		typ = 0
+	} else if layout.Kind == image.KindPaletted {
+		typ = 3
+	} else if layout.Kind != image.KindRGBA && layout.Kind != image.KindRGBA64 && layout.Kind != image.KindNRGBA && layout.Kind != image.KindNRGBA64 {
+		panic("png: unsupported image type")
+	}
+	if typ == 3 && (len(layout.Palette) == 0 || len(layout.Palette) > 256) {
+		panic("png: invalid palette size")
+	}
+	mut depth = match layout.Kind {
+		image.KindGray16, image.KindRGBA64, image.KindNRGBA64 => 16
+		_ => 8
+	}
+	if typ == 3 {
+		if len(layout.Palette) <= 2 {
+			depth = 1
+		} else if len(layout.Palette) <= 4 {
+			depth = 2
+		} else if len(layout.Palette) <= 16 {
+			depth = 4
+		}
+	}
+	let channels = match typ {
+		0, 3 => 1
+		_ => 4
+	}
+	let sampleBytes = depth / 8
+	mut raw = make([]u8, 0, h*(1+w*channels*sampleBytes))
+	for y in r.Min.Y..r.Max.Y {
+		raw = append(raw, 0)
+		for x in r.Min.X..r.Max.X {
+			let i = (y-r.Min.Y)*layout.Stride + (x-r.Min.X)*match layout.Kind {
+				image.KindGray, image.KindPaletted, image.KindAlpha => 1
+				image.KindGray16, image.KindAlpha16 => 2
+				image.KindRGBA, image.KindNRGBA => 4
+				_ => 8
+			}
+			if typ == 0 {
+				if depth == 8 {
+					raw = append(raw, layout.Pix[i])
+				} else {
+					raw = append(raw, layout.Pix[i], layout.Pix[i+1])
+				}
+			} else if typ == 3 {
+				let perByte = 8 / depth
+				if (x-r.Min.X) % perByte == 0 {
+					raw = append(raw, 0)
+				}
+				let shift = 8 - depth * ((x-r.Min.X) % perByte + 1)
+				raw[len(raw)-1] = raw[len(raw)-1] | (layout.Pix[i] << shift)
+			} else if depth == 8 {
+				if layout.Kind == image.KindNRGBA {
+					raw = append(raw, layout.Pix[i], layout.Pix[i+1], layout.Pix[i+2], layout.Pix[i+3])
+				} else {
+					let c = color.ToNRGBA(src.At(x, y))
+					raw = append(raw, c.R, c.G, c.B, c.A)
+				}
+			} else {
+				if layout.Kind == image.KindNRGBA64 {
+					raw = append(raw, layout.Pix[i], layout.Pix[i+1], layout.Pix[i+2], layout.Pix[i+3], layout.Pix[i+4], layout.Pix[i+5], layout.Pix[i+6], layout.Pix[i+7])
+				} else {
+					let c = color.ToNRGBA64(src.At(x, y))
+					raw = append(raw, u8(c.R >> 8), u8(c.R), u8(c.G >> 8), u8(c.G), u8(c.B >> 8), u8(c.B), u8(c.A >> 8), u8(c.A))
+				}
+			}
+		}
+	}
+	mut out = []u8{}
+	out = append(out, 137, 80, 78, 71, 13, 10, 26, 10)
+	mut ihdr = []u8{}
+	put32(mut ihdr, w)
+	put32(mut ihdr, h)
+	ihdr = append(ihdr, u8(depth), u8(typ), 0, 0, 0)
+	chunk(mut out, "IHDR", str(ihdr))
+	if typ == 3 {
+		mut plte = []u8{}
+		mut trans = []u8{}
+		for p in layout.Palette {
+			plte = append(plte, p.R, p.G, p.B)
+			trans = append(trans, p.A)
+		}
+		chunk(mut out, "PLTE", str(plte))
+		mut last = len(trans)
+		for last > 0 && trans[last-1] == 0xff {
+			last -= 1
+		}
+		if last > 0 {
+			chunk(mut out, "tRNS", str(trans[0:last]))
+		}
+	}
+	chunk(mut out, "IDAT", squash.Zlib(str(raw), squash.Default))
+	chunk(mut out, "IEND", "")
+	return str(out)
+}
+
+fn be32(s str, at i64) i64 {
+	return i64(s[at])<<24 | i64(s[at+1])<<16 | i64(s[at+2])<<8 | i64(s[at+3])
+}
+
+fn be16(s str, at i64) i64 {
+	return i64(s[at])<<8 | i64(s[at+1])
+}
+
+fn validDepth(typ i64, depth i64) bool {
+	if typ == 0 || typ == 3 {
+		return depth == 1 || depth == 2 || depth == 4 || depth == 8 || (typ == 0 && depth == 16)
+	}
+	if typ == 2 || typ == 4 || typ == 6 {
+		return depth == 8 || depth == 16
+	}
+	return false
+}
+
+fn sample(row []u8, base i64, index i64, depth i64) u16 {
+	if depth == 16 {
+		let i = base+2*index
+		return u16(row[i])<<8 | u16(row[i+1])
+	}
+	if depth == 8 {
+		return u16(row[base+index])
+	}
+	let perByte = 8/depth
+	let shift = 8-depth*(index%perByte+1)
+	let mask = (1 << depth)-1
+	return u16((i64(row[base+index/perByte]) >> shift) & mask)
+}
+
+fn scaleSample(v u16, depth i64) u16 {
+	if depth == 16 {
+		return v
+	}
+	if depth == 8 {
+		return v*0x101
+	}
+	let maxValue = (1 << depth)-1
+	return u16(i64(v)*0xffff/maxValue)
+}
+
+fn put32(out mut []u8, n i64) {
+	out = append(out, u8(n>>24), u8(n>>16), u8(n>>8), u8(n))
+}
+
+fn chunk(out mut []u8, name str, data str) {
+	put32(mut out, len(data))
+	for _, b in name {
+		out = append(out, u8(b))
+	}
+	for i in 0..len(data) {
+		out = append(out, u8(data[i]))
+	}
+	let crc = stamp.Crc32(name+data)
+	put32(mut out, i64(crc))
+}
+
+fn paeth(a i64, b i64, c i64) i64 {
+	let p = a+b-c
+	let pa = abs(a-p)
+	let pb = abs(b-p)
+	let pc = abs(c-p)
+	if pa <= pb && pa <= pc {
+		return a
+	}
+	if pb <= pc {
+		return b
+	}
+	return c
+}
+
+fn abs(x i64) i64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}

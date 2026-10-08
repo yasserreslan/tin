@@ -1,0 +1,55 @@
+package main
+
+import "./ci"
+import "say"
+
+fn compareLines(a []str, b []str, label str) {
+	ci.Check(len(a) == len(b), "{label}: {len(a)} lines from Go, {len(b)} from Tin")
+	for i in 0..min(len(a), len(b)) {
+		ci.Check(a[i] == b[i], "{label}: line {i + 1}: Go {a[i]}, Tin {b[i]}")
+	}
+}
+
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci/zip"), "zip-")
+	let tin = ci.Join(work, "zip-tin")
+	let goExe = ci.Join(work, "zip-go")
+	ci.BuildTin("tools/ci/fixtures/zip.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goExe, "./bench/ref/zip"}, root, 300), "go build zip reference")
+	let goArchive = ci.Join(work, "go.zip")
+	let tinArchive = ci.Join(work, "tin.zip")
+	ci.Must(ci.Exec([]str{goExe, "write", goArchive}, root, 30), "Go ZIP writer")
+	let goWant = ci.Exec([]str{goExe, "read", goArchive}, root, 30)
+	let tinReadGo = ci.Exec([]str{tin, "read", goArchive}, root, 30)
+	ci.Must(goWant, "Go read Go ZIP")
+	ci.Must(tinReadGo, "Tin read Go ZIP")
+	compareLines(ci.Lines(goWant.Stdout), ci.Lines(tinReadGo.Stdout), "Go-written archive")
+	ci.Must(ci.Exec([]str{tin, "write", tinArchive}, root, 30), "Tin ZIP writer")
+	let tinWant = ci.Exec([]str{tin, "read", tinArchive}, root, 30)
+	let goReadTin = ci.Exec([]str{goExe, "read", tinArchive}, root, 30)
+	ci.Must(tinWant, "Tin read Tin ZIP")
+	ci.Must(goReadTin, "Go read Tin ZIP")
+	compareLines(ci.Lines(tinWant.Stdout), ci.Lines(goReadTin.Stdout), "Tin-written archive")
+	for damage in []str{"damage-crc", "truncate"} {
+		let damaged = ci.Join(work, damage + ".zip")
+		ci.Must(ci.Exec([]str{tin, damage, goArchive, damaged}, root, 30), "make " + damage + " input")
+		let goFault = ci.Exec([]str{goExe, "classify", damaged}, root, 30)
+		let tinFault = ci.Exec([]str{tin, "classify", damaged}, root, 30)
+		ci.Must(goFault, "Go classify " + damage)
+		ci.Must(tinFault, "Tin classify " + damage)
+		compareLines(ci.Lines(goFault.Stdout), ci.Lines(tinFault.Stdout), damage + " input")
+	}
+	let corpus = []str{"test.zip", "test-prefix.zip", "dd.zip", "time-go.zip", "time-7zip.zip", "utf8-infozip.zip", "utf8-osx.zip", "unix.zip", "symlink.zip", "dupdir.zip", "zip64.zip"}
+	for name in corpus {
+		let path = ci.Join(root, "tools/ci/fixtures/zip_corpus/" + name)
+		let goCorpus = ci.Exec([]str{goExe, "read", path}, root, 30)
+		let tinCorpus = ci.Exec([]str{tin, "read", path}, root, 30)
+		ci.Must(goCorpus, "Go read corpus " + name)
+		ci.Must(tinCorpus, "Tin read corpus " + name)
+		compareLines(ci.Lines(goCorpus.Stdout), ci.Lines(tinCorpus.Stdout), "corpus " + name)
+	}
+	ci.Remove(work)
+	ci.Pass("zip: Go and Tin agree in both directions and on 11 Go archive corpus files")
+	say.Line("zip interoperability passed")
+}

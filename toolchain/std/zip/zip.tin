@@ -1,0 +1,439 @@
+// Package zip reads and writes ZIP archives like Go's archive/zip: the central directory (not just the local
+// headers), names and comments, MS-DOS and extended times, Unix and MS-DOS modes, the Store and Deflate methods with
+// their CRC-32, data descriptors, and ZIP64 (sizes, offsets and entry counts past 32 and 16 bits).
+//
+//	let r = try zip.OpenReader("site.zip")
+//	for f in r.File {
+//		let text = try f.ReadAll(16mb)          // fault.LimitExceeded past 16 MiB
+//		say.Line(f.Header.Name, f.Header.Mode(), len(text))
+//	}
+//
+//	let out = try flume.Create("out.zip")
+//	mut w = zip.NewWriter(out)
+//	try w.Create("hello.txt")
+//	_ = try w.Write([]u8("hello, zip"))
+//	try w.Close()
+//
+// The reader works over the whole archive in memory (NewReader, or OpenReader for a file) and decompresses an entry
+// as it is read (File.Open), so an entry of any size costs a 32 KiB window. An entry that inflates past its declared
+// size fails with ErrFormat, a damaged one with ErrChecksum, a cut one with ErrUnexpectedEOF, as Go's reader does.
+// Unlike Go, a header is a field of File (f.Header.Name) and the Writer itself takes the entry's bytes (w.Write after
+// w.Create), since Tin has no embedding. Reading follows Go byte for byte; tools/ci/zip_check.tin compares the two.
+package zip
+
+import "fault"
+import "glyph"
+import "quarry"
+import "squash"
+import "tide"
+import "trail"
+
+// Compression methods: Store keeps the bytes as they are, Deflate compresses them (RFC 1951).
+const Store = 0
+const Deflate = 8
+
+// ErrFormat is the fault of bytes that are not a valid zip archive or entry.
+let ErrFormat = fault("zip: not a valid zip file")
+
+// ErrAlgorithm is the fault of an entry compressed with a method other than Store and Deflate.
+let ErrAlgorithm = fault("zip: unsupported compression algorithm")
+
+// ErrChecksum is the fault of an entry whose CRC-32 does not match its bytes.
+let ErrChecksum = fault("zip: checksum error")
+
+// ErrInsecurePath is CheckPaths' fault for a name that is absolute, climbs out with "..", or has a backslash.
+let ErrInsecurePath = fault("zip: insecure file path")
+
+// ErrUnexpectedEOF is the fault of an archive or entry cut short (Go's io.ErrUnexpectedEOF and io.EOF).
+let ErrUnexpectedEOF = fault("zip: unexpected EOF")
+
+// File modes, Go's fs.FileMode bits: Mode returns them and SetMode takes them.
+const ModeDir = 0x80000000
+const ModeAppend = 0x40000000
+const ModeExclusive = 0x20000000
+const ModeTemporary = 0x10000000
+const ModeSymlink = 0x8000000
+const ModeDevice = 0x4000000
+const ModeNamedPipe = 0x2000000
+const ModeSocket = 0x1000000
+const ModeSetuid = 0x800000
+const ModeSetgid = 0x400000
+const ModeCharDevice = 0x200000
+const ModeSticky = 0x100000
+const ModeIrregular = 0x80000
+
+// ModeType is the type bits of a mode, ModePerm its permission bits.
+const ModeType = 0x8f280000
+const ModePerm = 0o777
+
+const fileHeaderSignature = 0x04034b50
+const directoryHeaderSignature = 0x02014b50
+const directoryEndSignature = 0x06054b50
+const directory64LocSignature = 0x07064b50
+const directory64EndSignature = 0x06064b50
+const dataDescriptorSignature = 0x08074b50
+const fileHeaderLen = 30
+const directoryHeaderLen = 46
+const directoryEndLen = 22
+const dataDescriptorLen = 16
+const dataDescriptor64Len = 24
+const directory64LocLen = 20
+const directory64EndLen = 56
+
+const creatorFAT = 0
+const creatorUnix = 3
+const creatorNTFS = 11
+const creatorVFAT = 14
+const creatorMacOSX = 19
+
+const zipVersion20 = 20
+const zipVersion45 = 45
+
+const uint16max = 0xffff
+const uint32max = 0xffffffff
+const maxInt64 = 0x7fffffffffffffff
+
+const zip64ExtraID = 0x0001
+const ntfsExtraID = 0x000a
+const unixExtraID = 0x000d
+const extTimeExtraID = 0x5455
+const infoZipUnixExtraID = 0x5855
+
+const second = 1000000000
+
+// FileHeader describes an entry, with the fields of Go's zip.FileHeader. Modified is the modification time in Unix
+// nanoseconds and ModifiedOffset the zone the MS-DOS fields are in (seconds east of UTC): reading, Go's estimate from
+// the MS-DOS and extended times when both are there (else 0); writing, a Modified of 0 means "not set", and then the
+// MS-DOS fields are written as they are, with no extended timestamp. The 32-bit sizes are 0xffffffff when either
+// size needs ZIP64; the 64-bit ones are always right.
+type FileHeader struct {
+	Name               str
+	Comment            str
+	NonUTF8            bool
+	CreatorVersion     u16
+	ReaderVersion      u16
+	Flags              u16
+	Method             u16
+	Modified           i64
+	ModifiedOffset     i64
+	ModifiedTime       u16
+	ModifiedDate       u16
+	CRC32              u32
+	CompressedSize     u32
+	UncompressedSize   u32
+	CompressedSize64   u64
+	UncompressedSize64 u64
+	Extra              str
+	ExternalAttrs      u32
+}
+
+// copyHeader is a copy of h that the writer may change.
+fn copyHeader(h FileHeader) FileHeader {
+	return FileHeader{Name: h.Name, Comment: h.Comment, NonUTF8: h.NonUTF8, CreatorVersion: h.CreatorVersion, ReaderVersion: h.ReaderVersion, Flags: h.Flags, Method: h.Method, Modified: h.Modified, ModifiedOffset: h.ModifiedOffset, ModifiedTime: h.ModifiedTime, ModifiedDate: h.ModifiedDate, CRC32: h.CRC32, CompressedSize: h.CompressedSize, UncompressedSize: h.UncompressedSize, CompressedSize64: h.CompressedSize64, UncompressedSize64: h.UncompressedSize64, Extra: h.Extra, ExternalAttrs: h.ExternalAttrs}
+}
+
+// IsDir reports whether the entry is a directory: its name ends in a slash.
+fn (h FileHeader) IsDir() bool {
+	return len(h.Name) > 0 && h.Name[len(h.Name) - 1] == '/'
+}
+
+// Size is the entry's uncompressed size (Go's FileInfo().Size()).
+fn (h FileHeader) Size() i64 {
+	if h.UncompressedSize64 > 0 {
+		return i64(h.UncompressedSize64)
+	}
+	return i64(h.UncompressedSize)
+}
+
+// Mode returns the permission and type bits, from the Unix or MS-DOS attributes the creator wrote.
+fn (h FileHeader) Mode() u32 {
+	mut mode = u32(0)
+	let creator = h.CreatorVersion >> 8
+	if creator == creatorUnix || creator == creatorMacOSX {
+		mode = unixModeToFileMode(h.ExternalAttrs >> 16)
+	} else if creator == creatorNTFS || creator == creatorVFAT || creator == creatorFAT {
+		mode = msdosModeToFileMode(h.ExternalAttrs)
+	}
+	if h.IsDir() {
+		mode = mode | ModeDir
+	}
+	return mode
+}
+
+// SetMode sets the permission and type bits, as Unix attributes and the matching MS-DOS ones.
+fn (h mut FileHeader) SetMode(mode u32) {
+	h.CreatorVersion = (h.CreatorVersion & 0xff) | (u16(creatorUnix) << 8)
+	h.ExternalAttrs = fileModeToUnixMode(mode) << 16
+	if mode & ModeDir != 0 {
+		h.ExternalAttrs = h.ExternalAttrs | 0x10
+	}
+	if mode & 0o200 == 0 {
+		h.ExternalAttrs = h.ExternalAttrs | 0x01
+	}
+}
+
+// ModTime is the time of the MS-DOS fields, in Unix nanoseconds read as UTC (Go's deprecated ModTime).
+fn (h FileHeader) ModTime() i64 {
+	return msDosTimeToTime(h.ModifiedDate, h.ModifiedTime)
+}
+
+// SetModTime sets Modified (in UTC) and the MS-DOS fields to the time ns.
+fn (h mut FileHeader) SetModTime(ns i64) {
+	h.Modified = ns
+	h.ModifiedOffset = 0
+	let (d, t) = timeToMsDosTime(ns, 0)
+	h.ModifiedDate = d
+	h.ModifiedTime = t
+}
+
+// FileInfoHeader is a header for the file that fi describes, named name (add a slash for a directory): its size,
+// modification time and mode. Set Method to Deflate to compress it.
+fn FileInfoHeader(name str, fi quarry.FileInfo) FileHeader {
+	mut h = FileHeader{Name: name, UncompressedSize64: u64(fi.Size)}
+	h.SetModTime(fi.Mtime)
+	mut unix = u32(0x8000)
+	match fi.Type {
+		Dir => unix = 0x4000
+		Symlink => unix = 0xa000
+		Fifo => unix = 0x1000
+		Socket => unix = 0xc000
+		Device => unix = 0x6000
+		Regular => unix = 0x8000
+	}
+	h.SetMode(unixModeToFileMode(unix | u32(fi.Perm & 0xfff)))
+	if h.UncompressedSize64 > uint32max {
+		h.UncompressedSize = uint32max
+	} else {
+		h.UncompressedSize = u32(h.UncompressedSize64)
+	}
+	return h
+}
+
+fn msdosModeToFileMode(m u32) u32 {
+	mut mode = u32(0o666)
+	if m & 0x10 != 0 {
+		mode = ModeDir | 0o777
+	}
+	if m & 0x01 != 0 {
+		mode = mode & ^u32(0o222)
+	}
+	return mode
+}
+
+fn fileModeToUnixMode(mode u32) u32 {
+	let t = mode & ModeType
+	mut m = u32(0x8000)
+	if t == ModeDir {
+		m = 0x4000
+	} else if t == ModeSymlink {
+		m = 0xa000
+	} else if t == ModeNamedPipe {
+		m = 0x1000
+	} else if t == ModeSocket {
+		m = 0xc000
+	} else if t == ModeDevice {
+		m = 0x6000
+	} else if t == ModeDevice | ModeCharDevice {
+		m = 0x2000
+	}
+	if mode & ModeSetuid != 0 {
+		m = m | 0x800
+	}
+	if mode & ModeSetgid != 0 {
+		m = m | 0x400
+	}
+	if mode & ModeSticky != 0 {
+		m = m | 0x200
+	}
+	return m | (mode & 0o777)
+}
+
+fn unixModeToFileMode(m u32) u32 {
+	mut mode = m & 0o777
+	let t = m & 0xf000
+	if t == 0x6000 {
+		mode = mode | ModeDevice
+	} else if t == 0x2000 {
+		mode = mode | ModeDevice | ModeCharDevice
+	} else if t == 0x4000 {
+		mode = mode | ModeDir
+	} else if t == 0x1000 {
+		mode = mode | ModeNamedPipe
+	} else if t == 0xa000 {
+		mode = mode | ModeSymlink
+	} else if t == 0xc000 {
+		mode = mode | ModeSocket
+	}
+	if m & 0x400 != 0 {
+		mode = mode | ModeSetgid
+	}
+	if m & 0x800 != 0 {
+		mode = mode | ModeSetuid
+	}
+	if m & 0x200 != 0 {
+		mode = mode | ModeSticky
+	}
+	return mode
+}
+
+// msDosTimeToTime is the UTC time of MS-DOS date and time fields (2-second resolution); fields out of range carry
+// as in Go's time.Date (month 0 is December of the year before).
+fn msDosTimeToTime(date u16, time u16) i64 {
+	return tide.Date(i64(date >> 9) + 1980, i64((date >> 5) & 0xf), i64(date & 0x1f), i64(time >> 11), i64((time >> 5) & 0x3f), i64(time & 0x1f) * 2, 0)
+}
+
+// timeToMsDosTime is the MS-DOS date and time of ns in the zone offset seconds east of UTC (truncated to 16 bits
+// as Go does for years outside 1980..2107).
+fn timeToMsDosTime(ns i64, offset i64) (u16, u16) {
+	let c = tide.UTC(ns + offset * second)
+	let date = u16(c.Day + c.Month * 32 + (c.Year - 1980) * 512)
+	let time = u16(c.Sec / 2 + c.Min * 32 + c.Hour * 2048)
+	return date, time
+}
+
+// floorDiv is a / b rounded down (b > 0).
+fn floorDiv(a i64, b i64) i64 {
+	mut q = a / b
+	if a - q * b < 0 {
+		q -= 1
+	}
+	return q
+}
+
+// zoneOffset is Go's timeZone(offset): the difference rounded to 15 minutes (half away from zero), in seconds, or 0
+// when it is outside -12h..+14h.
+fn zoneOffset(d i64) i64 {
+	if d > 100000 * second * 3600 || d < -100000 * second * 3600 {
+		return 0
+	}
+	let m = 15 * 60 * second
+	mut r = d % m
+	mut v = d
+	if d < 0 {
+		r = 0 - r
+		if r + r < m {
+			v = d + r
+		} else {
+			v = d - m + r
+		}
+	} else {
+		if r + r < m {
+			v = d - r
+		} else {
+			v = d + m - r
+		}
+	}
+	if v < -12 * 3600 * second || v > 14 * 3600 * second {
+		return 0
+	}
+	return v / second
+}
+
+// detectUTF8 reports whether s is valid UTF-8, and whether it must be taken as UTF-8 (it has a byte CP-437 and
+// the other legacy encodings would read differently).
+fn detectUTF8(s str) (bool, bool) {
+	mut require = false
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c >= 0x20 && c <= 0x7d && c != 0x5c {
+			i += 1
+			continue
+		}
+		if c < 0x80 {
+			require = true
+			i += 1
+			continue
+		}
+		let (r, size) = glyph.DecodeRune(s, i)
+		i += size
+		if r == 0xfffd && size == 1 {
+			return false, false
+		}
+		require = true
+	}
+	return true, require
+}
+
+// IsLocal is Go's filepath.IsLocal on Unix: name is not empty, not absolute, and does not climb out with "..".
+fn IsLocal(name str) bool {
+	if len(name) == 0 || name[0] == '/' {
+		return false
+	}
+	mut dots = false
+	mut start = 0
+	for i in 0..len(name) + 1 {
+		if i == len(name) || name[i] == '/' {
+			let part = name[start:i]
+			if part == "." || part == ".." {
+				dots = true
+				break
+			}
+			start = i + 1
+		}
+	}
+	mut p = name
+	if dots {
+		p = trail.Clean(name)
+	}
+	if p == ".." || (len(p) >= 3 && p[0:3] == "../") {
+		return false
+	}
+	return true
+}
+
+// le16 and friends read little-endian numbers from s at p.
+fn le16(s str, p i64) u16 {
+	return u16(s[p]) | u16(s[p + 1]) << 8
+}
+
+fn le32(s str, p i64) u32 {
+	return u32(s[p]) | u32(s[p + 1]) << 8 | u32(s[p + 2]) << 16 | u32(s[p + 3]) << 24
+}
+
+fn le64(s str, p i64) u64 {
+	return u64(le32(s, p)) | u64(le32(s, p + 4)) << 32
+}
+
+// put16 and friends append little-endian numbers to b.
+fn put16(b mut []u8, v u16) []u8 {
+	return append(b, u8(v), u8(v >> 8))
+}
+
+fn put32(b mut []u8, v u32) []u8 {
+	return append(b, u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24))
+}
+
+fn put64(b mut []u8, v u64) []u8 {
+	return append(b, u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24), u8(v >> 32), u8(v >> 40), u8(v >> 48), u8(v >> 56))
+}
+
+// FaultKind lets a caller tell the faults apart without their text: "format", "algorithm", "checksum", "eof",
+// "flate", "limit", "insecure" or "other".
+fn FaultKind(err fault) str {
+	if err == nil {
+		return "ok"
+	}
+	if fault.Is(err, ErrFormat) {
+		return "format"
+	}
+	if fault.Is(err, ErrAlgorithm) {
+		return "algorithm"
+	}
+	if fault.Is(err, ErrChecksum) {
+		return "checksum"
+	}
+	if fault.Is(err, ErrUnexpectedEOF) {
+		return "eof"
+	}
+	if fault.Is(err, squash.ErrCorrupt) {
+		return "flate"
+	}
+	if fault.Is(err, fault.LimitExceeded) {
+		return "limit"
+	}
+	if fault.Is(err, ErrInsecurePath) {
+		return "insecure"
+	}
+	return "other"
+}
