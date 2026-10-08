@@ -1,0 +1,43 @@
+timeout n=4 data=hell err=timeout n=4 data=o wo n=3 data=rld n=0 data=
+timeout empty n=0 data= err=timeout n=0 data=
+half n=2 data=he n=2 data=ll n=2 data=o  n=2 data=wo n=2 data=rl n=1 data=d n=0 data=
+dataerr n=0 data= n=3 data=abc err=boom err=boom
+truncate 3 5 2 abcdefg ok ok ok
+timeout is timeout true
+quick roundtrip ok
+quick count ok 25
+quick fail #1 calls 0
+quick check2 ok
+quick float ok
+quick bytes ok
+quick str ok
+quick uint ok
+quick equal ok
+quick unequal #1
+walk . dir
+walk a.txt file
+walk dir dir
+walk dir/b.txt file
+walk dir/empty dir
+walk dir/sub dir
+walk dir/sub/c.txt file
+walk ok
+readfile bravo! ok
+readdir b.txt(file),empty(dir),sub(dir) ok
+stat c.txt 7 false ok
+stat dir sub true ok
+glob dir/b.txt ok
+chunks cha|rli|e ok
+dir chunks b.txt(file),empty(dir)|sub(dir)| ok
+missing stat missing: file does not exist true
+testfs ok
+testfs missing true
+testfs size true
+slogtest problems 0
+2023-11-14T22:13:20.000Z WARN core=0 slow request path="/a b" ms=12
+2023-11-14T22:13:20.000Z ERROR core=0 bad msg="say \"hi\"" empty=""
+equal true false false
+seeded true false
+filled true false
+flips 528 of 528
+ok 3 checks

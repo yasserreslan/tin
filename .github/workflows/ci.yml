@@ -108,6 +108,8 @@ jobs:
         run: sh tools/ci/tin.sh netip_check
       - name: Tokens against Go's text/scanner (5,649 source texts, mode flags and Scan/Next/Peek orders)
         run: sh tools/ci/tin.sh scan_check
+      - name: Testing helpers against Go's testing/iotest, testing/quick, testing/fstest and crypto/subtle
+        run: sh tools/ci/tin.sh crucible_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: Operating system signals (dispositions, task delivery and per-core listeners)
