@@ -367,6 +367,10 @@ fn instantiate_fn(g Fn, targs []Ty, pos i64) Fn {
 	let saved = ck_state_save()
 	ck_tbind = nf.tbind
 	declare_fn(nf)
+	if co_ready != 0 {
+		// An instance made after closure_prepass: its closures passed to parameters that are only called are marked here (#816).
+		co_mark_fn(cast(Fn, nf))
+	}
 	ck_state_restore(saved)
 	return cast(Fn, nf)
 }

@@ -22,7 +22,7 @@ shared mut p_shared i64
 
 // Every AST node starts with its kind and position; expressions carry their type.
 // The sizes of the records that are allocated zeroed (a nil slice field is 0, which new(T) would not leave).
-const F_SIZE = 44
+const F_SIZE = 45
 const D_SIZE = 18
 const N_SIZE = 12
 

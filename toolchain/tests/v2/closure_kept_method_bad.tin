@@ -1,0 +1,34 @@
+package main
+
+import "say"
+
+type R struct {
+	n i64
+}
+
+type A struct {
+	x i64
+}
+
+type B struct {
+	y i64
+}
+
+mut kept []fn(R) = []fn(R){}
+
+fn (a A) each(f fn(R)) {
+	f(R{n: a.x})
+}
+
+fn (b B) each(f fn(R)) {
+	kept = append(kept, f)
+}
+
+fn main() {
+	mut all = []R{}
+	let a = A{x: 1}
+	a.each(fn(r R) {
+		all = append(all, r)
+	})
+	say.Line(len(all))
+}
