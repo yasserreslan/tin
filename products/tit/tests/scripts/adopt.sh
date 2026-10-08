@@ -1,7 +1,8 @@
 #!/bin/sh
 # tit adopt against git itself (#789): the logs of every branch and tag equal git's commit for commit, the working
 # directory is clean for both, a second adopt takes only the new commit, a git worktree adopts, a shallow clone is
-# refused. Usage: adopt.sh <tit> <empty directory>
+# refused, an adopt cut by SIGTERM finishes when run again without redoing its finished packs, and two adopts write
+# byte-identical packs. Usage: adopt.sh <tit> <empty directory>
 set -eu
 tit=$1
 d=$2
@@ -69,3 +70,41 @@ if "$tit" adopt > "$d/shallow.txt" 2>&1; then
 fi
 grep -q "unshallow" "$d/shallow.txt" || fail "shallow: $(cat "$d/shallow.txt")"
 echo "ok shallow clone refused"
+
+# an adopt cut by SIGTERM finishes when run again, keeping the packs it had finished; and two adopts of one repository,
+# one on a single core and one on all of them, write byte-identical packs (each pack is named by its hash)
+mkdir "$d/big"
+cd "$d/big"
+git init -q -b main .
+perl -e 'srand(7); for $i (1..160) { $c = join("", map { chr(32 + int(rand(95))) } 1..100000) . "\n"; $m = "c$i\n"; print "commit refs/heads/main\ncommitter A <a\@b> " . (1700000000 + $i) . " +0000\ndata " . length($m) . "\n$m"; print "M 100644 inline f$i.txt\ndata " . length($c) . "\n$c\n"; }' | git fast-import --quiet
+git checkout -q main
+cp -R "$d/big" "$d/big2"
+perl -e '$SIG{TERM} = "DEFAULT"; exec @ARGV' "$tit" adopt > /dev/null 2>&1 &
+pid=$!
+n=0
+until [ "$(ls .tit/packs 2> /dev/null | grep -c '\.pack$')" -ge 2 ]; do
+	n=$((n + 1))
+	[ $n -lt 300 ] || fail "adopt wrote no pack to interrupt"
+	sleep 0.02
+done
+kill -TERM $pid 2> /dev/null || true
+wait $pid 2> /dev/null || true
+before=$(ls .tit/packs | grep '\.pack$' | sort)
+total=$(git rev-list --all --objects | wc -l | tr -d ' ')
+"$tit" adopt > "$d/again.txt" 2>&1 || fail "adopt after SIGTERM: $(cat "$d/again.txt")"
+again=$(sed -n 's/^Adopted \([0-9]*\) objects.*/\1/p' "$d/again.txt")
+[ -n "$again" ] && [ "$again" -lt "$total" ] || fail "the second adopt redid everything: $(cat "$d/again.txt") of $total"
+for p in $before; do
+	[ -e ".tit/packs/$p" ] || fail "the pack $p finished before SIGTERM is gone"
+done
+same "log after SIGTERM" "$("$tit" log --format=git-id)" "$(git log --format=%H)"
+echo "ok an adopt cut by SIGTERM finishes when run again: $again of $total objects the second time"
+cd "$d/big2"
+TIN_CORES=1 "$tit" adopt > /dev/null
+rm -rf "$d/big3"
+cp -R "$d/big2" "$d/big3"
+rm -rf "$d/big3/.tit"
+cd "$d/big3"
+"$tit" adopt > /dev/null
+[ "$(ls "$d/big2/.tit/packs" | sort)" = "$(ls "$d/big3/.tit/packs" | sort)" ] || fail "two adopts wrote different packs"
+echo "ok two adopts (one core, all cores) write byte-identical packs"

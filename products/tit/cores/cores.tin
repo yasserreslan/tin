@@ -141,7 +141,10 @@ fn runJobs(n i64, job fn(i64) str) []str {
 	mut out = make([]str, n)
 	if !Running() || n < 2 {
 		for i in 0..n {
-			let reply = serve(job(i))
+			// in an arena, as on the workers: what the job made goes with it, its answer is copied out
+			let reply = arena {
+				serve(job(i))
+			}
 			let sp = twine.IndexByte(reply, ' ')
 			out[i] = reply[sp + 1:]
 		}
