@@ -513,7 +513,7 @@ toolchain/tests/v2/           strict tests and expected outputs
 toolchain/seed/               tinc-darwin-arm64, tinc-linux-arm64, tinc-linux-amd64: the compilers that start a build
 examples/           api.tin (HTTP server), tasks.tin, redis.tin, mysql.tin, websocket.tin, demo.tin, demo_go/
 bench/              v2/ CPU benchmarks, http/ HTTP benchmarks and tools, v04/ the service benchmark, ref/ Go references
-tools/              ci/ (the CI checks), dev/ (v2test.sh, dist.tin, debugging helpers, x64fuzz/), gen/ (gendoc.py, gencoverage.tin, table generators)
+tools/              ci/ (the CI checks), dev/ (v2test.sh, dist.tin, debugging helpers, x64fuzz/), gen/ (gendoc.tin, gencoverage.tin, table generators)
 toolchain/docs/               this documentation
 products/           programs built with Tin (tinland/: editor tooling)
 design/             design decisions, interfaces, verification, roadmap
@@ -523,7 +523,7 @@ bin/                build output (ignored)
 ## 10. Version control
 
 The tree is ready to become a git repository: `.gitignore` excludes `bin/` and scratch
-output, every generated file can be regenerated (`make`, `tools/gen/gendoc.py`,
+output, every generated file can be regenerated (`make`, `tools/gen/gendoc.tin`,
 `tools/gen/gencoverage.tin`), seeds are
 plain files, and no script depends on a machine-specific path.
 
@@ -537,7 +537,7 @@ where the bootstrap passed, together with the compiler change that needed them.
 
 ## 11. Regenerating the docs
 
-`python3 tools/gen/gendoc.py` rewrites `toolchain/docs/STDLIB.md` from the comments in `toolchain/std/` and `packages/`
+`sh tools/ci/tin.sh tools/gen/gendoc.tin` rewrites `toolchain/docs/STDLIB.md` from the comments in `toolchain/std/` and `packages/`
 (package comment, then one line per exported function, type and constant). Write a
 one-line comment above every exported declaration.
 

@@ -20,7 +20,7 @@ instead of inventing a new place for it.
 | `bench/`, `bench/v04`, `bench/http`, `bench/router` | Benchmarks and service benchmarks against Go. | Performance tasks. |
 | `toolchain/docs/` | `LANGUAGE.md` (reference), `RUNTIME.md`, `COMPILER.md`, `TOOLING.md`, `PORTING.md`, `PERFORMANCE.md`, `COVERAGE.md` (the inventory of Go's surface against Tin), `STDLIB.md` (generated), `AGENT_PRIMER.md`. | Whoever changes behavior updates the matching doc in the same PR. |
 | `design/` | `roadmap.md` (the plan), `design_foundations.md` (decided designs), `stdlib_verified.md` (what is verified against Go), the interfaces between parts. | Roadmap boxes and verification rows as work lands. |
-| `tools/` | `dev/` (`v2test.sh`, `compare_compilers.sh`, `dist.tin`, debugging helpers), `gen/` (`gendoc.py` writes `toolchain/docs/STDLIB.md`, `gen_unicode.py` writes the Unicode tables), `ci/` (CI checks). | `tools/ci`: extend existing files only, never add a Python file there. New tooling is written in Tin. |
+| `tools/` | `dev/` (`v2test.sh`, `compare_compilers.sh`, `dist.tin`, debugging helpers), `gen/` (`gendoc.tin` writes `toolchain/docs/STDLIB.md`, `gen_unicode.py` writes the Unicode tables), `ci/` (CI checks). | `tools/ci`: extend existing files only, never add a Python file there. New tooling is written in Tin. |
 | `products/` | Programs built with Tin that people use: `tinland/` (the IDE: `intellij/`, the IntelliJ Platform plugin, beside `vscode/`), `tinos/` later. Each product has its own README and tests and depends only on `toolchain/` and `packages/`. | The product's own tasks. |
 | `examples/`, `docker/`, `install.sh`, `Makefile`, `VERSION`, `.github/` | Examples, container images, installer, build entry points, CI and the PR template. | Only tasks about distribution or CI. |
 | `go.mod` | Left from the retired Go stage; Go remains only as a baseline for twins and the HTTP conformance tools until those are rewritten in Tin. | Do not add Go code to the product. |
@@ -45,7 +45,7 @@ Process:
 7. A library function is verified against Go: a generated twin (`bench/ref/NAME/main.go`) and the Tin test (`toolchain/tests/v2/NAME.tin`) come from one description, and the Tin output must be identical to Go's. Prove the test is sensitive by breaking one constant and seeing it fail.
 8. Every bug found gets an issue, a regression case in `toolchain/tests/regressions/` tied to it, and a fix in the same PR (or its own PR). Fix bugs you find along the way.
 9. A PR is big enough to be complete: the code, the tests, the twin, the docs and the roadmap boxes it closes. No two-line PRs, no half features.
-10. Behavior changes update `toolchain/docs/LANGUAGE.md` or the matching doc, regenerate `toolchain/docs/STDLIB.md` (`python3 tools/gen/gendoc.py`) and `toolchain/docs/COVERAGE.md`, and add the row to `design/stdlib_verified.md`.
+10. Behavior changes update `toolchain/docs/LANGUAGE.md` or the matching doc, regenerate `toolchain/docs/STDLIB.md` (`sh tools/ci/tin.sh tools/gen/gendoc.tin`) and `toolchain/docs/COVERAGE.md`, and add the row to `design/stdlib_verified.md`.
 11. Names follow the role of the thing, not a language prefix. A package directory is `toolchain/std/<name>/` or `packages/<name>/`; Tin's package names are short nouns (`twine` for strings, `link` for net/url).
 12. Do not add new Python files under `tools/ci`. Do not add dependencies. Do not weaken or delete a test to make it pass.
 
@@ -56,7 +56,7 @@ make bootstrap                       # the compiler rebuilds itself to an identi
 tools/dev/v2test.sh                      # the strict suite: every line must PASS
 sh tools/ci/tin.sh regressions       # regression cases
 sh tools/ci/tin.sh test_tooling     # harness tests
-python3 tools/gen/gendoc.py              # when package docs or exports changed
+sh tools/ci/tin.sh tools/gen/gendoc.tin              # when package docs or exports changed
 bin/tinc -target linux-arm64 -o /tmp/x FILE.tin ; bin/tinc -target linux-amd64 -o /tmp/x FILE.tin   # cross-build what you touched
 ```
 

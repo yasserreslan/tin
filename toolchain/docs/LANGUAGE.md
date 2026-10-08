@@ -127,7 +127,7 @@ panic, 1 when startup fails, or with the code passed to `quarry.Exit`.
 
 - **Encoding**: source is UTF-8.
 - **Comments**: `// to end of line` only. A comment directly above a declaration is its
-  documentation (`tools/gen/gendoc.py` builds [STDLIB.md](STDLIB.md) from them).
+  documentation (`tools/gen/gendoc.tin` builds [STDLIB.md](STDLIB.md) from them).
 - **Statements end at a newline.** There are no semicolons in source. A line whose last
   token is an operator, `,`, `(`, `[` or `{` continues on the next line; so does a call or
   literal whose brackets are still open. Write the opening brace of a block on the same
