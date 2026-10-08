@@ -1,0 +1,67 @@
+package main
+
+import "./ci"
+import "./dnstest"
+import "mint"
+import "say"
+import "tide"
+
+// The Linux resolver's caches (#348): answers for their TTL, names that do not exist for a few seconds, and /etc/hosts re-read when it
+// changes. Uses dns_check's fake DNS server and fixture.
+
+fn expect(port i64, name str, want str) {
+	let r = dnstest.Lookup(port, name, 0)
+	ci.Check(r.Status == 200 && r.Body == want, "lookup " + name + " answered " + mint.Itoa(r.Status) + " " + r.Body + ", want " + want)
+}
+
+fn missing(port i64, name str) {
+	let r = dnstest.Lookup(port, name, 0)
+	ci.Check(r.Status == 502, "lookup " + name + " answered " + mint.Itoa(r.Status) + " " + r.Body + ", want 502")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/dns_cache")
+	ci.Mkdirs(out)
+	let fake = dnstest.StartFake(out)
+	let fx = dnstest.Build(out)
+	ci.Write(fx.Hosts, "127.0.0.7 hosts.test\n")
+	fx.Config("", []str{"127.0.0.1"}, "first.test")
+	let server = fx.Run(fake, 4000, true, ci.Join(out, "server.log"))
+	let port = server.Port
+	let v4 = "2:7f000001"
+	// An answer is kept for its TTL: ten lookups, one question.
+	for i in 0..10 {
+		expect(port, "ok.test.", v4)
+	}
+	ci.Check(fake.Asked("ok.test") == 1, "ten lookups of ok.test asked " + mint.Itoa(fake.Asked("ok.test")))
+	// A one-second TTL runs out.
+	for i in 0..5 {
+		expect(port, "ttl1.test.", v4)
+	}
+	ci.Check(fake.Asked("ttl1.test") == 1, "ttl1.test asked " + mint.Itoa(fake.Asked("ttl1.test")))
+	tide.Sleep(1300000000)
+	expect(port, "ttl1.test.", v4)
+	ci.Check(fake.Asked("ttl1.test") == 2, "the entry stayed past its TTL")
+	// A name that does not exist is remembered for a few seconds, search list included.
+	missing(port, "gone.test.")
+	let asked = len(fake.Questions())
+	for i in 0..5 {
+		missing(port, "gone.test.")
+	}
+	ci.Check(len(fake.Questions()) == asked, "a missing name was asked for again at once")
+	tide.Sleep(5300000000)
+	missing(port, "gone.test.")
+	ci.Check(len(fake.Questions()) > asked, "a missing name was never asked for again")
+	// /etc/hosts is read again when it changes, also by a rewrite of the same size.
+	expect(port, "hosts.test", "2:7f000007")
+	ci.Write(fx.Hosts, "127.0.0.8 hosts.test\n")
+	expect(port, "hosts.test", "2:7f000008")
+	ci.Write(fx.Hosts, "127.0.0.9 hosts.test\n127.0.0.10 other.test\n")
+	expect(port, "hosts.test", "2:7f000009")
+	expect(port, "other.test", "2:7f00000a")
+	ci.Check(server.Running(), "the fixture exited")
+	server.Stop()
+	fake.Stop()
+	ci.Remove(fx.Work)
+	ci.Pass("DNS cache: answers kept for their TTL and dropped after it, missing names for 5 s, /etc/hosts re-read on change")
+}

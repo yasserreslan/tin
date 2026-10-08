@@ -117,10 +117,10 @@ jobs:
         run: sh tools/ci/tin.sh packages_check
       - name: Linux DNS contract, transport and request deadlines
         if: runner.os == 'Linux'
-        run: python3 tools/ci/dns_check.py
+        run: sh tools/ci/tin.sh dns_check
       - name: Linux DNS caches (answers for their TTL, missing names, /etc/hosts re-read on change)
         if: runner.os == 'Linux'
-        run: python3 tools/ci/dns_cache_check.py
+        run: sh tools/ci/tin.sh dns_cache_check
       - name: JSON decoding against encoding/json (strict mode, atomic faults, UTF-8)
         run: sh tools/ci/tin.sh argo_twin_check
       - name: Cryptographic primitives (Wycheproof and hashlib vectors)

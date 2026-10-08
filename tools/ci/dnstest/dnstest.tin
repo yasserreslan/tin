@@ -1,0 +1,122 @@
+// What dns_check and dns_cache_check share: the fake DNS server (tools/ci/fixtures/dns_server.go: UDP and TCP on 127.0.0.1 and
+// 127.0.0.2, a log of every question), the DNS fixture built against a private library with the resolver probe, and lookups through it.
+package dnstest
+
+import "../ci"
+import "../nettest"
+import "mint"
+import "twine"
+
+// Fake is the running fake DNS server.
+type Fake struct {
+	Server nettest.Server
+	Port i64
+	Log str
+}
+
+// StartFake builds and starts the fake DNS server; its log is a file in dir.
+fn StartFake(dir str) Fake {
+	let exe = ci.Join(dir, "dns_server")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", exe, "tools/ci/fixtures/dns_server.go"}, ci.Root(), 300), "go build dns_server.go")
+	let port = nettest.Port()
+	let log = ci.Join(dir, "dns_questions.log")
+	let server = nettest.Start(exe, []str{log}, []str{}, ci.Join(dir, "dns_server.out"), port)
+	server.Ready(10)
+	return Fake{Server: server, Port: port, Log: log}
+}
+
+// Questions are the lines of the log so far: "HOST NAME TYPE PROTO".
+fn (f Fake) Questions() []str {
+	return ci.Lines(ci.Read(f.Log))
+}
+
+// Asked is how many questions were asked of a name.
+fn (f Fake) Asked(name str) i64 {
+	mut n = 0
+	for q in f.Questions() {
+		let w = twine.Fields(q)
+		if len(w) == 4 && w[1] == name {
+			n += 1
+		}
+	}
+	return n
+}
+
+// Names are the names asked since the mark (a number of lines), in order.
+fn (f Fake) NamesSince(mark i64) []str {
+	mut out = []str{}
+	let all = f.Questions()
+	for i in mark..len(all) {
+		out = append(out, twine.Fields(all[i])[1])
+	}
+	return out
+}
+
+fn (f Fake) Stop() {
+	f.Server.Stop()
+}
+
+// Fixture is the DNS fixture program (tools/ci/fixtures/dns.tin) in a private tree whose wire package has the resolver probe, with
+// the hosts and resolv.conf files it reads.
+type Fixture struct {
+	Work str
+	Exe str
+	Hosts str
+	Resolv str
+}
+
+// Build makes the fixture in a new directory under dir.
+fn Build(dir str) Fixture {
+	let work = ci.TempDir(dir, "dns-")
+	ci.CopyTree(ci.Root(), work)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/dns_probe.tin"), ci.Join(work, "packages/wire/probe.tin"))
+	let exe = ci.Join(work, "dns")
+	ci.BuildTin("tools/ci/fixtures/dns.tin", exe, work, []str{})
+	return Fixture{Work: work, Exe: exe, Hosts: ci.Join(work, "hosts"), Resolv: ci.Join(work, "resolv.conf")}
+}
+
+// Config writes resolv.conf: the name servers, the search list and the options (after "timeout:1 attempts:1").
+fn (f Fixture) Config(options str, servers []str, search str) {
+	mut text = ""
+	for s in servers {
+		text += "nameserver " + s + "\n"
+	}
+	ci.Write(f.Resolv, text + "search " + search + "\noptions timeout:1 attempts:1 " + options + "\n")
+}
+
+// Run starts the fixture server with the given deadline and cache setting.
+fn (f Fixture) Run(fake Fake, deadlineMs i64, cache bool, log str) nettest.Server {
+	let port = nettest.Port()
+	mut set = []str{"TIN_CORES=1", "TIN_DEADLINE_MS=" + mint.Itoa(deadlineMs), "TIN_DNS_TEST=1", "TIN_DNS_HOSTS=" + f.Hosts, "TIN_DNS_RESOLV_CONF=" + f.Resolv, "TIN_DNS_PORT=" + mint.Itoa(fake.Port)}
+	if !cache {
+		set = append(set, "TIN_DNS_CACHE=0")
+	}
+	let server = nettest.Start(f.Exe, []str{}, set, log, port)
+	server.Ready(10)
+	let r = nettest.Do(port, "GET", "/health", []str{}, "")
+	ci.Check(r.Status == 200 && r.Body == "healthy", "the DNS fixture did not answer /health: " + r.Body)
+	return server
+}
+
+fn hexNibble(v i64) str {
+	return "0123456789ABCDEF"[v:v + 1]
+}
+
+// Quote is a URL query component, percent-encoded like urllib.parse.quote(safe="").
+fn Quote(s str) str {
+	mut out = ""
+	for i in 0..len(s) {
+		let c = s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' || c == '~' {
+			out += s[i:i + 1]
+		} else {
+			out += "%" + hexNibble(i64(c) / 16) + hexNibble(i64(c) % 16)
+		}
+	}
+	return out
+}
+
+// Lookup resolves a name through the fixture (timeout in milliseconds, 0 for the request's own deadline).
+fn Lookup(port i64, name str, timeoutMs i64) nettest.Reply {
+	return nettest.Do(port, "GET", "/resolve?name=" + Quote(name) + "&timeout=" + mint.Itoa(timeoutMs), []str{}, "")
+}
