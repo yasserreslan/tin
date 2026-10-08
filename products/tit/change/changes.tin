@@ -1,0 +1,80 @@
+package change
+
+import "../object"
+import "fault"
+import "mint"
+import "quarry"
+import "twine"
+
+// The change index (design/tit.md section 8): for each change, one line per version, oldest first:
+// `<op number> <hex commit id> <unix ns>`. It is a cache that can be rebuilt from the commits' change headers and
+// the oplog.
+
+fn changePath(dir str, c object.ChangeId) str {
+	let l = c.Letters()
+	return dir + "/changes/" + l[0:2] + "/" + l[2:]
+}
+
+// AddVersion records a new version of a change and syncs it.
+fn AddVersion(dir str, c object.ChangeId, v Version) ! {
+	let path = changePath(dir, c)
+	try quarry.MkdirAll(dirOf(path))
+	try quarry.AppendFile(path, "{v.Op} {v.Commit.Hex()} {v.Time}\n")
+	try quarry.Sync(path)
+}
+
+// Versions is every recorded version of a change, oldest first (none for a change never recorded).
+fn Versions(dir str, c object.ChangeId) ![]Version {
+	let path = changePath(dir, c)
+	mut out = []Version{}
+	if !quarry.Exists(path) {
+		return out
+	}
+	let text = try quarry.ReadFile(path)
+	for line in twine.Split(text, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		let f = twine.Fields(line)
+		if len(f) != 3 {
+			fail fault.Wrap(object.ErrCorrupt, "{path}: {line}")
+		}
+		let op = try mint.Atoi(f[0])
+		let id = try object.ParseId(f[1])
+		let t = try mint.Atoi(f[2])
+		out = append(out, Version{Op: op, Commit: id, Time: t})
+	}
+	return out
+}
+
+// Newest is the change's newest version, or nil.
+fn Newest(dir str, c object.ChangeId) !?Version {
+	let vs = try Versions(dir, c)
+	if len(vs) == 0 {
+		return nil
+	}
+	return vs[len(vs) - 1]
+}
+
+// MatchChanges is every recorded change whose letters start with prefix (at least two letters).
+fn MatchChanges(dir str, prefix str) ![]object.ChangeId {
+	mut out = []object.ChangeId{}
+	if len(prefix) < 2 {
+		return out
+	}
+	let sub = dir + "/changes/" + prefix[0:2]
+	if !quarry.IsDir(sub) {
+		return out
+	}
+	let names = try quarry.ReadDir(sub)
+	for n in names {
+		let letters = prefix[0:2] + n
+		if twine.HasPrefix(letters, prefix) {
+			let c = object.ParseChangeId(letters) catch _ {
+				continue
+			}
+			out = append(out, c)
+		}
+	}
+	return out
+}

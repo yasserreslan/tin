@@ -238,7 +238,8 @@ It is rewritten whole (temporary file, sync, rename) by each `tit adopt`.
 - **HEAD** (per workspace, section 10): `ref: refs/heads/<name>\n`, or `<hex id>\n` when detached.
 - **packed-refs**: `# tit packed-refs 1\n`, then `<target> <name>\n` sorted by name, where target is a hex id
   or `change:<letters>`. A loose ref file wins over a packed entry.
-- **Updates** are compare-and-swap: `Update(name, old, next)` takes the lock (section 12), checks the current
+- **Updates** are compare-and-swap: `Update(name, old, next)` takes the ref's own lock file `<ref>.lock`
+  (exclusive create; an operation also holds the repository lock of section 12 around all its updates), checks the current
   value equals `old` (`nil` = must not exist), writes the new value to `<file>.tmp`, syncs, renames, syncs the
   directory. A mismatch is `change.ErrConflict`, naming the current value.
 - **The change index** `.tit/changes/<first 2 letters>/<other 30>`: one line per version,

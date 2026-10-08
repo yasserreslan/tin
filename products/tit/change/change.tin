@@ -2,6 +2,10 @@ package change
 
 import "../object"
 import "fault"
+import "mint"
+import "quarry"
+import "tide"
+import "twine"
 
 // Refs, HEAD, the repository lock and change versions (design/tit.md sections 8 and 12; #779).
 
@@ -13,6 +17,9 @@ let ErrConflict = fault("ref changed")
 
 // ErrNoRef is the fault of a lookup of a ref that does not exist.
 let ErrNoRef = fault("no such ref")
+
+// ErrBadName is the fault of a ref name that breaks the naming rules.
+let ErrBadName = fault("bad ref name")
 
 // Target is what a ref names: a commit, or a change whose newest version it follows.
 type Target enum {
@@ -33,23 +40,105 @@ shape RefStore {
 	mut Update(name str, old ?Target, next ?Target) !
 }
 
-// Version is one version of a change.
+// Version is one version of a change: the operation that made it, its commit and when.
 type Version struct {
 	Op     i64
 	Commit object.Id
 	Time   i64
 }
 
+// TargetText is a target as a ref file holds it: hex digits, or "change " and the change id's letters.
+fn TargetText(t Target) str {
+	return match t {
+		Commit(id) => id.Hex()
+		Change(c) => "change " + c.Letters()
+	}
+}
+
+// ParseTarget reads a target from a ref file's line.
+fn ParseTarget(s str) !Target {
+	if twine.HasPrefix(s, "change ") {
+		let c = try object.ParseChangeId(s[7:])
+		return Target.Change(c)
+	}
+	let id = try object.ParseId(s)
+	return Target.Commit(id)
+}
+
+// SameTarget reports whether two optional targets are equal (both nil, or the same target).
+fn SameTarget(a ?Target, b ?Target) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return TargetText(a) == TargetText(b)
+}
+
+// ---- the repository lock ----
+
 // RepoLock is the held repository lock; Close releases it.
 type RepoLock struct {
 	path str
 }
 
-// Lock takes the repository lock of the .tit directory dir (#779).
+// Lock takes the repository lock of the .tit directory dir, waiting up to two seconds (or the enclosing deadline,
+// when that is earlier) while another live process holds it. A lock left by a process that no longer exists on this
+// machine is cleared.
 fn Lock(dir str) !RepoLock {
-	fail fault.Wrap(ErrLocked, "change.Lock: not implemented yet (#779)")
+	let path = dir + "/lock"
+	let host = quarry.Hostname() catch _ {
+		"?"
+	}
+	let me = "{quarry.Pid()} {host} {tide.Wall() / 1000000000}\n"
+	let got = within 2s {
+		mut held = false
+		for !held {
+			held = try tryLock(path, me, host)
+			if !held {
+				try tide.Wait(5ms)
+			}
+		}
+		true
+	} catch err {
+		if fault.Is(err, fault.DeadlineExceeded) {
+			let holder = quarry.ReadFile(path) catch _ {
+				"?"
+			}
+			fail fault.Wrap(ErrLocked, "{path} is held by process {twine.TrimSpace(holder)}")
+		}
+		fail err
+	}
+	if !got {
+		fail ErrLocked
+	}
+	return RepoLock{path: path}
+}
+
+// tryLock creates the lock file once; false while a live process holds it.
+fn tryLock(path str, me str, host str) !bool {
+	let (w, err) = flumeCreateExcl(path, me)
+	if err == nil {
+		return w
+	}
+	if !quarry.Exists(path) {
+		return false
+	}
+	let text = quarry.ReadFile(path) catch _ {
+		return false
+	}
+	let parts = twine.Fields(text)
+	if len(parts) >= 2 && parts[1] == host {
+		let pid = mint.Atoi(parts[0]) catch _ {
+			0
+		}
+		if pid > 0 && !quarry.Alive(pid) {
+			quarry.Remove(path) catch _ {
+			}
+		}
+	}
+	return false
 }
 
 // Close releases the lock.
 fn (l RepoLock) Close() ! {
+	try quarry.Remove(l.path)
 }
