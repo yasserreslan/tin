@@ -65,7 +65,7 @@ jobs:
       - name: Regular expressions against Go's regexp (12,000 pairs and the ported tables)
         run: sh tools/ci/tin.sh lasso_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
-        run: python3 tools/ci/pack_check.py
+        run: sh tools/ci/tin.sh pack_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: python3 tools/ci/spawn_check.py
       - name: DEFLATE against Go (every length and distance code, both directions)
