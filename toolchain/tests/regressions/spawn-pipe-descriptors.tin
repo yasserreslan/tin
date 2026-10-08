@@ -1,0 +1,62 @@
+package main
+
+// A child's output pipe and the error pipe that carries a failed execve are read with __ld(p, 4),
+// which is a one-byte load (__ld's size is the low two bits of the shift): every pipe descriptor
+// number at or above 256 came back as its low byte, so the child's answer was read from whatever
+// other descriptor that number was, and a failed execve reported errno 0.
+
+import "mint"
+import "quarry"
+import "say"
+import "spawn"
+import "twine"
+
+// hold opens n files and keeps their descriptors, so the next pipe() takes a number above 256.
+fn hold(n i64) []i64 {
+	let dir = quarry.TempDir()
+	mut fds = []i64{}
+	for i in 0..n {
+		let path = dir + "/fd" + mint.Itoa(i)
+		quarry.WriteFile(path, "hold") catch _ {
+			return fds
+		}
+		let (fd, _) = quarry.OpenRegular(path) catch _ {
+			return fds
+		}
+		fds = append(fds, fd)
+	}
+	return fds
+}
+
+// missingProgram is what spawning a program that does not exist reports.
+fn missingProgram() str {
+	let r = spawn.Run(spawn.Cmd{Argv: []str{"/no/such/tin-program"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Null, MaxOutput: 0}) catch err {
+		return say.Str(err)
+	}
+	return "code " + mint.Itoa(r.Code)
+}
+
+fn main() {
+	mut fds = hold(300)
+	if len(fds) < 300 {
+		say.Line("SKIP: only " + mint.Itoa(len(fds)) + " descriptors could be opened")
+		return
+	}
+	let answer = spawn.Run(spawn.Cmd{Argv: []str{"/bin/sh", "-c", "printf ready"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Null, MaxOutput: 0}) catch err {
+		say.Line("FAIL: the child's output pipe: " + say.Str(err))
+		quarry.Exit(1)
+		return
+	}
+	if answer.Code != 0 || answer.Stdout != "ready" {
+		say.Line("FAIL: the child answered code " + mint.Itoa(answer.Code) + " stdout " + say.Str(answer.Stdout))
+		quarry.Exit(1)
+		return
+	}
+	let missing = missingProgram()
+	if !twine.Contains(missing, "no such file or directory") {
+		say.Line("FAIL: a failed execve reported " + missing)
+		quarry.Exit(1)
+		return
+	}
+	say.Line("spawn: 300 descriptors held, the output pipe answered and a failed execve named its errno")
+}

@@ -141,8 +141,8 @@ fn stdioOpen(s Stdio, input bool) !(i64, i64) {
 				free(fds)
 				fail say.Fault("spawn: pipe: %s", errnoText(rt_errno()))
 			}
-			let a = i64(i32(__ld(fds, 4)))
-			let b = i64(i32(__ld(fds+4, 4)))
+			let a = i64(i32(__ld(fds, 2)))
+			let b = i64(i32(__ld(fds+4, 2)))
 			free(fds)
 			// macOS has no pipe2: mark both ends close-on-exec, so a later child never inherits
 			// them (the child of this spawn gets its end through the file actions).
