@@ -2653,6 +2653,8 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) SelectWordAt(row i64, col i64)`: SelectWordAt selects the word (letters, digits and underscores) around column col of row, or the one character there when it is not part of a word.
 - `(b mut Buffer) SetText(text str)`: SetText replaces the whole text as one undo step, keeping the cursor on its line and column (or the nearest place that exists).
 - `(b mut Buffer) JoinLines()`: JoinLines joins the current line with the line below, collapsing leading indentation into a single space.
+- `(b mut Buffer) SortLines()`: SortLines sorts the touched lines (the cursor's line when nothing is selected) by their text in bytewise order, one undo step; the cursor stays on its line. sift wants a slice it may move, so the lines are copied, sorted and written back.
+- `(b mut Buffer) TrimTrailingSpace()`: TrimTrailingSpace removes the spaces and tabs at the end of every touched line (the cursor's line when nothing is selected), one undo step for the whole thing.
 - `(b mut Buffer) TransformCase(upper bool)`: TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
 - `(b mut Buffer) SelectLine(row i64)`: SelectLine selects line row, including its newline when it is not the last line.
 
