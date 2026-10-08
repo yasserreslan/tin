@@ -10,6 +10,7 @@ package wire
 import "say"
 import "seal"
 import "tls"
+import "httptrace"
 
 // Conn is a TCP connection.
 type Conn struct {
@@ -424,6 +425,7 @@ type Options struct {
 	MaxIdle i64         // idle keep-alive connections kept per core and host after a call (0: 8; negative: none, every call dials and sends Connection: close)
 	NoH2    bool        // speak HTTP/1.1 only: https:// offers no h2 (#480)
 	H2C     bool        // http:// speaks HTTP/2 by prior knowledge (h2c), as gRPC servers expect (#480)
+	Trace   ?httptrace.ClientTrace // callbacks for observable HTTP phases
 }
 
 // DefaultMaxIdle is how many idle connections per host (and core) DoWith keeps when Options.MaxIdle is 0.
@@ -592,7 +594,7 @@ fn DoWith(method str, url str, headers []str, body str, opt Options) !Resp {
 		scheme = "https"
 	}
 	let k = call{addr: addr, hostport: hostport, key: pool_key(secure, hostport, opt), req: req, head: method == "HEAD", limit_: limit_, until: until, timeout: opt.Timeout, maxIdle: maxIdle, idem: method == "GET" || method == "HEAD" || method == "PUT" || method == "DELETE" || method == "OPTIONS" || method == "TRACE",
-		method: method, scheme: scheme, path: path, headers: headers, body: body, noH2: opt.NoH2, h2c: opt.H2C}
+		method: method, scheme: scheme, path: path, headers: headers, body: body, noH2: opt.NoH2, h2c: opt.H2C, trace: opt.Trace}
 	// A kept connection the server closed meanwhile fails before any response byte: once, for a
 	// request that may be repeated, the call goes to a fresh connection.
 	staleRetry = false
@@ -635,11 +637,33 @@ type call struct {
 	body     str
 	noH2     bool
 	h2c      bool
+	trace    ?httptrace.ClientTrace
+}
+
+fn trace_get_conn(trace ?httptrace.ClientTrace, host str) {
+	if trace != nil && trace.GetConn != nil { trace.GetConn(host) }
+}
+
+fn trace_tls_start(trace ?httptrace.ClientTrace) {
+	if trace != nil && trace.TLSHandshakeStart != nil { trace.TLSHandshakeStart() }
+}
+
+fn trace_tls_done(trace ?httptrace.ClientTrace, err fault) {
+	if trace != nil && trace.TLSHandshakeDone != nil { trace.TLSHandshakeDone(err) }
+}
+
+fn trace_wrote(trace ?httptrace.ClientTrace, err fault) {
+	if trace != nil && trace.WroteRequest != nil { trace.WroteRequest(err) }
+}
+
+fn trace_first_byte(trace ?httptrace.ClientTrace) {
+	if trace != nil && trace.GotFirstResponseByte != nil { trace.GotFirstResponseByte() }
 }
 
 // attempt_plain makes one http:// exchange, on a kept connection to the key when allowed (usePool)
 // and there is one, else on a new one. A connection is kept again when the response ends cleanly.
 fn attempt_plain(k call, usePool bool) !Resp {
+	trace_get_conn(k.trace, k.hostport)
 	if k.h2c {
 		// HTTP/2 by prior knowledge (#480).
 		if usePool {
@@ -667,12 +691,13 @@ fn attempt_plain(k call, usePool bool) !Resp {
 	respSeen = false
 	respReuse = false
 	let werr = c.WriteBytes(k.req)
+	trace_wrote(k.trace, werr)
 	if werr != nil {
 		c.Close()
 		staleRetry = reused && k.idem
 		fail werr
 	}
-	let (r, err) = read_response(mut c, k.head, k.limit_)
+	let (r, err) = read_response(mut c, k.head, k.limit_, k.trace)
 	if err != nil {
 		c.Close()
 		staleRetry = reused && k.idem && !respSeen
@@ -687,6 +712,7 @@ fn attempt_plain(k call, usePool bool) !Resp {
 
 // attempt_tls is attempt_plain for https://: a kept connection keeps its TLS session.
 fn attempt_tls(k call, opt Options, usePool bool) !Resp {
+	trace_get_conn(k.trace, k.hostport)
 	if usePool && !k.noH2 {
 		// A connection that speaks HTTP/2 to this origin takes the call as a stream (#480).
 		let g = h2_usable(k.key)
@@ -706,6 +732,7 @@ fn attempt_tls(k call, opt Options, usePool bool) !Resp {
 	if k.noH2 {
 		alpn = []str{"http/1.1"}
 	}
+	trace_tls_start(k.trace)
 	let cfg = tls.Config{ServerName: "", RootCAs: "", ALPN: alpn, Timeout: opt.Timeout, InsecureSkipVerify: false}
 	let given = opt.TLS
 	if given != nil {
@@ -719,7 +746,9 @@ fn attempt_tls(k call, opt Options, usePool bool) !Resp {
 		cfg.MinVersion = given.MinVersion
 	}
 	cfg.ServerName = tls_host(k.hostport)
-	let tc = try tls.Dial(k.addr, cfg)
+	let (tc, tlsErr) = tls.Dial(k.addr, cfg)
+	trace_tls_done(k.trace, tlsErr)
+	if tlsErr != nil { fail tlsErr }
 	if tc.ALPN() == "h2" && !k.noH2 {
 		return try h2_attempt(h2_new(k.key, tc.Fd(), tc), k)
 	}
@@ -735,12 +764,13 @@ fn exchange_tls(tc mut tls.Conn, k call, reused bool) !Resp {
 	respSeen = false
 	respReuse = false
 	let werr = tc.WriteBytes(k.req)
+	trace_wrote(k.trace, werr)
 	if werr != nil {
 		tc.Close()
 		staleRetry = reused && k.idem
 		fail werr
 	}
-	let (r, err) = read_response(mut tc, k.head, k.limit_)
+	let (r, err) = read_response(mut tc, k.head, k.limit_, k.trace)
 	if err != nil {
 		tc.Close()
 		staleRetry = reused && k.idem && !respSeen
@@ -1018,8 +1048,9 @@ fn find_crlf2(b []u8) i64 {
 shape stream { mut Read(buf mut []u8, max i64) !i64 }
 
 // read_head reads until buf holds a complete header block and returns its length.
-fn read_head[S stream](c mut S, buf mut []u8) !i64 {
+fn read_head[S stream](c mut S, buf mut []u8) !(i64, bool) {
 	mut hend = find_crlf2(buf)
+	mut gotBytes = false
 	for hend < 0 {
 		if len(buf) > 1048576 {
 			fail "wire: response headers too large"
@@ -1027,6 +1058,7 @@ fn read_head[S stream](c mut S, buf mut []u8) !i64 {
 		let (_, err) = c.Read(mut buf, 4096)
 		if len(buf) > 0 {
 			respSeen = true
+			gotBytes = true
 		}
 		if err != nil {
 			if IsEOF(err) {
@@ -1035,21 +1067,26 @@ fn read_head[S stream](c mut S, buf mut []u8) !i64 {
 			if err != nil {
 				fail err
 			}
-			return 0
+			return 0, false
 		}
 		hend = find_crlf2(buf)
 	}
-	return hend
+	return hend, gotBytes
 }
 
 // maxInformational bounds the 1xx responses accepted before the final one (as Go does).
 const maxInformational = 5
 
-fn read_response[S stream](c mut S, head bool, limit_ i64) !Resp {
+fn read_response[S stream](c mut S, head bool, limit_ i64, trace ?httptrace.ClientTrace) !Resp {
 	mut buf = make([]u8, 0, 4096)
+	mut firstByteSeen = false
 	mut informational = 0
 	for {
-		let hend = try read_head(mut c, mut buf)
+		let (hend, gotBytes) = try read_head(mut c, mut buf)
+		if gotBytes && !firstByteSeen {
+			trace_first_byte(trace)
+			firstByteSeen = true
+		}
 		let h = str(buf[:hend])
 		if len(h) < 12 || h[:5] != "HTTP/" {
 			fail "wire: malformed response"
