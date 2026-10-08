@@ -1,0 +1,46 @@
+package main
+
+import "image"
+import "image/jpeg"
+import "mint"
+import "quarry"
+import "seal"
+import "say"
+
+// Reads one hex-encoded JPEG per line and prints "W,H|r,g,b,..." with 8-bit channels, or "fault" when Decode rejects it.
+fn main() {
+	let input = quarry.ReadStdin() catch err {
+		say.Line("input fault", err)
+		return
+	}
+	mut start = i64(0)
+	for i in 0..len(input)+1 {
+		if i < len(input) && input[i] != '\n' { continue }
+		let line = input[start:i]
+		start = i+1
+		if len(line) == 0 { continue }
+		let data = seal.HexDecode(line) catch _ {
+			say.Line("fault")
+			continue
+		}
+		let decoded = jpeg.Decode(str(data)) catch _ {
+			say.Line("fault")
+			continue
+		}
+		let bounds = decoded.Bounds()
+		let pixels = image.AsNRGBA64(decoded)
+		if pixels == nil {
+			say.Line("unexpected image type")
+			continue
+		}
+		mut out = mint.Itoa(bounds.Dx()) + "," + mint.Itoa(bounds.Dy()) + "|"
+		for y in bounds.Min.Y..bounds.Max.Y {
+			for x in bounds.Min.X..bounds.Max.X {
+				let c = pixels.NRGBA64At(x, y)
+				if x != bounds.Min.X || y != bounds.Min.Y { out += "," }
+				out += mint.Itoa(i64(c.R >> 8)) + "," + mint.Itoa(i64(c.G >> 8)) + "," + mint.Itoa(i64(c.B >> 8))
+			}
+		}
+		say.Line(out)
+	}
+}

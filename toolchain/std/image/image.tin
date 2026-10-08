@@ -10,6 +10,7 @@
 // image also has its own typed accessors (RGBAAt, GrayAt, ColorIndexAt...). Layout tells which concrete image a
 // dyn Image is and gives its pixel buffer: it is how image/draw and image/png take their fast paths, and how a caller
 // gets the concrete image back (AsRGBA, AsNRGBA...).
+// The image/jpeg package decodes 8-bit baseline and progressive JPEG data and encodes baseline JPEG images.
 package image
 
 import "image/color"

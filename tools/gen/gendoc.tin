@@ -77,6 +77,8 @@ fn packages() []str {
 		"mime", "media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart)",
 		"scan", "a scanner and tokenizer for UTF-8 text (text/scanner)",
 		"image", "images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png)",
+		"image", "images, colors, drawing, PNG encoding and baseline JPEG decoding (image, image/color, image/draw, image/png, image/jpeg)",
+		"image", "images, colors, drawing, PNG encoding, baseline JPEG decoding and encoding (image, image/color, image/draw, image/png, image/jpeg)",
 		"appkit", "macOS frameworks for the Tinland editor (Cocoa, WebKit)",
 		"metal", "Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor",
 		"gpuwin", "a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU",
@@ -167,6 +169,9 @@ fn packageFiles(name str) []str {
 		if twine.HasSuffix(f, ".tin") && !twine.HasSuffix(f, "_test.tin") && !isOsFile(f) {
 			files = append(files, directory + "/" + f)
 		}
+	}
+	if name == "image" {
+		files = append(files, "toolchain/std/image/jpeg/jpeg.tin")
 	}
 	return files
 }
