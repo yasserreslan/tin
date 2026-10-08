@@ -30,7 +30,7 @@ fn Run(paths []str) bool {
 		quarry.Eprintln("Tinland draws on the GPU and this machine has none: " + gpu.Error)
 		return false
 	}
-	render.Init(gpu, appkit.Scale(win.Win), 13.0)
+	render.Init(gpu, appkit.Scale(win.Win), ws.CodeSize)
 	ws.Ed.UseFont()
 	BuildMenus(win)
 	for !ws.Quit {
@@ -90,6 +90,10 @@ fn take(ws mut workspace.Workspace, win gpuwin.Window) {
 // event handles a key or mouse event of the window.
 fn event(ws mut workspace.Workspace, win gpuwin.Window, e i64) {
 	ws.Event(e)
+	if ws.Menu == workspace.MenuTree {
+		ws.Menu = workspace.MenuNone
+		gpuwin.PopUp(win, e, []str{"New File...", "New Folder...", "-", "Rename...", "Delete", "-", "Refresh"}, []i64{workspace.CmdNewFile, workspace.CmdNewFolder2, 0, workspace.CmdRename, workspace.CmdDelete, 0, workspace.CmdRefresh})
+	}
 	if ws.Drag == workspace.DragTitle {
 		// a press on the title bar moves the window (a double click zooms it)
 		if appkit.EventClicks(e) >= 2 {

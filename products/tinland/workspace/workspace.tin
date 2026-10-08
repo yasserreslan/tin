@@ -88,7 +88,14 @@ type Workspace struct {
 	Search Search
 	// Git is the output of git status, one line per changed file.
 	Git []str
+	// Menu asks the application to pop up a context menu for the last right click (MenuNone when it does not).
+	Menu i64
+	// CodeSize is the size of the code font in points.
+	CodeSize f64
 }
+
+const MenuNone = 0
+const MenuTree = 1
 
 // Where typed text goes.
 const FocusEditor = 0
@@ -103,6 +110,7 @@ fn New(th theme.Theme, ed editor.Editor) Workspace {
 	ws.W = 1100.0
 	ws.H = 720.0
 	ws.Dirty = true
+	ws.CodeSize = 13.0
 	return ws
 }
 

@@ -55,6 +55,9 @@ fn commands() []command {
 		command{name: "Run: Run File", cmd: 22},
 		command{name: "Project: New File...", cmd: CmdNewFile},
 		command{name: "Project: Refresh", cmd: CmdRefresh},
+		command{name: "View: Zoom In", cmd: CmdZoomIn},
+		command{name: "View: Zoom Out", cmd: CmdZoomOut},
+		command{name: "View: Reset Zoom", cmd: CmdZoomReset},
 	}
 }
 

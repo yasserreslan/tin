@@ -184,3 +184,8 @@ fn Snapshot(scene metal.Scene, w i64, h i64, bg i64, path str) bool {
 fn HaveGPU() bool {
 	return cv.Gpu.Device != 0
 }
+
+// SetCodeSize changes the size of the code font (points) and rebuilds the atlas for it.
+fn SetCodeSize(points f64) {
+	Init(cv.Gpu, cv.Scale, points)
+}

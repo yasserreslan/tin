@@ -182,3 +182,20 @@ fn Pump(win Window, seconds f64) bool {
 fn NewMenuBar(win Window) appkit.Menu {
 	return appkit.NewCallbackMenuBar(win.Win.App, win.Delegate, "command:")
 }
+
+// PopUp shows a context menu at the place of the mouse event e. Choosing an item arrives as a command (KindCommand) with the
+// item's tag, like a menu bar item.
+fn PopUp(win Window, e i64, titles []str, tags []i64) {
+	let menu = appkit.Send1(appkit.Send(appkit.Class("NSMenu"), "alloc"), "initWithTitle:", appkit.NewString(""))
+	for i in 0..len(titles) {
+		if titles[i] == "-" {
+			appkit.Send1(menu, "addItem:", appkit.Send(appkit.Class("NSMenuItem"), "separatorItem"))
+			continue
+		}
+		let item = appkit.Send3(appkit.Send(appkit.Class("NSMenuItem"), "alloc"), "initWithTitle:action:keyEquivalent:", appkit.NewString(titles[i]), appkit.Sel("command:"), appkit.NewString(""))
+		appkit.Send1(item, "setTarget:", win.Delegate)
+		appkit.Send1(item, "setTag:", tags[i])
+		appkit.Send1(menu, "addItem:", item)
+	}
+	appkit.Send3(appkit.Class("NSMenu"), "popUpContextMenu:withEvent:forView:", menu, e, win.View)
+}

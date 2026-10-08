@@ -1,5 +1,6 @@
 package workspace
 
+import "../render"
 import "appkit"
 import "../editor"
 import "textedit"
@@ -19,9 +20,13 @@ const CmdNewFolder2 = 110
 const CmdRename = 111
 const CmdDelete = 112
 const CmdCollapseAll = 113
+const CmdZoomIn = 114
+const CmdZoomOut = 115
+const CmdZoomReset = 116
 
 // Event kinds of an NSEvent that the workspace reads.
 const evMouseDown = 1
+const evRightDown = 3
 const evMouseUp = 2
 const evMouseMoved = 5
 const evMouseDragged = 6
@@ -48,7 +53,7 @@ fn (ws mut Workspace) Event(e i64) {
 		ws.scroll(appkit.EventScrollX(e) * k, appkit.EventScrollY(e) * k)
 		return
 	}
-	if t != evMouseDown && t != evMouseUp && t != evMouseMoved && t != evMouseDragged {
+	if t != evMouseDown && t != evRightDown && t != evMouseUp && t != evMouseMoved && t != evMouseDragged {
 		return
 	}
 	let (x, wy) = appkit.EventLocation(e)
@@ -62,7 +67,14 @@ fn (ws mut Workspace) Event(e i64) {
 			ws.Dirty = true
 		}
 	}
-	if t == evMouseDown {
+	if t == evRightDown {
+		let id = ws.Hits.At(x, y)
+		if id >= idRow && id < idOutputLine {
+			ws.clickSelect(id - idRow)
+			ws.Menu = MenuTree
+		}
+		ws.Dirty = true
+	} else if t == evMouseDown {
 		ws.press(x, y, appkit.EventClicks(e), appkit.EventFlags(e))
 	} else if t == evMouseDragged {
 		ws.drag(x, y)
@@ -248,6 +260,12 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		ws.OpenPicker(PickRename)
 	} else if cmd == CmdDelete {
 		ws.deleteSelected()
+	} else if cmd == CmdZoomIn {
+		ws.zoom(ws.CodeSize + 1.0)
+	} else if cmd == CmdZoomOut {
+		ws.zoom(ws.CodeSize - 1.0)
+	} else if cmd == CmdZoomReset {
+		ws.zoom(13.0)
 	} else if cmd == CmdCollapseAll {
 		ws.collapseAll()
 	} else if cmd == CmdRevealInProject {
@@ -290,4 +308,26 @@ fn (ws mut Workspace) collapseAll() {
 		ws.Proj.Entries[i].Open = false
 	}
 	ws.Proj.Rebuild()
+}
+
+// clickSelect selects a row of the project panel without opening it.
+fn (ws mut Workspace) clickSelect(r i64) {
+	if r >= 0 && r < len(ws.Proj.Rows) {
+		ws.Proj.Select(ws.Proj.Rows[r])
+	}
+}
+
+// zoom sets the code font size (within 8 and 40 points).
+fn (ws mut Workspace) zoom(points f64) {
+	mut p = points
+	if p < 8.0 {
+		p = 8.0
+	}
+	if p > 40.0 {
+		p = 40.0
+	}
+	ws.CodeSize = p
+	render.SetCodeSize(p)
+	ws.Ed.UseFont()
+	ws.Dirty = true
 }
