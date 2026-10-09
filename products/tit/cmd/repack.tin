@@ -32,10 +32,11 @@ fn doRepack(g Global, o mut Out) ! {
 	mut commits = []object.Id{}
 	mut trees = []object.Id{}
 	mut blobs = []object.Id{}
-	for p in r.ids.packs {
+	for k in 0..len(r.ids.packs) {
+		mut p = r.ids.packs[k]
 		for i in 0..p.Count {
 			let id = p.IdAt(i)
-			let (kind, _) = try r.Store.GetRaw(id)
+			let kind = try p.KindAt(i)
 			match kind {
 				Commit, Tag => {
 					commits = append(commits, id)

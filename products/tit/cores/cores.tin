@@ -158,7 +158,25 @@ fn runJobs(n i64, job fn(i64) str) []str {
 		sent += 1
 	}
 	for done < n {
-		let (from, reply) = relay.Recv()
+		mut (from, reply, got) = relay.TryRecv()
+		if !got && sent < n {
+			// no answer waiting: core 0 does the next job itself instead of waiting (#778: idle, it left n cores
+			// n - 1 workers); the workers each have another job queued meanwhile
+			let i = sent
+			sent += 1
+			let mine = arena {
+				serve(job(i))
+			}
+			let sp0 = twine.IndexByte(mine, ' ')
+			out[i] = mine[sp0 + 1:]
+			done += 1
+			continue
+		}
+		if !got {
+			let (f, r) = relay.Recv()
+			from = f
+			reply = r
+		}
 		let sp = twine.IndexByte(reply, ' ')
 		let seq = mint.Atoi(reply[0:sp]) catch _ {
 			-1
@@ -337,18 +355,28 @@ fn WindowDeltas(bodies []str, kinds []i64, window i64) ([]i64, []str) {
 
 // HashPath is the blob id of the file at path: its contents, or a symlink's target.
 fn HashPath(path str) !object.Id {
-	let info = try quarry.Lstat(path)
-	if info.Type == quarry.FileType.Symlink {
-		let target = try quarry.Readlink(path)
-		return object.Hash(object.Kind.Blob, target)
+	// A file written while it is read changes size under the hash (an editor's save, tit watch looking at it): read
+	// it again, a few times, rather than fail as if it were damaged.
+	mut tries = 0
+	for {
+		let info = try quarry.Lstat(path)
+		if info.Type == quarry.FileType.Symlink {
+			let target = try quarry.Readlink(path)
+			return object.Hash(object.Kind.Blob, target)
+		}
+		mut r = try flume.Open(path)
+		let (id, err) = object.HashBlob(mut r, info.Size)
+		r.Close()
+		if err == nil {
+			return id
+		}
+		tries += 1
+		let (after, gone) = quarry.Lstat(path)
+		if tries >= 5 || gone != nil || (after.Size == info.Size && after.Mtime == info.Mtime) {
+			fail err
+		}
 	}
-	mut r = try flume.Open(path)
-	let (id, err) = object.HashBlob(mut r, info.Size)
-	r.Close()
-	if err != nil {
-		fail err
-	}
-	return id
+	fail "unreachable"
 }
 
 // HashResult is one file's blob id, or why it could not be read. Id is not the last field (#847).
@@ -383,7 +411,24 @@ fn HashPaths(paths []str) []HashResult {
 		sent += 1
 	}
 	for done < len(paths) {
-		let (from, reply) = relay.Recv()
+		mut (from, reply, got) = relay.TryRecv()
+		if !got && sent < len(paths) {
+			// no answer waiting: core 0 hashes the next file itself (#778)
+			let (id, err) = HashPath(paths[sent])
+			if err != nil {
+				out[sent] = HashResult{Err: fault.Message(err), Id: object.NoId}
+			} else {
+				out[sent] = HashResult{Err: "", Id: id}
+			}
+			sent += 1
+			done += 1
+			continue
+		}
+		if !got {
+			let (f, r) = relay.Recv()
+			from = f
+			reply = r
+		}
 		let sp = twine.IndexByte(reply, ' ')
 		let seq = mint.Atoi(reply[0:sp]) catch _ {
 			-1

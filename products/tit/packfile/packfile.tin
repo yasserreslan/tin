@@ -278,6 +278,52 @@ fn (p mut Pack) entryBytes(off i64) !str {
 	return e
 }
 
+// headAt is the first bytes of the entry at off, enough for its header.
+fn (p mut Pack) headAt(off i64) !str {
+	if off < 20 || off >= p.size - 32 {
+		fail fault.Wrap(ErrBadPack, "no entry at {off}")
+	}
+	if p.loaded {
+		return p.data[off:min(p.size - 32, off + maxHead)]
+	}
+	return try quarry.ReadAt(p.Path, off, min(maxHead, p.size - 32 - off))
+}
+
+// KindAt is the kind of the object at position i of the index, from its entry's header, or a delta's from its
+// base's: nothing is read past the headers or inflated, so sorting a pack's objects by kind reads none of their
+// bodies (#778: repack read every object twice, once only for its kind).
+fn (p mut Pack) KindAt(i i64) !object.Kind {
+	mut off = try p.offOf(i)
+	for depth in 0..MaxDeltaDepth + 1 {
+		let h = try p.headAt(off)
+		let t = i64(h[0])
+		if t == typeOfsDelta {
+			let (_, a) = try varintIn(h, 1)
+			let (dist, _) = try varintIn(h, a)
+			if dist <= 0 || off - dist < 20 {
+				fail fault.Wrap(ErrBadPack, "a delta at {off} against no earlier entry")
+			}
+			off = off - dist
+			continue
+		}
+		if t == typeRefDelta {
+			let (_, a) = try varintIn(h, 1)
+			if a + 32 > len(h) {
+				fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+			}
+			let baseId = try object.IdOf(h[a:a + 32])
+			let pos = p.Find(baseId)
+			if pos < 0 {
+				fail fault.Wrap(ErrBadPack, "a delta at {off} against {baseId.Hex()}, which this pack lacks")
+			}
+			off = try p.offOf(pos)
+			continue
+		}
+		return try kindOf(t)
+	}
+	fail fault.Wrap(ErrBadPack, "a delta chain longer than {MaxDeltaDepth}")
+}
+
 // maxHead is the most bytes an entry's header takes: its type, size, base (an offset or an id) and compressed length.
 const maxHead = 1 + 10 + 32 + 10
 
