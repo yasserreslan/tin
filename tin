@@ -9,6 +9,7 @@
 #   tin fix -edition 1 FILES...    rewrite legacy syntax to edition 1
 #   tin test [-bench] [-run REGEX] [-json] [DIR]  run DIR's *_test.tin tests (TestXxx, BenchmarkXxx)
 #   tin replay CAPSULE --against BUILD [--live KIND]... [--save-test NAME --issue N]  replay a recorded request
+#   tin replay key FILE                    a reader's key for version 2 capsules: private key to FILE, public key printed
 #   tin vendor [DIR]                copy tin.mod's requires into vendor/ and write tin.lock
 #   tin lsp                         language server on standard input and output (diagnostics, outline, definition, hover, completion)
 #   tin fmt [-l] [-d] [-w] FILE.tin... | DIR | -stdin   format source: the canonical whitespace
@@ -199,6 +200,13 @@ case $1 in
     "$tinc" -entry "$entry" -o "$exe" "$@" "$runner"
     "$exe" ;;
   replay)
+    # tin replay key FILE (#1004): a reader's key pair for version 2 capsules; the private key to FILE, the public key printed.
+    if [ "${2:-}" = key ]; then
+      [ $# -eq 3 ] || { echo "tin: replay key: usage: tin replay key FILE" >&2; exit 2; }
+      keytool=$cache/replay_key.$$; trap 'rm -f "$keytool"' EXIT
+      TIN_ROOT=$root "$tinc" -o "$keytool" "$root/tools/dev/replay_key.tin" && "$keytool" "$3"
+      exit $?
+    fi
     # tin replay CAPSULE --against BUILD [--live KIND]...: run BUILD (a binary, or FILE.tin built
     # here) on the capsule's request with every effect served from the capsule (#242; the
     # report and the exit status, 0, 3 diverged or 4 unreadable, are the program's).

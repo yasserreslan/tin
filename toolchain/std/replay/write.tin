@@ -19,6 +19,11 @@ shared mut gCores i64       // the cores sharing the spool's bound
 shared mut gDrop str        // ",name,name," lower case: header values not stored
 shared mut gSpool i64       // per core, 64 bytes: the capsules it keeps (section 6)
 shared mut gProgram str     // argv[0]
+shared mut gV2 bool         // version 2 envelopes: TIN_REPLAY_RECIPIENTS is set (section 6.1)
+shared mut gReaders str     // TIN_REPLAY_RECIPIENTS, checked by Setup and parsed again for each capsule
+shared mut gSignSeed str    // TIN_REPLAY_SIGNING_KEY's 32 bytes
+shared mut gSummaryPanic bool // TIN_REPLAY_SUMMARY_PANIC=1: the plain summary carries the panic message
+shared mut gKsCapsule bool  // a version 2 capsule being replayed gave the secret handles' key (Open)
 
 // Per core: its sampling generator.
 mut sampleState u64
@@ -50,6 +55,11 @@ fn Setup(cores i64) bool {
 		// A process replaying a capsule (#242) records nothing, but it writes secrets into
 		// effect keys as the recording did (the same key and secret headers), or no key with a
 		// secret in it would match the capsule's.
+		// A version 2 capsule carries the handles' key itself (Open read it); a version 1 replay derives it.
+		if gKsCapsule {
+			rt_replay_setup(Secret, list(secretDefaults, quarry.Getenv("TIN_REPLAY_SECRET_HEADERS")))
+			return false
+		}
 		let (k, err) = seal.HexDecode(quarry.Getenv("TIN_REPLAY_KEY"))
 		if err == nil && len(k) == 32 {
 			gKs = held(str(seal.HmacSha256(str(k), "tin replay secret")))
@@ -66,6 +76,25 @@ fn Setup(cores i64) bool {
 		return false
 	}
 	let key = str(k)
+	// version 2 (section 6.1): readers' keys and the server's signing key
+	gV2 = false
+	let readersText = quarry.Getenv("TIN_REPLAY_RECIPIENTS")
+	if readersText != "" {
+		let (_, rerr) = ParseRecipients(readersText)
+		if rerr != nil {
+			warn("replay: recording is off: " + say.Str(rerr))
+			return false
+		}
+		let (sk, serr) = seal.HexDecode(quarry.Getenv("TIN_REPLAY_SIGNING_KEY"))
+		if serr != nil || len(sk) != 32 {
+			warn("replay: recording is off: TIN_REPLAY_SIGNING_KEY must be 64 hex digits with TIN_REPLAY_RECIPIENTS")
+			return false
+		}
+		gReaders = held(readersText)
+		gSignSeed = held(str(sk))
+		gSummaryPanic = quarry.Getenv("TIN_REPLAY_SUMMARY_PANIC") == "1"
+		gV2 = true
+	}
 	if !quarry.IsDir(dir) {
 		quarry.MkdirAll(dir) catch err {
 			warn("replay: recording is off: " + say.Str(err))
@@ -150,7 +179,13 @@ fn Done(tp i64, core i64) {
 // Write writes the capsule of tape tp (recorded on core, with flags) into the spool, deleting
 // the core's oldest capsules past its share of TIN_REPLAY_MAX_MB; it returns the capsule's path.
 fn Write(tp i64, core i64, flags i64) !str {
-	let data = Seal(Encode(tp, core, flags))
+	mut data = ""
+	if gV2 {
+		let readers = try ParseRecipients(gReaders)
+		data = try SealV2(Encode(tp, core, flags), gKs, summaryOf(tp), readers, gSignSeed)
+	} else {
+		data = Seal(Encode(tp, core, flags))
+	}
 	mut wall = tp[13]
 	if wall == 0 {
 		wall = rt_wall_ns()
@@ -199,6 +234,43 @@ fn Encode(tp i64, core i64, flags i64) str {
 		b = append(b, rt_str_from_raw(tp[1], tp[2])...)
 	}
 	return str(b)
+}
+
+// summaryOf is a version 2 capsule's plain summary of tape tp (section 6.1): its status, its request's method and
+// path (the target without its query), and the panic message only with TIN_REPLAY_SUMMARY_PANIC=1.
+fn summaryOf(tp i64) str {
+	mut req = ""
+	if tp[8] != 0 {
+		req = rt_str_from_raw(tp[8], tp[9])
+	}
+	mut i = 0
+	for i < len(req) && req[i] != ' ' && req[i] != '\n' {
+		i += 1
+	}
+	let method = req[:i]
+	mut j = i + 1
+	mut path = ""
+	if j < len(req) {
+		mut k = j
+		for k < len(req) && req[k] != ' ' && req[k] != '?' && req[k] != '\r' && req[k] != '\n' {
+			k += 1
+		}
+		path = req[j:k]
+	}
+	mut out = "status=" + say.Str(tp[10]) + "\nmethod=" + method + "\npath=" + path + "\n"
+	if gSummaryPanic && tp[11] != 0 {
+		let pan = rt_str_from_raw(tp[11], tp[12])
+		mut clean = make([]u8, 0, len(pan))
+		for x in 0..len(pan) {
+			if pan[x] == '\n' || pan[x] == '\r' {
+				clean = append(clean, ' ')
+			} else {
+				clean = append(clean, pan[x])
+			}
+		}
+		out = out + "panic=" + str(clean) + "\n"
+	}
+	return out
 }
 
 // Seal is the envelope of a capsule body (section 6): the magic, a random nonce, the body under

@@ -254,7 +254,8 @@ capsule has no peer.
 ## 6.1 Envelope version 2: a key per capsule, wrapped for each reader, signed (#1004)
 
 Status: **proposed** by #1004, for #1027 (`tit replay`), #1022 (tinhub's capsule store) and #1028 (the review
-runner). Version 1 stays readable; a server writes version 2 when `TIN_REPLAY_RECIPIENTS` is set.
+runner). Version 1 stays readable; a server writes version 2 when `TIN_REPLAY_RECIPIENTS` is set. Implemented in
+`toolchain/std/replay/envelope2.tin`; `tools/ci/replay_check.tin` checks it.
 
 Why: under version 1 one symmetric `TIN_REPLAY_KEY` encrypts and authenticates every capsule, so whoever can read
 capsules can also forge them, access cannot be given to one person, and taking it back means a new key on every

@@ -29,14 +29,47 @@ const Kinds = ",sched.select@1,sched.resume@1,sched.cancel@1,tide.now@1,tide.wal
 
 const magic = "TINCAP\x01\x00"
 
-// Open reads the capsule at path, encrypted under keyHex (the 64 hex digits of TIN_REPLAY_KEY).
+// Open reads the capsule at path: a version 1 capsule encrypted under keyHex (the 64 hex digits of TIN_REPLAY_KEY),
+// or a version 2 capsule (section 6.1) opened with the private key in the file TIN_REPLAY_IDENTITY names and checked
+// against the signers TIN_REPLAY_SIGNERS lists. A version 2 capsule's secret handles' key is installed for the replay.
 fn Open(path str, keyHex str) !Capsule {
-	let key = try Key(keyHex)
 	let data = quarry.ReadFile(path) catch err {
 		fail "capsule: " + say.Str(err)
 	}
+	if Version(data) == 2 {
+		let idPath = quarry.Getenv("TIN_REPLAY_IDENTITY")
+		if idPath == "" {
+			fail "capsule: a version 2 capsule: set TIN_REPLAY_IDENTITY to your replay private key's file"
+		}
+		let text = quarry.ReadFile(idPath) catch err {
+			fail "capsule: TIN_REPLAY_IDENTITY: " + say.Str(err)
+		}
+		let id = try ParseIdentity(text)
+		let (ks, body) = try UnsealV2(data, id, splitList(quarry.Getenv("TIN_REPLAY_SIGNERS")))
+		gKs = held(ks)
+		gKsCapsule = true
+		return try Decode(body)
+	}
+	let key = try Key(keyHex)
 	let body = try Unseal(data, key)
 	return try Decode(body)
+}
+
+// splitList is a comma list's items.
+fn splitList(text str) []str {
+	mut out = []str{}
+	mut at = 0
+	for at <= len(text) {
+		mut end = at
+		for end < len(text) && text[end] != ',' {
+			end += 1
+		}
+		if end > at {
+			out = append(out, text[at:end])
+		}
+		at = end + 1
+	}
+	return out
 }
 
 // Key is the 32 bytes a TIN_REPLAY_KEY value (64 hex digits) stands for.
