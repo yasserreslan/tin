@@ -1,0 +1,24 @@
+package main
+
+import "./externpkg"
+import "abacus"
+import "say"
+
+// The program's own names are its own (#964): abacus reaches gauge, which declares the externs floor, ceil,
+// trunc, round and rint, and importing does not bring them into scope.
+mut floor i64 = 0
+let ceil = 7
+const rint = 3
+mut round i64 = 2
+
+fn trunc(x i64) i64 {
+	return x + 1
+}
+
+fn main() {
+	floor += 5
+	say.Line(floor, ceil, trunc(4), round, rint)
+	say.Line(externpkg.Own())
+	let n = abacus.FromI64(-42)
+	say.Line(n.Str())
+}

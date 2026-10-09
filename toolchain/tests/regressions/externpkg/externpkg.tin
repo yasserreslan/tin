@@ -1,0 +1,18 @@
+// Package externpkg declares names that gauge's externs also have (#964): a package's own names are its own.
+package externpkg
+
+import "gauge"
+import "say"
+
+mut round i64 = 4
+
+fn ceil(x i64) i64 {
+	return x * 2
+}
+
+// Own returns the package's round and ceil, and gauge's Sqrt of 16.
+fn Own() str {
+	let c = ceil(5)
+	let r = gauge.Sqrt(16)
+	return say.Fmt("{round} {c} {r}")
+}

@@ -2076,9 +2076,13 @@ fn chk_slice(e i64) i64 {
 	return ty_int
 }
 
-// pkg_member resolves pkg.name to its global symbol, or 0.
+// pkg_member resolves pkg.name to its global symbol, or 0. An extern is in its package's scope only, not a member (#964).
 fn pkg_member(pkg str, name str) i64 {
-	return cast(i64, lookup_global(pkg + "." + name))
+	let s = lookup_global(pkg + "." + name)
+	if cast(i64, s) != 0 && s.kind == SYM_FUNC && s.fn_ != 0 && cast(Fn, s.fn_).extern_ != 0 {
+		return 0
+	}
+	return cast(i64, s)
 }
 
 // is_private reports whether name is private to its package (not capitalized).

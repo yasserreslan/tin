@@ -1174,5 +1174,24 @@
       "stdout": "2 2\n8\ncaught boom 4\n3 0\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "extern-scope.tin",
+    "issue": 964,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "5 7 5 2 3\n4 10 4\n-42\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "extern-not-in-scope.tin",
+    "issue": 964,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr": "toolchain/tests/regressions/extern-not-in-scope.tin:8:11: error E103 UNDEFINED: undefined function: floor\n"
+    }
   }
 ]
