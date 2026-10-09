@@ -56,3 +56,13 @@ ok it was assigned both partitions
 ok it read the six records
 ok it committed its positions
 ok the member left the group
+ok a failed position load skips no offset
+ok a topic without metadata is skipped
+ok a topic created after the join, added partitions and a deleted topic are all seen
+ok one partition without a leader does not stop the others
+ok the fetch order rotates between polls
+ok the coordinator is found once, not once per request
+ok auto-commit waits the interval, it does not commit every poll
+ok a NOT_CONTROLLER answer asks the new controller
+ok a NOT_LEADER answer to DeleteRecords asks again
+ok 300 members made and closed fit in 256 slots

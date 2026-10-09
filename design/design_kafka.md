@@ -56,10 +56,31 @@ Tin has no threads to give a consumer, and heartbeats must go out while the appl
 classic protocol allows a member to heartbeat from its poll loop as long as each poll comes within the
 session timeout; the Java client did exactly that before 0.10.1. So:
 
-- `Group.Poll(maxWait)` sends a due heartbeat, rejoins when the coordinator asked for a rebalance,
-  commits the previous poll's offsets when auto-commit is on, and fetches. It never waits longer than the
-  time to the next heartbeat, so a poll loop with short handlers keeps the membership without anything
-  running in the background.
+- `Group.Poll(maxWait)` sends a due heartbeat, rejoins when the coordinator asked for a rebalance
+  or when a subscribed topic's partitions changed, commits the previous poll's offsets when
+  auto-commit is on, and fetches. It never waits longer than the time to the next heartbeat, so a
+  poll loop with short handlers keeps the membership without anything running in the background.
+- What a Poll does about the group's shape (#444):
+  - The member counts as joined only once its positions are loaded. A failed OffsetFetch or
+    ListOffsets leaves it rejoining: fetching at -1 answers OFFSET_OUT_OF_RANGE, jumps every
+    partition to the end of its log and commits the records it skipped.
+  - The assignor skips a subscribed topic the cluster has no metadata for (it does not exist yet,
+    or this principal may not read it), so one missing topic does not stop the group. A partition
+    whose start offset cannot be listed yet (it has no leader) keeps -1 and its fetch says why,
+    while the partitions that can be read are.
+  - When a heartbeat falls due, the member also refreshes its subscribed topics' metadata: a topic
+    created after the join, partitions added to one, or a topic deleted, makes it rejoin, so a
+    service started before its topic exists is assigned once it has partitions. A rejoin commits
+    the positions first (as Java does when it revokes the partitions), so the new assignment does
+    not deliver records twice.
+  - The partitions take turns at the head of the fetch request: the per-partition and the request
+    limit are both `FetchMax`, so a lagging first partition would starve the rest (Java rotates
+    too).
+  - A fetch that cannot reach one partition reports it per partition (`Part.Err`) together with the
+    records of the healthy ones, and the member keeps its position for the next Poll.
+  - The coordinator's address is cached until the broker says it is not the coordinator, and
+    auto-commit waits `GroupOptions.CommitEvery` (default 5 s, as Java) instead of writing an
+    OffsetCommit with every Poll.
 - A handler that may run longer than the session timeout calls `g.Heartbeat()` itself, or the service sets
   `GroupOptions.Session` above its slowest handler.
 - A long-running consumer in an anvil service lives in `detach { ... }` started from `on core.start`:

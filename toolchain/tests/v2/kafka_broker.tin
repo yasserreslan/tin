@@ -150,9 +150,12 @@ fn leaderOf(b broker, topic str, part i64, l i64) i64 {
 	return l
 }
 
+// leaders is topic's partition leaders as broker b sees it. The topics whose partitions change
+// during the test (#444): made appears when the test creates it, grow grows from one partition
+// to three, gone is deleted, and half's second partition has no leader at all.
 mut lateAsked i64
 
-fn leaders(topic str) []i64 {
+fn leaders(b broker, topic str) []i64 {
 	if topic == "t" {
 		return []i64{1, 2, 3}
 	}
@@ -167,6 +170,30 @@ fn leaders(topic str) []i64 {
 	}
 	if topic == "txl" || topic == "late" || topic == "p" {
 		return []i64{1}
+	}
+	if topic == "half" {
+		return []i64{1, -1}
+	}
+	if topic == "rec" {
+		return []i64{1}
+	}
+	if topic == "made" {
+		if b.made {
+			return []i64{1}
+		}
+		return []i64{}
+	}
+	if topic == "grow" {
+		if b.grown {
+			return []i64{1, 1, 1}
+		}
+		return []i64{1}
+	}
+	if topic == "gone" {
+		if b.deleted {
+			return []i64{}
+		}
+		return []i64{1, 2}
 	}
 	return []i64{}
 }
@@ -199,6 +226,12 @@ type broker struct {
 	scram      str // a SCRAM exchange in progress: client-first-bare,server-first
 	moved      bool // t/1's leader has moved from broker 2 to broker 1
 	client     str // the client id of the request being served
+	made       bool // topic made exists (it does not until the test creates it, #444)
+	grown      bool // topic grow has three partitions (it has one until then, #444)
+	deleted    bool // topic gone is deleted (it has two partitions until then, #444)
+	loadFails  i64 // OffsetFetch answers left to fail for the group loadfail (#444)
+	notCtrl    i64 // CreateTopics answers left to refuse with NOT_CONTROLLER (#444)
+	notLeader  i64 // DeleteRecords answers left to refuse with NOT_LEADER (#444)
 }
 
 fn (b mut broker) logIndex(topic str, part i64) i64 {
@@ -283,7 +316,7 @@ fn serve(id i64) ! {
 		}
 	}
 	ports = append(ports, cur)
-	mut b = broker{id: id, ports: ports, logs: []partLog{}, seqs: []i64{}, produces: 0, groupGen: 0, beats: 0, member: "", assignment: "", commits: []str{}, commitOffs: []i64{}, nextPid: 1000 + 100*id, txFirst: -1, txPid: -1, authed: false, scram: "", moved: false, client: ""}
+	mut b = broker{id: id, ports: ports, logs: []partLog{}, seqs: []i64{}, produces: 0, groupGen: 0, beats: 0, member: "", assignment: "", commits: []str{}, commitOffs: []i64{}, nextPid: 1000 + 100*id, txFirst: -1, txPid: -1, authed: false, scram: "", moved: false, client: "", made: false, grown: false, deleted: false, loadFails: 1, notCtrl: 1, notLeader: 1}
 	// The client keeps two connections to a broker (one for requests a broker may hold), so a
 	// broker serves several: it polls each with a short timeout and takes new ones in between.
 	mut conns = []wire.Conn{}
@@ -294,6 +327,15 @@ fn serve(id i64) ! {
 		let (_, note, noted) = relay.TryRecv()
 		if noted && note == "moved t/1" {
 			b.moved = true
+		}
+		if noted && note == "create made" {
+			b.made = true
+		}
+		if noted && note == "grow grow" {
+			b.grown = true
+		}
+		if noted && note == "delete gone" {
+			b.deleted = true
 		}
 		let (nc, aerr) = ln.AcceptTimeout(1ms)
 		if aerr == nil {
@@ -441,6 +483,9 @@ fn handle(b mut broker, frame str) (str, bool) {
 	if api == 10 {
 		r.str()
 		r.i8()
+		// The client on core 0 counts how often it has to find a coordinator again (#444:
+		// the address is cached until the broker says it is not the coordinator).
+		relay.Send(0, "coord found")
 		p32(mut out, 0)
 		p16(mut out, 0)
 		pnull(mut out)
@@ -475,12 +520,49 @@ fn handle(b mut broker, frame str) (str, bool) {
 				r.str()
 			}
 			pstr(mut out, name)
-			if len(leaders(name)) > 0 {
+			if name == "moved" && b.notCtrl > 0 {
+				// The controller says it is not the controller anymore (#444): the client must
+				// find the controller again and ask again.
+				b.notCtrl -= 1
+				p16(mut out, 41)
+				pstr(mut out, "This is not the correct controller for this topic.")
+			} else if len(leaders(b, name)) > 0 {
 				p16(mut out, 36)
 				pstr(mut out, "Topic '{name}' already exists.")
 			} else {
 				p16(mut out, 0)
 				pnull(mut out)
+			}
+		}
+		return str(out), true
+	}
+	if api == 21 {
+		// DeleteRecords: the first answer refuses with NOT_LEADER (#444).
+		let nt = r.i32()
+		mut code = 0
+		if b.notLeader > 0 {
+			b.notLeader -= 1
+			code = 6
+		}
+		p32(mut out, 0)
+		p32(mut out, nt)
+		for i in 0..nt {
+			let topic = r.str()
+			let np = r.i32()
+			pstr(mut out, topic)
+			p32(mut out, np)
+			for j in 0..np {
+				let part = r.i32()
+				r.i64() // before
+				p32(mut out, part)
+				if code == 0 {
+					b.logIndex(topic, part) // make sure the partition exists
+					p64(mut out, 0)
+					p16(mut out, 0)
+				} else {
+					p64(mut out, -1)
+					p16(mut out, code)
+				}
 			}
 		}
 		return str(out), true
@@ -588,7 +670,7 @@ fn metadata(b mut broker, r mut rd, head []u8) str {
 	p32(mut out, 1)
 	p32(mut out, len(asked))
 	for _, t in asked {
-		mut ls = leaders(t)
+		mut ls = leaders(b, t)
 		mut creating = t == "never"
 		if t == "late" {
 			lateAsked += 1
@@ -768,13 +850,22 @@ fn fetch(b mut broker, r mut rd, head []u8) str {
 	p32(mut out, 0)
 	let nt = r.i32()
 	p32(mut out, nt)
+	// The client on core 0 watches the order the partitions are asked in: it rotates between
+	// fetches, so a lagging partition does not starve the rest (#444).
+	mut firstPart = ""
 	for i in 0..nt {
 		let topic = r.str()
 		let np = r.i32()
+		if i == 0 && np > 0 {
+			firstPart = topic
+		}
 		pstr(mut out, topic)
 		p32(mut out, np)
 		for j in 0..np {
 			let part = r.i32()
+			if i == 0 && j == 0 {
+				firstPart = "{topic}/{part}"
+			}
 			r.i32()
 			let off = r.i64()
 			r.i64()
@@ -817,6 +908,9 @@ fn fetch(b mut broker, r mut rd, head []u8) str {
 			}
 			pbytes(mut out, str(data))
 		}
+	}
+	if firstPart != "" {
+		relay.Send(0, "fetch {firstPart}")
 	}
 	return str(out)
 }
@@ -999,7 +1093,14 @@ fn group(b mut broker, api i64, r mut rd, head []u8) str {
 		return str(out)
 	}
 	// OffsetFetch.
-	r.str()
+	let grp = r.str()
+	// The group loadfail's first position load fails (#444): the member must rejoin instead of
+	// fetching at -1 and jumping to the end of the log.
+	mut failLoad = false
+	if grp == "loadfail" && b.loadFails > 0 {
+		b.loadFails -= 1
+		failLoad = true
+	}
 	p32(mut out, 0)
 	let nt = r.i32()
 	p32(mut out, nt)
@@ -1020,7 +1121,12 @@ fn group(b mut broker, api i64, r mut rd, head []u8) str {
 			p64(mut out, off)
 			p32(mut out, -1)
 			pnull(mut out)
-			p16(mut out, 0)
+			if failLoad {
+				// TOPIC_AUTHORIZATION_FAILED: not a coordinator move, so the client gives up.
+				p16(mut out, 29)
+			} else {
+				p16(mut out, 0)
+			}
 		}
 	}
 	p16(mut out, 0)
@@ -1485,6 +1591,130 @@ fn run(ports str) ! {
 	check("it committed its positions", com == 3)
 	try g.Close()
 	say.Line("ok the member left the group")
+
+	// A failed position load leaves the member rejoining: the first OffsetFetch of the group
+	// "loadfail" fails, and the member must not fetch at -1, jump to the end of the log and
+	// commit the position it landed on (#444).
+	try c.Commit("loadfail", "g", 0, 1)
+	let lf = try c.Group(kafka.GroupOptions{Group: "loadfail", Topics: []str{"g"}, Heartbeat: 1ms, Start: kafka.Start.Earliest})
+	mut loaded = 0
+	mut loadedAt = -1
+	for k in 0..6 {
+		let (rs, perr) = lf.Poll(0)
+		if perr != nil {
+			continue
+		}
+		for _, r in rs {
+			if loadedAt < 0 {
+				loadedAt = r.Offset
+			}
+			loaded += 1
+		}
+	}
+	check("a failed position load skips no offset", loaded == 2 && loadedAt == 1)
+	try lf.Close()
+
+	// Topics that changed while the member was in the group: one created after the join is
+	// picked up, partitions added to one are read, and a deleted topic's partitions are
+	// dropped, instead of failing every Poll (#444).
+	let mg = try c.Group(kafka.GroupOptions{Group: "meta", Topics: []str{"made", "grow", "gone"}, Heartbeat: 1ms, Start: kafka.Start.Earliest})
+	try mg.Poll(0)
+	let before = assignedOf(mg)
+	check("a topic without metadata is skipped", before == "gone/0 gone/1 grow/0")
+	relay.Broadcast("create made")
+	relay.Broadcast("grow grow")
+	relay.Broadcast("delete gone")
+	mut afterAsg = ""
+	for k in 0..20 {
+		let (_, perr) = mg.Poll(0)
+		if perr != nil {
+			continue
+		}
+		afterAsg = assignedOf(mg)
+		if afterAsg == "grow/0 grow/1 grow/2 made/0" {
+			break
+		}
+	}
+	check("a topic created after the join, added partitions and a deleted topic are all seen", afterAsg == "grow/0 grow/1 grow/2 made/0")
+	try mg.Close()
+
+	// One partition without a leader does not stop the others being read (#444).
+	_ = try c.SendTo("half", 0, msg("half one"))
+	let hg = try c.Group(kafka.GroupOptions{Group: "halfg", Topics: []str{"half"}, Heartbeat: 1ms, Start: kafka.Start.Earliest})
+	mut halfGot = 0
+	for k in 0..6 {
+		let (rs, perr) = hg.Poll(0)
+		if perr != nil {
+			continue
+		}
+		halfGot += len(rs)
+	}
+	check("one partition without a leader does not stop the others", halfGot == 1)
+	try hg.Close()
+
+	// The partitions take turns at the head of the fetch request: the per-partition and the
+	// request limit are both FetchMax, so a lagging first partition would starve the rest
+	// (#444).
+	relay.Broadcast("grow grow")
+	_ = drain("fetch")
+	let rg = try c.Group(kafka.GroupOptions{Group: "rot", Topics: []str{"grow"}, Heartbeat: 1ms, Start: kafka.Start.Earliest})
+	for k in 0..6 {
+		let (_, perr) = rg.Poll(0)
+		if perr != nil {
+			continue
+		}
+	}
+	let heads = drain("fetch")
+	mut rotOK = len(heads) >= 3
+	for k in 0..min(len(heads), 3) {
+		if heads[k] != "grow/{k}" {
+			rotOK = false
+		}
+	}
+	check("the fetch order rotates between polls", rotOK)
+	try rg.Close()
+
+	// The coordinator is found once, not once per request (#444).
+	_ = drain("coord")
+	let cg = try c.Group(kafka.GroupOptions{Group: "cached", Topics: []str{"g"}, Heartbeat: 1ms, Start: kafka.Start.Earliest})
+	for k in 0..4 {
+		let (_, perr) = cg.Poll(0)
+		if perr != nil {
+			continue
+		}
+	}
+	check("the coordinator is found once, not once per request", len(drain("coord")) == 1)
+	try cg.Close()
+
+	// Auto-commit waits the interval (default 5 s, as Java) instead of writing an
+	// OffsetCommit with every Poll (#444).
+	_ = try c.SendTo("rec", 0, msg("sc 0"))
+	_ = try c.SendTo("rec", 0, msg("sc 1"))
+	let scm = try c.Group(kafka.GroupOptions{Group: "slowcommit", Topics: []str{"rec"}, Heartbeat: 1ms, Start: kafka.Start.Earliest, CommitEvery: 1h})
+	mut scGot = 0
+	for k in 0..3 {
+		let (rs, perr) = scm.Poll(0)
+		if perr != nil {
+			continue
+		}
+		scGot += len(rs)
+	}
+	let scCom = try c.Committed("slowcommit", "rec", 0)
+	check("auto-commit waits the interval, it does not commit every poll", scGot == 2 && scCom == -1)
+	try scm.Close()
+
+	// A controller that says it is not the controller anymore is found again, and a leader
+	// that refused a DeleteRecords is asked again (#444).
+	check("a NOT_CONTROLLER answer asks the new controller", c.CreateTopic("moved", 1, 1) == nil)
+	let (low, drErr) = c.DeleteRecords("rec", 0, 1)
+	check("a NOT_LEADER answer to DeleteRecords asks again", drErr == nil && low == 0)
+
+	// Group slots are freed on Close, so the 257th member of a core is not refused (#444).
+	for k in 0..300 {
+		let x = try c.Group(kafka.GroupOptions{Group: "slot{k}", Topics: []str{"g"}})
+		try x.Close()
+	}
+	check("300 members made and closed fit in 256 slots", true)
 }
 
 fn index(s str, c u8) i64 {
@@ -1494,6 +1724,33 @@ fn index(s str, c u8) i64 {
 		}
 	}
 	return len(s)
+}
+
+// assignedOf is the member's assignment as "topic/partition ..." in order.
+fn assignedOf(g kafka.Group) str {
+	mut b = ""
+	for _, p in g.Assigned() {
+		if b != "" {
+			b = b + " "
+		}
+		b = b + "{p.Topic}/{p.Partition}"
+	}
+	return b
+}
+
+// drain takes the brokers' notes whose kind matches ("fetch grow/1", "coord") and returns the
+// part after the kind.
+fn drain(kind str) []str {
+	mut out = []str{}
+	for {
+		let (_, note, noted) = relay.TryRecv()
+		if !noted {
+			return out
+		}
+		if len(note) > len(kind)+1 && note[:len(kind)+1] == kind+" " {
+			out = append(out, note[len(kind)+1:])
+		}
+	}
 }
 
 fn contains(s str, sub str) bool {

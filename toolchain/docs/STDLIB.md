@@ -2919,7 +2919,7 @@ A key picks the partition the way the Java client does (murmur2), so a key lands
 - `(c Client) DeleteTopics(names []str) !`: DeleteTopics removes topics.
 - `(c Client) ListTopics() ![]str`: ListTopics is the names of the cluster's topics (internal ones too).
 - `(c Client) CreatePartitions(topic str, total i64) !`: CreatePartitions grows topic to total partitions.
-- `(c Client) DeleteRecords(topic str, partition i64, before i64) !i64`: DeleteRecords deletes the records of the partition before offset; it returns the partition's new first offset.
+- `(c Client) DeleteRecords(topic str, partition i64, before i64) !i64`: DeleteRecords deletes the records of the partition before offset; it returns the partition's new first offset. A leader that moved between the metadata and the request is asked again (NOT_LEADER), as Java's AdminClient does.
 - `(c Client) ListGroups() ![]GroupListing`: ListGroups lists the groups of the whole cluster (each broker knows those it coordinates).
 - `(c Client) DescribeGroup(group str) !GroupDescription`: DescribeGroup is the state, protocol and members of group.
 - `(c Client) DeleteGroups(groups []str) !`: DeleteGroups removes empty groups and their committed offsets.
@@ -2931,7 +2931,7 @@ A key picks the partition the way the Java client does (murmur2), so a key lands
 - `type Part struct`: Part is what a fetch learned about one partition.
 - `type Fetched struct`: Fetched is the records of a FetchAll, in partition order, and what it learned of each partition.
 - `(c Client) Fetch(topic str, partition i64, offset i64, maxWait i64) ![]Record`: Fetch reads records of topic's partition from offset on. It returns as soon as there are records, or empty after maxWait nanoseconds with none. At most Options.FetchMax bytes of whole record batches come back; a record before offset is skipped. They decompress to at most 64 times the larger of FetchMax and the bytes fetched: batches past that come in the next fetch, and one batch larger than it fails (raise FetchMax). An offset outside the partition fails with ErrOffsetOutOfRange.
-- `(c Client) FetchAll(wants []Want, maxWait i64) !Fetched`: FetchAll reads several partitions at once: one request per leader broker, all sent before any is waited for when called inside a task. A partition whose offset is out of range is reported in Parts, not as a fault.
+- `(c Client) FetchAll(wants []Want, maxWait i64) !Fetched`: FetchAll reads several partitions at once: one request per leader broker, all sent before any is waited for when called inside a task. A partition whose offset is out of range is reported in Parts, not as a fault, and so is one that could not be read at all (no leader yet, the leader refused it): the records of the healthy partitions come back with them, and only the whole request failing (no broker, the request itself refused) fails the call.
 - `(c Client) Offsets(topic str, partition i64) !(i64, i64)`: Offsets returns the first offset still in partition and the offset the next record will get.
 - `(c Client) OffsetAt(topic str, partition i64, ts i64) !i64`: OffsetAt is the first offset whose record's timestamp is at or after ts (ms since the epoch), or -1 when every record is older.
 - `type Assignor enum`: Assignor is how a group's leader spreads partitions over its members.
@@ -2939,16 +2939,16 @@ A key picks the partition the way the Java client does (murmur2), so a key lands
 - `type GroupOptions struct`: GroupOptions describe a member.
 - `type Group struct`: Group is this core's member of a consumer group.
 - `type TopicPartition struct`: TopicPartition names a partition and an offset (a position or a committed offset).
-- `(c Client) Group(o GroupOptions) !Group`: Group makes this core's member of a consumer group. It joins on the first Poll.
+- `(c Client) Group(o GroupOptions) !Group`: Group makes this core's member of a consumer group. It joins on the first Poll. A core holds at most 256 members; Close frees the slot again.
 - `(g Group) MemberID() str`: MemberID is the id the coordinator gave this member ("" before it joined).
 - `(g Group) Generation() i64`: Generation is the group generation this member is in (-1 before it joined).
 - `(g Group) Assigned() []TopicPartition`: Assigned is the member's partitions with the offset each will be read from next (-1 until known).
 - `(g Group) Seek(topic str, partition i64, offset i64) !`: Seek makes the next Poll read the member's partition from offset.
 - `(g Group) Heartbeat() !`: Heartbeat tells the coordinator the member is alive (Poll does it when due). A rebalance makes the next Poll rejoin.
-- `(g Group) Poll(maxWait i64) ![]Record`: Poll returns the next records of the member's partitions, waiting up to maxWait (less when a heartbeat falls due). It joins the group first, rejoins after a rebalance, heartbeats, and unless ManualCommit is set commits what the previous Poll returned.
+- `(g Group) Poll(maxWait i64) ![]Record`: Poll returns the next records of the member's partitions, waiting up to maxWait (less when a heartbeat falls due). It joins the group first, rejoins after a rebalance or a change in its topics' partitions, heartbeats, and unless ManualCommit is set commits every CommitEvery.
 - `(g Group) Commit() !`: Commit stores the member's positions (the offsets after the records Poll returned) as the group's committed offsets. A rebalance in the meantime fails it with ErrRebalance.
 - `(g Group) CommitOffsets(parts []TopicPartition) !`: CommitOffsets stores the given offsets (each the next offset to read) for the group.
-- `(g Group) Close() !`: Close commits (unless ManualCommit) and leaves the group, so its partitions move to the other members at once. A static member (InstanceID) does not leave: its session keeps its partitions for a restart.
+- `(g Group) Close() !`: Close commits (unless ManualCommit) and leaves the group, so its partitions move to the other members at once. A static member (InstanceID) does not leave: its session keeps its partitions for a restart. A harmless ErrRebalance from the commit (a rebalance is already on its way) is not reported as a failure, and the member's slot is free again (#444).
 - `(c Client) Commit(group str, topic str, partition i64, offset i64) !`: Commit stores offset as group's position in the partition, without being a member (the "simple consumer" commit: generation -1). The offset is the next one to read.
 - `(c Client) Committed(group str, topic str, partition i64) !i64`: Committed is the offset group last committed for the partition, or -1 when it has none.
 - `type Mechanism enum`: Mechanism is the SASL mechanism used when Options.Username is set.
