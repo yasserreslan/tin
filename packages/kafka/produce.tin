@@ -24,7 +24,8 @@ const aBusy = 10   // a batch of this partition is in flight
 const aSeq = 11    // the next sequence number (idempotence)
 const aPidGen = 12 // the producer id generation aSeq counts for
 const aRetry = 13  // records at the head that must go out as one batch (a requeued one), 0 for none
-const accWords = 14
+const aReject = 14 // the error code the broker last answered this partition's batch with, 0 for none
+const accWords = 15
 
 // A waiter (calloc'd words): one record's caller.
 const wTask = 0
@@ -550,6 +551,7 @@ fn (c Client) produceBatch(a i64, topic str, part i64, recs []u8, k i64, first i
 	let acks = c.rec[rAcks]
 	mut info = batchInfo{codec: c.rec[rCodec], producerID: -1, producerEpoch: -1, baseSeq: -1, transactional: false}
 	mut seqTaken = false
+	mut unsure = false // an attempt failed without the broker's answer: the batch may be written
 	for attempt in 0..maxAttempts {
 		if c.rec[rIdem] != 0 && !seqTaken {
 			let (pid, epoch, gen) = try c.producerID()
@@ -564,7 +566,8 @@ fn (c Client) produceBatch(a i64, topic str, part i64, recs []u8, k i64, first i
 			seqTaken = true
 		}
 		let batch = buildBatch(recs, k, first, maxTs, info)
-		let (base, err) = c.produceOnce(topic, part, batch, acks, "")
+		a[aReject] = 0
+		let (base, err) = c.produceOnce(a, topic, part, batch, acks, "")
 		if err == nil {
 			return base
 		}
@@ -584,16 +587,56 @@ fn (c Client) produceBatch(a i64, topic str, part i64, recs []u8, k i64, first i
 				continue
 			}
 		} else if !c.retry(err, topic, attempt) {
-			// Rejected for good (MESSAGE_TOO_LARGE, INVALID_RECORD, authentication) or
-			// retries exhausted: the sequence rolls back, since only one batch per partition
-			// is in flight and nothing else consumed it. The next batch reuses it instead of
-			// getting OUT_OF_ORDER, which would cost the client a new producer id.
-			rollSeq(a, k, seqTaken)
+			// The broker answered a rejection it did not append (MESSAGE_TOO_LARGE, an
+			// invalid record, authorization) and no attempt of this batch failed without an
+			// answer: only one batch per partition is in flight, so the sequence rolls back
+			// and the next batch reuses it, instead of getting OUT_OF_ORDER and costing the
+			// client a new producer id. An ambiguous answer, or a transport failure, leaves
+			// the sequence consumed: reusing it would have the broker drop the next batch of
+			// the partition as a duplicate, and its records would be lost.
+			if !unsure && keepsSeq(a[aReject]) {
+				rollSeq(a, k, seqTaken)
+			}
 			fail err
 		}
+		if a[aReject] == 0 {
+			unsure = true
+		}
 	}
-	rollSeq(a, k, seqTaken)
+	if !unsure && keepsSeq(a[aReject]) {
+		rollSeq(a, k, seqTaken)
+	}
 	fail "kafka: produce to {topic}/{part} failed"
+}
+
+// keepsSeq reports whether a broker's rejection with this error code means it did not append the
+// batch, so the partition's sequence may be rolled back: validation, authorization, leader, epoch
+// and sequence-state errors. The rest are ambiguous — a NOT_ENOUGH_REPLICAS_AFTER_APPEND (20) was
+// appended, and a REQUEST_TIMED_OUT (7), a NETWORK_EXCEPTION (13) or a THROTTLING_QUOTA_EXCEEDED
+// (89) answer may have been — so the sequence stays consumed.
+fn keepsSeq(code i64) bool {
+	return match code {
+		3 => true
+		5 => true
+		6 => true
+		10 => true
+		18 => true
+		19 => true
+		29 => true
+		30 => true
+		31 => true
+		45 => true
+		47 => true
+		52 => true
+		58 => true
+		59 => true
+		74 => true
+		75 => true
+		82 => true
+		87 => true
+		90 => true
+		_ => false
+	}
 }
 
 // rollSeq gives back the k sequence numbers a failed batch took. Only one batch per partition is
@@ -606,8 +649,11 @@ fn rollSeq(a i64, k i64, taken bool) {
 	a[aSeq] = (a[aSeq] + 0x80000000 - k) & 0x7fffffff
 }
 
-// produceOnce sends one Produce request; txid is the transactional id ("" for none).
-fn (c Client) produceOnce(topic str, part i64, batch []u8, acks i64, txid str) !i64 {
+// produceOnce sends one Produce request; txid is the transactional id ("" for none). a is the
+// partition's accumulator, or 0 when there is none: the error code the broker answers with is
+// recorded on it (aReject), so the caller can tell a rejection that did not append the batch
+// from an answer that may have.
+fn (c Client) produceOnce(a i64, topic str, part i64, batch []u8, acks i64, txid str) !i64 {
 	let addr = try c.leader(topic, part)
 	mut body = make([]u8, 0, len(batch)+64)
 	putNullStr(mut body, txid)
@@ -646,6 +692,9 @@ fn (c Client) produceOnce(topic str, part i64, batch []u8, acks i64, txid str) !
 		return -1
 	}
 	if code != 0 {
+		if a != 0 {
+			a[aReject] = code
+		}
 		fail kerr(code, "produce to {topic}/{part}")
 	}
 	return base
@@ -683,7 +732,7 @@ fn (c Client) sendTaped(topic str, ms []Message, parts []i64, now i64) ![]Ack {
 			let batch = encodeBatch(sub, now, batchInfo{codec: c.rec[rCodec], producerID: -1, producerEpoch: -1, baseSeq: -1, transactional: false})
 			mut base = -1
 			for attempt in 0..maxAttempts {
-				let (b, err) = c.produceOnce(topic, p, batch, c.rec[rAcks], "")
+				let (b, err) = c.produceOnce(0, topic, p, batch, c.rec[rAcks], "")
 				if err == nil {
 					base = b
 					break

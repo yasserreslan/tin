@@ -346,7 +346,7 @@ fn (t Txn) produce(topic str, p i64, ms []Message, now i64) !i64 {
 	let info = batchInfo{codec: c.rec[rCodec], producerID: s.pid, producerEpoch: s.epoch, baseSeq: seq, transactional: true}
 	let batch = encodeBatch(ms, now, info)
 	for attempt in 0..maxAttempts {
-		let (base, err) = c.produceOnce(topic, p, batch, -1, s.txid)
+		let (base, err) = c.produceOnce(0, topic, p, batch, -1, s.txid)
 		if err == nil {
 			mut seqs = []txnPart{}
 			for i, x in sq {

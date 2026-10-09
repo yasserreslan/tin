@@ -96,10 +96,13 @@ A member is a value owned by one core: `Group` holds per-core state the same way
     when they are done. Ownership passes to the first caller still waiting (one that gave up is
     skipped), so a partition is never left with a batch nobody sends, and no waiter is handed to a task
     that already left.
-  - A batch the broker rejected for good (MESSAGE_TOO_LARGE, INVALID_RECORD, authentication, retries
-    exhausted) rolls the sequence back too: only one batch per partition is in flight, so nothing else
-    consumed it, and the next batch reuses it instead of getting OUT_OF_ORDER and costing the client a
-    new producer id.
+  - A batch the broker answered with a rejection it did not append (MESSAGE_TOO_LARGE, an invalid
+    record, authorization) rolls the sequence back, and so does one whose every attempt was answered:
+    only one batch per partition is in flight, so nothing else consumed the sequence, and the next
+    batch reuses it instead of getting OUT_OF_ORDER and costing the client a new producer id. An
+    ambiguous answer (NOT_ENOUGH_REPLICAS_AFTER_APPEND, REQUEST_TIMED_OUT, NETWORK_EXCEPTION) or a
+    transport failure leaves the sequence consumed: the batch may have been written, and reusing its
+    sequence would have the broker drop the next batch as a duplicate and lose its records.
   - A waiter's outcome is the fault itself, kept while the waiter outlives the failed call and copied
     back into the reporting caller's pool, so `fault.Is` holds for the deadline, cancel,
     ErrCoordinator, ErrTimedOut and broker-error faults a caller sees for a batch another task failed.

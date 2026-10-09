@@ -1158,6 +1158,16 @@ fn laterSend(c kafka.Client, topic str, p i64, v str, d i64) i64 {
 	return sendErr(c, topic, p, v)
 }
 
+// canceledSend sends one record and reports 1 when it fails with fault.Canceled (a cancellation
+// reaching it while it waited), 0 otherwise.
+fn canceledSend(c kafka.Client, topic str, p i64, v str) i64 {
+	let (_, err) = c.SendTo(topic, p, msg(v))
+	if err != nil && fault.Is(err, fault.Canceled) {
+		return 1
+	}
+	return 0
+}
+
 // pidsAsked is how many InitProducerId requests the brokers have answered, drained from relay.
 fn pidsAsked() i64 {
 	mut n = 0
@@ -1350,9 +1360,9 @@ fn run(ports str) ! {
 		withinBound(c, "p", 0, "slow-c", 60ms)
 		laterSend(c, "p", 0, "slow-d", 20ms)
 	}
-	check("a cancelled waiter leaves its records to the next batch", gone == 1 && kept == 0)
+	check("a cancelled owner's records go out in the next batch", gone == 1 && kept == 0)
 	let four = try c.Fetch("p", 0, 0, 0)
-	check("which sends them, in order, before any later record", len(four) == 4 && four[2].Value == "slow-c" && four[3].Value == "slow-d")
+	check("whole, before any record that came later", len(four) == 4 && four[2].Value == "slow-c" && four[3].Value == "slow-d")
 
 	// A waiter past the client's own timeout fails with ErrTimedOut, while the batch in flight
 	// still lands for the others.
@@ -1365,9 +1375,18 @@ fn run(ports str) ! {
 	check("and the batch in flight still lands", own2 == 0)
 	short.Close()
 
+	// A send whose acknowledgements are all lost fails after the broker wrote it, and the next
+	// send to the partition goes on with the next sequence: rolling this one back would have
+	// the broker drop the next batch as its duplicate, and its records would be lost (#443).
+	let (_, lost) = c.SendTo("p", 0, msg("ack-lost"))
+	check("a send whose answers are all lost fails", lost != nil)
+	let nextOne = try c.SendTo("p", 0, msg("after the lost ack"))
+	let eight = try c.Fetch("p", 0, 0, 0)
+	check("and the next send is written, not taken for its duplicate", nextOne.Offset == 7 && len(eight) == 8 && eight[7].Value == "after the lost ack")
+
 	let after = try c.SendTo("p", 0, msg("after the cancel"))
-	let six = try c.Fetch("p", 0, 0, 0)
-	check("and later sends to the partition complete", after.Offset == 6 && len(six) == 7 && six[6].Value == "after the cancel")
+	let nine = try c.Fetch("p", 0, 0, 0)
+	check("and later sends to the partition complete", after.Offset == 8 && len(nine) == 9 && nine[8].Value == "after the cancel")
 
 	// A failed batch's fault keeps its identity across tasks: the batchmate of a refused record
 	// sees the broker's own error, not a message rebuilt from text.
@@ -1392,7 +1411,7 @@ fn run(ports str) ! {
 	check("a batch too large for the broker is ErrMessageTooLarge", large != nil && fault.Is(large, kafka.ErrMessageTooLarge))
 	check("and its refusal asked for no producer id", pidsAsked() == 0)
 	let after2 = try c.SendTo("p", 0, msg("after the refusal"))
-	check("so the next send is written with the same producer id", after2.Offset == 7 && pidsAsked() == 0)
+	check("so the next send is written with the same producer id", after2.Offset == 9 && pidsAsked() == 0)
 
 	// A transactional SendBatch splits by BatchMax, as live mode does.
 	let tc = kafka.Open(kafka.Options{Brokers: []str{boot}, Username: "tin", Password: "secret", Timeout: 5s, BatchMax: 60})
@@ -1415,6 +1434,22 @@ fn run(ports str) ! {
 	check("and every record of it is written", splitOK)
 	tx2.Close()
 	tc.Close()
+
+	// A cancelled sender's own fault is Canceled (#443): its records go back to the head of the
+	// partition for whatever sends there next, and the fault keeps its identity.
+	mut canceled = 0
+	scope s {
+		let t = s.spawn(fn() !i64 {
+			return canceledSend(c, "p", 0, "slow-g")
+		})
+		let derr = tide.Wait(20ms)
+		if derr != nil {
+			// The wait was cancelled with the sender: nothing to do.
+		}
+		t.cancel()
+		canceled = try t.wait()
+	}
+	check("a cancelled sender's fault is Canceled", canceled == 1)
 
 	// Slots: Close frees one, and making the producer of an id again reuses its slot.
 	for k in 0..70 {
