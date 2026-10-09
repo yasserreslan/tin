@@ -846,7 +846,7 @@ fn named_first(q str) i64 {
 }
 
 // key_first resolves and lays out a struct map key declared further on, before the map is checked (#957): key_valid
-// reads the key's fields, and a key without them would pass for any struct, and the map would be laid out without them.
+// reads the key's fields, so a key whose fields are not set yet passes any check, and a map on it segfaulted (#841).
 fn key_first(t Ty) {
 	mut b = t
 	for kind_of(b) == K_VARRAY {
@@ -1089,6 +1089,7 @@ fn check() {
 	init_stmts = []i64{}
 	safe_pairs = []i64{}
 	len_aliases = []i64{}
+	named_seen = []i64{}
 	// Global initializers are checked outside any function (#627).
 	al_reset()
 	dyn_tables = []i64{}
