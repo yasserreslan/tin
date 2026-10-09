@@ -8630,14 +8630,16 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 		}
 		let r = cast(ReturnStmt, node_new(ST_RETURN, pos))
 		if nvals == 1 {
-			check_assignable(cast(Node, s), temps[0].type_, cast(Ty, frs[0]))
-			r.value = sym_ref_node(pos, temps[0])
+			let rv = sym_ref_node(pos, temps[0])
+			check_assignable(cast(Node, rv), temps[0].type_, cast(Ty, frs[0]))
+			r.value = rv
 		} else {
 			mut rv3 = []i64{}
 			mut i = 0
 			for i < nvals {
-				check_assignable(cast(Node, s), temps[i].type_, cast(Ty, frs[i]))
-				rv3 = append(rv3, sym_ref_node(pos, temps[i]))
+				let rv = sym_ref_node(pos, temps[i])
+				check_assignable(cast(Node, rv), temps[i].type_, cast(Ty, frs[i]))
+				rv3 = append(rv3, rv)
 				i = i + 1
 			}
 			r.values = cast([]i64, rv3)
@@ -8656,8 +8658,10 @@ fn lower_try_stmt(s i64, tr_in i64, mode i64, declared i64) {
 			mut i = 0
 			for i < nvals {
 				let ts = temps[i]
-				check_assignable(cast(Node, s), ts.type_, cast(Ty, frs[i]))
-				rv2 = append(rv2, sym_ref_node(pos, ts))
+				// check_assignable replaces the node it is given: convert the returned value, not s (#896).
+				let rv = sym_ref_node(pos, ts)
+				check_assignable(cast(Node, rv), ts.type_, cast(Ty, frs[i]))
+				rv2 = append(rv2, rv)
 				i = i + 1
 			}
 			rv2 = append(rv2, mk_int(pos, 0, ty_error))

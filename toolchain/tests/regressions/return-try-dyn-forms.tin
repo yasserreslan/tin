@@ -1,0 +1,104 @@
+package main
+
+import "say"
+
+shape Named {
+	name() str
+}
+
+type Dog struct {
+	n str
+}
+
+fn (d Dog) name() str {
+	return d.n
+}
+
+// A value struct is boxed as a dyn object (#692).
+type Cat value struct {
+	n str
+}
+
+fn (c Cat) name() str {
+	return c.n
+}
+
+fn find(ok bool) !Dog {
+	if !ok {
+		fail "gone"
+	}
+	return Dog{n: "rex"}
+}
+
+// return f() catch in a function that cannot fail: the value converts to dyn Named.
+fn pick(ok bool) dyn Named {
+	return find(ok) catch err {
+		say.Line("fallback after", err)
+		Dog{n: "fallback"}
+	}
+}
+
+// return f() catch in a function that can fail: the catch value converts to dyn Named.
+fn named(ok bool) !dyn Named {
+	return find(ok) catch err {
+		say.Line("named after", err)
+		Dog{n: "named"}
+	}
+}
+
+fn pair() !(Dog, i64) {
+	return Dog{n: "rex"}, 7
+}
+
+// return try with several results: the dyn value is the first one.
+fn both() !(dyn Named, i64) {
+	return try pair()
+}
+
+fn cat() !Cat {
+	return Cat{n: "tom"}
+}
+
+fn tom() !dyn Named {
+	return try cat()
+}
+
+fn num() !i64 {
+	return 5
+}
+
+// return try into an optional: the number is boxed as ?i64.
+fn maybe() !?i64 {
+	return try num()
+}
+
+fn main() {
+	let a = pick(true)
+	say.Line(a.name())
+	let b = pick(false)
+	say.Line(b.name())
+	let e = named(false) catch err {
+		say.Line(err)
+		return
+	}
+	say.Line(e.name())
+	let (d, n) = both() catch err {
+		say.Line(err)
+		return
+	}
+	say.Line(d.name(), n)
+	let c = tom() catch err {
+		say.Line(err)
+		return
+	}
+	say.Line(c.name())
+	let v = maybe() catch err {
+		say.Line(err)
+		return
+	}
+	if v != nil {
+		say.Line("some", v)
+	} else {
+		say.Line("nil")
+	}
+}
