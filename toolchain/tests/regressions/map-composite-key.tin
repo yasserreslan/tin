@@ -1,0 +1,194 @@
+package main
+
+// A lookup with a struct or value-struct key builds the key in the core's scratch, not in the
+// request pool (#893): the pool's used bytes do not move across the lookups below. Keys made by
+// lookups, values that are lookups and a map expression that looks up read their own keys, since
+// every encoding on the core shares the scratch; a stored key is a copy, so it reads right after
+// later lookups have encoded over the scratch.
+
+import "hearth"
+import "say"
+
+type UUID value struct {
+	b [16]u8
+}
+
+type P struct {
+	x i64
+	y i64
+}
+
+type PV value struct {
+	x i64
+	y i64
+}
+
+type Mixed value struct {
+	b [16]u8
+	s str
+	c u8
+}
+
+type Shape enum {
+	Dot
+	Circle(r i64)
+}
+
+type F struct {
+	f f64
+}
+
+shape Namer {
+	Name() str
+}
+
+type Named struct {
+	s str
+}
+
+fn (n Named) Name() str {
+	return n.s
+}
+
+// table is built by an initializer, so its keys are encoded before main runs.
+let table = buildTable()
+
+fn buildTable() map[PV]i64 {
+	mut t = map[PV]i64{}
+	t[PV{x: 1, y: 1}] = 10
+	t[PV{x: 2, y: 2}] = 20
+	return t
+}
+
+// keyOf is a key made from a lookup in m.
+fn keyOf(m map[P]i64, k P) P {
+	return P{x: m[k], y: 1}
+}
+
+// sumOf adds two lookups in m.
+fn sumOf(m map[P]i64, a P, b P) i64 {
+	return m[a] + m[b]
+}
+
+// pick looks up in a, then returns b.
+fn pick(a map[P]i64, b map[P]i64, k P) map[P]i64 {
+	if a[k] < 0 {
+		return a
+	}
+	return b
+}
+
+fn main() {
+	let ku = UUID{}
+	mut mu = map[UUID]i64{}
+	mu[ku] = 7
+	let kp = P{x: 1, y: 2}
+	mut mp = map[P]i64{}
+	mp[kp] = 2
+	let kv = PV{x: 1, y: 2}
+	mut mv = map[PV]i64{}
+	mv[kv] = 3
+	let km = Mixed{s: "abc", c: 7}
+	mut mm = map[Mixed]i64{}
+	mm[km] = 4
+	mut mdn = map[PV]dyn Namer{}
+	mdn[kv] = Named{s: "dyn"}
+	mut mvv = map[PV]PV{}
+	mvv[kv] = PV{x: 5, y: 6}
+
+	// The first lookup of each shape makes its scratch; the measured lookups come after.
+	let warm = mu[ku] + mp[kp] + mv[kv] + mm[km] + table[PV{x: 1, y: 1}]
+	mut p = rt_pool_used()
+	let a = mu[ku]
+	let dUUID = rt_pool_used() - p
+	p = rt_pool_used()
+	let b = mp[kp]
+	let dP = rt_pool_used() - p
+	p = rt_pool_used()
+	let (c, ok) = mv[kv]
+	let dComma = rt_pool_used() - p
+	p = rt_pool_used()
+	let d = mm[km]
+	let dMixed = rt_pool_used() - p
+	p = rt_pool_used()
+	let e = mvv[kv]
+	let dVal = rt_pool_used() - p
+	p = rt_pool_used()
+	let nm = mdn[kv]
+	let dDyn = rt_pool_used() - p
+	p = rt_pool_used()
+	let t = table[PV{x: 2, y: 2}]
+	let dTable = rt_pool_used() - p
+	say.Line("pool", dUUID, dP, dComma, dMixed, dVal, dDyn, dTable, warm > 0)
+	say.Line("values", a, b, c, ok, d, e.x, e.y, nm.Name(), t)
+
+	// A key made by a lookup, a set whose value looks up, and a map expression that looks up.
+	mp[keyOf(mp, kp)] = 9
+	mp[P{x: 3, y: 3}] = sumOf(mp, kp, P{x: 2, y: 1})
+	mp[P{x: 4, y: 4}] = mp[P{x: 3, y: 3}] + mp[kp]
+	let q = pick(mp, mp, kp)
+	say.Line("nested", mp[P{x: 2, y: 1}], mp[P{x: 3, y: 3}], q[P{x: 4, y: 4}])
+	let (w, found) = mp[keyOf(mp, kp)]
+	say.Line("nestedok", w, found, len(pick(mp, mp, kp)))
+	mvv[PV{x: 7, y: 7}] = PV{x: mvv[kv].x + 1, y: 0}
+	let f = mvv[PV{x: 7, y: 7}]
+	say.Line("vset", f.x)
+
+	// A str field past 128 bytes grows the scratch (the key is longer than its first block).
+	mut long = ""
+	for i in 0..20 {
+		long = long + "0123456789"
+	}
+	mm[Mixed{s: long, c: 1}] = 5
+	say.Line("long", mm[Mixed{s: long, c: 1}], mm[Mixed{s: long, c: 2}], mm[km])
+
+	// A NaN key is never found again: each store is a new entry.
+	let z = 0.0
+	mut mf = map[F]i64{}
+	mf[F{f: z / z}] = 1
+	mf[F{f: z / z}] = 2
+	say.Line("nan", len(mf), mf[F{f: z / z}])
+
+	mut ms = map[Shape]i64{}
+	ms[Shape.Circle(3)] = 1
+	ms[Shape.Dot] = 2
+	say.Line("enum", ms[Shape.Circle(3)], ms[Shape.Dot], ms[Shape.Circle(4)], len(ms))
+
+	p = rt_pool_used()
+	delete(mp, kp)
+	let dDel = rt_pool_used() - p
+	say.Line("delete", dDel, mp[kp], len(mp))
+	// The stored keys are copies: each reads right after the lookups above.
+	for k, v in mp {
+		say.Line("key", k.x, k.y, v)
+	}
+
+	// Past 4096 entries the map is chunked: its keys are looked up and deleted there too.
+	mut big = map[PV]i64{}
+	for i in 0..5000 {
+		big[PV{x: i, y: i * 2}] = i
+	}
+	mut total i64 = 0
+	for i in 0..5000 {
+		total += big[PV{x: i, y: i * 2}]
+	}
+	p = rt_pool_used()
+	let odd = big[PV{x: 4999, y: 9998}]
+	let dBig = rt_pool_used() - p
+	for i in 0..5000 {
+		if i%2 == 0 {
+			delete(big, PV{x: i, y: i * 2})
+		}
+	}
+	say.Line("big", len(big), total, dBig, odd, big[PV{x: 4000, y: 8000}])
+	say.Line("table", table[PV{x: 1, y: 1}], table[PV{x: 2, y: 2}], len(table))
+
+	// The request pool is emptied: the global table and the scratch its keys are encoded in are
+	// long-lived, so a lookup after the reset still reads its keys, and uses no pool memory.
+	hearth.Reset()
+	let fresh = say.Fmt("%d-%d", 1, 2)
+	p = rt_pool_used()
+	let r1 = table[PV{x: 1, y: 1}]
+	let dReset = rt_pool_used() - p
+	say.Line("reset", r1, table[PV{x: 2, y: 2}], len(table), fresh, dReset)
+}

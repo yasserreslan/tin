@@ -3405,10 +3405,19 @@ mut kdOff i64 // per core: where rt_kd_* reads next
 
 mut kbNaN i64 // per core: the key being encoded holds a NaN (#643)
 mut kbSeq i64 // per core: numbers the NaN keys, so no two encode alike
+mut kbBuf i64 // per core: the scratch slice keys are encoded in, a long-lived block (#893)
 
+// rt_kb_new starts an encoding in the core's scratch (#893): a byte slice in the ingot heap, so a
+// lookup builds its key without a pool allocation. An encoding ends before the next one starts.
 fn rt_kb_new() i64 {
 	kbNaN = 0
-	return rt_slice_make(0, 32, 1)
+	if kbBuf == 0 {
+		kbBuf = rt_ingot_alloc(32)
+		kbBuf[1] = 64
+		kbBuf[2] = rt_ingot_alloc(64+9) + 8
+	}
+	kbBuf[0] = 0
+	return kbBuf
 }
 
 // rt_kb_float appends the bits of a float field of a struct or enum key (#643): -0 as +0, the
@@ -3427,7 +3436,7 @@ fn rt_kb_float(b i64, v i64) i64 {
 // rt_kb_word appends v's 8 bytes to byte slice b.
 fn rt_kb_word(b i64, v i64) i64 {
 	if b[0]+8 > b[1] {
-		rt_slice_grow(b, b[0]+8, 1)
+		rt_kb_grow(b, b[0]+8)
 	}
 	(b[2] + b[0])[0] = v
 	b[0] += 8
@@ -3439,21 +3448,64 @@ fn rt_kb_str(b i64, s str) i64 {
 	let n = len(s)
 	b = rt_kb_word(b, n)
 	if b[0]+n > b[1] {
-		rt_slice_grow(b, b[0]+n, 1)
+		rt_kb_grow(b, b[0]+n)
 	}
 	memcpy(b[2]+b[0], cast(i64, s)+8, n)
 	b[0] += n
 	return b
 }
 
-fn rt_kb_done(b i64) str {
+// rt_kb_end appends the marks of a key that holds a NaN, so it is never found again (#643).
+fn rt_kb_end(b i64) i64 {
 	if kbNaN != 0 {
 		// After the fields, which decoding reads by position, so it never sees these words.
 		kbSeq += 1
 		b = rt_kb_word(b, __ctx()[ctxID])
 		b = rt_kb_word(b, kbSeq)
 	}
+	return b
+}
+
+// rt_kb_grow makes scratch b hold need bytes in a new block of the ingot heap (#893): the scratch
+// lives across requests, so it never takes pool memory. The old block is freed; no probe of it is
+// open, since an encoding ends before the next one starts.
+fn rt_kb_grow(b i64, need i64) {
+	if need < 0 || need > maxAlloc {
+		rt_panic("append: size out of range")
+	}
+	mut c = b[1] * 2
+	if c < 64 {
+		c = 64
+	}
+	for c < need {
+		c *= 2
+	}
+	let p = rt_ingot_alloc(c + 9)
+	if b[0] > 0 {
+		memcpy(p+8, b[2], b[0])
+	}
+	rt_ingot_free(b[2] - 8)
+	b[2] = p + 8
+	b[1] = c
+}
+
+// rt_kb_done ends an encoding in a str of its own: a set keeps the key, and rt_map_setk copies
+// it into the map on insert.
+fn rt_kb_done(b i64) str {
+	b = rt_kb_end(b)
 	return rt_str_from_raw(b[2], b[0])
+}
+
+// rt_kb_probe ends an encoding in a str that aliases the scratch, with no copy (#893): a lookup or
+// a delete reads the key and keeps nothing, and the scratch is reused by the next rt_kb_new.
+fn rt_kb_probe(b i64) str {
+	b = rt_kb_end(b)
+	if b[0]+1 > b[1] {
+		rt_kb_grow(b, b[0]+1)
+	}
+	store8(b[2]+b[0], 0)
+	(b[2] - 8)[0] = b[0]
+	return cast(str, b[2] - 8)
 }
 
 fn rt_kd_begin() {

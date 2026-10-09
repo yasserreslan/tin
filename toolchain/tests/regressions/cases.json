@@ -1347,5 +1347,15 @@
       "exit": 1,
       "stderr_contains": "E511 NOT_COMPARABLE"
     }
+  },
+  {
+    "source": "map-composite-key.tin",
+    "issue": 893,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "pool 0 0 0 0 0 0 0 true\nvalues 7 2 3 true 4 5 6 dyn 20\nnested 9 11 13\nnestedok 9 true 4\nvset 6\nlong 5 0 4\nnan 2 0\nenum 1 2 0 2\ndelete 0 0 3\nkey 2 1 9\nkey 3 3 11\nkey 4 4 13\nbig 2500 12497500 0 4999 0\ntable 10 20 2\nreset 10 20 2 1-2 0\n",
+      "stderr": ""
+    }
   }
 ]
