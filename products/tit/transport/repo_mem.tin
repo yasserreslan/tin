@@ -6,6 +6,7 @@ import "../packfile"
 import "../store"
 import "quarry"
 import "sift"
+import "tide"
 import "twine"
 
 // MemRepo is a Repo whose refs and change versions are in memory and whose packs are files under one directory
@@ -20,7 +21,7 @@ type MemRepo struct {
 
 // NewMemRepo is an empty repository whose packs live in dir (made when missing).
 fn NewMemRepo(dir str) !MemRepo {
-	for sub in []str{"/staged", "/live", "/retired"} {
+	for sub in []str{"/staged", "/live"} {
 		try quarry.MkdirAll(dir + sub)
 	}
 	return MemRepo{dir: dir, refs: map[str]str{}, versions: map[str][]change.Version{}, ops: 0}
@@ -74,15 +75,7 @@ fn (m MemRepo) Objects() !store.Layered {
 
 // Packs is the live packs.
 fn (m MemRepo) Packs() ![]packfile.Pack {
-	mut out = []packfile.Pack{}
-	let names = try quarry.ReadDir(m.dir + "/live")
-	for n in names {
-		if twine.HasSuffix(n, ".pack") {
-			let p = try packfile.Open(m.dir + "/live/" + n)
-			out = append(out, p)
-		}
-	}
-	return out
+	return try packfile.OpenAll(m.dir + "/live")
 }
 
 // TempDir is where packs are written before Stage.
@@ -153,17 +146,7 @@ fn (m MemRepo) Drop(s Staged) !bool {
 	return true
 }
 
-// Retire moves live packs to the retired directory.
+// Retire moves live packs to the retired directory (packfile.Retire).
 fn (m MemRepo) Retire(names []str) !i64 {
-	mut n = 0
-	for name in names {
-		let from = m.dir + "/live/" + name
-		if !quarry.Exists(from + ".pack") {
-			continue
-		}
-		try quarry.Rename(from + ".pack", m.dir + "/retired/" + name + ".pack")
-		try quarry.Rename(from + ".idx", m.dir + "/retired/" + name + ".idx")
-		n += 1
-	}
-	return n
+	return try packfile.Retire(m.dir + "/live", names, tide.Wall() / 1000000000)
 }

@@ -68,15 +68,11 @@ fn openWith(g Global, withPacks bool) !Repo {
 	// store first was a stat for every object read from a pack)
 	mut layers = []dyn store.ObjectStore{writes{loose: loose}}
 	mut packs = []packfile.Pack{}
-	let pdir = ws.Store + "/packs"
-	if withPacks && quarry.IsDir(pdir) {
-		let names = try quarry.ReadDir(pdir)
-		for n in names {
-			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
-				let p = try packfile.Open(pdir + "/" + n)
-				packs = append(packs, p)
-				layers = append(layers, p)
-			}
+	if withPacks {
+		// a pack a repack retires while this lists them is left out, or read from packs/retired once open (#1007)
+		packs = try packfile.OpenAll(ws.Store + "/packs")
+		for p in packs {
+			layers = append(layers, p)
 		}
 	}
 	layers = append(layers, loose)
