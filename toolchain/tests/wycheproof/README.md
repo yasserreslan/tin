@@ -10,3 +10,8 @@ and checks valid results byte for byte and that invalid inputs are rejected.
 `tools/gen/gen_wycheproof.tin` (only the fields the tests use). `toolchain/tests/v2/seal_wycheproof.tin` runs
 them; its Go twin `bench/ref/seal_wycheproof` must print the same lines
 (`tools/ci/x509_check.tin`).
+
+`mldsa/` holds the ML-DSA verify and sign-seed files of ML-DSA-44, -65 and -87, copied unchanged from the same repository
+at commit `ee7b4f7e6119` (the commit that Go's `crypto/internal/cryptotest` pins, so Go's own ML-DSA tests read these
+vectors too). The `sign_noseed` files are not used: they import expanded private keys in the semi-expanded form, which
+Go does not accept. `tools/ci/mldsa_check.tin` runs the rest, through `bench/ref/mldsa_vectors`.

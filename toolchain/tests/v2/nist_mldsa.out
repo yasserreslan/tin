@@ -1,0 +1,26 @@
+ML-DSA-44 1312 2420 2560
+ML-DSA-65 1952 3309 4032
+ML-DSA-87 2592 4627 4896
+public key 44 (ACVP keyGen tcId 1): true
+public key 65 (ACVP keyGen tcId 26): true
+public key 87 (ACVP keyGen tcId 51): true
+expanded key 44 (ACVP keyGen tcId 1): true
+expanded key 65 (ACVP keyGen tcId 26): true
+pure signature 44, empty message (golden corpus): true
+mu signature 44 (Wycheproof tcId 1): true
+verify 44, round trip: ok
+verify 44, wrong context: fault: nist: ML-DSA signature does not verify
+verify 44, wrong message: fault: nist: ML-DSA signature does not verify
+verify 44, another key: fault: nist: ML-DSA signature does not verify
+verify 44, signature 1 byte short: fault: nist: an ML-DSA signature has the wrong size
+verify 44, key 1 byte short: fault: nist: an ML-DSA key has the wrong size
+verify 44, context of 256 bytes: fault: nist: an ML-DSA context is at most 255 bytes
+sign 44, seed of 31 bytes: fault: nist: an ML-DSA seed is 32 bytes
+sign 44, context of 256 bytes: fault: nist: an ML-DSA context is at most 255 bytes
+public key 44, seed of 31 bytes: fault: nist: an ML-DSA seed is 32 bytes
+randomized 65, verify: ok
+randomized 65, two signatures differ: true
+mu verify 44, round trip: ok
+mu verify 44, another mu: fault: nist: ML-DSA signature does not verify
+mu sign 44, mu of 63 bytes: fault: nist: an ML-DSA mu is 64 bytes
+expanded key signs as its seed: true
