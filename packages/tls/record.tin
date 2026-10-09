@@ -10,6 +10,7 @@ const ctChangeCipherSpec = 20
 const ctAlert = 21
 const ctHandshake = 22
 const ctApplicationData = 23
+const ctPlainReady = 256 // next_record: application data opened in place into c.plain[0:pe] (#972)
 
 const maxPlaintext = 16384
 const maxCiphertext = 16384 + 256
@@ -35,6 +36,10 @@ const alertUnsupportedExtension = 110
 
 // pendingAlert is the alert the last alert_fault asked for (read at once by the caller).
 mut pendingAlert = 0
+
+// noRecord is the empty data of next_record's results that carry none (a literal would be a new
+// slice each time: one per record of a stream, #972).
+let noRecord = make([]u8, 0)
 
 // alert_fault returns "tls: msg" (for fail) and remembers the alert to send for it.
 fn alert_fault(desc i64, msg str) str {
@@ -167,6 +172,9 @@ type Conn struct {
 	phbuf   []u8
 	wnonce  []u8 // SealRawTo's nonce and record header, rewritten in place for each record
 	whdr    []u8
+	rnonce  []u8 // next_record's nonce and record header for application data, likewise (#972)
+	rhdr    []u8
+	raad    []u8 // and TLS 1.2's additional data
 	version i64  // the protocol version: VersionTLS13, or VersionTLS12 (#473; tls12.tin)
 	gcm12   bool // TLS 1.2 with AES-GCM: a 4-byte salt and an 8-byte explicit nonce per record
 	wantCCS bool // TLS 1.2: the peer's ChangeCipherSpec must come before its next record
@@ -176,8 +184,8 @@ type Conn struct {
 fn new_conn(tcp wire.Conn) Conn {
 	return Conn{tcp: tcp, fd: tcp.Fd(), failure: "", riv: make([]u8, 12), rsecret: make([]u8, 0, 48),
 		wiv: make([]u8, 12), wsecret: make([]u8, 0, 48), in: make([]u8, 5+maxCiphertext+64),
-		plain: make([]u8, maxPlaintext), ph: make([]u8, 5), alpn: "", certs: make([][]u8, 0, 1), hash: seal.Hash.SHA256,
-		resumption: []u8{}, skey: "", phbuf: []u8{}, wnonce: make([]u8, 12), whdr: make([]u8, 5), version: VersionTLS13,
+		plain: make([]u8, maxPlaintext+1), ph: make([]u8, 5), alpn: "", certs: make([][]u8, 0, 1), hash: seal.Hash.SHA256,
+		resumption: []u8{}, skey: "", phbuf: []u8{}, wnonce: make([]u8, 12), whdr: make([]u8, 5), rnonce: make([]u8, 12), rhdr: make([]u8, 5), raad: make([]u8, 13), version: VersionTLS13,
 		waad: make([]u8, 13)}
 }
 
@@ -236,12 +244,12 @@ fn (c mut Conn) fill_some(n i64, wait bool) !bool {
 	if c.ine-c.ins >= n {
 		return true
 	}
+	let base = cast(i64, c.in)[2]
 	if c.ins > 0 {
-		copy(c.in, c.in[c.ins:c.ine])
+		memmove(base, base+c.ins, c.ine-c.ins)
 		c.ine -= c.ins
 		c.ins = 0
 	}
-	let base = cast(i64, c.in)[2]
 	for c.ine < n {
 		let k = rt_sys_read(c.fd, base+c.ine, len(c.in)-c.ine)
 		if k > 0 {
@@ -361,11 +369,10 @@ fn (c mut Conn) next_record(wait bool) !(i64, []u8, bool) {
 	for {
 		mut more = try c.fill_some(5, wait)
 		if !more {
-			return 0, []u8{}, false
+			return 0, noRecord, false
 		}
-		let h = c.in[c.ins : c.ins+5]
-		let typ = i64(h[0])
-		let n = i64(h[3])<<8 | i64(h[4])
+		let typ = i64(c.in[c.ins])
+		let n = i64(c.in[c.ins+3])<<8 | i64(c.in[c.ins+4])
 		if typ < ctChangeCipherSpec || typ > ctApplicationData {
 			fail alert_fault(alertUnexpectedMessage, say.Fmt("unexpected record type %d", typ))
 		}
@@ -374,7 +381,81 @@ fn (c mut Conn) next_record(wait bool) !(i64, []u8, bool) {
 		}
 		more = try c.fill_some(5+n, wait)
 		if !more {
-			return 0, []u8{}, false
+			return 0, noRecord, false
+		}
+		// TLS 1.3 application data, once the handshake is done, opens in place into c.plain (whose
+		// bytes have all been read): its nonce and header are rewritten in the Conn's own slices,
+		// so reading a stream of any size allocates nothing per record (#972).
+		let ra = c.rd
+		if ra != nil && c.ready && typ == ctApplicationData && c.version == VersionTLS13 && !c.wantCCS && n >= 17 && n-16 <= len(c.plain) {
+			let base = cast(i64, c.in)[2] + c.ins
+			memcpy(cast(i64, c.rhdr)[2], base, 5)
+			let nc = c.rnonce
+			copy(nc, c.riv)
+			for i in 0..8 {
+				nc[11-i] ^= u8(c.rseq >> u64(8*i))
+			}
+			ra.OpenTo(nc, base+5, n-16, c.rhdr, cast(i64, c.plain)[2]) catch _ {
+				fail alert_fault(alertBadRecordMAC, "record authentication failed")
+			}
+			c.ins += 5 + n
+			c.rseq += 1
+			mut end = n - 17
+			for end >= 0 && c.plain[end] == 0 {
+				end -= 1
+			}
+			if end < 0 {
+				fail alert_fault(alertUnexpectedMessage, "record with no content type")
+			}
+			if end > maxPlaintext {
+				fail alert_fault(alertRecordOverflow, "record too large")
+			}
+			let inner = i64(c.plain[end])
+			if inner == ctApplicationData {
+				c.ps = 0
+				c.pe = end
+				return ctPlainReady, noRecord, true
+			}
+			return inner, clone(c.plain[:end]), true
+		}
+		// TLS 1.2 application data likewise: the explicit nonce (AES-GCM) or the IV xor the
+		// sequence number (ChaCha20-Poly1305), and the additional data, in the Conn's own slices.
+		mut skip = 0
+		if c.gcm12 {
+			skip = 8
+		}
+		if ra != nil && c.ready && typ == ctApplicationData && c.version == VersionTLS12 && !c.wantCCS && n >= skip+16 && n-skip-16 <= maxPlaintext {
+			let base = cast(i64, c.in)[2] + c.ins
+			let m = n - skip - 16
+			let nc = c.rnonce
+			if c.gcm12 {
+				for i in 0..4 {
+					nc[i] = c.riv[i]
+				}
+				memcpy(cast(i64, nc)[2]+4, base+5, 8)
+			} else {
+				copy(nc, c.riv)
+				for i in 0..8 {
+					nc[11-i] ^= u8(c.rseq >> u64(8*i))
+				}
+			}
+			let ad = c.raad
+			for i in 0..8 {
+				ad[7-i] = u8(c.rseq >> u64(8*i))
+			}
+			ad[8] = u8(typ)
+			ad[9] = 3
+			ad[10] = 3
+			ad[11] = u8(m >> 8)
+			ad[12] = u8(m)
+			ra.OpenTo(nc, base+5+skip, m, ad, cast(i64, c.plain)[2]) catch _ {
+				fail alert_fault(alertBadRecordMAC, "record authentication failed")
+			}
+			c.ins += 5 + n
+			c.rseq += 1
+			c.ps = 0
+			c.pe = m
+			return ctPlainReady, noRecord, true
 		}
 		let hdr = clone(c.in[c.ins : c.ins+5])
 		let body = c.in[c.ins+5 : c.ins+5+n]
@@ -450,7 +531,7 @@ fn (c mut Conn) next_record(wait bool) !(i64, []u8, bool) {
 		}
 		return i64(pt[end]), pt[:end], true
 	}
-	return 0, []u8{}, false
+	return 0, noRecord, false
 }
 
 // set_read_key and set_write_key install the keys of a traffic secret (in place once they

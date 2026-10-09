@@ -1,0 +1,687 @@
+package wire
+
+import "io"
+import "say"
+import "tls"
+
+// ---- streamed bodies (#774) ----
+//
+// DoStream sends a request whose body is read from an io.Reader as it goes out, and returns as
+// soon as the response's headers are in: its body is read from the Stream as it arrives. Memory
+// stays at one 64 KiB buffer each way, whatever the size: tit fetch and push move packs of
+// gigabytes this way. The body goes chunked (HTTP/1.1 Transfer-Encoding), or as it is when the
+// headers give a Content-Length, which must then match it. Options.MaxBody bounds what Read
+// gives (0: DefaultMaxBody), Options.Timeout the whole call, response body included, and the
+// deadline of the enclosing within applies to every read and write: when it passes, the
+// connection closes and the call or Read fails with fault.DeadlineExceeded.
+//
+// DoStream speaks HTTP/1.1: https:// offers only http/1.1 by ALPN, and Options.H2C is refused
+// (HTTP/2 DATA frames for streamed bodies are a follow-up). A response read to its end, framed
+// and not "Connection: close", leaves its connection in the keep-alive pool as DoWith's do; one
+// closed before its end is dropped. A request without a body may use a kept connection (and a
+// fresh one when the server had closed it); one with a body always dials, since the body cannot
+// be read again.
+//
+// Recorded and replayed (wire.http@1, #241), a streamed call is one whole call: the request body
+// is read to its end first, the response body is the recorded bytes, and both are in memory.
+
+// Stream is a response whose body is read as it arrives: an io.Reader. Close it when done with it
+// before its end (Read to the end closes it).
+type Stream struct {
+	Status   i64
+	head     str
+	c        Conn      // the connection (its fd is the TLS connection's for https)
+	tc       ?tls.Conn // https: the TLS layer
+	key      str
+	maxIdle  i64
+	keepable bool
+	mode     i64 // sLength, sChunked, sClose, sTaped, sDone
+	left     i64 // sLength: body bytes still to come; sChunked: bytes left in the current chunk
+	crlf     bool // sChunked: a chunk's data ended, its CRLF is next
+	buf      i64  // malloc'd: bytes read from the connection; buf[at:n] are not used yet
+	seal     i64  // malloc'd for https: the records of one write, sealed
+	at       i64
+	n        i64
+	limit_   i64
+	got      i64
+	taped    str // sTaped: the recorded body
+}
+
+const sLength = 1
+const sChunked = 2
+const sClose = 3
+const sTaped = 4
+const sDone = 5
+
+// streamBuf is the size of a Stream's read buffer and of DoStream's send buffer.
+const streamBuf = 65536
+
+// NoBody is the body of a request that has none, for DoStream.
+type NoBody struct{}
+
+// Read gives nothing: the body has ended.
+fn (b mut NoBody) Read(buf mut []u8) !i64 {
+	return 0
+}
+
+// DoStream sends one request with its body read from body, and returns the response once its
+// headers are in; see the section comment above.
+fn DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options) !Stream {
+	mut src = body
+	let tp = rt_tape()
+	if tp != 0 {
+		let whole = try io.ReadAll(src)
+		let r = try http_taped(tp, method, url, headers, whole, opt)
+		return Stream{Status: r.Status, head: r.head, c: Conn{open: false, fd: -1}, tc: nil, mode: sTaped, taped: r.Body, limit_: 0}
+	}
+	if opt.H2C {
+		fail "wire: DoStream speaks HTTP/1.1: Options.H2C is not supported"
+	}
+	// The first block says whether there is a body at all.
+	mut win = make([]u8, streamBuf)
+	let first = try src.Read(mut win)
+	let k = try prepare(method, url, headers, "", opt, first > 0)
+	mut declared = -1
+	{
+		mut i = 0
+		for i+1 < len(headers) {
+			if fold_eq(headers[i], "Content-Length") {
+				declared = try decimal(headers[i+1])
+			}
+			i += 2
+		}
+	}
+	if first <= 0 && declared > 0 {
+		fail say.Fault("wire: the body is empty, its Content-Length %d", declared)
+	}
+	let secure = k.scheme == "https"
+	// Without a body, a kept connection may carry the call, and a fresh one replaces it once
+	// when the server had closed it before answering.
+	if first <= 0 && k.maxIdle >= 0 {
+		staleRetry = false
+		let (s, err) = stream_attempt(k, opt, secure, true, mut src, mut win, 0, declared)
+		if err == nil {
+			return s
+		}
+		if !staleRetry {
+			fail err
+		}
+	}
+	return try stream_attempt(k, opt, secure, false, mut src, mut win, first, declared)
+}
+
+// decimal is a Content-Length header's value.
+fn decimal(v str) !i64 {
+	mut x = 0
+	mut digits = 0
+	for i in 0..len(v) {
+		let d = v[i]
+		if d == ' ' || d == '\t' {
+			continue
+		}
+		if d < '0' || d > '9' || digits >= 13 {
+			fail say.Fault("wire: bad Content-Length %q", v)
+		}
+		x = x*10 + i64(d-'0')
+		digits += 1
+	}
+	if digits == 0 {
+		fail say.Fault("wire: bad Content-Length %q", v)
+	}
+	return x
+}
+
+// stream_attempt makes one exchange: it connects (or takes a kept connection when usePool), sends
+// the head and the body (first bytes of it are in win already), and reads the response's head.
+fn stream_attempt[R io.Reader](k call, opt Options, secure bool, usePool bool, src mut R, win mut []u8, first i64, declared i64) !Stream {
+	trace_get_conn(k.trace, k.hostport)
+	mut s = Stream{Status: 0, head: "", c: Conn{open: false, fd: -1}, tc: nil, key: k.key, maxIdle: k.maxIdle, mode: sDone, limit_: k.limit_}
+	mut reused = false
+	if secure {
+		if usePool {
+			let kept = pool_take_tls(k.key)
+			if kept != nil {
+				reused = true
+				kept.SetDeadline(k.until)
+				s.c = Conn{open: true, fd: kept.Fd(), timeout: 0, until: k.until}
+				s.tc = kept
+			}
+		}
+		if !reused {
+			let tc = try stream_dial_tls(k, opt)
+			tc.SetDeadline(k.until)
+			s.c = Conn{open: true, fd: tc.Fd(), timeout: 0, until: k.until}
+			s.tc = tc
+		}
+	} else {
+		if usePool {
+			let fd = pool_take(k.key, false)
+			if fd >= 0 {
+				s.c = Conn{open: true, fd: fd, timeout: 0}
+				reused = true
+			}
+		}
+		if !reused {
+			s.c = try DialTimeout(k.addr, k.timeout)
+		}
+		s.c.until = k.until
+	}
+	s.buf = malloc(streamBuf + 2*maxChunkLine)
+	respSeen = false
+	let werr = stream_send(mut s, k.req, mut src, mut win, first, declared)
+	trace_wrote(k.trace, werr)
+	if werr != nil {
+		// A server may answer before it has read the whole body (a 413, a 401): that answer is
+		// the result. With none, the write's fault is.
+		let herr = s.read_head(k)
+		if herr != nil {
+			s.drop()
+			staleRetry = reused && k.idem && first <= 0 && !respSeen
+			fail werr
+		}
+		s.keepable = false
+		return s
+	}
+	let herr = s.read_head(k)
+	if herr != nil {
+		s.drop()
+		staleRetry = reused && k.idem && first <= 0 && !respSeen
+		fail herr
+	}
+	return s
+}
+
+// stream_dial_tls makes a TLS connection for k that speaks HTTP/1.1.
+fn stream_dial_tls(k call, opt Options) !tls.Conn {
+	trace_tls_start(k.trace)
+	let cfg = tls.Config{ServerName: "", RootCAs: "", ALPN: []str{"http/1.1"}, Timeout: opt.Timeout, InsecureSkipVerify: false}
+	let given = opt.TLS
+	if given != nil {
+		cfg.RootCAs = given.RootCAs
+		cfg.InsecureSkipVerify = given.InsecureSkipVerify
+		cfg.Certificate = given.Certificate
+		cfg.Key = given.Key
+		cfg.MinVersion = given.MinVersion
+	}
+	cfg.ServerName = tls_host(k.hostport)
+	let (tc, err) = tls.Dial(k.addr, cfg)
+	trace_tls_done(k.trace, err)
+	if err != nil {
+		fail err
+	}
+	if tc.ALPN() != "" && tc.ALPN() != "http/1.1" {
+		tc.Close()
+		fail say.Fault("wire: the server chose %q by ALPN; DoStream speaks HTTP/1.1", tc.ALPN())
+	}
+	return tc
+}
+
+// stream_send writes the head, then the body: chunked (one chunk per read), or as it is when declared
+// is its length.
+fn stream_send[R io.Reader](s mut Stream, head []u8, src mut R, win mut []u8, first i64, declared i64) ! {
+	try s.write(head)
+	if first <= 0 {
+		return
+	}
+	// out holds a chunk: its size line (right-aligned in the first 10 bytes), the data, CRLF.
+	mut out = make([]u8, streamBuf+12)
+	let op = cast(i64, out)[2]
+	let wp = cast(i64, win)[2]
+	mut n = first
+	mut sent = 0
+	for n > 0 {
+		if declared >= 0 {
+			if sent+n > declared {
+				fail say.Fault("wire: the body is longer than its Content-Length %d", declared)
+			}
+			memcpy(op, wp, n)
+			try s.write_part(out, n)
+		} else {
+			mut start = 8
+			mut v = n
+			for v > 0 {
+				start -= 1
+				store8(op+start, "0123456789abcdef"[v%16])
+				v = v / 16
+			}
+			store8(op+8, '\r')
+			store8(op+9, '\n')
+			memcpy(op+10, wp, n)
+			store8(op+10+n, '\r')
+			store8(op+11+n, '\n')
+			try s.write_at(out, start, 12+n-start)
+		}
+		sent += n
+		n = try src.Read(mut win)
+	}
+	if declared >= 0 {
+		if sent != declared {
+			fail say.Fault("wire: the body ended at %d bytes, its Content-Length is %d", sent, declared)
+		}
+		return
+	}
+	try s.write_text("0\r\n\r\n")
+}
+
+fn (s mut Stream) write(b []u8) ! {
+	try s.write_at(b, 0, len(b))
+}
+
+fn (s mut Stream) write_part(b []u8, n i64) ! {
+	try s.write_at(b, 0, n)
+}
+
+fn (s mut Stream) write_text(t str) ! {
+	try s.write([]u8(t))
+}
+
+// write_at sends n bytes of b from offset at. Over TLS the records are sealed into the Stream's
+// own buffer (tls.SealRawTo), so a body of any size allocates nothing per write.
+fn (s mut Stream) write_at(b []u8, at i64, n i64) ! {
+	let p = cast(i64, b)[2] + at
+	mut tc = s.tc
+	if tc != nil {
+		if s.seal == 0 {
+			s.seal = malloc(tls.SealRawSize(streamBuf))
+		}
+		mut off = 0
+		for off < n {
+			mut m = n - off
+			if m > streamBuf {
+				m = streamBuf
+			}
+			let (k, err) = tc.SealRawTo(p+off, m, s.seal)
+			s.tc = tc
+			if err != nil {
+				fail err
+			}
+			try s.c.write_raw(s.seal, k)
+			off += m
+		}
+		return
+	}
+	try s.c.write_raw(p, n)
+}
+
+// fill reads more of the connection into the buffer, after what is not used yet; false at its end.
+fn (s mut Stream) fill() !bool {
+	if s.at == s.n {
+		s.at = 0
+		s.n = 0
+	} else if s.n+4096 > streamBuf+2*maxChunkLine {
+		memmove(s.buf, s.buf+s.at, s.n-s.at)
+		s.n -= s.at
+		s.at = 0
+	}
+	mut room = streamBuf + 2*maxChunkLine - s.n
+	if room > streamBuf {
+		room = streamBuf
+	}
+	mut tc = s.tc
+	if tc != nil {
+		for {
+			let (k, err) = tc.ReadNowTo(s.buf+s.n, room)
+			s.tc = tc
+			if err != nil {
+				if IsEOF(err) {
+					return false
+				}
+				fail err
+			}
+			if k > 0 {
+				s.n += k
+				return true
+			}
+			try s.c.wait(1, "read")
+		}
+	}
+	for {
+		let k = rt_sys_read(s.c.fd, s.buf+s.n, room)
+		if k > 0 {
+			s.n += k
+			return true
+		}
+		if k == 0 {
+			return false
+		}
+		let e = errno()
+		if e == 4 {
+			continue
+		}
+		if e == EAGAIN {
+			try s.c.wait(1, "read")
+			continue
+		}
+		fail os_fault("read")
+	}
+	return false
+}
+
+// read_head reads the response's head (after any 1xx) and sets how its body is framed.
+fn (s mut Stream) read_head(k call) ! {
+	mut informational = 0
+	mut firstByteSeen = false
+	for {
+		mut end = -1
+		for end < 0 {
+			for i in s.at+3..s.n {
+				let p = s.buf + i - 3
+				if load8(p) == '\r' && load8(p+1) == '\n' && load8(p+2) == '\r' && load8(p+3) == '\n' {
+					end = i + 1
+					break
+				}
+			}
+			if end >= 0 {
+				break
+			}
+			if s.n-s.at > streamBuf {
+				fail "wire: response headers too large"
+			}
+			let more = try s.fill()
+			if s.n > s.at {
+				respSeen = true
+				if !firstByteSeen {
+					trace_first_byte(k.trace)
+					firstByteSeen = true
+				}
+			}
+			if !more {
+				fail "wire: connection closed before the response headers"
+			}
+		}
+		let h = rt_str_from_raw(s.buf+s.at, end-s.at)
+		s.at = end
+		if len(h) < 12 || h[:5] != "HTTP/" {
+			fail "wire: malformed response"
+		}
+		mut status = 0
+		for i in 9..12 {
+			let d = h[i]
+			if d < '0' || d > '9' {
+				fail "wire: malformed status line"
+			}
+			status = status*10 + i64(d-'0')
+		}
+		if status >= 100 && status < 200 && status != 101 {
+			informational += 1
+			if informational > maxInformational {
+				fail "wire: too many informational responses"
+			}
+			continue
+		}
+		s.Status = status
+		s.head = h
+		s.keepable = len(h) >= 8 && h[:8] == "HTTP/1.1" && !connection_closes(h)
+		break
+	}
+	let r = Resp{Status: s.Status, Body: "", head: s.head}
+	if k.head || s.Status == 204 || s.Status == 304 || s.Status == 101 {
+		s.keepable = s.keepable && s.Status != 101
+		s.finish()
+		return
+	}
+	let chunked = try transfer_coding(r)
+	let n = try content_length(r)
+	if chunked && n >= 0 {
+		fail "wire: both Transfer-Encoding and Content-Length"
+	}
+	if chunked {
+		s.mode = sChunked
+		s.left = 0
+		return
+	}
+	if n >= 0 {
+		if n > s.limit_ {
+			fail say.Fault("wire: response body of %d bytes is over the %d-byte limit", n, s.limit_)
+		}
+		s.mode = sLength
+		s.left = n
+		if n == 0 {
+			s.finish()
+		}
+		return
+	}
+	s.mode = sClose
+	s.keepable = false
+}
+
+// Read fills buf with the next bytes of the body and returns how many; 0 at its end, after which
+// the connection is back in the pool or closed. A connection that fails or ends early is closed
+// and Read fails: it never gives a truncated body as complete.
+fn (s mut Stream) Read(buf mut []u8) !i64 {
+	if s.mode == sDone || len(buf) == 0 {
+		return 0
+	}
+	let (n, err) = s.next(cast(i64, buf)[2], len(buf))
+	if err != nil {
+		s.drop()
+		fail err
+	}
+	return n
+}
+
+// next copies the body's next bytes to bp, at most room of them.
+fn (s mut Stream) next(bp i64, room i64) !i64 {
+	if s.mode == sTaped {
+		mut n = len(s.taped) - s.got
+		if n > room {
+			n = room
+		}
+		memcpy(bp, cast(i64, s.taped)+8+s.got, n)
+		s.got += n
+		if n == 0 {
+			s.mode = sDone
+		}
+		return n
+	}
+	for {
+		if s.mode == sLength {
+			if s.left == 0 {
+				s.finish()
+				return 0
+			}
+			if s.at == s.n {
+				let more = try s.fill()
+				if !more {
+					fail "wire: response body truncated"
+				}
+			}
+			let n = s.give(bp, room, s.left)
+			s.left -= n
+			if s.left == 0 {
+				s.finish()
+			}
+			return n
+		}
+		if s.mode == sClose {
+			if s.at == s.n {
+				let more = try s.fill()
+				if !more {
+					s.finish()
+					return 0
+				}
+			}
+			return try s.counted(s.give(bp, room, s.n-s.at))
+		}
+		if s.mode != sChunked {
+			return 0
+		}
+		if s.left > 0 {
+			if s.at == s.n {
+				let more = try s.fill()
+				if !more {
+					fail "wire: chunked body truncated"
+				}
+			}
+			let n = s.give(bp, room, s.left)
+			s.left -= n
+			if s.left == 0 {
+				s.crlf = true
+			}
+			return try s.counted(n)
+		}
+		if s.crlf {
+			for s.n-s.at < 2 {
+				let more = try s.fill()
+				if !more {
+					fail "wire: chunked body truncated"
+				}
+			}
+			if load8(s.buf+s.at) != '\r' || load8(s.buf+s.at+1) != '\n' {
+				fail "wire: malformed chunked body: chunk data not ended by CRLF"
+			}
+			s.at += 2
+			s.crlf = false
+			continue
+		}
+		// a chunk-size line
+		let end = try s.line()
+		let size = try chunk_size(s.view(), s.at, end)
+		s.at = end + 2
+		if size == 0 {
+			// trailers, up to the empty line: they are ignored
+			mut seen = 0
+			for {
+				let e = try s.line()
+				if e == s.at {
+					s.at += 2
+					break
+				}
+				seen += e - s.at + 2
+				if seen > maxTrailers {
+					fail "wire: malformed chunked body: trailers too large"
+				}
+				s.at = e + 2
+			}
+			s.keepable = s.keepable && s.at == s.n
+			s.finish()
+			return 0
+		}
+		if size > s.limit_-s.got {
+			fail say.Fault("wire: response body is over the %d-byte limit", s.limit_)
+		}
+		s.left = size
+	}
+	return 0
+}
+
+// counted adds n to the body given so far, failing past the limit.
+fn (s mut Stream) counted(n i64) !i64 {
+	if s.mode == sClose && s.got > s.limit_ {
+		fail say.Fault("wire: response body is over the %d-byte limit", s.limit_)
+	}
+	return n
+}
+
+// give copies up to max bytes (and at most room) from the buffer to p.
+fn (s mut Stream) give(p i64, room i64, max i64) i64 {
+	mut n = s.n - s.at
+	if n > room {
+		n = room
+	}
+	if n > max {
+		n = max
+	}
+	memcpy(p, s.buf+s.at, n)
+	s.at += n
+	s.got += n
+	return n
+}
+
+// view is the buffer's bytes as a slice, for the chunk-size parser (it reads buf[at:end]).
+fn (s Stream) view() []u8 {
+	mut b = make([]u8, 0, 0)
+	let h = cast(i64, b)
+	h[0] = s.n
+	h[1] = s.n
+	h[2] = s.buf
+	return b
+}
+
+// line reads until the buffer holds a CRLF-ended line at at, and returns the index of its CR.
+fn (s mut Stream) line() !i64 {
+	mut scan = s.at
+	for {
+		for i in scan..s.n {
+			if load8(s.buf+i) == '\n' {
+				if i == s.at || load8(s.buf+i-1) != '\r' {
+					fail "wire: malformed chunked body: line not ended by CRLF"
+				}
+				return i - 1
+			}
+		}
+		if s.n-s.at > maxChunkLine {
+			fail "wire: malformed chunked body: line too long"
+		}
+		// fill may move the unused bytes to the front: what was scanned stays scanned
+		let scanned = s.n - s.at
+		let more = try s.fill()
+		if !more {
+			fail "wire: chunked body truncated"
+		}
+		scan = s.at + scanned
+	}
+	return 0
+}
+
+// finish ends a body read to its end: the connection goes back to the pool when it may carry
+// another call, and is closed otherwise.
+fn (s mut Stream) finish() {
+	if s.mode == sDone && s.buf == 0 {
+		return
+	}
+	s.mode = sDone
+	if s.keepable && s.at == s.n && s.maxIdle >= 0 && s.c.open {
+		mut tc = s.tc
+		if tc != nil {
+			if tc.Buffered() == 0 && pool_put(s.key, tc.Fd(), tc, s.maxIdle) {
+				s.c.open = false
+				s.tc = nil
+			}
+		} else if pool_put(s.key, s.c.fd, nil, s.maxIdle) {
+			s.c.open = false
+		}
+	}
+	s.drop()
+}
+
+// drop closes the connection (when not given back to the pool) and frees the buffer.
+fn (s mut Stream) drop() {
+	s.mode = sDone
+	mut tc = s.tc
+	if tc != nil {
+		tc.Close()
+		s.tc = nil
+		s.c.open = false
+	}
+	s.c.Close()
+	if s.buf != 0 {
+		free(s.buf)
+		s.buf = 0
+	}
+	if s.seal != 0 {
+		free(s.seal)
+		s.seal = 0
+	}
+}
+
+// Close ends the response: a body not read to its end closes the connection.
+fn (s mut Stream) Close() {
+	if s.mode != sDone || s.buf != 0 {
+		s.drop()
+	}
+}
+
+// Header returns the response header name (any case), or "".
+fn (s Stream) Header(name str) str {
+	return field_of(s.head, name)
+}
+
+// Length is the body's length when the response gave it (Content-Length), else -1.
+fn (s Stream) Length() i64 {
+	let (n, err) = content_length(Resp{Status: s.Status, Body: "", head: s.head})
+	if err != nil {
+		return -1
+	}
+	return n
+}

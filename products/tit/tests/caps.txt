@@ -19,6 +19,7 @@ hpack
 identity files
 ignore files
 index files
+io
 link
 main net files spawn
 merge

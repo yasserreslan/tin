@@ -142,7 +142,7 @@ replayer (#242) refuses a capsule with a kind or version this build does not lis
 | `tide.wall@1` | "" | word: wall ns | `tide.Wall` |
 | `dice.seed@1` | "" | word: the seed of this request's generator | `dice` package functions, at the first draw of a request (they then draw from `tpRand`, not the core's generator) |
 | `seal.random@1` | decimal n | the n bytes | `seal.RandomBytes` |
-| `wire.http@1` | method, " ", URL, then for each header "\n" name ": " value, then "\n\n" and the body | word status, string head, string body | `wire.DoWith` (so `Get`, `Post`, `Do`) |
+| `wire.http@1` | method, " ", URL, then for each header "\n" name ": " value, then "\n\n" and the body | word status, string head, string body | `wire.DoWith` (so `Get`, `Post`, `Do`), and `wire.DoStream` as one whole call: its request body read to the end first, its response body read from the recorded bytes (#774) |
 | `wire.dial@1` | address | word: the connection's number in this request (1, 2, ...) | `wire.Dial`, `DialTimeout` (raw TCP) |
 | `wire.read@1` | connection number, " ", max | the bytes (EOF: the `EOF` fault) | `Conn.Read` and what reads through it |
 | `wire.write@1` | connection number, " ", the bytes | "" | `Conn.Write`, `WriteBytes` |

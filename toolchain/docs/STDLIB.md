@@ -492,6 +492,14 @@ try c.Write("PING\r\n")
 let r = try wire.Get("http://127.0.0.1:8080/json")
 ```
 
+- `type Stream struct`: Stream is a response whose body is read as it arrives: an io.Reader. Close it when done with it before its end (Read to the end closes it).
+- `type NoBody struct{}`: NoBody is the body of a request that has none, for DoStream.
+- `(b mut NoBody) Read(buf mut []u8) !i64`: Read gives nothing: the body has ended.
+- `DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options) !Stream`: DoStream sends one request with its body read from body, and returns the response once its headers are in; see the section comment above.
+- `(s mut Stream) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the body and returns how many; 0 at its end, after which the connection is back in the pool or closed. A connection that fails or ends early is closed and Read fails: it never gives a truncated body as complete.
+- `(s mut Stream) Close()`: Close ends the response: a body not read to its end closes the connection.
+- `(s Stream) Header(name str) str`: Header returns the response header name (any case), or "".
+- `(s Stream) Length() i64`: Length is the body's length when the response gave it (Content-Length), else -1.
 - `type Conn struct`: Conn is a TCP connection.
 - `type Listener struct`: Listener accepts TCP connections.
 - `type Resp struct`: Resp is an HTTP response.
@@ -2033,6 +2041,7 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `(a AEAD) Overhead() i64`: Overhead is the tag length in bytes (16).
 - `(a AEAD) Seal(nonce []u8, plaintext secret []u8, aad []u8) ![]u8`: Seal encrypts plaintext and authenticates it with aad under a 12-byte nonce, returning the ciphertext followed by the tag. A nonce must never be used twice with one key.
 - `(a AEAD) SealTo(nonce []u8, src i64, n i64, aad []u8, dst i64) !`: SealTo is Seal into raw memory: it encrypts the n bytes at src into dst and writes the 16-byte tag after them (dst may be src, to seal in place). Nothing it allocates grows with n, so a connection that streams can seal into a buffer of its own instead of its request's pool; AES-GCM on the CPU's instructions allocates nothing at all.
+- `(a AEAD) OpenTo(nonce []u8, src i64, n i64, aad []u8, dst i64) !`: OpenTo is Open into raw memory: it checks the 16-byte tag after the n bytes of ciphertext at src and decrypts them into dst (dst may be src, to open in place); it writes nothing when the tag does not match. Like SealTo, nothing it allocates grows with n, and AES-GCM on the CPU's instructions allocates nothing at all: a connection that streams opens records into a buffer of its own.
 - `(a AEAD) Open(nonce []u8, sealed []u8, aad []u8) ![]u8`: Open checks the tag of sealed (ciphertext then tag) against aad and the nonce and returns the plaintext; it fails, revealing nothing else, when anything was changed.
 - `(a mut AEAD) Rekey(key secret []u8) !`: Rekey replaces a's key with key, of the same algorithm and length, reusing a's memory: an AEAD kept in long-lived memory (a connection's state) can change keys without allocating there.
 - `AESHardware() bool`: AESHardware reports whether AES-GCM runs on the CPU's AES instructions here (AES-NI and PCLMULQDQ, or ARMv8 AES and PMULL); without them it runs a slower constant-time software path and ChaCha20-Poly1305 is the faster choice.
