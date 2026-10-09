@@ -13,7 +13,8 @@ import "twine"
 // Note is the struct of the N cases (as bench/ref/jsonv2's Note).
 type Note struct {
 	Title str
-	Tags  []str
+	Tags  ?[]str
+	Labels ?map[str]str
 	At    ?Point
 	Ok    bool
 }
@@ -62,7 +63,7 @@ fn caseLine(line str) str {
 	}
 	let doc = str(raw)
 	if mode == "N" {
-		mut n = Note{Title: "", Tags: []str{}, Ok: false}
+		mut n = Note{Title: "", Ok: false}
 		jsonv2.Unmarshal(doc, mut n, jsonv2.Options{}) catch _ {
 			return "E"
 		}

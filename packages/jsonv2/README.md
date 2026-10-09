@@ -24,15 +24,14 @@ encoding/json/v2's surface, built on `argo` (typed encoders and decoders) and `j
 
 ## Checked against Go
 
-- `tools/ci/jsonv2_check.tin` (CI step): 412 cases, hand-written and generated `Note` and `Point` documents and their mutations,
+- `tools/ci/jsonv2_check.tin` (CI step): 415 cases, hand-written and generated `Note` and `Point` documents and their mutations,
   each unmarshalled and then marshalled under four option sets, against Go's `encoding/json/v2` (`bench/ref/jsonv2`). Both sides agree
   on which documents decode and on every byte of the output.
 - `toolchain/tests/v2/jsonv2.tin`: the options, the escapes, duplicates, unknown members and the unchanged target after a fault.
 
 ## Known gaps (differences from encoding/json/v2)
 
-- Nil slices and maps marshal as `null`: `argo`'s generated encoder writes `null` for them, where v2's default writes `[]` and `{}`.
-  The fix is in the encoder generator (toolchain/compiler), which this package does not touch.
+- Nil slices and maps marshal as `[]` and `{}`, matching v2's defaults. `jsonv2` uses argo's separate generated v2 encoders; v1 `argo.Put` continues to write `null`.
 - Invalid UTF-8 in a string marshals as `�`; v2 refuses it by default (`argo_utf8`, #104 keeps `argo`'s output).
 - Semantic error texts are `argo`'s, not v2's (type mismatch, overflow, `RejectUnknownMembers`: `argo: unknown key "Z" at offset 7`).
   Syntax errors are jsontext's, which match Go. The twin checks whether a document decodes, not the text of its error.

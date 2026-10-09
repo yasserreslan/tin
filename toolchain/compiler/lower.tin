@@ -4305,8 +4305,8 @@ fn chk_call(e i64, want i64) i64 {
 			if pkg == "say" && is_say_func(m) != 0 {
 				return lower_say(e, m, want)
 			}
-			if pkg == "argo" && m == "Put" {
-				return lower_argo_put(e)
+			if pkg == "argo" && (m == "Put" || m == "PutV2") {
+				return lower_argo_put(e, i64(m == "PutV2"))
 			}
 			if pkg == "argo" && m == "Get" {
 				return lower_argo_get(e, 0)
@@ -5186,8 +5186,10 @@ fn lower_keep(e Node, want i64) i64 {
 // ---- argo: a JSON encoder generated for each type ----
 shared mut argo_types []i64
 shared mut argo_fns []i64
+shared mut argo_v2_types []i64
+shared mut argo_v2_fns []i64
 
-fn lower_argo_put(e i64) i64 {
+fn lower_argo_put(e i64, v2 i64) i64 {
 	let pos = cast(Node, e).pos
 	let args = cast(Call, e).args
 	if len(args) != 2 {
@@ -5212,7 +5214,7 @@ fn lower_argo_put(e i64) i64 {
 	if is_untyped(t) != 0 {
 		t = reconvert(cast(Node, v), default_type(t))
 	}
-	let f = argo_fn(pos, cast(Ty, t))
+	let f = argo_fn(pos, cast(Ty, t), v2)
 	if f == 0 {
 		return ty_void
 	}
@@ -5238,7 +5240,7 @@ fn argo_lib(pos i64, name str) Fn {
 }
 
 // argo_emit appends a call that writes x (of type t) to buffer b.
-fn argo_emit(pos i64, body []i64, b i64, x i64, t Ty) {
+fn argo_emit(pos i64, body []i64, b i64, x i64, t Ty, v2 i64) {
 	let k = kind_of(t)
 	let bref = sym_ref_node(pos, cast(Sym, b))
 	if k == K_STRING {
@@ -5254,7 +5256,7 @@ fn argo_emit(pos i64, body []i64, b i64, x i64, t Ty) {
 	} else if k == K_INT {
 		body = append(body, expr_stmt(call_fn(pos, argo_lib(pos, "argo.wint"), args2(bref, mk_conv(pos, x, CV_SAME, ty_int)), ty_void)))
 	} else {
-		let f = argo_fn(pos, t)
+		let f = argo_fn(pos, t, v2)
 		if f != 0 {
 			body = append(body, expr_stmt(call_fn(pos, cast(Fn, f), args2(bref, x), ty_void)))
 		}
@@ -5270,15 +5272,25 @@ fn ty_byte_slice() i64 {
 }
 
 // argo_fn returns (generating on first use) argo$N(b mut []u8, x T), the encoder for T.
-fn argo_fn(pos i64, t Ty) i64 {
-	if cast(i64, argo_types) == 0 {
+fn argo_fn(pos i64, t Ty, v2 i64) i64 {
+	if v2 != 0 && cast(i64, argo_v2_types) == 0 {
+		argo_v2_types = []i64{}
+		argo_v2_fns = []i64{}
+	}
+	if v2 == 0 && cast(i64, argo_types) == 0 {
 		argo_types = []i64{}
 		argo_fns = []i64{}
 	}
 	mut i = 0
-	for i < len(argo_types) {
-		if cast(i64, cast(Ty, cast([]i64, argo_types)[i])) == cast(i64, t) {
-			return argo_fns[i]
+	mut types = argo_types
+	mut fns = argo_fns
+	if v2 != 0 {
+		types = argo_v2_types
+		fns = argo_v2_fns
+	}
+	for i < len(types) {
+		if cast(i64, cast(Ty, types[i])) == cast(i64, t) {
+			return fns[i]
 		}
 		i = i + 1
 	}
@@ -5309,9 +5321,13 @@ fn argo_fn(pos i64, t Ty) i64 {
 	f.type_ = func_of(f.ptypes, f.rtypes, 0)
 	f.locals = cast([]Sym, []i64{})
 	f.body = empty_block(0)
-	mut vs7 = cast([]i64, argo_types)
-	vs7 = append(vs7, cast(i64, t))
-	argo_fns = append(argo_fns, cast(i64, f))
+	if v2 != 0 {
+		argo_v2_types = append(argo_v2_types, cast(i64, t))
+		argo_v2_fns = append(argo_v2_fns, cast(i64, f))
+	} else {
+		argo_types = append(argo_types, cast(i64, t))
+		argo_fns = append(argo_fns, cast(i64, f))
+	}
 	prog_fns = append(prog_fns, cast(Fn, f))
 	let saved_fn = ck_fn
 	ck_fn = cast(Fn, f)
@@ -5366,7 +5382,7 @@ fn argo_fn(pos i64, t Ty) i64 {
 					buf_str(piece, "\":")
 					argo_raw(pos, vb, cast(i64, b), str(piece))
 					let ft2 = field_type(t, fi2)
-					argo_emit(pos, vb, cast(i64, b), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi2), ft2), cast(Ty, ft2))
+					argo_emit(pos, vb, cast(i64, b), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi2), ft2), cast(Ty, ft2), v2)
 					kk = kk + 1
 				}
 				argo_raw(pos, vb, cast(i64, b), "}}}}")
@@ -5391,7 +5407,7 @@ fn argo_fn(pos i64, t Ty) i64 {
 			buf_str(piece, fname)
 			buf_str(piece, "\":")
 			argo_raw(pos, body, cast(i64, b), str(piece))
-			argo_emit(pos, body, cast(i64, b), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi), ft), cast(Ty, ft))
+			argo_emit(pos, body, cast(i64, b), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi), ft), cast(Ty, ft), v2)
 			lead = ","
 			fi = fi + 1
 		}
@@ -5408,17 +5424,23 @@ fn argo_fn(pos i64, t Ty) i64 {
 			ifs.cond = mk_bin(pos, "==", opt_tag(pos, sym_ref_node(pos, x)), mk_int(pos, 0, ty_int), ty_bool)
 		}
 		ifs.then = empty_block(pos)
-		argo_raw(pos, cast(Block, ifs.then).stmts, cast(i64, b), "null")
+		mut null_value = "null"
+		if v2 != 0 && kind_of(cast(Ty, t.elem)) == K_SLICE {
+			null_value = "[]"
+		} else if v2 != 0 && kind_of(cast(Ty, t.elem)) == K_MAP {
+			null_value = "{{}}"
+		}
+		argo_raw(pos, cast(Block, ifs.then).stmts, cast(i64, b), null_value)
 		let els = cast(Block, empty_block(pos))
 		ifs.else_ = cast(i64, els)
 		if k == K_ERROR {
-			argo_emit(pos, els.stmts, cast(i64, b), mk_conv(pos, sym_ref_node(pos, x), CV_SAME, ty_string), cast(Ty, ty_string))
+			argo_emit(pos, els.stmts, cast(i64, b), mk_conv(pos, sym_ref_node(pos, x), CV_SAME, ty_string), cast(Ty, ty_string), v2)
 		} else if opt_scalar(t) != 0 {
-			argo_emit(pos, els.stmts, cast(i64, b), opt_payload(pos, sym_ref_node(pos, x), opt_scalar(t)), cast(Ty, opt_scalar(t)))
+			argo_emit(pos, els.stmts, cast(i64, b), opt_payload(pos, sym_ref_node(pos, x), opt_scalar(t)), cast(Ty, opt_scalar(t)), v2)
 		} else if opt_value(t) != 0 {
-			argo_emit(pos, els.stmts, cast(i64, b), opt_payload(pos, sym_ref_node(pos, x), t.elem), cast(Ty, t.elem))
+			argo_emit(pos, els.stmts, cast(i64, b), opt_payload(pos, sym_ref_node(pos, x), t.elem), cast(Ty, t.elem), v2)
 		} else {
-			argo_emit(pos, els.stmts, cast(i64, b), mk_conv(pos, sym_ref_node(pos, x), CV_SAME, t.elem), cast(Ty, t.elem))
+			argo_emit(pos, els.stmts, cast(i64, b), mk_conv(pos, sym_ref_node(pos, x), CV_SAME, t.elem), cast(Ty, t.elem), v2)
 		}
 		body = append(body, cast(i64, ifs))
 	} else if k == K_VARRAY {
@@ -5432,15 +5454,26 @@ fn argo_fn(pos i64, t Ty) i64 {
 		argo_raw(pos, cast(Block, comma.then).stmts, cast(i64, b), ",")
 		mut lb = cast(Block, lp.a).stmts
 		lb = append(lb, cast(i64, comma))
-		argo_emit(pos, cast(Block, lp.a).stmts, cast(i64, b), lp.b, cast(Ty, t.elem))
+		argo_emit(pos, cast(Block, lp.a).stmts, cast(i64, b), lp.b, cast(Ty, t.elem), v2)
 		argo_raw(pos, body, cast(i64, b), "]")
 	} else if k == K_SLICE {
 		let et = t.elem
-		argo_raw(pos, body, cast(i64, b), "[")
+		mut enc_body = body
+		if v2 != 0 {
+			let nils = cast(IfStmt, node_new(ST_IF, pos))
+			nils.cond = mk_bin(pos, "==", sym_ref_node(pos, x), mk_int(pos, 0, ty_int), ty_bool)
+			nils.then = empty_block(pos)
+			argo_raw(pos, cast(Block, nils.then).stmts, cast(i64, b), "[]")
+			let rest = cast(Block, empty_block(pos))
+			nils.else_ = cast(i64, rest)
+			body = append(body, cast(i64, nils))
+			enc_body = rest.stmts
+		}
+		argo_raw(pos, enc_body, cast(i64, b), "[")
 		let n = temp(pos, mk_hdr(pos, sym_ref_node(pos, x), 0), ty_int)
-		body = append(body, cast(i64, n))
+		enc_body = append(enc_body, cast(i64, n))
 		let j = declare_local(pos, "$", ty_int)
-		body = append(body, let_stmt(pos, cast(Sym, j), mk_int(pos, 0, ty_int)))
+		enc_body = append(enc_body, let_stmt(pos, cast(Sym, j), mk_int(pos, 0, ty_int)))
 		let w = cast(WhileStmt, node_new(ST_WHILE, pos))
 		w.cond = mk_bin(pos, "<", sym_ref_node(pos, cast(Sym, j)), sym_ref_node(pos, cast(Sym, n.sym)), ty_bool)
 		w.post = assign_stmt(pos, sym_ref_node(pos, cast(Sym, j)), mk_bin(pos, "+", sym_ref_node(pos, cast(Sym, j)), mk_int(pos, 1, ty_int), ty_int))
@@ -5453,17 +5486,28 @@ fn argo_fn(pos i64, t Ty) i64 {
 		wb.stmts = append(wb.stmts, cast(i64, comma))
 		let el = mk_elem(pos, sym_ref_node(pos, x), sym_ref_node(pos, cast(Sym, j)), et, 0)
 		el.safe = 1
-		argo_emit(pos, wb.stmts, cast(i64, b), cast(i64, el), cast(Ty, et))
-		body = append(body, cast(i64, w))
-		argo_raw(pos, body, cast(i64, b), "]")
+		argo_emit(pos, wb.stmts, cast(i64, b), cast(i64, el), cast(Ty, et), v2)
+		enc_body = append(enc_body, cast(i64, w))
+		argo_raw(pos, enc_body, cast(i64, b), "]")
 	} else if k == K_MAP {
-		argo_raw(pos, body, cast(i64, b), "{{")
+		mut enc_body = body
+		if v2 != 0 {
+			let nils = cast(IfStmt, node_new(ST_IF, pos))
+			nils.cond = mk_bin(pos, "==", sym_ref_node(pos, x), mk_int(pos, 0, ty_int), ty_bool)
+			nils.then = empty_block(pos)
+			argo_raw(pos, cast(Block, nils.then).stmts, cast(i64, b), "{{}}")
+			let rest = cast(Block, empty_block(pos))
+			nils.else_ = cast(i64, rest)
+			body = append(body, cast(i64, nils))
+			enc_body = rest.stmts
+		}
+		argo_raw(pos, enc_body, cast(i64, b), "{{")
 		let first = declare_local(pos, "$", ty_bool)
-		body = append(body, let_stmt(pos, cast(Sym, first), mk_int(pos, 1, ty_bool)))
+		enc_body = append(enc_body, let_stmt(pos, cast(Sym, first), mk_int(pos, 1, ty_bool)))
 		let slots = temp(pos, rt_call(pos, "rt_map_slots", args1(sym_ref_node(pos, x)), ty_int), ty_int)
-		body = append(body, cast(i64, slots))
+		enc_body = append(enc_body, cast(i64, slots))
 		let j2 = declare_local(pos, "$", ty_int)
-		body = append(body, let_stmt(pos, cast(Sym, j2), mk_int(pos, 0, ty_int)))
+		enc_body = append(enc_body, let_stmt(pos, cast(Sym, j2), mk_int(pos, 0, ty_int)))
 		let w2 = cast(WhileStmt, node_new(ST_WHILE, pos))
 		w2.cond = mk_bin(pos, "<", sym_ref_node(pos, cast(Sym, j2)), sym_ref_node(pos, cast(Sym, slots.sym)), ty_bool)
 		w2.post = assign_stmt(pos, sym_ref_node(pos, cast(Sym, j2)), mk_bin(pos, "+", sym_ref_node(pos, cast(Sym, j2)), mk_int(pos, 1, ty_int), ty_int))
@@ -5484,21 +5528,21 @@ fn argo_fn(pos i64, t Ty) i64 {
 		let kt = t.key
 		let kv = from_bits(cast(Node, rt_call(pos, "rt_map_key", args2(sym_ref_node(pos, x), sym_ref_node(pos, cast(Sym, j2))), ty_int)), kt)
 		if kind_of(cast(Ty, kt)) == K_STRING {
-			argo_emit(pos, lb, cast(i64, b), kv, cast(Ty, kt))
+			argo_emit(pos, lb, cast(i64, b), kv, cast(Ty, kt), v2)
 		} else {
 			argo_raw(pos, lb, cast(i64, b), "\"")
-			argo_emit(pos, lb, cast(i64, b), kv, cast(Ty, kt))
+			argo_emit(pos, lb, cast(i64, b), kv, cast(Ty, kt), v2)
 			argo_raw(pos, lb, cast(i64, b), "\"")
 		}
 		argo_raw(pos, lb, cast(i64, b), ":")
 		let vt = t.elem
 		let vv = map_val(pos, sym_ref_node(pos, x), sym_ref_node(pos, cast(Sym, j2)), vt)
-		argo_emit(pos, lb, cast(i64, b), vv, cast(Ty, vt))
+		argo_emit(pos, lb, cast(i64, b), vv, cast(Ty, vt), v2)
 		wb2.stmts = append(wb2.stmts, cast(i64, live))
-		body = append(body, cast(i64, w2))
-		argo_raw(pos, body, cast(i64, b), "}}")
+		enc_body = append(enc_body, cast(i64, w2))
+		argo_raw(pos, enc_body, cast(i64, b), "}}")
 	} else {
-		argo_emit(pos, body, cast(i64, b), sym_ref_node(pos, x), t)
+		argo_emit(pos, body, cast(i64, b), sym_ref_node(pos, x), t, v2)
 	}
 	ck_fn = saved_fn
 	return cast(i64, f)

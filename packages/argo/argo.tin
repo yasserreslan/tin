@@ -15,6 +15,12 @@ fn Put(b mut []u8, v i64) {
 	wint(mut b, v)
 }
 
+// PutV2 uses the encoding/json/v2 nil slice and map defaults. The compiler replaces every
+// call with a typed encoder; v1 callers continue to use Put.
+fn PutV2(b mut []u8, v i64) {
+	wint(mut b, v)
+}
+
 // Str appends s as a JSON string.
 fn Str(b mut []u8, s str) {
 	wstr(mut b, s)

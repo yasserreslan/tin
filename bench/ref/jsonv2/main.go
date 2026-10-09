@@ -26,6 +26,7 @@ type Point struct {
 type Note struct {
 	Title string
 	Tags  []string
+	Labels map[string]string
 	At    *Point
 	Ok    bool
 }

@@ -36,7 +36,7 @@ type Options struct {
 // HTML-escaped unless opts asks for it.
 fn Marshal[T constraints.Any](v T, opts Options) !str {
 	mut b = []u8{}
-	argo.Put(mut b, v)
+	argo.PutV2(mut b, v)
 	return try reformat(str(b), opts)
 }
 
