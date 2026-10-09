@@ -274,9 +274,14 @@ fn main() {
 	say.Line(x)
 }
 
---- untitled row 1 col 9 dirty true
-one two 
---- untitled row 1 col 8 dirty true
-one twothree four
---- untitled row 1 col 9 dirty true
-one two hree
+--- untitled row 1 col 4 dirty true
+acbd
+--- untitled row 1 col 5 dirty true
+acdb
+--- untitled row 1 col 3 dirty true
+cadb
+--- untitled row 1 col 5 dirty true
+cabd
+--- untitled row 1 col 5 dirty true
+selection: cdab
+cdabef

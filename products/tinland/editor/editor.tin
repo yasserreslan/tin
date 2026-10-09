@@ -728,6 +728,10 @@ fn (ed mut Editor) controlKey(k Key) {
 		ed.Redraw = true
 	} else if c == 'q' || c == 17 {
 		ed.quickInfo()
+	} else if c == 't' || c == 20 {
+		// Ctrl+T swaps the characters either side of the caret (Emacs transpose)
+		b.Transpose()
+		ed.Follow = true
 	} else if c == 'k' || c == 11 {
 		// kill to the end of the line (at the end of a line, the line break)
 		b.MoveTo(b.Row, len(b.Lines[b.Row]), true)
