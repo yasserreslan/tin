@@ -24,7 +24,9 @@ fn main() {
 			ci.Check(tinLines[i] == goLines[i], "{target} ELF metadata line {i + 1}: Tin {tinLines[i]}, Go {goLines[i]}")
 		}
 	}
-	let bad = ci.Exec([]str{ci.Join(root, "bin/ci/elf_debug")}, root, 30)
+	let debug = ci.Join(work, "elf_debug")
+	ci.BuildTin("toolchain/tests/v2/elf_debug.tin", debug, "", []str{})
+	let bad = ci.Exec([]str{debug}, root, 30)
 	ci.Must(bad, "Tin rejects foreign and truncated files")
 	ci.Check(bad.Stdout == "foreign file rejected\ntruncated ELF rejected\n", "malformed ELF rejection output")
 	ci.Remove(work)
