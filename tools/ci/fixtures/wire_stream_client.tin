@@ -13,6 +13,7 @@ import "wire"
 //	up URL N       POSTs N bytes of the pattern, chunked, and prints the status and the answer
 //	upcl URL N     the same with a Content-Length
 //	down URL N     GETs and reads the body 64 KiB at a time, and prints "got=N bad=B"
+//	downto URL     GETs with DoStreamTo into a checking writer, and prints "got=N bad=B copied=N"
 //	cancel URL     reads /slow inside a within of 300 ms and prints how the read ended
 //	reuse URL      GETs twice, reading to the end, and prints both answers (the server's view of the client's address)
 //
@@ -72,6 +73,33 @@ fn up(url str, n i64, declared bool) ! {
 	mut s = try wire.DoStream("POST", url, headers, Pattern{left: n, pos: 0}, opts())
 	let body = try readAll(mut s)
 	say.Line("status={s.Status} {body} seconds={tide.Since(t0) / 1000000000}")
+}
+
+// Checker counts a body's bytes against the pattern, for DoStreamTo.
+type Checker struct {
+	got i64
+	bad i64
+}
+
+fn (c mut Checker) Write(b []u8) !i64 {
+	mut want = c.got % 251
+	for i in 0..len(b) {
+		if b[i] != u8(want) {
+			c.bad += 1
+		}
+		want += 1
+		if want == 251 {
+			want = 0
+		}
+	}
+	c.got += len(b)
+	return len(b)
+}
+
+fn downTo(url str) ! {
+	mut c = Checker{got: 0, bad: 0}
+	let r = try wire.DoStreamTo("GET", url, []str{}, wire.NoBody{}, opts(), mut c)
+	say.Line("status={r.Status} got={c.got} bad={c.bad} copied={r.Bytes}")
 }
 
 fn down(url str) ! {
@@ -152,6 +180,7 @@ fn main() {
 		"up" => up(url, n, false),
 		"upcl" => up(url, n, true),
 		"down" => down(url),
+		"downto" => downTo(url),
 		"reuse" => reuse(url),
 		_ => {
 			cancel(url)

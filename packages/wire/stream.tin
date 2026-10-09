@@ -111,6 +111,37 @@ fn DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options
 }
 
 // decimal is a Content-Length header's value.
+// Copied is what DoStreamTo gives back: the response's status and how many body bytes it copied.
+type Copied struct {
+	Status i64
+	Bytes  i64
+}
+
+// DoStreamTo is DoStream with the response's body copied to w as it arrives, a buffer at a time,
+// whatever its status (an error answer's body too). Reading the Stream here, inside wire, keeps a
+// caller's code from tripping #1036 (a false E312 on Stream.Read from outside the package).
+fn DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body R, opt Options, w mut W) !Copied {
+	mut s = try DoStream(method, url, headers, body, opt)
+	mut buf = make([]u8, streamBuf)
+	mut n = 0
+	for {
+		let k = s.Read(mut buf) catch err {
+			s.Close()
+			fail err
+		}
+		if k == 0 {
+			break
+		}
+		let (_, werr) = w.Write(buf[0:k])
+		if werr != nil {
+			s.Close()
+			fail werr
+		}
+		n += k
+	}
+	return Copied{Status: s.Status, Bytes: n}
+}
+
 fn decimal(v str) !i64 {
 	mut x = 0
 	mut digits = 0
