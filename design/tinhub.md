@@ -129,6 +129,7 @@ removed), which is how a secret comes from a mounted file. Unknown keys are refu
 | `workers.concurrency` | `4` | jobs one worker process runs at once |
 | `workers.lease` | `5m` | how long a claimed job stays claimed without a heartbeat |
 | `repack.packs` | `16` | the live pack count that queues a repack |
+| `api.rate` | `600` | API requests per minute for each user (signed in) or address; `0` for no limit |
 | `smtp.addr`, `smtp.from` | none | mail for notifications; none sends no mail |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` |
 

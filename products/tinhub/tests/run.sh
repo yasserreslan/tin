@@ -41,6 +41,8 @@ TIN_ROOT=$PWD "$compiler" -o "$tmp/queue_worker" products/tinhub/tests/programs/
 sh products/tinhub/tests/queue.sh "$tmp/queue_worker"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/repo_driver" products/tinhub/tests/programs/repo_driver.tin
 sh products/tinhub/tests/repo.sh "$tmp/repo_driver"
+TIN_ROOT=$PWD "$compiler" -o "$tmp/tit" products/tit/main.tin 2>/dev/null
+sh products/tinhub/tests/api.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 # a server: not ready before tinhub migrate, ready after, and a request in flight at SIGTERM completes
 "$tmp/queue_worker" setup 0 > /dev/null
 dbaddr=${TINHUB_TEST_DB%%/*}

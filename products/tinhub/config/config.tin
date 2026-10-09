@@ -48,6 +48,7 @@ type Config struct {
 	Workers     i64
 	WorkerLease i64
 	RepackPacks i64
+	ApiRate     i64
 	SmtpAddr    str
 	SmtpFrom    str
 	LogLevel    str
@@ -97,6 +98,7 @@ fn Keys() []Key {
 		Key{Name: "workers.concurrency", Default: "4", Secret: false},
 		Key{Name: "workers.lease", Default: "5m", Secret: false},
 		Key{Name: "repack.packs", Default: "16", Secret: false},
+		Key{Name: "api.rate", Default: "600", Secret: false},
 		Key{Name: "smtp.addr", Default: "", Secret: false},
 		Key{Name: "smtp.from", Default: "", Secret: false},
 		Key{Name: "log.level", Default: "info", Secret: false},
@@ -284,6 +286,7 @@ fn Build(vals map[str]str) !Config {
 	let workersV = try count(vals, "workers.concurrency")
 	let workerLeaseV = try duration(vals, "workers.lease")
 	let repackPacksV = try count(vals, "repack.packs")
+	let apiRateV = try count(vals, "api.rate")
 	return Config{
 		Roles: roles,
 		Listen: vals["listen"],
@@ -318,6 +321,7 @@ fn Build(vals map[str]str) !Config {
 		Workers: workersV,
 		WorkerLease: workerLeaseV,
 		RepackPacks: repackPacksV,
+		ApiRate: apiRateV,
 		SmtpAddr: vals["smtp.addr"],
 		SmtpFrom: vals["smtp.from"],
 		LogLevel: level,

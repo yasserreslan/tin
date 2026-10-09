@@ -25,6 +25,7 @@ import "twine"
 //   repo_driver redis N         N pushes by one writer, each read back through two nodes' caches at once
 //   repo_driver crash DIR       a push of c2, a repack of both packs and the retiring of the old ones (TIT_CRASH_AT)
 //   repo_driver check DIR       main reaches only live packs' objects; after a sweep, rows and files agree
+//   repo_driver private         make repository 1 private
 
 fn client() postgres.Client {
 	let (o, ok) = db.TestOptions()
@@ -43,7 +44,7 @@ fn die(what str, err fault) {
 }
 
 fn node(dir str) repo.PgRepo {
-	let s = packs.NewDirStore(dir + "/store") catch err {
+	let s = packs.NewDirStore(dir) catch err {
 		die("store", err)
 		return repo.PgRepo{Db: pg, Store: packs.DirStore{Root: ""}, Cache: repo.NoCache(), Id: 1, Dir: dir, Who: 0}
 	}
@@ -382,6 +383,12 @@ fn main() {
 			redisReads(n)
 		}
 		"crash" => crashRun(arg(2))
+		"private" => {
+			_ = pg.Exec("UPDATE repos SET visibility = 'private' WHERE id = 1") catch err {
+				die("private", err)
+				postgres.Result{Affected: 0}
+			}
+		}
 		"check" => check(arg(2))
 		_ => {
 			say.Line("unknown command {args[1]}")

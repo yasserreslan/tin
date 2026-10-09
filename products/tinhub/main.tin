@@ -1,9 +1,12 @@
 package main
 
+import "./api"
 import "./config"
 import "./db"
 import "./events"
 import "./packs"
+import "./proto"
+import "./repo"
 import "anvil"
 import "fault"
 import "hearth"
@@ -11,6 +14,7 @@ import "mint"
 import "herald"
 import "postgres"
 import "quarry"
+import "redis"
 import "s3"
 import "say"
 import "seal"
@@ -161,6 +165,33 @@ fn sweep(c config.Config, rows bool) ! {
 	}
 }
 
+// serving reports whether this process answers the protocol: tinhub run with the node role.
+fn serving() bool {
+	return boot.Command == "run" && len(boot.Err) == 0 && boot.Conf.Has("node")
+}
+
+// fetchWithin and fetchMemory are a heads or fetch request's budget (design/tinhub.md §8).
+const fetchWithin = 10 * tide.Minute
+
+const fetchMemory = 256 * 1024 * 1024
+
+// configureProto gives this core the protocol's dependencies: its pack store, its Redis client and the limits.
+fn configureProto(c config.Config) {
+	let st = openStore(c) catch err {
+		herald.Log(herald.LError, "the pack store", []str{"error", fault.Message(err)})
+		return
+	}
+	let cache = repo.NewRefCache(c.RedisAddr, "tinhub:", tide.Minute)
+	let limits = redis.Open(redis.Options{Addr: c.RedisAddr, Username: "", Password: "", DB: 0, Proto: 0, Timeout: 0, TLS: nil})
+	api.Configure(api.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: nobody})
+	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
+}
+
+// nobody is the API's caller until sign-in lands (#1012): every request is anonymous, and reads what is public.
+fn nobody(q anvil.Req) !i64 {
+	return 0
+}
+
 // sweeping reports whether this process runs the sweeps: tinhub run, on core 0.
 fn sweeping() bool {
 	return boot.Command == "run" && len(boot.Err) == 0 && hearth.ID() == 0
@@ -197,6 +228,9 @@ on core.start {
 				runner().Loop(s)
 			}
 		}
+	}
+	if serving() {
+		configureProto(boot.Conf)
 	}
 	if sweeping() && boot.Conf.PacksSweep > 0 {
 		detach {
@@ -315,6 +349,10 @@ fn routes(c config.Config) anvil.Router {
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz)
 	r.Get("/metrics", metrics)
+	if c.Has("node") {
+		proto.Mount(mut r)
+		api.Mount(mut r)
+	}
 	// tests/run.sh checks the drain with a request that waits; never on in a deployment
 	if quarry.Getenv("TINHUB_TEST_ROUTES") == "1" {
 		r.Get("/test/wait", testWait)
@@ -330,7 +368,19 @@ fn run(c config.Config) ! {
 	// the drain (SIGTERM) waits this long for requests in flight, so a push that has begun completes
 	let grace = c.Shutdown / 1000000000
 	try quarry.Setenv("TIN_GRACE", "{grace}")
-	anvil.Deadline(c.PushDeadline / 1000000)
+	// a request's deadline is the longest any request has (a fetch's, or a push's when longer); pushes, fetches and API
+	// calls each run inside their own budget below it
+	mut longest = fetchWithin
+	if c.PushDeadline > longest {
+		longest = c.PushDeadline
+	}
+	anvil.Deadline(longest / 1000000)
+	// each push, fetch and API call runs inside its own limit memory (design/tinhub.md §8), so anvil's default request
+	// budget (a share of memory per core, smaller than a push's) is lifted; TIN_REQUEST_MEMORY, when set, is kept
+	let (_, set) = quarry.LookupEnv("TIN_REQUEST_MEMORY")
+	if !set {
+		try quarry.Setenv("TIN_REQUEST_MEMORY", "0")
+	}
 	let r = routes(c)
 	herald.Log(herald.LInfo, "tinhub starting", []str{"version", version, "roles", twine.Join(c.Roles, ","), "listen", c.Listen})
 	if len(c.TLSCert) > 0 {
