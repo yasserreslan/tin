@@ -4,6 +4,7 @@ import "../cores"
 import "../diff"
 import "../index"
 import "../object"
+import "../packfile"
 import "../store"
 import "fault"
 import "quarry"
@@ -160,19 +161,42 @@ fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from
 			try quarry.Chmod(w.Root + "/" + c.Path, 493)
 		}
 	}
-	mut bodies = make([]str, len(whole))
-	for i in 0..len(whole) {
-		let id = try object.IdOf(whole[i].NewHash)
-		let (_, body) = try s.GetRaw(id)
-		bodies[i] = body
-	}
 	mut paths = make([]str, 0, len(whole))
 	mut modes = make([]object.Mode, 0, len(whole))
+	mut hashes = make([]str, 0, len(whole))
 	for i in 0..len(whole) {
 		paths = append(paths, whole[i].Path)
 		modes = append(modes, whole[i].NewMode)
+		hashes = append(hashes, whole[i].NewHash)
 	}
-	try writeAll(w.Root, paths, modes, bodies)
+	// a batch at a time (#1049), each in an arena with a store of its own: a checkout takes the memory of one batch,
+	// not of the whole tree (a plain program never frees its pool otherwise). What the repository's own packs and loose
+	// store lack (a lazy clone's, a test's memory store) is read through s afterwards, as before.
+	mut rest = []i64{}
+	mut at = 0
+	for at < len(paths) {
+		let from = at
+		let b = try arena {
+			try writeLocal(w.Store, w.Root, paths, modes, hashes, from)
+		}
+		for m in b.missing {
+			rest = append(rest, m)
+		}
+		at = b.next
+	}
+	if len(rest) > 0 {
+		mut bodies = make([]str, 0, len(rest))
+		mut rp = make([]str, 0, len(rest))
+		mut rm = make([]object.Mode, 0, len(rest))
+		for i in rest {
+			let id = try object.IdOf(hashes[i])
+			let (_, body) = try s.GetRaw(id)
+			bodies = append(bodies, body)
+			rp = append(rp, paths[i])
+			rm = append(rm, modes[i])
+		}
+		try writeAll(w.Root, rp, rm, bodies)
+	}
 	for i in 0..len(writes) {
 		try index.AddStat(mut idx, w.Root, writes[i].Path, writes[i].NewHash, writes[i].NewMode)
 	}
@@ -237,6 +261,51 @@ fn check(w Workspace, idx index.Index, changes []diff.FileChange) ! {
 }
 
 // writeAll writes the files in parallel tasks, so their I/O overlaps.
+// batchBytes is about how much a checkout reads before it writes and lets the memory go (8 MiB: a clone of 512 MiB of
+// files peaks at 34 MiB of RSS on Linux arm64).
+const batchBytes = 8 << 20
+
+// written is one batch's result: where the next batch starts, and the files the local store lacks.
+type written struct {
+	next    i64
+	missing []i64
+}
+
+// writeLocal writes the files from paths[from] on whose blobs the repository's own packs and loose objects hold,
+// reading them from a store opened here (in the caller's arena), until about batchBytes are read.
+fn writeLocal(storeDir str, root str, paths []str, modes []object.Mode, hashes []str, from i64) !written {
+	let packs = try packfile.OpenAll(storeDir + "/packs")
+	mut layers = []dyn store.ObjectStore{}
+	for p in packs {
+		layers = append(layers, p)
+	}
+	layers = append(layers, store.NewLoose(storeDir + "/objects"))
+	mut st = store.NewLayered(layers)
+	mut out = written{next: from, missing: []i64{}}
+	mut bp = []str{}
+	mut bm = []object.Mode{}
+	mut bodies = []str{}
+	mut held = 0
+	mut i = from
+	for i < len(paths) && held < batchBytes {
+		let id = try object.IdOf(hashes[i])
+		if !st.Has(id) {
+			out.missing = append(out.missing, i)
+			i += 1
+			continue
+		}
+		let (_, body) = try st.GetRaw(id)
+		bp = append(bp, paths[i])
+		bm = append(bm, modes[i])
+		bodies = append(bodies, body)
+		held += len(body)
+		i += 1
+	}
+	try writeAll(root, bp, bm, bodies)
+	out.next = i
+	return out
+}
+
 fn writeAll(root str, paths []str, modes []object.Mode, bodies []str) ! {
 	scope sc {
 		for i in 0..len(paths) {
