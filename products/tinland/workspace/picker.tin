@@ -73,6 +73,8 @@ fn commands() []command {
 		command{name: "View: Search in Project", cmd: CmdSearch},
 		command{name: "Go: Go to File...", cmd: CmdQuickOpen},
 		command{name: "Go: Go to Line...", cmd: 16},
+		command{name: "Go: Next Problem", cmd: 50},
+		command{name: "Go: Previous Problem", cmd: 51},
 		command{name: "Go: Go to Symbol in File...", cmd: 128},
 		command{name: "Go: Jump to Matching Bracket", cmd: 33},
 		command{name: "Go: Go to Declaration", cmd: 24},
