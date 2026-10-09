@@ -1,0 +1,9 @@
+package main
+
+import "say"
+
+fn main() {
+	//embed: embed_tree
+	let x = 1
+	say.Line(x)
+}

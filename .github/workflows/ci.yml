@@ -132,6 +132,8 @@ jobs:
         run: sh tools/ci/tin.sh zip_check
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
+      - name: Embedded file trees (the embed directive) against Go's file trees over the same patterns
+        run: sh tools/ci/tin.sh embed_check
       - name: Task memory after a 300-request heavy burst
         run: sh tools/ci/tin.sh task_memory_check
       - name: Long-lived blocks above 4 KiB (slab classes to 256 KiB, kept mappings, mappings after deletes)

@@ -1,0 +1,23 @@
+dir .
+dir embed_tree
+file embed_tree/a.txt
+dir embed_tree/docs
+dir embed_tree/docs/deep
+file embed_tree/docs/deep/bin.dat
+file embed_tree/docs/guide.txt
+file embed_tree/index.html
+a.txt 6 true
+bin.dat 4 0 127 255 10
+read 11 10
+end 0
+entry a.txt false
+entry docs true
+entry index.html false
+glob embed_tree/a.txt
+stat docs dr-xr-xr-x
+stat bin.dat -r--r--r-- 4
+open open embed_tree/nope: file does not exist
+open open embed_tree/.hidden: file does not exist
+readdir read embed_tree/a.txt: not a directory
+guide 11
+parse embed: not an embedded file tree

@@ -26,6 +26,7 @@ fn packages() []str {
 		"argo", "JSON (encoding/json)",
 		"io", "streaming shapes (io)",
 		"fs", "file system interfaces and helpers (io/fs)",
+		"embed", "read-only file trees compiled into the image, from a // embed: directive (embed)",
 		"anvil", "HTTP/1.1 and HTTP/2 server, HTTPS with ServeTLS (net/http)",
 		"hearth", "cores and threads (runtime)",
 		"relay", "messages between cores (channels)",

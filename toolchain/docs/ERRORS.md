@@ -97,6 +97,34 @@ error E003 CANNOT_OPEN: cannot open missing.tin
 
 Fix: check the path (it is relative to the current directory) and that the file is readable.
 
+### E004 EMBED
+
+An embed directive (`// embed: PATTERN`, #928) sits at column 1 on the line directly above a
+top-level `let NAME str`, and its pattern names files inside the directory of the source file
+that exist: a missing file, a pattern that leaves the directory (`..`, an absolute path), a
+symbolic link, a `[` or a backslash in the pattern, or more than 64 MiB of files is an error at the
+directive.
+
+```tin edition=1
+package main
+
+import "say"
+
+// embed: static/*.html
+let site str
+
+fn main() {
+	say.Line(len(site))
+}
+```
+
+```text
+example.tin:5:1: error E004 EMBED: no file matches static/*.html
+```
+
+Fix: check the pattern against the files (the directory is the one of the source file), or move
+the directive onto the `let` line above it.
+
 ### E010 UNEXPECTED_CHARACTER
 
 Outside strings and comments, a program uses only the characters of Tin's tokens: letters,

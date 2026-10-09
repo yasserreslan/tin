@@ -200,6 +200,48 @@ half typed. Limits: the type of an expression that is not a name or a chain of f
 completion after it offers every method and field name; a package-level `let` has no type text yet, so completion after a
 global's dot does too.
 
+### 3.5 Embedded files: the `// embed:` directive (#928)
+
+A file tree is compiled into the program's image, so a single binary carries its assets (a web UI,
+templates) and reads them with no file system at run time. The directive is a line comment at
+column 1 on the line directly above a top-level `let NAME str` (the spelling `tin fmt` writes; `//embed:`
+is accepted too):
+
+```text
+// embed: static/*.html
+let pages str
+
+// embed: static
+let assets str
+```
+
+The pattern is slash-separated elements relative to the directory of the source file. Each element is a
+name, or a glob with `*` and `?` (`[`, a backslash, `..` and absolute paths are errors, and `.` elements
+are skipped). A matched file is embedded as one record; a matched directory is walked in name order, and
+names starting with `.` or `_` are left out of a walk and a glob, as Go's `embed` does. Symbolic links are
+refused (never followed), and so is any entry whose type readdir does not give. A pattern that matches
+nothing is an error (`no file matches PATTERN`), and so are a directive that is not directly above a
+top-level `let`, a `let` that already has a value, and more than 64 MiB of files. Every error is E004 at
+the directive's position (toolchain/docs/ERRORS.md).
+
+How the bytes land in the image: the lexer binds the directive to the `let` (`embed_bind` in
+`toolchain/compiler/lex.tin`), the parser reads the files (`embed_blob` in `toolchain/compiler/parse.tin`)
+and gives the `let` the blob as a string literal. The string emitter writes that literal into the read-only
+strings, so the bytes are in the image and nothing is read at run time. The blob holds, for each file, its
+slash-separated name relative to the source directory, a newline, its size in decimal, a newline and its bytes.
+Directory entries are sorted by byte order, so the same tree gives the same blob on every filesystem and
+the same output on Linux and macOS.
+
+The `embed` package (`toolchain/std/embed/`) reads the blob: `embed.Parse(blob) !FS` gives a read-only file
+tree that satisfies the `fs` package's shapes (`Open`, `ReadDir`, `Stat`, `ReadFile`), so `fs.ReadFile`,
+`fs.WalkDir` and `fs.Glob` work on it. Its messages and modes are Go's `embed.FS`'s. The compile-time
+behaviour is tested by `toolchain/tests/v2/embed.tin` (with the tree in `embed_tree/`), the two negative
+tests `embed_missing_bad` and `embed_misplaced_bad`, and `sh tools/ci/tin.sh embed_check`, which compares
+the selected trees with Go's over six patterns (`bench/ref/embed`).
+
+Not in the directive: runtime embedding (the set of files is fixed when the program is built), a
+`[]str` or name-and-size slice form (a directive goes over a `str`), and `fs.Sub` on an `FS`.
+
 ## 4. Make targets
 
 | target | does |

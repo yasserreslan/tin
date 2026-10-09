@@ -212,6 +212,9 @@ fn parse_setup() {
 	prog_shapes = cast([]Decl, []i64{})
 	prog_uses = []i64{}
 	prog_ons = []i64{}
+	embed_lets = []i64{}
+	embed_dirs = []i64{}
+	embed_pats = []str{}
 	file_pkgs = []str{}
 	file_imports = [][]Import{}
 	file_ed1 = []i64{}
@@ -322,9 +325,13 @@ fn parse_mode(toks []i64, edition i64) {
 			}
 			parse_group(1, cast([]i64, prog_consts))
 		} else if p_edition1 != 0 && p_is("let") != 0 {
+			let embed_at = embed_index(p_peek().pos)
 			p_next()
 			p_decl_mut = 0
 			parse_group(0, cast([]i64, prog_vars))
+			if embed_at >= 0 {
+				embed_declare(embed_at, cast([]i64, prog_vars))
+			}
 			p_decl_mut = 1
 		} else if p_edition1 != 0 && p_is("mut") != 0 {
 			p_next()
@@ -508,6 +515,294 @@ fn parse_attributes() i64 {
 		}
 	}
 	return cast(i64, attrs)
+}
+
+// ---- embed directives (#928) ----
+//
+// "//embed: PATTERN" at column 1 on the line above a top-level "let NAME str" makes the compiler embed the files the pattern names,
+// relative to the directory of the file, as one str: the blob embed.Parse reads (toolchain/std/embed). The lexer binds the
+// directive to the let (embed_bind in lex.tin); the declaration gets the blob as a string literal, which the emitter writes into
+// the image's read-only strings. A pattern is slash-separated elements, each a name or a glob with * and ?; "." elements are
+// skipped; a missing file, an absolute path or ".." is an error at the directive, and so is every symbolic link on the way.
+
+// DT_DIR, DT_REG and DT_LNK are the d_type values of readdir (the same on Linux and macOS).
+const DT_DIR = 4
+const DT_REG = 8
+const DT_LNK = 10
+
+// EMBED_LIMIT bounds the bytes one embed directive embeds: 64 MiB, the bound quarry.ReadFile uses.
+const EMBED_LIMIT = 67108864
+
+// embed_index is the index of the directive bound to the let at pos, or -1.
+fn embed_index(pos i64) i64 {
+	for i in 0..len(embed_lets) {
+		if embed_lets[i] == pos {
+			return i64(i)
+		}
+	}
+	return -1
+}
+
+// embed_declare gives the declaration the directive i is bound to its blob, as a string literal.
+fn embed_declare(i i64, decls []i64) {
+	let d = cast(Decl, decls[len(decls) - 1])
+	let at = embed_dirs[i]
+	if d.init != 0 {
+		p_fail_code(at, "E004 EMBED", "an embed directive goes on a let with no value: write let NAME str")
+	}
+	d.init = lit_string(at, embed_blob(at, embed_pats[i]))
+}
+
+// embed_blob is the blob of the files pat names (see the section above), with the directive at pos.
+fn embed_blob(pos i64, pat str) str {
+	let elems = embed_elems(pos, pat)
+	mut root = dir_of(files[pos >> 48])
+	if root == "" {
+		root = "/"
+	}
+	let b = buf_new()
+	if embed_visit(pos, root, "", elems, 0, b) == 0 {
+		p_fail_code(pos, "E004 EMBED", "no file matches " + pat)
+	}
+	return str(b)
+}
+
+// embed_elems splits the pattern into its elements, refusing what leaves the directory or is not a glob this compiler reads.
+fn embed_elems(pos i64, pat str) []str {
+	mut out = []str{}
+	if len(pat) == 0 {
+		p_fail_code(pos, "E004 EMBED", "an embed directive names no file")
+	}
+	if i64(pat[0]) == '/' {
+		p_fail_code(pos, "E004 EMBED", pat + " is absolute: an embed pattern names files inside the directory of its file")
+	}
+	mut start = 0
+	for i in 0..len(pat) + 1 {
+		if i == len(pat) || i64(pat[i]) == '/' {
+			let e = pat[start:i]
+			start = i + 1
+			if e == "" {
+				p_fail_code(pos, "E004 EMBED", "an embed pattern has an empty element: " + pat)
+			}
+			if e == ".." {
+				p_fail_code(pos, "E004 EMBED", pat + " leaves the directory of its file: an embed pattern cannot contain ..")
+			}
+			if e == "." {
+				continue
+			}
+			if embed_has(e, '[') || embed_has(e, '\\') {
+				p_fail_code(pos, "E004 EMBED", pat + ": [ and \\ are not supported in an embed pattern (only * and ?)")
+			}
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 {
+		p_fail_code(pos, "E004 EMBED", "an embed directive names no file: " + pat)
+	}
+	return out
+}
+
+// embed_visit embeds what elems[i:] names inside the directory full (rel is its name from the file's directory) and returns how
+// many files it embedded; a glob skips hidden names, a literal element matches its name exactly.
+fn embed_visit(pos i64, full str, rel str, elems []str, i i64, b []u8) i64 {
+	mut names = []str{}
+	mut kinds = []i64{}
+	embed_list(pos, full, rel, names, kinds)
+	let el = elems[i]
+	let glob = embed_has(el, '*') || embed_has(el, '?')
+	let last = i + 1 == i64(len(elems))
+	mut found = 0
+	for k in 0..len(names) {
+		let name = names[k]
+		if glob {
+			if embed_hidden(name) || embed_glob(el, name) == 0 {
+				continue
+			}
+		} else if name != el {
+			continue
+		}
+		let child = embed_join(full, name)
+		let crel = embed_rel(rel, name)
+		if kinds[k] == DT_LNK {
+			p_fail_code(pos, "E004 EMBED", crel + " is a symbolic link: embed does not follow links")
+		}
+		if kinds[k] == DT_DIR {
+			if last {
+				found = found + embed_tree(pos, child, crel, b)
+			} else {
+				found = found + embed_visit(pos, child, crel, elems, i + 1, b)
+			}
+		} else if kinds[k] == DT_REG {
+			if last {
+				embed_file(pos, child, crel, b)
+				found = found + 1
+			}
+		} else {
+			p_fail_code(pos, "E004 EMBED", "cannot tell what " + crel + " is: only regular files and directories are embedded")
+		}
+	}
+	return found
+}
+
+// embed_tree embeds every file below the directory full, in name order, and returns how many (hidden names are left out, as in Go).
+fn embed_tree(pos i64, full str, rel str, b []u8) i64 {
+	mut names = []str{}
+	mut kinds = []i64{}
+	embed_list(pos, full, rel, names, kinds)
+	mut found = 0
+	for k in 0..len(names) {
+		let name = names[k]
+		if embed_hidden(name) {
+			continue
+		}
+		let child = embed_join(full, name)
+		let crel = embed_rel(rel, name)
+		if kinds[k] == DT_LNK {
+			p_fail_code(pos, "E004 EMBED", crel + " is a symbolic link: embed does not follow links")
+		}
+		if kinds[k] == DT_DIR {
+			found = found + embed_tree(pos, child, crel, b)
+		} else if kinds[k] == DT_REG {
+			embed_file(pos, child, crel, b)
+			found = found + 1
+		} else {
+			p_fail_code(pos, "E004 EMBED", "cannot tell what " + crel + " is: only regular files and directories are embedded")
+		}
+	}
+	return found
+}
+
+// embed_list reads the directory full into names and kinds (their d_type), sorted by name bytes.
+fn embed_list(pos i64, full str, rel str, names []str, kinds []i64) {
+	let d = host_opendir(full)
+	if d == 0 {
+		p_fail_code(pos, "E004 EMBED", "cannot read the directory " + embed_show(rel))
+	}
+	for {
+		let ent = rt_sys_readdir(d)
+		if ent == 0 {
+			break
+		}
+		let name = host_str(host_dirent_name(ent))
+		if name == "." || name == ".." {
+			continue
+		}
+		names = append(names, name)
+		kinds = append(kinds, host_dirent_type(ent))
+	}
+	rt_sys_closedir(d)
+	for i in 1..len(names) {
+		mut j = i
+		for j > 0 && embed_less(names[j], names[j - 1]) {
+			let tn = names[j]
+			names[j] = names[j - 1]
+			names[j - 1] = tn
+			let tk = kinds[j]
+			kinds[j] = kinds[j - 1]
+			kinds[j - 1] = tk
+			j = j - 1
+		}
+	}
+}
+
+// embed_file appends one record for the file full, named rel: the name, a newline, its size, a newline and its bytes.
+fn embed_file(pos i64, full str, rel str, b []u8) {
+	if embed_has(rel, '\n') {
+		p_fail_code(pos, "E004 EMBED", "a line break in the name " + rel + " cannot be embedded")
+	}
+	let raw = try_read_file(full)
+	if raw == 0 {
+		p_fail_code(pos, "E004 EMBED", "cannot read " + rel)
+	}
+	let body = str(cast([]u8, cast([]i64, raw)))
+	if len(b) + len(body) + len(rel) + 32 > EMBED_LIMIT {
+		p_fail_code(pos, "E004 EMBED", "the embed directive embeds more than 64 MiB (at " + rel + ")")
+	}
+	buf_str(b, rel)
+	buf_byte(b, '\n')
+	buf_int(b, i64(len(body)))
+	buf_byte(b, '\n')
+	buf_str(b, body)
+}
+
+// embed_glob reports whether name matches the glob p, where * is any run of bytes and ? one byte (1) or not (0).
+fn embed_glob(p str, name str) i64 {
+	mut pi = 0
+	mut si = 0
+	mut star = -1
+	mut mark = 0
+	for si < len(name) {
+		if pi < len(p) && (i64(p[pi]) == '?' || i64(p[pi]) == i64(name[si])) {
+			pi = pi + 1
+			si = si + 1
+		} else if pi < len(p) && i64(p[pi]) == '*' {
+			star = pi
+			mark = si
+			pi = pi + 1
+		} else if star >= 0 {
+			pi = star + 1
+			mark = mark + 1
+			si = mark
+		} else {
+			return 0
+		}
+	}
+	for pi < len(p) && i64(p[pi]) == '*' {
+		pi = pi + 1
+	}
+	return i64(pi == len(p))
+}
+
+// embed_has reports whether s has the byte c.
+fn embed_has(s str, c i64) bool {
+	for i in 0..len(s) {
+		if i64(s[i]) == c {
+			return true
+		}
+	}
+	return false
+}
+
+// embed_hidden reports whether a name starts with . or _ (Go's embed leaves such names out of a tree and a glob).
+fn embed_hidden(name str) bool {
+	return len(name) > 0 && (name[0] == '.' || name[0] == '_')
+}
+
+// embed_less orders names by their bytes.
+fn embed_less(a str, b str) bool {
+	for i in 0..len(a) {
+		if i >= len(b) {
+			return false
+		}
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
+// embed_join is the operating system path of name in the directory full.
+fn embed_join(full str, name str) str {
+	if len(full) > 0 && full[len(full) - 1] == '/' {
+		return full + name
+	}
+	return full + "/" + name
+}
+
+// embed_rel is the name of name in the directory rel of the file's directory ("" is that directory).
+fn embed_rel(rel str, name str) str {
+	if rel == "" {
+		return name
+	}
+	return rel + "/" + name
+}
+
+// embed_show is the name of the directory rel for a message.
+fn embed_show(rel str) str {
+	if rel == "" {
+		return "."
+	}
+	return rel
 }
 
 // parse_group reads one const/var declaration or a parenthesized group of them.

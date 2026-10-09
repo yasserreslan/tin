@@ -19,6 +19,13 @@ shared mut lx_edition i64
 shared mut lx_newline i64
 shared mut lx_esc_rune i64
 shared mut lx_token_start i64
+// embed directives (#928): a comment "//embed: PATTERN" at column 1 waits for the next token, which must be a top-level let on
+// the next line; lx_embed_pos is its position (0 when none) and embed_lets, embed_dirs and embed_pats keep each bound pair.
+shared mut lx_embed_pos i64
+shared mut lx_embed_pat str
+shared mut embed_lets []i64
+shared mut embed_dirs []i64
+shared mut embed_pats []str
 
 fn lex(file i64, src str, edition i64) i64 {
 	lx_file = file
@@ -28,10 +35,12 @@ fn lex(file i64, src str, edition i64) i64 {
 	lx_i = 0
 	lx_line = 1
 	lx_col = 1
+	lx_embed_pos = 0
 	mut toks = []i64{}
 	mut last = 0
 	for {
 		let t = cast(Token, lex_next())
+		embed_bind(t)
 		if last != 0 && (lx_newline != 0 || t.kind == TK_EOF) && ends_statement(cast(Token, last)) != 0 {
 			let semi = cast(Token, token_new(TK_PUNCT, ";", 1, t.pos))
 			semi.synth = 1
@@ -190,6 +199,7 @@ fn lx_skip_space() {
 		} else if c == ' ' || c == '\t' || c == '\r' {
 			lx_advance()
 		} else if c == '/' && lx_peek(1) == '/' {
+			lx_embed_comment()
 			for lx_i < lx_len && lx_peek(0) != '\n' {
 				lx_advance()
 			}
@@ -211,6 +221,54 @@ fn lx_skip_space() {
 			return
 		}
 	}
+}
+
+// lx_embed_comment notes the comment the lexer is on when it is an embed directive (#928): "//", then blanks, "embed:" and the
+// pattern to the end of the line, blanks trimmed. embed_bind checks that it stands at column 1 on its own line.
+fn lx_embed_comment() {
+	mut j = 2
+	for lx_peek(j) == ' ' || lx_peek(j) == '\t' {
+		j = j + 1
+	}
+	let word = "embed:"
+	for k in 0..len(word) {
+		if lx_peek(j + k) != i64(word[k]) {
+			return
+		}
+	}
+	let pos = pos_make(lx_file, lx_line, lx_col)
+	if lx_embed_pos != 0 {
+		lx_fail_code(pos, "E004 EMBED", "two embed directives above one declaration")
+	}
+	mut s = lx_i + j + len(word)
+	mut e = s
+	for e < lx_len && i64(lx_src[e]) != '\n' {
+		e = e + 1
+	}
+	for s < e && (i64(lx_src[s]) == ' ' || i64(lx_src[s]) == '\t') {
+		s = s + 1
+	}
+	for e > s && (i64(lx_src[e - 1]) == ' ' || i64(lx_src[e - 1]) == '\t' || i64(lx_src[e - 1]) == '\r') {
+		e = e - 1
+	}
+	lx_embed_pos = pos
+	lx_embed_pat = lx_src[s:e]
+}
+
+// embed_bind gives the pending embed directive to t, the token after it: a top-level let on the next line (#928).
+fn embed_bind(t Token) {
+	if lx_embed_pos == 0 {
+		return
+	}
+	let dline = (lx_embed_pos >> 16) & 0xffffffff
+	let tline = (t.pos >> 16) & 0xffffffff
+	if (lx_embed_pos & 0xffff) != 1 || t.kind != TK_KEYWORD || t.text != "let" || (t.pos & 0xffff) != 1 || tline != dline + 1 {
+		lx_fail_code(lx_embed_pos, "E004 EMBED", "an embed directive goes on the line directly above a top-level let")
+	}
+	embed_lets = append(embed_lets, t.pos)
+	embed_dirs = append(embed_dirs, lx_embed_pos)
+	embed_pats = append(embed_pats, lx_embed_pat)
+	lx_embed_pos = 0
 }
 
 // Go's semicolon rule: a line break after one of these tokens ends the statement.

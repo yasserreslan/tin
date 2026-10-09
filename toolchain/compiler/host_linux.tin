@@ -11,6 +11,11 @@ fn host_dirent_name(ent i64) i64 {
 	return ent + 19
 }
 
+// host_dirent_type is the d_type of a struct dirent from readdir (DT_REG 8, DT_DIR 4, DT_LNK 10, DT_UNKNOWN 0; #928).
+fn host_dirent_type(ent i64) i64 {
+	return i64(load8(ent + 18))
+}
+
 // The environment and the auxiliary vector follow argv's NULL on the initial stack (the same
 // layout under glibc's start and Tin's own _start); host_start records where, first thing in
 // main, so the compiler needs no libc getenv or getauxval (#125).
