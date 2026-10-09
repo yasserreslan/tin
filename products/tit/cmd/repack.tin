@@ -4,12 +4,14 @@ import "../change"
 import "../object"
 import "../packfile"
 import "quarry"
+import "tide"
 import "twine"
 
 // tit repack (#778): every pack into three (commits and tags, trees, blobs), its deltas searched again and its entries compressed on every core. adopt
 // leaves three packs (it merges its batches' packs of each kind), but each later adopt and each fetch adds packs, and
 // each pack is one more index to search for every object read. Loose objects stay as they are (large files among them
-// are kept in chunks). The new pack is in place before the old ones go, so a crash leaves objects twice, never missing.
+// are kept in chunks). The new pack is in place before the old ones go, so a crash leaves objects twice, never missing;
+// the old ones are retired (packfile.Retire), so a reader that listed them still finds them (#1007).
 
 fn doRepack(g Global, all bool, o mut Out) ! {
 	mut r = try open(g)
@@ -65,6 +67,9 @@ fn doRepack(g Global, all bool, o mut Out) ! {
 		let info = try quarry.Lstat(p.Path)
 		size += info.Size
 	}
+	// the old packs are retired, not deleted: a reader that listed them before keeps reading them in packs/retired
+	// until they have been retired longer than the grace period (#1007)
+	mut gone = []str{}
 	for n in old {
 		mut kept = false
 		for m in made {
@@ -72,11 +77,12 @@ fn doRepack(g Global, all bool, o mut Out) ! {
 				kept = true
 			}
 		}
-		if kept {
-			continue
+		if !kept {
+			gone = append(gone, n)
 		}
-		try quarry.Remove(dir + "/" + n + ".idx")
-		try quarry.Remove(dir + "/" + n + ".pack")
 	}
+	let now = tide.Wall() / 1000000000
+	_ = try packfile.Retire(dir, gone, now)
+	_ = try packfile.Sweep(dir, packfile.Grace(), now)
 	o.Line("Packed {count} objects from {len(old)} packs into {len(made)}: commits, trees and blobs apart ({size / 1048576} MiB, {deltas} deltas).")
 }

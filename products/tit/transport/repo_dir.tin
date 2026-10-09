@@ -7,6 +7,7 @@ import "../oplog"
 import "../packfile"
 import "../store"
 import "quarry"
+import "tide"
 import "twine"
 
 // DirRepo is a Repo on a .tit directory (design/tit.md §16, #1006): pending packs in packs/staged, live ones in
@@ -89,6 +90,10 @@ fn (r mut DirRepo) Commit(u Update) !i64 {
 		crash.Point()
 		try quarry.Rename(from + ".pack", to + ".pack")
 		try quarry.Sync(r.Dir + "/packs")
+		// what crashed or refused pushes left pending, and packs retired longer than the grace period ago
+		packfile.Sweep(r.Dir + "/packs", packfile.Grace(), tide.Wall() / 1000000000) catch _ {
+			0
+		}
 	}
 	if len(u.Refs) == 0 && len(u.Changes) == 0 {
 		return 0
@@ -120,22 +125,10 @@ fn (r DirRepo) Drop(s Staged) !bool {
 	return true
 }
 
-// Retire moves live packs to packs/retired, the pack first (so new readers stop listing it), then its index.
+// Retire moves live packs to packs/retired (packfile.Retire): readers that listed them keep reading them there until
+// Sweep deletes them after the grace period.
 fn (r DirRepo) Retire(names []str) !i64 {
-	let to = r.Dir + "/packs/retired"
-	try quarry.MkdirAll(to)
-	mut n = 0
-	for name in names {
-		let from = r.Dir + "/packs/" + name
-		if !quarry.Exists(from + ".pack") {
-			continue
-		}
-		try quarry.Rename(from + ".pack", to + "/" + name + ".pack")
-		try quarry.Rename(from + ".idx", to + "/" + name + ".idx")
-		n += 1
-	}
-	try quarry.Sync(r.Dir + "/packs")
-	return n
+	return try packfile.Retire(r.Dir + "/packs", names, tide.Wall() / 1000000000)
 }
 
 // baseName is the last element of a path.

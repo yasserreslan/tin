@@ -190,33 +190,16 @@ fn (s mut Server) authenticate(method str, path str, signature str, body str, no
 // objects is the repository's store: its loose objects and every pack.
 fn objects(dir str) !store.Layered {
 	mut layers = []dyn store.ObjectStore{store.NewLoose(dir + "/objects")}
-	let pdir = dir + "/packs"
-	if quarry.IsDir(pdir) {
-		let names = try quarry.ReadDir(pdir)
-		for n in names {
-			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
-				let p = try packfile.Open(pdir + "/" + n)
-				layers = append(layers, p)
-			}
-		}
+	let packs = try packfile.OpenAll(dir + "/packs")
+	for p in packs {
+		layers = append(layers, p)
 	}
 	return store.NewLayered(layers)
 }
 
 // packsOf is the repository's packs, for a fetch to send their entries as they are (packfile.Reuse).
 fn packsOf(dir str) ![]packfile.Pack {
-	mut out = []packfile.Pack{}
-	let pdir = dir + "/packs"
-	if quarry.IsDir(pdir) {
-		let names = try quarry.ReadDir(pdir)
-		for n in names {
-			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
-				let p = try packfile.Open(pdir + "/" + n)
-				out = append(out, p)
-			}
-		}
-	}
-	return out
+	return try packfile.OpenAll(dir + "/packs")
 }
 
 fn (s mut Server) heads(now i64) !Heads {
