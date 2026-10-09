@@ -660,7 +660,17 @@ fn (ed mut Editor) handleKey(k Key) {
 		}
 		b.Backspace()
 	} else if k.Code == keyForwardDelete {
-		b.Delete()
+		if alt && !b.HasSel {
+			// Alt+Delete removes the word after the caret, and the line break when there is no word left
+			b.WordRight(true)
+			if !b.HasSel {
+				b.Delete()
+			} else {
+				b.Backspace()
+			}
+		} else {
+			b.Delete()
+		}
 	} else if k.Code == keyTab && ctrl {
 		mut next = ed.Active + 1
 		if shift {
