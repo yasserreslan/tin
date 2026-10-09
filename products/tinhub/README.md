@@ -10,6 +10,7 @@ written in Tin and run on Linux (arm64 and x86-64). The design, with every table
 tinhub run [--config FILE] [--roles node,worker,runner]   # serve; every role by default
 tinhub migrate [--config FILE]                             # apply the pending migrations, then exit
 tinhub packs sweep [--config FILE]                         # delete what crashed pushes and repacks left, once
+tinhub packs copy [--config FILE]                          # copy packs.dir into the s3.* bucket; rerun to catch up
 tinhub version
 ```
 

@@ -89,7 +89,7 @@ tinhub run [--config FILE] [--roles node,worker,runner]   serve; all roles by de
 tinhub migrate [--config FILE]                             apply the pending migrations, then exit
 tinhub version [-v]                                        the version, and with -v the build's Tin version
 tinhub admin invite --email ADDRESS [--org NAME] [--admin] a one-use invite code for tit key add (§7)
-tinhub packs copy --from dir --to s3 [--config FILE]       copy every pack into the configured bucket, idempotently
+tinhub packs copy [--config FILE]                          copy every pack under packs.dir into the s3.* bucket, idempotently
 tinhub packs sweep [--config FILE]                         run the pending and retired sweeps once
 ```
 

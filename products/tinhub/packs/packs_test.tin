@@ -94,3 +94,54 @@ fn TestTrimCache(t mut crucible.T) {
 	quarry.RemoveAll(cache) catch _ {
 	}
 }
+
+// TestCopy: tinhub packs copy moves every object across, and a second copy finds them all there already.
+fn TestCopy(t mut crucible.T) {
+	let a = scratch("copyfrom")
+	let b = scratch("copyto")
+	let files = scratch("copyfiles")
+	mut from = NewDirStore(a) catch err {
+		t.Error("new: {err}")
+		return
+	}
+	mut to = NewDirStore(b) catch err {
+		t.Error("new: {err}")
+		return
+	}
+	quarry.MkdirAll(files) catch err {
+		t.Error("mkdir: {err}")
+		return
+	}
+	for i in 0..5 {
+		let f = files + "/f{i}"
+		quarry.WriteFile(f, "pack {i} " + seal.Hex(seal.RandomBytes(16))) catch err {
+			t.Error("write: {err}")
+			return
+		}
+		from.Put(PackKey(i % 2 + 1, "h{i}", "pack"), f) catch err {
+			t.Error("put: {err}")
+			return
+		}
+	}
+	let first = Copy(mut from, mut to, "repos/", files + "/tmp") catch err {
+		t.Error("copy: {err}")
+		return
+	}
+	crucible.Equal(mut t, "copied", first.Copied, 5)
+	crucible.Equal(mut t, "skipped", first.Skipped, 0)
+	let again = Copy(mut from, mut to, "repos/", files + "/tmp") catch err {
+		t.Error("copy again: {err}")
+		return
+	}
+	crucible.Equal(mut t, "copied again", again.Copied, 0)
+	crucible.Equal(mut t, "skipped again", again.Skipped, 5)
+	let keys = to.List("repos/") catch err {
+		t.Error("list: {err}")
+		return
+	}
+	crucible.Equal(mut t, "keys", len(keys), 5)
+	for dir in []str{a, b, files} {
+		quarry.RemoveAll(dir) catch _ {
+		}
+	}
+}

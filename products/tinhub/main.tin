@@ -36,7 +36,7 @@ type Boot struct {
 }
 
 fn usage() str {
-	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep [--config FILE]\n       tinhub version [-v]\n"
+	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub version [-v]\n"
 }
 
 // parseBoot reads the command, its --config and --roles flags, and loads the configuration.
@@ -422,6 +422,13 @@ fn main() {
 			}
 		}
 		"packs" => {
+			if len(b.Args) == 1 && b.Args[0] == "copy" {
+				copyNow(b.Conf) catch err {
+					quarry.Eprintln("tinhub: packs copy: {fault.Message(err)}")
+					quarry.Exit(1)
+				}
+				quarry.Exit(0)
+			}
 			if len(b.Args) != 1 || b.Args[0] != "sweep" {
 				quarry.Eprint(usage())
 				quarry.Exit(2)
@@ -443,4 +450,18 @@ fn sweepNow(c config.Config) ! {
 	try db.Current(pg)
 	try sweep(c, true)
 	say.Line("tinhub: swept")
+}
+
+// copyNow is tinhub packs copy: every pack under packs.dir into the bucket the s3.* keys name, for the move from
+// phase 1's directory store to S3 (design/tinhub.md §7). Run it again after switching packs.store to s3 to pick up
+// what arrived in between: keys already in the bucket at the same size are skipped.
+fn copyNow(c config.Config) ! {
+	if c.S3Bucket == "" {
+		fail "set s3.bucket and the other s3.* keys first"
+	}
+	mut from = try packs.NewDirStore(c.PacksDir)
+	let client = try s3.New(s3.Config{Endpoint: c.S3Endpoint, Region: c.S3Region, AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, Token: "", PathStyle: c.S3PathStyle, SignPayload: false, UnsignedPayload: false, Attempts: 0, Backoff: 0, Timeout: 0, TLS: nil})
+	mut to = packs.S3Store{Client: client, Bucket: c.S3Bucket, Cache: c.PacksDir + "/cache"}
+	let got = try packs.Copy(mut from, mut to, "repos/", c.PacksDir + "/tmp")
+	say.Line("tinhub: copied {got.Copied} objects ({got.Bytes} bytes), {got.Skipped} already there")
 }
