@@ -1226,3 +1226,51 @@ fn (b mut Buffer) SelectLine(row i64) {
 	}
 	b.want = -1
 }
+
+// Transpose swaps the characters either side of the caret (Emacs Ctrl+T): the one before and the one
+// after it, leaving the caret after the pair. At the end of a line it swaps the last two characters of
+// the line instead, and at the start of a line it swaps the line's first two. With a selection it swaps
+// the selected text with the text that follows it on the line, as far as the line allows.
+fn (b mut Buffer) Transpose() {
+	let line = b.Lines[b.Row]
+	if len(line) < 2 {
+		return
+	}
+	b.record(kindOther)
+	if b.HasSel {
+		let text = b.SelectedText()
+		let at = b.SelStart()
+		let rest = line[at.Col + len(text):]
+		let head = line[:at.Col]
+		// the piece of what follows that has the same length, or all of it when shorter
+		mut n = 0
+		for n < len(rest) && n < len(text) {
+			n += 1
+		}
+		let moved = rest[:n]
+		if n == 0 {
+			return
+		}
+		b.Lines[b.Row] = head + moved + text + rest[n:]
+		b.Col = at.Col + n + len(text)
+		b.want = -1
+		b.Dirty = true
+		b.Version += 1
+		return
+	}
+	if b.Col == 0 {
+		// the line's first two characters
+		b.Lines[b.Row] = line[1:2] + line[0:1] + line[2:]
+		b.Col = 2
+	} else if b.Col >= len(line) {
+		// the last two characters of the line
+		b.Lines[b.Row] = line[:len(line) - 2] + line[len(line) - 1:] + line[len(line) - 2:len(line) - 1]
+		b.Col = len(line)
+	} else {
+		b.Lines[b.Row] = line[:b.Col - 1] + line[b.Col:b.Col + 1] + line[b.Col - 1:b.Col] + line[b.Col + 1:]
+		b.Col += 1
+	}
+	b.want = -1
+	b.Dirty = true
+	b.Version += 1
+}

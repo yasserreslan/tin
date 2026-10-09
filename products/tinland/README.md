@@ -32,7 +32,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+Alt+N, Cmd+Alt+Shift+N | new file, new folder in the selected folder (the File menu also has Rename and Delete) |
 | Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes); File > Close Other Tabs and Close All Tabs do the same for every other tab, or every tab |
 | Cmd+1 to 9, Ctrl+Tab | switch tabs |
-| Cmd+Z, Cmd+Shift+Z | undo, redo |
+| Cmd+Z, Cmd+Shift+Z, Ctrl+T | undo, redo, transpose the characters either side of the caret (the selected text with what follows it when there is a selection) |
 | Cmd+X, C, V, Ctrl+L, A | cut, copy, paste, select the caret's line, select all (a cut or copy without a selection takes the line) |
 | Cmd+F, Cmd+G (Shift: backwards) | find as you type; Tab switches to the replacement, Return replaces, Cmd+Return replaces all |
 | Cmd+L | go to line |
