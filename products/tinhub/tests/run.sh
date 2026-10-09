@@ -2,7 +2,8 @@
 # tinhub's checks (#1005). Usage: run.sh [COMPILER]
 # Unit tests run everywhere. With TINHUB_TEST_DB (host:port/name, plus TINHUB_TEST_DB_USER and TINHUB_TEST_DB_PASSWORD)
 # the Postgres tests run too: the schema, the event queue's processes, the repository (races, the Redis ref cache,
-# crash points), the workers' crash points and a server's start, readiness and drain.
+# crash points), the workers' crash points, the runner's sandboxed replays (Linux) and a server's start, readiness and
+# drain.
 # The test database is emptied: never point it at a database you need.
 set -eu
 cd "$(dirname "$0")/../../.." || exit 1
@@ -52,6 +53,11 @@ TIN_ROOT=$PWD "$compiler" -o "$tmp/fetch_load" products/tinhub/tests/programs/fe
 TINHUB_BENCH_RUNS=${TINHUB_BENCH_RUNS:-1} TINHUB_BENCH_SECONDS=${TINHUB_BENCH_SECONDS:-5} sh products/tinhub/tests/clones.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit" "$tmp/fetch_load"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/workers_driver" products/tinhub/tests/programs/workers_driver.tin
 sh products/tinhub/tests/workers.sh "$tmp/workers_driver"
+# the runner: a change's build replayed in the sandbox against examples/checkout.tin's capsules (Linux; skipped without
+# user namespaces or Redis)
+TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_driver" products/tinhub/tests/programs/runner_driver.tin
+TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_probe" products/tinhub/tests/programs/runner_probe.tin
+sh products/tinhub/tests/runner.sh "$tmp/runner_driver" "$tmp/runner_probe" "$compiler"
 # notifications, webhooks and live updates on two nodes, against bench/ref/tinhub_hooks (Go checks the signatures)
 if command -v go > /dev/null 2>&1 && (cd bench/ref/tinhub_hooks && go build -o "$tmp/hooks" main.go) > "$tmp/go.out" 2>&1; then
 	TIN_ROOT=$PWD "$compiler" -o "$tmp/notify_node" products/tinhub/tests/programs/notify_node.tin

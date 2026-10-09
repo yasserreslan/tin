@@ -35,6 +35,7 @@ type Spec struct {
 	MaxOutput   i64    // bytes kept of stdout and of stderr each; the rest is read and dropped.
 	Cgroup      str    // the delegated parent cgroup v2 directory a child cgroup is made in, or "" for none.
 	Network     bool   // share the caller's network (and allow IPv4 and IPv6 sockets) instead of none.
+	Loopback    bool   // without Network: a private network namespace whose loopback is up, and IPv4 and IPv6 sockets allowed.
 }
 
 // Result is how a sandboxed run ended and what it printed.
@@ -73,7 +74,7 @@ fn Run(spec Spec) !Result {
 
 // normalize checks spec and returns a copy with the defaults filled in (a struct is a reference: the caller's stays as it was).
 fn normalize(spec Spec) !Spec {
-	mut s = Spec{Argv: spec.Argv, Env: spec.Env, Dir: spec.Dir, Inputs: spec.Inputs, System: spec.System, NoSystem: spec.NoSystem, Scratch: spec.Scratch, ScratchPath: spec.ScratchPath, Memory: spec.Memory, CPU: spec.CPU, Pids: spec.Pids, Weight: spec.Weight, Timeout: spec.Timeout, MaxOutput: spec.MaxOutput, Cgroup: spec.Cgroup, Network: spec.Network}
+	mut s = Spec{Argv: spec.Argv, Env: spec.Env, Dir: spec.Dir, Inputs: spec.Inputs, System: spec.System, NoSystem: spec.NoSystem, Scratch: spec.Scratch, ScratchPath: spec.ScratchPath, Memory: spec.Memory, CPU: spec.CPU, Pids: spec.Pids, Weight: spec.Weight, Timeout: spec.Timeout, MaxOutput: spec.MaxOutput, Cgroup: spec.Cgroup, Network: spec.Network, Loopback: spec.Loopback}
 	if len(s.Argv) == 0 || len(s.Argv[0]) == 0 {
 		fail say.Fault("sandbox: empty argv")
 	}

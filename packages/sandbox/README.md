@@ -66,6 +66,9 @@ fn build() !sandbox.Result {
   - `Cgroup`: the cgroup v2 directory each run makes its own child cgroup in (see below), or `""`.
   - `Network`: share the caller's network namespace and allow IPv4 and IPv6 sockets. The default is no
     network at all.
+  - `Loopback` (without `Network`): the sandbox's own network namespace with its loopback up, and IPv4 and IPv6
+    sockets allowed: the program reaches itself on 127.0.0.1 and ::1 and nothing else (no other interface exists).
+    tinhub's runner replays with it, because `tin replay` sends the request to the program over its loopback.
 
 ## What the program sees
 
@@ -79,7 +82,8 @@ fn build() !sandbox.Result {
   read-only), and a `/dev` with `null`, `zero`, `full`, `random`, `urandom` and the `fd`, `stdin`,
   `stdout`, `stderr` links. Nothing else of the host is mounted: no `/etc`, `/home`, `/tmp`, `/sys`.
   stdin is `/dev/null`.
-- **Network**: none: only a loopback interface, which is down.
+- **Network**: none: only a loopback interface, which is down (up with `Loopback`; init brings it up with
+  `SIOCSIFFLAGS`, holding `CAP_NET_ADMIN` over the namespace its user namespace owns).
 - **Capabilities**: none. The uid inside is not 0, so execve drops the capability set the user namespace
   gave the setup, and `PR_SET_NO_NEW_PRIVS` is set.
 - **seccomp**: an allow-list of about 260 system calls (x86-64) or 230 (arm64) that ordinary static and
@@ -88,7 +92,7 @@ fn build() !sandbox.Result {
   `kexec_*`, `bpf`, `perf_event_open`, `userfaultfd`, `unshare`, `setns`, `keyctl`, `add_key`,
   `request_key`, the module calls, `reboot`, `swapon`, the clock setters, `open_by_handle_at`, io_uring
   (the Tin runtime falls back to helper threads), `personality` and the rest. `socket` and `socketpair`
-  are allowed for `AF_UNIX` only (and `AF_INET`, `AF_INET6` with `Network`); `clone` without any
+  are allowed for `AF_UNIX` only (and `AF_INET`, `AF_INET6` with `Network` or `Loopback`); `clone` without any
   `CLONE_NEW*` flag; `clone3` gets ENOSYS, so a C library falls back to `clone`, whose flags the filter
   can see. A system call from another ABI (i386 or x32 on x86-64, arm32 on arm64) kills the process. The
   table is kept by name in `sandbox_linux.tin`; the numbers are per architecture in
@@ -145,3 +149,5 @@ machine) the cgroup part is skipped, which the check refuses on CI.
 - With `Network`, the abstract Unix socket namespace is the host's too.
 - No stdin input, no `/dev/shm`, no `/tmp` but the scratch directory (point `TMPDIR` at it).
 - Only cgroup v2.
+- `Loopback` is checked end to end by tinhub's runner test (`products/tinhub/tests/runner.sh`: the program reaches
+  itself, not the host's 127.0.0.1 nor the internet), not yet by `sandbox_check`.

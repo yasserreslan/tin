@@ -53,6 +53,13 @@ type Config struct {
 	SmtpFrom    str
 	LogLevel    str
 	Shutdown    i64
+	// RunnerKey is the runner's replay private key (tinreplaykey1:…), RunnerTin the Tin toolchain its sandboxes build
+	// and replay with, RunnerCgroup the delegated cgroup v2 directory they run in ("" for none), RunnerConcurrency the
+	// runs one runner process does at once (#1028).
+	RunnerKey   secret str
+	RunnerTin   str
+	RunnerCgroup str
+	RunnerConcurrency i64
 }
 
 // Key is one setting: its name, its default and whether it is a secret.
@@ -103,6 +110,10 @@ fn Keys() []Key {
 		Key{Name: "smtp.from", Default: "", Secret: false},
 		Key{Name: "log.level", Default: "info", Secret: false},
 		Key{Name: "shutdown.deadline", Default: "", Secret: false},
+		Key{Name: "runner.key", Default: "", Secret: true},
+		Key{Name: "runner.tin", Default: "/usr/local/lib/tin", Secret: false},
+		Key{Name: "runner.cgroup", Default: "", Secret: false},
+		Key{Name: "runner.concurrency", Default: "1", Secret: false},
 	}
 }
 
@@ -287,6 +298,7 @@ fn Build(vals map[str]str) !Config {
 	let workerLeaseV = try duration(vals, "workers.lease")
 	let repackPacksV = try count(vals, "repack.packs")
 	let apiRateV = try count(vals, "api.rate")
+	let runnerConcurrencyV = try count(vals, "runner.concurrency")
 	return Config{
 		Roles: roles,
 		Listen: vals["listen"],
@@ -326,6 +338,10 @@ fn Build(vals map[str]str) !Config {
 		SmtpFrom: vals["smtp.from"],
 		LogLevel: level,
 		Shutdown: shutdown,
+		RunnerKey: vals["runner.key"],
+		RunnerTin: twine.TrimRight(vals["runner.tin"], "/"),
+		RunnerCgroup: vals["runner.cgroup"],
+		RunnerConcurrency: runnerConcurrencyV,
 	}
 }
 

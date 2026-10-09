@@ -75,6 +75,31 @@ the `replay.retention` job deletes them nightly. The API, under `/api/v1/repos/<
 - `GET retention`, `PUT retention` (`{"days": N}`, admin)
 - `PUT grants/<user>`, `DELETE grants/<user>` (admin)
 
+## Runner: a change's behaviour
+
+The `runner` role replays a repository's capsules against a change version's build and its base's, every build and
+replay in `packages/sandbox` (no network but the replay's own loopback, sources read-only, a lower CPU weight with
+`runner.cgroup`), and groups what differs by the first effect that does: one new SQL query is one "different calls at
+effect N" group. Only for owners that opt in, and only capsules sealed for the runner's key. Set it up:
+
+```sh
+tin replay key /run/secrets/tinhub-runner           # the runner's key pair; the public key is printed
+runner.key = file:/run/secrets/tinhub-runner         # in tinhub.conf, with runner.tin = the Tin toolchain's root
+```
+
+then an org owner `PUT /api/v1/orgs/<org>/runner` (it answers the `public_key` the org's servers add to
+`TIN_REPLAY_RECIPIENTS`), and a repository's admin sets what to build and the replayed program's environment:
+`PUT /api/v1/repos/<owner>/<repo>/runner` with `{"entry": "main.tin", "sample": 20, "env": ["PAYMENTS_URL=…"]}`.
+
+- `POST /api/v1/repos/<owner>/<repo>/changes/<change>/behaviour` (`{"version": N}`, else the newest) queues a run (409
+  when the owner has not opted in); reviews queue one per new version (`runner.Request`).
+- `GET …/changes/<change>/behaviour` (`?version=N`): the run and its groups (`calls`, `error` for a new 5xx, panic or
+  timeout, `body`, `same`, `skipped`), each with its count, label, first differing effect and up to 20 capsule ids.
+
+Both take read access and the replay permission. Postgres keeps outcomes only, never a request, body or effect key; the
+private key is written only into a run's sandbox directory and removed with it. See
+[design/tinhub.md §12](../../design/tinhub.md#12-the-runner-a-changes-behaviour-against-productions-requests-1028).
+
 ## Notifications, webhooks and live updates
 
 - `GET|POST /api/v1/repos/<owner>/<repo>/hooks`, `GET|PATCH|DELETE …/hooks/<id>`: a repository's webhooks, for its
@@ -107,7 +132,9 @@ TINHUB_TEST_DB=127.0.0.1:5432/tinhub_test TINHUB_TEST_DB_USER=tin TINHUB_TEST_DB
   sh products/tinhub/tests/run.sh               # plus Postgres: schema, event queue, accounts, readiness and drain
 ```
 
-With `TINHUB_TEST_REDIS=host:port` as well, the accounts tests also check that sessions survive a restart and that a
+On Linux the Postgres checks also run the runner end to end (`tests/runner.sh`: examples/checkout.tin recorded, a change
+adding a SQL query replayed in the sandbox), skipped where the sandbox cannot run (no user namespaces) or there is no
+`redis-server` or docker. With `TINHUB_TEST_REDIS=host:port` as well, the accounts tests also check that sessions survive a restart and that a
 login code is claimed once (under a random key prefix).
 
 The test database is emptied by the tests. CI runs the Postgres checks on Linux x86-64 against the runner's

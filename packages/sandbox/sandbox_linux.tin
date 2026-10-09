@@ -109,6 +109,13 @@ const opSys = 0
 const opWrite = 1   // open a0 for writing, write a1 (length a2), close.
 const opTouch = 2   // create the empty file a0 for a bind to land on.
 const opSignals = 3 // every signal back to SIG_DFL (a0 is a zeroed sigaction).
+const opLoopUp = 4  // the loopback up: socket(AF_INET) (nr in the op), ioctl a0 SIOCSIFFLAGS with the ifreq at a1, close.
+
+// The loopback of a private network namespace (Spec.Loopback): socket(2) and ioctl(2) values.
+const sockDgram = 2
+const sockCloexec = 0x80000
+const siocSifflags = 0x8914
+const iffUp = 1
 
 // The record init reads (words of a calloc'd block).
 const rSetup = 0
@@ -144,7 +151,7 @@ const execBase = 1000002
 // EPERM: mount and the new mount API, umount2, pivot_root, chroot, ptrace, process_vm_readv/writev, kexec_load, bpf,
 // perf_event_open, userfaultfd, unshare, setns, keyctl, add_key, request_key, the module calls, reboot, swapon, the
 // clock setters, open_by_handle_at, io_uring (the Tin runtime falls back to threads), personality and the rest. socket
-// and socketpair are allowed for AF_UNIX only (and AF_INET and AF_INET6 with Spec.Network), clone without a CLONE_NEW* flag,
+// and socketpair are allowed for AF_UNIX only (and AF_INET and AF_INET6 with Spec.Network or Spec.Loopback), clone without a CLONE_NEW* flag,
 // and clone3 gets ENOSYS so a C library falls back to clone, whose flags the filter can see.
 fn allowedSyscalls() []str {
 	return []str{
@@ -367,6 +374,15 @@ fn setupPlan(s Spec, ms []mount, stdin i64, stdout i64, stderr i64) plan {
 	p.sys("prctl PR_SET_DUMPABLE", "prctl", []i64{prSetDumpable, 0})
 	let host = "sandbox"
 	p.sys("sethostname", "sethostname", []i64{rt_cstr(host), len(host)})
+	// Loopback: the namespace's own lo up (init holds CAP_NET_ADMIN over the network namespace its user namespace owns), so the
+	// program can reach itself on 127.0.0.1 and ::1 and nothing else: the namespace has no other interface.
+	if s.Loopback && !s.Network {
+		let ifr = p.alloc(5) // struct ifreq: the name "lo", then ifr_flags at byte 16.
+		store8(ifr, 'l')
+		store8(ifr+1, 'o')
+		__st(ifr+16, iffUp, 1)
+		p.add(opLoopUp, "bring the loopback up", sysnr("socket"), []i64{sysnr("ioctl"), ifr}, 0)
+	}
 	p.sys("make the mount tree private", "mount", []i64{0, rt_cstr("/"), 0, msRec | msPrivate, 0})
 	let tmpfs = "tmpfs"
 	let mode = "mode=0755"
@@ -613,6 +629,16 @@ fn childOps(rec i64, ops i64, n i64) {
 				childFail(rec, o[9], 0-fd)
 			}
 			linux_raw(rec[rNrClose], fd, 0, 0, 0, 0, 0)
+		} else if kind == opLoopUp {
+			let fd = linux_raw(o[1], afInet, sockDgram|sockCloexec, 0, 0, 0, 0)
+			if fd < 0 {
+				childFail(rec, o[9], 0-fd)
+			}
+			let r = linux_raw(o[2], fd, siocSifflags, o[3], 0, 0, 0)
+			linux_raw(rec[rNrClose], fd, 0, 0, 0, 0, 0)
+			if r < 0 {
+				childFail(rec, o[9], 0-r)
+			}
 		} else if kind == opSignals {
 			for sig in 1..65 {
 				linux_raw(rec[rNrSigaction], sig, o[2], 0, 8, 0, 0)
@@ -766,7 +792,7 @@ fn runIn(s Spec, cg str, cgfd i64) !Result {
 		fail e
 	}
 	mut setup = setupPlan(s, ms, devnull, outW, errW)
-	mut exec = execPlan(s.Network)
+	mut exec = execPlan(s.Network || s.Loopback)
 	let cands = candidates(s.Argv[0], s.Env)
 	let rec = exec.alloc(recWords)
 	rec[rSetup] = cast(i64, setup.ops)[2]

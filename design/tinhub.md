@@ -133,6 +133,10 @@ removed), which is how a secret comes from a mounted file. Unknown keys are refu
 | `api.rate` | `600` | API requests per minute for each user (signed in) or address; `0` for no limit |
 | `smtp.addr`, `smtp.from` | none | mail for notifications; none sends no mail |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` |
+| `runner.key` | none | **secret**: the runner's replay private key (`tin replay key FILE`; `file:` it); none runs no replays |
+| `runner.tin` | `/usr/local/lib/tin` | the Tin toolchain the runner's sandboxes mount at `/tin` (`bin/tinc`, `tin`, `toolchain/`, `packages/`) |
+| `runner.cgroup` | none | a delegated cgroup v2 directory for the runner's sandboxes (limits and `cpu.weight` 50); none: no limits |
+| `runner.concurrency` | `1` | runs one runner process does at once |
 
 Secrets are `secret str` from the moment they are read: `say`, faults and logs cannot show them.
 
@@ -141,7 +145,8 @@ otherwise; migrations are never applied implicitly by `run`.
 
 - `node`: anvil on `listen` (h2c, or HTTPS and h2 with `tls.*`) with the routes of §4.
 - `worker`: `workers.concurrency` claim loops over the event queue (§6) on core 0's tasks, and the sweeps.
-- `runner`: the runner loop (#1028), which starts every replay through `sandbox`.
+- `runner`: the runner loop (#1028, §12): `runner.concurrency` claim loops over `replay.run` jobs only, each build and
+  replay through `sandbox`.
 
 **Health.** `GET /healthz` answers 200 `ok` while the process runs. `GET /readyz` answers 200 `ready` when Postgres
 answers and the newest applied migration is the newest the binary knows, else 503 with the reason.
@@ -168,6 +173,7 @@ else 16 random hex digits, echoed in the answer).
 | `GET /api/v1/live` (websocket) | node | #1023 |
 | `GET\|POST /api/v1/repos/<owner>/<repo>/hooks`, `GET\|PATCH\|DELETE …/hooks/<id>`, `GET …/hooks/<id>/deliveries` (admin) | node | #1023 |
 | `GET /api/v1/subscriptions`, `PUT\|DELETE /api/v1/repos/<owner>/<repo>/subscription`, `PUT\|DELETE …/changes/<change>/subscription` | node | #1023 |
+| `GET\|POST /api/v1/repos/<owner>/<repo>/changes/<change>/behaviour`, `GET\|PUT …/runner`, `GET\|PUT\|DELETE /api/v1/orgs/<org>/runner` | node | #1028 |
 
 Owner names (users and orgs share one namespace) and repository names match `[a-z0-9][a-z0-9-]{0,38}` and
 `[A-Za-z0-9._-]{1,100}` (not `.` or `..`, not ending in `.tit`). A private repository answers 404, never 403, to
@@ -251,6 +257,16 @@ more hex digits) marks the group (`capsules.ChangeLanded`, called by landing in 
 when that change's saved test passes on main (`capsules.CheckPassed`, called by the checks code); a capsule of a
 closed group reopens it, moving `fixed_by` to `reopened_by`.
 
+### The runner (#1028, migration `0005_runner`)
+
+| table | columns | constraints |
+|---|---|---|
+| `runner_keys` | `key_id text` (hex SHA-256 of the public key), `public_key text` (`tinreplay1:…`), `seen_at` | `primary key (key_id)`; each runner registers its own |
+| `runner_optins` | `owner_id`, `key_id text`, `signers text` (comma list of hex ed25519 keys, `''`: the capsule's own), `enabled_by`, `created_at` | `primary key (owner_id)` |
+| `runner_settings` | `repo_id`, `entry text` (`main.tin`), `sample int` (20), `env text` (`NAME=value` lines), `updated_at` | `primary key (repo_id)` |
+| `runner_runs` | `id`, `repo_id`, `change_id text`, `version int`, `commit_id text`, `base_commit text`, `state text` (`queued`, `running`, `done`, `failed`, `skipped`), `reason text`, `requested_by`, `capsules int`, `created_at`, `started_at`, `finished_at` | `unique (repo_id, change_id, version)` |
+| `runner_results` | `run_id`, `capsule_id text`, `outcome text` (`same`, `body`, `calls`, `error`, `skipped`), `group_key text`, `label text`, `effect int`, `recorded_status`, `base_status`, `change_status` | `primary key (run_id, capsule_id)` |
+
 ### Events, webhooks (#1013, #1023)
 
 | table | columns | constraints |
@@ -297,6 +313,7 @@ in the push transaction). Workers run handlers by `kind`; a job is an event in t
 | `mirror` | `push` | #1014 | 10m, 256mb |
 | `notify`, `webhook` | events with subscribers | #1023 | 30s, 16mb |
 | `replay.retention` | nightly | #1022 | 5m, 64mb |
+| `replay.run` | a review's new version (#1025), or the API | #1028, on the runner role only | 60m, 512mb (the sandboxes apart) |
 | `bench` | `push` | #1029 | 1m, 64mb |
 
 Metrics: `GET /metrics` (Prometheus text, answered to loopback clients only): ready and dead jobs per kind, claimed
@@ -389,7 +406,8 @@ miss reads Postgres. Pushes never read the cache.
 | an API read | 2s | 16mb | node |
 | an API write | 5s | 16mb | node |
 | a job | its kind's (§6) | its kind's (§6) | worker |
-| a replay | the runner's sandbox: memory.max, cpu.max, pids.max, a hard timeout | | runner |
+| a replay | the runner's sandbox: 30 s, and with `runner.cgroup` 512 MiB, one CPU, 256 pids, `cpu.weight` 50 | | runner |
+| a build | the runner's sandbox: 5 min, and with `runner.cgroup` 2 GiB, one CPU, 256 pids, `cpu.weight` 50 | | runner |
 
 ---
 
@@ -487,3 +505,51 @@ everyone out**; browsers sign in again with `tit login`, and nothing else is los
 signed out. Without `redis.addr` there are no browser sessions (`ErrNoSessions`), which replaces §3's "per process"
 for sessions: a per-core store would sign a browser in on one core only. Requests signed with `Tit-Signature` need no
 session.
+
+---
+
+## 12. The runner: a change's behaviour against production's requests (#1028)
+
+`products/tinhub/runner` replays a repository's sampled capsules against the build of a change version and of its base
+(the commit's first parent), and groups what differs. It runs only for owners that opt in, and only in the runner role.
+
+**Opting in.** A runner registers its public key (`runner_keys`, from `runner.key`) when it starts and before each run.
+An org's owner opts in with `PUT /api/v1/orgs/<org>/runner` (`{"signers": [hex]}`, optional), which records the newest
+registered key; `GET` shows that key's `public_key`, which the org's recording servers add to
+`TIN_REPLAY_RECIPIENTS` (design/interface_replay.md §6.1). A run replays only capsules sealed for the runner: a version 2
+capsule names its readers' key ids in its plain header, so tinhub picks them without a key. A key rotated since the
+opt-in skips runs until the owner opts in again.
+
+**A run.** `runner.Request(tx, repo, change, version, by)` queues it (reviews call it in the transaction that adds a
+version, #1025; `POST …/changes/<change>/behaviour` on request); it returns 0, queuing nothing, when the owner has not
+opted in, and the queued or running run of the version when there is one. The `replay.run` job then, on the runner role:
+writes the change's tree and its base's into a working directory (`<packs.dir>/runner/<run>-<random>`, mode 0700),
+builds each with `/tin/bin/tinc` in a sandbox (sources at `/src` and the toolchain at `/tin` read-only, scratch at
+`/scratch`, no network), writes `runner.key` into the scratch directory alone, and replays each sampled capsule (the
+newest `sample`, sealed for the runner) against both builds with `/bin/sh /tin/tin replay /scratch/capsule.tcap
+--against /scratch/<build>` in a sandbox of its own: no network but its own loopback (`sandbox.Spec.Loopback`; replay
+sends the request to the program over it), `TIN_REPLAY_IDENTITY` the key, `TIN_REPLAY_SIGNERS` the opt-in's signers (else
+the capsule's), and the repository's `env`. The key and the working directory are removed when the run ends, whatever
+happened. With `runner.cgroup` every sandbox gets `cpu.weight` 50 against the default 100 and the limits of §8.
+
+**Outcomes.** Each capsule is compared on what tin replay printed for the change and for the base (or, without a base
+that builds, for the recording): the first difference decides, in the order a request meets them.
+
+| outcome | when | group (one per) |
+|---|---|---|
+| `calls` | the effects asked for differ (a divergence, or recorded effects left) | first differing effect: `different calls at effect N: got KIND, recorded KIND` |
+| `error` | a new 5xx, no response (a panic) or a timeout | status |
+| `body` | a different status or body | the statuses |
+| `same` | nothing differs | one |
+| `skipped` | the capsule did not replay (unreadable, not sealed for the key) | the reason |
+
+So one new SQL query is one `calls` group, however many requests meet it. Postgres keeps only outcomes, statuses,
+effect numbers and kinds: no request, body or effect key leaves the sandbox. `GET …/changes/<change>/behaviour`
+(`?version=N`) answers the run and its groups, `calls` first; it and the settings (`GET|PUT …/runner`: `entry`, `sample`,
+`env`; admins set them) take read access and the replay permission, like capsules.
+
+**What the key's exposure is.** The replayed program opens the capsule itself, so it can read the key file in its
+scratch directory: a writer of an opted-in repository could make a change that prints it. The runner stores no body
+or key it prints, and the sandbox has no network, so it cannot leave that way; a key per owner would close the rest
+(later).
+
