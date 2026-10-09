@@ -1,0 +1,50 @@
+package main
+
+import "image"
+import "image/color"
+import "image/gif"
+import "say"
+
+fn main() {
+	let palette color.Palette = []color.NRGBA{{R: 255, A: 255}, {G: 255, A: 255}, {B: 255, A: 0}}
+	mut a = image.NewPaletted(image.Rect(0, 0, 3, 2), palette)
+	a.SetColorIndex(0, 0, 0)
+	a.SetColorIndex(1, 0, 1)
+	a.SetColorIndex(2, 0, 2)
+	a.SetColorIndex(0, 1, 2)
+	a.SetColorIndex(1, 1, 1)
+	a.SetColorIndex(2, 1, 0)
+	mut b = image.NewPaletted(image.Rect(1, 0, 3, 2), palette)
+	b.SetColorIndex(1, 0, 2)
+	b.SetColorIndex(2, 0, 1)
+	b.SetColorIndex(1, 1, 1)
+	b.SetColorIndex(2, 1, 2)
+	let data = gif.EncodeAll(gif.GIF{Image: []image.Paletted{a, b}, Delay: []i64{7, 13}, Disposal: []u8{1, 2}, LoopCount: 3})
+	let decoded = gif.DecodeAll(data) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	if len(decoded.Image) != 2 || decoded.Delay[0] != 7 || decoded.Delay[1] != 13 || decoded.Disposal[0] != 1 || decoded.Disposal[1] != 2 || decoded.LoopCount != 3 {
+		panic("GIF frame metadata round trip")
+	}
+	if decoded.Image[0].ColorIndexAt(2, 0) != 2 || decoded.Image[1].ColorIndexAt(1, 0) != 2 || decoded.Image[1].ColorIndexAt(2, 1) != 2 || decoded.Image[0].Palette[2].A != 0 {
+		panic("GIF pixels or transparency round trip")
+	}
+	let first = gif.Decode(data) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	if first.Bounds().Dx() != 3 || first.Bounds().Dy() != 2 || first.At(2, 0).A != 0 {
+		panic("GIF Decode")
+	}
+	let (_, err) = gif.DecodeAll("GIF89a")
+	if err == nil { panic("GIF accepted malformed stream") }
+	let config = gif.DecodeConfig(data) catch err {
+		say.Line("decode error", err)
+		return
+	}
+	if config.Width != 3 || config.Height != 2 || config.ColorModel != color.PaletteModel { panic("GIF DecodeConfig") }
+	let (missing, configErr) = gif.DecodeConfig("GIF89a")
+	if configErr == nil || missing.Width != 0 || missing.Height != 0 { panic("GIF DecodeConfig accepted malformed stream") }
+	say.Line("gif frames, delays, disposal, transparency pass", len(data))
+}

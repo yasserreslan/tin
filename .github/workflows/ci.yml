@@ -80,6 +80,8 @@ jobs:
         run: sh tools/ci/tin.sh png_check
       - name: JPEG Go decode corpus and Tin encoder smoke test
         run: sh tools/ci/tin.sh jpeg_check
+      - name: GIF frame and animation interoperability against Go
+        run: sh tools/ci/tin.sh gif_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: sh tools/ci/tin.sh pack_check
       - name: Stream helpers against Go's io (a generated chunk corpus)
