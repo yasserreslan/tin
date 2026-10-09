@@ -3,7 +3,6 @@ package transport
 import "../change"
 import "../identity"
 import "../object"
-import "../oplog"
 import "../packfile"
 import "../revwalk"
 import "../store"
@@ -15,7 +14,7 @@ import "twine"
 import "argo"
 import "constraints"
 
-// The server side of the protocol (#796), over one repository's .tit directory and with no HTTP in it: Handle takes
+// The server side of the protocol (#796), over one repository (a Repo, design/tit.md §16) and with no HTTP in it: Handle takes
 // a request's method, path, Tit-Signature header and body and gives the status and body to answer with, so tit serve
 // puts it behind anvil and tests call it directly.
 
@@ -30,8 +29,7 @@ type Reply struct {
 
 // Server serves one repository.
 type Server struct {
-	// Dir is the repository's .tit directory.
-	Dir    str
+	repo   dyn Repo
 	key    secret str
 	keys   map[str][]str
 	public bool
@@ -39,9 +37,15 @@ type Server struct {
 	seen   map[str]i64
 }
 
-// NewServer serves the repository in dir; key signs its nonces. public lets heads and fetch go unsigned.
+// NewServer serves the repository whose .tit directory is dir; key signs its nonces. public lets heads and fetch go
+// unsigned.
 fn NewServer(dir str, key secret str, public bool) Server {
-	return Server{Dir: dir, key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
+	return NewRepoServer(NewDirRepo(dir), key, public)
+}
+
+// NewRepoServer serves repo (design/tit.md §16): tinhub's, or a MemRepo in tests.
+fn NewRepoServer(repo dyn Repo, key secret str, public bool) Server {
+	return Server{repo: repo, key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
 }
 
 // Allow lets the holder of an ed25519 public key sign requests as email.
@@ -215,15 +219,14 @@ fn packsOf(dir str) ![]packfile.Pack {
 	return out
 }
 
-fn (s Server) heads(now i64) !Heads {
-	let refs = change.NewRefs(s.Dir)
-	let all = try refs.List("refs/")
+fn (s mut Server) heads(now i64) !Heads {
+	let all = try s.repo.Refs("refs/")
 	mut out = Heads{Refs: []RefHead{}, Changes: []ChangeHead{}, Nonce: NewNonce(s.key, now), Server: "tit 1", Limits: s.limits}
 	for r in all {
 		out.Refs = append(out.Refs, RefHead{Name: r.Name, Target: change.TargetText(r.Target)})
 		match r.Target {
 			Change(c) => {
-				let v = try change.Newest(s.Dir, c)
+				let v = try s.repo.Newest(c)
 				if v != nil {
 					let id = try object.IdOf(v.Hash)
 					out.Changes = append(out.Changes, ChangeHead{Change: c.Letters(), Version: v.Op, Commit: id.Hex()})
@@ -337,7 +340,7 @@ fn notCommit(id object.Id) !object.CommitData {
 	fail fault.Wrap(ErrRefused, "BadRequest: {id.Hex()} is not a commit")
 }
 
-fn (s Server) fetch(body str) !str {
+fn (s mut Server) fetch(body str) !str {
 	let (k, header, _) = ReadFrame(body) catch e {
 		try refusal(Code.BadRequest, fault.Message(e))
 		return ""
@@ -349,7 +352,7 @@ fn (s Server) fetch(body str) !str {
 	argoGet(header, mut req) catch e {
 		try refusal(Code.BadRequest, fault.Message(e))
 	}
-	mut st = try objects(s.Dir)
+	mut st = try s.repo.Objects()
 	if len(req.Objects) > 0 {
 		// a lazy clone reading what it left out: these objects, and nothing else
 		if len(req.Objects) > s.limits.Refs * 100 {
@@ -366,7 +369,7 @@ fn (s Server) fetch(body str) !str {
 			}
 			ids = append(ids, id)
 		}
-		mut opacks = try packsOf(s.Dir)
+		mut opacks = try s.repo.Packs()
 		let odata = try packfile.Reuse(mut st, mut opacks, ids)
 		return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(ids)}), odata)
 	}
@@ -442,7 +445,7 @@ fn (s Server) fetch(body str) !str {
 		}
 	}
 	// the entries the packs hold already go as they are (packfile.Reuse): no delta search, no recompression
-	mut packs = try packsOf(s.Dir)
+	mut packs = try s.repo.Packs()
 	let data = try packfile.Reuse(mut st, mut packs, send)
 	return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(send)}), data)
 }
@@ -507,33 +510,15 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 			[]object.Id{}
 		}
 	}
-	let here = try objects(s.Dir)
+	let here = try s.repo.Objects()
 	mut layers = []dyn store.ObjectStore{mem, here}
 	mut st = store.NewLayered(layers)
-	use lock = change.Lock(s.Dir)
-	// changes: each replaces the version the server has now
+	// design/tit.md §16 step 2: the checks without the lock, against what the repository holds now (Commit makes
+	// those on versions and refs again under it)
+	let checks = Update{Who: who, Command: "push by " + who, Changes: req.Changes, Refs: req.Refs, Pack: "", Time: now * 1000000000}
+	mut rp = s.repo
+	try recheck(mut rp, checks)
 	for cu in req.Changes {
-		let cid = object.ParseChangeId(cu.Change) catch _ {
-			try refusal(Code.BadRequest, "{cu.Change} is not a change id")
-			object.NewChangeId()
-		}
-		let newest = try change.Newest(s.Dir, cid)
-		mut have = ""
-		if newest != nil {
-			let nid = try object.IdOf(newest.Hash)
-			have = nid.Hex()
-		}
-		if have != cu.Replaces {
-			mut what = "a new change"
-			if len(cu.Replaces) > 0 {
-				what = "version " + cu.Replaces[0:12]
-			}
-			mut there = "none"
-			if len(have) > 0 {
-				there = have[0:12]
-			}
-			try refusal(Code.Moved, "{cu.Change} has version {there} here; this push replaces {what}")
-		}
 		let cmt = object.ParseId(cu.Commit) catch _ {
 			try refusal(Code.BadRequest, "{cu.Commit} is not an id")
 			object.NoId
@@ -543,20 +528,8 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 			try refusal(Code.BadRequest, "{cu.Commit} is not a version of {cu.Change}")
 		}
 	}
-	// refs: each holds what the push says it holds
-	let refs = change.NewRefs(s.Dir)
-	mut moves = []oplog.RefChange{}
 	mut checked = map[str]bool{}
 	for ru in req.Refs {
-		try change.CheckName(ru.Name)
-		let cur = try refs.Get(ru.Name)
-		mut now2 = ""
-		if cur != nil {
-			now2 = change.TargetText(cur.Target)
-		}
-		if now2 != ru.Old {
-			try refusal(Code.RefChanged, "{ru.Name} moved: it holds {short(now2)} here, not {short(ru.Old)}")
-		}
 		if len(ru.New) > 0 && !twine.HasPrefix(ru.New, "change ") {
 			let id = object.ParseId(ru.New) catch _ {
 				try refusal(Code.BadRequest, "{ru.New} is not an id")
@@ -564,7 +537,6 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 			}
 			try complete(mut st, id, mut checked)
 		}
-		moves = append(moves, oplog.RefChange{Name: ru.Name, Before: ru.Old, After: ru.New})
 	}
 	for cu in req.Changes {
 		let id = try object.ParseId(cu.Commit)
@@ -592,25 +564,29 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 			}
 		}
 	}
-	// data first: the new objects as a pack of this repository's own, then the versions and refs in one operation
+	// step 3, data first: the new objects as a pack of this repository's own, pending
 	mut keepIds = []object.Id{}
 	for id in fresh {
 		if !here.Has(id) {
 			keepIds = append(keepIds, id)
 		}
 	}
+	mut staged = ""
 	if len(keepIds) > 0 {
-		mut p = try packfile.Write(mut mem, keepIds, s.Dir + "/packs")
+		mut p = try packfile.Write(mut mem, keepIds, s.repo.TempDir())
 		try p.Verify()
+		let sp = try s.repo.Stage(p.Path)
+		staged = sp.Name
 	}
-	use tx = oplog.Begin(s.Dir, "server", "push by " + who, oplog.Op.Push(who), moves)
-	try tx.Apply()
-	for cu in req.Changes {
-		let cid = try object.ParseChangeId(cu.Change)
-		let id = try object.ParseId(cu.Commit)
-		try change.AddVersion(s.Dir, cid, change.NewVersion(tx.Number(), id, now * 1000000000))
+	// step 4: versions and refs checked again under the lock, then everything current in one step
+	s.repo.Commit(Update{Who: who, Command: "push by " + who, Changes: req.Changes, Refs: req.Refs, Pack: staged, Time: now * 1000000000}) catch e {
+		if len(staged) > 0 {
+			s.repo.Drop(Staged{Name: staged}) catch _ {
+				false
+			}
+		}
+		fail e
 	}
-	try tx.Commit()
 	mut names = []str{}
 	for ru in req.Refs {
 		names = append(names, ru.Name)
