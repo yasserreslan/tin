@@ -218,5 +218,10 @@ while Redis (redis-server, else the `redis` image) is killed and restarted, a pu
 crash point (main never reaches a missing pack, and the sweep removes the rest), notifications on two nodes (#1023: an
 event committed through one node reaches websockets on the other; `bench/ref/tinhub_hooks` checks each webhook's
 HMAC-SHA256 signature with Go's `crypto/hmac`, answers 500 to make a delivery retried and given up after its attempts,
-and is the SMTP server followers are mailed through), and a server that refuses to start before `tinhub migrate`,
+and is the SMTP server followers are mailed through), sign-in and access (`signin.sh`: an invite, a reader's push
+refused and a writer's landing, 100 concurrent clones within a memory bound, a 50 MB blob streamed, a browser session,
+the mirror sync and pushes across restarts), the backup and restore drill (`backup.sh`), the move to phase 2 on the S3
+fake with nodes killed mid-push, mid-fetch and mid-job (`phase2.sh`), the Tin repo mirrored, cloned and pushed with
+short clone timings and a one-versus-three-node fetch count (`clones.sh`; its `TINHUB_BENCH_*` variables lengthen
+them), and a server that refuses to start before `tinhub migrate`,
 turns ready after it, and finishes a request in flight at SIGTERM.

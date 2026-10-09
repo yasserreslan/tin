@@ -15,3 +15,6 @@ packs.dir = /var/lib/tinhub
 secrets.nonce = file:/etc/tinhub/secrets/nonce
 secrets.cookie = file:/etc/tinhub/secrets/cookie
 log.level = info
+# the runner (design/tinhub.md §12): without runner.key it runs no replays; the toolchain is a Tin release unpacked here
+runner.key = file:/etc/tinhub/secrets/runner
+runner.tin = /usr/local/lib/tin

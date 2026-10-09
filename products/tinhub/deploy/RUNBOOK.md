@@ -21,6 +21,7 @@ One Linux server (arm64 or x86-64) runs every role; Postgres is on the same host
    install -d -o tinhub -g tinhub -m 0750 /var/lib/tinhub /var/backups/tinhub
    install -d -o root -g tinhub -m 0750 /etc/tinhub /etc/tinhub/secrets /etc/tinhub/tls
    for s in db nonce cookie; do head -c 32 /dev/urandom | base64 > /etc/tinhub/secrets/$s; done
+   tin replay key /etc/tinhub/secrets/runner   # the runner's replay key (design/tinhub.md §12); it prints the public key
    chgrp tinhub /etc/tinhub/secrets/*; chmod 0640 /etc/tinhub/secrets/*
    sudo -u postgres psql -c "ALTER ROLE tinhub PASSWORD '$(cat /etc/tinhub/secrets/db)'"
    ```
