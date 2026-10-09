@@ -93,13 +93,13 @@ type Out struct {
 
 // Line writes s and a newline.
 fn (o mut Out) Line(s str) {
-	o.buf = append(o.buf, []u8(s)...)
+	o.buf = append(o.buf, s...)
 	o.buf = append(o.buf, '\n')
 }
 
 // Text writes s.
 fn (o mut Out) Text(s str) {
-	o.buf = append(o.buf, []u8(s)...)
+	o.buf = append(o.buf, s...)
 }
 
 // flush writes the buffer to standard output, through `less -FRX` when it is a terminal and the text is taller than it.

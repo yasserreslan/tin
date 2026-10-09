@@ -373,7 +373,8 @@ fn writeCommit(g Global, r mut Repo, id object.Id, c object.CommitData, o mut Ou
 	o.Line("Date:   " + dateText(c.Author))
 	o.Line("")
 	for line in splitLines(c.Message) {
-		o.Line("    " + line)
+		o.Text("    ")
+		o.Line(line)
 	}
 }
 

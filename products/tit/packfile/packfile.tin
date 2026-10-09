@@ -286,6 +286,62 @@ fn (p mut Pack) entryBytes(off i64) !str {
 	return e
 }
 
+// storedZlib is the data of a zlib stream made only of stored blocks, when it is exactly size bytes and its Adler-32
+// matches; otherwise "" (the caller inflates it, which also reports what is wrong with it). size 0 is never stored.
+fn storedZlib(z str, size i64) str {
+	// the header: deflate with a 32 KiB window, no dictionary, a multiple of 31
+	if size <= 0 || len(z) < 2 + 5 + 4 || (i64(z[0]) & 15) != 8 || (i64(z[1]) & 32) != 0 || (i64(z[0]) * 256 + i64(z[1])) % 31 != 0 {
+		return ""
+	}
+	// one final block, as almost every commit and tree is: the body is a slice of the stream
+	if i64(z[2]) == 1 && len(z) == 2 + 5 + size + 4 {
+		let n = i64(z[3]) | (i64(z[4]) << 8)
+		let nn = i64(z[5]) | (i64(z[6]) << 8)
+		if n == size && n ^ nn == 65535 {
+			let body = z[7:7 + n]
+			let at = 7 + n
+			let sum = (u32(z[at]) << 24) | (u32(z[at + 1]) << 16) | (u32(z[at + 2]) << 8) | u32(z[at + 3])
+			if stamp.Adler32(body) == sum {
+				return body
+			}
+			return ""
+		}
+	}
+	mut out = make([]u8, 0, size)
+	mut at = 2
+	for {
+		if at + 5 > len(z) {
+			return ""
+		}
+		let h = i64(z[at])
+		// BTYPE 00 (stored) and nothing else in the header byte
+		if (h >> 1) != 0 {
+			return ""
+		}
+		let n = i64(z[at + 1]) | (i64(z[at + 2]) << 8)
+		let nn = i64(z[at + 3]) | (i64(z[at + 4]) << 8)
+		if n ^ nn != 65535 || at + 5 + n > len(z) || len(out) + n > size {
+			return ""
+		}
+		for k in 0..n {
+			out = append(out, z[at + 5 + k])
+		}
+		at += 5 + n
+		if h & 1 == 1 {
+			break
+		}
+	}
+	if at + 4 != len(z) || len(out) != size {
+		return ""
+	}
+	let body = str(out)
+	let sum = (u32(z[at]) << 24) | (u32(z[at + 1]) << 16) | (u32(z[at + 2]) << 8) | u32(z[at + 3])
+	if stamp.Adler32(body) != sum {
+		return ""
+	}
+	return body
+}
+
 // varintIn is the uvarint at e[at:] and where it ends, within e.
 fn varintIn(e str, at i64) !(i64, i64) {
 	if at >= len(e) {
@@ -345,10 +401,15 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 	// the size together) and copies the result once: 6 times the size, and room for its tables
 	let budget = 6 * size + 4194304
 	// budget * 1: a bare name before { would read as a struct literal.
-	let body = limit memory budget * 1 {
-		try squash.Unzlib(zbytes, size + 1)
-	} catch err {
-		fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
+	// commits and trees are written as zlib's stored blocks: copied out as they are, with no inflater (its tables and
+	// buffers were most of a log's memory, #807)
+	mut body = storedZlib(zbytes, size)
+	if len(body) != size {
+		body = limit memory budget * 1 {
+			try squash.Unzlib(zbytes, size + 1)
+		} catch err {
+			fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
+		}
 	}
 	if baseOff < 0 {
 		if len(body) != size {
