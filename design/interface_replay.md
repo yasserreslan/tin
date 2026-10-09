@@ -251,6 +251,66 @@ word   count       effect records
 Schema 2 added `peer` (#355). This build writes schema 2 and reads schemas 1 and 2; a schema 1
 capsule has no peer.
 
+## 6.1 Envelope version 2: a key per capsule, wrapped for each reader, signed (#1004)
+
+Status: **proposed** by #1004, for #1027 (`tit replay`), #1022 (tinhub's capsule store) and #1028 (the review
+runner). Version 1 stays readable; a server writes version 2 when `TIN_REPLAY_RECIPIENTS` is set.
+
+Why: under version 1 one symmetric `TIN_REPLAY_KEY` encrypts and authenticates every capsule, so whoever can read
+capsules can also forge them, access cannot be given to one person, and taking it back means a new key on every
+server. Version 2 gives each capsule its own data key, wraps it for each reader, and has the server sign the capsule.
+
+**Switches** (section 1, added):
+
+| variable | meaning |
+|---|---|
+| `TIN_REPLAY_RECIPIENTS` | comma list of readers' public keys (`tinreplay1:` and base64 of the 32-byte X25519 public key followed by the 1184-byte ML-KEM-768 encapsulation key; at most 64). Set: capsules are version 2. |
+| `TIN_REPLAY_SIGNING_KEY` | 64 hex digits: the ed25519 seed the server signs capsules with. Required with `TIN_REPLAY_RECIPIENTS`. |
+| `TIN_REPLAY_SUMMARY_PANIC` | `1`: the plain summary also carries the panic message (off by default: panic messages often hold user data). |
+| `TIN_REPLAY_IDENTITY` | for reading: the file holding a reader's private key (`tinreplaykey1:` and base64 of the 32-byte X25519 private key followed by the 64-byte ML-KEM-768 seed), mode 0600. |
+| `TIN_REPLAY_SIGNERS` | for reading: comma list of trusted signers' ed25519 public keys (64 hex digits). A version 2 capsule signed by any other key is refused. |
+
+`TIN_REPLAY_KEY` stays required: it still keys the secret handles (section 5.1), so they are the same in every
+capsule. A reader replays with the handles' key carried inside the encrypted body (below) and needs no
+`TIN_REPLAY_KEY` of its own. `tin replay key FILE` writes a new private key to FILE and prints its public key.
+
+**Layout.**
+
+```
+8 bytes    "TINCAP\x02\x00"            magic and envelope version
+32 bytes   signer                       the server's ed25519 public key
+string     summary                      plain text, readable without a key: "status=N\nmethod=M\npath=P\n",
+                                        and "panic=TEXT\n" with TIN_REPLAY_SUMMARY_PANIC=1 (path: the target
+                                        without its query)
+word       r                            readers, 1 to 64
+r ×        reader, 1200 bytes:
+  32 bytes   key id                     SHA-256 of the reader's public key bytes (X25519 || ML-KEM)
+  32 bytes   enc                        HPKE's encapsulated key
+  1088 bytes ML-KEM-768 ciphertext
+  48 bytes   sealed                     HPKE ciphertext and tag
+16 bytes   nonce
+n bytes    ciphertext                   (Ks || body) XOR keystream; keystream block i = HMAC-SHA256(Ke, nonce || word i)
+32 bytes   tag                          HMAC-SHA256(Km, every byte above)
+64 bytes   signature                    ed25519 by signer over "tin replay capsule v2\n" || SHA-256(every byte above)
+```
+
+- D is 32 fresh random bytes per capsule; Ke = HMAC-SHA256(D, "tin replay enc"), Km = HMAC-SHA256(D, "tin
+  replay mac") (version 1's construction, keyed by D). Ks is the 32-byte secret-handle key of section 5.1.
+- **Wrapping D for one reader** (hybrid: a reader's D is safe while either X25519 or ML-KEM-768 holds):
+  1. (ss, ct) = ML-KEM-768 encapsulation to the reader's encapsulation key.
+  2. mask = HMAC-SHA256(ss, "tin replay pq" || key id).
+  3. (enc, sealed) = HPKE base mode (RFC 9180; DHKEM X25519, HKDF-SHA256, ChaCha20-Poly1305) to the reader's
+     X25519 key, info = "tin replay v2" || key id, aad = ct, plaintext = D XOR mask.
+  A reader finds its block by key id, opens `sealed` (aad = ct), decapsulates ct and XORs the mask off.
+- **Reading** checks, in order: the magic; the signer is in `TIN_REPLAY_SIGNERS` ("capsule: signed by <hex>, not
+  a trusted signer"); the signature ("capsule: damaged or forged"); a reader block for the identity's key id
+  ("capsule: not sealed for this key"); the tag under Km. Only then is the body decrypted.
+
+What this gives: removing a reader from `TIN_REPLAY_RECIPIENTS` keeps them out of every capsule recorded after;
+a reader who edits a capsule cannot re-sign it, so `tin replay` refuses it; tinhub stores the summary to group
+failures and never holds a key. What it does not: a reader learns Ks, as under version 1, so a reader can test
+guesses of a secret against its handle; capsules recorded before a reader was removed stay readable to them.
+
 ## 7. Scheduling events (#243)
 
 Recorded in the same log, in completion order, with these kinds (result layouts fixed here; the
