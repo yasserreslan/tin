@@ -75,6 +75,20 @@ fn storePack(r mut Repo, data str) !i64 {
 	return p.Count
 }
 
+// storeFile keeps the pack a fetch wrote to path (none when it sent nothing) as it is, indexed where it lies; it gives
+// how many objects it holds.
+fn storeFile(r mut Repo, path str) !i64 {
+	if !quarry.Exists(path) {
+		return 0
+	}
+	let p = packfile.KeepFile(path, r.Ws.Store + "/packs", transport.MaxObject) catch e {
+		quarry.Remove(path) catch _ {
+		}
+		fail e
+	}
+	return p.Count
+}
+
 fn localTips(r Repo) ![]str {
 	let refs = change.NewRefs(r.Ws.Store)
 	let all = try refs.List("refs/")
@@ -122,8 +136,17 @@ fn fetchFrom(r mut Repo, remote str, url str, remoteName str) !(transport.Heads,
 		let cfg = try r.config()
 		let lazyRemote = cfg.Get("lazy.remote")
 		let lazy = lazyRemote != nil && lazyRemote == remote
-		let (_, data) = try c.Fetch(transport.FetchRequest{Wants: wants, Haves: haves, NoBlobs: lazy, Objects: []str{}})
-		got = try storePack(mut r, data)
+		// the pack streams to a file and is indexed where it lies (#1009): a clone takes the memory of its buffers
+		try quarry.MkdirAll(r.Ws.Store + "/packs")
+		let tmp = r.Ws.Store + "/packs/tmp-fetch-" + seal.Hex(seal.RandomBytes(8)) + ".pack"
+		_ = c.FetchTo(transport.FetchRequest{Wants: wants, Haves: haves, NoBlobs: lazy, Objects: []str{}}, tmp) catch e {
+			if quarry.Exists(tmp) {
+				quarry.Remove(tmp) catch _ {
+				}
+			}
+			fail e
+		}
+		got = try storeFile(mut r, tmp)
 	}
 	// the refs: branches under refs/remotes/<name>/, tags as they are when this repository has none of that name
 	let refs = change.NewRefs(r.Ws.Store)
@@ -393,9 +416,12 @@ fn doPush(g Global, a ShareArgs, o mut Out) ! {
 	let ids = try sendObjects(mut r, tip, hide)
 	let tmp = r.Ws.Store + "/tmp-push-" + seal.Hex(seal.RandomBytes(8))
 	let p = try packfile.Write(mut r.Store, ids, tmp)
-	let data = try flume.ReadFile(p.Path)
+	// the pack streams from its file (#1009)
+	let (_, perr) = c.PushFile(transport.PushRequest{Changes: []transport.ChangeUpdate{}, Refs: []transport.RefUpdate{transport.RefUpdate{Name: branch, Old: old, New: tip.Hex()}}}, p.Path)
 	try quarry.RemoveAll(tmp)
-	_ = try c.Push(transport.PushRequest{Changes: []transport.ChangeUpdate{}, Refs: []transport.RefUpdate{transport.RefUpdate{Name: branch, Old: old, New: tip.Hex()}}}, data)
+	if perr != nil {
+		fail perr
+	}
 	// this repository's copy of the server's branch
 	let tracking = "refs/remotes/" + a.Remote + "/" + shortBranch(branch)
 	if !twine.Contains(a.Remote, "://") {
