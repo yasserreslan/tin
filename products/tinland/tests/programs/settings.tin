@@ -28,6 +28,11 @@ fn main() {
 	}
 	let h = app.LoadSettings()
 	say.Line("hygiene", h.TrimTrailing, h.FinalNewline)
+	quarry.WriteFile(path, "line_height = 1.6\nruler_column = 90\n") catch _ {
+	}
+	let lh = app.LoadSettings()
+	say.Line("line height", lh.LineHeight, lh.RulerColumn)
+	say.Line("line height defaults", app.DefaultSettings().LineHeight)
 	let def = app.DefaultSettings()
 	say.Line("hygiene defaults", def.TrimTrailing, def.FinalNewline)
 	let (k1, m1) = s.Binding("Toggle Terminal", "`", appkit.ModCtrl)

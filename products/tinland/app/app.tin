@@ -21,6 +21,7 @@ fn Run(paths []str) bool {
 	mut ws = workspace.New(theme.ByName(cfg.Theme), editor.New(textedit.New()))
 	ws.SaveHygiene(cfg.TrimTrailing, cfg.FinalNewline)
 	ws.UseRuler(cfg.Ruler, cfg.RulerColumn)
+	editor.SetLineHeight(cfg.LineHeight)
 	ws.CodeSize = cfg.FontSize
 	render.UseFonts(cfg.UIFont, cfg.CodeFont)
 	ws.LoadRecent(quarry.Getenv("HOME") + "/.config/tinland/recent")

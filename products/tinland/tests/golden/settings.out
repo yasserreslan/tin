@@ -3,6 +3,8 @@ template written true true
 template changes nothing dark 13 0
 read light 15 SFMono-Regular 2
 hygiene true false
+line height 1.6 90
+line height defaults 1.2
 hygiene defaults false false
 rebound j true
 removed true 0
