@@ -717,6 +717,20 @@ fn (c mut Conn) raw_step(out mut []u8) i64 {
 		out = append(out, c.raw_alert(err)...)
 		return -2
 	}
+	if typ == ctPlainReady {
+		// opened in place into c.plain (#972)
+		if c.pe == 0 {
+			c.alertCt += 1
+			if c.alertCt > 32 {
+				pendingAlert = alertUnexpectedMessage
+				out = append(out, c.raw_alert(fail("tls: too many empty records"))...)
+				return -2
+			}
+			return 1
+		}
+		c.alertCt = 0
+		return 1
+	}
 	if typ == ctApplicationData {
 		if len(data) == 0 {
 			c.alertCt += 1

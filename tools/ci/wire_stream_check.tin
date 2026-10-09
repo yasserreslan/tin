@@ -1,0 +1,133 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "./tlsutil"
+import "mint"
+import "say"
+import "twine"
+
+// Streamed HTTP client bodies (#774): wire.DoStream against the anvil server tools/ci/fixtures/wire_stream_server.tin, the client
+// tools/ci/fixtures/wire_stream_client.tin.
+//
+// - A 2 GiB upload (chunked, and with a Content-Length) and a 2 GiB download (chunked) arrive whole and in order, with the client's
+//   memory pool under 4 MiB all along (TIN_POOL_WARN_MB=4: the runtime says so when a plain program's pool passes it) and its RSS
+//   reported.
+// - A within that ends mid-body fails the read with fault.DeadlineExceeded, and the connection closes: the server's next write fails.
+// - A response read to its end leaves its connection in the keep-alive pool: the next call to the host comes from the same address.
+// - Recorded in a request (wire.http@1, #241) and replayed with the upstream gone: the same answer.
+// - The same over HTTPS (HTTP/1.1 by ALPN), 2 GiB each way: sending seals records into the Stream's own buffer (tls SealRawTo),
+//   receiving opens TLS 1.3 records in place (seal AEAD.OpenTo, #972).
+
+const GIB = 1073741824
+
+// Run is one client run: its output, and the client's RSS at its peak.
+type Run struct {
+	Out str
+	TopMiB i64
+}
+
+fn client(exe str, out str, name str, args []str, env []str) Run {
+	let log = ci.Join(out, name + ".log")
+	mut set = []str{"TIN_POOL_WARN_MB=4"}
+	for e in env {
+		set = append(set, e)
+	}
+	let run = nettest.StartCoded(exe, args, set, log, 0)
+	mut top = 0
+	mut code = 0
+	for {
+		let (c, done) = run.ExitCode(0.05)
+		if done {
+			code = c
+			break
+		}
+		let now = nettest.RssKiB(run.Pid)
+		if now > top {
+			top = now
+		}
+	}
+	let text = ci.Read(log)
+	ci.Check(code == 0, name + ": exit " + mint.Itoa(code) + ": " + text)
+	ci.Check(!twine.Contains(text, "memory pool holds"), name + ": the client's pool passed 4 MiB: " + text)
+	return Run{Out: twine.TrimSpace(text), TopMiB: top / 1024}
+}
+
+fn expect(r Run, want str, what str) {
+	ci.Check(twine.HasPrefix(r.Out, want), what + ": " + r.Out)
+	say.Line(what + ": " + r.Out + " (client RSS at most " + mint.Itoa(r.TopMiB) + " MiB)")
+}
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/wire_stream")
+	ci.Mkdirs(out)
+	let server = ci.Join(out, "server")
+	ci.BuildTin("tools/ci/fixtures/wire_stream_server.tin", server, "", []str{})
+	let exe = ci.Join(out, "client")
+	ci.BuildTin("tools/ci/fixtures/wire_stream_client.tin", exe, "", []str{})
+	let port = nettest.Port()
+	let srv = nettest.Start(server, []str{}, []str{"TIN_CORES=1"}, ci.Join(out, "server.log"), port)
+	srv.Ready(10)
+	let u = "http://127.0.0.1:" + mint.Itoa(port)
+	let n = mint.Itoa(2 * GIB)
+
+	expect(client(exe, out, "up", []str{"up", u + "/sink", n}, []str{}), "status=200 len=" + n + " bad=0", "2 GiB upload, chunked")
+	expect(client(exe, out, "upcl", []str{"upcl", u + "/sink", n}, []str{}), "status=200 len=" + n + " bad=0", "2 GiB upload, Content-Length")
+	expect(client(exe, out, "down", []str{"down", u + "/source?n=" + n}, []str{}), "status=200 got=" + n + " bad=0 length=-1", "2 GiB download, chunked")
+	expect(client(exe, out, "downcl", []str{"down", u + "/source?n=67108864&len=1"}, []str{}), "status=200 got=67108864 bad=0 length=67108864",
+		"64 MiB download, Content-Length")
+
+	let c = client(exe, out, "cancel", []str{"cancel", u + "/slow"}, []str{})
+	ci.Check(twine.HasPrefix(c.Out, "ended: deadline exceeded deadline=true"), "a within that ends mid-body: " + c.Out)
+	nettest.Eventually(5.0, fn() bool {
+		return nettest.Get(port, "/left") == "1"
+	})
+	say.Line("a within that ends mid-body: " + c.Out + "; the server saw the connection close")
+
+	let r = client(exe, out, "reuse", []str{"reuse", u + "/"}, []str{})
+	let parts = twine.Split(r.Out, " ")
+	ci.Check(len(parts) == 2 && twine.HasPrefix(parts[0], "first=") && parts[0][6:] == parts[1][7:], "a response read to its end keeps its connection: " + r.Out)
+	say.Line("a response read to its end keeps its connection: " + r.Out)
+
+	// Recorded and replayed: a server records its /proxy request, which reads this one's /source through DoStream; replayed with the
+	// upstream stopped, the effects come from the capsule.
+	let spool = ci.Join(out, "spool")
+	ci.Sh("rm -rf \"" + spool + "\"", "", 30)
+	let key = "0000000000000000000000000000000000000000000000000000000000000007"
+	let rport = nettest.Port()
+	let rec = nettest.Start(server, []str{}, []str{"TIN_CORES=1", "TIN_REPLAY_DIR=" + spool, "TIN_REPLAY_KEY=" + key, "TIN_REPLAY_SAMPLE=1"}, ci.Join(out, "record.log"), rport)
+	rec.Ready(10)
+	let live = nettest.Get(rport, "/proxy?to=" + u + "/source?n=300000")
+	ci.Check(live == "proxied len=300000 bad=0", "a streamed call while recording: " + live)
+	nettest.Eventually(5.0, fn() bool {
+		return len(ci.Files(spool, ".tcap")) == 1
+	})
+	rec.Stop()
+	srv.Stop()
+	let caps = ci.Files(spool, ".tcap")
+	ci.Check(len(caps) == 1, "one capsule recorded, not " + mint.Itoa(len(caps)))
+	let replayed = ci.Sh("TIN_CORES=1 PORT=1 TIN_REPLAY_KEY=" + key + " TIN_REPLAY_CAPSULE=\"" + caps[0] + "\" \"" + server + "\"", "", 60)
+	ci.Check(replayed.Code == 0 && twine.Contains(replayed.Stdout + replayed.Stderr, "proxied len=300000 bad=0"), "the streamed call replayed: " + replayed.Stdout + replayed.Stderr)
+	say.Line("recorded and replayed with the upstream gone: " + twine.TrimSpace(replayed.Stdout + replayed.Stderr))
+
+	// HTTPS, HTTP/1.1 by ALPN.
+	mut openssl = tlsutil.Openssl3()
+	if len(openssl) == 0 {
+		openssl = "openssl"
+	}
+	let certs = tlsutil.MakeCerts(openssl, out, []str{"ecdsa"})
+	let cert = tlsutil.Of(certs, "ecdsa")
+	let tport = nettest.Port()
+	let tsrv = nettest.Start(server, []str{}, []str{"TIN_CORES=1", "TLS_CERT=" + cert.Cert, "TLS_KEY=" + cert.Key}, ci.Join(out, "server_tls.log"), tport)
+	tsrv.Ready(10)
+	let tu = "https://127.0.0.1:" + mint.Itoa(tport)
+	let insecure = []str{"INSECURE=1"}
+	expect(client(exe, out, "tls_up", []str{"up", tu + "/sink", n}, insecure), "status=200 len=" + n + " bad=0", "https: 2 GiB upload")
+	expect(client(exe, out, "tls_down", []str{"down", tu + "/source?n=" + n}, insecure), "status=200 got=" + n + " bad=0", "https: 2 GiB download")
+	let tr = client(exe, out, "tls_reuse", []str{"reuse", tu + "/"}, insecure)
+	let tparts = twine.Split(tr.Out, " ")
+	ci.Check(len(tparts) == 2 && len(tparts[0]) > 6 && tparts[0][6:] == tparts[1][7:], "https: a response read to its end keeps its connection: " + tr.Out)
+	say.Line("https: a response read to its end keeps its connection: " + tr.Out)
+	tsrv.Stop()
+	ci.Pass("wire streams: 2 GiB up and down in a pool under 4 MiB over http and https, a within ends the body and closes, keep-alive, replay")
+}

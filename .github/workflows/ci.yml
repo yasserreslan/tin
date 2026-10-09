@@ -234,6 +234,8 @@ jobs:
         run: sh tools/ci/tin.sh stream_body_check
       - name: HTTP client keep-alive pool (connections reused, stale ones replaced, MaxIdle, https on one handshake)
         run: sh tools/ci/tin.sh wire_pool_check
+      - name: HTTP client streamed bodies (2 GiB up and down in a 4 MiB pool, http and https, a within ends the body, replay)
+        run: sh tools/ci/tin.sh wire_stream_check
       - name: HTTP/2 client (wire against Go's net/http and anvil over TLS and h2c, GOAWAY)
         run: sh tools/ci/tin.sh wire_h2_check
       - name: Held cores (stuck-core counters; SIGTERM while core 0 is held, Linux)

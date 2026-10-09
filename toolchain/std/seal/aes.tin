@@ -463,6 +463,59 @@ fn gcm_seal_hw_to(a AEAD, nonce []u8, src i64, n i64, aad []u8, dst i64) {
 	memcpy(dst+n, st, 16)
 }
 
+// gcm_open_hw_to is AEAD.OpenTo on the CPU's instructions, with its blocks in a.tmp: it hashes
+// the ciphertext, checks the tag after it, and only then decrypts into dst (which may be src). It
+// allocates nothing; false when the tag does not match.
+fn gcm_open_hw_to(a AEAD, nonce []u8, src i64, n i64, aad []u8, dst i64) bool {
+	let t = cast(i64, a.tmp)[2]
+	let rkp = cast(i64, a.rkb)[2]
+	let hp = cast(i64, a.hb)[2]
+	let np = cast(i64, nonce)[2]
+	let j = t
+	let j0 = t + 16
+	let st = t + 32
+	let lens = t + 48
+	let blk = t + 64
+	memcpy(j, np, 12)
+	memcpy(j0, np, 12)
+	for i in 12..15 {
+		store8(j+i, 0)
+		store8(j0+i, 0)
+	}
+	store8(j+15, 2)
+	store8(j0+15, 1)
+	__st(st, 0, 3)
+	__st(st+8, 0, 3)
+	ghash_hw_raw(st, hp, cast(i64, aad)[2], len(aad), blk)
+	ghash_hw_raw(st, hp, src, n, blk)
+	for i in 0..8 {
+		store8(lens+7-i, u8(u64(len(aad)) * 8 >> u64(8*i)))
+		store8(lens+15-i, u8(u64(n) * 8 >> u64(8*i)))
+	}
+	ghash_hw(st, hp, lens, 1)
+	aes_hw_ctr(rkp, a.nr, j0, st, st, 1)
+	mut d = u8(0)
+	for i in 0..16 {
+		d |= load8(st+i) ^ load8(src+n+i)
+	}
+	if d != 0 {
+		return false
+	}
+	let full = n / 16
+	if full > 0 {
+		aes_hw_ctr(rkp, a.nr, j, src, dst, full)
+	}
+	let rest = n - 16*full
+	if rest > 0 {
+		__st(blk, 0, 3)
+		__st(blk+8, 0, 3)
+		memcpy(blk, src+16*full, rest)
+		aes_hw_ctr(rkp, a.nr, j, blk, blk, 1)
+		memcpy(dst+16*full, blk, rest)
+	}
+	return true
+}
+
 // ghash_hw_raw is ghash_hw_bytes with the zero-padded last block built at pad (16 bytes).
 fn ghash_hw_raw(sp i64, hp i64, p i64, n i64, pad i64) {
 	let full = n / 16

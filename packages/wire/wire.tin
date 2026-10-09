@@ -475,6 +475,33 @@ fn DoWith(method str, url str, headers []str, body str, opt Options) !Resp {
 	if tp != 0 {
 		return try http_taped(tp, method, url, headers, body, opt)
 	}
+	let k = try prepare(method, url, headers, body, opt, false)
+	// A kept connection the server closed meanwhile fails before any response byte: once, for a
+	// request that may be repeated, the call goes to a fresh connection.
+	staleRetry = false
+	if k.scheme == "https" {
+		let (r, err) = attempt_tls(k, opt, true)
+		if err != nil && staleRetry {
+			return try attempt_tls(k, opt, false)
+		}
+		if err != nil {
+			fail err
+		}
+		return r
+	}
+	let (r, err) = attempt_plain(k, true)
+	if err != nil && staleRetry {
+		return try attempt_plain(k, false)
+	}
+	if err != nil {
+		fail err
+	}
+	return r
+}
+
+// prepare checks a call and makes its request: the head, then body. chunked (DoStream) asks for a
+// head that announces a chunked body, sent afterwards, unless headers give a Content-Length.
+fn prepare(method str, url str, headers []str, body str, opt Options, chunked bool) !call {
 	mut limit_ = opt.MaxBody
 	if limit_ <= 0 {
 		limit_ = DefaultMaxBody
@@ -579,7 +606,19 @@ fn DoWith(method str, url str, headers []str, body str, opt Options) !Resp {
 			i += 2
 		}
 	}
-	if len(body) > 0 || method == "POST" || method == "PUT" {
+	mut given = false
+	{
+		mut i = 0
+		for i+1 < len(headers) {
+			if fold_eq(headers[i], "Content-Length") {
+				given = true
+			}
+			i += 2
+		}
+	}
+	if chunked && !given {
+		req = append(req, "Transfer-Encoding: chunked\r\n"...)
+	} else if !chunked && (len(body) > 0 || method == "POST" || method == "PUT") {
 		req = append(req, "Content-Length: "...)
 		req = append(req, say.Str(len(body))...)
 		req = append(req, "\r\n"...)
@@ -595,27 +634,7 @@ fn DoWith(method str, url str, headers []str, body str, opt Options) !Resp {
 	}
 	let k = call{addr: addr, hostport: hostport, key: pool_key(secure, hostport, opt), req: req, head: method == "HEAD", limit_: limit_, until: until, timeout: opt.Timeout, maxIdle: maxIdle, idem: method == "GET" || method == "HEAD" || method == "PUT" || method == "DELETE" || method == "OPTIONS" || method == "TRACE",
 		method: method, scheme: scheme, path: path, headers: headers, body: body, noH2: opt.NoH2, h2c: opt.H2C, trace: opt.Trace}
-	// A kept connection the server closed meanwhile fails before any response byte: once, for a
-	// request that may be repeated, the call goes to a fresh connection.
-	staleRetry = false
-	if secure {
-		let (r, err) = attempt_tls(k, opt, true)
-		if err != nil && staleRetry {
-			return try attempt_tls(k, opt, false)
-		}
-		if err != nil {
-			fail err
-		}
-		return r
-	}
-	let (r, err) = attempt_plain(k, true)
-	if err != nil && staleRetry {
-		return try attempt_plain(k, false)
-	}
-	if err != nil {
-		fail err
-	}
-	return r
+	return k
 }
 
 // call is one DoWith call, ready to send: as HTTP/1.1 bytes (req), and in parts for HTTP/2.
