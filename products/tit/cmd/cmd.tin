@@ -60,6 +60,7 @@ type Command enum {
 	Focus([]str, bool)
 	Repack(bool)
 	Prune(PruneArgs)
+	Replay(ReplayArgs)
 	Purge(PurgeArgs)
 	Unpark(str)
 	Log(LogArgs)
@@ -364,6 +365,12 @@ commands:
   prune [--older-than D] [--dry-run]
                              remove what nothing reaches: refs, changes, workspaces, and the oplog and
                              snapshots of the last D (default 30d) are kept, so undo keeps working
+  replay push [--remote R] [--commit REV] [SPOOL]
+                             send a server's version 2 replay capsules (SPOOL, or TIN_REPLAY_DIR) to R
+  replay ls [--remote R] [--group]
+                             the capsules at R, newest first (or their groups, with counts)
+  replay ID [--remote R] [--against BUILD ...]
+                             fetch a capsule to .tit/replay/; --against runs tin replay on it (TIT_TIN)
   purge ID... --reason TEXT  remove objects no ref, change or workspace reaches from every pack at once
                              (a leaked secret: tit rewrite first); recorded in .tit/purged
   mirror [git dir or URL]    write every branch and tag into a git directory, as git objects (mirror.url); an
@@ -1053,6 +1060,10 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Watch(wa)
 	}
+	if name == "replay" {
+		let ra = try parseReplay(rest)
+		return g, Command.Replay(ra)
+	}
 	if name == "prune" {
 		mut pa = PruneArgs{Retention: prune.DefaultRetention, Dry: false}
 		mut k = 0
@@ -1360,6 +1371,7 @@ fn commandName(c Command) str {
 		Focus(_, _) => "focus"
 		Repack(_) => "repack"
 		Prune(_) => "prune"
+		Replay(_) => "replay"
 		Purge(_) => "purge"
 		Unpark(_) => "unpark"
 		Log(_) => "log"
@@ -1513,6 +1525,9 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Prune(pa) => {
 			try doPrune(g, pa, mut o)
+		}
+		Replay(ra) => {
+			try doReplay(g, ra, mut o)
 		}
 		Purge(ua) => {
 			try doPurge(g, ua, mut o)

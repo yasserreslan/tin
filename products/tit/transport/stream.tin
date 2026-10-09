@@ -55,7 +55,12 @@ fn readBody[R io.Reader](body mut R, most i64) !str {
 // any other request's body is small (at most a header and a list of ids) and is read whole, then answered by Handle.
 fn HandleStream[R io.Reader](s mut Server, method str, path str, signature str, body mut R, now i64) Reply {
 	if !(method == "POST" && twine.HasSuffix(path, "/tit/v1/push")) {
-		let whole = readBody(mut body, MaxHeader + streamBuf) catch e {
+		// a replay capsule (§17) may be up to MaxCapsule; anything else is a header and a list of ids
+		mut most = MaxHeader + streamBuf
+		if twine.HasSuffix(path, "/tit/v1/replay") {
+			most = MaxCapsule + MaxHeader + 64
+		}
+		let whole = readBody(mut body, most) catch e {
 			let (c, m) = codeOf(e)
 			mut code = c
 			if code == Code.Internal {
