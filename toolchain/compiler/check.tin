@@ -225,6 +225,7 @@ fn declare_global(s Sym) {
 }
 
 shared mut main_shadows i64 // declarations of package main renamed main.NAME beside the runtime's NAME (#519)
+shared mut externs []Fn // the C functions declared so far, one per name: a package's extern of a declared name calls it (#964)
 
 // sym_in_runtime reports a declaration in a runtime file (trusted, no package name).
 fn sym_in_runtime(s Sym) i64 {
@@ -1011,6 +1012,7 @@ fn map_entry_read(e i64) i64 {
 fn check() {
 	globals = cast([]Sym, []i64{})
 	sc_syms = cast([]Sym, []i64{})
+	externs = []Fn{}
 	sc_marks = []i64{}
 	init_stmts = []i64{}
 	safe_pairs = []i64{}
@@ -1444,12 +1446,38 @@ fn declare_fn(f Fn) {
 	if f.lifted != 0 {
 		return
 	}
-	let prev = lookup_global(name)
-	if f.extern_ != 0 && cast(i64, prev) != 0 && prev.kind == SYM_FUNC && cast(Fn, prev.fn_).extern_ != 0 {
+	if f.extern_ != 0 {
+		declare_extern(f)
 		return
 	}
 	let fs = sym_new(SYM_FUNC, name, f.pos)
 	fs.fn_ = cast(i64, f)
+	declare_global(fs)
+}
+
+// declare_extern declares an extern in the package being checked (#964). Its name is the package's, like
+// every function's, so a program's own name never meets it. The C function is one per name: a package that
+// declares a name another package already declared gets a symbol that calls the first declaration.
+fn declare_extern(f Fn) {
+	let key = qual(ck_pkg, f.name)
+	let prev = lookup_global(key)
+	if cast(i64, prev) != 0 && prev.kind == SYM_FUNC && cast(Fn, prev.fn_).extern_ != 0 {
+		return
+	}
+	mut target = f
+	mut i = 0
+	for i < len(externs) {
+		if externs[i].name == f.name {
+			target = externs[i]
+			break
+		}
+		i = i + 1
+	}
+	if cast(i64, target) == cast(i64, f) {
+		externs = append(externs, f)
+	}
+	let fs = sym_new(SYM_FUNC, key, f.pos)
+	fs.fn_ = cast(i64, target)
 	declare_global(fs)
 }
 
@@ -3173,7 +3201,8 @@ fn co_targets(c i64) []i64 {
 			return out
 		}
 		let s = lookup_global(qual(ck_pkg, plain))
-		if cast(i64, s) != 0 && s.kind == SYM_FUNC && s.fn_ != 0 {
+		// An extern has no body to follow, so the call is judged as before externs had package names (#964).
+		if cast(i64, s) != 0 && s.kind == SYM_FUNC && s.fn_ != 0 && cast(Fn, s.fn_).extern_ == 0 {
 			out = append(out, s.fn_)
 		}
 		return out
