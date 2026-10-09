@@ -462,7 +462,7 @@ Three requests over HTTP or HTTPS (`wire`), under a repository's URL (`remote.<n
 A body is a frame: `"TITP"`, u8 protocol version (1), u8 kind, u32 little-endian length *n*, *n* bytes of
 header (JSON, `argo`), then for the kinds that carry objects a tit pack (section 6) to the end of the body.
 Kinds: 1 heads answer, 2 fetch request, 3 fetch answer (header and pack), 4 push request (header and pack),
-5 push answer, 6 error. A header is at most 16 MiB. A reader rejects any other magic, version or kind with
+5 push answer, 6 error; 7 replay push, 8 replay answer, 9 replay capsule (§17). A header is at most 16 MiB. A reader rejects any other magic, version or kind with
 `BadRequest`; a later version is a new path (`/tit/v2/`), never a changed frame.
 
 ```text
@@ -625,3 +625,61 @@ the checks of step 2 do, so `Server.Handle` answers both the same way. A version
 
 The packages tinhub imports from tit (`object`, `store`, `packfile`, `change`, `transport`, `semantic`, `diff`,
 `merge`, `revwalk`) keep no process-wide state that two repositories in one process would share.
+
+## 17. Replay capsules over the protocol (#1027)
+
+Status: **proposed** by #1027, for #1022 (tinhub's capsule store, which serves the same requests). `tit serve` serves
+them too, from `.tit/replay/`. Only version 2 capsules (design/interface_replay.md §6.1) are taken: their plain
+summary and signature are readable without a key, so a server stores and groups capsules it cannot open.
+
+| request | body | answer |
+|---|---|---|
+| `POST <url>/tit/v1/replay` | kind 7 (replay push): header `{"commit": "<hex>", "name": "<file name>"}`, then the capsule | kind 8: `{"id": "<hex>", "group": "<hex>", "new": true}` |
+| `GET <url>/tit/v1/replay` | none | kind 8: `{"capsules": [{"id", "group", "name", "commit", "signer", "summary", "time"}]}`, newest first |
+| `GET <url>/tit/v1/replay/<id>` | none | kind 9: `{"id", "name", "commit"}`, then the capsule |
+
+- Every replay request is signed (§15 Authentication), even on a public repository: capsules hold real requests.
+- **id**: the hex SHA-256 of the capsule's bytes. A capsule pushed again answers `"new": false`, so an interrupted
+  upload simply runs again. **group**: the hex SHA-256 of the signer and the summary, so the same failure from the
+  same server falls in one group.
+- The server refuses a version 1 capsule, a damaged one, and one whose signature does not verify against the signer
+  it names (`BadRequest`), and one larger than 64 MiB (`TooLarge`).
+- `tit serve` keeps `.tit/replay/<id>.tcap` and `.tit/replay/<id>.json` (the answer's fields).
+
+```text
+tit replay push [--remote R] [--commit REV] [SPOOL]   send every .tcap in SPOOL (TIN_REPLAY_DIR); each sent file is removed
+tit replay ls [--remote R] [--group]                  the capsules (or the groups, with counts), newest first
+tit replay ID [--remote R] [--against BUILD [tin replay's options]]
+                                                      fetch a capsule (an id or a unique prefix) to .tit/replay/ID.tcap;
+                                                      with --against, run `tin replay` on it (TIT_TIN, or tin on the PATH)
+```
+
+## 18. Signing in and adding keys (#1017)
+
+Status: **proposed** by #1017, for #1012 (tinhub's accounts). `tit serve` serves both, for its allowed keys.
+
+**Sign-in with a key, no password.** A browser (or anything that wants a session) asks for a login request; the
+holder of a registered key approves it with a signed request.
+
+| request | body | answer |
+|---|---|---|
+| `POST <url>/tit/v1/login` | none (unsigned) | `{"code": "ABCD-EFGH", "url": "<where a browser waits>", "expires": <unix s>}` |
+| `POST <url>/tit/v1/login/<code>` | none, **signed** | `{"email": "<who approved>"}` |
+| `GET <url>/tit/v1/login/<code>` | none | `{"state": "pending" \| "approved" \| "expired", "email": "…"}` |
+
+A code is 8 letters from an alphabet without look-alikes (`ABCDEFGHJKMNPQRSTUVWXYZ23456789`), lives 10 minutes and is
+approved once: a second approval, or one after it expired, is refused (`Moved`). tinhub turns an approved code into
+the browser's session; `tit serve` only records it (`.tit/logins/<code>`). These answers are plain JSON
+(`application/json`), not frames: a browser reads them.
+
+**Adding a key with an invite.** `tit invite [--email ADDRESS]`, run in a served repository, makes a one-use code
+(`.tit/invites/<code>`, valid 7 days). `tit key add URL CODE` sends `POST <url>/tit/v1/keys` with
+`{"email", "key": "<base64 ed25519 public key>", "invite": "<code>"}`, signed by that key (it proves the sender holds
+it); the server checks and spends the invite and adds the key to its allowed keys (`.tit/allowed-keys` for `tit
+serve`). A spent, expired or unknown invite is refused (`Unauthorized`).
+
+```text
+tit login [URL or remote]     ask for a login request, approve it with your key, and print the code and the URL
+tit invite [--email ADDRESS]  (in a served repository) a one-use invite for tit key add
+tit key add URL CODE          register this machine's key at URL with an invite
+```
