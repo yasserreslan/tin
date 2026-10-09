@@ -211,39 +211,51 @@ fn personText(p Person) str {
 }
 
 fn parsePerson(s str, what str) !Person {
-	let lt = indexFrom(s, 0, '<')
-	let gt = indexFrom(s, 0, '>')
-	if lt < 1 || gt < lt || s[lt - 1] != ' ' || gt + 1 >= len(s) || s[gt + 1] != ' ' {
+	return try parsePersonAt(s, 0, len(s), what)
+}
+
+// parsePersonAt reads "name <email> seconds zone" from s[from:to], one header line without its newline, taking only
+// the name and the email out of s. It accepts only personText of the person it gives: the name ends at the first '<'
+// (after a space) and the email at the first '>', which checkPerson then requires to be the only ones; the seconds are
+// a canonical decimal, and the zone is five bytes, +hhmm or -hhmm with mm below 60 and not -0000, which zoneText writes
+// back the same (hh is at most 99, so the zone stays inside checkPerson's range).
+fn parsePersonAt(s str, from i64, to i64, what str) !Person {
+	let lt = indexIn(s, from, to, '<')
+	let gt = indexIn(s, from, to, '>')
+	if lt < from + 1 || gt < lt || s[lt - 1] != ' ' || gt + 1 >= to || s[gt + 1] != ' ' {
 		fail fault.Wrap(ErrCorrupt, "{what}: not 'name <email> seconds zone'")
 	}
-	let rest = s[gt + 2:]
-	let sp = indexFrom(rest, 0, ' ')
+	let rest = gt + 2
+	let sp = indexIn(s, rest, to, ' ')
 	if sp < 0 {
 		fail fault.Wrap(ErrCorrupt, "{what}: no zone")
 	}
-	let when = try parseDecimal(rest[0:sp], what + " time")
-	let z = rest[sp + 1:]
-	if len(z) != 5 || (z[0] != '+' && z[0] != '-') {
-		fail fault.Wrap(ErrCorrupt, "{what}: zone {z} is not +hhmm or -hhmm")
+	let when = decimalAt(s, rest, sp)
+	if when < 0 {
+		fail fault.Wrap(ErrCorrupt, "{what} time: {s[rest:sp]} is not a canonical decimal")
 	}
-	for i in 1..5 {
-		if z[i] < '0' || z[i] > '9' {
-			fail fault.Wrap(ErrCorrupt, "{what}: zone {z} is not +hhmm or -hhmm")
+	let z = sp + 1
+	if to - z != 5 || (s[z] != '+' && s[z] != '-') {
+		fail fault.Wrap(ErrCorrupt, "{what}: zone {s[z:to]} is not +hhmm or -hhmm")
+	}
+	for i in z + 1..z + 5 {
+		if s[i] < '0' || s[i] > '9' {
+			fail fault.Wrap(ErrCorrupt, "{what}: zone {s[z:to]} is not +hhmm or -hhmm")
 		}
 	}
-	let hh = i64(z[1] - '0') * 10 + i64(z[2] - '0')
-	let mm = i64(z[3] - '0') * 10 + i64(z[4] - '0')
+	let hh = i64(s[z + 1] - '0') * 10 + i64(s[z + 2] - '0')
+	let mm = i64(s[z + 3] - '0') * 10 + i64(s[z + 4] - '0')
 	if mm >= 60 {
 		fail fault.Wrap(ErrCorrupt, "{what}: zone minutes {mm}")
 	}
 	mut zone = hh * 60 + mm
-	if z[0] == '-' {
+	if s[z] == '-' {
 		if zone == 0 {
 			fail fault.Wrap(ErrCorrupt, "{what}: zone -0000 is written +0000")
 		}
 		zone = 0 - zone
 	}
-	let p = Person{Name: s[0:lt - 1], Email: s[lt + 1:gt], When: when, Zone: zone}
+	let p = Person{Name: s[from:lt - 1], Email: s[lt + 1:gt], When: when, Zone: zone}
 	try checkPerson(p, what)
 	return p
 }
@@ -402,102 +414,212 @@ fn parseSignature(s str) !str {
 	return str(b)
 }
 
+// decodeCommit reads a commit body with one cursor and takes each field out of it once (#807: splitting the headers
+// into lines, joining a signature's lines again and encoding the headers again to compare them cost two to three
+// times the body in allocations, which log made for every commit).
+//
+// It accepts exactly the bodies commitBody writes, without encoding anything again. The headers are read in the
+// order commitBody writes them, and each reader accepts only the text its writer gives for the value it returns:
+// - tree and parent ids are 64 lower-case hex digits (hexIdLine), which Hex writes back the same; parents are
+//   distinct, as commitCore requires;
+// - the change id is 32 letters k to z (changeIdLine), which Letters writes back the same;
+// - author and committer are read by parsePersonAt, which accepts only personText of what it gives;
+// - a conflict is the rest of its line, not empty and without NUL, the checks commitCore makes;
+// - a git header is read by gitHeaderAt, which accepts only what commitHeaders writes for what it gives;
+// - the signature line holds 64 bytes in canonical base64 (parseSignature), which signatureLine writes back;
+// then comes the empty line, and the message is the rest of the body. Each reader starts at a line's start and ends
+// after that line's newline, so no other text can come between the lines. No line can be read as another kind of
+// header: each starts with its own name and a space, and only a git header's continuation lines start with a space.
 fn decodeCommit(body str) !CommitData {
-	let h = try splitHeaders(body, "commit")
-	let ls = h.lines
-	mut k = 0
-	if k >= len(ls) {
-		fail fault.Wrap(ErrCorrupt, "commit: no tree")
-	}
-	let treeHex = field(ls[k], "tree")
-	if treeHex == nil {
+	if !textAt(body, 0, "tree ") {
 		fail fault.Wrap(ErrCorrupt, "commit: the first line is not tree")
 	}
-	let tree = try parseHexId(treeHex, "commit tree")
-	let none = Person{Name: "", Email: "", When: 0, Zone: 0}
-	mut c = CommitData{Tree: tree, Parents: []Id{}, Change: ChangeId{raw: ""}, Author: none, Committer: none, GitHeaders: []str{}, Signature: "", Message: h.message, Conflicts: []str{}}
-	k += 1
-	for k < len(ls) {
-		let p = field(ls[k], "parent")
-		if p == nil {
-			break
+	let tree = try hexIdLine(body, 5, "commit tree")
+	mut at = 5 + 65
+	mut parents = []Id{}
+	for textAt(body, at, "parent ") {
+		let pid = try hexIdLine(body, at + 7, "commit parent")
+		for q in parents {
+			if q == pid {
+				fail fault.Wrap(ErrCorrupt, "commit: parent {pid.Hex()} twice")
+			}
 		}
-		let pid = try parseHexId(p, "commit parent")
-		c.Parents = append(c.Parents, pid)
-		k += 1
+		parents = append(parents, pid)
+		at += 7 + 65
 	}
-	if k >= len(ls) {
-		fail fault.Wrap(ErrCorrupt, "commit: no change")
-	}
-	let ch = field(ls[k], "change")
-	if ch == nil {
+	if !textAt(body, at, "change ") {
 		fail fault.Wrap(ErrCorrupt, "commit: change expected")
 	}
-	c.Change = try ParseChangeId(ch)
-	k += 1
-	if k >= len(ls) {
-		fail fault.Wrap(ErrCorrupt, "commit: no author")
-	}
-	let au = field(ls[k], "author")
-	if au == nil {
+	let change = try changeIdLine(body, at + 7)
+	at += 7 + 33
+	if !textAt(body, at, "author ") {
 		fail fault.Wrap(ErrCorrupt, "commit: author expected")
 	}
-	c.Author = try parsePerson(au, "author")
-	k += 1
-	if k >= len(ls) {
-		fail fault.Wrap(ErrCorrupt, "commit: no committer")
-	}
-	let co = field(ls[k], "committer")
-	if co == nil {
+	let authorEnd = try lineEnd(body, at, "commit")
+	let author = try parsePersonAt(body, at + 7, authorEnd, "author")
+	at = authorEnd + 1
+	if !textAt(body, at, "committer ") {
 		fail fault.Wrap(ErrCorrupt, "commit: committer expected")
 	}
-	c.Committer = try parsePerson(co, "committer")
-	k += 1
-	for k < len(ls) {
-		let cf = field(ls[k], "conflict")
-		if cf == nil {
-			break
+	let committerEnd = try lineEnd(body, at, "commit")
+	let committer = try parsePersonAt(body, at + 10, committerEnd, "committer")
+	at = committerEnd + 1
+	mut conflicts = []str{}
+	for textAt(body, at, "conflict ") {
+		let e = try lineEnd(body, at, "commit")
+		if e == at + 9 || indexIn(body, at + 9, e, 0) >= 0 {
+			fail fault.Wrap(ErrCorrupt, "commit: a conflict line is empty or contains NUL")
 		}
-		c.Conflicts = append(c.Conflicts, cf)
-		k += 1
+		conflicts = append(conflicts, body[at + 9:e])
+		at = e + 1
 	}
-	for k < len(ls) && len(ls[k]) > 4 && ls[k][0:4] == "git-" {
-		// a header's continuation lines joined once (a signature has dozens: adding them one by one was quadratic)
-		mut parts = []str{ls[k][4:]}
-		k += 1
-		for k < len(ls) && len(ls[k]) > 0 && ls[k][0] == ' ' {
-			parts = append(parts, ls[k][1:])
-			k += 1
-		}
-		c.GitHeaders = append(c.GitHeaders, twine.Join(parts, "\n"))
+	mut gitHeaders = []str{}
+	for textAt(body, at, "git-") {
+		let (h, next) = try gitHeaderAt(body, at)
+		gitHeaders = append(gitHeaders, h)
+		at = next
 	}
-	if k < len(ls) {
-		let sig = field(ls[k], "signature")
-		if sig == nil {
-			fail fault.Wrap(ErrCorrupt, "commit: unexpected header {ls[k]}")
-		}
-		c.Signature = try parseSignature(sig)
-		k += 1
+	mut sig = ""
+	if textAt(body, at, "signature ") {
+		let e = try lineEnd(body, at, "commit")
+		sig = try parseSignature(body[at + 10:e])
+		at = e + 1
 	}
-	if k != len(ls) {
-		fail fault.Wrap(ErrCorrupt, "commit: header after the signature")
+	if at >= len(body) {
+		fail fault.Wrap(ErrCorrupt, "commit: no empty line before the message")
 	}
-	// the message is the body's own tail: only the headers and the signature line are encoded again, and compared in
-	// place (#807: building the whole body again cost as much as the rest of decoding)
-	// The git headers are the body's own lines between the core headers and the signature line, each checked here:
-	// encoding them again would give those lines back, so only the rest is encoded again and compared.
-	let coreBytes = try commitCore(c)
-	let core = str(coreBytes)
-	for h in c.GitHeaders {
-		let (_, _) = try checkGitHeader(h)
+	if body[at] != '\n' {
+		fail fault.Wrap(ErrCorrupt, "commit: unexpected header at byte {at}")
 	}
-	let sig = try signatureLine(c.Signature)
-	let sigAt = len(body) - len(c.Message) - 1 - len(sig)
-	if sigAt < len(core) || !textAt(body, 0, core) || !textAt(body, sigAt, sig) || (len(c.GitHeaders) == 0 && sigAt != len(core)) {
-		fail fault.Wrap(ErrCorrupt, "commit: not in canonical form")
-	}
-	return c
+	return CommitData{Tree: tree, Parents: parents, Change: change, Author: author, Committer: committer, GitHeaders: gitHeaders, Signature: sig, Message: body[at + 1:], Conflicts: conflicts}
 }
+
+// lineEnd is the offset of the newline ending the line that holds offset at.
+fn lineEnd(s str, at i64, what str) !i64 {
+	let e = indexFrom(s, at, '\n')
+	if e < 0 {
+		fail fault.Wrap(ErrCorrupt, "{what}: no empty line before the message")
+	}
+	return e
+}
+
+// hexIdLine reads the id written at offset at as 64 lower-case hex digits ending the line: the only text Hex writes
+// for it.
+fn hexIdLine(s str, at i64, what str) !Id {
+	if at + 65 > len(s) || s[at + 64] != '\n' {
+		fail fault.Wrap(ErrCorrupt, "{what}: an id is a line of 64 hex digits")
+	}
+	for i in 0..32 {
+		let hi = hexValue(s[at + 2 * i])
+		let lo = hexValue(s[at + 2 * i + 1])
+		if hi < 0 || lo < 0 {
+			fail fault.Wrap(ErrCorrupt, "{what}: an id has 64 lower-case hex digits")
+		}
+		decodeScratch[i] = u8(hi * 16 + lo)
+	}
+	return Id{raw: str(decodeScratch[0:32])}
+}
+
+// hexValue is the value of a lower-case hex digit, or -1.
+fn hexValue(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c - 'a') + 10
+	}
+	return -1
+}
+
+// changeIdLine reads the change id written at offset at as 32 letters k to z ending the line: the only text Letters
+// writes for it.
+fn changeIdLine(s str, at i64) !ChangeId {
+	if at + 33 > len(s) || s[at + 32] != '\n' {
+		fail fault.Wrap(ErrCorrupt, "commit: a change id is a line of 32 letters")
+	}
+	for i in 0..16 {
+		let hi = s[at + 2 * i]
+		let lo = s[at + 2 * i + 1]
+		if hi < 'k' || hi > 'z' || lo < 'k' || lo > 'z' {
+			fail fault.Wrap(ErrCorrupt, "commit: change id letters are k to z")
+		}
+		decodeScratch[i] = ((hi - 'k') << 4) | (lo - 'k')
+	}
+	return ChangeId{raw: str(decodeScratch[0:16])}
+}
+
+// gitNameByte reports whether c may be in a git header's name.
+fn gitNameByte(c u8) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+}
+
+// gitHeaderAt reads the git header whose line starts at offset at ("git-" name ' ' value), with its continuation
+// lines, and gives the header as CommitData keeps it ("name value", the value's lines joined by newlines, built in
+// one allocation) and the offset after its last line. It accepts only what commitHeaders writes for that header: the
+// name is one or more of a-z, 0-9 and '-' up to the first space and the value has no NUL (checkGitHeader's rules),
+// and each newline of the value is written as a newline and a space, so each continuation line is a space and one
+// more line of the value. The header ends at the first line that does not start with a space.
+fn gitHeaderAt(s str, at i64) !(str, i64) {
+	let from = at + 4
+	let e = try lineEnd(s, from, "commit")
+	mut p = from
+	for p < e && gitNameByte(s[p]) {
+		p += 1
+	}
+	if p == from || p == e || s[p] != ' ' {
+		fail fault.Wrap(ErrCorrupt, "commit: a git header name is not one or more of a-z, 0-9 and -")
+	}
+	if indexIn(s, p + 1, e, 0) >= 0 {
+		fail fault.Wrap(ErrCorrupt, "commit: git header {s[from:p]} contains NUL")
+	}
+	mut size = e - from
+	mut end = e
+	for end + 1 < len(s) && s[end + 1] == ' ' {
+		let ne = try lineEnd(s, end + 1, "commit")
+		if indexIn(s, end + 2, ne, 0) >= 0 {
+			fail fault.Wrap(ErrCorrupt, "commit: git header {s[from:p]} contains NUL")
+		}
+		size += ne - end - 1
+		end = ne
+	}
+	if end == e {
+		return s[from:e], e + 1
+	}
+	// every newline before end starts a continuation line: the newline is kept and the space after it dropped
+	if size > len(decodeScratch) {
+		mut out = make([]u8, 0, size)
+		mut i = from
+		for i < end {
+			let c = s[i]
+			out = append(out, c)
+			if c == '\n' {
+				i += 2
+			} else {
+				i += 1
+			}
+		}
+		return str(out), end + 1
+	}
+	mut i = from
+	mut n = 0
+	for i < end {
+		let c = s[i]
+		decodeScratch[n] = c
+		n += 1
+		if c == '\n' {
+			i += 2
+		} else {
+			i += 1
+		}
+	}
+	return str(decodeScratch[0:n]), end + 1
+}
+
+// decodeScratch is where decoding builds a value before it copies it into the value's one string (an id's bytes, a git
+// header's lines joined): a []u8 made for each value and then copied doubled what decoding allocates for it, and a
+// signed commit's signature is most of its headers. Each core has its own, and each function that writes it is done
+// with it before it returns, with no wait in between.
+mut decodeScratch = make([]u8, 4096)
 
 // textAt reports whether s holds t at offset at.
 fn textAt(s str, at i64, t str) bool {
@@ -588,16 +710,36 @@ fn appendStr(out mut []u8, s str) {
 
 // parseDecimal reads a non-negative decimal with no sign and no leading zero.
 fn parseDecimal(s str, what str) !i64 {
-	if len(s) == 0 || len(s) > 18 || (len(s) > 1 && s[0] == '0') {
+	let n = decimalAt(s, 0, len(s))
+	if n < 0 {
 		fail fault.Wrap(ErrCorrupt, "{what}: {s} is not a canonical decimal")
 	}
-	mut n i64 = 0
-	for i in 0..len(s) {
+	return n
+}
+
+// decimalAt is the decimal in s[from:to] when it is canonical (1 to 18 digits, no sign, no leading zero), else -1.
+fn decimalAt(s str, from i64, to i64) i64 {
+	let n = to - from
+	if n <= 0 || n > 18 || (n > 1 && s[from] == '0') {
+		return -1
+	}
+	mut v i64 = 0
+	for i in from..to {
 		let c = s[i]
 		if c < '0' || c > '9' {
-			fail fault.Wrap(ErrCorrupt, "{what}: {s} is not a canonical decimal")
+			return -1
 		}
-		n = n * 10 + i64(c - '0')
+		v = v * 10 + i64(c - '0')
 	}
-	return n
+	return v
+}
+
+// indexIn is the offset of the first c in s[from:to], or -1.
+fn indexIn(s str, from i64, to i64, c u8) i64 {
+	for i in from..to {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
