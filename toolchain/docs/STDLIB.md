@@ -2348,6 +2348,7 @@ Package rpc is Go's net/rpc over a codec. A Server serves methods registered wit
 - `Go[A constraints.Any, R constraints.Any](c mut Client, method str, args A) Pending[R]`: Go starts a call of method with args and returns its Pending reply at once, after the request is written (Go's Client.Go).
 - `(p mut Pending[R]) Wait() !R`: Wait waits for the call's reply and decodes it as R; a remote error or a lost connection is the call's fault.
 - `Call[A constraints.Any, R constraints.Any](c mut Client, method str, args A) !R`: Call invokes method with args and waits for its reply (Go's Client.Call).
+
 ## syslog
 
 Package syslog writes messages to the system log and to collectors, as Go's log/syslog does: the local Unix socket (/dev/log and its fallbacks), Unix datagram and stream sockets, TCP and IPv4 UDP, the priorities and facilities, a collector for the receiving side, and a herald sink that writes a log record in the same wire format.
