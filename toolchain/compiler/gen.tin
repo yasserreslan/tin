@@ -962,6 +962,7 @@ shared mut vd_fn i64
 shared mut vd_dst i64 // the running function's destination local (0: its result is not one)
 shared mut vd_pairs []i64 // [call, destination local or -1] for the running function's calls
 shared mut vd_regs i64 // the running function returns a value struct in registers (dest_regs)
+shared mut vd_bangs []i64 // [call, destination local] for the running function's !T calls (bang_syms, #893)
 
 // dest_regs reports a value struct result of 8 or 16 bytes (#669): it comes back in x0 and x1
 // (rax and rdx on x86-64), as a dyn value does, with no destination. The caller stores the
@@ -975,6 +976,35 @@ fn dest_regs(t Ty) i64 {
 fn dest_fn(f Fn) i64 {
 	let t = cast(Ty, f.type_)
 	return i64(cast(i64, t) != 0 && kind_of(t) == K_FUNC && len(t.results) == 1 && is_value_struct(cast(Ty, t.results[0])) != 0)
+}
+
+// dest_bang_fn reports whether f is a !T returning a value struct (#893): the value goes through
+// the caller's destination too, and the fault comes back in the second result lane.
+fn dest_bang_fn(f Fn) i64 {
+	let t = cast(Ty, f.type_)
+	return i64(cast(i64, t) != 0 && kind_of(t) == K_FUNC && len(t.results) == 2 && is_value_struct(cast(Ty, t.results[0])) != 0 && kind_of(cast(Ty, t.results[1])) == K_ERROR)
+}
+
+// bang_syms reports the results of a !T call (its CallMultiStmt syms): a value struct and a
+// fault. The call's value is written to a destination of the caller's (vd_bangs).
+fn bang_syms(syms []Sym) i64 {
+	return i64(len(syms) == 2 && is_value_struct(cast(Ty, syms[0].type_)) != 0 && kind_of(cast(Ty, syms[1].type_)) == K_ERROR)
+}
+
+// bang_call is the call a CallMultiStmt makes for a !T (bang_syms): the call itself, or the value
+// of the sequence it is wrapped in (a dyn method's receiver, gen_seq), or 0 for any other shape.
+fn bang_call(s CallMultiStmt) i64 {
+	if bang_syms(s.syms) == 0 {
+		return 0
+	}
+	mut c = s.call
+	if cast(Node, c).kind == EX_SEQ {
+		c = cast(SeqExpr, c).value
+	}
+	if cast(Node, c).kind != EX_CALL {
+		return 0
+	}
+	return c
 }
 
 // dest_call reports a call of such a function: any call (direct, through a function value or a
@@ -992,9 +1022,10 @@ fn value_dests(f Fn) {
 	vd_dst = 0
 	vd_regs = 0
 	vd_pairs = []i64{}
+	vd_bangs = []i64{}
 	if dest_fn(f) != 0 && dest_regs(cast(Ty, cast(Ty, f.type_).results[0])) != 0 {
 		vd_regs = 1
-	} else if dest_fn(f) != 0 {
+	} else if dest_fn(f) != 0 || dest_bang_fn(f) != 0 {
 		vd_dst = ia_local_in(f, ty_int)
 		// Read by the code generator only: a frame word of its own.
 		cast(Sym, vd_dst).addr = 1
@@ -1044,11 +1075,30 @@ fn vd_stmt(s i64) {
 		let vals = cast(ReturnStmt, s).values
 		mut j = 0
 		for cast(i64, vals) != 0 && j < len(vals) {
-			vd_expr(vals[j])
+			if j == 0 && vd_dst != 0 && dest_call(vals[0]) != 0 && dest_regs(cast(Ty, cast(Node, vals[0]).type_)) == 0 {
+				// A !T returns a call's value: the call writes this function's destination (#893).
+				vd_pairs = append(vd_pairs, vals[0])
+				vd_pairs = append(vd_pairs, -1)
+				vd_parts(vals[0])
+			} else {
+				vd_expr(vals[j])
+			}
 			j = j + 1
 		}
 	} else if k == ST_CALLMULTI {
-		vd_expr(cast(CallMultiStmt, s).call)
+		let cm = cast(CallMultiStmt, s)
+		let bc = bang_call(cm)
+		if bc != 0 {
+			// A !T call's value goes to a destination of its own, not a pool copy (#893).
+			vd_bangs = append(vd_bangs, bc)
+			vd_bangs = append(vd_bangs, ia_local_in(cast(Fn, vd_fn), cm.syms[0].type_))
+			if cast(Node, cm.call).kind == EX_SEQ {
+				vd_stmts(cast(SeqExpr, cm.call).stmts)
+			}
+			vd_parts(bc)
+		} else {
+			vd_expr(cm.call)
+		}
 	}
 }
 
@@ -1122,8 +1172,25 @@ fn vd_dest(e i64) i64 {
 	return 0
 }
 
+// vd_bang is the destination of !T call e (vd_bangs), or 0 when it has none.
+fn vd_bang(e i64) i64 {
+	mut i = 0
+	for i < len(vd_bangs) {
+		if vd_bangs[i] == e {
+			return vd_bangs[i + 1]
+		}
+		i = i + 2
+	}
+	return 0
+}
+
 // vd_pass puts call e's destination in x8, last before the branch.
 fn vd_pass(e i64) {
+	let b = vd_bang(e)
+	if b != 0 {
+		fp_offset(8, cast(Sym, b).off)
+		return
+	}
 	if is_value_struct(cast(Ty, cast(Node, e).type_)) == 0 || dest_regs(cast(Ty, cast(Node, e).type_)) != 0 {
 		return
 	}
@@ -1140,7 +1207,7 @@ fn vd_pass(e i64) {
 // value struct. A call the function returns as its own leaves the words for its return.
 fn vd_receive(e i64) {
 	let t = cast(Ty, cast(Node, e).type_)
-	if dest_regs(t) == 0 {
+	if dest_regs(t) == 0 || vd_bang(e) != 0 {
 		return
 	}
 	let d = vd_dest(e)
@@ -1181,6 +1248,19 @@ fn vd_return(v i64) {
 	}
 	slot_mem(I_LDR, X16, cast(Sym, vd_dst).off)
 	gen_value_store(v, cast(Ty, cast(Node, v).type_).size)
+	slot_mem(I_LDR, 0, cast(Sym, vd_dst).off)
+}
+
+// vd_bang_return returns a !T's value v and fault e (dest_bang_fn, #893): the value is written to
+// the caller's destination, whose address goes back in x0, and the fault goes in x1.
+fn vd_bang_return(v i64, e i64) {
+	if cast(Node, v).kind == EX_CALL && vd_dest(v) < 0 {
+		gen_call(v, 0)
+	} else {
+		slot_mem(I_LDR, X16, cast(Sym, vd_dst).off)
+		gen_value_store(v, cast(Ty, cast(Node, v).type_).size)
+	}
+	gen_to(e, 1, 0)
 	slot_mem(I_LDR, 0, cast(Sym, vd_dst).off)
 }
 
@@ -4047,6 +4127,10 @@ fn gen_stmt(s i64) {
 		}
 		emit1(I_B, g_loops[i])
 	} else if k == ST_CALLMULTI {
+		let cm = cast(CallMultiStmt, s)
+		if bang_syms(cm.syms) != 0 && vd_bang(bang_call(cm)) == 0 {
+			err_code_at(cast(Node, s).pos, "E990 INTERNAL", "a !T call has no destination")
+		}
 		gen_call(cast(CallMultiStmt, s).call, 0)
 		let syms = cast(CallMultiStmt, s).syms
 		// Results arrive in lanes x0-x7; a dyn value takes two, as gen_return sends it (#568).
@@ -4081,7 +4165,9 @@ fn gen_stmt(s i64) {
 // Multiple results travel in x0-x7 (floats as bits); a single float result in d0.
 fn gen_return(s ReturnStmt) {
 	let f = cur_gen_fn
-	if cast(i64, s.values) != 0 {
+	if cast(i64, s.values) != 0 && vd_dst != 0 {
+		vd_bang_return(s.values[0], s.values[1])
+	} else if cast(i64, s.values) != 0 {
 		let vals = s.values
 		mut lanes = []i64{}
 		mut nlanes = 0

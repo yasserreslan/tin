@@ -974,6 +974,11 @@ fn x_value_store(v i64, size i64) {
 
 // x_vd_pass puts call e's destination in r10, last before the call (#631 A2, gen.tin vd_pass).
 fn x_vd_pass(e i64) {
+	let b = vd_bang(e)
+	if b != 0 {
+		emit2(X_LEA, R10, x_mem1(RBP, cast(Sym, b).off))
+		return
+	}
 	if is_value_struct(cast(Ty, cast(Node, e).type_)) == 0 || dest_regs(cast(Ty, cast(Node, e).type_)) != 0 {
 		return
 	}
@@ -989,7 +994,7 @@ fn x_vd_pass(e i64) {
 // address in rax (gen.tin vd_receive).
 fn x_vd_receive(e i64) {
 	let t = cast(Ty, cast(Node, e).type_)
-	if dest_regs(t) == 0 {
+	if dest_regs(t) == 0 || vd_bang(e) != 0 {
 		return
 	}
 	let d = vd_dest(e)
@@ -1029,6 +1034,19 @@ fn x_vd_return(v i64) {
 	}
 	x_slot_load(XSCR, cast(Sym, vd_dst).off)
 	x_value_store(v, cast(Ty, cast(Node, v).type_).size)
+	x_slot_load(RAX, cast(Sym, vd_dst).off)
+}
+
+// x_vd_bang_return returns a !T's value v and fault e through the destination: the value is
+// written there, its address goes back in rax and the fault in rdx (gen.tin vd_bang_return, #893).
+fn x_vd_bang_return(v i64, e i64) {
+	if cast(Node, v).kind == EX_CALL && vd_dest(v) < 0 {
+		x_gen_call(v, 0)
+	} else {
+		x_slot_load(XSCR, cast(Sym, vd_dst).off)
+		x_value_store(v, cast(Ty, cast(Node, v).type_).size)
+	}
+	x_gen_to(e, RDX, 0)
 	x_slot_load(RAX, cast(Sym, vd_dst).off)
 }
 
@@ -2855,6 +2873,10 @@ fn x_gen_stmt(s i64) {
 		}
 		emit1(X_JMP, g_loops[i])
 	} else if k == ST_CALLMULTI {
+		let cm = cast(CallMultiStmt, s)
+		if bang_syms(cm.syms) != 0 && vd_bang(bang_call(cm)) == 0 {
+			err_code_at(cast(Node, s).pos, "E990 INTERNAL", "a !T call has no destination")
+		}
 		x_gen_call(cast(CallMultiStmt, s).call, 0)
 		let syms = cast(CallMultiStmt, s).syms
 		// A dyn value takes two result lanes, as x_gen_return sends it (#568).
@@ -2903,7 +2925,9 @@ fn x_gen_stmt(s i64) {
 // (floats as bits); a single result goes to rax or xmm0.
 fn x_gen_return(s ReturnStmt) {
 	let f = cur_gen_fn
-	if cast(i64, s.values) != 0 {
+	if cast(i64, s.values) != 0 && vd_dst != 0 {
+		x_vd_bang_return(s.values[0], s.values[1])
+	} else if cast(i64, s.values) != 0 {
 		let vals = s.values
 		mut lanes = []i64{}
 		mut nlanes = 0

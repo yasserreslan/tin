@@ -1261,5 +1261,24 @@
       "exit": 1,
       "stderr_contains": "E201 MAP_KEY"
     }
+  },
+  {
+    "source": "bang-value-dest.tin",
+    "issue": 893,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "let 0 3 4 5 6 true\ntry 0 400 5 6 7\ncatch 0 5 8\nassign 4 7 true\npass 0 40 0 true\npassP 0 4 -4 true\ndirect fault 0 true\ndepth 6 0 0 0\nfuncvalue 5 8 true\nmethod 11 12 13 14 true\nmethod fault 0 true\ndyn 0 3 6 true\ndynTry 5 8 true\nreceiver call 5 8 true\nreceiver fault 0 0 true\nloop 6\nnamed 7 named 9 true\nnamed fault 0 0 true\ntri 7 8 9 true\ntri fault 0 0 true\necho 2 3 4 5 true\nlocal 9 9 9 9 true\nspawn 1006 7 8 9\ndone\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "bang-value-region-bad.tin",
+    "issue": 893,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "request memory stored into global"
+    }
   }
 ]
