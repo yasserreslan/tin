@@ -1,0 +1,300 @@
+package main
+
+// The crucible twin, Tin side: the helpers of toolchain/std/crucible (iotest, quick, fstest and
+// cryptotest) print the lines bench/ref/crucible prints with Go's testing/iotest, testing/quick,
+// testing/fstest and crypto/subtle, and tools/ci/crucible_check.tin compares them (#920).
+//
+//	C <hex|-> <hex|->     cryptotest.Equal of the two buffers ("-" is empty): 1 or 0, from stdin
+
+import "crucible/cryptotest"
+import "crucible/fstest"
+import "crucible/iotest"
+import "crucible/quick"
+import "fault"
+import "fs"
+import "io"
+import "mint"
+import "quarry"
+import "say"
+import "twine"
+
+// eofErr is the fault the DataErrReader case ends with, named as Go's io.EOF.
+let eofErr = fault("EOF")
+
+// strSrc reads a string and returns 0 once it is read.
+type strSrc struct {
+	s  str
+	at i64
+}
+
+// Read copies the next bytes of the string into buf.
+fn (r mut strSrc) Read(buf mut []u8) !i64 {
+	mut n = i64(len(r.s)) - r.at
+	if n > i64(len(buf)) {
+		n = i64(len(buf))
+	}
+	if n <= 0 {
+		return 0
+	}
+	for i in 0..n {
+		buf[i] = r.s[r.at+i]
+	}
+	r.at += n
+	return n
+}
+
+// one makes one read of size bytes and describes it: the count and data, or the fault.
+fn one[R io.Reader](r mut R, size i64) str {
+	mut buf = make([]u8, size)
+	let (n, err) = r.Read(mut buf)
+	if err != nil {
+		return "err=" + fault.Message(err)
+	}
+	return "n=" + mint.Itoa(n) + " data=" + str(buf[0:n])
+}
+
+// outcome is "ok" for a nil fault and its message otherwise.
+fn outcome(err fault) str {
+	if err == nil {
+		return "ok"
+	}
+	return fault.Message(err)
+}
+
+// names lists the entries as name(kind), joined by commas.
+fn names(entries []fs.DirEntry) str {
+	mut parts = []str{}
+	for e in entries {
+		mut kind = "file"
+		if e.IsDir() {
+			kind = "dir"
+		}
+		parts = append(parts, e.Name + "(" + kind + ")")
+	}
+	return twine.Join(parts, ",")
+}
+
+// readChunks reads the named file through Open in 3-byte reads and joins the chunks with "|".
+fn readChunks(fsys fstest.MapFS, p str) !str {
+	mut f = try fsys.Open(p)
+	mut parts = []str{}
+	mut buf = make([]u8, 3)
+	for {
+		let n = try f.Read(mut buf)
+		if n <= 0 {
+			break
+		}
+		parts = append(parts, str(buf[0:n]))
+	}
+	try f.Close()
+	return twine.Join(parts, "|")
+}
+
+// dirChunks lists the named directory through Open and ReadDir(2), and joins the chunks with "|".
+fn dirChunks(fsys fstest.MapFS, p str) !str {
+	mut d = try fsys.Open(p)
+	mut parts = []str{}
+	for i in 0..3 {
+		let entries = try d.ReadDir(2)
+		parts = append(parts, names(entries))
+	}
+	try d.Close()
+	return twine.Join(parts, "|")
+}
+
+// walkLine prints the path and kind of each visit.
+fn walkLine(p str, d ?fs.DirEntry, err fault) ! {
+	if let e = d {
+		mut kind = "file"
+		if e.IsDir() {
+			kind = "dir"
+		}
+		say.Line("walk", p, kind)
+	}
+}
+
+// walkFS is WalkDir's outcome as a line, calling visit at each path: "ok", or the message of its fault.
+fn walkFS(fsys fstest.MapFS, visit fn(str, ?fs.DirEntry, fault) !) str {
+	fs.WalkDir(fsys, ".", visit) catch err {
+		return fault.Message(err)
+	}
+	return "ok"
+}
+
+// checkFS is "ok" when TestFS accepts fsys, and "error: MESSAGE" otherwise.
+fn checkFS[F fs.TreeFS](fsys F, expected []str) str {
+	fstest.TestFS(fsys, expected) catch err {
+		return "error: " + fault.Message(err)
+	}
+	return "ok"
+}
+
+// verdict is the first word of a check's answer: "ok" or "error".
+fn verdict(s str) str {
+	return twine.Split(s, ":")[0]
+}
+
+// shortStat is a file system whose Stat reports one byte more than the contents hold.
+type shortStat[F fs.TreeFS] struct {
+	m F
+}
+
+// Open opens the file through the map.
+fn (s shortStat[F]) Open(name str) !dyn fs.File {
+	return try s.m.Open(name)
+}
+
+// ReadDir lists the directory through the map.
+fn (s shortStat[F]) ReadDir(name str) ![]fs.DirEntry {
+	return try s.m.ReadDir(name)
+}
+
+// Stat describes the file through the map, with a size one too large.
+fn (s shortStat[F]) Stat(name str) !fs.FileInfo {
+	mut info = try s.m.Stat(name)
+	info.Size += 1
+	return info
+}
+
+// roundTrip is true when mint.Itoa and mint.Atoi give back x.
+fn roundTrip(x i64) bool {
+	let (v, err) = mint.Atoi(mint.Itoa(x))
+	return err == nil && v == x
+}
+
+// calls counts the cases a property ran.
+mut calls i64
+
+// countCase counts one case and holds for it.
+fn countCase(x i64) bool {
+	calls += 1
+	return true
+}
+
+// nibble is the value of one hex digit.
+fn nibble(c u8) i64 {
+	if c <= '9' {
+		return i64(c) - '0'
+	}
+	return i64(c) - 'a' + 10
+}
+
+// unhex is the bytes of a hex field, "-" being empty.
+fn unhex(s str) []u8 {
+	mut out = []u8{}
+	if s == "-" {
+		return out
+	}
+	for i in 0..len(s)/2 {
+		out = append(out, u8(nibble(s[2*i])*16+nibble(s[2*i+1])))
+	}
+	return out
+}
+
+// bytesOf is the bytes of a string.
+fn bytesOf(s str) []u8 {
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+fn main() {
+	// iotest: the same reads over the same source.
+	mut t = iotest.TimeoutReader(strSrc{s: "hello world"})
+	say.Line("timeout", one(mut t, 4), one(mut t, 4), one(mut t, 4), one(mut t, 4), one(mut t, 4))
+	mut e = iotest.TimeoutReader(strSrc{s: ""})
+	say.Line("timeout empty", one(mut e, 8), one(mut e, 8), one(mut e, 8))
+	mut h = iotest.HalfReader(strSrc{s: "hello world"})
+	say.Line("half", one(mut h, 3), one(mut h, 3), one(mut h, 3), one(mut h, 3), one(mut h, 3), one(mut h, 3), one(mut h, 3))
+	mut d = iotest.DataErrReader(strSrc{s: "abc"}, eofErr)
+	say.Line("dataerr", one(mut d, 8), one(mut d, 8))
+	mut out = strSink{}
+	mut w = iotest.TruncateWriter(out, 7)
+	for p in []str{"abc", "defgh", "ij"} {
+		let (n, err) = w.Write(bytesOf(p))
+		say.Line("write", n, outcome(err), "got", out.got)
+	}
+
+	// quick: the same properties as bench/ref/crucible.
+	say.Line("quick roundtrip", outcome(quick.Check(roundTrip, quick.Int64, quick.Config{})))
+	say.Line("quick count", outcome(quick.Check(countCase, quick.Int64, quick.Config{MaxCount: 25})), calls)
+	calls = 0
+	let never = quick.Check(fn(s str) bool { return false }, quick.Str, quick.Config{})
+	say.Line("quick fail", twine.Split(outcome(never), ":")[0], "calls", calls)
+	say.Line("quick check2", outcome(quick.Check2(fn(b bool, s str) bool { return len(s) < 1000 }, quick.Bool, quick.Str, quick.Config{})))
+	say.Line("quick float", outcome(quick.Check(fn(x f64) bool { return x-x == 0 }, quick.Float64, quick.Config{})))
+	say.Line("quick bytes", outcome(quick.Check(fn(b []u8) bool { return len(b) < 1000 }, quick.Bytes, quick.Config{})))
+	say.Line("quick str", outcome(quick.Check(fn(s str) bool { return len(s) < 1000 }, quick.Str, quick.Config{})))
+	say.Line("quick uint", outcome(quick.Check(fn(x u64) bool { return x == x }, quick.Uint64, quick.Config{MaxCount: 7})))
+	let eq = quick.CheckEqual(fn(s str) i64 { return i64(len(s)) }, fn(s str) i64 { return i64(len(s)) }, quick.Str, quick.Config{})
+	say.Line("quick equal", outcome(eq))
+	let neq = quick.CheckEqual(fn(s str) i64 { return i64(len(s)) }, fn(s str) i64 { return i64(len(s)) + 1 }, quick.Str, quick.Config{})
+	say.Line("quick unequal", twine.Split(outcome(neq), ":")[0])
+
+	// fstest: the same MapFS, walked, read, listed, globbed and checked.
+	let fsys = fstest.MapFS{
+		"a.txt":         fstest.MapFile{Data: "alpha"},
+		"dir/b.txt":     fstest.MapFile{Data: "bravo!"},
+		"dir/empty":     fstest.MapFile{Mode: fs.ModeDir | 0o755},
+		"dir/sub/c.txt": fstest.MapFile{Data: "charlie"},
+	}
+	say.Line("walk", walkFS(fsys, walkLine))
+	let (text, terr) = fs.ReadFile(fsys, "dir/b.txt")
+	say.Line("readfile", text, outcome(terr))
+	let (listed, lerr) = fs.ReadDir(fsys, "dir")
+	say.Line("readdir", names(listed), outcome(lerr))
+	let (info, ierr) = fs.Stat(fsys, "dir/sub/c.txt")
+	say.Line("stat", info.Name, info.Size, info.IsDir(), outcome(ierr))
+	let (sub, serr) = fs.Stat(fsys, "dir/sub")
+	say.Line("stat dir", sub.Name, sub.IsDir(), outcome(serr))
+	let (globbed, gerr) = fs.Glob(fsys, "dir/*.txt")
+	say.Line("glob", twine.Join(globbed, ","), outcome(gerr))
+	let (chunks, cerr) = readChunks(fsys, "dir/sub/c.txt")
+	say.Line("chunks", chunks, outcome(cerr))
+	let (dchunks, derr) = dirChunks(fsys, "dir")
+	say.Line("dir chunks", dchunks, outcome(derr))
+	let (_, merr) = fs.Stat(fsys, "missing")
+	say.Line("missing", merr != nil)
+	say.Line("testfs", verdict(checkFS(fsys, []str{"a.txt", "dir/sub/c.txt"})))
+	say.Line("testfs missing", verdict(checkFS(fsys, []str{"nope.txt"})))
+	say.Line("testfs size", verdict(checkFS(shortStat[fstest.MapFS]{m: fsys}, []str{})))
+
+	// cryptotest: the comparison corpus on stdin, through seal.Equal.
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", fault.Message(err))
+		return
+	}
+	mut start = i64(0)
+	mut i = i64(0)
+	for i <= i64(len(body)) {
+		if i < i64(len(body)) && body[i] != '\n' {
+			i += 1
+			continue
+		}
+		let line = body[start:i]
+		start = i + 1
+		i += 1
+		let fields = twine.Split(line, " ")
+		if len(fields) != 3 || fields[0] != "C" {
+			continue
+		}
+		mut same = 0
+		if cryptotest.Equal(unhex(fields[1]), unhex(fields[2])) {
+			same = 1
+		}
+		say.Line("C", same)
+	}
+}
+
+// strSink is a writer that keeps what it is given.
+type strSink struct {
+	got str
+}
+
+// Write appends data to what the sink holds.
+fn (s mut strSink) Write(data []u8) !i64 {
+	s.got = s.got + str(data)
+	return i64(len(data))
+}

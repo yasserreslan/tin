@@ -1,0 +1,121 @@
+package main
+
+import "./ci"
+import "crucible/cryptotest"
+import "mint"
+import "say"
+import "twine"
+
+// Compare the crucible helpers with Go's testing/iotest, testing/quick, testing/fstest and crypto/subtle.
+//
+// bench/ref/crucible and tools/ci/fixtures/crucible.tin print the same lines for fixed cases (readers and a writer
+// wrapped by iotest, quick checks, a MapFS walked and checked by fstest) and one line per comparison of a
+// cryptotest corpus: the corpus (a fixed seed, so both sides see the same buffers) holds equal pairs, pairs that differ
+// in one bit, pairs of different lengths and random pairs, and each line says whether crypto/subtle and cryptotest.Equal
+// (seal.Equal) found the two buffers the same. The check also requires that the answers are the ones the corpus was
+// built with.
+
+const SEED = 920
+
+// hex is the lowercase hex of b, "-" for an empty buffer.
+fn hex(b []u8) str {
+	if len(b) == 0 {
+		return "-"
+	}
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// pair is the corpus line for two buffers.
+fn pair(a []u8, b []u8) str {
+	return "C " + hex(a) + " " + hex(b)
+}
+
+// corpus is the comparison corpus and, for each of its lines, whether the two buffers are the same (the random
+// pair of length 0 is two empty buffers).
+fn corpus() ([]str, []bool) {
+	mut lines = []str{}
+	mut same = []bool{}
+	for n in 0..33 {
+		let a = cryptotest.Seeded(u64(SEED+n), i64(n))
+		let other = cryptotest.Seeded(u64(SEED+1000+n), i64(n))
+		lines = append(lines, pair(a, a), pair(a, other))
+		same = append(same, true, n == 0)
+		if n > 0 {
+			lines = append(lines, pair(a, a[0:n-1]))
+			same = append(same, false)
+		}
+		for i in 0..n {
+			lines = append(lines, pair(a, cryptotest.Flip(a, i, 1)), pair(a, cryptotest.Flip(a, i, 0x80)))
+			same = append(same, false, false)
+		}
+		let z = cryptotest.Filled(i64(n), 0)
+		lines = append(lines, pair(z, z))
+		same = append(same, true)
+		if n > 0 {
+			lines = append(lines, pair(z, cryptotest.Flip(z, i64(n-1), 0x80)))
+			same = append(same, false)
+		}
+	}
+	return lines, same
+}
+
+// run feeds data to exe on stdin and returns its lines.
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 900, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let (lines, same) = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/crucible")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "crucible-")
+	let tin = ci.Join(work, "crucible-tin")
+	ci.BuildTin("tools/ci/fixtures/crucible.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "crucible-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/crucible"}, ci.Root(), 300), "go build crucible")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "crucible: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 6 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "crucible: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	// The corpus lines are the last ones of both outputs: one answer each, which must be the answer the corpus was built with.
+	let first = len(want) - len(lines)
+	mut mismatch = 0
+	mut identical = 0
+	for i in 0..len(lines) {
+		let answer = want[first+i]
+		if answer == "C 1" {
+			identical += 1
+		}
+		mut expect = "C 0"
+		if same[i] {
+			expect = "C 1"
+		}
+		if answer != expect {
+			mismatch += 1
+		}
+	}
+	ci.Check(mismatch == 0, "crucible: " + mint.Itoa(mismatch) + " corpus answers differ from the corpus")
+	ci.Remove(work)
+	ci.Pass("crucible: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " comparisons, " + mint.Itoa(identical) + " identical) match Go's testing/iotest, testing/quick, testing/fstest and crypto/subtle")
+}
