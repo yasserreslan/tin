@@ -20,6 +20,7 @@ type Part struct {
 	LastStable    i64  // with ReadCommitted: the offset before which every transaction is decided
 	LogStart      i64  // the first offset still in the partition
 	OutOfRange    bool // the offset asked for is not in the partition (Next is unchanged)
+	Err           fault // why this partition could not be read (no leader yet, the leader refused): the others were
 }
 
 // Fetched is the records of a FetchAll, in partition order, and what it learned of each partition.
@@ -36,6 +37,9 @@ type Fetched struct {
 // ErrOffsetOutOfRange.
 fn (c Client) Fetch(topic str, partition i64, offset i64, maxWait i64) ![]Record {
 	let f = try c.FetchAll([]Want{Want{Topic: topic, Partition: partition, Offset: offset}}, maxWait)
+	if len(f.Parts) == 1 && f.Parts[0].Err != nil {
+		fail f.Parts[0].Err
+	}
 	if len(f.Parts) == 1 && f.Parts[0].OutOfRange {
 		fail fault.Wrap(ErrOffsetOutOfRange, "kafka: offset {offset} is not in {topic}/{partition} (it holds {f.Parts[0].LogStart} to {f.Parts[0].HighWatermark})")
 	}
@@ -44,7 +48,9 @@ fn (c Client) Fetch(topic str, partition i64, offset i64, maxWait i64) ![]Record
 
 // FetchAll reads several partitions at once: one request per leader broker, all sent before
 // any is waited for when called inside a task. A partition whose offset is out of range is
-// reported in Parts, not as a fault.
+// reported in Parts, not as a fault, and so is one that could not be read at all (no leader yet,
+// the leader refused it): the records of the healthy partitions come back with them, and only
+// the whole request failing (no broker, the request itself refused) fails the call.
 fn (c Client) FetchAll(wants []Want, maxWait i64) !Fetched {
 	for attempt in 0..maxAttempts {
 		let (f, err) = c.fetchOnce(wants, maxWait)
@@ -73,11 +79,18 @@ fn (c Client) FetchAll(wants []Want, maxWait i64) !Fetched {
 }
 
 fn (c Client) fetchOnce(wants []Want, maxWait i64) !Fetched {
-	// Group the partitions by leader.
+	// Group the partitions by leader. One whose leader is not known yet (a partition being
+	// created, or a leader that just moved) is reported with its fault and left to the next
+	// fetch: the healthy partitions are still read (#444).
+	mut out = Fetched{Records: []Record{}, Parts: []Part{}}
 	mut addrs = []str{}
 	mut groups = [][]Want{}
 	for _, w in wants {
-		let a = try c.leader(w.Topic, w.Partition)
+		let (a, lerr) = c.leader(w.Topic, w.Partition)
+		if lerr != nil {
+			out.Parts = append(out.Parts, Part{Topic: w.Topic, Partition: w.Partition, Next: w.Offset, Err: lerr})
+			continue
+		}
 		mut found = -1
 		for i, x in addrs {
 			if x == a {
@@ -91,7 +104,9 @@ fn (c Client) fetchOnce(wants []Want, maxWait i64) !Fetched {
 			groups[found] = append(groups[found], w)
 		}
 	}
-	mut out = Fetched{Records: []Record{}, Parts: []Part{}}
+	if len(addrs) == 0 {
+		return out
+	}
 	if len(addrs) == 1 {
 		try c.fetchFrom(addrs[0], groups[0], maxWait, mut out)
 		return out
@@ -207,7 +222,10 @@ fn (c Client) fetchFrom(addr str, wants []Want, maxWait i64, out mut Fetched) ! 
 				continue
 			}
 			if code != 0 {
-				fail kerr(code, "fetch from {topic}/{part} at {from}")
+				// This partition could not be read (the leader moved, the topic is gone):
+				// report it and go on with the partitions that can (#444).
+				out.Parts = append(out.Parts, Part{Topic: topic, Partition: part, Next: from, HighWatermark: hw, LastStable: lso, LogStart: ls, Err: kerr(code, "fetch from {topic}/{part} at {from}")})
+				continue
 			}
 			let f = readFilter{from: from, committed: c.rec[rIsolation] == 1, aborted: aborted}
 			let (rs, next) = try decodeBatches(data, topic, part, f, mut budget)

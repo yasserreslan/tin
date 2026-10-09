@@ -62,6 +62,60 @@ fn (c Client) CreateTopic(name str, partitions i64, replicas i64) ! {
 	try c.CreateTopics([]TopicSpec{TopicSpec{Name: name, Partitions: partitions, Replicas: replicas, Configs: []Config{}}})
 }
 
+// adminCall sends an administration request to the broker that must answer it (where says
+// which, freshly resolved each attempt), asking again after the controller moved
+// (NOT_CONTROLLER, 41) or the broker's connection dropped, as Java's AdminClient does (#444):
+// an admin-only client survives a controller move.
+fn (c Client) adminCall(api i64, body []u8, extra i64, check fn(str) i64, where fn() !str) !str {
+	for attempt in 0..maxAttempts {
+		let addr = try where()
+		let (resp, err) = c.call(addr, api, body, extra, false)
+		if err == nil && check(resp) != 41 {
+			return resp
+		}
+		if attempt+1 < maxAttempts && backoff(attempt) {
+			let rerr = c.refresh([]str{}) // the controller moved: look at the cluster again
+			if rerr != nil {
+				// The next attempt looks again.
+			}
+			continue
+		}
+		if err != nil {
+			fail err
+		}
+		return resp
+	}
+	fail "kafka: the broker that answers {apiName(api)} did not answer"
+}
+
+// topicsCode is the error code of the first topic of a CreateTopics, DeleteTopics or
+// CreatePartitions response.
+fn topicsCode(r str) i64 {
+	mut d = newDec(r)
+	d.i32()
+	if d.count() == 0 {
+		return 0
+	}
+	d.str()
+	return d.i16()
+}
+
+// configCode is the error code of the first resource of a DescribeConfigs or
+// IncrementalAlterConfigs response.
+fn configCode(r str) i64 {
+	mut d = newDec(r)
+	d.i32()
+	if d.count() == 0 {
+		return 0
+	}
+	return d.i16()
+}
+
+// atController resolves the cluster's controller (the broker that answers topic requests).
+fn (c Client) atController() !str {
+	return try c.controllerAddr()
+}
+
 // CreateTopics makes topics; the first failure fails the call (ErrTopicExists for one that exists).
 fn (c Client) CreateTopics(specs []TopicSpec) ! {
 	mut body = make([]u8, 0, 64)
@@ -79,8 +133,9 @@ fn (c Client) CreateTopics(specs []TopicSpec) ! {
 	}
 	put32(mut body, 30000)
 	putBool(mut body, false)
-	let addr = try c.controllerAddr()
-	let resp = try c.call(addr, apiCreateTopics, body, 30000000000, false)
+	let resp = try c.adminCall(apiCreateTopics, body, 30000000000, topicsCode, fn() !str {
+		return try c.atController()
+	})
 	mut d = newDec(resp)
 	d.i32()
 	let nt = d.count()
@@ -102,11 +157,12 @@ fn (c Client) CreateTopics(specs []TopicSpec) ! {
 
 // DeleteTopics removes topics.
 fn (c Client) DeleteTopics(names []str) ! {
-	mut body = make([]u8, 0, 64)
+	mut body = make([]u8, 0, len(names)*8+8)
 	putStrs(mut body, names)
 	put32(mut body, 30000)
-	let addr = try c.controllerAddr()
-	let resp = try c.call(addr, apiDeleteTopics, body, 30000000000, false)
+	let resp = try c.adminCall(apiDeleteTopics, body, 30000000000, topicsCode, fn() !str {
+		return try c.atController()
+	})
 	mut d = newDec(resp)
 	d.i32()
 	let nt = d.count()
@@ -172,8 +228,9 @@ fn (c Client) CreatePartitions(topic str, total i64) ! {
 	put32(mut body, -1) // assignments: the broker's choice
 	put32(mut body, 30000)
 	putBool(mut body, false)
-	let addr = try c.controllerAddr()
-	let resp = try c.call(addr, apiCreatePartitions, body, 30000000000, false)
+	let resp = try c.adminCall(apiCreatePartitions, body, 30000000000, topicsCode, fn() !str {
+		return try c.atController()
+	})
 	mut d = newDec(resp)
 	d.i32()
 	let n = d.count()
@@ -192,8 +249,22 @@ fn (c Client) CreatePartitions(topic str, total i64) ! {
 }
 
 // DeleteRecords deletes the records of the partition before offset; it returns the partition's
-// new first offset.
+// new first offset. A leader that moved between the metadata and the request is asked again
+// (NOT_LEADER), as Java's AdminClient does.
 fn (c Client) DeleteRecords(topic str, partition i64, before i64) !i64 {
+	for attempt in 0..maxAttempts {
+		let (low, err) = c.deleteOnce(topic, partition, before)
+		if err == nil {
+			return low
+		}
+		if !c.retry(err, topic, attempt) {
+			fail err
+		}
+	}
+	fail "kafka: deleting records of {topic}/{partition} failed"
+}
+
+fn (c Client) deleteOnce(topic str, partition i64, before i64) !i64 {
 	let addr = try c.leader(topic, partition)
 	mut body = make([]u8, 0, 64)
 	put32(mut body, 1)
@@ -343,8 +414,9 @@ fn (c Client) DescribeConfigs(kind Resource, name str) ![]Config {
 	putStr(mut body, name)
 	put32(mut body, -1) // every key
 	putBool(mut body, false)
-	let addr = try c.configAddr(kind, name)
-	let resp = try c.call(addr, apiDescribeConfigs, body, 0, false)
+	let resp = try c.adminCall(apiDescribeConfigs, body, 0, configCode, fn() !str {
+		return try c.configAddr(kind, name)
+	})
 	mut d = newDec(resp)
 	d.i32()
 	mut out = []Config{}
@@ -379,15 +451,19 @@ fn (c Client) DescribeConfigs(kind Resource, name str) ![]Config {
 	return out
 }
 
-// configAddr is where a config request for a resource goes: a broker's to that broker.
+// configAddr is where a config request for a resource goes: a broker's to that broker (the
+// cluster's, with an empty name, to the controller, as the cluster-default broker resource is
+// the controller's), a topic's to the controller.
 fn (c Client) configAddr(kind Resource, name str) !str {
 	match kind {
 		Broker => {
-			try c.refresh([]str{})
-			let id = mint_atoi(name)
-			let a = c.nodeAddr(id)
-			if a != "" {
-				return a
+			if name != "" {
+				try c.refresh([]str{})
+				let id = mint_atoi(name)
+				let a = c.nodeAddr(id)
+				if a != "" {
+					return a
+				}
 			}
 		}
 		Topic => {
@@ -431,8 +507,9 @@ fn (c Client) alterConfig(kind Resource, name str, key str, value str, op i64) !
 		putStr(mut body, value)
 	}
 	putBool(mut body, false)
-	let addr = try c.configAddr(kind, name)
-	let resp = try c.call(addr, apiIncrementalAlterConfigs, body, 0, false)
+	let resp = try c.adminCall(apiIncrementalAlterConfigs, body, 0, configCode, fn() !str {
+		return try c.configAddr(kind, name)
+	})
 	mut d = newDec(resp)
 	d.i32()
 	let n = d.count()
