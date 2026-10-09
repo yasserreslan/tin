@@ -2,9 +2,11 @@ package main
 
 import "./accounts"
 import "./api"
+import "./capsules"
 import "./config"
 import "./db"
 import "./events"
+import "./notify"
 import "./packs"
 import "./proto"
 import "./repo"
@@ -136,7 +138,11 @@ fn handlers() []events.Handler {
 		herald.Log(herald.LError, "the pack store", []str{"error", fault.Message(err)})
 		return []events.Handler{}
 	}
-	return workers.Handlers(workers.NewDeps(pg, st, boot.Conf.PacksDir, boot.Conf.RepackPacks))
+	mut all = workers.Handlers(workers.NewDeps(pg, st, boot.Conf.PacksDir, boot.Conf.RepackPacks))
+	capsules.Configure(capsules.Deps{Db: pg, Store: st, Dir: boot.Conf.PacksDir, Auth: signin.Caller})
+	all = append(all, capsules.Handlers()...)
+	all = append(all, notify.Handlers(notifyDeps(boot.Conf))...)
+	return all
 }
 
 fn runner() events.Runner {
@@ -200,6 +206,12 @@ const fetchWithin = 10 * tide.Minute
 
 const fetchMemory = 256 * 1024 * 1024
 
+// notifyDeps is what notifications, webhooks and the live websocket need (#1023).
+fn notifyDeps(c config.Config) notify.Deps {
+	let (_, test) = quarry.LookupEnv("TINHUB_TEST_ROUTES")
+	return notify.Deps{Db: pg, Auth: signin.Caller, Role: accounts.RoleOf, SmtpAddr: c.SmtpAddr, SmtpFrom: c.SmtpFrom, PublicURL: c.PublicURL, Attempts: 0, Timeout: 0, AllowPrivate: test, Poll: 0}
+}
+
 // configureProto gives this core the protocol's dependencies: its pack store, its Redis client and the limits.
 fn configureProto(c config.Config) {
 	let st = openStore(c) catch err {
@@ -211,6 +223,8 @@ fn configureProto(c config.Config) {
 	api.Configure(api.Deps{Db: pg, Stale: stale, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: signin.Caller})
 	let sessions = accounts.NewSessions(c.RedisAddr, "tinhub:", accounts.SessionTTL, c.CookieKey)
 	signin.Configure(signin.Deps{Db: pg, Sessions: sessions, NonceKey: c.NonceSecret, CookieKey: c.CookieKey, PublicUrl: c.PublicURL, Secure: twine.HasPrefix(c.PublicURL, "https:")})
+	capsules.Configure(capsules.Deps{Db: pg, Store: st, Dir: c.PacksDir, Auth: signin.Caller})
+	notify.Configure(notifyDeps(c))
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
 }
 
@@ -244,6 +258,11 @@ fn sweepLoop() {
 on core.start {
 	herald.SetLevel(level(boot.Conf.LogLevel))
 	if working() {
+		// the nightly capsule retention queues its next run itself; this queues the first
+		_ = capsules.ScheduleRetention(pg, 24 * tide.Hour) catch err {
+			herald.Log(herald.LError, "scheduling capsule retention", []str{"error", fault.Message(err)})
+			false
+		}
 		for slot in 0..boot.Conf.Workers {
 			let s = slot
 			detach {
@@ -373,6 +392,8 @@ fn routes(c config.Config) anvil.Router {
 	r.Get("/metrics", metrics)
 	if c.Has("node") {
 		signin.Mount(mut r)
+		capsules.Mount(mut r)
+		notify.Mount(mut r)
 		proto.Mount(mut r)
 		api.Mount(mut r)
 	}

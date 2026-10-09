@@ -134,11 +134,12 @@ for i in $(seq 1 15); do
 	cmp -s "$tmp/after/big$i.bin" "$tmp/work/big$i.bin" || fail "push $i's file differs after the kills"
 done
 TINHUB_PACKS_DIR="$tmp/check" "$hub" check > "$tmp/check.out" || fail "a live pack is missing after the kills: $(cat "$tmp/check.out")"
-# every job finishes: the worker node reclaims what the killed one held once its lease (3s) runs out
+# every job finishes: the worker node reclaims what the killed one held once its lease (3s) runs out (the nightly
+# capsule retention waits for its time, so it is not counted)
 done=0
 for i in $(seq 1 120); do
 	m=$(curl -sf "http://127.0.0.1:18443/metrics") || m=
-	ready=$(echo "$m" | awk '/^tinhub_jobs_ready/ { s += $2 } END { print s + 0 }')
+	ready=$(echo "$m" | awk '/^tinhub_jobs_ready/ && !/replay.retention/ { s += $2 } END { print s + 0 }')
 	claimed=$(echo "$m" | awk '/^tinhub_jobs_claimed/ { print $2 + 0 }')
 	dead=$(echo "$m" | awk '/^tinhub_jobs_dead/ { s += $2 } END { print s + 0 }')
 	if [ -n "$m" ] && [ "$ready" = 0 ] && [ "$claimed" = 0 ]; then done=1; break; fi

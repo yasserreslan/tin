@@ -413,6 +413,16 @@ secrets, restore, the mirror). The Tin repo is imported with `tit adopt` and kep
 `deploy/mirror-sync.sh` (fetch, `tit adopt` again, push with the mirror account's key, the only one with write
 access); GitHub stays the source of truth, with issues and CI, until the cutover.
 
+Phase 2 (#1026) is the same binary with other config: `packs.store = s3` and the `s3.*` keys after `tinhub packs copy`
+(which makes the bucket when it can, and copies only what the bucket lacks, so it runs again after the switch), nodes
+with `roles = node` behind the load balancer and worker nodes with `roles = worker`, one shared Redis, and
+`db.replica`. The API's lists of repositories, changes and versions read the replica; access checks, refs and the
+packs objects are read from always use the primary, so a stale replica never names a pack a node cannot find.
+`products/tinhub/tests/phase2.sh` moves a phase 1 node to two nodes and a worker node on a bucket, then kills nodes
+(SIGKILL) mid-push, mid-fetch and mid-job: every push tit reported is on main, `tinhub check` finds every live pack and
+every job finishes. A rolling upgrade is one node at a time: the drain finishes its requests, and a migration that
+adds tables or columns is applied first (`tinhub migrate`) while the old binaries still run.
+
 **Not in this milestone:** website pages, public CI, public replay (code from anyone), regions.
 
 ---

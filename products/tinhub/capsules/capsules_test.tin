@@ -772,7 +772,7 @@ fn TestNoPlaintext(t mut crucible.T) {
 	crucible.Equal(mut t, "files holding the marker in hex", len(hexLeaks), 0)
 	let like = "%" + marker + "%"
 	let hexLike = "%" + hexMarker + "%"
-	let rows = c.Query("SELECT t.table_name FROM information_schema.tables t WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND (query_to_xml(format('SELECT 1 FROM %I x WHERE x::text LIKE %L OR x::text LIKE %L LIMIT 1', t.table_name, {like}::text, {hexLike}::text), false, true, ''))::text <> ''") catch err {
+	let rows = c.Query("WITH t AS MATERIALIZED (SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE') SELECT t.table_name FROM t WHERE (query_to_xml(format('SELECT 1 FROM public.%I x WHERE x::text LIKE %L OR x::text LIKE %L LIMIT 1', t.table_name, {like}::text, {hexLike}::text), false, true, ''))::text <> ''") catch err {
 		t.Error("search the database: {err}")
 		return
 	}
@@ -781,7 +781,7 @@ fn TestNoPlaintext(t mut crucible.T) {
 	}
 	// the search would have found it: a row holding the marker is seen
 	t.True("the search sees a marker", exec(c, "INSERT INTO audit_log (action, target_kind, target_id, detail) VALUES ('test', 'repo', {r.Id}, jsonb_build_object('m', {marker}::text))"))
-	let seen = c.Query("SELECT t.table_name FROM information_schema.tables t WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND (query_to_xml(format('SELECT 1 FROM %I x WHERE x::text LIKE %L LIMIT 1', t.table_name, {like}::text), false, true, ''))::text <> ''") catch err {
+	let seen = c.Query("WITH t AS MATERIALIZED (SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE') SELECT t.table_name FROM t WHERE (query_to_xml(format('SELECT 1 FROM public.%I x WHERE x::text LIKE %L LIMIT 1', t.table_name, {like}::text), false, true, ''))::text <> ''") catch err {
 		t.Error("search the database: {err}")
 		return
 	}

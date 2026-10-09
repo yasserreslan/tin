@@ -1,6 +1,7 @@
 package workers
 
 import "../events"
+import "../notify"
 import "postgres"
 
 // The push event's fan-out (design/tinhub.md §6): a push queues, in one transaction, the jobs that follow it. Every
@@ -35,13 +36,16 @@ fn fanOut(d Deps, tx mut postgres.Tx, j events.Job) ! {
 //	index         symbols of moved heads and new versions        #1020
 //	review.diff   semantic diffs of a new version                #1021
 //	overlap       overlaps of a new version                      #1021
-//	notify        notifications to subscribers                   #1023
-//	webhook       webhook deliveries                             #1023
+//	notify        notifications to subscribers                   #1023 (notify.EnqueueFor, below)
+//	webhook       webhook deliveries                             #1023 (notify.EnqueueFor, below)
 //	bench         benchmarks of a pushed commit                  #1029
 fn followUps(d Deps, tx mut postgres.Tx, j events.Job) ! {
 	let repo = j.RepoId
 	let ev = "{j.Id}"
 	let pushed = j.Payload
+	// webhooks and notifications (#1023): at least once, as webhooks are; a fan-out that dies between its commit and
+	// its job's end queues them again, and receivers tell repeats apart by the event in the body
+	_ = try notify.EnqueueFor(mut tx, repo, "push", pushed)
 	for k in d.Follows {
 		_ = try tx.Exec("INSERT INTO events (kind, repo_id, payload) SELECT {k}, {repo}, {pushed}::jsonb || jsonb_build_object('push', {j.Id}) WHERE NOT EXISTS (SELECT 1 FROM events WHERE kind = {k} AND repo_id = {repo} AND payload->>'push' = {ev})")
 	}
