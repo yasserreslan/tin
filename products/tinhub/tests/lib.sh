@@ -1,4 +1,4 @@
-# Shared by tinhub's process tests: a Redis of their own on 127.0.0.1:16379 (redis-server, else the redis image in
+# Shared by tinhub's process tests: a Redis of their own on 127.0.0.1:16379 or the next free port (redis-server, else the redis image in
 # docker), started and killed at will. start_redis fails (status 1) when neither is installed.
 rpid=
 container=
@@ -9,6 +9,8 @@ stop_redis() {
 }
 start_redis() {
 	if command -v redis-server > /dev/null 2>&1; then
+		# a port another Redis holds would answer the ping with its own data: take the next free one
+		while redis-cli -p $port ping > /dev/null 2>&1; do port=$((port + 1)); done
 		redis-server --port $port --bind 127.0.0.1 --save '' --appendonly no > "${tmp:-/tmp}/redis.log" 2>&1 & rpid=$!
 	elif command -v docker > /dev/null 2>&1; then
 		container=tinhub-test-redis-$$
@@ -22,6 +24,7 @@ start_redis() {
 		if [ -n "$container" ]; then
 			docker exec "$container" redis-cli ping 2>/dev/null | grep -q PONG && return 0
 		else
+			kill -0 "$rpid" 2>/dev/null || { echo "FAIL tinhub: Redis did not start: $(cat "${tmp:-/tmp}/redis.log")"; exit 1; }
 			redis-cli -p $port ping 2>/dev/null | grep -q PONG && return 0
 		fi
 		sleep 0.2
