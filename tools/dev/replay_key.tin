@@ -1,0 +1,38 @@
+package main
+
+import "quarry"
+import "replay"
+import "say"
+
+// tin replay key FILE (#1004): a reader's key pair for version 2 capsules (design/interface_replay.md section 6.1). The
+// private key goes to FILE (mode 0600, made only when nothing is there), for TIN_REPLAY_IDENTITY; the public key is
+// printed, for a server's TIN_REPLAY_RECIPIENTS.
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) != 2 {
+		say.Line("usage: tin replay key FILE")
+		quarry.Exit(2)
+	}
+	let path = args[1]
+	if quarry.Exists(path) {
+		say.Line("tin: replay key: {path} exists; a key is never overwritten")
+		quarry.Exit(2)
+	}
+	let (priv, pub) = replay.NewIdentity() catch err {
+		say.Line("tin: replay key: " + say.Str(err))
+		quarry.Exit(1)
+		return
+	}
+	quarry.WriteFile(path, priv + "\n") catch err {
+		say.Line("tin: replay key: " + say.Str(err))
+		quarry.Exit(1)
+		return
+	}
+	quarry.Chmod(path, 384) catch err {
+		say.Line("tin: replay key: " + say.Str(err))
+		quarry.Exit(1)
+		return
+	}
+	say.Line(pub)
+}

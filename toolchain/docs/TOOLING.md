@@ -38,6 +38,7 @@ moving or deleting the tree breaks it.
 | `tin audit secrets [-edition 1] FILE.tin...` | check the program and list every place a `secret` leaves the checker's protection: each `reveal(x)` and each secret passed to a library parameter declared `secret`, as `file:line:col: ...` sorted by position, then a count; exit status 1 (with the errors) when the program does not check |
 | `tin test [-bench] [-run REGEX] [-json] [DIR]` | build DIR (default `.`) with its `*_test.tin` files and run every `TestXxx(t mut crucible.T)`, then `BenchmarkXxx(b mut crucible.B)` with `-bench`; exit status 1 when a test fails, 2 for a wrong test signature (see §5.1); `-run REGEX` runs only the tests and benchmarks whose names match (a lasso regular expression, found anywhere in the name), `-json` prints events instead of text (§5.2) |
 | `tin replay CAPSULE --against BUILD [--live KIND]... [--save-test NAME --issue N]` | run a recorded request again with every effect served from its capsule, and report the first divergence (see §8.1) |
+| `tin replay key FILE` | a reader's key pair for version 2 capsules: the private key to FILE (0600), the public key printed (see §8.1) |
 | `tin fix -edition 1 FILE.tin...` | translate each file to edition 1 in place, and declare `mut` every `let` the program reassigns (E711). A file whose translation does not parse as edition 1, or changes when translated again, is left unchanged with the reason (for example a `const` in a nested block, which has to move by hand); exit status 1 when any file was left unchanged |
 | `tin vendor [DIR]` | copy every package `DIR/tin.mod` requires (transitively, from local source directories) into `DIR/vendor/<path>` and write `DIR/tin.lock` with each vendored file's SHA-256 (see §2.1) |
 | `tin fmt [-l] [-d] [-w] FILE.tin... \| DIR \| -stdin` | format source files: the canonical whitespace (§3.2); `-l` lists the files that would change (exit status 1 when there are any), `-d` prints the change as a unified diff that `patch` applies, `-w` rewrites them (the default without `-l` and `-d`), a directory stands for the `.tin` files under it, `-stdin` formats standard input to standard output (for editors) |
@@ -495,6 +496,20 @@ A server records a request's effects in a capsule when it runs with `TIN_REPLAY_
 TIN_REPLAY_KEY=<64 hex digits> tin replay spool/00001700000000000000-000-1.tcap --against server.tin
 ```
 
+- **Version 2 capsules** (`design/interface_replay.md` §6.1, #1004): a server with
+  `TIN_REPLAY_RECIPIENTS` (readers' public keys) and `TIN_REPLAY_SIGNING_KEY` (an ed25519 seed)
+  seals each capsule for those readers only and signs it. `tin replay key FILE` makes a reader's
+  key pair: the private key goes to FILE (mode 0600) and the public key is printed. Replay one
+  with your identity and the server's signer, no `TIN_REPLAY_KEY` needed:
+
+  ```sh
+  TIN_REPLAY_IDENTITY=~/.tin/replay.key TIN_REPLAY_SIGNERS=<signer hex> tin replay CAPSULE --against server.tin
+  ```
+
+  A capsule signed by a key not in `TIN_REPLAY_SIGNERS`, sealed for another reader, or changed
+  by one byte is refused. A reader removed from `TIN_REPLAY_RECIPIENTS` cannot open the
+  capsules recorded after. Each capsule carries a plain summary (status, method, path; the
+  panic message only with `TIN_REPLAY_SUMMARY_PANIC=1`) that tinhub groups without a key.
 - `--against BUILD` is the program to run: a binary, or a `FILE.tin` that `tin` builds
   first. It can be a later build than the one that recorded the capsule.
 - Run it with the configuration the server was recording under (the same environment

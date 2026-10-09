@@ -3050,11 +3050,21 @@ A worker ends its loop when the lane is closed and drained, and on nothing else:
 
 ## replay
 
-Package replay records a request's effects into a sealed capsule and reads capsules back, for `tin replay` (design/interface_replay.md). Reading replay capsules (section 6; #242): the envelope's tag and keystream, the body, and the effect kinds this build can replay. Writing capsules, the spool and the keys of secrets are #241's, in write.tin.
+Capsule envelope version 2 (design/interface_replay.md section 6.1; #1004): a fresh data key per capsule, wrapped for each reader (HPKE X25519 and an ML-KEM-768 mask, so a reader's key holds while either does), a plain summary, and the server's ed25519 signature. Version 1 (one symmetric TIN_REPLAY_KEY) stays readable.
 
+- `type Recipient struct`: Recipient is a reader a version 2 capsule is sealed for: its key id (SHA-256 of its public key's bytes), its X25519 public key and its ML-KEM-768 encapsulation key.
+- `type Identity struct`: Identity is a reader's private key: its key id, its X25519 private key and its ML-KEM-768 decapsulation key.
+- `NewIdentity() !(str, str)`: NewIdentity makes a reader's key pair: the private key's text (for a file of mode 0600, TIN_REPLAY_IDENTITY) and the public key's text (for a server's TIN_REPLAY_RECIPIENTS).
+- `ParseIdentity(text str) !Identity`: ParseIdentity reads a reader's private key from its text (surrounding space is ignored).
+- `ParseRecipient(text str) !Recipient`: ParseRecipient reads a reader's public key from its text.
+- `ParseRecipients(listText str) ![]Recipient`: ParseRecipients reads a comma list of readers' public keys (TIN_REPLAY_RECIPIENTS): one to 64 of them.
+- `SealV2(body str, ks str, summary str, readers []Recipient, signSeed str) !str`: SealV2 is the version 2 envelope of a capsule body for readers, signed with the ed25519 seed signSeed; ks is the secret handles' key (section 5.1, carried so a reader replays with the same handles) and summary the plain summary.
+- `Version(data str) i64`: Version is a capsule's envelope version (1 or 2), 0 when it is not a capsule.
+- `Summary(data str) !(str, str)`: Summary is a version 2 capsule's signer (its ed25519 public key, hex) and plain summary, read without a key; the signature is checked against the signer the capsule names (a forger can only name their own key).
+- `UnsealV2(data str, id Identity, signers []str) !(str, str)`: UnsealV2 opens a version 2 capsule for identity, trusting the signers listed (ed25519 public keys, hex): the secret handles' key and the body. It checks, in order, the signer, the signature, that the capsule is sealed for identity, and the tag; only then is the body decrypted.
 - `type Capsule struct`: Capsule is a decoded capsule: one recorded request and its effect records.
 - `const Kinds = ",sched.select@1,sched.resume@1,sched.cancel@1,tide.now@1,tide.wall@1,dice.seed@1,seal.random@1,wire.http@1,wire.dial@1,wire.read@1,wire.write@1,redis@1,kafka@1,mysql@1,mysql.tx@1,postgres@1,postgres.tx@1,websocket.dial@1,websocket.read@1,websocket.write@1,quarry.read@1,quarry.write@1,quarry.stat@1,quarry.dir@1,quarry.fs@1,"`: Kinds lists the effect kinds (name@version) this build replays (section 4); a capsule with any other kind is refused. The sched.* kinds are the request's scheduling (section 7, #243).
-- `Open(path str, keyHex str) !Capsule`: Open reads the capsule at path, encrypted under keyHex (the 64 hex digits of TIN_REPLAY_KEY).
+- `Open(path str, keyHex str) !Capsule`: Open reads the capsule at path: a version 1 capsule encrypted under keyHex (the 64 hex digits of TIN_REPLAY_KEY), or a version 2 capsule (section 6.1) opened with the private key in the file TIN_REPLAY_IDENTITY names and checked against the signers TIN_REPLAY_SIGNERS lists. A version 2 capsule's secret handles' key is installed for the replay.
 - `Key(keyHex str) !str`: Key is the 32 bytes a TIN_REPLAY_KEY value (64 hex digits) stands for.
 - `Unseal(data str, key str) !str`: Unseal checks a capsule envelope's tag under key and returns its decrypted body.
 - `Decode(body str) !Capsule`: Decode reads a capsule body (schema 1 or 2) and checks every effect record and its kind.
