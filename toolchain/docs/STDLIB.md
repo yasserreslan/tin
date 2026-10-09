@@ -54,6 +54,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [nist](#nist) | NIST curves P-224 to P-521, DSA signature verification and FIPS 140-3 status (crypto/elliptic, crypto/dsa, crypto/fips140) |
 | [herald](#herald) | logging (log/slog) |
 | [expvar](#expvar) | published variables and their JSON handler (expvar) |
+| [rpc](#rpc) | Go's net/rpc: registered methods, a server and a client over a codec (net/rpc, net/rpc/jsonrpc) |
 | [crucible](#crucible) | testing helpers (testing) |
 | [crucible/iotest](#crucible/iotest) | readers and writers that fail or cut short (testing/iotest) |
 | [crucible/quick](#crucible/quick) | properties checked over generated values (testing/quick) |
@@ -2266,6 +2267,28 @@ Nothing is freed while a handle may still use it (there is no collector): see RE
 - `(m Map) Init() Map`: Init removes every key from m and returns m.
 - `(m Map) Do(f fn(KeyValue))`: Do calls f for each variable of m, in key order.
 - `(m Map) String() str`: String returns m as Go's expvar writes it on one line: {"a": 1, "b": "x"}.
+
+## rpc
+
+Package rpc is Go's net/rpc over a codec. A Server serves methods registered with RegisterMethod; a Client calls them with Call and Go. The codec owns the wire (rpc/jsonrpc is Go's net/rpc/jsonrpc); this package owns Go's request and response grammar and its error texts. Codecs move JSON text: the parameters of a call and its result.
+
+- `type Request struct`: Request is the header of a call: the "Service.Method" name and the client's sequence number.
+- `type Response struct`: Response is the header of an answer: the request's name and sequence number, and the error text ("" for none).
+- `shape ServerCodec`: ServerCodec reads requests and writes responses. ReadRequestBody returns the call's parameters as JSON text, and WriteResponse takes the reply as JSON text (the codec ignores it when the response has an error).
+- `shape ClientCodec`: ClientCodec writes requests and reads responses. WriteRequest takes the parameters as JSON text, and ReadResponseBody returns the result as JSON text.
+- `(m typedMethod[A, R]) Call(params str) !str`: Call decodes the first parameter as A (Go's jsonrpc decodes params[0]; an empty list leaves the zero value), runs the handler, and encodes its reply as JSON text.
+- `type Server struct`: Server holds the registered methods by their "Service.Method" names.
+- `NewServer() Server`: NewServer makes a server with no methods.
+- `RegisterMethod[A constraints.Any, R constraints.Any](srv mut Server, name str, h fn(A) !R) !`: RegisterMethod registers the handler of "Service.Method". The request's first parameter is decoded as A, and the reply R is the result; a handler that fails sends its text as the response's error. A name with no dot, or one already registered, is a fault.
+- `(srv Server) ServeCodec(codec dyn ServerCodec)`: ServeCodec serves the calls codec reads, until the codec ends a header, as Go's ServeCodec does, and then closes the codec. The calls on one codec run one at a time, in the order they were read.
+- `type Client struct`: Client makes calls over a ClientCodec. Its reader is Input, which runs as a task of the caller's scope (a handle cannot outlive its scope); calls are matched to their replies by sequence number.
+- `NewClient(codec dyn ClientCodec) Client`: NewClient makes a client over codec. Start its reader in a scope that outlives the calls: s.spawn(fn() ! { c.Input() }).
+- `(c mut Client) Input()`: Input reads replies and hands each to the call waiting for it, until the codec ends. Then the calls still waiting fail: with ErrShutdown after Close, with ErrUnexpectedEOF when the peer hung up inside a message, else with the codec's fault. It returns nothing, since a fault would cancel the scope it runs in.
+- `(c mut Client) Close() !`: Close closes the codec. The reader ends once the peer has closed its side too, and the calls still waiting then fail with ErrShutdown. A second Close fails with ErrShutdown.
+- `type Pending[R constraints.Any] struct`: Pending is a call in flight: Wait takes its reply, decoded as R.
+- `Go[A constraints.Any, R constraints.Any](c mut Client, method str, args A) Pending[R]`: Go starts a call of method with args and returns its Pending reply at once, after the request is written (Go's Client.Go).
+- `(p mut Pending[R]) Wait() !R`: Wait waits for the call's reply and decodes it as R; a remote error or a lost connection is the call's fault.
+- `Call[A constraints.Any, R constraints.Any](c mut Client, method str, args A) !R`: Call invokes method with args and waits for its reply (Go's Client.Call).
 
 ## crucible
 

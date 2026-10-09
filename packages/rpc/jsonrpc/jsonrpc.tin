@@ -1,0 +1,530 @@
+// Package jsonrpc is Go's net/rpc/jsonrpc over a stream: a Client or Server codec for package rpc, one JSON object per message.
+// A request is {"method": "Service.Method", "params": [args], "id": seq}; a response is {"id": ..., "result": ..., "error":
+// ...}, with a null for the member that is not used. Go's encoder writes the same bytes: members in this order, no spaces, a
+// newline after each message, and the HTML characters escaped in strings.
+package jsonrpc
+
+import "argo"
+import "fault"
+import "io"
+import "rpc"
+import "say"
+import "wire"
+
+// Stream is the transport of a codec: reads and writes bytes, and closes its write side (CloseWrite, which the peer sees as the
+// end of the stream) or both sides (Close).
+shape Stream {
+	mut Read(buf mut []u8) !i64
+	mut Write(data []u8) !i64
+	mut CloseWrite() !()
+	mut Close() !()
+}
+
+// wireStream is a wire connection as a Stream.
+type wireStream struct {
+	c wire.Conn
+}
+
+// Read reads up to len(buf) bytes into buf; it returns 0 at the end of the stream. wire appends what it reads, so the bytes go
+// through an empty slice first.
+fn (s mut wireStream) Read(buf mut []u8) !i64 {
+	mut got = make([]u8, 0, len(buf))
+	let n = try s.c.Read(mut got, i64(len(buf)))
+	copy(buf, got)
+	return n
+}
+
+// Write sends all of data.
+fn (s mut wireStream) Write(data []u8) !i64 {
+	try s.c.WriteBytes(data)
+	return i64(len(data))
+}
+
+// CloseWrite ends the stream on the peer's side: the peer reads its end after what was written.
+fn (s mut wireStream) CloseWrite() !() {
+	s.c.CloseWrite()
+}
+
+// Close closes the connection.
+fn (s mut wireStream) Close() !() {
+	s.c.Close()
+}
+
+// WireStream is a wire connection as a Stream.
+fn WireStream(c wire.Conn) dyn Stream {
+	return wireStream{c: c}
+}
+
+// pipeStream is a pair of io pipe ends as a Stream: it reads from r and writes to w.
+type pipeStream struct {
+	r io.PipeReader
+	w io.PipeWriter
+}
+
+// Read reads what the peer wrote; it returns 0 once the peer closed its write side.
+fn (s mut pipeStream) Read(buf mut []u8) !i64 {
+	return try s.r.Read(mut buf)
+}
+
+// Write sends all of data into the pipe.
+fn (s mut pipeStream) Write(data []u8) !i64 {
+	return try s.w.Write(data)
+}
+
+// CloseWrite closes the write end, so the peer reads the end of the stream.
+fn (s mut pipeStream) CloseWrite() !() {
+	try s.w.Close()
+}
+
+// Close closes both ends; a second Close of an end is a fault the codec ignores.
+fn (s mut pipeStream) Close() !() {
+	s.r.Close() catch err {
+		ignore(err)
+	}
+	s.w.Close() catch err {
+		ignore(err)
+	}
+}
+
+// PipeStream is the pair of io pipe ends r (read) and w (write) as a Stream.
+fn PipeStream(r io.PipeReader, w io.PipeWriter) dyn Stream {
+	return pipeStream{r: r, w: w}
+}
+
+// ignore takes a fault the codec decides not to act on (a close after the peer ended, for instance).
+fn ignore(err fault) {
+	_ = fault.Message(err)
+}
+
+// frames reads the messages of a stream: each is one JSON object, and it ends where its braces close. A message may arrive in
+// several reads, so the scan keeps its place in buf between reads.
+type frames struct {
+	s     dyn Stream
+	buf   []u8
+	from  i64
+	at    i64
+	depth i64
+	inStr bool
+	esc   bool
+}
+
+// isSpace reports whether ch is JSON whitespace.
+fn isSpace(ch u8) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+}
+
+// fill reads more of the stream into buf, after dropping the bytes of the messages already taken; it returns how many bytes
+// came (0 at the end of the stream).
+fn (f mut frames) fill() !i64 {
+	if f.from > 0 {
+		f.buf = f.buf[f.from:]
+		f.at -= f.from
+		f.from = 0
+	}
+	mut chunk = make([]u8, 4096)
+	let n = try f.s.Read(mut chunk)
+	f.buf = append(f.buf, chunk[:n]...)
+	return n
+}
+
+// next returns the text of the next message. It fails with rpc.EOF when the stream ends between messages, with
+// rpc.ErrUnexpectedEOF when it ends inside one, and with a fault for bytes that are not an object.
+fn (f mut frames) next() !str {
+	for {
+		for f.at < len(f.buf) {
+			let ch = f.buf[f.at]
+			f.at += 1
+			if f.depth == 0 {
+				if isSpace(ch) {
+					f.from = f.at
+				} else if ch == '{' {
+					f.depth = 1
+				} else {
+					fail "jsonrpc: message is not a JSON object"
+				}
+				continue
+			}
+			if f.inStr {
+				if f.esc {
+					f.esc = false
+				} else if ch == '\\' {
+					f.esc = true
+				} else if ch == '"' {
+					f.inStr = false
+				}
+				continue
+			}
+			if ch == '"' {
+				f.inStr = true
+			} else if ch == '{' || ch == '[' {
+				f.depth += 1
+			} else if ch == '}' || ch == ']' {
+				f.depth -= 1
+				if f.depth == 0 {
+					let text = str(f.buf[f.from:f.at])
+					f.from = f.at
+					return text
+				}
+			}
+		}
+		let n = try f.fill()
+		if n == 0 {
+			if f.from == len(f.buf) {
+				fail rpc.EOF
+			}
+			fail rpc.ErrUnexpectedEOF
+		}
+	}
+}
+
+// skipSpace is the index of the first byte at or after i that is not JSON whitespace.
+fn skipSpace(s str, i i64) i64 {
+	mut j = i
+	for j < len(s) && isSpace(s[j]) {
+		j += 1
+	}
+	return j
+}
+
+// stringEnd is the index just after the JSON string whose opening quote is at i.
+fn stringEnd(s str, i i64) !i64 {
+	mut j = i + 1
+	for j < len(s) {
+		if s[j] == '\\' {
+			j += 2
+		} else if s[j] == '"' {
+			return j + 1
+		} else {
+			j += 1
+		}
+	}
+	fail "jsonrpc: unterminated string"
+}
+
+// valueEnd is the index just after the JSON value that starts at i: a string, an object or array, or a literal or number.
+fn valueEnd(s str, i i64) !i64 {
+	if i >= len(s) {
+		fail "jsonrpc: missing value"
+	}
+	if s[i] == '"' {
+		return try stringEnd(s, i)
+	}
+	if s[i] == '{' || s[i] == '[' {
+		mut depth = 0
+		mut j = i
+		for j < len(s) {
+			let ch = s[j]
+			if ch == '"' {
+				j = try stringEnd(s, j)
+			} else {
+				if ch == '{' || ch == '[' {
+					depth += 1
+				} else if ch == '}' || ch == ']' {
+					depth -= 1
+					if depth == 0 {
+						return j + 1
+					}
+				}
+				j += 1
+			}
+		}
+		fail "jsonrpc: unterminated value"
+	}
+	mut j = i
+	for j < len(s) && !isSpace(s[j]) && s[j] != ',' && s[j] != '}' && s[j] != ']' && s[j] != ':' {
+		j += 1
+	}
+	if j == i {
+		fail "jsonrpc: missing value"
+	}
+	return j
+}
+
+// decodeStr is the string that the JSON string literal lit holds.
+fn decodeStr(lit str) !str {
+	mut arr = []str{}
+	try argo.Get("[" + lit + "]", mut arr)
+	if len(arr) == 0 {
+		fail "jsonrpc: missing string"
+	}
+	return arr[0]
+}
+
+// fields reads the members of the JSON object obj: each key is decoded and each value is its raw JSON text; a repeated key
+// keeps its last value, as Go's decoder does.
+fn fields(obj str) !map[str]str {
+	mut out = make(map[str]str)
+	mut i = skipSpace(obj, 0)
+	if i >= len(obj) || obj[i] != '{' {
+		fail "jsonrpc: message is not a JSON object"
+	}
+	i = skipSpace(obj, i + 1)
+	if i < len(obj) && obj[i] == '}' {
+		return out
+	}
+	for {
+		if i >= len(obj) || obj[i] != '"' {
+			fail "jsonrpc: member name is not a string"
+		}
+		let kEnd = try stringEnd(obj, i)
+		let key = try decodeStr(obj[i:kEnd])
+		i = skipSpace(obj, kEnd)
+		if i >= len(obj) || obj[i] != ':' {
+			fail "jsonrpc: member has no colon"
+		}
+		i = skipSpace(obj, i + 1)
+		let vEnd = try valueEnd(obj, i)
+		out[key] = obj[i:vEnd]
+		i = skipSpace(obj, vEnd)
+		if i < len(obj) && obj[i] == ',' {
+			i = skipSpace(obj, i + 1)
+		} else if i < len(obj) && obj[i] == '}' {
+			return out
+		} else {
+			fail "jsonrpc: object is not closed"
+		}
+	}
+}
+
+// hexDigit is the lower-case hex digit of n (0 to 15).
+fn hexDigit(n u8) u8 {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'a' + n - 10
+}
+
+// quote is s as a JSON string, escaped as Go's encoder escapes it: quotes, backslashes and control bytes (\b and \f by name, as Go 1.22
+// and later write them), the HTML characters <, > and &, and U+2028 and U+2029, with lower-case hex.
+fn quote(s str) str {
+	mut out = []u8{}
+	out = append(out, '"')
+	mut i = 0
+	for i < len(s) {
+		let ch = s[i]
+		if ch == '"' {
+			out = append(out, "\\\""...)
+		} else if ch == '\\' {
+			out = append(out, "\\\\"...)
+		} else if ch == '\n' {
+			out = append(out, "\\n"...)
+		} else if ch == '\r' {
+			out = append(out, "\\r"...)
+		} else if ch == '\t' {
+			out = append(out, "\\t"...)
+		} else if ch == 8 {
+			out = append(out, "\\b"...)
+		} else if ch == 12 {
+			out = append(out, "\\f"...)
+		} else if ch < 0x20 || ch == '<' || ch == '>' || ch == '&' {
+			out = append(out, "\\u00"...)
+			out = append(out, hexDigit(ch / 16))
+			out = append(out, hexDigit(ch % 16))
+		} else if ch == 0xE2 && i + 2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xA8 || s[i+2] == 0xA9) {
+			if s[i+2] == 0xA8 {
+				out = append(out, "\\u2028"...)
+			} else {
+				out = append(out, "\\u2029"...)
+			}
+			i += 2
+		} else {
+			out = append(out, ch)
+		}
+		i += 1
+	}
+	out = append(out, '"')
+	return str(out)
+}
+
+// writeAll writes every byte of data to the stream, and fails when the stream takes none.
+fn writeAll(s dyn Stream, data []u8) ! {
+	mut off = 0
+	for off < len(data) {
+		let n = try s.Write(data[off:])
+		if n <= 0 {
+			fail "jsonrpc: write stopped"
+		}
+		off += n
+	}
+}
+
+// serverCodec is Go's jsonrpc server codec: a request's id is kept by its sequence number and echoed in its response.
+type serverCodec struct {
+	f       frames
+	s       dyn Stream
+	ids     map[u64]str
+	seq     u64
+	params  str
+	hasBody bool
+}
+
+// NewServerCodec is a server codec over conn: rpc.Server.ServeCodec serves the requests it reads.
+fn NewServerCodec(conn dyn Stream) dyn rpc.ServerCodec {
+	return serverCodec{f: frames{s: conn, buf: []u8{}, from: 0, at: 0, depth: 0, inStr: false, esc: false}, s: conn, ids: make(map[u64]str), seq: 0, params: "", hasBody: false}
+}
+
+// ReadRequestHeader reads the next message and fills req with its method name and a sequence number.
+fn (c mut serverCodec) ReadRequestHeader(req mut rpc.Request) !() {
+	let text = try c.f.next()
+	let m = try fields(text)
+	let (rawName, hasName) = m["method"]
+	mut name = ""
+	if hasName && rawName != "null" {
+		name = try decodeStr(rawName)
+	}
+	req.ServiceMethod = name
+	let (rawID, hasID) = m["id"]
+	c.seq += 1
+	req.Seq = c.seq
+	if hasID {
+		c.ids[c.seq] = rawID
+	} else {
+		c.ids[c.seq] = "null"
+	}
+	let (rawParams, hasParams) = m["params"]
+	c.params = rawParams
+	c.hasBody = hasParams && rawParams != "null"
+}
+
+// ReadRequestBody returns the parameters of the request just read, as the JSON array Go's jsonrpc decodes.
+fn (c mut serverCodec) ReadRequestBody() !str {
+	if !c.hasBody {
+		fail "jsonrpc: request body missing params"
+	}
+	return c.params
+}
+
+// WriteResponse writes the response to the request it answers, with the same id.
+fn (c mut serverCodec) WriteResponse(resp rpc.Response, result str) !() {
+	let (id, ok) = c.ids[resp.Seq]
+	if !ok {
+		fail "invalid sequence number in response"
+	}
+	delete(c.ids, resp.Seq)
+	mut line = "{{\"id\":" + id + ",\"result\":"
+	if resp.Error == "" {
+		line += result
+	} else {
+		line += "null"
+	}
+	line += ",\"error\":"
+	if resp.Error == "" {
+		line += "null"
+	} else {
+		line += quote(resp.Error)
+	}
+	line += "}}\n"
+	try writeAll(c.s, append([]u8{}, line...))
+}
+
+// Close closes the connection.
+fn (c mut serverCodec) Close() !() {
+	try c.s.Close()
+}
+
+// clientCodec is Go's jsonrpc client codec: it keeps each request's method name to fill its response.
+type clientCodec struct {
+	f       frames
+	s       dyn Stream
+	methods map[u64]str
+	result  str
+}
+
+// NewClientCodec is a client codec over conn: rpc.Client sends its requests and reads their responses.
+fn NewClientCodec(conn dyn Stream) dyn rpc.ClientCodec {
+	return clientCodec{f: frames{s: conn, buf: []u8{}, from: 0, at: 0, depth: 0, inStr: false, esc: false}, s: conn, methods: make(map[u64]str), result: ""}
+}
+
+// NewClient is an rpc client over conn. Start its reader with Input in a scope that outlives the calls.
+fn NewClient(conn dyn Stream) rpc.Client {
+	return rpc.NewClient(NewClientCodec(conn))
+}
+
+// WriteRequest writes the request for one call: {"method", "params", "id"}, with params the JSON array of the arguments.
+fn (c mut clientCodec) WriteRequest(req rpc.Request, params str) !() {
+	c.methods[req.Seq] = req.ServiceMethod
+	let line = "{{\"method\":" + quote(req.ServiceMethod) + ",\"params\":" + params + ",\"id\":" + say.Fmt("%d", req.Seq) + "}}\n"
+	try writeAll(c.s, append([]u8{}, line...))
+}
+
+// ReadResponseHeader reads the next response and fills resp with its sequence number and its error text, if any. A response
+// with neither a result nor an error is a protocol fault, as in Go.
+fn (c mut clientCodec) ReadResponseHeader(resp mut rpc.Response) !() {
+	let text = c.f.next() catch err {
+		closeStream(c.s)
+		fail err
+	}
+	let m = try fields(text)
+	let (rawID, hasID) = m["id"]
+	if !hasID {
+		fail "jsonrpc: response has no id"
+	}
+	mut ids = []u64{}
+	try argo.Get("[" + rawID + "]", mut ids)
+	if len(ids) == 0 {
+		fail "jsonrpc: response id is not a number"
+	}
+	let id = ids[0]
+	resp.Seq = id
+	resp.ServiceMethod = c.methods[id]
+	delete(c.methods, id)
+	resp.Error = ""
+	let (rawErr, hasErr) = m["error"]
+	let (rawRes, hasRes) = m["result"]
+	c.result = rawRes
+	let errSet = hasErr && rawErr != "null"
+	let resultNil = !hasRes || rawRes == "null"
+	if errSet || resultNil {
+		if !errSet {
+			fail "invalid error <nil>"
+		}
+		let text2 = decodeStr(rawErr) catch err {
+			ignore(err)
+			fail "invalid error " + rawErr
+		}
+		resp.Error = text2
+		if text2 == "" {
+			resp.Error = "unspecified error"
+		}
+	}
+}
+
+// ReadResponseBody returns the result of the response just read, as JSON text.
+fn (c mut clientCodec) ReadResponseBody() !str {
+	return c.result
+}
+
+// Close ends the requests: the server reads the end of the stream, and then the reader ends.
+fn (c mut clientCodec) Close() !() {
+	try c.s.CloseWrite()
+}
+
+// closeStream closes a stream whose peer has ended, and ignores the fault of the close.
+fn closeStream(s dyn Stream) {
+	s.Close() catch err {
+		ignore(err)
+	}
+}
+
+// ServeConn serves srv's methods on conn, until the peer closes its side (Go's ServeConn).
+fn ServeConn(srv rpc.Server, conn dyn Stream) {
+	srv.ServeCodec(NewServerCodec(conn))
+}
+
+// Dial connects to the JSON-RPC server at addr ("host:port") and returns its client: start the reader with c.Input() in a scope.
+fn Dial(addr str) !rpc.Client {
+	let c = try wire.Dial(addr)
+	return NewClient(WireStream(c))
+}
+
+// Serve accepts connections on l and serves each one to its end before it accepts the next (Go's Server.Accept serves them
+// concurrently; this one does not yet). It returns when the listener fails.
+fn Serve(srv rpc.Server, l wire.Listener) {
+	for {
+		let conn = l.Accept() catch err {
+			ignore(err)
+			return
+		}
+		ServeConn(srv, WireStream(conn))
+	}
+}

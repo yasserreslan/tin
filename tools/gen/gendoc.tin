@@ -71,6 +71,7 @@ fn packages() []str {
 		"nist", "NIST curves P-224 to P-521, DSA signature verification and FIPS 140-3 status (crypto/elliptic, crypto/dsa, crypto/fips140)",
 		"herald", "logging (log/slog)",
 		"expvar", "published variables and their JSON handler (expvar)",
+		"rpc", "Go's net/rpc: registered methods, a server and a client over a codec (net/rpc, net/rpc/jsonrpc)",
 		"crucible", "testing helpers (testing)",
 		"crucible/iotest", "readers and writers that fail or cut short (testing/iotest)",
 		"crucible/quick", "properties checked over generated values (testing/quick)",

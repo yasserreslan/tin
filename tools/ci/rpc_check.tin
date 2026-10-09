@@ -1,0 +1,58 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+
+// rpc_check is the Go twin of package rpc (#922): a server and a client in each language, over TCP, must print the session of
+// toolchain/tests/v2/rpc.tin. Tin's client calls Go's net/rpc/jsonrpc server, and Go's client calls Tin's server; the
+// Tin-to-Tin pairing always runs, and the Go pairings run when go is installed (as argo_twin_check does).
+
+// runClient runs a client program against a running server and returns its output; the client must exit 0.
+fn runClient(exe str, args []str, root str) str {
+	let run = ci.Exec(args, root, 60)
+	ci.Must(run, "rpc client " + exe)
+	return run.Stdout
+}
+
+// serveAt starts exe serving on a fresh port and returns the server with its address.
+fn serveAt(exe str, outDir str, name str) (nettest.Server, str) {
+	let port = nettest.Port()
+	let addr = "127.0.0.1:" + mint.Itoa(port)
+	let server = nettest.Start(exe, []str{"serve", addr}, []str{}, ci.Join(outDir, name + ".log"), port)
+	server.Ready(30)
+	return server, addr
+}
+
+fn main() {
+	let root = ci.Root()
+	let outDir = ci.Join(root, "bin/ci/rpc")
+	ci.Mkdirs(outDir)
+	let want = ci.Read(ci.Join(root, "tools/ci/fixtures/rpc_twin.out"))
+	let tinExe = ci.Join(outDir, "rpc_twin")
+	ci.BuildTin("tools/ci/fixtures/rpc_twin.tin", tinExe, "", []str{})
+
+	let (tinServer, tinAddr) = serveAt(tinExe, outDir, "tin_server")
+	ci.Same("tin client, tin server", runClient(tinExe, []str{tinExe, "call", tinAddr}, root), want)
+	tinServer.Stop()
+
+	let haveGo = ci.Exec([]str{"go", "version"}, "", 20).Code == 0
+	if !haveGo {
+		say.Line("go is not installed: Tin-to-Tin results only")
+		ci.Finish()
+		return
+	}
+	let goExe = ci.Join(outDir, "rpc_twin_go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goExe, "./tools/ci/fixtures/rpc_twin.go"}, root, 300), "go build rpc_twin.go")
+
+	let (tinServer2, tinAddr2) = serveAt(tinExe, outDir, "tin_server_go_client")
+	ci.Same("go client, tin server", runClient(goExe, []str{goExe, "call", tinAddr2}, root), want)
+	tinServer2.Stop()
+
+	let (goServer, goAddr) = serveAt(goExe, outDir, "go_server")
+	ci.Same("tin client, go server", runClient(tinExe, []str{tinExe, "call", goAddr}, root), want)
+	goServer.Stop()
+
+	ci.Finish()
+}

@@ -1,0 +1,243 @@
+package main
+
+import "fault"
+import "io"
+import "rpc"
+import "rpc/jsonrpc"
+import "say"
+
+// Args and Reply are the typed parameters of the Arith service, as Go's net/rpc examples use them.
+type Args struct {
+	A i64
+	B i64
+}
+
+type Reply struct {
+	C i64
+}
+
+// Named is a struct with a slice field, sent and returned whole.
+type Named struct {
+	Name str
+	Tags []str
+}
+
+fn multiply(a Args) !Reply {
+	return Reply{C: a.A * a.B}
+}
+
+fn divide(a Args) !Reply {
+	if a.B == 0 {
+		fail "divide by zero"
+	}
+	return Reply{C: a.A / a.B}
+}
+
+fn double(n i64) !i64 {
+	return n * 2
+}
+
+fn echo(s str) !str {
+	return "echo " + s
+}
+
+fn sum(xs []i64) !i64 {
+	mut total = 0
+	for x in xs {
+		total += x
+	}
+	return total
+}
+
+fn tag(n Named) !Named {
+	mut tags = append([]str{}, n.Tags...)
+	tags = append(tags, "seen")
+	return Named{Name: n.Name, Tags: tags}
+}
+
+fn angry(s str) !str {
+	fail "<no> & more"
+}
+
+// ctl fails with every byte the JSON encoder escapes: backspace, form feed, a control byte, quote, backslash, newline, tab, the
+// HTML characters and U+2028.
+fn ctl(s str) !str {
+	fail say.Fault("%s", str([]u8{8, 12, 1, 34, 92, 10, 9, 60, 62, 38, 226, 128, 168}))
+}
+
+fn setup() !rpc.Server {
+	mut srv = rpc.NewServer()
+	try rpc.RegisterMethod(mut srv, "Arith.Multiply", multiply)
+	try rpc.RegisterMethod(mut srv, "Arith.Divide", divide)
+	try rpc.RegisterMethod(mut srv, "Math.Double", double)
+	try rpc.RegisterMethod(mut srv, "Text.Echo", echo)
+	try rpc.RegisterMethod(mut srv, "Stats.Sum", sum)
+	try rpc.RegisterMethod(mut srv, "Users.Tag", tag)
+	try rpc.RegisterMethod(mut srv, "Text.Angry", angry)
+	try rpc.RegisterMethod(mut srv, "Text.Ctl", ctl)
+	return srv
+}
+
+// report prints a call's outcome: its value, or the fault's text.
+fn report(label str, err fault) {
+	say.Line(label, "error:", fault.Message(err))
+}
+
+// session runs a server and a client in one program over two io pipes, and prints what each call returns.
+fn session(srv rpc.Server) !() {
+	let (rq, wq) = try io.Pipe()
+	let (rr, wr) = try io.Pipe()
+	scope s {
+		s.spawn(fn() ! {
+			jsonrpc.ServeConn(srv, jsonrpc.PipeStream(rq, wr))
+		})
+		mut c = jsonrpc.NewClient(jsonrpc.PipeStream(rr, wq))
+		s.spawn(fn() ! {
+			c.Input()
+		})
+
+		let m = rpc.Call[Args, Reply](mut c, "Arith.Multiply", Args{A: 7, B: 6}) catch err {
+			report("multiply", err)
+			Reply{C: -1}
+		}
+		say.Line("multiply", m.C)
+
+		let d = rpc.Call[Args, Reply](mut c, "Arith.Divide", Args{A: 7, B: 2}) catch err {
+			report("divide", err)
+			Reply{C: -1}
+		}
+		say.Line("divide", d.C)
+
+		let z = rpc.Call[Args, Reply](mut c, "Arith.Divide", Args{A: 7, B: 0}) catch err {
+			report("divide by zero", err)
+			Reply{C: -1}
+		}
+		say.Line("divide by zero", z.C)
+
+		let dbl = rpc.Call[i64, i64](mut c, "Math.Double", 21) catch err {
+			report("double", err)
+			-1
+		}
+		say.Line("double", dbl)
+
+		let e = rpc.Call[str, str](mut c, "Text.Echo", "hi") catch err {
+			report("echo", err)
+			""
+		}
+		say.Line("echo", e)
+
+		let total = rpc.Call[[]i64, i64](mut c, "Stats.Sum", []i64{1, 2, 3, 4}) catch err {
+			report("sum", err)
+			-1
+		}
+		say.Line("sum", total)
+
+		let named = rpc.Call[Named, Named](mut c, "Users.Tag", Named{Name: "ada", Tags: []str{"x"}}) catch err {
+			report("tag", err)
+			Named{Name: "", Tags: []str{}}
+		}
+		say.Line("tag", named.Name, named.Tags)
+
+		let angryReply = rpc.Call[str, str](mut c, "Text.Angry", "x") catch err {
+			report("angry", err)
+			""
+		}
+		say.Line("angry", angryReply)
+
+		let nope = rpc.Call[Args, Reply](mut c, "Arith.Nope", Args{A: 1, B: 1}) catch err {
+			report("unknown method", err)
+			Reply{C: -1}
+		}
+		say.Line("unknown method", nope.C)
+
+		let nosvc = rpc.Call[Args, Reply](mut c, "Nope.Call", Args{A: 1, B: 1}) catch err {
+			report("unknown service", err)
+			Reply{C: -1}
+		}
+		say.Line("unknown service", nosvc.C)
+
+		let bad = rpc.Call[Args, Reply](mut c, "Nope", Args{A: 1, B: 1}) catch err {
+			report("ill-formed", err)
+			Reply{C: -1}
+		}
+		say.Line("ill-formed", bad.C)
+
+		// Calls in flight at once: each Go sends its request, and the replies are taken in order.
+		mut p1 = rpc.Go[Args, Reply](mut c, "Arith.Multiply", Args{A: 2, B: 3})
+		mut p2 = rpc.Go[Args, Reply](mut c, "Arith.Multiply", Args{A: 4, B: 5})
+		mut p3 = rpc.Go[Args, Reply](mut c, "Arith.Multiply", Args{A: 6, B: 7})
+		let r3 = p3.Wait() catch err {
+			report("pipelined 3", err)
+			Reply{C: -1}
+		}
+		let r1 = p1.Wait() catch err {
+			report("pipelined 1", err)
+			Reply{C: -1}
+		}
+		let r2 = p2.Wait() catch err {
+			report("pipelined 2", err)
+			Reply{C: -1}
+		}
+		say.Line("pipelined", r1.C, r2.C, r3.C)
+
+		c.Close() catch err {
+			report("close", err)
+		}
+		let late = rpc.Call[Args, Reply](mut c, "Arith.Multiply", Args{A: 1, B: 1}) catch err {
+			say.Line("after close:", fault.Message(err), fault.Is(err, rpc.ErrShutdown))
+			Reply{C: -1}
+		}
+		say.Line("after close", late.C)
+	}
+}
+
+// raw sends the request bytes to a server and prints the response bytes it writes, as Go's encoder would send them.
+fn raw(srv rpc.Server, request str) !() {
+	let (rq, wq) = try io.Pipe()
+	let (rr, wr) = try io.Pipe()
+	scope s {
+		s.spawn(fn() ! {
+			jsonrpc.ServeConn(srv, jsonrpc.PipeStream(rq, wr))
+		})
+		try wq.WriteString(request)
+		try wq.Close()
+		mut out = []u8{}
+		mut buf = make([]u8, 256)
+		for {
+			let n = rr.Read(mut buf) catch err {
+				_ = fault.Message(err)
+				break
+			}
+			if n == 0 {
+				break
+			}
+			out = append(out, buf[:n]...)
+		}
+		say.Line(str(out))
+	}
+}
+
+fn main() {
+	let srv = setup() catch err {
+		say.Line("setup failed:", fault.Message(err))
+		return
+	}
+	session(srv) catch err {
+		say.Line("session failed:", fault.Message(err))
+	}
+	raw(srv, `{"method":"Arith.Multiply","params":[{"A":7,"B":6}],"id":5}`) catch err {
+		say.Line("raw failed:", fault.Message(err))
+	}
+	raw(srv, `{"method":"Arith.Nope","params":[{}],"id":"abc"}`) catch err {
+		say.Line("raw failed:", fault.Message(err))
+	}
+	raw(srv, `{"method":"Text.Angry","params":["x"],"id":7}`) catch err {
+		say.Line("raw failed:", fault.Message(err))
+	}
+	raw(srv, `{"method":"Arith.Multiply","id":8}`) catch err {
+		say.Line("raw failed:", fault.Message(err))
+	}
+	raw(srv, `{"method":"Text.Ctl","params":["x"],"id":9}`) catch err {
+		say.Line("raw failed:", fault.Message(err))
+	}
+}

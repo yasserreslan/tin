@@ -1,0 +1,354 @@
+// Package rpc is Go's net/rpc over a codec. A Server serves methods registered with RegisterMethod; a Client calls them with
+// Call and Go. The codec owns the wire (rpc/jsonrpc is Go's net/rpc/jsonrpc); this package owns Go's request and response
+// grammar and its error texts. Codecs move JSON text: the parameters of a call and its result.
+package rpc
+
+import "argo"
+import "constraints"
+import "fault"
+import "lane"
+import "say"
+
+// ErrShutdown is the fault of a call on a client that is closing or has lost its connection (Go's rpc.ErrShutdown).
+let ErrShutdown = fault("connection is shut down")
+
+// EOF is the fault a codec returns when its peer has closed the stream between two messages (Go's io.EOF).
+let EOF = fault("EOF")
+
+// ErrUnexpectedEOF is the fault of the calls waiting when the peer closes the stream inside a message (Go's io.ErrUnexpectedEOF).
+let ErrUnexpectedEOF = fault("unexpected EOF")
+
+// Request is the header of a call: the "Service.Method" name and the client's sequence number.
+type Request struct {
+	ServiceMethod str
+	Seq           u64
+}
+
+// Response is the header of an answer: the request's name and sequence number, and the error text ("" for none).
+type Response struct {
+	ServiceMethod str
+	Seq           u64
+	Error         str
+}
+
+// ServerCodec reads requests and writes responses. ReadRequestBody returns the call's parameters as JSON text, and
+// WriteResponse takes the reply as JSON text (the codec ignores it when the response has an error).
+shape ServerCodec {
+	mut ReadRequestHeader(req mut Request) !()
+	mut ReadRequestBody() !str
+	mut WriteResponse(resp Response, result str) !()
+	mut Close() !()
+}
+
+// ClientCodec writes requests and reads responses. WriteRequest takes the parameters as JSON text, and ReadResponseBody
+// returns the result as JSON text.
+shape ClientCodec {
+	mut WriteRequest(req Request, params str) !()
+	mut ReadResponseHeader(resp mut Response) !()
+	mut ReadResponseBody() !str
+	mut Close() !()
+}
+
+// methodCall is a registered method: Call runs it on params, the JSON array of the arguments, and returns the reply as JSON text.
+shape methodCall {
+	Call(params str) !str
+}
+
+// typedMethod is a handler with its argument and reply types, as a methodCall.
+type typedMethod[A constraints.Any, R constraints.Any] struct {
+	h fn(A) !R
+}
+
+// Call decodes the first parameter as A (Go's jsonrpc decodes params[0]; an empty list leaves the zero value), runs the
+// handler, and encodes its reply as JSON text.
+fn (m typedMethod[A, R]) Call(params str) !str {
+	mut args = []A{}
+	if len(params) > 0 {
+		try argo.Get(params, mut args)
+	}
+	mut a = zero[A]()
+	if len(args) > 0 {
+		a = args[0]
+	}
+	let r = try m.h(a)
+	mut out = []u8{}
+	argo.Put(mut out, r)
+	return str(out)
+}
+
+// Server holds the registered methods by their "Service.Method" names.
+type Server struct {
+	services map[str]bool
+	methods  map[str]?dyn methodCall
+}
+
+// NewServer makes a server with no methods.
+fn NewServer() Server {
+	return Server{services: make(map[str]bool), methods: make(map[str]?dyn methodCall)}
+}
+
+// zero is T's zero value: a missing key of a map reads as the zero value of its element type.
+fn zero[T constraints.Any]() T {
+	let m = make(map[i64]T)
+	return m[0]
+}
+
+// lastDot is the index of the last dot in name (Go splits "Service.Method" there), or -1.
+fn lastDot(name str) i64 {
+	mut i = len(name) - 1
+	for i >= 0 {
+		if name[i] == '.' {
+			return i
+		}
+		i -= 1
+	}
+	return -1
+}
+
+// RegisterMethod registers the handler of "Service.Method". The request's first parameter is decoded as A, and the reply R
+// is the result; a handler that fails sends its text as the response's error. A name with no dot, or one already registered,
+// is a fault.
+fn RegisterMethod[A constraints.Any, R constraints.Any](srv mut Server, name str, h fn(A) !R) ! {
+	let dot = lastDot(name)
+	if dot <= 0 {
+		fail "rpc: method name is not Service.Method: " + name
+	}
+	let (_, dup) = srv.methods[name]
+	if dup {
+		fail "rpc: method already registered: " + name
+	}
+	srv.services[name[:dot]] = true
+	srv.methods[name] = typedMethod[A, R]{h: h}
+}
+
+// lookup finds the method named name, or gives the error text Go gives for a name with no dot, an unknown service and an
+// unknown method.
+fn (srv Server) lookup(name str) (?dyn methodCall, str) {
+	let dot = lastDot(name)
+	if dot <= 0 {
+		return nil, "rpc: service/method request ill-formed: " + name
+	}
+	let (m, ok) = srv.methods[name]
+	if ok {
+		return m, ""
+	}
+	let (_, known) = srv.services[name[:dot]]
+	if !known {
+		return nil, "rpc: can't find service " + name
+	}
+	return nil, "rpc: can't find method " + name
+}
+
+// textFault makes a fault whose text is msg, for a text that is only known at run time: the fault is its second result.
+fn textFault(msg str) !i64 {
+	fail say.Fault("%s", msg)
+}
+
+// ignore takes a fault the program decides not to act on, as Go's sendResponse ignores a write error.
+fn ignore(err fault) {
+	_ = fault.Message(err)
+}
+
+// readBody reads a call's parameters; its second result is the fault's text when they cannot be read.
+fn readBody(codec dyn ServerCodec) (str, str) {
+	let params = codec.ReadRequestBody() catch err {
+		return "", fault.Message(err)
+	}
+	return params, ""
+}
+
+// send writes one response on codec, ignoring a write fault as Go's sendResponse does.
+fn send(codec dyn ServerCodec, resp Response, result str) {
+	codec.WriteResponse(resp, result) catch err {
+		ignore(err)
+	}
+}
+
+// run calls the method on params and sends its reply, or the text of its fault as the error.
+fn run(codec dyn ServerCodec, m dyn methodCall, name str, seq u64, params str) {
+	let result = m.Call(params) catch err {
+		send(codec, Response{ServiceMethod: name, Seq: seq, Error: fault.Message(err)}, "")
+		return
+	}
+	send(codec, Response{ServiceMethod: name, Seq: seq, Error: ""}, result)
+}
+
+// ServeCodec serves the calls codec reads, until the codec ends a header, as Go's ServeCodec does, and then closes the codec.
+// The calls on one codec run one at a time, in the order they were read.
+fn (srv Server) ServeCodec(codec dyn ServerCodec) {
+	for {
+		mut req = Request{ServiceMethod: "", Seq: 0}
+		codec.ReadRequestHeader(mut req) catch err {
+			ignore(err)
+			break
+		}
+		let (m, bad) = srv.lookup(req.ServiceMethod)
+		let (params, berr) = readBody(codec)
+		mut text = bad
+		if text == "" {
+			text = berr
+		}
+		if text != "" {
+			send(codec, Response{ServiceMethod: req.ServiceMethod, Seq: req.Seq, Error: text}, "")
+			continue
+		}
+		if let call = m {
+			run(codec, call, req.ServiceMethod, req.Seq, params)
+		}
+	}
+	codec.Close() catch err {
+		ignore(err)
+	}
+}
+
+// failure boxes a call's fault: a fault cannot be a field of a value that needs a zero value.
+type failure struct {
+	err fault
+}
+
+// waiter is one call in flight: the reader sets its reply and wakes the caller on done.
+type waiter struct {
+	result str
+	broken ?failure
+	done   lane.Lane[bool]
+}
+
+// finish gives the reply to the call waiting on w and wakes it; a waiter's lane holds one wake-up, so this does not wait.
+fn finish(w mut waiter, result str, broken ?failure) {
+	w.result = result
+	w.broken = broken
+	w.done.Send(true) catch err {
+		ignore(err)
+	}
+}
+
+// Client makes calls over a ClientCodec. Its reader is Input, which runs as a task of the caller's scope (a handle cannot
+// outlive its scope); calls are matched to their replies by sequence number.
+type Client struct {
+	codec    dyn ClientCodec
+	writing  lane.Lane[bool]
+	seq      u64
+	pending  map[u64]waiter
+	closing  bool
+	shutdown bool
+}
+
+// NewClient makes a client over codec. Start its reader in a scope that outlives the calls: s.spawn(fn() ! { c.Input() }).
+fn NewClient(codec dyn ClientCodec) Client {
+	return Client{codec: codec, writing: lane.New[bool](1), seq: 0, pending: make(map[u64]waiter), closing: false, shutdown: false}
+}
+
+// send writes the request for one call and registers w to be answered (Go's Client.send).
+fn (c mut Client) send(method str, params str, w mut waiter) {
+	c.writing.Send(true) catch err {
+		finish(mut w, "", failure{err: err})
+		return
+	}
+	if c.shutdown || c.closing {
+		finish(mut w, "", failure{err: ErrShutdown})
+		c.writing.Recv() catch err {
+			ignore(err)
+		}
+		return
+	}
+	let seq = c.seq
+	c.seq += 1
+	c.pending[seq] = w
+	c.codec.WriteRequest(Request{ServiceMethod: method, Seq: seq}, params) catch err {
+		delete(c.pending, seq)
+		finish(mut w, "", failure{err: err})
+	}
+	c.writing.Recv() catch err {
+		ignore(err)
+	}
+}
+
+// Input reads replies and hands each to the call waiting for it, until the codec ends. Then the calls still waiting fail:
+// with ErrShutdown after Close, with ErrUnexpectedEOF when the peer hung up inside a message, else with the codec's fault. It
+// returns nothing, since a fault would cancel the scope it runs in.
+fn (c mut Client) Input() {
+	mut endErr = ErrShutdown
+	for {
+		mut resp = Response{ServiceMethod: "", Seq: 0, Error: ""}
+		c.codec.ReadResponseHeader(mut resp) catch err {
+			endErr = err
+			break
+		}
+		let (got, found) = c.pending[resp.Seq]
+		if !found {
+			continue
+		}
+		mut w = got
+		delete(c.pending, resp.Seq)
+		if resp.Error != "" {
+			let (_, err) = textFault(resp.Error)
+			finish(mut w, "", failure{err: err})
+			continue
+		}
+		let result = c.codec.ReadResponseBody() catch err {
+			finish(mut w, "", failure{err: err})
+			continue
+		}
+		finish(mut w, result, nil)
+	}
+	c.shutdown = true
+	mut failed = endErr
+	if fault.Is(endErr, EOF) {
+		failed = ErrUnexpectedEOF
+		if c.closing {
+			failed = ErrShutdown
+		}
+	}
+	for _, got in c.pending {
+		mut w = got
+		finish(mut w, "", failure{err: failed})
+	}
+	c.pending = make(map[u64]waiter)
+}
+
+// Close closes the codec. The reader ends once the peer has closed its side too, and the calls still waiting then fail with
+// ErrShutdown. A second Close fails with ErrShutdown.
+fn (c mut Client) Close() ! {
+	if c.closing {
+		fail ErrShutdown
+	}
+	c.closing = true
+	try c.codec.Close()
+}
+
+// Pending is a call in flight: Wait takes its reply, decoded as R.
+type Pending[R constraints.Any] struct {
+	w waiter
+}
+
+// Go starts a call of method with args and returns its Pending reply at once, after the request is written (Go's Client.Go).
+fn Go[A constraints.Any, R constraints.Any](c mut Client, method str, args A) Pending[R] {
+	mut params = []u8{}
+	params = append(params, "["...)
+	argo.Put(mut params, args)
+	params = append(params, "]"...)
+	mut w = waiter{result: "", broken: nil, done: lane.New[bool](1)}
+	c.send(method, str(params), mut w)
+	return Pending[R]{w: w}
+}
+
+// Wait waits for the call's reply and decodes it as R; a remote error or a lost connection is the call's fault.
+fn (p mut Pending[R]) Wait() !R {
+	let _ = try p.w.done.Recv()
+	if let b = p.w.broken {
+		fail b.err
+	}
+	mut arr = []R{}
+	try argo.Get("[" + p.w.result + "]", mut arr)
+	mut out = zero[R]()
+	if len(arr) > 0 {
+		out = arr[0]
+	}
+	return out
+}
+
+// Call invokes method with args and waits for its reply (Go's Client.Call).
+fn Call[A constraints.Any, R constraints.Any](c mut Client, method str, args A) !R {
+	mut p = Go[A, R](mut c, method, args)
+	return try p.Wait()
+}
