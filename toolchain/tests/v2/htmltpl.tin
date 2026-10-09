@@ -1,0 +1,151 @@
+package main
+
+// The htmltpl strict test: the html/template API over the contextual mode, each context with hostile data, the trusted types, and
+// the contexts the mode refuses. Every output line of a template that Go accepts is Go's html/template output for the same
+// template and data (bench/ref/htmltpl); the refusals print the parse error this mode gives instead (a context it cannot judge).
+
+import "htmltpl"
+import "say"
+import "stencil"
+import "twine"
+
+// show parses text as a template and executes it with data, printing the label with the output or the error.
+fn show(label str, text str, data stencil.Value) {
+	mut t = htmltpl.New("t")
+	t.Parse(text) catch err {
+		say.Line(label, say.Fmt("%s", err))
+		return
+	}
+	let out = t.ExecuteString(data) catch err {
+		say.Line(label, say.Fmt("%s", err))
+		return
+	}
+	say.Line(label, out)
+}
+
+// shout is a template function: its result is text, escaped where the call sits.
+fn shout(args []stencil.Value) !stencil.Value {
+	return stencil.Str(args[0].String() + "!")
+}
+
+// unparsed executes a template that has no body, which is an error.
+fn unparsed() {
+	let t = htmltpl.New("t")
+	let out = t.ExecuteString(stencil.Str("x")) catch err {
+		say.Line("unparsed", say.Fmt("%s", err))
+		return
+	}
+	say.Line("unparsed", out)
+}
+
+fn main() {
+	// Element text: the payload is escaped, and a bare "<" in static text is written &lt;.
+	show("text", `<p>{{.}}</p>`, stencil.Str("<script>alert(1)</script>"))
+	show("text static lt", `<p>a < b</p>`, stencil.None())
+	show("text doctype", `<!DOCTYPE html><p>{{.}}</p>`, stencil.Str("x"))
+	show("text nul", `<p>{{.}}</p>`, stencil.Str("a" + str(u8(0)) + "b"))
+	show("text plus", `<p>{{.}}</p>`, stencil.Str("a+b"))
+	show("text html trusted", `<p>{{.}}</p>`, htmltpl.HTML("<b>x</b> &amp;"))
+	show("text comment", `a<!-- {{.}} -->b`, stencil.Str("x"))
+	show("text comment static", `a<!-- c -->b<p>{{.}}</p>`, stencil.Str("x"))
+
+	// URL attributes: the scheme is filtered at the start, the value is normalized and query-escaped after it.
+	show("url start", `<a href="{{.}}">x</a>`, stencil.Str("javascript:alert(1)"))
+	show("url trusted", `<a href="{{.}}">x</a>`, htmltpl.URL("javascript:alert(1)"))
+	show("url query", `<a href="/s?q={{.}}">x</a>`, stencil.Str("a b&c"))
+	show("url fragment", `<a href="/p#{{.}}">x</a>`, stencil.Str("x\"y"))
+	show("url unquoted", `<img src={{.}}>`, stencil.Str("/a b"))
+
+	// Attribute values: quoted, unquoted (an empty value is ZgotmplZ), and trusted HTML is stripped of its tags.
+	show("attr", `<p title="{{.}}">x</p>`, stencil.Str(`" onmouseover="alert(1)`))
+	show("attr single", `<p title='{{.}}'>x</p>`, stencil.Str(`' onmouseover='alert(1)`))
+	show("attr unquoted", `<p title={{.}}>x</p>`, stencil.Str("a b"))
+	show("attr unquoted empty", `<p title={{.}}>x</p>`, stencil.Str(""))
+	show("attr html stripped", `<p title="{{.}}">x</p>`, htmltpl.HTML("<b>x</b> &amp;"))
+	show("attr unquoted html", `<p title={{.}}>x</p>`, htmltpl.HTML("<b>x</b>"))
+	show("attr style", `<p style="color: {{.}}">x</p>`, stencil.Str("red"))
+	show("attr style bad", `<p style="color: {{.}}">x</p>`, stencil.Str("expression(alert(1))"))
+
+	// RCDATA: title and textarea escape their text as text does.
+	show("rcdata title", `<title>{{.}}</title>`, stencil.Str("<script>"))
+	show("rcdata textarea", `<textarea>{{.}}</textarea>`, stencil.Str("a&<b>"))
+	show("rcdata html", `<textarea>{{.}}</textarea>`, htmltpl.HTML("<b>x</b>&amp;"))
+
+	// JavaScript values: JSON, padded with spaces when it starts or ends with an identifier byte.
+	show("js string", `<script>var x = {{.}};</script>`, stencil.Str("a</script>"))
+	show("js int", `<script>var x = {{.}};</script>`, stencil.Int(3))
+	show("js bool", `<script>var x = {{.}};</script>`, stencil.Bool(true))
+	show("js none", `<script>var x = {{.}};</script>`, stencil.None())
+	show("js float", `<script>var x = {{.}};</script>`, stencil.Float(1.5e-7))
+	show("js list", `<script>var x = {{.}};</script>`, stencil.List([]stencil.Value{stencil.Int(1), stencil.Str("a"), stencil.None()}))
+	show("js map", `<script>var x = {{.}};</script>`, stencil.Map(map[str]stencil.Value{"b": stencil.Int(1), "a": stencil.Str("<x>")}))
+	show("js trusted", `<script>var x = {{.}};</script>`, htmltpl.JS("1+2"))
+	show("js trusted string", `<script>var x = {{.}};</script>`, htmltpl.JSStr("a\\b"))
+	show("js division", `<script>var y = {{.}} / 2; var z = 1 / 3</script>`, stencil.Int(4))
+
+	// JavaScript strings: the quote, backslash, slash and HTML characters are escaped, a trusted JSStr is written as it is.
+	show("js dq", `<script>var s = "{{.}}";</script>`, stencil.Str("a\"b\\c</script>"))
+	show("js sq", `<script>var s = '{{.}}';</script>`, stencil.Str("it's"))
+	show("js jsstr", `<script>var s = "{{.}}";</script>`, htmltpl.JSStr("a\\b"))
+	show("js comment", `<script>// {{.}}` + "\n" + `var x = 1;</script>`, stencil.Str("x"))
+	show("js comment static", `<script>x = 1 /* c */ + {{.}}</script>`, stencil.Int(2))
+	show("js line static", `<script>x = 1 // don't` + "\n" + `var y = {{.}}</script>`, stencil.Str("Q"))
+
+	// CSS: values are filtered, strings and url() escape by their part, and trusted CSS passes through.
+	show("css value", `<style>p { color: {{.}} }</style>`, stencil.Str("red"))
+	show("css value bad", `<style>p { color: {{.}} }</style>`, stencil.Str("expression(alert(1))"))
+	show("css trusted", `<style>p { color: {{.}} }</style>`, htmltpl.CSS("red;"))
+	show("css string", `<style>p::before { content: "{{.}}" }</style>`, stencil.Str(`a\b"c<d>`))
+	show("css string url", `<style>p::before { content: "{{.}}" }</style>`, stencil.Str("javascript:alert(1)"))
+	show("css url", `<style>p { background: url({{.}}) }</style>`, stencil.Str("a b"))
+	show("css url quoted", `<style>p { background: url("{{.}}") }</style>`, stencil.Str("x y?q=<"))
+	show("css comment", `<style>/* {{.}} */p{}</style>`, stencil.Str("X"))
+
+	// Event handler and branches: the attribute's script escapes its value as a JavaScript value.
+	show("on attr", `<a onclick="f({{.}})">x</a>`, stencil.Str("a"))
+	show("branch", `{{if .}}<p>{{.}}</p>{{end}}`, stencil.Str("x"))
+	show("range", `{{range .}}<p>{{.}}</p>{{end}}`, stencil.List([]stencil.Value{stencil.Str("a"), stencil.Str("<")}))
+	show("with", `{{with .}}<p>{{.}}</p>{{end}}`, stencil.Str("<"))
+	show("define", `<p>{{template "T" .}}</p>{{define "T"}}[{{.}}]{{end}}`, stencil.Str("<x>"))
+
+	// Functions registered with Funcs are called in the template and their result is escaped where the call sits.
+	mut f = htmltpl.New("funcs")
+	f.Funcs(map[str]fn([]stencil.Value) !stencil.Value{"shout": shout})
+	f.Parse(`<p>{{shout .}}</p>`) catch err {
+		say.Line("funcs parse", say.Fmt("%s", err))
+		return
+	}
+	let fout = f.ExecuteString(stencil.Str("<hi>")) catch err {
+		say.Line("funcs exec", say.Fmt("%s", err))
+		return
+	}
+	say.Line("funcs", fout)
+
+	// Parse gives the template its body; Execute before Parse is an error; Name returns the name.
+	unparsed()
+	mut r = htmltpl.New("r")
+	r.Parse("first") catch _ {
+		return
+	}
+	r.Parse(`<p>{{.}}</p>`) catch _ {
+		return
+	}
+	let rout = r.ExecuteString(stencil.Str("x")) catch _ {
+		return
+	}
+	say.Line("reparse", r.Name(), rout)
+
+	// Contexts the mode refuses are parse errors, with the reason.
+	show("refuse tag", `<a {{.}}>x</a>`, stencil.Str("x"))
+	show("refuse template call", `<a href="{{template "u" .}}">x</a>{{define "u"}}{{.}}{{end}}`, stencil.Str("x"))
+	show("refuse predefined", `<p>{{. | html}}</p>`, stencil.Str("x"))
+	show("refuse regexp", `<script>var r = /{{.}}/;</script>`, stencil.Str("x"))
+	show("refuse template literal", `<script>var s = ` + str(u8(96)) + `x{{.}}` + str(u8(96)) + `;</script>`, stencil.Str("x"))
+	show("refuse unquoted quote", `<p title=a"b{{.}}>x</p>`, stencil.Str("x"))
+	show("refuse srcset", `<img srcset="{{.}}">`, stencil.Str("x"))
+	show("refuse meta", `<meta content="{{.}}">`, stencil.Str("x"))
+	show("refuse end in context", `<p title="{{.}}`, stencil.Str("x"))
+	show("refuse script end in string", `<script>var s = "</script>{{.}}"</script>`, stencil.Str("x"))
+	show("refuse if crosses", `<p {{if .}}title="x{{end}}">y</p>`, stencil.Str("x"))
+	show("if same context", `{{if .}}<p>{{end}}{{.}}</p>`, stencil.Str("x"))
+}

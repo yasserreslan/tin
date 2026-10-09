@@ -1,0 +1,82 @@
+package main
+
+// The htmltpl twin, Tin side: read template, value kind and value triples (hex-encoded, tab separated, one per line) on stdin
+// and print what htmltpl makes of each, in the format of bench/ref/htmltpl (Go's html/template): the hex-encoded output, or
+// PARSE or EXEC. tools/ci/htmltpl_check.tin feeds both sides the same corpus and compares the lines (#912).
+
+import "htmltpl"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "stencil"
+import "twine"
+
+// value is the data of one kind, as bench/ref/htmltpl builds it: the trusted types and the plain kinds.
+fn value(kind str, s str) (stencil.Value, bool) {
+	if kind == "str" {
+		return stencil.Str(s), true
+	}
+	if kind == "html" {
+		return htmltpl.HTML(s), true
+	}
+	if kind == "js" {
+		return htmltpl.JS(s), true
+	}
+	if kind == "jsstr" {
+		return htmltpl.JSStr(s), true
+	}
+	if kind == "css" {
+		return htmltpl.CSS(s), true
+	}
+	if kind == "url" {
+		return htmltpl.URL(s), true
+	}
+	if kind == "int" {
+		let n = mint.Atoi(s) catch _ {
+			return stencil.None(), false
+		}
+		return stencil.Int(n), true
+	}
+	if kind == "bool" {
+		return stencil.Bool(s == "true"), true
+	}
+	if kind == "none" {
+		return stencil.None(), true
+	}
+	return stencil.None(), false
+}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		if len(line) == 0 {
+			continue
+		}
+		let f = twine.Split(line, "\t")
+		let srcBytes = seal.HexDecode(f[0]) catch _ {
+			[]u8{}
+		}
+		let valBytes = seal.HexDecode(f[2]) catch _ {
+			[]u8{}
+		}
+		mut t = htmltpl.New("t")
+		t.Parse(str(srcBytes)) catch _ {
+			say.Line("PARSE")
+			continue
+		}
+		let (v, ok) = value(f[1], str(valBytes))
+		if !ok {
+			say.Line("EXEC")
+			continue
+		}
+		let out = t.ExecuteString(v) catch _ {
+			say.Line("EXEC")
+			continue
+		}
+		say.Line(seal.Hex([]u8(out)))
+	}
+}

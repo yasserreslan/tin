@@ -48,5 +48,6 @@ refused <script>var x = `${ {{.}} }`;</script> stencil: an action in <script> mu
 refused <a href="/x" onclick="{{.}}">x</a> stencil: the onclick attribute is not supported
 refused <a {{.}}>x</a> stencil: an action inside a tag, outside an attribute value, is not supported
 refused <a b {{.}}>x</a> stencil: an action inside a tag, outside an attribute value, is not supported
+refused <a href="{{template "u" .}}">x</a>{{define "u"}}{{.}}{{end}} stencil: a template call outside element text is not supported
 accepted accepted accepted
 defs out <p>[&lt;x&gt;]</p>

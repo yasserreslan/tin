@@ -1,0 +1,85 @@
+package htmltpl
+
+// Package htmltpl is Go's html/template over stencil: a template is parsed once, its actions are escaped by the context they
+// sit in (element text, comments, RCDATA, attribute values, URLs, <script> and <style>), and the trusted types HTML, JS,
+// JSStr, CSS and URL pass through the escaper of their own context. The contextual engine is stencil's
+// (stencil.ParseContextual); this package is the Go-shaped API over it. See README.md for the contexts and the gaps.
+
+import "say"
+import "stencil"
+import "twine"
+
+// Template is a template in the html/template style: a name, the functions registered for it, and its parsed body.
+type Template struct {
+	name  str
+	funcs map[str]fn([]stencil.Value) !stencil.Value
+	tpl   ?stencil.Template
+}
+
+// New returns an empty template named name, as Go's template.New does; Parse gives it a body.
+fn New(name str) Template {
+	return Template{name: name, funcs: make(map[str]fn([]stencil.Value) !stencil.Value), tpl: nil}
+}
+
+// Name returns the template's name.
+fn (t Template) Name() str {
+	return t.name
+}
+
+// Funcs registers functions for {{name ...}} calls in the template's text; it must be called before Parse, as in Go.
+fn (t mut Template) Funcs(funcs map[str]fn([]stencil.Value) !stencil.Value) {
+	for name, f in funcs {
+		t.funcs[name] = f
+	}
+}
+
+// Parse parses text as the template's body, escaped by context. A later Parse replaces the body. A context the mode does not
+// support is an error (see README.md).
+fn (t mut Template) Parse(text str) ! {
+	mut tpl = try stencil.ParseContextual(t.name, text)
+	for name, f in t.funcs {
+		tpl.Func(name, f)
+	}
+	t.tpl = tpl
+}
+
+// Execute writes the template's output for data into w, escaped by context.
+fn (t Template) Execute(w mut twine.Builder, data stencil.Value) ! {
+	if let tpl = t.tpl {
+		try tpl.ExecuteTo(mut w, data)
+		return
+	}
+	fail say.Fault("htmltpl: %s: the template has no body; call Parse first", t.name)
+}
+
+// ExecuteString returns the template's output for data as a string.
+fn (t Template) ExecuteString(data stencil.Value) !str {
+	mut b = twine.NewBuilder(256)
+	try t.Execute(mut b, data)
+	return b.String()
+}
+
+// HTML marks s as HTML that the escapers pass through in element text and RCDATA (template.HTML).
+fn HTML(s str) stencil.Value {
+	return stencil.Trusted(stencil.TrustHTML, s)
+}
+
+// JS marks s as a JavaScript expression that a <script> or an event attribute passes through (template.JS).
+fn JS(s str) stencil.Value {
+	return stencil.Trusted(stencil.TrustJS, s)
+}
+
+// JSStr marks s as text already escaped for a JavaScript string literal (template.JSStr).
+fn JSStr(s str) stencil.Value {
+	return stencil.Trusted(stencil.TrustJSStr, s)
+}
+
+// CSS marks s as a CSS value that a <style> element or a style attribute passes through (template.CSS).
+fn CSS(s str) stencil.Value {
+	return stencil.Trusted(stencil.TrustCSS, s)
+}
+
+// URL marks s as a URL that the URL escaper passes through without filtering its scheme (template.URL).
+fn URL(s str) stencil.Value {
+	return stencil.Trusted(stencil.TrustURL, s)
+}

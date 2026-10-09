@@ -1,0 +1,1323 @@
+package stencil
+
+// The contextual HTML mode (ParseContextual), as Go's html/template: an action's escaper follows its
+// context through element text, comments, RCDATA (title and textarea), tags, attribute values (quoted,
+// unquoted, URL, script and style) and <script> and <style> content, and static text is rewritten where
+// Go's escaper rewrites it ("<" that is not markup becomes &lt;, comments are dropped). The scanner is a
+// port of Go's transitions over the states this mode supports. A context it does not support is a parse
+// error, not a guess: an action in a tag or an attribute name, in srcset, in a regular expression or in a
+// meta tag, a template literal or "<script", "</script" or "<!--" in a JavaScript string, a predefined
+// escaper (html or urlquery), and a template call outside element text.
+
+import "html"
+import "say"
+import "twine"
+
+// The contexts (Go's states). A context is a state and the fields that qualify it.
+const xText = 0
+
+const xTag = 1
+
+const xAttrName = 2
+
+const xAfterName = 3
+
+const xBeforeValue = 4
+
+const xHTMLCmt = 5
+
+const xRCDATA = 6
+
+const xAttr = 7
+
+const xURL = 8
+
+const xSrcset = 9
+
+const xJS = 10
+
+const xJSDq = 11
+
+const xJSSq = 12
+
+const xJSRegexp = 13
+
+const xJSBlockCmt = 14
+
+const xJSLineCmt = 15
+
+const xJSOpenCmt = 16
+
+const xJSCloseCmt = 17
+
+const xCSS = 18
+
+const xCSSDq = 19
+
+const xCSSSq = 20
+
+const xCSSDqURL = 21
+
+const xCSSSqURL = 22
+
+const xCSSURL = 23
+
+const xCSSBlockCmt = 24
+
+const xCSSLineCmt = 25
+
+// The elements whose content has its own context.
+const xElNone = 0
+
+const xElScript = 1
+
+const xElStyle = 2
+
+const xElTextarea = 3
+
+const xElTitle = 4
+
+const xElMeta = 5
+
+// The quote that ends an attribute value (none outside one; unquoted values end at a space or ">").
+const xDNone = 0
+
+const xDDQ = 1
+
+const xDSQ = 2
+
+const xDUnq = 3
+
+// Where a URL value is: at its start (the scheme), in its path, or in its query or fragment.
+const xUNone = 0
+
+const xUPre = 1
+
+const xUQuery = 2
+
+// Whether a "/" after a JavaScript token starts a regular expression or divides.
+const xJSCtxRegexp = 0
+
+const xJSCtxDivOp = 1
+
+// The kinds of an attribute: the URL, style, script and srcset attributes start their values in their own state.
+const xANone = 0
+
+const xAURL = 1
+
+const xACSS = 2
+
+const xAJS = 3
+
+const xASrcset = 4
+
+const xAScriptType = 5
+
+// ctxState is the scanner's context, as Go's context: the state and the fields that qualify it.
+type ctxState struct {
+	state   i64
+	delim   i64
+	element i64
+	attr    i64
+	urlPart i64
+	jsCtx   i64
+}
+
+// ctxFresh is a context with the state, element and attribute given and every other field zero, as Go builds a context literal.
+fn ctxFresh(state i64, element i64, attr i64) ctxState {
+	return ctxState{state: state, delim: xDNone, element: element, attr: attr, urlPart: xUNone, jsCtx: xJSCtxRegexp}
+}
+
+// ctxNewText is the context at the start of a template: element text.
+fn ctxNewText() ctxState {
+	return ctxFresh(xText, xElNone, xANone)
+}
+
+// copyCtx is a fresh copy: a struct is a reference in Tin, so a scanner must not write through its caller's context.
+fn copyCtx(c ctxState) ctxState {
+	return ctxState{state: c.state, delim: c.delim, element: c.element, attr: c.attr, urlPart: c.urlPart, jsCtx: c.jsCtx}
+}
+
+// sameCtx reports whether two contexts agree in every field: a block must end in the context it started in.
+fn sameCtx(a ctxState, b ctxState) bool {
+	return a.state == b.state && a.delim == b.delim && a.element == b.element && a.attr == b.attr && a.urlPart == b.urlPart && a.jsCtx == b.jsCtx
+}
+
+// ParseContextual parses text into a Template whose actions are escaped by their context, as Go's
+// html/template does. A context the mode does not support is a parse error (see the file's comment).
+fn ParseContextual(name str, text str) !Template {
+	let t = try Parse(name, text)
+	let end = try ctxAnnotate(t.root, ctxNewText())
+	if end.state != xText {
+		fail say.Fault("stencil: %s: the template ends inside an HTML context", name)
+	}
+	for _, body in t.defs {
+		let e2 = try ctxAnnotate(body, ctxNewText())
+		if e2.state != xText {
+			fail say.Fault("stencil: %s: a defined template ends inside an HTML context", name)
+		}
+	}
+	return t
+}
+
+// ctxAnnotate walks a node list in document order from context c: it rewrites the static text and sets
+// each action's mode. It returns the context the list ends in.
+fn ctxAnnotate(nodes []Node, c ctxState) !ctxState {
+	mut cur = copyCtx(c)
+	for i in 0..len(nodes) {
+		match nodes[i] {
+			Text(t) => {
+				let (out, next) = try ctxEscapeText(t, cur)
+				cur = next
+				if out != t {
+					nodes[i] = Node.Text(out)
+				}
+			}
+			Action(p, _) => {
+				if !p.hasAssign {
+					if ctxPredefined(p) {
+						fail say.Fault("stencil: a predefined escaper (html or urlquery) in an action is not supported")
+					}
+					let (next, mode) = try ctxActionMode(cur)
+					cur = next
+					nodes[i] = Node.Action(p, mode)
+				}
+			}
+			If(b) => {
+				let s1 = try ctxAnnotate(b.then, cur)
+				let s2 = try ctxAnnotate(b.otherwise, cur)
+				if !sameCtx(s1, cur) || !sameCtx(s2, cur) {
+					fail say.Fault("stencil: an if block crosses an HTML context boundary")
+				}
+			}
+			Range(r) => {
+				let s1 = try ctxAnnotate(r.body, cur)
+				let s2 = try ctxAnnotate(r.otherwise, cur)
+				if !sameCtx(s1, cur) || !sameCtx(s2, cur) {
+					fail say.Fault("stencil: a range block crosses an HTML context boundary")
+				}
+			}
+			With(b) => {
+				let s1 = try ctxAnnotate(b.then, cur)
+				let s2 = try ctxAnnotate(b.otherwise, cur)
+				if !sameCtx(s1, cur) || !sameCtx(s2, cur) {
+					fail say.Fault("stencil: a with block crosses an HTML context boundary")
+				}
+			}
+			Call(_) => {
+				// A called template renders in element text, so the call must sit there too.
+				if cur.state != xText {
+					fail say.Fault("stencil: a template call outside element text is not supported")
+				}
+			}
+		}
+	}
+	return cur
+}
+
+// ctxPredefined reports whether a pipeline names html or urlquery, the predefined escapers this mode refuses.
+fn ctxPredefined(p Pipe) bool {
+	for _, cmd in p.cmds {
+		for _, a in cmd.args {
+			match a {
+				Fn(name) => {
+					if name == "html" || name == "urlquery" {
+						return true
+					}
+				}
+				Pipe(inner) => {
+					if ctxPredefined(inner) {
+						return true
+					}
+				}
+				_ => {}
+			}
+		}
+	}
+	return false
+}
+
+// ctxNudge is Go's nudge: a tag or a name that an action follows is an attribute name, and an action right after "="
+// is an unquoted attribute value.
+fn ctxNudge(c ctxState) ctxState {
+	mut n = copyCtx(c)
+	if c.state == xTag {
+		n.state = xAttrName
+	} else if c.state == xBeforeValue {
+		n.state = ctxAttrStart(c.attr)
+		n.delim = xDUnq
+		n.attr = xANone
+	} else if c.state == xAfterName {
+		n.state = xAttrName
+		n.attr = xANone
+	}
+	return n
+}
+
+// ctxActionMode is Go's escapeAction: the mode of an action in context c, and the context after it (a JavaScript value
+// ends in a division context, as Go's escaper leaves it).
+fn ctxActionMode(c ctxState) !(ctxState, i64) {
+	mut n = ctxNudge(c)
+	if n.element == xElMeta {
+		fail say.Fault("stencil: an action in a meta tag is not supported")
+	}
+	let st = n.state
+	mut sc = xSNone
+	if st == xTag || st == xAttrName {
+		fail say.Fault("stencil: an action inside a tag, outside an attribute value, is not supported")
+	}
+	if st == xSrcset {
+		fail say.Fault("stencil: an action in a srcset attribute is not supported")
+	}
+	if st == xURL || st == xCSSDqURL || st == xCSSSqURL || st == xCSSURL {
+		sc = ctxURLMode(n.urlPart, false)
+	} else if st == xCSSDq || st == xCSSSq {
+		sc = ctxURLMode(n.urlPart, true)
+	} else if st == xJS {
+		sc = xSJSVal
+		n.jsCtx = xJSCtxDivOp
+	} else if st == xJSDq || st == xJSSq {
+		sc = xSJSStr
+	} else if st == xJSRegexp {
+		fail say.Fault("stencil: an action in a JavaScript regular expression is not supported")
+	} else if st == xCSS {
+		sc = xSCSSVal
+	} else if st == xText {
+		sc = xSHTML
+	} else if st == xRCDATA {
+		sc = xSRCDATA
+	} else if st == xAttr {
+		sc = xSNone
+	} else if ctxIsComment(st) {
+		sc = xSComment
+	} else {
+		fail say.Fault("stencil: an action in this context is not supported")
+	}
+	mut dc = xDCAttr
+	if n.delim == xDNone {
+		dc = xDCNone
+	} else if n.delim == xDUnq {
+		dc = xDCNospace
+	}
+	return n, xModeBase + sc*10 + dc
+}
+
+// ctxURLMode is the state escaper of a URL value at part: the filter and normalizer at its start, the normalizer after it,
+// and the query escaper in its query or fragment. A string in CSS (css) is escaped as CSS after the filter.
+fn ctxURLMode(part i64, css bool) i64 {
+	if part == xUNone {
+		if css {
+			return xSCSSStrFilter
+		}
+		return xSURLFilter
+	}
+	if part == xUPre {
+		if css {
+			return xSCSSStr
+		}
+		return xSURLNorm
+	}
+	return xSURLEscape
+}
+
+// ctxIsComment reports the states inside a comment (Go's isComment).
+fn ctxIsComment(st i64) bool {
+	return st == xHTMLCmt || st == xJSBlockCmt || st == xJSLineCmt || st == xJSOpenCmt || st == xJSCloseCmt || st == xCSSBlockCmt || st == xCSSLineCmt
+}
+
+// ctxInLiteral reports the JavaScript string and regular expression states (Go's isInScriptLiteral, without templates).
+fn ctxInLiteral(st i64) bool {
+	return st == xJSDq || st == xJSSq || st == xJSRegexp
+}
+
+// ctxEscapeText is Go's escapeText over one static text node from context c: "<" that is not markup is written &lt; in
+// text and RCDATA, comments are dropped (a block comment leaves a space, or a newline when it spans lines). It returns the
+// text as it reads after the rewrite and the context it ends in.
+fn ctxEscapeText(t str, c ctxState) !(str, ctxState) {
+	mut b = twine.NewBuilder(len(t) + 16)
+	mut written = 0
+	mut i = 0
+	mut cur = copyCtx(c)
+	for i != len(t) {
+		let (c1, nread) = try ctxAfterText(cur, t[i:])
+		let i1 = i + nread
+		if cur.state == xText || cur.state == xRCDATA {
+			mut end = i1
+			if c1.state != cur.state {
+				mut j = end - 1
+				for j >= i {
+					if t[j] == '<' {
+						end = j
+						break
+					}
+					j -= 1
+				}
+			}
+			for j in i..end {
+				if t[j] == '<' && !ctxIsDoctype(t, j) {
+					b.Str(t[written:j])
+					b.Str("&lt;")
+					written = j + 1
+				}
+			}
+		} else if ctxIsComment(cur.state) && cur.delim == xDNone {
+			if cur.state == xJSBlockCmt {
+				if ctxIndexLineEnd(t[written:i1]) >= 0 {
+					b.Byte('\n')
+				} else {
+					b.Byte(' ')
+				}
+			} else if cur.state == xCSSBlockCmt {
+				b.Byte(' ')
+			}
+			written = i1
+		}
+		if cur.state != c1.state && ctxIsComment(c1.state) && c1.delim == xDNone {
+			mut cs = i1 - 2
+			if c1.state == xHTMLCmt || c1.state == xJSOpenCmt {
+				cs -= 2
+			} else if c1.state == xJSCloseCmt {
+				cs -= 1
+			}
+			b.Str(t[written:cs])
+			written = i1
+		}
+		if ctxInLiteral(cur.state) && ctxHasSpecialTag(t[i:i1]) {
+			fail say.Fault("stencil: <script, </script or <!-- inside a JavaScript string is not supported")
+		}
+		if cur.element == xElScript && ctxIsComment(cur.state) && ctxIndexOf(lower(t[i:i1]), "</script") >= 0 {
+			fail say.Fault("stencil: </script inside a JavaScript comment is not supported")
+		}
+		if i == i1 && cur.state == c1.state {
+			fail say.Fault("stencil: the contextual scanner does not advance")
+		}
+		cur = c1
+		i = i1
+	}
+	if written == 0 {
+		return t, cur
+	}
+	if !ctxIsComment(cur.state) || cur.delim != xDNone {
+		b.Str(t[written:])
+	}
+	return b.String(), cur
+}
+
+// ctxIsDoctype reports a "<!DOCTYPE" in any case at j, which the escaper leaves alone.
+fn ctxIsDoctype(t str, j i64) bool {
+	return j+9 <= len(t) && lower(t[j:j+9]) == "<!doctype"
+}
+
+// ctxHasSpecialTag reports "<script", "</script" or "<!--" in any case.
+fn ctxHasSpecialTag(seg str) bool {
+	let l = lower(seg)
+	return ctxIndexOf(l, "<script") >= 0 || ctxIndexOf(l, "</script") >= 0 || ctxIndexOf(l, "<!--") >= 0
+}
+
+// ctxAfterText is Go's contextAfterText: the context after the text s, and how far into s it reads.
+fn ctxAfterText(c ctxState, s str) !(ctxState, i64) {
+	if c.delim == xDNone {
+		let (c1, i) = try ctxSpecialTagEnd(c, s)
+		if i == 0 {
+			return c1, 0
+		}
+		return ctxTransition(c, s[:i])
+	}
+	mut i = ctxIndexAny(s, ctxDelimEnds(c.delim))
+	if i < 0 {
+		i = len(s)
+	}
+	if c.delim == xDUnq && ctxIndexAny(s[:i], "\"'<=`") >= 0 {
+		fail say.Fault("stencil: a quote, <, = or backtick in an unquoted attribute value is not supported")
+	}
+	if i == len(s) {
+		mut u = html.UnescapeString(s)
+		mut cc = copyCtx(c)
+		for len(u) != 0 {
+			let (c2, i1) = try ctxTransition(cc, u)
+			cc = c2
+			if i1 == 0 {
+				break
+			}
+			u = u[i1:]
+		}
+		return cc, len(s)
+	}
+	mut element = c.element
+	if c.state == xAttr && c.element == xElScript && c.attr == xAScriptType && !ctxIsJSType(s[:i]) {
+		element = xElNone
+	}
+	if c.delim != xDUnq {
+		i += 1
+	}
+	return ctxFresh(xTag, element, xANone), i
+}
+
+// ctxDelimEnds is the bytes that end an attribute value with the delimiter d.
+fn ctxDelimEnds(d i64) str {
+	if d == xDDQ {
+		return "\""
+	}
+	if d == xDSQ {
+		return "'"
+	}
+	return " \t\n\f\r>"
+}
+
+// ctxTransition is Go's transitionFunc: the scanner of the state c is in, over s.
+fn ctxTransition(c ctxState, s str) !(ctxState, i64) {
+	let st = c.state
+	if st == xText {
+		return ctxScanText(c, s)
+	}
+	if st == xTag {
+		return ctxScanTag(c, s)
+	}
+	if st == xAttrName {
+		return ctxScanAttrName(c, s)
+	}
+	if st == xAfterName {
+		return ctxScanAfterName(c, s)
+	}
+	if st == xBeforeValue {
+		return ctxScanBeforeValue(c, s)
+	}
+	if st == xHTMLCmt {
+		return ctxScanHTMLCmt(c, s)
+	}
+	if st == xRCDATA {
+		return ctxSpecialTagEnd(c, s)
+	}
+	if st == xAttr {
+		return c, len(s)
+	}
+	if st == xURL || st == xSrcset {
+		return ctxScanURL(c, s)
+	}
+	if st == xJS {
+		return ctxScanJS(c, s)
+	}
+	if st == xJSDq || st == xJSSq || st == xJSRegexp {
+		return ctxScanJSDelimited(c, s)
+	}
+	if st == xJSBlockCmt || st == xCSSBlockCmt {
+		return ctxScanBlockCmt(c, s)
+	}
+	if st == xJSLineCmt || st == xJSOpenCmt || st == xJSCloseCmt || st == xCSSLineCmt {
+		return ctxScanLineCmt(c, s)
+	}
+	if st == xCSS {
+		return ctxScanCSS(c, s)
+	}
+	return ctxScanCSSStr(c, s)
+}
+
+// ctxScanText is Go's tText: the text up to a tag or a comment, and the tag or comment it opens.
+fn ctxScanText(c ctxState, s str) !(ctxState, i64) {
+	mut k = 0
+	for {
+		let i = ctxIndexFrom(s, k, '<')
+		if i < 0 || i+1 == len(s) {
+			return c, len(s)
+		}
+		if i+4 <= len(s) && s[i:i+4] == "<!--" {
+			return ctxFresh(xHTMLCmt, xElNone, xANone), i + 4
+		}
+		mut j = i + 1
+		mut end = false
+		if s[j] == '/' {
+			if j+1 == len(s) {
+				return c, len(s)
+			}
+			end = true
+			j += 1
+		}
+		let (e, el) = ctxEatTagName(s, j)
+		if e != j {
+			if end {
+				return ctxFresh(xTag, xElNone, xANone), e
+			}
+			return ctxFresh(xTag, el, xANone), e
+		}
+		k = e
+	}
+}
+
+// ctxScanTag is Go's tTag: the attribute name that starts the segment, or the ">" that ends the tag and opens its content.
+fn ctxScanTag(c ctxState, s str) !(ctxState, i64) {
+	let i = ctxEatSpace(s, 0)
+	if i == len(s) {
+		return c, len(s)
+	}
+	if s[i] == '>' {
+		if c.element == xElMeta {
+			return ctxFresh(xText, xElNone, xANone), i + 1
+		}
+		return ctxFresh(ctxContentState(c.element), c.element, xANone), i + 1
+	}
+	let j = try ctxEatAttrName(s, i)
+	if i == j {
+		fail say.Fault("stencil: expected a space, an attribute name or the end of a tag")
+	}
+	let name = lower(s[i:j])
+	mut kind = ctxAttrKind(name)
+	if c.element == xElScript && name == "type" {
+		kind = xAScriptType
+	}
+	mut state = xTag
+	if j == len(s) {
+		state = xAttrName
+	} else {
+		state = xAfterName
+	}
+	return ctxFresh(state, c.element, kind), j
+}
+
+// ctxScanAttrName is Go's tAttrName: an attribute name that the segment may end in.
+fn ctxScanAttrName(c ctxState, s str) !(ctxState, i64) {
+	let i = try ctxEatAttrName(s, 0)
+	mut n = copyCtx(c)
+	if i != len(s) {
+		n.state = xAfterName
+	}
+	return n, i
+}
+
+// ctxScanAfterName is Go's tAfterName: whitespace, then "=" (the value follows) or another name.
+fn ctxScanAfterName(c ctxState, s str) !(ctxState, i64) {
+	let i = ctxEatSpace(s, 0)
+	if i == len(s) {
+		return c, len(s)
+	}
+	mut n = copyCtx(c)
+	if s[i] != '=' {
+		n.state = xTag
+		return n, i
+	}
+	n.state = xBeforeValue
+	return n, i + 1
+}
+
+// ctxScanBeforeValue is Go's tBeforeValue: the value's quote, if it has one, and the state the attribute's kind starts in.
+fn ctxScanBeforeValue(c ctxState, s str) !(ctxState, i64) {
+	let i = ctxEatSpace(s, 0)
+	if i == len(s) {
+		return c, len(s)
+	}
+	mut delim = xDUnq
+	mut j = i
+	if s[i] == '\'' {
+		delim = xDSQ
+		j = i + 1
+	} else if s[i] == '"' {
+		delim = xDDQ
+		j = i + 1
+	}
+	mut n = copyCtx(c)
+	n.state = ctxAttrStart(c.attr)
+	n.delim = delim
+	return n, j
+}
+
+// ctxAttrStart is the state an attribute value starts in, by the attribute's kind (Go's attrStartStates).
+fn ctxAttrStart(kind i64) i64 {
+	if kind == xAURL {
+		return xURL
+	}
+	if kind == xACSS {
+		return xCSS
+	}
+	if kind == xAJS {
+		return xJS
+	}
+	if kind == xASrcset {
+		return xSrcset
+	}
+	return xAttr
+}
+
+// ctxScanHTMLCmt is Go's tHTMLCmt: a comment ends at "-->", and the text after it is element text.
+fn ctxScanHTMLCmt(c ctxState, s str) !(ctxState, i64) {
+	let i = ctxIndexOf(s, "-->")
+	if i >= 0 {
+		return ctxNewText(), i + 3
+	}
+	return c, len(s)
+}
+
+// ctxScanURL is Go's tURL: a "?" or "#" starts the query or fragment, and the first non-space text starts the path.
+fn ctxScanURL(c ctxState, s str) !(ctxState, i64) {
+	mut n = copyCtx(c)
+	if ctxIndexAny(s, "#?") >= 0 {
+		n.urlPart = xUQuery
+	} else if len(s) != ctxEatSpace(s, 0) && c.urlPart == xUNone {
+		n.urlPart = xUPre
+	}
+	return n, len(s)
+}
+
+// ctxScanJS is Go's tJS: the JavaScript up to the next quote, comment, slash, brace or HTML comment marker.
+fn ctxScanJS(c ctxState, s str) !(ctxState, i64) {
+	let i = ctxIndexAny(s, "\"`'/{{}}<-#")
+	mut n = copyCtx(c)
+	if i < 0 {
+		n.jsCtx = ctxNextJSCtx(s, c.jsCtx)
+		return n, len(s)
+	}
+	n.jsCtx = ctxNextJSCtx(s[:i], c.jsCtx)
+	mut j = i
+	let ch = s[i]
+	if ch == '"' {
+		n.state = xJSDq
+		n.jsCtx = xJSCtxRegexp
+	} else if ch == '\'' {
+		n.state = xJSSq
+		n.jsCtx = xJSCtxRegexp
+	} else if ch == '`' {
+		fail say.Fault("stencil: a template literal in a <script> is not supported")
+	} else if ch == '/' {
+		if i+1 < len(s) && s[i+1] == '/' {
+			n.state = xJSLineCmt
+			j = i + 1
+		} else if i+1 < len(s) && s[i+1] == '*' {
+			n.state = xJSBlockCmt
+			j = i + 1
+		} else if n.jsCtx == xJSCtxRegexp {
+			n.state = xJSRegexp
+		} else {
+			n.jsCtx = xJSCtxRegexp
+		}
+	} else if ch == '<' {
+		if i+3 < len(s) && s[i:i+4] == "<!--" {
+			n.state = xJSOpenCmt
+			j = i + 3
+		}
+	} else if ch == '-' {
+		if i+2 < len(s) && s[i:i+3] == "-->" {
+			n.state = xJSCloseCmt
+			j = i + 2
+		}
+	} else if ch == '#' {
+		if i+1 < len(s) && s[i+1] == '!' {
+			n.state = xJSLineCmt
+			j = i + 1
+		}
+	} else if ch == '{' || ch == '}' {
+		n.jsCtx = ctxNextJSCtx(s[i:i+1], n.jsCtx)
+		return n, i + 1
+	}
+	return n, j + 1
+}
+
+// ctxScanJSDelimited is Go's tJSDelimited: a string or a regular expression, up to its closing quote or slash.
+fn ctxScanJSDelimited(c ctxState, s str) !(ctxState, i64) {
+	mut specials = "\\\""
+	if c.state == xJSSq {
+		specials = "\\'"
+	} else if c.state == xJSRegexp {
+		specials = "\\/[]"
+	}
+	mut k = 0
+	mut inCharset = false
+	for {
+		let rel = ctxIndexAny(s[k:], specials)
+		if rel < 0 {
+			break
+		}
+		mut i = k + rel
+		let ch = s[i]
+		if ch == '\\' {
+			i += 1
+			if i == len(s) {
+				fail say.Fault("stencil: an unfinished escape sequence in a JavaScript string")
+			}
+		} else if ch == '[' {
+			inCharset = true
+		} else if ch == ']' {
+			inCharset = false
+		} else if ch == '/' && i > 0 && i+7 <= len(s) && lower(s[i-1:i+7]) == "</script" {
+			i += 1
+		} else if !inCharset {
+			mut n = copyCtx(c)
+			n.state = xJS
+			n.jsCtx = xJSCtxDivOp
+			return n, i + 1
+		}
+		k = i + 1
+	}
+	if inCharset {
+		fail say.Fault("stencil: an unfinished JavaScript regular expression charset")
+	}
+	return c, len(s)
+}
+
+// ctxScanBlockCmt is Go's tBlockCmt: a block comment ends after "*/", and the context returns to the code it sits in.
+fn ctxScanBlockCmt(c ctxState, s str) !(ctxState, i64) {
+	let i = ctxIndexOf(s, "*/")
+	if i < 0 {
+		return c, len(s)
+	}
+	mut n = copyCtx(c)
+	if c.state == xJSBlockCmt {
+		n.state = xJS
+	} else {
+		n.state = xCSS
+	}
+	return n, i + 2
+}
+
+// ctxScanLineCmt is Go's tLineCmt: a line comment ends before its line terminator, which the text after it keeps.
+fn ctxScanLineCmt(c ctxState, s str) !(ctxState, i64) {
+	mut i = -1
+	mut end = xJS
+	if c.state == xCSSLineCmt {
+		end = xCSS
+		i = ctxIndexAny(s, "\n\f\r")
+	} else {
+		i = ctxIndexLineEnd(s)
+	}
+	if i < 0 {
+		return c, len(s)
+	}
+	mut n = copyCtx(c)
+	n.state = end
+	return n, i
+}
+
+// ctxScanCSS is Go's tCSS: the CSS up to a string, a url( or a comment.
+fn ctxScanCSS(c ctxState, s str) !(ctxState, i64) {
+	mut k = 0
+	for {
+		let rel = ctxIndexAny(s[k:], "(\"'/")
+		if rel < 0 {
+			return c, len(s)
+		}
+		let i = k + rel
+		let ch = s[i]
+		if ch == '(' {
+			let p = ctxTrimRightCSS(s[:i])
+			if ctxEndsWithKeyword(p, "url") {
+				let j = i + 1 + ctxSkipCSSSpaces(s[i+1:])
+				mut n = copyCtx(c)
+				mut next = j
+				if j != len(s) && s[j] == '"' {
+					n.state = xCSSDqURL
+					next = j + 1
+				} else if j != len(s) && s[j] == '\'' {
+					n.state = xCSSSqURL
+					next = j + 1
+				} else {
+					n.state = xCSSURL
+				}
+				return n, next
+			}
+		} else if ch == '/' && i+1 < len(s) {
+			if s[i+1] == '/' {
+				mut n = copyCtx(c)
+				n.state = xCSSLineCmt
+				return n, i + 2
+			}
+			if s[i+1] == '*' {
+				mut n = copyCtx(c)
+				n.state = xCSSBlockCmt
+				return n, i + 2
+			}
+		} else if ch == '"' {
+			mut n = copyCtx(c)
+			n.state = xCSSDq
+			return n, i + 1
+		} else if ch == '\'' {
+			mut n = copyCtx(c)
+			n.state = xCSSSq
+			return n, i + 1
+		}
+		k = i + 1
+	}
+}
+
+// ctxScanCSSStr is Go's tCSSStr: a CSS string or url( value up to its closing quote or ")", past its escapes, with the
+// URL part read from the decoded text.
+fn ctxScanCSSStr(c ctxState, s str) !(ctxState, i64) {
+	mut endAndEsc = "\\\""
+	if c.state == xCSSSq || c.state == xCSSSqURL {
+		endAndEsc = "\\'"
+	} else if c.state == xCSSURL {
+		endAndEsc = "\\\t\n\f\r )"
+	}
+	mut cur = copyCtx(c)
+	mut k = 0
+	for {
+		let rel = ctxIndexAny(s[k:], endAndEsc)
+		if rel < 0 {
+			let (n, nread) = try ctxScanURL(cur, ctxDecodeCSS(s[k:]))
+			return n, k + nread
+		}
+		let i = k + rel
+		if s[i] == '\\' {
+			let e = i + 1
+			if e == len(s) {
+				fail say.Fault("stencil: an unfinished escape sequence in a CSS string")
+			}
+			let (n, _) = try ctxScanURL(cur, ctxDecodeCSS(s[:e+1]))
+			cur = n
+			k = e + 1
+		} else {
+			mut n = copyCtx(cur)
+			n.state = xCSS
+			return n, i + 1
+		}
+	}
+}
+
+// ctxSpecialTagEnd is Go's tSpecialTagEnd: in a raw-text or RCDATA element, the end tag of that element. A "</script" inside a
+// JavaScript string or comment is refused: Go ignores it there, which a browser does not.
+fn ctxSpecialTagEnd(c ctxState, s str) !(ctxState, i64) {
+	if c.element == xElNone || c.element == xElMeta {
+		return c, len(s)
+	}
+	if c.element == xElScript && (ctxInLiteral(c.state) || ctxIsComment(c.state)) {
+		// Go ignores an end tag inside a string or a comment; ctxEscapeText refuses one in the text it reads there.
+		return c, len(s)
+	}
+	let i = ctxIndexTagEnd(s, ctxElementName(c.element))
+	if i >= 0 {
+		return ctxNewText(), i
+	}
+	return c, len(s)
+}
+
+// ctxIndexTagEnd is Go's indexTagEnd: the position of "</tag" followed by a tag-end byte, or -1.
+fn ctxIndexTagEnd(s str, tag str) i64 {
+	mut res = 0
+	mut rest = s
+	for len(rest) > 0 {
+		let i = ctxIndexOf(rest, "</")
+		if i < 0 {
+			return -1
+		}
+		rest = rest[i+2:]
+		if len(tag) <= len(rest) && lower(rest[:len(tag)]) == tag {
+			rest = rest[len(tag):]
+			if len(rest) > 0 && indexOfByte("> \t\n\f/", rest[0]) >= 0 {
+				return res + i
+			}
+			res += len(tag)
+		}
+		res += i + 2
+	}
+	return -1
+}
+
+// ctxElementName is the name of a raw-text or RCDATA element.
+fn ctxElementName(element i64) str {
+	if element == xElScript {
+		return "script"
+	}
+	if element == xElStyle {
+		return "style"
+	}
+	if element == xElTextarea {
+		return "textarea"
+	}
+	return "title"
+}
+
+// ctxContentState is the state the content of an element starts in (Go's elementContentType).
+fn ctxContentState(element i64) i64 {
+	if element == xElScript {
+		return xJS
+	}
+	if element == xElStyle {
+		return xCSS
+	}
+	if element == xElTextarea || element == xElTitle {
+		return xRCDATA
+	}
+	return xText
+}
+
+// ctxElementOf is the element a tag name opens: a raw-text or RCDATA element, meta, or none.
+fn ctxElementOf(name str) i64 {
+	if name == "script" {
+		return xElScript
+	}
+	if name == "style" {
+		return xElStyle
+	}
+	if name == "textarea" {
+		return xElTextarea
+	}
+	if name == "title" {
+		return xElTitle
+	}
+	if name == "meta" {
+		return xElMeta
+	}
+	return xElNone
+}
+
+// ctxEatTagName reads a tag name at i (Go's eatTagName): its end, and the element it opens.
+fn ctxEatTagName(s str, i i64) (i64, i64) {
+	if i == len(s) || !ctxIsAlpha(s[i]) {
+		return i, xElNone
+	}
+	mut j = i + 1
+	for j < len(s) {
+		let x = s[j]
+		if ctxIsAlnum(x) {
+			j += 1
+		} else if (x == ':' || x == '-') && j+1 < len(s) && ctxIsAlnum(s[j+1]) {
+			j += 2
+		} else {
+			break
+		}
+	}
+	return j, ctxElementOf(lower(s[i:j]))
+}
+
+// ctxEatAttrName is the end of the attribute name at i (Go's eatAttrName): a quote or "<" inside it is refused.
+fn ctxEatAttrName(s str, i i64) !i64 {
+	for j in i..len(s) {
+		let c = s[j]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == '=' || c == '>' {
+			return j
+		}
+		if c == '\'' || c == '"' || c == '<' {
+			fail say.Fault("stencil: a quote or < in an attribute name is not supported")
+		}
+	}
+	return len(s)
+}
+
+// ctxAttrKind is the kind of an attribute by its name (Go's attrType): the URL, style, JavaScript (on...) and srcset
+// attributes, and the other names that contain "src", "uri" or "url", are the kinds that matter.
+fn ctxAttrKind(name str) i64 {
+	mut n = name
+	if len(name) >= 5 && name[0:5] == "data-" {
+		n = name[5:]
+	} else {
+		let colon = indexOfByte(name, ':')
+		if colon >= 0 {
+			if name[0:colon] == "xmlns" {
+				return xAURL
+			}
+			n = name[colon+1:]
+		}
+	}
+	if ctxIsURLName(n) {
+		return xAURL
+	}
+	if n == "style" {
+		return xACSS
+	}
+	if n == "srcset" {
+		return xASrcset
+	}
+	if n == "srcdoc" || n == "srclang" {
+		return xANone
+	}
+	if len(n) >= 2 && n[0:2] == "on" {
+		return xAJS
+	}
+	if ctxIndexOf(n, "src") >= 0 || ctxIndexOf(n, "uri") >= 0 || ctxIndexOf(n, "url") >= 0 {
+		return xAURL
+	}
+	return xANone
+}
+
+// ctxIsURLName reports the attribute names whose values are URLs in Go's attribute table.
+fn ctxIsURLName(n str) bool {
+	return n == "action" || n == "archive" || n == "background" || n == "cite" || n == "classid" || n == "codebase" ||
+		n == "data" || n == "formaction" || n == "href" || n == "icon" || n == "longdesc" || n == "manifest" ||
+		n == "poster" || n == "profile" || n == "src" || n == "usemap" || n == "xmlns"
+}
+
+// ctxIsJSType reports a script type that is JavaScript (Go's isJSType): an empty type or one of the JavaScript MIME types.
+fn ctxIsJSType(v str) bool {
+	mut m = v
+	let semi = ctxIndexAny(v, ";")
+	if semi >= 0 {
+		m = v[:semi]
+	}
+	m = lower(ctxTrimSpace(m))
+	return m == "" || m == "application/ecmascript" || m == "application/javascript" || m == "application/json" ||
+		m == "application/ld+json" || m == "application/x-ecmascript" || m == "application/x-javascript" || m == "module" ||
+		m == "text/ecmascript" || m == "text/javascript" || m == "text/javascript1.0" || m == "text/javascript1.1" ||
+		m == "text/javascript1.2" || m == "text/javascript1.3" || m == "text/javascript1.4" || m == "text/javascript1.5" ||
+		m == "text/jscript" || m == "text/livescript" || m == "text/x-ecmascript" || m == "text/x-javascript"
+}
+
+// ctxTrimSpace trims the HTML whitespace bytes from both ends.
+fn ctxTrimSpace(s str) str {
+	mut a = 0
+	mut b = len(s)
+	for a < b && ctxIsSpace(s[a]) {
+		a += 1
+	}
+	for b > a && ctxIsSpace(s[b-1]) {
+		b -= 1
+	}
+	return s[a:b]
+}
+
+// ctxTrimRightCSS trims the CSS whitespace bytes from the right (Go's bytes.TrimRight with the CSS whitespace set).
+fn ctxTrimRightCSS(s str) str {
+	mut b = len(s)
+	for b > 0 && ctxIsSpace(s[b-1]) {
+		b -= 1
+	}
+	return s[:b]
+}
+
+// ctxSkipCSSSpaces is the number of leading CSS whitespace bytes of s.
+fn ctxSkipCSSSpaces(s str) i64 {
+	mut n = 0
+	for n < len(s) && ctxIsSpace(s[n]) {
+		n += 1
+	}
+	return n
+}
+
+// ctxEndsWithKeyword is Go's endsWithCSSKeyword: b ends with kw (any case) and nothing that could be part of an identifier
+// precedes it.
+fn ctxEndsWithKeyword(b str, kw str) bool {
+	let i = len(b) - len(kw)
+	if i < 0 {
+		return false
+	}
+	if i != 0 && ctxIsCSSNmchar(b[i-1]) {
+		return false
+	}
+	return lower(b[i:]) == kw
+}
+
+// ctxNextJSCtx is Go's nextJSCtx: whether a "/" after the text s starts a regular expression or divides, by the last token of s.
+fn ctxNextJSCtx(s str, preceding i64) i64 {
+	let n = ctxTrimJSSpace(s)
+	if n == 0 {
+		return preceding
+	}
+	let c = s[n-1]
+	if c == '+' || c == '-' {
+		mut start = n - 1
+		for start > 0 && s[start-1] == c {
+			start -= 1
+		}
+		if (n-start)&1 == 1 {
+			return xJSCtxRegexp
+		}
+		return xJSCtxDivOp
+	}
+	if c == '.' {
+		if n != 1 && s[n-2] >= '0' && s[n-2] <= '9' {
+			return xJSCtxDivOp
+		}
+		return xJSCtxRegexp
+	}
+	if indexOfByte(",<>=*%&|^?!~([:;{{}}", c) >= 0 {
+		return xJSCtxRegexp
+	}
+	mut j = n
+	for j > 0 && ctxIsIdent(s[j-1]) {
+		j -= 1
+	}
+	if ctxIsRegexpKeyword(s[j:n]) {
+		return xJSCtxRegexp
+	}
+	return xJSCtxDivOp
+}
+
+// ctxIsRegexpKeyword reports the keywords after which a "/" starts a regular expression (Go's regexpPrecederKeywords).
+fn ctxIsRegexpKeyword(w str) bool {
+	return w == "break" || w == "case" || w == "continue" || w == "delete" || w == "do" || w == "else" || w == "finally" ||
+		w == "in" || w == "instanceof" || w == "return" || w == "throw" || w == "try" || w == "typeof" || w == "void"
+}
+
+// ctxTrimJSSpace is the length of s without its trailing JavaScript whitespace (Go's jsWhitespace, multi-byte runes included).
+fn ctxTrimJSSpace(s str) i64 {
+	mut n = len(s)
+	for n > 0 {
+		let c = s[n-1]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == 11 {
+			n -= 1
+		} else if n >= 2 && s[n-2] == 0xC2 && c == 0xA0 {
+			n -= 2
+		} else if n >= 3 && ctxIsSpace3(s[n-3:n]) {
+			n -= 3
+		} else {
+			break
+		}
+	}
+	return n
+}
+
+// ctxIsSpace3 reports a three-byte JavaScript whitespace rune: U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F,
+// U+3000 and U+FEFF.
+fn ctxIsSpace3(t str) bool {
+	let a = t[0]
+	let b = t[1]
+	let c = t[2]
+	if a == 0xE1 && b == 0x9A && c == 0x80 {
+		return true
+	}
+	if a == 0xE2 && b == 0x80 && (c >= 0x80 && c <= 0x8A || c == 0xA8 || c == 0xA9 || c == 0xAF) {
+		return true
+	}
+	if a == 0xE2 && b == 0x81 && c == 0x9F {
+		return true
+	}
+	if a == 0xE3 && b == 0x80 && c == 0x80 {
+		return true
+	}
+	return a == 0xEF && b == 0xBB && c == 0xBF
+}
+
+// ctxIndexLineEnd is the first JavaScript line terminator (LF, CR, U+2028 or U+2029) in s, or -1.
+fn ctxIndexLineEnd(s str) i64 {
+	for i in 0..len(s) {
+		let c = s[i]
+		if c == '\n' || c == '\r' {
+			return i
+		}
+		if c == 0xE2 && i+2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xA8 || s[i+2] == 0xA9) {
+			return i
+		}
+	}
+	return -1
+}
+
+// ctxIndexAny is the first position in s of a byte of set, or -1.
+fn ctxIndexAny(s str, set str) i64 {
+	for i in 0..len(s) {
+		if indexOfByte(set, s[i]) >= 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// ctxIndexFrom is the first position at or after k of the byte c in s, or -1.
+fn ctxIndexFrom(s str, k i64, c u8) i64 {
+	for i in k..len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// ctxIndexOf is the first position of sub in s, or -1.
+fn ctxIndexOf(s str, sub str) i64 {
+	let n = len(sub)
+	if n > len(s) {
+		return -1
+	}
+	for i in 0..len(s)-n+1 {
+		if s[i:i+n] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+// ctxEatSpace is the first position at or after i that is not an HTML whitespace byte, or len(s).
+fn ctxEatSpace(s str, i i64) i64 {
+	mut j = i
+	for j < len(s) && ctxIsSpace(s[j]) {
+		j += 1
+	}
+	return j
+}
+
+// ctxIsSpace is an HTML whitespace byte.
+fn ctxIsSpace(c u8) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r'
+}
+
+// ctxIsAlpha is an ASCII letter.
+fn ctxIsAlpha(c u8) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// ctxIsAlnum is an ASCII letter or digit.
+fn ctxIsAlnum(c u8) bool {
+	return ctxIsAlpha(c) || c >= '0' && c <= '9'
+}
+
+// ctxIsIdent is a JavaScript identifier byte (Go's isJSIdentPart on ASCII): a letter, a digit, "_" or "$".
+fn ctxIsIdent(c u8) bool {
+	return ctxIsAlnum(c) || c == '_' || c == '$'
+}
+
+// ctxIsCSSNmchar is a CSS name byte (Go's isCSSNmchar): a letter, a digit, "-", "_" or any non-ASCII byte.
+fn ctxIsCSSNmchar(c u8) bool {
+	return ctxIsAlnum(c) || c == '-' || c == '_' || c >= 0x80
+}
+
+// ctxIsInTag reports the states inside a tag (Go's isInTag).
+fn ctxIsInTag(st i64) bool {
+	return st == xTag || st == xAttrName || st == xAfterName || st == xBeforeValue || st == xAttr
+}
+
+// ctxStripTags is Go's stripTags: the text of a trusted HTML value without its tags and comments, which is what Go writes in an
+// attribute value. A value with no markup in it comes back as it is.
+fn ctxStripTags(s str) !str {
+	mut b = twine.NewBuilder(len(s))
+	mut c = ctxNewText()
+	mut i = 0
+	mut allText = true
+	for i != len(s) {
+		if c.delim == xDNone {
+			mut st = c.state
+			if c.element != xElNone && !ctxIsInTag(st) {
+				st = xRCDATA
+			}
+			let (d, nread) = try ctxStripStep(st, c, s[i:])
+			let i1 = i + nread
+			if c.state == xText || c.state == xRCDATA {
+				mut j = i1
+				if d.state != c.state {
+					mut j1 = j - 1
+					for j1 >= i {
+						if s[j1] == '<' {
+							j = j1
+							break
+						}
+						j1 -= 1
+					}
+				}
+				b.Str(s[i:j])
+			} else {
+				allText = false
+			}
+			c = d
+			i = i1
+			continue
+		}
+		let rel = ctxIndexAny(s[i:], ctxDelimEnds(c.delim))
+		if rel < 0 {
+			break
+		}
+		mut i1 = i + rel
+		if c.delim != xDUnq {
+			i1 += 1
+		}
+		c = ctxFresh(xTag, c.element, xANone)
+		i = i1
+	}
+	if allText {
+		return s
+	}
+	if c.state == xText || c.state == xRCDATA {
+		b.Str(s[i:])
+	}
+	return b.String()
+}
+
+// ctxStripStep runs the scanner of st over s from the context c (Go's transitionFunc[st](c, s)).
+fn ctxStripStep(st i64, c ctxState, s str) !(ctxState, i64) {
+	if st == xRCDATA {
+		return ctxSpecialTagEnd(c, s)
+	}
+	return ctxTransition(c, s)
+}

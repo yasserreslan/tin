@@ -77,7 +77,7 @@ fn main() {
 		`<title>{{.}}</title>`, `<{{.}}>`, `{{if .}}<p{{end}}>`, `{{if .}}{{else}}<p{{end}}`, `{{range .}}<p{{end}}`,
 		`<p class="`, `<script>var x = {{.}};</script>`, `<script>var x = "a" / 2; var y = "{{.}}";</script>`,
 		`<script>var x = ` + str(u8(96)) + `${ {{.}} }` + str(u8(96)) + `;</script>`, `<a href="/x" onclick="{{.}}">x</a>`,
-		`<a {{.}}>x</a>`, `<a b {{.}}>x</a>`} {
+		`<a {{.}}>x</a>`, `<a b {{.}}>x</a>`, `<a href="{{template "u" .}}">x</a>{{define "u"}}{{.}}{{end}}`} {
 		say.Line("refused", bad, htmlErr("bad", bad))
 	}
 	// A whole tag inside a block is fine; the context is the same on both paths.

@@ -1,0 +1,183 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "seal"
+import "say"
+import "twine"
+
+// Compare htmltpl (stencil's contextual HTML mode behind Go's html/template API) with Go's html/template over a generated
+// corpus (#912). Each template is one of the contexts the mode supports (element text, comments, RCDATA, tags, quoted, unquoted
+// and URL attribute values, style and script attributes, <script> values, strings and comments, <style> values, strings and
+// url() values), each with {{.}} in it; each value is a hostile payload (a <script> in a URL, in text, in JavaScript and in CSS),
+// a random string of URL-, HTML-, JavaScript- and CSS-significant bytes, or a trusted value of one of the Go types. Both sides
+// print one line per pair (bench/ref/htmltpl and tools/ci/fixtures/htmltpl.tin): the hex-encoded output, or PARSE or EXEC, and
+// the check compares the lines.
+
+const SEED = 912
+const RANDOM_VALUES = 80
+const TYPED_VALUES = 30
+
+// templates are the supported contexts, each with {{.}} in it. The raw strings keep the braces of the template text.
+fn templates() []str {
+	return []str{
+		`<p>{{.}}</p>`,
+		`<p title="{{.}}">x</p>`,
+		`<p title='{{.}}'>x</p>`,
+		`<p title={{.}}>x</p>`,
+		`<a href="{{.}}">x</a>`,
+		`<a href="/s?q={{.}}">x</a>`,
+		`<a href="/p#{{.}}">x</a>`,
+		`<a href='{{.}}'>x</a>`,
+		`<img src={{.}}>`,
+		`<a href="x/{{.}}/y">x</a>`,
+		`<a href=" {{.}}">x</a>`,
+		`<a href="{{.}}{{.}}">x</a>`,
+		`a<!-- {{.}} -->b<p>{{.}}</p>`,
+		`<script>var x = {{.}};</script>`,
+		`<script>var s = "{{.}}";</script>`,
+		`<script>var s = '{{.}}';</script>`,
+		`<script>// {{.}}` + "\n" + `var x = 1;</script>`,
+		`<script>/* a */ var x = {{.}}; /* {{.}} */</script>`,
+		`<script>var x = {{.}} / 2; var z = 1 / 3</script>`,
+		`<script>x = 1 // don't` + "\n" + `var y = {{.}}</script>`,
+		`<script type="text/javascript">var x = {{.}};</script>`,
+		`<script>var r = /a/; var s = "{{.}}";</script>`,
+		`<style>p { color: {{.}} }</style>`,
+		`<style>p::before { content: "{{.}}" }</style>`,
+		`<style>p::before { content: '{{.}}' }</style>`,
+		`<style>p { background: url({{.}}) }</style>`,
+		`<style>p { background: url("{{.}}") }</style>`,
+		`<style>p { background: url('{{.}}') }</style>`,
+		`<style>/* {{.}} */p{}</style>`,
+		`<style>p { color: red; } /* c */ p { margin: {{.}} }</style>`,
+		`<title>{{.}}</title>`,
+		`<textarea>{{.}}</textarea>`,
+		`<p style="color: {{.}}">x</p>`,
+		`<a onclick="x = '{{.}}'">x</a>`,
+		`<a onclick="f({{.}})">x</a>`,
+		`{{if .}}<p>{{.}}</p>{{end}}`,
+		`<p>{{if .}}a{{else}}b{{end}}{{.}}</p>`,
+	}
+}
+
+// fixed are the hostile payloads and the edge cases of a plain string.
+fn fixed() []str {
+	return []str{
+		`<script>alert(1)</script>`, `javascript:alert(1)`, `" onmouseover="alert(1)`, `' onmouseover='alert(1)`,
+		`</script><script>alert(1)</script>`, `\"; alert(1); "`, `'-alert(1)-'`, `expression(alert(1))`,
+		`url(javascript:x)`, "x\xE2\x80\xA8y", `&amp; &lt;b&gt;`, "a\x00b", `a\b`, `-->`, `<!--`, `</style>`, `a b c`,
+		`=` + str(u8(96)) + `x`, `é 中文/路径`, `100%`, `%zz`, `a%20b`, `http://x`, `HTTPS://X/Y`, `mailto:a@b`,
+		`data:text/html,x`, `x+y`, `a&b`, "\t\n\r\x0c\x08", "\x7f", "\xFF", "\xED\xA0\x80", "\xEF\xB7\x90", "\xEF\xBF\xBF",
+		`a'b"c`, `/* c */ */ //`, `1e21`, `0.5`, ``, `   `, `?#`, `&`,
+	}
+}
+
+// pieces are the fragments of the random strings.
+fn pieces() []str {
+	return []str{
+		"a", "b", "Z", "0", " ", "&", "?", "#", "/", ":", "%", "=", "+", "\"", "'", "<", ">", "\\", "é", "中", "javascript",
+		"expression", "url", "script", "</script", "<!--", "-->", "/*", "*/", "//", "{{", "}}", "(", ")", ";", "@", "[", "]", "-",
+		"`", "$", "_", "\t", "\n", "\r", "\x0c", "\x00", "\xE2\x80\xA8", "style", "red", "*",
+	}
+}
+
+// hex encodes bytes as the protocol does.
+fn hex(s str) str {
+	return seal.Hex([]u8(s))
+}
+
+// unhex decodes a line of output for the report.
+fn unhex(s str) str {
+	let b = seal.HexDecode(s) catch _ {
+		[]u8{}
+	}
+	return str(b)
+}
+
+// values is every (kind, value) pair a template is run with: the plain strings, then the trusted kinds, then the other kinds.
+fn values(rng mut dice.Rand) ([]str, []str) {
+	mut kinds = []str{}
+	mut vals = []str{}
+	for v in fixed() {
+		kinds = append(kinds, "str")
+		vals = append(vals, v)
+	}
+	for i in 0..RANDOM_VALUES {
+		mut v = ""
+		let n = rng.Range(0, 12)
+		for j in 0..n {
+			v += pieces()[rng.I64n(len(pieces()))]
+		}
+		kinds = append(kinds, "str")
+		vals = append(vals, v)
+	}
+	for kind in []str{"html", "js", "jsstr", "css", "url"} {
+		for i in 0..TYPED_VALUES {
+			kinds = append(kinds, kind)
+			vals = append(vals, fixed()[i])
+		}
+	}
+	for v in []str{"0", "-42", "9007199254740993"} {
+		kinds = append(kinds, "int")
+		vals = append(vals, v)
+	}
+	kinds = append(kinds, "bool")
+	vals = append(vals, "true")
+	kinds = append(kinds, "bool")
+	vals = append(vals, "false")
+	kinds = append(kinds, "none")
+	vals = append(vals, "")
+	return kinds, vals
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/htmltpl")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "htmltpl-")
+	let tin = ci.Join(work, "htmltpl-tin")
+	ci.BuildTin("tools/ci/fixtures/htmltpl.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "htmltpl-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/htmltpl"}, ci.Root(), 300), "go build htmltpl")
+
+	mut rng = dice.New(SEED)
+	let (kinds, vals) = values(mut rng)
+	mut lines = []str{}
+	let tpls = templates()
+	for t in tpls {
+		for i in 0..len(vals) {
+			lines = append(lines, hex(t) + "\t" + kinds[i] + "\t" + hex(vals[i]))
+		}
+	}
+	let input = twine.Join(lines, "\n") + "\n"
+	let want = ci.Lines(ci.ExecIn([]str{goexe}, ci.Root(), 600, input, []str{}).Stdout)
+	let got = ci.Lines(ci.ExecIn([]str{tin}, ci.Root(), 600, input, []str{}).Stdout)
+	ci.Check(len(got) == len(want) && len(want) == len(lines), "htmltpl: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	mut byKind = map[str]i64{}
+	mut byTemplate = map[str]i64{}
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			bad += 1
+			let t = tpls[i / len(vals)]
+			let j = i % len(vals)
+			byKind[kinds[j]] = byKind[kinds[j]] + 1
+			byTemplate[t] = byTemplate[t] + 1
+			if bad <= 20 {
+				say.Line("template " + t + " kind " + kinds[j] + " value " + say.Fmt("%q", vals[j]))
+				say.Line("  Go:  " + unhex(want[i]) + " (" + want[i] + ")")
+				say.Line("  Tin: " + unhex(got[i]) + " (" + got[i] + ")")
+			}
+		}
+	}
+	for k, n in byKind {
+		say.Line("differ by kind: " + k + " " + mint.Itoa(n))
+	}
+	for t, n in byTemplate {
+		say.Line("differ by template: " + t + " " + mint.Itoa(n))
+	}
+	ci.Check(bad == 0, "htmltpl: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " outputs differ from Go's html/template")
+	ci.Remove(work)
+	ci.Pass("htmltpl: " + mint.Itoa(len(want)) + " template/value pairs match Go's html/template")
+}

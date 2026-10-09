@@ -122,7 +122,8 @@ fn (st State) walk(nodes []Node) ! {
 				if p.hasAssign {
 					st.set(p.assign, v, p.isSet)
 				} else {
-					try st.emit(escapeFor(mode, printValue(v)))
+					let out = try actionOutput(mode, v)
+					try st.emit(out)
 				}
 			}
 			If(b) => {

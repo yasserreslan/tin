@@ -1,0 +1,776 @@
+package stencil
+
+// The escapers of the contextual mode (ParseContextual), as Go's html/template writes them: an action's
+// output is its state escaper (its context: text, RCDATA, a URL, a CSS or JavaScript value or string) followed
+// by the escaper of the attribute delimiter it sits in. A trusted value (Trusted) passes through the escaper of
+// its own kind; the other escapers see its text. Each escaper writes through a builder, so a long value costs
+// time linear in its size. The unicode escapes below are spelled with a backslash escape (\x5c), so the source
+// keeps them as text.
+
+import "mint"
+import "say"
+import "twine"
+
+// The state escapers of a contextual mode.
+const xSNone = 0
+
+const xSHTML = 1
+
+const xSRCDATA = 2
+
+const xSURLFilter = 3
+
+const xSURLNorm = 4
+
+const xSURLEscape = 5
+
+const xSCSSStrFilter = 6
+
+const xSCSSStr = 7
+
+const xSJSVal = 8
+
+const xSJSStr = 9
+
+const xSCSSVal = 10
+
+const xSComment = 11
+
+// The attribute delimiter escapers of a contextual mode.
+const xDCNone = 0
+
+const xDCAttr = 1
+
+const xDCNospace = 2
+
+// A contextual mode is xModeBase + state escaper * 10 + delimiter escaper; the modes below it are the HTML mode's.
+const xModeBase = 100
+
+// actionOutput is the output of an action of mode for the value v: a contextual mode escapes by its context, and any
+// other mode is the HTML mode's escaper over the value's text (a trusted kind does not apply there).
+fn actionOutput(mode i64, v Value) !str {
+	if mode >= xModeBase {
+		let out = try ctxEscape(mode, v)
+		return out
+	}
+	return escapeFor(mode, printValue(v))
+}
+
+// ctxEscape is the output of an action of a contextual mode for the value v.
+fn ctxEscape(mode i64, v Value) !str {
+	let k = mode - xModeBase
+	let sc = k / 10
+	let dc = k % 10
+	if sc == xSNone && v.trust == TrustHTML {
+		// Go strips the tags of trusted HTML in an attribute value and writes the text without the "&" table.
+		if dc == xDCNospace {
+			if len(v.s) == 0 {
+				return "ZgotmplZ"
+			}
+			let stripped = try ctxStripTags(v.s)
+			return ctxNospaceNorm(stripped)
+		}
+		let stripped = try ctxStripTags(v.s)
+		return ctxHTMLNorm(stripped)
+	}
+	let s = try ctxStateEscape(sc, v)
+	if dc == xDCNospace {
+		return ctxNospace(s)
+	}
+	if dc == xDCAttr {
+		return ctxHTMLText(s)
+	}
+	return s
+}
+
+// ctxText is the text of a value as the escapers see it: none is empty (Go skips a nil argument), the rest as {{.}} prints it.
+fn ctxText(v Value) str {
+	if v.kind == KindNone {
+		return ""
+	}
+	return printValue(v)
+}
+
+// ctxStateEscape is the state escaper sc applied to the value v.
+fn ctxStateEscape(sc i64, v Value) !str {
+	let text = ctxText(v)
+	if sc == xSNone {
+		return text
+	}
+	if sc == xSHTML {
+		if v.trust == TrustHTML {
+			return v.s
+		}
+		return ctxHTMLText(text)
+	}
+	if sc == xSRCDATA {
+		if v.trust == TrustHTML {
+			return ctxHTMLNorm(v.s)
+		}
+		return ctxHTMLText(text)
+	}
+	if sc == xSURLFilter {
+		if v.trust == TrustURL {
+			return urlEncode(v.s, true)
+		}
+		if !isSafeURL(text) {
+			return "#ZgotmplZ"
+		}
+		return urlEncode(text, true)
+	}
+	if sc == xSURLNorm {
+		return urlEncode(text, true)
+	}
+	if sc == xSURLEscape {
+		if v.trust == TrustURL {
+			return urlEncode(text, true)
+		}
+		return urlEncode(text, false)
+	}
+	if sc == xSCSSStrFilter {
+		mut t = text
+		if v.trust != TrustURL && !isSafeURL(text) {
+			t = "#ZgotmplZ"
+		}
+		return ctxCSSEscape(t)
+	}
+	if sc == xSCSSStr {
+		return ctxCSSEscape(text)
+	}
+	if sc == xSJSVal {
+		return ctxJSValue(v)
+	}
+	if sc == xSJSStr {
+		if v.trust == TrustJSStr {
+			return ctxJSStr(v.s, true)
+		}
+		return ctxJSStr(text, false)
+	}
+	if sc == xSCSSVal {
+		if v.trust == TrustCSS {
+			return v.s
+		}
+		return ctxCSSValue(text)
+	}
+	return ""
+}
+
+// ctxJSValue is Go's jsValEscaper: a trusted JavaScript value as it is, a trusted JSStr as a quoted string, and anything else
+// as JSON, padded with spaces when it starts or ends with an identifier byte. A value JSON cannot write is a comment and null.
+fn ctxJSValue(v Value) str {
+	if v.trust == TrustJS {
+		return v.s
+	}
+	if v.trust == TrustJSStr {
+		return "\"" + v.s + "\""
+	}
+	mut b = twine.NewBuilder(32)
+	let err = ctxJSON(v, mut b)
+	if len(err) > 0 {
+		return " /* " + err + " */null "
+	}
+	let out = b.String()
+	if len(out) == 0 {
+		return " null "
+	}
+	if ctxIsIdent(out[0]) || ctxIsIdent(out[len(out)-1]) {
+		return " " + out + " "
+	}
+	return out
+}
+
+// ctxJSON writes v as JSON the way Go's encoding/json does with HTML escaping (map keys sorted). It returns the error text for a
+// value JSON cannot write (a NaN or an infinity) and "" otherwise.
+fn ctxJSON(v Value, b mut twine.Builder) str {
+	if v.kind == KindNone {
+		b.Str("null")
+		return ""
+	}
+	if v.kind == KindStr {
+		ctxJSONString(v.s, mut b)
+		return ""
+	}
+	if v.kind == KindInt {
+		b.Str(mint.Itoa(v.n))
+		return ""
+	}
+	if v.kind == KindFloat {
+		return ctxJSONFloat(v.f, mut b)
+	}
+	if v.kind == KindBool {
+		if v.b {
+			b.Str("true")
+		} else {
+			b.Str("false")
+		}
+		return ""
+	}
+	if v.kind == KindList {
+		b.Byte('[')
+		for i in 0..len(v.xs) {
+			if i > 0 {
+				b.Byte(',')
+			}
+			let e = ctxJSON(v.xs[i], mut b)
+			if len(e) > 0 {
+				return e
+			}
+		}
+		b.Byte(']')
+		return ""
+	}
+	b.Byte('{')
+	let keys = sortedKeys(v.m)
+	for i in 0..len(keys) {
+		if i > 0 {
+			b.Byte(',')
+		}
+		ctxJSONString(keys[i], mut b)
+		b.Byte(':')
+		let e = ctxJSON(v.m[keys[i]], mut b)
+		if len(e) > 0 {
+			return e
+		}
+	}
+	b.Byte('}')
+	return ""
+}
+
+// ctxJSONString writes s as a JSON string, as Go's encoding/json does with HTML escaping: quotes, backslashes and control bytes
+// escaped, "<", ">", "&", U+2028 and U+2029 as \u escapes, and invalid UTF-8 as U+FFFD.
+fn ctxJSONString(s str, b mut twine.Builder) {
+	b.Byte('"')
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c >= 0x80 {
+			let (r, w) = ctxDecodeRune(s[i:])
+			if r == 0x2028 {
+				b.Str("\x5cu2028")
+			} else if r == 0x2029 {
+				b.Str("\x5cu2029")
+			} else if r == 0xFFFD && w == 1 {
+				// Go's encoder writes an invalid byte as the replacement character itself.
+				b.Str(replacementChar())
+			} else {
+				b.Str(s[i:i+w])
+			}
+			i += w
+			continue
+		}
+		if c == '"' {
+			b.Str(`\"`)
+		} else if c == '\\' {
+			b.Str(`\\`)
+		} else if c == '\n' {
+			b.Str(`\n`)
+		} else if c == '\r' {
+			b.Str(`\r`)
+		} else if c == '\t' {
+			b.Str(`\t`)
+		} else if c == '\b' {
+			b.Str(`\b`)
+		} else if c == '\f' {
+			b.Str(`\f`)
+		} else if c < 0x20 || c == '<' || c == '>' || c == '&' {
+			b.Str("\x5cu00")
+			b.Byte(ctxHexDigit(c >> 4))
+			b.Byte(ctxHexDigit(c & 15))
+		} else {
+			b.Byte(c)
+		}
+		i += 1
+	}
+	b.Byte('"')
+}
+
+// ctxJSONFloat writes f as Go's encoding/json writes a float64: plain notation, or exponent notation (with its zero dropped)
+// outside 1e-6 to 1e21. A NaN or an infinity is an error, which it returns.
+fn ctxJSONFloat(f f64, b mut twine.Builder) str {
+	if f != f {
+		return "json: unsupported value: NaN"
+	}
+	if f > 1.7976931348623157e308 {
+		return "json: unsupported value: +Inf"
+	}
+	if f < -1.7976931348623157e308 {
+		return "json: unsupported value: -Inf"
+	}
+	mut abs = f
+	if abs < 0 {
+		abs = -abs
+	}
+	mut form u8 = 'f'
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		form = 'e'
+	}
+	mut s = mint.FormatFloat(f, form, -1)
+	if form == 'e' {
+		let n = len(s)
+		if n >= 4 && s[n-4] == 'e' && s[n-3] == '-' && s[n-2] == '0' {
+			s = s[:n-2] + s[n-1:]
+		}
+	}
+	b.Str(s)
+	return ""
+}
+
+// ctxJSStr is Go's jsStrEscaper over a string inside a JavaScript string literal: control bytes, quotes, "&", "+", "/", "<",
+// ">" and the backquote as escapes, the backslash too unless norm (a trusted JSStr is already escaped), and U+2028 and U+2029
+// as \u escapes.
+fn ctxJSStr(s str, norm bool) str {
+	mut b = twine.NewBuilder(len(s) + 8)
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c == 0xE2 && i+2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xA8 || s[i+2] == 0xA9) {
+			if s[i+2] == 0xA8 {
+				b.Str("\x5cu2028")
+			} else {
+				b.Str("\x5cu2029")
+			}
+			i += 3
+			continue
+		}
+		if c == '\t' {
+			b.Str(`\t`)
+		} else if c == '\n' {
+			b.Str(`\n`)
+		} else if c == '\f' {
+			b.Str(`\f`)
+		} else if c == '\r' {
+			b.Str(`\r`)
+		} else if c < 0x20 {
+			b.Str("\x5cu00")
+			b.Byte(ctxHexDigit(c >> 4))
+			b.Byte(ctxHexDigit(c & 15))
+		} else if c == '"' {
+			b.Str("\x5cu0022")
+		} else if c == '\'' {
+			b.Str("\x5cu0027")
+		} else if c == '&' {
+			b.Str("\x5cu0026")
+		} else if c == '+' {
+			b.Str("\x5cu002b")
+		} else if c == '<' {
+			b.Str("\x5cu003c")
+		} else if c == '>' {
+			b.Str("\x5cu003e")
+		} else if c == '`' {
+			b.Str("\x5cu0060")
+		} else if c == '/' {
+			b.Str(`\/`)
+		} else if c == '\\' && !norm {
+			b.Str(`\\`)
+		} else {
+			b.Byte(c)
+		}
+		i += 1
+	}
+	return b.String()
+}
+
+// ctxHTMLText is Go's htmlEscaper over text and quoted attribute values: NUL, quotes, "&", "+", "<" and ">" escaped.
+fn ctxHTMLText(s str) str {
+	return ctxHTMLRepl(s, true)
+}
+
+// ctxHTMLNorm is the text table without "&", for the RCDATA of a trusted HTML value, which is already escaped.
+fn ctxHTMLNorm(s str) str {
+	return ctxHTMLRepl(s, false)
+}
+
+// ctxHTMLRepl writes s with the text table, escaping "&" only when amp is set.
+fn ctxHTMLRepl(s str, amp bool) str {
+	mut b = twine.NewBuilder(len(s) + 16)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c == 0 {
+			b.Str(replacementChar())
+		} else if c == '"' {
+			b.Str("&#34;")
+		} else if c == '\'' {
+			b.Str("&#39;")
+		} else if c == '+' {
+			b.Str("&#43;")
+		} else if c == '<' {
+			b.Str("&lt;")
+		} else if c == '>' {
+			b.Str("&gt;")
+		} else if c == '&' && amp {
+			b.Str("&amp;")
+		} else {
+			b.Byte(c)
+		}
+	}
+	return b.String()
+}
+
+// ctxNospace is Go's htmlNospaceEscaper for an unquoted attribute value: an empty value is ZgotmplZ, and the whitespace,
+// quotes, "&", "+", "<", "=", ">" and the backtick are escaped, NUL and the noncharacters as hex references.
+fn ctxNospace(s str) str {
+	if len(s) == 0 {
+		return "ZgotmplZ"
+	}
+	return ctxNospaceRepl(s, true)
+}
+
+// ctxNospaceNorm is the unquoted-value table without "&", for the text of a trusted HTML value (Go's htmlNospaceNormReplacementTable).
+fn ctxNospaceNorm(s str) str {
+	return ctxNospaceRepl(s, false)
+}
+
+// ctxNospaceRepl writes s with the unquoted-value table, escaping "&" only when amp is set.
+fn ctxNospaceRepl(s str, amp bool) str {
+	mut b = twine.NewBuilder(len(s) + 16)
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c >= 0x80 {
+			// An invalid byte decodes to U+FFFD, a noncharacter of this table, so it is a hex reference too.
+			let (r, w) = ctxDecodeRune(s[i:])
+			if r == 0xFFFD && w == 1 {
+				b.Str("&#xfffd;")
+				i += 1
+				continue
+			}
+		}
+		if c >= 0x80 {
+			let (r, w) = ctxDecodeRune(s[i:])
+			if w > 1 && !(r >= 0xFDD0 && r <= 0xFDEF || r >= 0xFFF0 && r <= 0xFFFF) {
+				b.Str(s[i:i+w])
+				i += w
+				continue
+			}
+		}
+		if c == 0xEF && i+2 < len(s) && (s[i+1] == 0xB7 && s[i+2] >= 0x90 && s[i+2] <= 0xAF || s[i+1] == 0xBF && s[i+2] >= 0xB0 && s[i+2] <= 0xBF) {
+			let r = (i64(c&0x0F) << 12) | (i64(s[i+1]&0x3F) << 6) | i64(s[i+2]&0x3F)
+			b.Str("&#x")
+			b.Str(mint.FormatInt(r, 16))
+			b.Str(";")
+			i += 3
+			continue
+		}
+		if c == 0 {
+			b.Str("&#xfffd;")
+		} else if c == '\t' {
+			b.Str("&#9;")
+		} else if c == '\n' {
+			b.Str("&#10;")
+		} else if c == 11 {
+			b.Str("&#11;")
+		} else if c == '\f' {
+			b.Str("&#12;")
+		} else if c == '\r' {
+			b.Str("&#13;")
+		} else if c == ' ' {
+			b.Str("&#32;")
+		} else if c == '"' {
+			b.Str("&#34;")
+		} else if c == '&' && amp {
+			b.Str("&amp;")
+		} else if c == '\'' {
+			b.Str("&#39;")
+		} else if c == '+' {
+			b.Str("&#43;")
+		} else if c == '<' {
+			b.Str("&lt;")
+		} else if c == '=' {
+			b.Str("&#61;")
+		} else if c == '>' {
+			b.Str("&gt;")
+		} else if c == '`' {
+			b.Str("&#96;")
+		} else {
+			b.Byte(c)
+		}
+		i += 1
+	}
+	return b.String()
+}
+
+// ctxCSSValue is Go's cssValueFilter for a value that is not trusted: the value with its CSS escapes decoded, or ZgotmplZ where
+// the value could leave its declaration (a quote, a bracket, a slash, a semicolon, an at sign, a comment, "--", "expression" or
+// "-moz-binding").
+fn ctxCSSValue(s str) str {
+	let b = ctxDecodeCSS(s)
+	mut id = twine.NewBuilder(len(b) + 1)
+	for i in 0..len(b) {
+		let c = b[i]
+		if c == 0 || c == '"' || c == '\'' || c == '(' || c == ')' || c == '/' || c == ';' || c == '@' || c == '[' || c == '\\' ||
+			c == ']' || c == '`' || c == '{' || c == '}' || c == '<' || c == '>' {
+			return "ZgotmplZ"
+		}
+		if c == '-' {
+			if i != 0 && b[i-1] == '-' {
+				return "ZgotmplZ"
+			}
+		} else if c < 0x80 && ctxIsCSSNmchar(c) {
+			id.Byte(ctxLowerByte(c))
+		}
+	}
+	let word = id.String()
+	if ctxIndexOf(word, "expression") >= 0 || ctxIndexOf(word, "mozbinding") >= 0 {
+		return "ZgotmplZ"
+	}
+	return b
+}
+
+// ctxCSSEscape is Go's cssEscaper: the bytes that could end a CSS string or URL are written as escapes, and an escape gets a
+// space after it when the next byte is a hex digit or a space, or when the string ends there.
+fn ctxCSSEscape(s str) str {
+	mut b = twine.NewBuilder(len(s) + 8)
+	mut written = 0
+	for i in 0..len(s) {
+		let r = ctxCSSRepl(s[i])
+		if len(r) == 0 {
+			continue
+		}
+		b.Str(s[written:i])
+		b.Str(r)
+		written = i + 1
+		if r != `\\` && (written == len(s) || ctxIsHex(s[written]) || ctxIsCSSSpace(s[written])) {
+			b.Byte(' ')
+		}
+	}
+	if written == 0 {
+		return s
+	}
+	b.Str(s[written:])
+	return b.String()
+}
+
+// ctxCSSRepl is the CSS escape of a byte (Go's cssReplacementTable), or "" for a byte that stays as it is.
+fn ctxCSSRepl(c u8) str {
+	if c == 0 {
+		return `\0`
+	}
+	if c == '\t' {
+		return `\9`
+	}
+	if c == '\n' {
+		return `\a`
+	}
+	if c == '\f' {
+		return `\c`
+	}
+	if c == '\r' {
+		return `\d`
+	}
+	if c == '"' {
+		return `\22`
+	}
+	if c == '&' {
+		return `\26`
+	}
+	if c == '\'' {
+		return `\27`
+	}
+	if c == '(' {
+		return `\28`
+	}
+	if c == ')' {
+		return `\29`
+	}
+	if c == '+' {
+		return `\2b`
+	}
+	if c == '/' {
+		return `\2f`
+	}
+	if c == ':' {
+		return `\3a`
+	}
+	if c == ';' {
+		return `\3b`
+	}
+	if c == '<' {
+		return `\3c`
+	}
+	if c == '>' {
+		return `\3e`
+	}
+	if c == '\\' {
+		return `\\`
+	}
+	if c == '{' {
+		return `\7b`
+	}
+	if c == '}' {
+		return `\7d`
+	}
+	return ""
+}
+
+// ctxDecodeCSS is Go's decodeCSS: the CSS escapes of s decoded (up to six hex digits and one space after them, or the byte
+// after a backslash that is not hex). A lone backslash at the end is dropped.
+fn ctxDecodeCSS(s str) str {
+	if indexOfByte(s, '\\') < 0 {
+		return s
+	}
+	mut b = twine.NewBuilder(len(s))
+	mut p = 0
+	for p < len(s) {
+		let k = ctxIndexFrom(s, p, '\\')
+		mut stop = len(s)
+		if k >= 0 {
+			stop = k
+		}
+		b.Str(s[p:stop])
+		p = stop
+		if len(s)-p < 2 {
+			break
+		}
+		if ctxIsHex(s[p+1]) {
+			mut j = p + 2
+			for j < len(s) && j < p+7 && ctxIsHex(s[j]) {
+				j += 1
+			}
+			mut r = ctxHexValue(s[p+1:j])
+			mut end = j
+			if r > 0x10FFFF {
+				r = r / 16
+				end = j - 1
+			}
+			b.Str(ctxEncodeRune(r))
+			p = ctxSkipCSSSpace(s, end)
+		} else {
+			let (_, n) = ctxDecodeRune(s[p+1:])
+			b.Str(s[p+1:p+1+n])
+			p = p + 1 + n
+		}
+	}
+	return b.String()
+}
+
+// ctxSkipCSSSpace skips one CSS whitespace at p (a CR LF pair counts as one), as Go's skipCSSSpace does.
+fn ctxSkipCSSSpace(s str, p i64) i64 {
+	if p >= len(s) {
+		return p
+	}
+	let c = s[p]
+	if c == '\t' || c == '\n' || c == '\f' || c == ' ' {
+		return p + 1
+	}
+	if c == '\r' {
+		if p+1 < len(s) && s[p+1] == '\n' {
+			return p + 2
+		}
+		return p + 1
+	}
+	return p
+}
+
+// ctxIsCSSSpace is a CSS whitespace byte.
+fn ctxIsCSSSpace(c u8) bool {
+	return c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' '
+}
+
+// ctxIsHex is a hex digit.
+fn ctxIsHex(c u8) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+// ctxHexNibble is the value of a hex digit.
+fn ctxHexNibble(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c-'a') + 10
+	}
+	return i64(c-'A') + 10
+}
+
+// ctxHexValue is the value of the hex digits of h (at most six, so it fits).
+fn ctxHexValue(h str) i64 {
+	mut n = 0
+	for i in 0..len(h) {
+		n = n*16 + ctxHexNibble(h[i])
+	}
+	return n
+}
+
+// ctxHexDigit is the lower-case hex digit of a nibble.
+fn ctxHexDigit(n u8) u8 {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'a' + (n - 10)
+}
+
+// ctxLowerByte lowercases an ASCII letter.
+fn ctxLowerByte(c u8) u8 {
+	if c >= 'A' && c <= 'Z' {
+		return c + 32
+	}
+	return c
+}
+
+// ctxEncodeRune is the UTF-8 encoding of r, or of U+FFFD for a value that is not a rune.
+fn ctxEncodeRune(r i64) str {
+	mut v = r
+	if v < 0 || v > 0x10FFFF || v >= 0xD800 && v <= 0xDFFF {
+		v = 0xFFFD
+	}
+	mut b = twine.NewBuilder(4)
+	if v < 0x80 {
+		b.Byte(u8(v))
+	} else if v < 0x800 {
+		b.Byte(u8(0xC0 | (v >> 6)))
+		b.Byte(u8(0x80 | (v & 0x3F)))
+	} else if v < 0x10000 {
+		b.Byte(u8(0xE0 | (v >> 12)))
+		b.Byte(u8(0x80 | ((v >> 6) & 0x3F)))
+		b.Byte(u8(0x80 | (v & 0x3F)))
+	} else {
+		b.Byte(u8(0xF0 | (v >> 18)))
+		b.Byte(u8(0x80 | ((v >> 12) & 0x3F)))
+		b.Byte(u8(0x80 | ((v >> 6) & 0x3F)))
+		b.Byte(u8(0x80 | (v & 0x3F)))
+	}
+	return b.String()
+}
+
+// ctxDecodeRune is the rune at the start of s and its width in bytes: U+FFFD with width 1 for bytes that are not UTF-8.
+fn ctxDecodeRune(s str) (i64, i64) {
+	let c = s[0]
+	if c < 0x80 {
+		return i64(c), 1
+	}
+	if c >= 0xC2 && c <= 0xDF && len(s) >= 2 && ctxCont(s[1], 0x80, 0xBF) {
+		return (i64(c&0x1F) << 6) | i64(s[1]&0x3F), 2
+	}
+	if c >= 0xE0 && c <= 0xEF && len(s) >= 3 {
+		mut lo i64 = 0x80
+		mut hi i64 = 0xBF
+		if c == 0xE0 {
+			lo = 0xA0
+		}
+		if c == 0xED {
+			hi = 0x9F
+		}
+		if ctxCont(s[1], lo, hi) && ctxCont(s[2], 0x80, 0xBF) {
+			return (i64(c&0x0F) << 12) | (i64(s[1]&0x3F) << 6) | i64(s[2]&0x3F), 3
+		}
+	}
+	if c >= 0xF0 && c <= 0xF4 && len(s) >= 4 {
+		mut lo i64 = 0x80
+		mut hi i64 = 0xBF
+		if c == 0xF0 {
+			lo = 0x90
+		}
+		if c == 0xF4 {
+			hi = 0x8F
+		}
+		if ctxCont(s[1], lo, hi) && ctxCont(s[2], 0x80, 0xBF) && ctxCont(s[3], 0x80, 0xBF) {
+			return (i64(c&0x07) << 18) | (i64(s[1]&0x3F) << 12) | (i64(s[2]&0x3F) << 6) | i64(s[3]&0x3F), 4
+		}
+	}
+	return 0xFFFD, 1
+}
+
+// ctxCont reports a continuation byte in the range lo to hi.
+fn ctxCont(c u8, lo i64, hi i64) bool {
+	return i64(c) >= lo && i64(c) <= hi
+}
