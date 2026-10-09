@@ -1226,3 +1226,47 @@ fn (b mut Buffer) SelectLine(row i64) {
 	}
 	b.want = -1
 }
+
+// OpenLineAbove and OpenLineBelow break a new line above or below the caret's line without moving it:
+// the caret stays where it is (at the same column when the line it lands on still reaches that far) and
+// the new line takes the indentation of the line it was made from. The caret ends on the new line.
+fn (b mut Buffer) OpenLine(above bool) {
+	let line = b.Lines[b.Row]
+	let indent = indentOf(line)
+	b.record(kindOther)
+	mut at = b.Row
+	if above {
+		at = b.Row
+	} else {
+		at = b.Row + 1
+	}
+	mut out = []str{}
+	mut i = 0
+	for i < at {
+		out = append(out, b.Lines[i])
+		i += 1
+	}
+	// an empty line keeps no indentation: an indent between two empty lines would be a trap
+	mut fresh = indent
+	if len(line) == 0 {
+		fresh = ""
+	}
+	out = append(out, fresh)
+	i = at
+	for i < len(b.Lines) {
+		out = append(out, b.Lines[i])
+		i += 1
+	}
+	b.Lines = out
+	if above {
+		b.Row = at
+	} else {
+		b.Row = at
+	}
+	// the caret lands on the new line, at the end of its indentation
+	b.Col = len(fresh)
+	b.HasSel = false
+	b.want = -1
+	b.Dirty = true
+	b.Version += 1
+}

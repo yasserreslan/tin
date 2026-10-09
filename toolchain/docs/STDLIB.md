@@ -4197,6 +4197,7 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) TrimTrailingSpace()`: TrimTrailingSpace removes the spaces and tabs at the end of every touched line (the cursor's line when nothing is selected), one undo step for the whole thing.
 - `(b mut Buffer) TransformCase(upper bool)`: TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
 - `(b mut Buffer) SelectLine(row i64)`: SelectLine selects line row, including its newline when it is not the last line.
+- `(b mut Buffer) OpenLine(above bool)`: OpenLineAbove and OpenLineBelow break a new line above or below the caret's line without moving it: the caret stays where it is (at the same column when the line it lands on still reaches that far) and the new line takes the indentation of the line it was made from. The caret ends on the new line.
 
 ## tinjson
 

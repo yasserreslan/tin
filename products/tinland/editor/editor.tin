@@ -738,6 +738,9 @@ fn (ed mut Editor) command(k Key, shift bool) {
 	}
 	if k.Code == keyLeft && (k.Flags & flagAlt) != 0 {
 		ed.goBack()
+	} else if k.Code == keyReturn || k.Code == keyEnter {
+		// Cmd+Return opens a line below the caret's, Cmd+Shift+Return one above; neither moves the caret
+		b.OpenLine(shift)
 	} else if c == 'b' {
 		ed.gotoDefinition()
 	} else if k.Code == keyBackspace {
