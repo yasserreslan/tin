@@ -26,6 +26,7 @@ import "twine"
 //   repo_driver crash DIR       a push of c2, a repack of both packs and the retiring of the old ones (TIT_CRASH_AT)
 //   repo_driver check DIR       main reaches only live packs' objects; after a sweep, rows and files agree
 //   repo_driver private         make repository 1 private
+//   repo_driver grant EMAIL ROLE the user with EMAIL gets ROLE (read, write, admin) on repository 1
 
 fn client() postgres.Client {
 	let (o, ok) = db.TestOptions()
@@ -390,6 +391,15 @@ fn main() {
 			}
 		}
 		"check" => check(arg(2))
+		"grant" => {
+			// grant EMAIL ROLE: the user with that email gets ROLE on ada/tin
+			let email = arg(2)
+			let role = arg(3)
+			_ = pg.Exec("INSERT INTO grants (repo_id, user_id, role) SELECT 1, id, {role} FROM users WHERE lower(email) = lower({email})") catch err {
+				die("grant", err)
+				postgres.Result{Affected: 0}
+			}
+		}
 		_ => {
 			say.Line("unknown command {args[1]}")
 			quarry.Exit(2)

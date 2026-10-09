@@ -12,7 +12,7 @@ case "$dump" in
 /*) ;;
 *) dump="$target/db/$dump" ;;
 esac
-psql -q -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' > /dev/null
+PGOPTIONS='-c client_min_messages=warning' psql -q -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' > /dev/null
 pg_restore --no-owner --exit-on-error --dbname="$PGDATABASE" "$dump"
 mkdir -p "$packs"
 n=$(copy_new "$target/packs" "$packs")

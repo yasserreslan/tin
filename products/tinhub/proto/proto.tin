@@ -76,6 +76,20 @@ fn notFound(w mut anvil.Out, owner str, name str) {
 	refuse(mut w, 404, "NotFound", "no repository {owner}/{name}")
 }
 
+// hidden answers a request for a repository that does not exist, or that its caller cannot read. Unsigned, it is a
+// challenge (Unauthorized, with a nonce to sign with), the same for both, so a private repository's name is not
+// revealed and tit can sign its next attempt (tit clone, tit login); signed, it is NotFound.
+fn hidden(w mut anvil.Out, d Deps, sig str, owner str, name str) {
+	if len(sig) > 0 {
+		notFound(mut w, owner, name)
+		return
+	}
+	w.Status(401)
+	w.Type("application/x-tit")
+	let nonce = transport.NewNonce(d.NonceKey, now())
+	w.Body = []u8(transport.Frame(transport.Kind.Error, transport.Encode(transport.ErrorAnswer{Code: "Unauthorized", Message: "sign the request to read {owner}/{name}", Ref: "", Nonce: nonce}), ""))
+}
+
 // Access is a request's repository, its server, and the role its signer (or nobody) has there.
 type Access struct {
 	Repo   accounts.Repo
@@ -102,7 +116,7 @@ fn access(q anvil.Req, w mut anvil.Out) ?Access {
 		return nil
 	}
 	if found == nil {
-		notFound(mut w, owner, name)
+		hidden(mut w, d, q.Header("tit-signature"), owner, name)
 		return nil
 	}
 	let r = found
@@ -133,7 +147,7 @@ fn access(q anvil.Req, w mut anvil.Out) ?Access {
 		return nil
 	}
 	if role == accounts.RoleNone {
-		notFound(mut w, owner, name)
+		hidden(mut w, d, sig, owner, name)
 		return nil
 	}
 	let pg = repo.PgRepo{Db: d.Db, Store: d.Store, Cache: d.Cache, Id: r.Id, Dir: d.Dir, Who: userId}

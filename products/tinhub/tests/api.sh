@@ -1,7 +1,7 @@
 #!/bin/sh
 # The JSON API's contract tests (#1019) and the protocol's (#1018) against TINHUB_TEST_DB. Usage: api.sh TINHUB
 # REPO_DRIVER TIT. A server runs on the repository repo_driver setup makes (ada/tin, public, main at c1); every
-# endpoint is checked for its answer's shape, a private repository is a 404 everywhere, the rate limit answers 429
+# endpoint is checked for its answer's shape, a private repository is a 404 on the API and, unsigned, the same challenge as a missing one on the protocol, the rate limit answers 429
 # with Retry-After, and tit clones from the server.
 set -eu
 hub=$1
@@ -86,13 +86,19 @@ echo "PASS tinhub api: every endpoint's answer"
 [ "$(cat "$tmp/clone/a.txt")" = one ] || fail "the clone's a.txt"
 echo "PASS tinhub protocol: tit clone"
 
-# a private repository is a 404 to anyone outside it, on the protocol and the API alike
+# a private repository is a 404 to anyone outside it on the API
 "$driver" private > /dev/null
 status "$r" 404 not_found
 status "$r/refs" 404 not_found
 get /api/v1/owners/ada/repos '(.repos | length) == 0'
-code=$(curl -s -o /dev/null -w '%{http_code}' "$base/ada/tin/tit/v1/heads")
-[ "$code" = 404 ] || fail "heads of a private repository: $code, not 404"
+# unsigned, the protocol answers a private repository and a missing one alike: a challenge to sign the next attempt
+code=$(curl -s -o "$tmp/private.out" -w '%{http_code}' "$base/ada/tin/tit/v1/heads")
+[ "$code" = 401 ] || fail "unsigned heads of a private repository: $code, not 401"
+code=$(curl -s -o "$tmp/missing.out" -w '%{http_code}' "$base/ada/nope/tit/v1/heads")
+[ "$code" = 401 ] || fail "unsigned heads of a missing repository: $code, not 401"
+for f in private missing; do
+	grep -q '"Code":"Unauthorized"' "$tmp/$f.out" && grep -q '"Nonce":"[^"]' "$tmp/$f.out" || fail "the $f repository's challenge: $(cat "$tmp/$f.out")"
+done
 echo "PASS tinhub api: a private repository is not found"
 stop
 

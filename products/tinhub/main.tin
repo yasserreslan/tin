@@ -1,5 +1,6 @@
 package main
 
+import "./accounts"
 import "./api"
 import "./config"
 import "./db"
@@ -7,6 +8,8 @@ import "./events"
 import "./packs"
 import "./proto"
 import "./repo"
+import "./signin"
+import "./workers"
 import "anvil"
 import "fault"
 import "hearth"
@@ -37,7 +40,7 @@ type Boot struct {
 }
 
 fn usage() str {
-	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub check [--config FILE]\n       tinhub version [-v]\n"
+	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub check [--config FILE]\n       tinhub admin invite EMAIL [--site-admin] [--config FILE]\n       tinhub version [-v]\n"
 }
 
 // parseBoot reads the command, its --config and --roles flags, and loads the configuration.
@@ -117,7 +120,11 @@ fn level(name str) i64 {
 
 // handlers is every job kind this binary runs (design/tinhub.md §6); later issues add theirs here.
 fn handlers() []events.Handler {
-	return []events.Handler{}
+	let st = openStore(boot.Conf) catch err {
+		herald.Log(herald.LError, "the pack store", []str{"error", fault.Message(err)})
+		return []events.Handler{}
+	}
+	return workers.Handlers(workers.NewDeps(pg, st, boot.Conf.PacksDir, boot.Conf.RepackPacks))
 }
 
 fn runner() events.Runner {
@@ -159,6 +166,11 @@ fn sweep(c config.Config, rows bool) ! {
 		if n > 0 {
 			herald.Log(herald.LInfo, "swept packs", []str{"packs", say.Str(n)})
 		}
+		// the nightly prune: each repository at most once a day
+		let p = try workers.SchedulePrune(pg)
+		if p > 0 {
+			herald.Log(herald.LInfo, "queued prunes", []str{"repos", say.Str(p)})
+		}
 	}
 	_ = try packs.SweepTemp(c.PacksDir + "/tmp", pendingAge(c) / tide.Second, now)
 	if c.PacksStore == "s3" {
@@ -184,14 +196,12 @@ fn configureProto(c config.Config) {
 	}
 	let cache = repo.NewRefCache(c.RedisAddr, "tinhub:", tide.Minute)
 	let limits = redis.Open(redis.Options{Addr: c.RedisAddr, Username: "", Password: "", DB: 0, Proto: 0, Timeout: 0, TLS: nil})
-	api.Configure(api.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: nobody})
+	api.Configure(api.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: signin.Caller})
+	let sessions = accounts.NewSessions(c.RedisAddr, "tinhub:", accounts.SessionTTL, c.CookieKey)
+	signin.Configure(signin.Deps{Db: pg, Sessions: sessions, NonceKey: c.NonceSecret, CookieKey: c.CookieKey, PublicUrl: c.PublicURL, Secure: twine.HasPrefix(c.PublicURL, "https:")})
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
 }
 
-// nobody is the API's caller until sign-in lands (#1012): every request is anonymous, and reads what is public.
-fn nobody(q anvil.Req) !i64 {
-	return 0
-}
 
 // sweeping reports whether this process runs the sweeps: tinhub run, on core 0.
 fn sweeping() bool {
@@ -351,6 +361,7 @@ fn routes(c config.Config) anvil.Router {
 	r.Get("/readyz", readyz)
 	r.Get("/metrics", metrics)
 	if c.Has("node") {
+		signin.Mount(mut r)
 		proto.Mount(mut r)
 		api.Mount(mut r)
 	}
@@ -425,6 +436,16 @@ fn main() {
 				quarry.Exit(1)
 			}
 		}
+		"admin" => {
+			if len(b.Args) < 2 || b.Args[0] != "invite" || (len(b.Args) == 3 && b.Args[2] != "--site-admin") || len(b.Args) > 3 {
+				quarry.Eprint(usage())
+				quarry.Exit(2)
+			}
+			invite(b.Args[1], len(b.Args) == 3) catch err {
+				quarry.Eprintln("tinhub: admin invite: {fault.Message(err)}")
+				quarry.Exit(1)
+			}
+		}
 		"check" => {
 			let ok = checkNow(b.Conf) catch err {
 				quarry.Eprintln("tinhub: check: {fault.Message(err)}")
@@ -493,4 +514,13 @@ fn checkNow(c config.Config) !bool {
 		say.Line("missing {m}")
 	}
 	return len(v.Missing) == 0
+}
+
+// invite is tinhub admin invite: a one-use code for tit key add, the way the first user (with --site-admin) and every
+// later one gets in (design/tinhub.md §11).
+fn invite(email str, siteAdmin bool) ! {
+	try db.Current(pg)
+	let code = try accounts.CreateInvite(pg, email, siteAdmin)
+	say.Line("invite for {email}: {code}")
+	say.Line("on their machine: tit key add {boot.Conf.PublicURL} {code}")
 }

@@ -243,7 +243,7 @@ versions (design/tit.md §16).
 | `deliveries` | `id`, `webhook_id`, `event_id`, `attempt int`, `status int`, `error text`, `duration_ms int`, `created_at` | index `(webhook_id, created_at)` |
 | `schema_migrations` | `version int`, `name text`, `applied_at` | `primary key (version)` |
 
-### Mirrors (#1014, migration `0004_workers`)
+### Mirrors (#1014, migration `0002_workers`)
 
 | table | columns | constraints |
 |---|---|---|
