@@ -1,7 +1,8 @@
 package workers
 
-import "../events"
+import "../bench"
 import "../diffs"
+import "../events"
 import "../notify"
 import "postgres"
 
@@ -38,7 +39,7 @@ fn fanOut(d Deps, tx mut postgres.Tx, j events.Job) ! {
 //	review.diff   semantic diffs and overlaps of a new version   #1021 (diffs.EnqueueFor, below)
 //	notify        notifications to subscribers                   #1023 (notify.EnqueueFor, below)
 //	webhook       webhook deliveries                             #1023 (notify.EnqueueFor, below)
-//	bench         benchmarks of a pushed commit                  #1029
+//	bench         benchmarks of a pushed commit                  #1029 (bench.Enqueue, below)
 fn followUps(d Deps, tx mut postgres.Tx, j events.Job) ! {
 	let repo = j.RepoId
 	let ev = "{j.Id}"
@@ -48,6 +49,8 @@ fn followUps(d Deps, tx mut postgres.Tx, j events.Job) ! {
 	_ = try notify.EnqueueFor(mut tx, repo, "push", pushed)
 	// each new change version's review diff and overlaps (#1021), once per version
 	_ = try diffs.EnqueueFor(mut tx, repo, pushed)
+	// benchmarks (#1029): the results files of the pushed heads and versions, and each version against its base
+	_ = try bench.Enqueue(mut tx, repo, j.Id, pushed)
 	for k in d.Follows {
 		_ = try tx.Exec("INSERT INTO events (kind, repo_id, payload) SELECT {k}, {repo}, {pushed}::jsonb || jsonb_build_object('push', {j.Id}) WHERE NOT EXISTS (SELECT 1 FROM events WHERE kind = {k} AND repo_id = {repo} AND payload->>'push' = {ev})")
 	}

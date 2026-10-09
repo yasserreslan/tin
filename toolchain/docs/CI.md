@@ -224,5 +224,8 @@ refused and a writer's landing, 100 concurrent clones within a memory bound, a 5
 the mirror sync and pushes across restarts), the backup and restore drill (`backup.sh`), the move to phase 2 on the S3
 fake with nodes killed mid-push, mid-fetch and mid-job (`phase2.sh`), the Tin repo mirrored, cloned and pushed with
 short clone timings and a one-versus-three-node fetch count (`clones.sh`; its `TINHUB_BENCH_*` variables lengthen
-them), and a server that refuses to start before `tinhub migrate`,
+them), benchmark history (`bench.sh`, #1029: the Tin repo's `bench/fib.tin` timed, recorded with `tit bench record`
+and pushed under `.bench/`, read into `bench_results` with the CPU and kernel; a change made three times slower fails
+its `bench` check with a note on its review; `tit ship`'s release listed with a verified signature), and a server that
+refuses to start before `tinhub migrate`,
 turns ready after it, and finishes a request in flight at SIGTERM.

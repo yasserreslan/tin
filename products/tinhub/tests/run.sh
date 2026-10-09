@@ -65,6 +65,10 @@ sh products/tinhub/tests/workers.sh "$tmp/workers_driver"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_driver" products/tinhub/tests/programs/runner_driver.tin
 TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_probe" products/tinhub/tests/programs/runner_probe.tin
 sh products/tinhub/tests/runner.sh "$tmp/runner_driver" "$tmp/runner_probe" "$compiler"
+# benchmark history and releases: the Tin repo's fib benchmark timed, recorded with tit bench and pushed; a change made
+# slower fails its check with a note on its review; tit ship's release with its verified signature (#1029)
+TIN_ROOT=$PWD "$compiler" -o "$tmp/bench_node" products/tinhub/tests/programs/bench_node.tin
+sh products/tinhub/tests/bench.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit" "$tmp/bench_node" "$compiler"
 # notifications, webhooks and live updates on two nodes, against bench/ref/tinhub_hooks (Go checks the signatures)
 if command -v go > /dev/null 2>&1 && (cd bench/ref/tinhub_hooks && go build -o "$tmp/hooks" main.go) > "$tmp/go.out" 2>&1; then
 	TIN_ROOT=$PWD "$compiler" -o "$tmp/notify_node" products/tinhub/tests/programs/notify_node.tin

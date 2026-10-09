@@ -100,6 +100,30 @@ Both take read access and the replay permission. Postgres keeps outcomes only, n
 private key is written only into a run's sandbox directory and removed with it. See
 [design/tinhub.md §12](../../design/tinhub.md#12-the-runner-a-changes-behaviour-against-productions-requests-1028).
 
+## Benchmarks and releases
+
+`tit bench record` keeps results in `.tit/bench/<name>.jsonl`; a repository publishes them by committing those files
+under `.bench/` (the same name, the same lines). On every push the `bench` job reads `.bench/*.jsonl` from the pushed
+branch tips and change versions into `bench_results` (each line once, with the machine's OS, architecture, CPU, cores
+and kernel), then compares each change version with its base (its first parent): a Linux result more than 10% slower
+than the base's newest on the same benchmark, unit, architecture and machine fails the version's `bench` check and
+leaves a note on its review. A unit ending in `/s` is a rate (higher is faster); any other is a cost. macOS results
+are kept and charted on their own, never compared with Linux ones.
+
+```sh
+tit bench record fib "$ms" --unit ms && mkdir -p .bench && cp .tit/bench/fib.jsonl .bench/
+tit add .bench && tit commit --amend && tit push
+```
+
+- `GET /api/v1/repos/<owner>/<repo>/bench`: every benchmark; `GET …/bench/<name>?limit=N`: its series, one per machine
+  and unit, Linux first, a macOS one marked `development`.
+- `GET …/changes/<change>/bench?version=N`: the version against its base: each benchmark's base and value, `slower`
+  (a fraction) and `regressed`, and the check's `state`.
+- `GET …/releases?limit=&cursor=`, `GET …/releases/<tag>`: what `tit ship` made (annotated tags), newest first, with the
+  changelog's changes and whether a key registered to the tagger's account signed it (`verified`, `signed_by`).
+
+See [design/tinhub.md §13](../../design/tinhub.md#13-benchmark-history-and-releases-1029).
+
 ## Notifications, webhooks and live updates
 
 - `GET|POST /api/v1/repos/<owner>/<repo>/hooks`, `GET|PATCH|DELETE …/hooks/<id>`: a repository's webhooks, for its
@@ -153,7 +177,9 @@ TINHUB_TEST_DB=127.0.0.1:5432/tinhub_test TINHUB_TEST_DB_USER=tin TINHUB_TEST_DB
 
 On Linux the Postgres checks also run the runner end to end (`tests/runner.sh`: examples/checkout.tin recorded, a change
 adding a SQL query replayed in the sandbox), skipped where the sandbox cannot run (no user namespaces) or there is no
-`redis-server` or docker. With `TINHUB_TEST_REDIS=host:port` as well, the accounts tests also check that sessions survive a restart and that a
+`redis-server` or docker. They also run benchmark history end to end (`tests/bench.sh`: the Tin repo's `bench/fib.tin`
+timed and recorded with tit, a change made three times slower failing its check with a note, `tit ship`'s release).
+With `TINHUB_TEST_REDIS=host:port` as well, the accounts tests also check that sessions survive a restart and that a
 login code is claimed once (under a random key prefix).
 
 The test database is emptied by the tests. CI runs the Postgres checks on Linux x86-64 against the runner's

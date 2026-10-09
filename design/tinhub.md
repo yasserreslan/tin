@@ -65,6 +65,7 @@ products/tinhub/capsules/         the capsule store and failure groups (#1022; n
 products/tinhub/notify/           notifications, webhooks and the live websocket (#1023)
 products/tinhub/review/           reviews, comments, checks and landing (#1025)
 products/tinhub/runner/           the runner role (#1028)
+products/tinhub/bench/            benchmark history and releases (#1029)
 products/tinhub/deploy/           systemd unit, container image, backup and restore, runbook (#1024, #1026)
 products/tinhub/tests/run.sh      the tinhub checks (#1005)
 ```
@@ -176,6 +177,7 @@ else 16 random hex digits, echoed in the answer).
 | `GET\|POST /api/v1/repos/<owner>/<repo>/hooks`, `GET\|PATCH\|DELETE …/hooks/<id>`, `GET …/hooks/<id>/deliveries` (admin) | node | #1023 |
 | `GET /api/v1/subscriptions`, `PUT\|DELETE /api/v1/repos/<owner>/<repo>/subscription`, `PUT\|DELETE …/changes/<change>/subscription` | node | #1023 |
 | `GET\|POST /api/v1/repos/<owner>/<repo>/changes/<change>/behaviour`, `GET\|PUT …/runner`, `GET\|PUT\|DELETE /api/v1/orgs/<org>/runner` | node | #1028 |
+| `GET /api/v1/repos/<owner>/<repo>/bench`, `GET …/bench/<name>`, `GET …/changes/<change>/bench`, `GET …/releases`, `GET …/releases/<tag>` | node | #1029 |
 
 Owner names (users and orgs share one namespace) and repository names match `[a-z0-9][a-z0-9-]{0,38}` and
 `[A-Za-z0-9._-]{1,100}` (not `.` or `..`, not ending in `.tit`). A private repository answers 404, never 403, to
@@ -241,7 +243,8 @@ versions (design/tit.md §16).
 | `change_decls` | `repo_id`, `change_id text`, `version int`, `decl text` (`<package dir>: <key>`, as tit overlap names it) | `primary key (repo_id, change_id, version, decl)`, index `(repo_id, decl)` |
 | `change_overlaps` | `repo_id`, `change_id text`, `version int`, `other_change_id text`, `decl text`, `created_at` | `primary key (repo_id, change_id, version, other_change_id, decl)` |
 | `diffs` | `repo_id`, `change_id text`, `version int`, `against text` (`base`, `previous`), `kind text` (`semantic`, `lines`), `body text` (capped; a large one is `""` and stored in the pack store), `stored bool` | `primary key (repo_id, change_id, version, against)` |
-| `bench_results` | `id`, `repo_id`, `commit_id text`, `name text`, `value double precision`, `unit text`, `os text`, `arch text`, `cpu text`, `kernel text`, `machine text`, `created_at` | index `(repo_id, name, created_at)` |
+| `bench_results` | `id`, `repo_id`, `commit_id text`, `name text`, `value double precision`, `unit text`, `os text`, `arch text`, `cpu text`, `kernel text`, `machine text`, `created_at`; `change_id text` and `line_hash text` (migration `0007_bench`) | index `(repo_id, name, created_at)`, `unique (repo_id, line_hash) where line_hash <> ''` |
+| `bench_files` (migration `0007_bench`) | `repo_id`, `blob text` (a results file read already), `lines int`, `created_at` | `primary key (repo_id, blob)` |
 
 The index (#1020) checks out a commit's Tin files (and the files their `// embed:` lines name) and runs `tinc -symbols
 -json` on them in batches of 300, in `packages/sandbox` with no network (a plain child process where the host cannot
@@ -335,7 +338,7 @@ in the push transaction). Workers run handlers by `kind`; a job is an event in t
 | `notify`, `webhook` | events with subscribers | #1023 | 30s, 16mb |
 | `replay.retention` | nightly | #1022 | 5m, 64mb |
 | `replay.run` | a review's new version (#1025), or the API | #1028, on the runner role only | 60m, 512mb (the sandboxes apart) |
-| `bench` | `push` | #1029 | 1m, 64mb |
+| `bench` | `push` (`bench.Enqueue`), or a review (`bench.Recheck`) | #1029, §13 | 1m, 64mb |
 
 Metrics: `GET /metrics` (Prometheus text, answered to loopback clients only): ready and dead jobs per kind, claimed
 jobs, and the age of the oldest ready job of each kind.
@@ -573,4 +576,56 @@ effect numbers and kinds: no request, body or effect key leaves the sandbox. `GE
 scratch directory: a writer of an opted-in repository could make a change that prints it. The runner stores no body
 or key it prints, and the sandbox has no network, so it cannot leave that way; a key per owner would close the rest
 (later).
+
+---
+
+## 13. Benchmark history and releases (#1029)
+
+`products/tinhub/bench` reads tit bench's results from pushes, compares each change version with its base, and lists
+the releases tit ship makes. Migration `0007_bench` adds `bench_results.change_id` and `line_hash` and `bench_files`.
+
+**Where results come from.** `tit bench record` keeps a result for HEAD's change in `.tit/bench/<name>.jsonl` (one JSON
+line: `Change`, `Commit`, `Value`, `Unit`, `Time`, `Machine{Os, Arch, Cpu, Kernel, Cores}`), which a push never carries.
+A repository publishes its results by committing those files, unchanged, under `.bench/` at the tree's root. On every
+push, `followUps` calls `bench.Enqueue(tx, repo, push, payload)`, which queues one `bench` job when the push moved a
+branch or added a change version, on a worker that runs the bench handler (a tag push queues none). The job reads
+`.bench/*.jsonl` (at most 256 files of 8 MiB) from each pushed branch tip and version commit and inserts every valid
+line (`ON CONFLICT DO NOTHING` on the line's hash, which covers the file's name and the line), one transaction per
+file, with its blob in `bench_files` so a file is read once. A row keeps the machine's `os`, `arch`, `cpu`, `kernel` and `machine` (`"<os> <arch>, <cpu>, <cores>
+cores"`: tit's machine without the kernel). A line that is not tit bench's is left out and logged.
+
+**A version against its base.** For each change version among the pushed commits (a `changes` row naming the commit)
+the job runs `bench.CompareVersion(c, repo, change, version)`: the newest Linux result of each series (benchmark, unit,
+architecture, machine) for the change, as the version's own `.bench/` files hold them (so a later version's results
+never judge an earlier one; when its tree has none, the newest rows of the change), against the newest rows of the
+base, the version's first parent (rows of the base's change, or of the base commit for rows without a change). A unit
+ending in `/s`, `/sec` or `/second` is a rate (slower is lower); any other is a cost (slower is higher). macOS rows
+never take part. More than `Deps.Threshold` (10%) slower fails the version's `checks` row named `bench` (else
+`success`; the row is written whatever the review's state, with a link to the API's verdict when `public_url` is set),
+and, when the change has a `reviews` row, adds a note: a `comments` row with no author (`author_id` NULL, `decl` and
+`file` empty) naming each slower benchmark with both numbers and the machine, written once per version (under
+`pg_advisory_xact_lock(1029, hashtext(change))`). Reviews (#1025) call `bench.Recheck(tx, repo, change, version)` in the
+transaction that opens a review or adds a version (it queues a `bench` job `{"change", "version"}`), or
+`bench.CompareVersion` directly, so a version pushed before its review gets its note.
+
+**Releases.** A release is an annotated tag under `refs/tags/` (tit ship's: the tag's message is the changelog, its
+first line the version, then `- <first line> (<change, 12 letters>)` a change), read from refs and the packs: no table.
+Its signature is verified against the keys registered to the tinhub account whose email is the tagger's.
+Lightweight tags are not releases.
+
+**API** (read access; within 2 s, 16 MiB):
+
+- `GET /api/v1/repos/<owner>/<repo>/bench`: `{"benchmarks": [{"name", "results", "linux_results", "newest_at"}]}`.
+- `GET …/bench/<name>?limit=N` (100, at most 1000 points a series): `{"name", "series": [{"os", "arch", "cpu",
+  "machine", "unit", "development", "points": [{"commit", "change", "value", "kernel", "at"}]}]}`, one series per machine
+  and unit, oldest point first, Linux series first; a series of another OS has `development: true` and is never merged
+  with a Linux one.
+- `GET …/changes/<change>/bench?version=N` (else the newest): `{"change", "version", "commit", "base", "base_change",
+  "threshold", "state", "benchmarks": [{"name", "unit", "arch", "machine", "cpu", "kernel", "base", "value", "slower",
+  "regressed"}]}`.
+- `GET …/releases?limit=&cursor=` (newest by the tagger's time first) and `GET …/releases/<tag>`: `{"name", "tag",
+  "commit", "title", "message", "changes": [{"title", "change"}], "tagger", "signed", "verified", "signed_by"}`.
+
+What `main.tin` wires: `bench.Handlers(bench.NewDeps(pg, st, packs.dir, signin.Caller))` on a worker,
+`bench.Configure(…)` and `bench.Mount(r)` on a node.
 

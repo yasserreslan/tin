@@ -225,6 +225,14 @@ fn post(q anvil.Req, w mut anvil.Out) {
 	let body = q.BodyStream()
 	if twine.HasSuffix(q.Path, "/tit/v1/push") {
 		if a.Role < accounts.RoleWrite {
+			// unsigned (tit ship's tag push opens with no nonce, #1029): a challenge, so tit signs its next attempt
+			if len(q.Header("tit-signature")) == 0 {
+				w.Status(401)
+				w.Type("application/x-tit")
+				let nonce = transport.NewNonce(d.NonceKey, now())
+				w.Body = []u8(transport.Frame(transport.Kind.Error, transport.Encode(transport.ErrorAnswer{Code: "Unauthorized", Message: "sign the request to push to {a.Repo.Owner}/{a.Repo.Name}", Ref: "", Nonce: nonce}), ""))
+				return
+			}
 			refuse(mut w, 403, "Unauthorized", "you can read {a.Repo.Owner}/{a.Repo.Name} but not push to it")
 			return
 		}
