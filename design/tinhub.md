@@ -243,6 +243,12 @@ versions (design/tit.md §16).
 | `deliveries` | `id`, `webhook_id`, `event_id`, `attempt int`, `status int`, `error text`, `duration_ms int`, `created_at` | index `(webhook_id, created_at)` |
 | `schema_migrations` | `version int`, `name text`, `applied_at` | `primary key (version)` |
 
+### Mirrors (#1014, migration `0004_workers`)
+
+| table | columns | constraints |
+|---|---|---|
+| `mirrors` | `repo_id`, `url text` (`https://…`; a local git directory only where the worker allows it), `token text` (HTTP basic password, `''` for none), `active bool`, `created_at`, `mirrored_at`, `last_error text` | `primary key (repo_id)`; set by a repository's admins |
+
 ---
 
 ## 6. The event queue (#1013)
@@ -276,6 +282,25 @@ in the push transaction). Workers run handlers by `kind`; a job is an event in t
 
 Metrics: `GET /metrics` (Prometheus text, answered to loopback clients only): ready and dead jobs per kind, claimed
 jobs, and the age of the oldest ready job of each kind.
+
+**The repository workers** (`products/tinhub/workers`, #1014): `workers.Handlers(deps)` gives the handlers of `push`,
+`repack`, `prune`, `purge` and `mirror` with the budgets above.
+
+- `push` queues, in one transaction, the follow-up kinds (`followUps` in `workers/push.tin` is the one place each of
+  index, review.diff, overlap, notify, webhook and bench is added once its handler exists, keyed by the push event's
+  id), a `mirror` when the repository has an active one, and a `repack` past `repack.packs` live packs; a mirror or
+  repack already `ready` for the repository covers the push.
+- `repack` merges every live pack into one (`packfile.Merge`, oldest first), `Stage`s it, `Commit`s it with no refs,
+  then `Retire`s the packs it merged. A rerun after a crash writes the same pack (already live) and retires the rest.
+- `prune` (queued nightly by `workers.SchedulePrune`, payload `retention_secs` optional) keeps what refs and open
+  changes reach (tit's rules: a change a ref names, one with an open review, or one with a reachable version) plus
+  every object of a pack live for less than the retention (default 30 days; tinhub has no oplog), rewrites the packs
+  that hold anything else and retires them.
+- `purge` (queued by `workers.RequestPurge`, which writes `repo.purge.requested` to `audit_log` in the same
+  transaction) refuses an object something reaches (`repo.purge.refused`, the job done), else rewrites the live packs
+  without it and deletes at once every retired pack that holds it (`repo.purge`).
+- `mirror` writes branches and tags with tit mirror's encoding into `<packs.dir>/mirror/<repo>/mirror.git` (a cache,
+  with its git-ids table) and pushes them over smart HTTP; refs deleted in tinhub stay on the mirror.
 
 ---
 

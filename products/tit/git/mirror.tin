@@ -143,6 +143,22 @@ fn MirrorPlan[S store.ObjectStore](s mut S, target Repo, back Back, tips []objec
 // reading the tit repository in titDir. Run it in an arena: only the pairs of ids (Batch.Git and Batch.Tit) leave it.
 fn MirrorBatch(titDir str, gitDir str, known Back, order []object.Id, start i64, budget i64) !Batch {
 	mut s = try titStore(titDir)
+	return try mirrorBatchIn(mut s, gitDir, known, order, start, budget)
+}
+
+// MirrorBatchFrom is MirrorBatch reading the packs at paths (each a .pack with its .idx beside it) instead of a .tit
+// directory: a server's live packs (tinhub, #1014).
+fn MirrorBatchFrom(paths []str, gitDir str, known Back, order []object.Id, start i64, budget i64) !Batch {
+	mut layers = []dyn store.ObjectStore{}
+	for path in paths {
+		let p = try packfile.Open(path)
+		layers = append(layers, p)
+	}
+	mut s = store.NewLayered(layers)
+	return try mirrorBatchIn(mut s, gitDir, known, order, start, budget)
+}
+
+fn mirrorBatchIn(s mut store.Layered, gitDir str, known Back, order []object.Id, start i64, budget i64) !Batch {
 	let target = try Open(gitDir)
 	mut local = Back{tit: map[str]str{}}
 	mut size = 0

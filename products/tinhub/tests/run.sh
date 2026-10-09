@@ -2,7 +2,7 @@
 # tinhub's checks (#1005). Usage: run.sh [COMPILER]
 # Unit tests run everywhere. With TINHUB_TEST_DB (host:port/name, plus TINHUB_TEST_DB_USER and TINHUB_TEST_DB_PASSWORD)
 # the Postgres tests run too: the schema, the event queue's processes, the repository (races, the Redis ref cache,
-# crash points) and a server's start, readiness and drain.
+# crash points), the workers' crash points and a server's start, readiness and drain.
 # The test database is emptied: never point it at a database you need.
 set -eu
 cd "$(dirname "$0")/../../.." || exit 1
@@ -43,6 +43,8 @@ TIN_ROOT=$PWD "$compiler" -o "$tmp/repo_driver" products/tinhub/tests/programs/r
 sh products/tinhub/tests/repo.sh "$tmp/repo_driver"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/tit" products/tit/main.tin 2>/dev/null
 sh products/tinhub/tests/api.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
+TIN_ROOT=$PWD "$compiler" -o "$tmp/workers_driver" products/tinhub/tests/programs/workers_driver.tin
+sh products/tinhub/tests/workers.sh "$tmp/workers_driver"
 # a server: not ready before tinhub migrate, ready after, and a request in flight at SIGTERM completes
 "$tmp/queue_worker" setup 0 > /dev/null
 dbaddr=${TINHUB_TEST_DB%%/*}
