@@ -5,7 +5,9 @@ import "./api"
 import "./capsules"
 import "./config"
 import "./db"
+import "./diffs"
 import "./events"
+import "./index"
 import "./notify"
 import "./packs"
 import "./proto"
@@ -143,11 +145,24 @@ fn handlers() []events.Handler {
 	capsules.Configure(capsules.Deps{Db: pg, Store: st, Dir: boot.Conf.PacksDir, Auth: signin.Caller})
 	all = append(all, capsules.Handlers()...)
 	all = append(all, notify.Handlers(notifyDeps(boot.Conf))...)
+	let cache = repo.NewRefCache(boot.Conf.RedisAddr, "tinhub:", tide.Minute)
+	all = append(all, index.Handlers(indexDeps(boot.Conf, st, cache))...)
+	all = append(all, diffs.Handlers(diffs.Deps{Db: pg, Store: st, Cache: cache, Dir: boot.Conf.PacksDir, Auth: signin.Caller})...)
 	return all
 }
 
 fn workerLoop() events.Runner {
 	return events.Runner{Db: pg, Handlers: handlers(), Lease: boot.Conf.WorkerLease, Poll: tide.Second}
+}
+
+// indexDeps is the symbol index's dependencies (#1020): tinc from runner.tin when that toolchain is installed (else
+// $TIN_ROOT's), in the sandbox where the host can build one, in runner.cgroup when set.
+fn indexDeps(c config.Config, st dyn packs.PackStore, cache repo.RefCache) index.Deps {
+	mut root = ""
+	if quarry.IsDir(c.RunnerTin + "/bin") {
+		root = c.RunnerTin
+	}
+	return index.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, TinRoot: root, Tinc: "", Sandbox: "auto", Cgroup: c.RunnerCgroup, Auth: signin.Caller}
 }
 
 // runnerDeps is the runner's dependencies (#1028): the replay.run job and the behaviour routes.
@@ -239,6 +254,8 @@ fn configureProto(c config.Config) {
 	capsules.Configure(capsules.Deps{Db: pg, Store: st, Dir: c.PacksDir, Auth: signin.Caller})
 	notify.Configure(notifyDeps(c))
 	runner.Configure(runnerDeps(c, st))
+	index.Configure(indexDeps(c, st, cache))
+	diffs.Configure(diffs.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Auth: signin.Caller})
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
 }
 
@@ -432,6 +449,8 @@ fn routes(c config.Config) anvil.Router {
 		capsules.Mount(mut r)
 		notify.Mount(mut r)
 		runner.Mount(mut r)
+		index.Mount(mut r)
+		diffs.Mount(mut r)
 		proto.Mount(mut r)
 		api.Mount(mut r)
 	}
