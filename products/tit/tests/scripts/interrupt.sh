@@ -14,6 +14,13 @@ t() { "$tit" "$@"; }
 bg() {
 	perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or exit 127' "$@" &
 }
+# true while the process runs (an exited one, zombie or not, is not running)
+running() {
+	case $(ps -o stat= -p "$1" 2> /dev/null) in
+	'' | Z*) return 1 ;;
+	*) return 0 ;;
+	esac
+}
 mkdir "$d/r"
 cd "$d/r"
 git init -q -b main .
@@ -23,14 +30,21 @@ t adopt . > /dev/null
 t config set user.name Ada
 t config set user.email ada@example.com
 
-# the log writes into a pipe nobody reads, so it is still running (blocked on the full pipe) when the interrupt comes,
-# however fast it is
+# the log writes into a pipe whose reader takes its first byte and then holds the pipe open without reading, so the log
+# is still running (blocked on the full pipe) once its output has started, however fast it is
 mkfifo "$d/slow"
-sleep 60 < "$d/slow" &
+( dd bs=1 count=1 of=/dev/null 2> /dev/null; : > "$d/started"; exec sleep 60 ) < "$d/slow" &
 reader=$!
 bg "$tit" log > "$d/slow"
 pid=$!
-sleep 0.2
+n=0
+until [ -e "$d/started" ]; do
+	n=$((n + 1))
+	[ $n -le 300 ] || fail "tit log wrote nothing in 30 s"
+	running $pid || fail "tit log exited before it wrote anything"
+	sleep 0.1
+done
+running $pid || fail "tit log exited before the interrupt"
 kill -INT $pid
 status=0
 wait $pid > /dev/null 2>&1 || status=$?
