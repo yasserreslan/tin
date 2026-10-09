@@ -2,6 +2,7 @@ package worktree
 
 import "../index"
 import "../object"
+import "../packfile"
 import "../store"
 import "crucible"
 import "fault"
@@ -170,4 +171,44 @@ fn TestFindEnds(t mut crucible.T) {
 	t.True("relative", e1 != nil && fault.Is(e1, ErrNoWorkspace))
 	let (_, e2) = Find("/no-such-directory-here/at-all")
 	t.True("absolute", e2 != nil && fault.Is(e2, ErrNoWorkspace))
+}
+
+// A checkout of more than its memory budget (#1049): 64 files of 1 MiB from the repository's packs are written inside
+// limit memory 24mb, a batch at a time; the old checkout read them all first.
+fn TestCheckoutBoundedMemory(t mut crucible.T) {
+	let d = fresh("bounded")
+	let w = Workspace{Name: "default", Root: d, Store: d + "/.tit"}
+	mut s = store.NewMem()
+	mut files = []file{}
+	for i in 0..64 {
+		files = append(files, file{path: "f{i}.bin", mode: object.Mode.File, body: str(seal.RandomBytes(1 << 20))})
+	}
+	let tree = treeOf(mut s, files)
+	mut ids = []object.Id{tree}
+	for f in files {
+		ids = append(ids, object.Hash(object.Kind.Blob, f.body))
+	}
+	let _ = packfile.Write(mut s, ids, d + "/.tit/packs") catch e {
+		t.Error("pack: {e}")
+		return
+	}
+	// read through the packs, as tit reads a repository: every read allocates
+	let packs = packfile.OpenAll(d + "/.tit/packs") catch e {
+		t.Error("open: {e}")
+		return
+	}
+	mut layers = []dyn store.ObjectStore{}
+	for p in packs {
+		layers = append(layers, p)
+	}
+	mut ps = store.NewLayered(layers)
+	mut idx = index.New()
+	let (_, over) = limit memory 24mb {
+		try Checkout(mut ps, w, mut idx, object.NoId, tree, false)
+		0
+	}
+	t.True("the checkout fits in 24 MiB", over == nil)
+	crucible.Equal(mut t, "a file written whole", len(read(d, "f63.bin")), 1 << 20)
+	quarry.RemoveAll(d) catch _ {
+	}
 }
