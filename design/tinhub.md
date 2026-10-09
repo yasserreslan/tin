@@ -60,7 +60,7 @@ products/tinhub/api/              the JSON API under /api/v1 (#1019)
 products/tinhub/events/           the event queue and the worker loop (#1013)
 products/tinhub/workers/          the job handlers: repack, prune, purge, mirror, index, diffs (#1014, #1020, #1021)
 products/tinhub/capsules/         the capsule store and failure groups (#1022; not `replay`: tit imports std replay)
-products/tinhub/live/             notifications, webhooks and the websocket (#1023)
+products/tinhub/notify/           notifications, webhooks and the live websocket (#1023)
 products/tinhub/review/           reviews, comments, checks and landing (#1025)
 products/tinhub/runner/           the runner role (#1028)
 products/tinhub/deploy/           systemd unit, container image, backup and restore, runbook (#1024, #1026)
@@ -166,6 +166,8 @@ else 16 random hex digits, echoed in the answer).
 | `POST /tit/v1/login/<code>/session` (the browser's claim), `POST /tit/v1/logout` | node | #1012 |
 | `/api/v1/…` (JSON) | node | #1019 and later |
 | `GET /api/v1/live` (websocket) | node | #1023 |
+| `GET\|POST /api/v1/repos/<owner>/<repo>/hooks`, `GET\|PATCH\|DELETE …/hooks/<id>`, `GET …/hooks/<id>/deliveries` (admin) | node | #1023 |
+| `GET /api/v1/subscriptions`, `PUT\|DELETE /api/v1/repos/<owner>/<repo>/subscription`, `PUT\|DELETE …/changes/<change>/subscription` | node | #1023 |
 
 Owner names (users and orgs share one namespace) and repository names match `[a-z0-9][a-z0-9-]{0,38}` and
 `[A-Za-z0-9._-]{1,100}` (not `.` or `..`, not ending in `.tit`). A private repository answers 404, never 403, to
@@ -256,6 +258,8 @@ closed group reopens it, moving `fixed_by` to `reopened_by`.
 | `events` | `id`, `kind text`, `repo_id` (nullable), `payload jsonb`, `state text` (`ready`, `claimed`, `done`, `dead`), `attempts int`, `next_at`, `lease_until`, `claimed_by text`, `last_error text`, `created_at`, `done_at` | index `(next_at) where state = 'ready'`, index `(lease_until) where state = 'claimed'` |
 | `webhooks` | `id`, `repo_id`, `url text`, `secret text`, `kinds text[]`, `active bool`, `created_by`, `created_at` | |
 | `deliveries` | `id`, `webhook_id`, `event_id`, `attempt int`, `status int`, `error text`, `duration_ms int`, `created_at` | index `(webhook_id, created_at)` |
+| `subscriptions` (migration `notify`) | `id`, `user_id`, `repo_id`, `change_id text` (`''`: the whole repository), `created_at` | `unique (user_id, repo_id, change_id)`, index `(repo_id, change_id)` |
+| `notifications` (migration `notify`) | `event_id` (the notify job), `user_id`, `sent_at` | `primary key (event_id, user_id)`: a job run again mails nobody twice |
 | `schema_migrations` | `version int`, `name text`, `applied_at` | `primary key (version)` |
 
 ### Mirrors (#1014, migration `0002_workers`)
@@ -316,6 +320,20 @@ jobs, and the age of the oldest ready job of each kind.
   without it and deletes at once every retired pack that holds it (`repo.purge`).
 - `mirror` writes branches and tags with tit mirror's encoding into `<packs.dir>/mirror/<repo>/mirror.git` (a cache,
   with its git-ids table) and pushes them over smart HTTP; refs deleted in tinhub stay on the mirror.
+
+**Notifications, webhooks, live updates (#1023, `notify`).** The `push` handler (and later the review handlers) calls
+`notify.EnqueueFor(tx, repo, kind, payload)` in its transaction: one `webhook` job per active webhook of the
+repository whose `kinds` is empty or holds the kind, and one `notify` job when someone follows the repository or a
+change the payload names (and `smtp.addr` is set). A `webhook` job is one attempt: it POSTs
+`{"kind","repo","delivery","event"}` with `X-Tinhub-Event`, `X-Tinhub-Delivery` (the job's id, the same on every
+attempt), `X-Tinhub-Attempt` and `X-Tinhub-Signature-256: sha256=<hex HMAC-SHA256 of the body under the secret>`,
+logs a `deliveries` row, and fails on no answer or a status outside 2xx, so the queue's backoff retries it until
+`notify.Deps.Attempts` (default 8), then `dead`. Webhook URLs must be `http(s)` to a public address or a fully
+qualified non-local name (tests may allow loopback). A `notify` job mails each follower who can still read the
+repository once (std `smtp`). `GET /api/v1/live` is a websocket following `repo:<owner>/<name>` and
+`change:<owner>/<name>/<change>` topics: each core with websockets polls `events` for new live kinds every
+`Deps.Poll` (500 ms) into a ring, remembering ids given out but not yet committed for 30 s, so an event committed
+through any node reaches subscribers on every node within a poll; `LISTEN/NOTIFY` would only replace the timer.
 
 ---
 
@@ -405,7 +423,7 @@ access); GitHub stays the source of truth, with issues and CI, until the cutover
 |---|---|---|
 | S3 client | `packages/s3` | #1001 |
 | a process sandbox | `packages/sandbox` | #1002 |
-| `LISTEN/NOTIFY` in `postgres` | missing: workers poll; live updates fan out through Redis or polling until it lands | #1013, #1023 |
+| `LISTEN/NOTIFY` in `postgres` | missing: workers poll; live updates poll the `events` table (below) until it lands | #1013, #1023 |
 | a connection cap that holds (`MaxTotal`) | #856 | phase 1 runs with headroom below Postgres's `max_connections` |
 | memory allocated in main survives `anvil.Serve` | #1056 | config is read into `shared let` before cores start |
 

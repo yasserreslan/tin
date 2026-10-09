@@ -75,6 +75,19 @@ the `replay.retention` job deletes them nightly. The API, under `/api/v1/repos/<
 - `GET retention`, `PUT retention` (`{"days": N}`, admin)
 - `PUT grants/<user>`, `DELETE grants/<user>` (admin)
 
+## Notifications, webhooks and live updates
+
+- `GET|POST /api/v1/repos/<owner>/<repo>/hooks`, `GET|PATCH|DELETE …/hooks/<id>`: a repository's webhooks, for its
+  admins (`{"url","secret","kinds":["push"],"active"}`; the secret, 16 to 200 bytes, is generated when left out and
+  shown only by the create). Each delivery is a POST of `{"kind","repo","delivery","event"}` signed in
+  `X-Tinhub-Signature-256: sha256=<hex HMAC-SHA256 of the body>`; a failed one is tried again with backoff, up to 8
+  attempts. `GET …/hooks/<id>/deliveries?limit=&cursor=` lists the attempts, newest first.
+- `GET /api/v1/subscriptions`, `PUT|DELETE /api/v1/repos/<owner>/<repo>/subscription` and
+  `…/changes/<change>/subscription`: what the caller follows; followers are mailed through `smtp.addr`.
+- `GET /api/v1/live?topics=repo:<owner>/<repo>,change:<owner>/<repo>/<change>`: a websocket; send
+  `{"op":"subscribe"|"unsubscribe","topic":…}`, receive `{"op":"event","topic","id","kind","payload"}`. Any node
+  serves any subscriber: each polls the events table.
+
 ## Health and shutdown
 
 - `GET /healthz`: 200 while the process runs.

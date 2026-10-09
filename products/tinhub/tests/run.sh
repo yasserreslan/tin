@@ -45,8 +45,16 @@ TIN_ROOT=$PWD "$compiler" -o "$tmp/tit" products/tit/main.tin 2>/dev/null
 sh products/tinhub/tests/api.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 sh products/tinhub/tests/signin.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 sh products/tinhub/tests/backup.sh "$tmp/tinhub" "$tmp/repo_driver"
+sh products/tinhub/tests/phase2.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/workers_driver" products/tinhub/tests/programs/workers_driver.tin
 sh products/tinhub/tests/workers.sh "$tmp/workers_driver"
+# notifications, webhooks and live updates on two nodes, against bench/ref/tinhub_hooks (Go checks the signatures)
+if command -v go > /dev/null 2>&1 && (cd bench/ref/tinhub_hooks && go build -o "$tmp/hooks" main.go) > "$tmp/go.out" 2>&1; then
+	TIN_ROOT=$PWD "$compiler" -o "$tmp/notify_node" products/tinhub/tests/programs/notify_node.tin
+	sh products/tinhub/tests/notify.sh "$tmp/notify_node" "$tmp/hooks"
+else
+	echo "SKIP tinhub notify (no Go, or the webhook receiver does not build)"
+fi
 # a server: not ready before tinhub migrate, ready after, and a request in flight at SIGTERM completes
 "$tmp/queue_worker" setup 0 > /dev/null
 dbaddr=${TINHUB_TEST_DB%%/*}
