@@ -2152,6 +2152,23 @@ Package nist has the NIST curves P-224, P-256, P-384 and P-521 as Go's crypto/el
 - `FIPS140Enforced() bool`: FIPS140Enforced reports whether FIPS 140-3 rules are enforced (Go's Enforced, the only-mode switch). Tin's verdict is always false.
 - `FIPS140Version() str`: FIPS140Version is the version of a frozen FIPS 140-3 module: "" because Tin has none (Go reports "latest" for its unfrozen module).
 - `FIPS140WithoutEnforcement(f fn())`: FIPS140WithoutEnforcement runs f. Tin never enforces FIPS 140-3 rules, so there is nothing to switch off.
+- `type MLDSAParams struct`: MLDSAParams is one parameter set of FIPS 204 (Table 1): the matrix shape k x l, the secret bound eta, the challenge weight tau, the mask bound gamma1, the rounding gamma2, the hint weight omega, the challenge length ctilde (lambda / 4 bytes), the bits of a z coefficient and of a w1 coefficient.
+- `(p MLDSAParams) String() str`: String is the parameter set's name, such as "ML-DSA-44".
+- `(p MLDSAParams) PublicKeySize() i64`: PublicKeySize is the length of a public key in bytes (32 + 320 k).
+- `(p MLDSAParams) SignatureSize() i64`: SignatureSize is the length of a signature in bytes (ctilde + 32 l zbits + omega + k).
+- `(p MLDSAParams) ExpandedKeySize() i64`: ExpandedKeySize is the length of an expanded private key in bytes (2560, 4032 or 4896).
+- `MLDSAGenerateKey(p MLDSAParams) ([]u8, []u8)`: MLDSAGenerateKey makes a key pair from fresh randomness: the 32-byte seed (the private key) and the public key.
+- `MLDSAPublicKey(p MLDSAParams, seed secret []u8) ![]u8`: MLDSAPublicKey is the public key of the 32-byte seed (FIPS 204's KeyGen_internal, Go's PrivateKey.PublicKey).
+- `MLDSAExpandedKey(p MLDSAParams, seed secret []u8) ![]u8`: MLDSAExpandedKey is the FIPS 204 expanded private key of the 32-byte seed (2560, 4032 or 4896 bytes).
+- `MLDSASign(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8`: MLDSASign signs msg with context ctx under the seed with a fresh nonce, as Go's PrivateKey.Sign does.
+- `MLDSASignDeterministic(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8`: MLDSASignDeterministic signs msg with context ctx under the seed with a zero nonce, as Go's SignDeterministic does.
+- `MLDSASignMu(p MLDSAParams, seed secret []u8, mu []u8) ![]u8`: MLDSASignMu signs the message representative mu (64 bytes) under the seed with a fresh nonce (Go's SignExternalMu).
+- `MLDSASignMuDeterministic(p MLDSAParams, seed secret []u8, mu []u8) ![]u8`: MLDSASignMuDeterministic signs mu under the seed with a zero nonce (Go's SignExternalMuDeterministic).
+- `MLDSASignMuDerand(p MLDSAParams, seed secret []u8, mu []u8, rnd secret []u8) ![]u8`: MLDSASignMuDerand signs mu under the seed with the nonce rnd (32 bytes): for known-answer tests only.
+- `MLDSASignExpandedMuDerand(p MLDSAParams, sk secret []u8, mu []u8, rnd secret []u8) ![]u8`: MLDSASignExpandedMuDerand signs mu under the expanded key sk with the nonce rnd: for known-answer tests only.
+- `MLDSAVerify(p MLDSAParams, pk []u8, msg []u8, sig []u8, ctx []u8) !`: MLDSAVerify checks sig as a signature of msg with context ctx under pk; a signature that does not verify fails.
+- `MLDSADecompose(p MLDSAParams, r i64) (i64, i64)`: MLDSADecompose is Decompose (FIPS 204 Algorithm 36) of r in [0, q) for the set: the high part and the centered low part.
+- `MLDSAVerifyMu(p MLDSAParams, pk []u8, mu []u8, sig []u8) !`: MLDSAVerifyMu checks sig as a signature of the message representative mu under pk (the pre-hashed mode).
 
 ## herald
 
