@@ -140,6 +140,8 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("in", ed.Name())
 		} else if step == "where" {
 			say.Line("at", ed.Name(), ed.Buf.Row + 1, ed.Buf.Col + 1)
+		} else if step == "selinfo" {
+			say.Line("selection", ed.SelectionInfo())
 		} else if step == "info" {
 			say.Line("info:", twine.Join(ed.Info, " | "))
 		} else if step == "check" {

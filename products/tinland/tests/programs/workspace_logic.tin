@@ -185,6 +185,12 @@ added
 	typeText(mut ws, "notes")
 	say.Line("recent picker", ws.Picker.Kind, len(ws.Picker.Items), twine.HasSuffix(ws.Picker.Items[0], "/notes.md"))
 	ws.ClosePicker()
+	// the status bar's selection count
+	ws.OpenFile(root + "/notes.md")
+	ws.Ed.Buf.SelectAll()
+	say.Line("selection", ws.Ed.SelectionInfo())
+	ws.Ed.Buf.HasSel = false
+	say.Line("none", ws.Ed.SelectionInfo())
 	// auto-save: a file with changes is written, a tab without a name is not
 	ws.OpenFile(root + "/notes.md")
 	ws.Ed.Buf.MoveTo(0, 0, false)

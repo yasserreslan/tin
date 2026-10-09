@@ -978,6 +978,22 @@ fn (ed Editor) StatusLine() str {
 	return ed.Message
 }
 
+// SelectionInfo is what the status bar adds to the cursor position while text is selected: the lines and
+// characters it spans ("" without a selection).
+fn (ed Editor) SelectionInfo() str {
+	if !ed.Buf.HasSel {
+		return ""
+	}
+	let text = ed.Buf.SelectedText()
+	mut lines = 1
+	for i in 0..len(text) {
+		if text[i] == '\n' {
+			lines += 1
+		}
+	}
+	return " (" + mint.Itoa(lines) + " lines, " + mint.Itoa(len(text)) + " chars selected)"
+}
+
 // closerOf is the character that closes an opening one ("" for a character that opens nothing).
 fn closerOf(ch str) str {
 	if ch == "(" {
