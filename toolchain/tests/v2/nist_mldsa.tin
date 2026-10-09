@@ -1,0 +1,179 @@
+package main
+
+import "nist"
+import "say"
+import "seal"
+
+// The ML-DSA strict test (#917). The digests below are SHA-256 values computed outside the test: the public and expanded
+// keys of NIST's ACVP keyGen vectors (tcId 1, 26 and 51), the signature of Wycheproof's mu vector tcId 1 (ML-DSA-44), and
+// the golden corpus of bench/ref/mldsa, which is Go's crypto/mldsa. Each line says what it checks.
+
+// the seeds of the ACVP keyGen vectors, with the digests of their public and expanded keys
+let seed44 = "7194B13C95231010AFD2C909992BD2003BA6F437C3886BDBE3F6B867A14BA161"
+let seed65 = "A991FD42B071D49C48AE3E75C647459E0DAAD1E1BA356A04801912D3294BCFF8"
+let seed87 = "A16F5B0796703E2D1A0140A35CBF36EFABE70E752BA59B6A9A0E9C4B05302F73"
+let pk44Hash = "838b88b6ac41e2c60698173e08ca173d0b0d2839205806e56a8a3d53195f3a03"
+let pk65Hash = "b1a7d0d2f0d7a04b9d5ffccd9bd578864dab4a01cdd7f70a05cd1f4f0672e43a"
+let pk87Hash = "33f49649f05ec2fc3b050007b18ade043bbc8d1c0ded03a269d540486daaa5f4"
+let sk44Hash = "1c911d163cd0a5563e06f22403f7e16334fee17c2abb66f11ddf39ca6307ec58"
+let sk65Hash = "56c53ac82fbff7d81b7a8cfbbc73011ceccad677e16dc53f2ece66d49aa11edd"
+
+// Wycheproof's ML-DSA-44 sign-seed vector tcId 1: its seed (0x2a bytes), its mu, and the digest of its signature
+let wpSeed = "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a"
+let wpMu = "0ba2d90bc4fa5877844e47f7563eefccf658f898eaf4197b2a9a89d3df683955c73a80895ac0a51cc9049d44cdc1d1c550ef3870c1126afdb3d52ee057cbbcdd"
+let wpSigHash = "8cd6fc03daa72e87210a4e721523e84c14f27733789075e65736744d4787fdd5"
+
+// the golden corpus's first key (ML-DSA-44): its seed, and the digest of its deterministic signature of an empty message
+let goldenSeed = "c95f130583b697f1ef089485042b29a977f2ab520d546234185127b401cfd8b7"
+let goldenSignHash = "cc88cd21f73844fa3e9300a9652263e283f951313fe201c778ba7736c11af83c"
+
+// bytes is the hex string s as bytes; the constants above are correct, so a bad one shows as a wrong line.
+fn bytes(s str) []u8 {
+	let b = seal.HexDecode(s) catch err {
+		say.Line("bad hex", say.Str(err))
+		return []u8{}
+	}
+	return b
+}
+
+// faulted is "ok", or the fault's message.
+fn faulted(err fault) str {
+	if err == nil {
+		return "ok"
+	}
+	return "fault: " + say.Str(err)
+}
+
+// pubHash is the SHA-256 of the public key of seed under p, or the fault.
+fn pubHash(p nist.MLDSAParams, seed []u8) str {
+	let pk = nist.MLDSAPublicKey(p, seed) catch err {
+		return faulted(err)
+	}
+	return seal.Sha256Hex(str(pk))
+}
+
+// expHash is the SHA-256 of the expanded private key of seed under p, or the fault.
+fn expHash(p nist.MLDSAParams, seed []u8) str {
+	let sk = nist.MLDSAExpandedKey(p, seed) catch err {
+		return faulted(err)
+	}
+	return seal.Sha256Hex(str(sk))
+}
+
+// signHash is the SHA-256 of the deterministic signature of msg under seed and ctx, or the fault.
+fn signHash(p nist.MLDSAParams, seed []u8, msg []u8, ctx []u8) str {
+	let sig = nist.MLDSASignDeterministic(p, seed, msg, ctx) catch err {
+		return faulted(err)
+	}
+	return seal.Sha256Hex(str(sig))
+}
+
+// muHash is the SHA-256 of the deterministic pre-hashed signature of mu under seed, or the fault.
+fn muHash(p nist.MLDSAParams, seed []u8, mu []u8) str {
+	let sig = nist.MLDSASignMuDeterministic(p, seed, mu) catch err {
+		return faulted(err)
+	}
+	return seal.Sha256Hex(str(sig))
+}
+
+// verdict is "ok" when sig verifies msg under pk and ctx, and the fault otherwise.
+fn verdict(p nist.MLDSAParams, pk []u8, msg []u8, sig []u8, ctx []u8) str {
+	nist.MLDSAVerify(p, pk, msg, sig, ctx) catch err {
+		return faulted(err)
+	}
+	return "ok"
+}
+
+// verdictMu is verdict for the pre-hashed mode: sig is checked against the representative mu.
+fn verdictMu(p nist.MLDSAParams, pk []u8, mu []u8, sig []u8) str {
+	nist.MLDSAVerifyMu(p, pk, mu, sig) catch err {
+		return faulted(err)
+	}
+	return "ok"
+}
+
+// sizes prints the parameter set's name and its three sizes (FIPS 204, Table 2).
+fn sizes(p nist.MLDSAParams) {
+	say.Line(p.String(), p.PublicKeySize(), p.SignatureSize(), p.ExpandedKeySize())
+}
+
+fn main() {
+	sizes(nist.MLDSA44)
+	sizes(nist.MLDSA65)
+	sizes(nist.MLDSA87)
+
+	say.Line("public key 44 (ACVP keyGen tcId 1):", pubHash(nist.MLDSA44, bytes(seed44)) == pk44Hash)
+	say.Line("public key 65 (ACVP keyGen tcId 26):", pubHash(nist.MLDSA65, bytes(seed65)) == pk65Hash)
+	say.Line("public key 87 (ACVP keyGen tcId 51):", pubHash(nist.MLDSA87, bytes(seed87)) == pk87Hash)
+	say.Line("expanded key 44 (ACVP keyGen tcId 1):", expHash(nist.MLDSA44, bytes(seed44)) == sk44Hash)
+	say.Line("expanded key 65 (ACVP keyGen tcId 26):", expHash(nist.MLDSA65, bytes(seed65)) == sk65Hash)
+
+	// the deterministic pure signature of an empty message and context (the golden corpus), and the pre-hashed signature
+	// of Wycheproof's mu vector
+	say.Line("pure signature 44, empty message (golden corpus):", signHash(nist.MLDSA44, bytes(goldenSeed), []u8{}, []u8{}) == goldenSignHash)
+	say.Line("mu signature 44 (Wycheproof tcId 1):", muHash(nist.MLDSA44, bytes(wpSeed), bytes(wpMu)) == wpSigHash)
+
+	// a signature verifies under its key, message and context; each change of one of them is refused
+	let msg = bytes("48656c6c6f20776f726c64")
+	let ctx = bytes("6374782d6d6c6473")
+	let seed = bytes(wpSeed)
+	let sig = nist.MLDSASignDeterministic(nist.MLDSA44, seed, msg, ctx) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	let pk = nist.MLDSAPublicKey(nist.MLDSA44, seed) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	let other = nist.MLDSAPublicKey(nist.MLDSA44, bytes(goldenSeed)) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	say.Line("verify 44, round trip:", verdict(nist.MLDSA44, pk, msg, sig, ctx))
+	say.Line("verify 44, wrong context:", verdict(nist.MLDSA44, pk, msg, sig, bytes("6374782d6d6c6474")))
+	say.Line("verify 44, wrong message:", verdict(nist.MLDSA44, pk, bytes("48656c6c6f20776f726c65"), sig, ctx))
+	say.Line("verify 44, another key:", verdict(nist.MLDSA44, other, msg, sig, ctx))
+	say.Line("verify 44, signature 1 byte short:", verdict(nist.MLDSA44, pk, msg, sig[0:len(sig)-1], ctx))
+	say.Line("verify 44, key 1 byte short:", verdict(nist.MLDSA44, pk[0:len(pk)-1], msg, sig, ctx))
+	say.Line("verify 44, context of 256 bytes:", verdict(nist.MLDSA44, pk, msg, sig, make([]u8, 256)))
+	say.Line("sign 44, seed of 31 bytes:", signHash(nist.MLDSA44, seed[0:31], msg, ctx))
+	say.Line("sign 44, context of 256 bytes:", signHash(nist.MLDSA44, seed, msg, make([]u8, 256)))
+	say.Line("public key 44, seed of 31 bytes:", pubHash(nist.MLDSA44, seed[0:31]))
+
+	// randomized signing: a signature verifies, and two signatures of the same message differ (a fresh nonce each time)
+	let seed65b = bytes(seed65)
+	let pk65 = nist.MLDSAPublicKey(nist.MLDSA65, seed65b) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	let r1 = nist.MLDSASign(nist.MLDSA65, seed65b, msg, ctx) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	let r2 = nist.MLDSASign(nist.MLDSA65, seed65b, msg, ctx) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	say.Line("randomized 65, verify:", verdict(nist.MLDSA65, pk65, msg, r1, ctx))
+	say.Line("randomized 65, two signatures differ:", seal.Hex(r1) != seal.Hex(r2))
+
+	// the pre-hashed mode: its own signature verifies, another mu (64 bytes) is refused, and a mu of 63 bytes is refused
+	let muSig = nist.MLDSASignMuDeterministic(nist.MLDSA44, seed, bytes(wpMu)) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	say.Line("mu verify 44, round trip:", verdictMu(nist.MLDSA44, pk, bytes(wpMu), muSig))
+	say.Line("mu verify 44, another mu:", verdictMu(nist.MLDSA44, pk, bytes(goldenSeed+goldenSeed), muSig))
+	say.Line("mu sign 44, mu of 63 bytes:", muHash(nist.MLDSA44, seed, bytes(wpMu)[0:63]))
+
+	// the expanded key signs as its seed does: the pre-hashed path with a zero nonce agrees
+	let sk = nist.MLDSAExpandedKey(nist.MLDSA44, seed) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	let viaSk = nist.MLDSASignExpandedMuDerand(nist.MLDSA44, sk, bytes(wpMu), make([]u8, 32)) catch err {
+		say.Line("unexpected fault", say.Str(err))
+		return
+	}
+	say.Line("expanded key signs as its seed:", seal.Hex(viaSk) == seal.Hex(muSig))
+}
