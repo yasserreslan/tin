@@ -507,6 +507,8 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `type NoBody struct{}`: NoBody is the body of a request that has none, for DoStream.
 - `(b mut NoBody) Read(buf mut []u8) !i64`: Read gives nothing: the body has ended.
 - `DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options) !Stream`: DoStream sends one request with its body read from body, and returns the response once its headers are in; see the section comment above.
+- `type Copied struct`: decimal is a Content-Length header's value. Copied is what DoStreamTo gives back: the response's status and how many body bytes it copied.
+- `DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body R, opt Options, w mut W) !Copied`: DoStreamTo is DoStream with the response's body copied to w as it arrives, a buffer at a time, whatever its status (an error answer's body too). Reading the Stream here, inside wire, keeps a caller's code from tripping #1036 (a false E312 on Stream.Read from outside the package).
 - `(s mut Stream) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the body and returns how many; 0 at its end, after which the connection is back in the pool or closed. A connection that fails or ends early is closed and Read fails: it never gives a truncated body as complete.
 - `(s mut Stream) Close()`: Close ends the response: a body not read to its end closes the connection.
 - `(s Stream) Header(name str) str`: Header returns the response header name (any case), or "".
