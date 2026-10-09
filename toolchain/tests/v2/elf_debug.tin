@@ -1,0 +1,30 @@
+package main
+
+import "debug/elf"
+import "fault"
+import "quarry"
+import "say"
+
+fn main() {
+	let (_, err) = elf.Open("toolchain/std/debug/elf/elf.tin")
+	if fault.Is(err, elf.ErrFormat) {
+		say.Line("foreign file rejected")
+	} else {
+		say.Line("unexpected ELF result: {err}")
+	}
+	let path = "bin/ci/elf-truncated"
+	quarry.WriteFile(path, str([]u8{0x7f, 'E', 'L', 'F'})) catch err {
+		say.Line("could not write truncated fixture: {err}")
+		return
+	}
+	let (_, truncatedErr) = elf.Open(path)
+	quarry.Remove(path) catch err {
+		say.Line("could not remove truncated fixture: {err}")
+		return
+	}
+	if fault.Is(truncatedErr, elf.ErrFormat) {
+		say.Line("truncated ELF rejected")
+	} else {
+		say.Line("unexpected truncated ELF result: {truncatedErr}")
+	}
+}

@@ -1,0 +1,919 @@
+// Package jsontext reads and writes JSON token by token, as Go's encoding/json/jsontext does: a Decoder yields Tokens and whole Values,
+// an Encoder takes them back and formats them with Options. Strings are unescaped in Token.String; numbers, literals and delimiters
+// keep their text. Errors carry Go's messages (#931).
+package jsontext
+
+import "fault"
+import "glyph"
+import "mint"
+import "twine"
+
+// EOF is the fault a Decoder returns at the end of its input, as io.EOF is for Go's Decoder.
+let EOF = fault("EOF")
+
+// Token is one JSON token: its kind byte and its text (the unescaped string of a string token, the literal of any other).
+type Token struct {
+	kind u8
+	text str
+}
+
+// Null is the null token.
+let Null = Token{kind: 'n', text: "null"}
+
+// BeginObject is the '{' token.
+let BeginObject = Token{kind: '{', text: "{{"}
+
+// EndObject is the '}' token.
+let EndObject = Token{kind: '}', text: "}}"}
+
+// BeginArray is the '[' token.
+let BeginArray = Token{kind: '[', text: "["}
+
+// EndArray is the ']' token.
+let EndArray = Token{kind: ']', text: "]"}
+
+// Bool returns the true or false token.
+fn Bool(b bool) Token {
+	if b {
+		return Token{kind: 't', text: "true"}
+	}
+	return Token{kind: 'f', text: "false"}
+}
+
+// String returns the string token for s (unescaped text; it is escaped when written).
+fn String(s str) Token {
+	return Token{kind: '"', text: s}
+}
+
+// Int returns the number token for n.
+fn Int(n i64) Token {
+	return Token{kind: '0', text: mint.Itoa(n)}
+}
+
+// Uint returns the number token for n.
+fn Uint(n u64) Token {
+	return Token{kind: '0', text: mint.FormatUint(n, 10)}
+}
+
+// Float returns the number token for n, in the shortest form that reads back (NaN and infinities are not numbers: their token is
+// the text "NaN" or "Inf", which Encoder refuses).
+fn Float(n f64) Token {
+	return Token{kind: '0', text: formatFloat(n)}
+}
+
+// formatFloat writes n in the shortest digits that read back, plain for decimal exponents from -6 to 20 and with an exponent otherwise
+// (as ECMAScript and Go's jsontext do). NaN and the infinities are kept as their names, which Encoder refuses.
+fn formatFloat(n f64) str {
+	if n != n {
+		return "NaN"
+	}
+	if n > 1.7976931348623157e308 {
+		return "+Inf"
+	}
+	if n < -1.7976931348623157e308 {
+		return "-Inf"
+	}
+	let s = mint.FormatFloat(n, 'e', -1)
+	mut body = s
+	mut neg = false
+	if body[0] == '-' {
+		neg = true
+		body = body[1:]
+	}
+	let epos = twine.IndexByte(body, 'e')
+	let e = mint.Atoi(body[epos+1:]) catch _ {
+		return s
+	}
+	let digits = twine.ReplaceAll(body[0:epos], ".", "")
+	let k = i64(len(digits))
+	let p = e + 1
+	mut out = ""
+	if k <= p && p <= 21 {
+		out = digits + twine.Repeat("0", p-k)
+	} else if p > 0 && p <= 21 {
+		out = digits[0:p] + "." + digits[p:]
+	} else if p > -6 && p <= 0 {
+		out = "0." + twine.Repeat("0", -p) + digits
+	} else {
+		mut m = digits[0:1]
+		if k > 1 {
+			m += "." + digits[1:]
+		}
+		if p-1 < 0 {
+			out = m + "e-" + mint.Itoa(-(p - 1))
+		} else {
+			out = m + "e+" + mint.Itoa(p-1)
+		}
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
+// Kind returns the token's kind byte: '"', '0', 't', 'f', 'n', '{', '}', '[' or ']'.
+fn (t Token) Kind() u8 {
+	return t.kind
+}
+
+// String returns the unescaped text of a string token and the literal of any other token.
+fn (t Token) String() str {
+	return t.text
+}
+
+// Bool reports whether the token is true.
+fn (t Token) Bool() bool {
+	return t.kind == 't'
+}
+
+// Int returns the token's number as an integer (0 when it is not one or does not fit).
+fn (t Token) Int() i64 {
+	if t.kind != '0' {
+		return 0
+	}
+	return mint.ParseInt(t.text, 10) catch _ {
+		return 0
+	}
+}
+
+// Float returns the token's number as a float64 (0 when it is not one).
+fn (t Token) Float() f64 {
+	if t.kind != '0' {
+		return 0
+	}
+	return mint.ParseFloat(t.text) catch _ {
+		return 0
+	}
+}
+
+// Options are the jsontext options this package implements (Go's jsontext.Options). Multiline or a non-empty Indent puts each member
+// and element on its own line; each line starts with IndentPrefix and then Indent once per nesting level.
+type Options struct {
+	// Multiline starts a new line for each member and element.
+	Multiline bool
+	// Indent is the text written per nesting level; it implies Multiline.
+	Indent str
+	// IndentPrefix is written at the start of each line after the first, before Indent.
+	IndentPrefix str
+	// SpaceAfterColon writes a space after each member name's colon.
+	SpaceAfterColon bool
+	// SpaceAfterComma writes a space after each comma.
+	SpaceAfterComma bool
+	// EscapeForHTML escapes <, > and & in strings as <, > and &.
+	EscapeForHTML bool
+	// EscapeForJS escapes U+2028 and U+2029 in strings.
+	EscapeForJS bool
+	// AllowDuplicateNames accepts an object with the same member name twice; by default the Decoder refuses it.
+	AllowDuplicateNames bool
+}
+
+// frame is one open object or array. For an object, state is ':' after a name (a colon is next), 'v' after the colon (a value is
+// next), ',' after a value (a comma or the close is next), and 'k' or 'K' where a name is next ('k' after the '{', 'K' after a comma).
+// For an array, state is 'a' after the '[', 'v' after a comma and ',' after an element. count is the index of the current element;
+// comma is the offset of the last comma; name is the member being read.
+type frame struct {
+	obj   bool
+	state u8
+	count i64
+	comma i64
+	name  str
+	names []str
+}
+
+// Decoder reads the tokens and values of a JSON text. Top-level values follow one another without separators, as in Go.
+type Decoder struct {
+	src      str
+	pos      i64
+	frames   []frame
+	dups     bool
+	inValue  bool
+	inScalar bool
+}
+
+// NewDecoder returns a Decoder that reads the JSON text s.
+fn NewDecoder(s str, opts Options) Decoder {
+	return Decoder{src: s, pos: 0, frames: []frame{}, dups: opts.AllowDuplicateNames}
+}
+
+// Encoder writes tokens and values as JSON text, formatted with its Options. Each complete top-level value ends with a newline.
+type Encoder struct {
+	buf    []u8
+	opts   Options
+	frames []frame
+}
+
+// NewEncoder returns an Encoder that formats with opts.
+fn NewEncoder(opts Options) Encoder {
+	return Encoder{buf: []u8{}, opts: opts, frames: []frame{}}
+}
+
+// Bytes returns the JSON text written so far.
+fn (e Encoder) Bytes() str {
+	return str(e.buf)
+}
+
+// isSpace reports whether c is JSON white space.
+fn isSpace(c u8) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// isDigit reports whether c is a decimal digit.
+fn isDigit(c u8) bool {
+	return c >= '0' && c <= '9'
+}
+
+// invalidText is Go's InvalidTextError text for the invalid text what: a single rune in its quotes, text that holds a backtick, a space,
+// a control byte or a byte that is not UTF-8 in strconv.Quote form, and anything else in backquotes. Text longer than six bytes is a
+// surrogate pair, not an escape sequence (the caller names it).
+fn invalidText(label str, what str, where str) str {
+	mut q = "`" + what + "`"
+	if glyph.RuneCount(what) == 1 {
+		q = quoteChar(what[0])
+	} else {
+		for i in 0..len(what) {
+			let c = what[i]
+			if c == '`' || c == ' ' || c < 0x20 || c == 0x7f || c >= 0x80 {
+				q = mint.Quote(what)
+				break
+			}
+		}
+	}
+	return twine.TrimSuffix("invalid " + label + " " + q + " " + where, " ")
+}
+
+// hexVal is the value of the hex digit c, or -1.
+fn hexVal(c u8) i64 {
+	if c >= '0' && c <= '9' {
+		return i64(c - '0')
+	}
+	if c >= 'a' && c <= 'f' {
+		return i64(c-'a') + 10
+	}
+	if c >= 'A' && c <= 'F' {
+		return i64(c-'A') + 10
+	}
+	return -1
+}
+
+// startsValue reports whether c can begin a JSON value.
+fn startsValue(c u8) bool {
+	return c == '"' || c == '{' || c == '[' || c == '-' || isDigit(c) || c == 't' || c == 'f' || c == 'n'
+}
+
+// quoteChar is the form Go's error texts give a byte: '\n' and the like escaped, control bytes as \x hex.
+fn quoteChar(c u8) str {
+	if c == '\n' {
+		return "'\\n'"
+	}
+	if c == '\r' {
+		return "'\\r'"
+	}
+	if c == '\t' {
+		return "'\\t'"
+	}
+	if c == '\'' {
+		return "'\\''"
+	}
+	if c == '\\' {
+		return "'\\\\'"
+	}
+	if c < 0x20 || c == 0x7f {
+		return "'\\x" + hex2(c) + "'"
+	}
+	return "'" + str([]u8{c}) + "'"
+}
+
+// hex2 is the two lower-case hex digits of c.
+fn hex2(c u8) str {
+	let digits = "0123456789abcdef"
+	return str([]u8{digits[c>>4], digits[c&15]})
+}
+
+// pointerToken escapes one JSON pointer reference token (~ and / as ~0 and ~1).
+fn pointerToken(s str) str {
+	return twine.ReplaceAll(twine.ReplaceAll(s, "~", "~0"), "/", "~1")
+}
+
+// pointer is the JSON pointer Go's error texts name: each open object's member and each open array's element, the innermost one
+// only while its value is in progress. eof hides array indices, as Go does at the end of the input.
+fn (d Decoder) pointer(eof bool, inner bool) str {
+	mut out = ""
+	let n = len(d.frames)
+	for i in 0..n {
+		let f = d.frames[i]
+		let last = i == n-1
+		if last && !inner {
+			continue
+		}
+		if f.obj {
+			if !last || f.state == ':' || f.state == 'v' {
+				out += "/" + pointerToken(f.name)
+			}
+		} else if !eof {
+			// The innermost array names its element once a value is due, and always in value mode or while a scalar is read.
+			if !last || d.inScalar || ((f.state == 'a' || f.state == 'v') && (f.count > 0 || d.inValue)) {
+				out += "/" + mint.Itoa(f.count)
+			}
+		}
+	}
+	return out
+}
+
+// syntaxError is Go's SyntacticError text: what, then the pointer when there is one, then the offset when it is not 0.
+fn (d Decoder) syntaxError(what str, at i64, eof bool) str {
+	mut msg = "jsontext: " + what
+	let p = d.pointer(eof, true)
+	if p != "" {
+		msg += " within " + mint.Quote(p)
+	}
+	if at > 0 {
+		msg += " after offset " + mint.Itoa(at)
+	}
+	return msg
+}
+
+// trailingComma is the error for a comma before the close of a container: Go names the comma and gives no pointer.
+fn (d Decoder) trailingComma(at i64) str {
+	return d.parentError("invalid character ',' at start of value", at)
+}
+
+// parentError is a syntax error whose pointer names the containers around the innermost one, not that one's member or element.
+fn (d Decoder) parentError(what str, at i64) str {
+	mut msg = "jsontext: " + what
+	let p = d.pointer(false, false)
+	if p != "" {
+		msg += " within " + mint.Quote(p)
+	}
+	if at > 0 {
+		msg += " after offset " + mint.Itoa(at)
+	}
+	return msg
+}
+
+// skipSpace moves past white space.
+fn (d mut Decoder) skipSpace() {
+	let n = i64(len(d.src))
+	for d.pos < n && isSpace(d.src[d.pos]) {
+		d.pos += 1
+	}
+}
+
+// setParent records that a value has started (or ended) in the innermost open container.
+fn (d mut Decoder) valueStarted() {
+	let i = len(d.frames) - 1
+	if i >= 0 {
+		d.frames[i].state = ','
+	}
+}
+
+// hex4 reads the four hex digits after the \u at esc and moves past them.
+fn (d mut Decoder) hex4(esc i64) !i64 {
+	let n = i64(len(d.src))
+	mut v = i64(0)
+	for k in 0..4 {
+		let at = esc + 2 + k
+		if at >= n {
+			fail d.syntaxError("unexpected EOF", n, false)
+		}
+		let h = hexVal(d.src[at])
+		if h < 0 {
+			fail d.syntaxError(invalidText("escape sequence", d.src[esc:min(esc+6, n)], "in string"), esc, false)
+		}
+		v = v*16 + h
+	}
+	d.pos = esc + 6
+	return v
+}
+
+// readString reads the string at d.pos (a '"') and returns its unescaped text.
+fn (d mut Decoder) readString() !str {
+	let n = i64(len(d.src))
+	d.pos += 1
+	mut out = []u8{}
+	for {
+		if d.pos >= n {
+			fail d.syntaxError("unexpected EOF", n, false)
+		}
+		let c = d.src[d.pos]
+		if c == '"' {
+			d.pos += 1
+			return str(out)
+		}
+		if c < 0x20 {
+			fail d.syntaxError("invalid character " + quoteChar(c) + " in string (expecting non-control character)", d.pos, false)
+		}
+		if c == '\\' {
+			let esc = d.pos
+			if d.pos+1 >= n {
+				fail d.syntaxError("unexpected EOF", n, false)
+			}
+			let e = d.src[d.pos+1]
+			if e == 'u' {
+				let r = try d.hex4(esc)
+				mut cp = r
+				if r >= 0xd800 && r < 0xdc00 {
+					// A high surrogate must be followed by an escaped low surrogate.
+					if esc+12 > n || d.src[esc+6] != '\\' || d.src[esc+7] != 'u' {
+						fail d.syntaxError(invalidText("surrogate pair", d.src[esc:min(esc+7, n)], "in string"), esc, false)
+					}
+					d.pos = esc + 6
+					let lo = d.hex4(esc+6) catch _ {
+						fail d.syntaxError(invalidText("surrogate pair", d.src[esc:min(esc+12, n)], "in string"), esc, false)
+					}
+					if lo < 0xdc00 || lo >= 0xe000 {
+						fail d.syntaxError(invalidText("surrogate pair", d.src[esc:esc+12], "in string"), esc, false)
+					}
+					cp = 0x10000 + ((r - 0xd800) << 10) + (lo - 0xdc00)
+				} else if r >= 0xdc00 && r < 0xe000 {
+					fail d.syntaxError("invalid surrogate pair `" + d.src[esc:min(esc+7, n)] + "` in string", esc, false)
+				}
+				mut buf = []u8{}
+				glyph.EncodeRune(mut buf, i32(cp))
+				for x in buf {
+					out = append(out, x)
+				}
+				continue
+			}
+			d.pos += 2
+			if e == '"' || e == '\\' || e == '/' {
+				out = append(out, e)
+			} else if e == 'b' {
+				out = append(out, 0x08)
+			} else if e == 'f' {
+				out = append(out, 0x0c)
+			} else if e == 'n' {
+				out = append(out, '\n')
+			} else if e == 'r' {
+				out = append(out, '\r')
+			} else if e == 't' {
+				out = append(out, '\t')
+			} else {
+				fail d.syntaxError(invalidText("escape sequence", d.src[esc:esc+2], "in string"), esc, false)
+			}
+			continue
+		}
+		if c < 0x80 {
+			out = append(out, c)
+			d.pos += 1
+			continue
+		}
+		let (r, size) = glyph.DecodeRune(d.src, d.pos)
+		if r == 0xfffd && size == 1 {
+			fail d.syntaxError("invalid UTF-8", d.pos, false)
+		}
+		for k in 0..size {
+			out = append(out, d.src[d.pos+k])
+		}
+		d.pos += size
+	}
+	return str(out)
+}
+
+// readNumber reads the number at d.pos (its grammar is -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?, as Go reads it) and returns
+// its text.
+fn (d mut Decoder) readNumber() !str {
+	let n = i64(len(d.src))
+	let start = d.pos
+	if d.src[d.pos] == '-' {
+		d.pos += 1
+	}
+	if d.pos >= n {
+		fail d.syntaxError("unexpected EOF", start, false)
+	}
+	if d.src[d.pos] == '0' {
+		d.pos += 1
+	} else if isDigit(d.src[d.pos]) {
+		for d.pos < n && isDigit(d.src[d.pos]) {
+			d.pos += 1
+		}
+	} else {
+		fail d.syntaxError("invalid character " + quoteChar(d.src[d.pos]) + " in number (expecting digit)", d.pos, false)
+	}
+	if d.pos < n && d.src[d.pos] == '.' {
+		d.pos += 1
+		try d.digits(start)
+	}
+	if d.pos < n && (d.src[d.pos] == 'e' || d.src[d.pos] == 'E') {
+		d.pos += 1
+		if d.pos < n && (d.src[d.pos] == '+' || d.src[d.pos] == '-') {
+			d.pos += 1
+		}
+		try d.digits(start)
+	}
+	return d.src[start:d.pos]
+}
+
+// digits reads one or more digits at d.pos; the number starts at start.
+fn (d mut Decoder) digits(start i64) ! {
+	let n = i64(len(d.src))
+	if d.pos >= n {
+		fail d.syntaxError("unexpected EOF", start, false)
+	}
+	if !isDigit(d.src[d.pos]) {
+		fail d.syntaxError("invalid character " + quoteChar(d.src[d.pos]) + " in number (expecting digit)", d.pos, false)
+	}
+	for d.pos < n && isDigit(d.src[d.pos]) {
+		d.pos += 1
+	}
+}
+
+// readLiteral reads the literal word (true, false or null) at d.pos.
+fn (d mut Decoder) readLiteral(word str) !str {
+	let n = i64(len(d.src))
+	let start = d.pos
+	for k in 0..len(word) {
+		if d.pos >= n {
+			fail d.syntaxError("unexpected EOF", n, false)
+		}
+		if d.src[d.pos] != word[k] {
+			fail d.syntaxError("invalid character " + quoteChar(d.src[d.pos]) + " in literal " + word + " (expecting " + quoteChar(word[k]) + ")", d.pos, false)
+		}
+		d.pos += 1
+	}
+	return d.src[start:d.pos]
+}
+
+// value reads the value that starts at d.pos (its first byte c). A container's opening delimiter pushes a frame.
+fn (d mut Decoder) value(c u8) !Token {
+	if c == '{' {
+		d.valueStarted()
+		d.pos += 1
+		d.frames = append(d.frames, frame{obj: true, state: 'k', count: 0, comma: 0, name: "", names: []str{}})
+		return BeginObject
+	}
+	if c == '[' {
+		d.valueStarted()
+		d.pos += 1
+		d.frames = append(d.frames, frame{obj: false, state: 'a', count: 0, comma: 0, name: "", names: []str{}})
+		return BeginArray
+	}
+	d.inScalar = true
+	if c == '"' {
+		let s = try d.readString()
+		d.inScalar = false
+		d.valueStarted()
+		return Token{kind: '"', text: s}
+	}
+	if c == '-' || isDigit(c) {
+		let s = try d.readNumber()
+		d.inScalar = false
+		d.valueStarted()
+		return Token{kind: '0', text: s}
+	}
+	if c == 't' {
+		let s = try d.readLiteral("true")
+		d.inScalar = false
+		d.valueStarted()
+		return Token{kind: 't', text: s}
+	}
+	if c == 'f' {
+		let s = try d.readLiteral("false")
+		d.inScalar = false
+		d.valueStarted()
+		return Token{kind: 'f', text: s}
+	}
+	if c == 'n' {
+		let s = try d.readLiteral("null")
+		d.inScalar = false
+		d.valueStarted()
+		return Token{kind: 'n', text: s}
+	}
+	d.inScalar = false
+	fail d.syntaxError("invalid character " + quoteChar(c) + " at start of value", d.pos, false)
+}
+
+// pop closes the innermost frame, consuming its delimiter c.
+fn (d mut Decoder) pop(c u8) Token {
+	d.pos += 1
+	d.frames = d.frames[:len(d.frames)-1]
+	if c == '}' {
+		return EndObject
+	}
+	return EndArray
+}
+
+// ReadToken returns the next token. At the end of the input it returns EOF; inside an open object or array, the end of the input is
+// an unexpected EOF.
+fn (d mut Decoder) ReadToken() !Token {
+	let n = i64(len(d.src))
+	for {
+		d.skipSpace()
+		let top = len(d.frames) == 0
+		if d.pos >= n {
+			if !top {
+				fail d.syntaxError("unexpected EOF", n, true)
+			}
+			fail EOF
+		}
+		let c = d.src[d.pos]
+		if top {
+			return try d.value(c)
+		}
+		let i = len(d.frames) - 1
+		let f = d.frames[i]
+		if f.obj {
+			if f.state == ',' {
+				if c == ',' {
+					d.frames[i].state = 'K'
+					d.frames[i].comma = d.pos
+					d.pos += 1
+					continue
+				}
+				if c == '}' {
+					return d.pop(c)
+				}
+				fail d.syntaxError("invalid character " + quoteChar(c) + " after object value (expecting ',' or '}}')", d.pos, false)
+			}
+			if f.state == 'k' || f.state == 'K' {
+				if c == '}' && f.state == 'k' {
+					return d.pop(c)
+				}
+				if c == '}' {
+					if d.inValue {
+						fail d.syntaxError("invalid character '}}' at start of string (expecting '\"')", d.pos, false)
+					}
+					fail d.trailingComma(f.comma)
+				}
+				if c != '"' {
+					if d.inValue {
+						fail d.syntaxError("invalid character " + quoteChar(c) + " at start of string (expecting '\"')", d.pos, false)
+					}
+					if startsValue(c) {
+						fail d.syntaxError("object member name must be a string", d.pos, false)
+					}
+					fail d.syntaxError("invalid character " + quoteChar(c) + " at start of value", d.pos, false)
+				}
+				let name = try d.readString()
+				if !d.dups {
+					for seen in f.names {
+						if seen == name {
+							fail d.parentError("duplicate object member name " + mint.Quote(name), 0)
+						}
+					}
+				}
+				d.frames[i].name = name
+				d.frames[i].names = append(d.frames[i].names, name)
+				d.frames[i].state = ':'
+				return Token{kind: '"', text: name}
+			}
+			if f.state == ':' {
+				if c != ':' {
+					fail d.syntaxError("invalid character " + quoteChar(c) + " after object name (expecting ':')", d.pos, false)
+				}
+				d.frames[i].state = 'v'
+				d.pos += 1
+				continue
+			}
+			// state 'v': a value follows the colon.
+			if c == '}' {
+				if d.inValue {
+					fail d.syntaxError("invalid character '}}' at start of value", d.pos, false)
+				}
+				fail d.syntaxError("missing value after object name", d.pos, false)
+			}
+			if c == ']' {
+				if d.inValue {
+					fail d.syntaxError("invalid character ']' at start of value", d.pos, false)
+				}
+				fail d.parentError("invalid character ']' after object value (expecting ',' or '}}')", d.pos)
+			}
+			return try d.value(c)
+		}
+		// An array: state 'a' (after '['), 'v' (after a comma) or ',' (after an element).
+		if f.state == ',' {
+			if c == ',' {
+				d.frames[i].state = 'v'
+				d.frames[i].count += 1
+				d.frames[i].comma = d.pos
+				d.pos += 1
+				continue
+			}
+			if c == ']' {
+				return d.pop(c)
+			}
+			fail d.syntaxError("invalid character " + quoteChar(c) + " after array element (expecting ',' or ']')", d.pos, false)
+		}
+		if c == ']' && f.state == 'a' {
+			return d.pop(c)
+		}
+		if c == ']' {
+			if d.inValue {
+				fail d.syntaxError("invalid character ']' at start of value", d.pos, false)
+			}
+			fail d.trailingComma(f.comma)
+		}
+		return try d.value(c)
+	}
+	fail EOF
+}
+
+// ReadValue returns the raw text of the next whole value, from its first byte to its last (the white space between its tokens is
+// kept), or EOF at the end of the input. Go reads a value in one pass, so a comma before a close is reported at the close.
+fn (d mut Decoder) ReadValue() !str {
+	d.skipSpace()
+	let base = len(d.frames)
+	let start = d.pos
+	d.inValue = true
+	for {
+		let t = d.ReadToken() catch err {
+			d.inValue = false
+			fail err
+		}
+		if len(d.frames) == base {
+			d.inValue = false
+			return d.src[start:d.pos]
+		}
+	}
+	fail EOF
+}
+
+// multiline reports whether the encoder starts a line for each member and element.
+fn (e Encoder) multiline() bool {
+	return e.opts.Multiline || e.opts.Indent != ""
+}
+
+// put appends the text s.
+fn (e mut Encoder) put(s str) {
+	for i in 0..len(s) {
+		e.buf = append(e.buf, s[i])
+	}
+}
+
+// newline starts a new line indented for level nesting levels (only when the encoder is multiline).
+fn (e mut Encoder) newline(level i64) {
+	if !e.multiline() {
+		return
+	}
+	e.put("\n")
+	e.put(e.opts.IndentPrefix)
+	mut unit = e.opts.Indent
+	if unit == "" {
+		// Go indents by a tab when only Multiline is set.
+		unit = "\t"
+	}
+	for k in 0..level {
+		e.put(unit)
+	}
+}
+
+// writeString writes s as a JSON string, escaped as the options ask.
+fn (e mut Encoder) writeString(s str) {
+	let digits = "0123456789abcdef"
+	e.put("\"")
+	mut i = i64(0)
+	let n = i64(len(s))
+	for i < n {
+		let c = s[i]
+		if c == '"' {
+			e.put("\\\"")
+		} else if c == '\\' {
+			e.put("\\\\")
+		} else if c == '\n' {
+			e.put("\\n")
+		} else if c == '\r' {
+			e.put("\\r")
+		} else if c == '\t' {
+			e.put("\\t")
+		} else if c == 0x08 {
+			e.put("\\b")
+		} else if c == 0x0c {
+			e.put("\\f")
+		} else if c < 0x20 {
+			e.put("\\u00")
+			e.put(str([]u8{digits[c>>4], digits[c&15]}))
+		} else if e.opts.EscapeForHTML && (c == '<' || c == '>' || c == '&') {
+			e.put("\\u00")
+			e.put(str([]u8{digits[c>>4], digits[c&15]}))
+		} else if c < 0x80 {
+			e.buf = append(e.buf, c)
+		} else {
+			let (r, size) = glyph.DecodeRune(s, i)
+			if r == 0xfffd && size == 1 {
+				e.put("\\ufffd")
+			} else if e.opts.EscapeForJS && (r == 0x2028 || r == 0x2029) {
+				e.put("\\u202")
+				e.buf = append(e.buf, digits[r&15])
+			} else {
+				for k in 0..size {
+					e.buf = append(e.buf, s[i+k])
+				}
+			}
+			i += size
+			continue
+		}
+		i += 1
+	}
+	e.put("\"")
+}
+
+// separate writes what comes before the next member name or element of the innermost container: a comma after the first one, then
+// the line break and indentation.
+fn (e mut Encoder) separate() {
+	let i = len(e.frames) - 1
+	if e.frames[i].count > 0 {
+		e.put(",")
+		if e.opts.SpaceAfterComma {
+			e.put(" ")
+		}
+	}
+	e.frames[i].count += 1
+	e.newline(i64(len(e.frames)))
+}
+
+// valueDone records that a value ended: an object then expects a name.
+fn (e mut Encoder) valueDone() {
+	let i = len(e.frames) - 1
+	if i >= 0 && e.frames[i].obj {
+		e.frames[i].state = 'k'
+	}
+}
+
+// writeValue writes the token t as a value (a scalar, or the opening delimiter of a container).
+fn (e mut Encoder) writeValue(t Token) ! {
+	if t.kind == '{' {
+		e.put("{{")
+		e.frames = append(e.frames, frame{obj: true, state: 'k', count: 0, comma: 0, name: "", names: []str{}})
+		return
+	}
+	if t.kind == '[' {
+		e.put("[")
+		e.frames = append(e.frames, frame{obj: false, state: 'a', count: 0, comma: 0, name: "", names: []str{}})
+		return
+	}
+	if t.kind == '"' {
+		e.writeString(t.text)
+	} else if t.kind == '0' {
+		if t.text == "NaN" || t.text == "+Inf" || t.text == "-Inf" || t.text == "Inf" {
+			fail "jsontext: invalid number " + t.text
+		}
+		e.put(t.text)
+	} else {
+		e.put(t.text)
+	}
+	e.valueDone()
+}
+
+// WriteToken writes the next token: a name where the innermost object expects one, a value otherwise, and the closing delimiter of
+// the innermost container. A complete top-level value ends with a newline.
+fn (e mut Encoder) WriteToken(t Token) ! {
+	let n = len(e.frames)
+	if n == 0 {
+		if t.kind == '}' || t.kind == ']' {
+			fail "jsontext: unexpected " + t.text + " at top level"
+		}
+		try e.writeValue(t)
+		if len(e.frames) == 0 {
+			e.put("\n")
+		}
+		return
+	}
+	let i = n - 1
+	if t.kind == '}' || t.kind == ']' {
+		let obj = e.frames[i].obj
+		if (obj && t.kind != '}') || (!obj && t.kind != ']') {
+			fail "jsontext: unexpected " + t.text
+		}
+		let count = e.frames[i].count
+		e.frames = e.frames[:i]
+		if count > 0 {
+			e.newline(i64(len(e.frames)))
+		}
+		e.put(t.text)
+		e.valueDone()
+		if len(e.frames) == 0 {
+			e.put("\n")
+		}
+		return
+	}
+	if e.frames[i].obj && e.frames[i].state == 'k' {
+		if t.kind != '"' {
+			fail "jsontext: object member name must be a string"
+		}
+		e.separate()
+		e.writeString(t.text)
+		e.put(":")
+		if e.opts.SpaceAfterColon || e.multiline() {
+			e.put(" ")
+		}
+		e.frames[i].state = 'v'
+		return
+	}
+	if !e.frames[i].obj {
+		e.separate()
+	}
+	try e.writeValue(t)
+}
+
+// WriteValue writes the JSON value v (validated, and formatted with the encoder's options).
+fn (e mut Encoder) WriteValue(v str) ! {
+	mut d = NewDecoder(v, Options{})
+	for {
+		let t = d.ReadToken() catch err {
+			if fault.Is(err, EOF) {
+				break
+			}
+			fail err
+		}
+		try e.WriteToken(t)
+	}
+}

@@ -651,6 +651,11 @@ fn (ed mut Editor) controlKey(k Key) {
 		b.Home(false)
 	} else if c == 'e' || c == 5 {
 		b.End(false)
+	} else if c == 'l' || c == 12 {
+		// Ctrl+L selects the caret's line (its newline with it when it is not the last)
+		b.SelectLine(b.Row)
+		ed.Follow = true
+		ed.Redraw = true
 	} else if c == 'q' || c == 17 {
 		ed.quickInfo()
 	} else if c == 'k' || c == 11 {

@@ -80,6 +80,8 @@ jobs:
         run: sh tools/ci/tin.sh png_check
       - name: JPEG Go decode corpus and Tin encoder smoke test
         run: sh tools/ci/tin.sh jpeg_check
+      - name: GIF frame and animation interoperability against Go
+        run: sh tools/ci/tin.sh gif_check
       - name: Packed numbers and the small encodings against Go (10,000 cases)
         run: sh tools/ci/tin.sh pack_check
       - name: Stream helpers against Go's io (a generated chunk corpus)
@@ -106,6 +108,12 @@ jobs:
         run: sh tools/ci/tin.sh asn1_check
       - name: gob streams against Go's encoding/gob (330 seeds encoded and decoded both ways, damaged streams)
         run: sh tools/ci/tin.sh gob_check
+      - name: argo string escapes against Go's encoding/json (HTML characters, \b and \f)
+        run: sh tools/ci/tin.sh argo_string_check
+      - name: jsontext tokens, values and encoder against Go's encoding/json/jsontext (a generated corpus)
+        run: sh tools/ci/tin.sh jsontext_check
+      - name: jsonv2 Marshal and Unmarshal against Go's encoding/json/v2 (a generated corpus)
+        run: sh tools/ci/tin.sh jsonv2_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
       - name: container/list and container/ring against Go (generated and exhaustive small cases)
@@ -120,6 +128,8 @@ jobs:
         run: sh tools/ci/tin.sh scan_check
       - name: Testing helpers against Go's testing/iotest, testing/quick, testing/fstest and crypto/subtle
         run: sh tools/ci/tin.sh crucible_check
+      - name: Tar ustar strict regression and bidirectional archive/tar metadata and 32 MiB payload interoperability
+        run: sh tools/ci/tin.sh tar_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
       - name: Operating system signals (dispositions, task delivery and per-core listeners)
@@ -130,6 +140,8 @@ jobs:
         run: sh tools/ci/tin.sh zlib_stream_check
       - name: ZIP archives against Go's archive/zip (both directions)
         run: sh tools/ci/tin.sh zip_check
+      - name: Lazy ELF64 sections, symbols and dynamic tables against Go on arm64 and amd64
+        run: sh tools/ci/tin.sh elf_check
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
       - name: Embedded file trees (the embed directive) against Go's file trees over the same patterns
@@ -187,6 +199,8 @@ jobs:
         run: sh tools/ci/tin.sh dice_v2_check
       - name: Elliptic curves, DSA verification and FIPS status against Go (a generated corpus; #927)
         run: sh tools/ci/tin.sh nist_check
+      - name: ML-DSA (FIPS 204 ACVP and Wycheproof vectors and the Go crypto/mldsa corpus; live Go where installed; #917)
+        run: sh tools/ci/tin.sh mldsa_check
       - name: TLS 1.3 client (RFC 8448 trace, openssl and Python interop, https and wss)
         run: sh tools/ci/tin.sh tls_check
       - name: TLS 1.3 server (anvil.ServeTLS against openssl, Python and Tin clients; malformed handshakes, one core, shutdown)
@@ -234,6 +248,8 @@ jobs:
         run: sh tools/ci/tin.sh stream_body_check
       - name: HTTP client keep-alive pool (connections reused, stale ones replaced, MaxIdle, https on one handshake)
         run: sh tools/ci/tin.sh wire_pool_check
+      - name: HTTP client streamed bodies (2 GiB up and down in a 4 MiB pool, http and https, a within ends the body, replay)
+        run: sh tools/ci/tin.sh wire_stream_check
       - name: HTTP/2 client (wire against Go's net/http and anvil over TLS and h2c, GOAWAY)
         run: sh tools/ci/tin.sh wire_h2_check
       - name: Held cores (stuck-core counters; SIGTERM while core 0 is held, Linux)
@@ -276,6 +292,11 @@ jobs:
         run: sh tools/ci/tin.sh dump_check
       - name: HTTP client trace hooks against Go net/http
         run: sh tools/ci/tin.sh httptrace_check
+      - name: pprof route availability
+        run: |
+          bin/tinc toolchain/tests/v2/pprof.tin -o bin/ci/pprof-test
+          bin/ci/pprof-test > bin/ci/pprof.out
+          diff -u toolchain/tests/v2/pprof.out bin/ci/pprof.out
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

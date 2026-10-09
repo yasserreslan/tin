@@ -1,0 +1,215 @@
+// Package elf reads bounded ELF64 little-endian binaries for Linux arm64 and amd64.
+package elf
+
+import "fault"
+import "quarry"
+
+const maxTableBytes = 4 * 1024 * 1024
+const maxSectionBytes = 64 * 1024 * 1024
+const class64 = 2
+const dataLittleEndian = 1
+const machineAMD64 = 62
+const machineARM64 = 183
+const sectionDynamic = 6
+const sectionSymtab = 2
+const sectionDynsym = 11
+const sectionStrtab = 3
+
+// ErrFormat marks a truncated, malformed, or unsupported ELF file.
+let ErrFormat = fault("debug/elf: malformed or unsupported ELF")
+
+// Header is the ELF identification and file header fields used by this reader.
+type Header struct {
+	Class i64 // ELF class: 2 for ELF64.
+	Machine i64 // ELF machine number.
+	Entry i64 // Virtual address of the entry point.
+	ProgramOffset i64 // File offset of the program header table.
+	SectionOffset i64 // File offset of the section header table.
+	ProgramEntrySize i64 // Size of one program header.
+	ProgramCount i64 // Number of program headers.
+	SectionEntrySize i64 // Size of one section header.
+	SectionCount i64 // Number of section headers.
+	SectionNames i64 // Index of the section name string table.
+}
+
+// Segment describes one ELF program header.
+type Segment struct {
+	Type i64 // Program header type.
+	Flags i64 // Segment permissions and flags.
+	Offset i64 // File offset of the segment data.
+	Address i64 // Virtual address of the segment.
+	FileSize i64 // Number of file-backed bytes.
+	MemorySize i64 // Number of bytes in memory.
+	Align i64 // Required segment alignment.
+}
+
+// Section describes one ELF section header; its data is read on demand.
+type Section struct {
+	Name str // Section name from the section name string table.
+	Type i64 // Section type.
+	Flags i64 // Section attributes.
+	Address i64 // Address when the section is loaded.
+	Offset i64 // File offset of section data.
+	Size i64 // Section size in bytes.
+	Link i64 // Index of a related section.
+	Info i64 // Section-specific metadata.
+	Align i64 // Required section alignment.
+	EntrySize i64 // Size of one table entry, or zero.
+}
+
+// Symbol is one ELF symbol table entry.
+type Symbol struct {
+	Name str // Symbol name.
+	Info i64 // Binding and symbol type.
+	Other i64 // Visibility.
+	Section i64 // Section index, or zero when undefined.
+	Value i64 // Symbol value.
+	Size i64 // Symbol size.
+}
+
+// DynamicEntry is one ELF dynamic table key and value.
+type DynamicEntry struct {
+	Tag i64 // Dynamic tag.
+	Value i64 // Integer or string-table offset value.
+}
+
+// File is a validated ELF image backed by a path; section bytes are not retained.
+type File struct {
+	Path str // File path used for bounded reads.
+	Size i64 // Size captured when the file was opened.
+	Header Header // ELF header fields.
+	Segments []Segment // Program headers.
+	Sections []Section // Section headers.
+}
+
+fn read16(b str, p i64) i64 {
+	return i64(b[p]) | i64(b[p+1])<<8
+}
+
+fn read32(b str, p i64) i64 {
+	return read16(b, p) + read16(b, p+2)*65536
+}
+
+fn read64(b str, p i64) i64 {
+	let hi = read32(b, p+4)
+	if hi > 0x7fffffff { return -1 }
+	return read32(b, p) + hi*4294967296
+}
+
+fn validRange(size i64, off i64, n i64) bool {
+	return off >= 0 && n >= 0 && off <= size && n <= size-off
+}
+
+fn sectionName(data str, off i64) str {
+	if off < 0 || off >= len(data) { return "" }
+	mut end = off
+	for end < len(data) && data[end] != 0 { end += 1 }
+	return data[off:end]
+}
+
+// Open validates the ELF64 little-endian header and tables for arm64 or amd64.
+fn Open(path str) !File {
+	let size = try quarry.Size(path)
+	if size < 64 { fail ErrFormat }
+	let b = try quarry.ReadAt(path, 0, 64)
+	if len(b) != 64 || b[0:4] != "\x7fELF" || i64(b[4]) != class64 || i64(b[5]) != dataLittleEndian || i64(b[6]) != 1 { fail ErrFormat }
+	let machine = read16(b, 18)
+	if machine != machineAMD64 && machine != machineARM64 { fail ErrFormat }
+	let phoff = read64(b, 32)
+	let shoff = read64(b, 40)
+	let phentsize = read16(b, 54)
+	let phnum = read16(b, 56)
+	let shentsize = read16(b, 58)
+	let shnum = read16(b, 60)
+	let shstr = read16(b, 62)
+	if (phnum > 0 && (phentsize < 56 || phentsize*phnum > maxTableBytes || !validRange(size, phoff, phentsize*phnum))) || (shnum > 0 && (shentsize < 64 || shentsize*shnum > maxTableBytes || !validRange(size, shoff, shentsize*shnum) || shstr >= shnum)) { fail ErrFormat }
+	let h = Header{Class: class64, Machine: machine, Entry: read64(b, 24), ProgramOffset: phoff, SectionOffset: shoff, ProgramEntrySize: phentsize, ProgramCount: phnum, SectionEntrySize: shentsize, SectionCount: shnum, SectionNames: shstr}
+	let pt = try quarry.ReadAt(path, phoff, phentsize*phnum)
+	let st = try quarry.ReadAt(path, shoff, shentsize*shnum)
+	if len(pt) != phentsize*phnum || len(st) != shentsize*shnum { fail ErrFormat }
+	mut segments = make([]Segment, 0, phnum)
+	for i in 0..phnum {
+		let p = i*phentsize
+		let off = read64(pt, p+8)
+		let filesz = read64(pt, p+32)
+		if !validRange(size, off, filesz) { fail ErrFormat }
+		segments = append(segments, Segment{Type: read32(pt, p), Flags: read32(pt, p+4), Offset: off, Address: read64(pt, p+16), FileSize: filesz, MemorySize: read64(pt, p+40), Align: read64(pt, p+48)})
+	}
+	mut names = ""
+	if shnum > 0 {
+		let np = shstr*shentsize
+		let noff = read64(st, np+24)
+		let nsize = read64(st, np+32)
+		if nsize > maxTableBytes || !validRange(size, noff, nsize) { fail ErrFormat }
+		names = try quarry.ReadAt(path, noff, nsize)
+		if len(names) != nsize { fail ErrFormat }
+	}
+	mut sections = make([]Section, 0, shnum)
+	for i in 0..shnum {
+		let p = i*shentsize
+		let typ = read32(st, p+4)
+		let off = read64(st, p+24)
+		let length = read64(st, p+32)
+		if (typ != 8 && !validRange(size, off, length)) || read32(st, p) >= len(names) || read32(st, p+40) >= shnum { fail ErrFormat }
+		sections = append(sections, Section{Name: sectionName(names, read32(st, p)), Type: typ, Flags: read64(st, p+8), Address: read64(st, p+16), Offset: off, Size: length, Link: read32(st, p+40), Info: read32(st, p+44), Align: read64(st, p+48), EntrySize: read64(st, p+56)})
+	}
+	return File{Path: path, Size: size, Header: h, Segments: segments, Sections: sections}
+}
+
+// ReadSection reads one section's file-backed bytes, capped at 64 MiB.
+fn (f File) ReadSection(index i64) !str {
+	if index < 0 || index >= len(f.Sections) { fail ErrFormat }
+	let s = f.Sections[index]
+	if s.Type == 8 { return "" }
+	if s.Size > maxSectionBytes || !validRange(f.Size, s.Offset, s.Size) { fail ErrFormat }
+	let data = try quarry.ReadAt(f.Path, s.Offset, s.Size)
+	if len(data) != s.Size { fail ErrFormat }
+	return data
+}
+
+fn tableString(data str, offset i64) !str {
+	if offset < 0 || offset >= len(data) { fail ErrFormat }
+	mut end = offset
+	for end < len(data) && data[end] != 0 { end += 1 }
+	if end == len(data) { fail ErrFormat }
+	return data[offset:end]
+}
+
+// Symbols reads static and dynamic ELF symbol tables with their linked strings.
+fn (f File) Symbols() ![]Symbol {
+	mut out = []Symbol{}
+	for index, s in f.Sections {
+		if s.Type != sectionSymtab && s.Type != sectionDynsym { continue }
+		if s.EntrySize < 24 || s.Size%s.EntrySize != 0 || s.Link < 0 || s.Link >= len(f.Sections) || s.Size > maxTableBytes { fail ErrFormat }
+		let raw = try f.ReadSection(index)
+		if len(raw) != s.Size { fail ErrFormat }
+		if f.Sections[s.Link].Type != sectionStrtab { fail ErrFormat }
+		let strings = try f.ReadSection(s.Link)
+		for i in 0..(s.Size/s.EntrySize) {
+			let p = i*s.EntrySize
+			let nameOff = read32(raw, p)
+			if nameOff != 0 {
+				let name = try tableString(strings, nameOff)
+				out = append(out, Symbol{Name: name, Info: i64(raw[p+4]), Other: i64(raw[p+5]), Section: read16(raw, p+6), Value: read64(raw, p+8), Size: read64(raw, p+16)})
+			}
+		}
+	}
+	return out
+}
+
+// Dynamic reads entries from SHT_DYNAMIC sections until DT_NULL.
+fn (f File) Dynamic() ![]DynamicEntry {
+	mut out = []DynamicEntry{}
+	for i, s in f.Sections {
+		if s.Type != sectionDynamic { continue }
+		if s.EntrySize < 16 || s.Size%s.EntrySize != 0 || s.Size > maxTableBytes { fail ErrFormat }
+		let data = try f.ReadSection(i)
+		for i in 0..(s.Size/s.EntrySize) {
+			let p = i*s.EntrySize
+			let tag = read64(data, p)
+			out = append(out, DynamicEntry{Tag: tag, Value: read64(data, p+8)})
+			if tag == 0 { break }
+		}
+	}
+	return out
+}

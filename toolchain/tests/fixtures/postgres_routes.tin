@@ -18,9 +18,9 @@ fn extra(q anvil.Req, w mut anvil.Out) bool {
 		}
 		let db = sql.Open("postgres", "") catch err { fail_with(mut w, err)
 			return true }
-		let _ = db.SetMaxOpen(4) catch err { fail_with(mut w, err)
+		db.SetMaxOpen(4) catch err { fail_with(mut w, err)
 			return true }
-		let _ = db.SetMaxIdle(4) catch err { fail_with(mut w, err)
+		db.SetMaxIdle(4) catch err { fail_with(mut w, err)
 			return true }
 		let rows = db.Query("SELECT 123 AS id, 'generic' AS name") catch err { fail_with(mut w, err)
 			return true }

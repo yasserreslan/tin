@@ -11,6 +11,8 @@ const CmdToggleProject = 101
 const CmdNewFile = 102
 const CmdNewFolder = 103
 const CmdRevealInProject = 104
+const CmdRevealFinder = 126
+const CmdCopyPath = 127
 const CmdQuickOpen = 105
 const CmdPalette = 106
 const CmdSearch = 107
@@ -368,6 +370,16 @@ fn (ws mut Workspace) Perform(cmd i64) {
 			ws.Ed.Say("whitespace shown")
 		} else {
 			ws.Ed.Say("whitespace hidden")
+		}
+	} else if cmd == CmdRevealFinder {
+		if len(ws.Ed.Buf.Path) > 0 {
+			appkit.RunCapture("open -R '" + ws.Ed.Buf.Path + "'")
+			ws.Ed.Say("revealed in Finder")
+		}
+	} else if cmd == CmdCopyPath {
+		if len(ws.Ed.Buf.Path) > 0 {
+			appkit.SetClipboard(ws.Ed.Buf.Path)
+			ws.Ed.Say("copied the path")
 		}
 	} else if cmd == CmdCollapseAll {
 		ws.collapseAll()

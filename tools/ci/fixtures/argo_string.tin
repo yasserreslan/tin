@@ -1,0 +1,29 @@
+package main
+
+// The argo string twin, Tin side: read one hex-encoded string per line on stdin and print the hex of argo.Str's output for it, so
+// tools/ci/argo_string_check.tin can compare it with encoding/json's Marshal (#943).
+
+import "argo"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	// The corpus ends with a newline, so the last element is empty and is not a line; an empty line is the empty string.
+	let lines = twine.Split(body, "\n")
+	for i in 0..len(lines)-1 {
+		let line = lines[i]
+		let raw = seal.HexDecode(line) catch _ {
+			say.Line("bad input")
+			continue
+		}
+		mut b = []u8{}
+		argo.Str(mut b, str(raw))
+		say.Line(seal.Hex(b))
+	}
+}

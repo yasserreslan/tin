@@ -16,6 +16,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
 | [httptrace](#httptrace) | observable HTTP client phase hooks (net/http/httptrace) |
+| [pprof](#pprof) | HTTP profiling route names and runtime profile availability (net/http/pprof) |
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
 | [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
@@ -31,8 +32,11 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [link](#link) | URLs and their escaping (net/url) |
 | [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
 | [ore](#ore) | byte slices (bytes) |
+| [jsontext](#jsontext) | JSON tokens and values, token by token (encoding/json/jsontext) |
+| [jsonv2](#jsonv2) | JSON Marshal and Unmarshal with options (encoding/json/v2) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
+| [debug](#debug) | ELF executable metadata (debug/elf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [signal](#signal) | operating-system signals (os/signal) |
@@ -89,6 +93,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
 | [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
 | [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
+| [tar](#tar) | bounded ustar archive reading and writing (archive/tar) |
 | [appkit](#appkit) | macOS frameworks for the Tinland editor (Cocoa, WebKit) |
 | [metal](#metal) | Metal: a GPU scene of rectangles and text with a glyph atlas, for the Tinland editor |
 | [gpuwin](#gpuwin) | a window AppKit calls into (Objective-C classes defined in Tin), drawn on the GPU |
@@ -487,6 +492,14 @@ try c.Write("PING\r\n")
 let r = try wire.Get("http://127.0.0.1:8080/json")
 ```
 
+- `type Stream struct`: Stream is a response whose body is read as it arrives: an io.Reader. Close it when done with it before its end (Read to the end closes it).
+- `type NoBody struct{}`: NoBody is the body of a request that has none, for DoStream.
+- `(b mut NoBody) Read(buf mut []u8) !i64`: Read gives nothing: the body has ended.
+- `DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options) !Stream`: DoStream sends one request with its body read from body, and returns the response once its headers are in; see the section comment above.
+- `(s mut Stream) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the body and returns how many; 0 at its end, after which the connection is back in the pool or closed. A connection that fails or ends early is closed and Read fails: it never gives a truncated body as complete.
+- `(s mut Stream) Close()`: Close ends the response: a body not read to its end closes the connection.
+- `(s Stream) Header(name str) str`: Header returns the response header name (any case), or "".
+- `(s Stream) Length() i64`: Length is the body's length when the response gave it (Content-Length), else -1.
 - `type Conn struct`: Conn is a TCP connection.
 - `type Listener struct`: Listener accepts TCP connections.
 - `type Resp struct`: Resp is an HTTP response.
@@ -526,6 +539,12 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 Package httptrace provides the HTTP client hooks wire can observe on HTTP/1.1 and TLS. DNS and connect hooks are unavailable because wire's platform resolver combines those phases. HTTP/2 requests currently use a separate path and report only GetConn and TLS handshake hooks.
 
 - `type ClientTrace struct`: ClientTrace contains callbacks for observable HTTP client phases.
+
+## pprof
+
+Package pprof exposes Go-compatible profiling route names for anvil and reports which profiles the Tin runtime cannot provide.
+
+- `Register(r mut anvil.Router)`: Register adds the standard pprof route paths to r. Tin currently has no runtime profile source, so profile requests return 501.
 
 ## jar
 
@@ -1169,6 +1188,40 @@ Package ore works on byte slices ([]u8), like Go's bytes. Functions that append 
 - `ToUpper(b []u8) []u8`: ToUpper returns a copy with ASCII letters raised.
 - `Repeat(b []u8, n i64) []u8`: Repeat returns n copies of b (panics when the length overflows).
 
+## jsontext
+
+Package jsontext reads and writes JSON token by token, as Go's encoding/json/jsontext does: a Decoder yields Tokens and whole Values, an Encoder takes them back and formats them with Options. Strings are unescaped in Token.String; numbers, literals and delimiters keep their text. Errors carry Go's messages (#931).
+
+- `type Token struct`: Token is one JSON token: its kind byte and its text (the unescaped string of a string token, the literal of any other).
+- `Bool(b bool) Token`: Bool returns the true or false token.
+- `String(s str) Token`: String returns the string token for s (unescaped text; it is escaped when written).
+- `Int(n i64) Token`: Int returns the number token for n.
+- `Uint(n u64) Token`: Uint returns the number token for n.
+- `Float(n f64) Token`: Float returns the number token for n, in the shortest form that reads back (NaN and infinities are not numbers: their token is the text "NaN" or "Inf", which Encoder refuses).
+- `(t Token) Kind() u8`: Kind returns the token's kind byte: '"', '0', 't', 'f', 'n', '{', '}', '[' or ']'.
+- `(t Token) String() str`: String returns the unescaped text of a string token and the literal of any other token.
+- `(t Token) Bool() bool`: Bool reports whether the token is true.
+- `(t Token) Int() i64`: Int returns the token's number as an integer (0 when it is not one or does not fit).
+- `(t Token) Float() f64`: Float returns the token's number as a float64 (0 when it is not one).
+- `type Options struct`: Options are the jsontext options this package implements (Go's jsontext.Options). Multiline or a non-empty Indent puts each member and element on its own line; each line starts with IndentPrefix and then Indent once per nesting level.
+- `type Decoder struct`: Decoder reads the tokens and values of a JSON text. Top-level values follow one another without separators, as in Go.
+- `NewDecoder(s str, opts Options) Decoder`: NewDecoder returns a Decoder that reads the JSON text s.
+- `type Encoder struct`: Encoder writes tokens and values as JSON text, formatted with its Options. Each complete top-level value ends with a newline.
+- `NewEncoder(opts Options) Encoder`: NewEncoder returns an Encoder that formats with opts.
+- `(e Encoder) Bytes() str`: Bytes returns the JSON text written so far.
+- `(d mut Decoder) ReadToken() !Token`: ReadToken returns the next token. At the end of the input it returns EOF; inside an open object or array, the end of the input is an unexpected EOF.
+- `(d mut Decoder) ReadValue() !str`: ReadValue returns the raw text of the next whole value, from its first byte to its last (the white space between its tokens is kept), or EOF at the end of the input. Go reads a value in one pass, so a comma before a close is reported at the close.
+- `(e mut Encoder) WriteToken(t Token) !`: WriteToken writes the next token: a name where the innermost object expects one, a value otherwise, and the closing delimiter of the innermost container. A complete top-level value ends with a newline.
+- `(e mut Encoder) WriteValue(v str) !`: WriteValue writes the JSON value v (validated, and formatted with the encoder's options).
+
+## jsonv2
+
+Package jsonv2 is encoding/json/v2's surface over argo and jsontext: Marshal and Unmarshal with options (#931). argo does the typed work (its encoders and decoders are generated per type); jsontext rewrites the encoded text with the options and checks text for the v2 rules argo does not apply (malformed text and duplicate member names are refused). The differences from v2 are in README.md.
+
+- `type Options struct`: Options are the v2 options this package implements: the formatting of Marshal's output (jsontext's options), whether Unmarshal accepts duplicate member names, and whether it refuses members that match no field.
+- `Marshal[T constraints.Any](v T, opts Options) !str`: Marshal returns the JSON encoding of v, formatted with opts. It has no newline at the end, as Go's Marshal has none. Strings are not HTML-escaped unless opts asks for it.
+- `Unmarshal[T constraints.Any](s str, v mut T, opts Options) !`: Unmarshal parses the JSON text s into v, a struct, slice or map. Malformed text and duplicate member names are faults (unless AllowDuplicateNames); a member that matches no field is a fault with RejectUnknownMembers. A fault leaves v unchanged.
+
 ## flume
 
 Package flume reads and writes file descriptors through 64 KiB buffers: lines, whole files and buffered output with one write per flush.
@@ -1774,7 +1827,9 @@ let back = try squash.Gunzip(z, 64mb)
 - `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
 - `const LSB = 1`
 - `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `LzwWidth(data str, order i64, litWidth i64) str`: LzwWidth compresses bytes with the given literal width (2 through 8), as GIF requires.
 - `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `UnlzwWidth(data str, order i64, max i64, litWidth i64) !str`: UnlzwWidth decompresses an LZW stream with the given literal width (2 through 8).
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
@@ -1825,7 +1880,9 @@ let back = try squash.Gunzip(z, 64mb)
 - `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
 - `const LSB = 1`
 - `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `LzwWidth(data str, order i64, litWidth i64) str`: LzwWidth compresses bytes with the given literal width (2 through 8), as GIF requires.
 - `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `UnlzwWidth(data str, order i64, max i64, litWidth i64) !str`: UnlzwWidth decompresses an LZW stream with the given literal width (2 through 8).
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
@@ -1985,6 +2042,7 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `(a AEAD) Overhead() i64`: Overhead is the tag length in bytes (16).
 - `(a AEAD) Seal(nonce []u8, plaintext secret []u8, aad []u8) ![]u8`: Seal encrypts plaintext and authenticates it with aad under a 12-byte nonce, returning the ciphertext followed by the tag. A nonce must never be used twice with one key.
 - `(a AEAD) SealTo(nonce []u8, src i64, n i64, aad []u8, dst i64) !`: SealTo is Seal into raw memory: it encrypts the n bytes at src into dst and writes the 16-byte tag after them (dst may be src, to seal in place). Nothing it allocates grows with n, so a connection that streams can seal into a buffer of its own instead of its request's pool; AES-GCM on the CPU's instructions allocates nothing at all.
+- `(a AEAD) OpenTo(nonce []u8, src i64, n i64, aad []u8, dst i64) !`: OpenTo is Open into raw memory: it checks the 16-byte tag after the n bytes of ciphertext at src and decrypts them into dst (dst may be src, to open in place); it writes nothing when the tag does not match. Like SealTo, nothing it allocates grows with n, and AES-GCM on the CPU's instructions allocates nothing at all: a connection that streams opens records into a buffer of its own.
 - `(a AEAD) Open(nonce []u8, sealed []u8, aad []u8) ![]u8`: Open checks the tag of sealed (ciphertext then tag) against aad and the nonce and returns the plaintext; it fails, revealing nothing else, when anything was changed.
 - `(a mut AEAD) Rekey(key secret []u8) !`: Rekey replaces a's key with key, of the same algorithm and length, reusing a's memory: an AEAD kept in long-lived memory (a connection's state) can change keys without allocating there.
 - `AESHardware() bool`: AESHardware reports whether AES-GCM runs on the CPU's AES instructions here (AES-NI and PCLMULQDQ, or ARMv8 AES and PMULL); without them it runs a slower constant-time software path and ChaCha20-Poly1305 is the faster choice.
@@ -2187,6 +2245,23 @@ Package nist has the NIST curves P-224, P-256, P-384 and P-521 as Go's crypto/el
 - `FIPS140Enforced() bool`: FIPS140Enforced reports whether FIPS 140-3 rules are enforced (Go's Enforced, the only-mode switch). Tin's verdict is always false.
 - `FIPS140Version() str`: FIPS140Version is the version of a frozen FIPS 140-3 module: "" because Tin has none (Go reports "latest" for its unfrozen module).
 - `FIPS140WithoutEnforcement(f fn())`: FIPS140WithoutEnforcement runs f. Tin never enforces FIPS 140-3 rules, so there is nothing to switch off.
+- `type MLDSAParams struct`: MLDSAParams is one parameter set of FIPS 204 (Table 1): the matrix shape k x l, the secret bound eta, the challenge weight tau, the mask bound gamma1, the rounding gamma2, the hint weight omega, the challenge length ctilde (lambda / 4 bytes), the bits of a z coefficient and of a w1 coefficient.
+- `(p MLDSAParams) String() str`: String is the parameter set's name, such as "ML-DSA-44".
+- `(p MLDSAParams) PublicKeySize() i64`: PublicKeySize is the length of a public key in bytes (32 + 320 k).
+- `(p MLDSAParams) SignatureSize() i64`: SignatureSize is the length of a signature in bytes (ctilde + 32 l zbits + omega + k).
+- `(p MLDSAParams) ExpandedKeySize() i64`: ExpandedKeySize is the length of an expanded private key in bytes (2560, 4032 or 4896).
+- `MLDSAGenerateKey(p MLDSAParams) ([]u8, []u8)`: MLDSAGenerateKey makes a key pair from fresh randomness: the 32-byte seed (the private key) and the public key.
+- `MLDSAPublicKey(p MLDSAParams, seed secret []u8) ![]u8`: MLDSAPublicKey is the public key of the 32-byte seed (FIPS 204's KeyGen_internal, Go's PrivateKey.PublicKey).
+- `MLDSAExpandedKey(p MLDSAParams, seed secret []u8) ![]u8`: MLDSAExpandedKey is the FIPS 204 expanded private key of the 32-byte seed (2560, 4032 or 4896 bytes).
+- `MLDSASign(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8`: MLDSASign signs msg with context ctx under the seed with a fresh nonce, as Go's PrivateKey.Sign does.
+- `MLDSASignDeterministic(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8`: MLDSASignDeterministic signs msg with context ctx under the seed with a zero nonce, as Go's SignDeterministic does.
+- `MLDSASignMu(p MLDSAParams, seed secret []u8, mu []u8) ![]u8`: MLDSASignMu signs the message representative mu (64 bytes) under the seed with a fresh nonce (Go's SignExternalMu).
+- `MLDSASignMuDeterministic(p MLDSAParams, seed secret []u8, mu []u8) ![]u8`: MLDSASignMuDeterministic signs mu under the seed with a zero nonce (Go's SignExternalMuDeterministic).
+- `MLDSASignMuDerand(p MLDSAParams, seed secret []u8, mu []u8, rnd secret []u8) ![]u8`: MLDSASignMuDerand signs mu under the seed with the nonce rnd (32 bytes): for known-answer tests only.
+- `MLDSASignExpandedMuDerand(p MLDSAParams, sk secret []u8, mu []u8, rnd secret []u8) ![]u8`: MLDSASignExpandedMuDerand signs mu under the expanded key sk with the nonce rnd: for known-answer tests only.
+- `MLDSAVerify(p MLDSAParams, pk []u8, msg []u8, sig []u8, ctx []u8) !`: MLDSAVerify checks sig as a signature of msg with context ctx under pk; a signature that does not verify fails.
+- `MLDSADecompose(p MLDSAParams, r i64) (i64, i64)`: MLDSADecompose is Decompose (FIPS 204 Algorithm 36) of r in [0, q) for the set: the high part and the centered low part.
+- `MLDSAVerifyMu(p MLDSAParams, pk []u8, mu []u8, sig []u8) !`: MLDSAVerifyMu checks sig as a signature of the message representative mu under pk (the pre-hashed mode).
 
 ## herald
 
@@ -2583,8 +2658,8 @@ Package postgres implements a database/sql driver for the PostgreSQL client.
 - `(v Value) Float() f64`: Float is v as a float.
 - `(v Value) Text() str`: Text is v as text ("" for NULL).
 - `(r Rows) Col(name str) i64`: Col is the index of the named column, or -1.
-- `(c Client) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide connection cap for this client; configure it before first use.
-- `(c Client) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core connection cap for this client; configure it before first use.
+- `(c Client) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide connection cap for this client (0: no cap). It takes effect at once, also after use: a raised cap wakes this core's waiters, a lowered one closes this core's idle connections above it. Clients that share a MaxTotal cap share the change; other cores close their excess idle connections, and wait for a raised cap, when they next use the client.
+- `(c Client) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core connection cap for this client (0: none kept). It takes effect at once on this core, and on the others when they next use the client.
 - `(c Client) Close() !`: Close prevents new use and closes this client's idle connections; checked-out connections close when returned.
 - `(c Client) Query(q query) !Rows`: Query returns the first rowset. With no parameters, multiple statements are allowed and all replies are consumed before returning. Integers and booleans use Value.Int; float4/8 use Value.Float; other OIDs (including numeric and bytea) use Value.Text.
 - `(c Client) Exec(q query) !Result`: Exec returns the affected count of the last command. Use Query with RETURNING to obtain generated IDs (PostgreSQL has no connection-wide last insert ID).
@@ -2605,13 +2680,54 @@ Package database groups database interfaces and drivers.
 - `shape Driver { Open(name str) !dyn Conn }`: Driver opens a connection for a driver-specific data source name.
 - `shape Conn`: Conn prepares statements and closes a driver connection.
 - `shape Stmt`: Stmt executes queries and closes a prepared statement.
+- `shape Dest`: Dest receives one column's value: Set converts it to the destination's type, as Go's Scan does.
+- `type Int64 struct`: Int64 is a scan destination for an integer column; NULL is an error, as in Go.
+- `NewInt64() Int64`: NewInt64 makes an Int64 destination.
+- `(d Int64) Get() i64`: Get returns the stored value.
+- `(d mut Int64) Set(v Value) !`: Set stores the column value as an integer.
+- `type Float64 struct`: Float64 is a scan destination for a floating-point column; NULL is an error, as in Go.
+- `NewFloat64() Float64`: NewFloat64 makes a Float64 destination.
+- `(d Float64) Get() f64`: Get returns the stored value.
+- `(d mut Float64) Set(v Value) !`: Set stores the column value as a float.
+- `type String struct`: String is a scan destination for a text column; NULL is an error, as in Go.
+- `NewString() String`: NewString makes a String destination.
+- `(d String) Get() str`: Get returns the stored value.
+- `(d mut String) Set(v Value) !`: Set stores the column value as text.
+- `type Bool struct`: Bool is a scan destination for a boolean column; NULL is an error, as in Go.
+- `NewBool() Bool`: NewBool makes a Bool destination.
+- `(d Bool) Get() bool`: Get returns the stored value.
+- `(d mut Bool) Set(v Value) !`: Set stores the column value as a boolean.
+- `type Bytes struct`: Bytes is a scan destination for a binary or text column; NULL leaves it empty, as in Go.
+- `NewBytes() Bytes`: NewBytes makes a Bytes destination.
+- `(d Bytes) Get() []u8`: Get returns the stored bytes.
+- `(d mut Bytes) Set(v Value) !`: Set stores the column value as bytes.
+- `type NullInt64 struct`: NullInt64 is a scan destination for an integer column that may be NULL.
+- `NewNullInt64() NullInt64`: NewNullInt64 makes a NullInt64 destination.
+- `(d NullInt64) Get() ?i64`: Get returns the stored value, nil for NULL.
+- `(d mut NullInt64) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullFloat64 struct`: NullFloat64 is a scan destination for a floating-point column that may be NULL.
+- `NewNullFloat64() NullFloat64`: NewNullFloat64 makes a NullFloat64 destination.
+- `(d NullFloat64) Get() ?f64`: Get returns the stored value, nil for NULL.
+- `(d mut NullFloat64) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullString struct`: NullString is a scan destination for a text column that may be NULL.
+- `NewNullString() NullString`: NewNullString makes a NullString destination.
+- `(d NullString) Get() ?str`: Get returns the stored value, nil for NULL.
+- `(d mut NullString) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullBool struct`: NullBool is a scan destination for a boolean column that may be NULL.
+- `NewNullBool() NullBool`: NewNullBool makes a NullBool destination.
+- `(d NullBool) Get() ?bool`: Get returns the stored value, nil for NULL.
+- `(d mut NullBool) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullBytes struct`: NullBytes is a scan destination for a binary or text column that may be NULL.
+- `NewNullBytes() NullBytes`: NewNullBytes makes a NullBytes destination.
+- `(d NullBytes) Get() ?[]u8`: Get returns the stored bytes, nil for NULL.
+- `(d mut NullBytes) Set(v Value) !`: Set stores the column value, or nil for NULL.
 - `type Rows struct`: Rows is a materialized result set with a deterministic cursor.
 - `NewRows(columns []str, values [][]Value) Rows`: NewRows creates a result set from column names and row values.
 - `type Row struct`: Row holds the first row of a query result, or its query fault.
 - `type DB struct`: DB is a database handle backed by the registered driver's connection pool.
-- `type Statement struct`: Stmt is a prepared statement tied to its database connection.
+- `type Statement struct`: Statement is a prepared statement tied to its database connection.
 - `type Tx struct`: Tx is a transaction that uses its connection until it finishes.
-- `Register(name str, driver dyn Driver) !`: Register adds a driver under a unique non-empty name.
+- `Register(name str, driver dyn Driver) !`: Register makes a driver available by name to every core; a name already registered is refused, as in Go.
 - `Drivers() []str`: Drivers returns the registered names in lexical order.
 - `Open(driverName str, dataSourceName str) !DB`: Open opens a database by its registered driver name and data source name.
 - `(db mut DB) Close() !`: Close closes the database and prevents later operations.
@@ -2619,16 +2735,17 @@ Package database groups database interfaces and drivers.
 - `(db DB) Query(query query) !Rows`: Query executes query and returns its rows.
 - `(db DB) QueryRow(query query) Row`: QueryRow executes query and returns its first row or deferred query fault.
 - `(db DB) Exec(query query) !Result`: Exec executes a statement and returns its result.
-- `(db DB) SetMaxOpen(n i64) !bool`: SetMaxOpen sets the process-wide cap on open connections.
-- `(db DB) SetMaxIdle(n i64) !bool`: SetMaxIdle sets the per-core cap on idle connections.
+- `(db DB) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide cap on open connections (0: no cap); it takes effect at once, also after use.
+- `(db DB) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core cap on idle connections (0: none kept); it takes effect at once, also after use.
 - `(s mut Statement) Close() !`: Close closes a prepared statement.
 - `(s Statement) Query() !Rows`: Query executes the prepared query and returns rows.
 - `(s Statement) Exec() !Result`: Exec executes the prepared statement and returns its result.
 - `(r Rows) Columns() []str { return r.columns }`: Columns returns the result column names.
 - `(r mut Rows) Next() bool`: Next advances the cursor and reports whether a row is available.
 - `(r Rows) Values() []Value`: Values returns the current row's values, or an empty slice before Next or after exhaustion.
+- `(r Rows) Scan(dests ...dyn Dest) !`: Scan copies the current row into the destinations, one per column, as Go's Rows.Scan does.
 - `(r mut Rows) Close() ! { r.closed = true }`: Close marks the rows exhausted.
-- `(r Row) Scan() ![]Value`: Scan returns the row values or its deferred query fault.
+- `(r Row) Scan(dests ...dyn Dest) !`: Scan copies the row into the destinations, or fails with its query fault or ErrNoRows.
 - `(r Result) LastInsertId() !i64`: LastInsertId returns the inserted ID when the driver reports one.
 - `(r Result) RowsAffected() !i64 { return r.affected }`: RowsAffected returns the number of rows affected.
 - `(db DB) Begin() !Tx`: Begin starts a transaction on the database connection.
@@ -3814,6 +3931,26 @@ Image's At gives a pixel as color.RGBA64 (Go's RGBA64At), so reading a pixel thr
 - `type Component struct`
 - `Decode(data str) !dyn image.Image`: Decode decodes an 8-bit baseline or progressive JPEG into NRGBA64 pixels. EXIF orientation is left to the caller.
 - `type Bits struct`
+
+## tar
+
+Package tar reads and writes bounded ustar archives with PAX and GNU long-name extensions. Reader applies PAX records (x) to the next entry, global PAX records (g) to every later entry until a record with the same keyword replaces or empties them, and GNU long name and link entries (L, K) to the next entry; those extension entries are consumed by Next and never returned. Writer stores a name up to 100 bytes directly or splits a path at a slash into the 155-byte prefix and 100-byte name fields; otherwise, and for a link name, user or group name, uid or gid past 7 octal digits, or an mtime with a fraction or past the octal field, it writes a PAX entry before the header and truncates the ustar field. It never writes GNU records. Reader uses the supplied archive bytes; Writer buffers at most MaxArchiveSize bytes, and extension payloads are limited to MaxExtensionSize. Sparse formats are not supported.
+
+- `const BlockSize = 512`: BlockSize is the size of a tar header and data-alignment block.
+- `const MaxArchiveSize = 67108864`: MaxArchiveSize bounds archives built by Writer and accepted by the default examples.
+- `const MaxExtensionSize = 1048576`: MaxExtensionSize bounds the payload of one PAX or GNU extension entry, read or written.
+- `type TypeFlag enum`: TypeFlag identifies the kind of an archive entry.
+- `type Header struct`: Header describes one tar archive entry; MtimeNsec is the fraction of Mtime, in nanoseconds.
+- `type Reader struct`: Reader reads entries from a bounded archive in order.
+- `NewReader(data []u8, maxBytes i64) !Reader`: NewReader creates a reader over an archive, rejecting inputs above limit bytes.
+- `(r mut Reader) Next() !?Header`: Next advances to the next header, returning nil at the end of the archive.
+- `(r mut Reader) Read(buf mut []u8) !i64`: Read returns the current entry's next bytes, or zero at its end.
+- `type Writer struct`: Writer constructs a ustar archive in bounded memory, with a PAX entry before a header whose fields do not fit ustar.
+- `NewWriter() Writer`: NewWriter creates an empty archive writer.
+- `(w mut Writer) WriteHeader(h Header) !`: WriteHeader appends a header, preceded by a PAX entry when a field needs one; the following Write calls must provide Size bytes.
+- `(w mut Writer) Write(data []u8) !i64`: Write appends file content and returns its byte count.
+- `(w mut Writer) Close() !`: Close pads the final entry and writes the two zero blocks ending the archive.
+- `(w Writer) Bytes() ![]u8`: Bytes returns the archive bytes after Close.
 
 ## textedit
 

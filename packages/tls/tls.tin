@@ -238,6 +238,18 @@ fn (c mut Conn) pump(wait bool) !bool {
 	if !ok {
 		return false
 	}
+	if typ == ctPlainReady {
+		// opened in place into c.plain (#972)
+		if c.pe == 0 {
+			c.alertCt += 1
+			if c.alertCt > 32 {
+				fail c.abort(alertUnexpectedMessage, "too many empty records")
+			}
+			return true
+		}
+		c.alertCt = 0
+		return true
+	}
 	if typ == ctApplicationData {
 		if len(data) == 0 {
 			c.alertCt += 1

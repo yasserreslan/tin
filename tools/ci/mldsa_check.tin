@@ -1,0 +1,216 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "seal"
+import "twine"
+
+// ML-DSA (FIPS 204, #917) against the NIST ACVP vectors and the Wycheproof vectors pinned under toolchain/tests, and
+// against the golden corpus of bench/ref/mldsa (Go's crypto/mldsa, Go 1.27). bench/ref/mldsa_vectors copies the vectors
+// into case lines with their answers (Go 1.26 is enough for it); tools/ci/fixtures/mldsa.tin answers every case, and each
+// answer is judged against its class. When the installed Go has crypto/mldsa, the Go twin also runs live: its classes for
+// the golden corpus must not have drifted, and Tin's randomized signatures must verify in Go. CI's Go (1.26, from go.mod)
+// has no crypto/mldsa, so there the pinned corpus stands for the Go twin.
+
+const GOLDEN = "toolchain/tests/data/mldsa/go_corpus.txt"
+
+// Case is one line for the fixture, the class its answer must have (ok, fault, hex:H or sha256:H), and where it came from.
+type Case struct {
+	Line str
+	Want str
+	Source str
+}
+
+// head is the first n bytes of s, for messages.
+fn head(s str, n i64) str {
+	if len(s) > n {
+		return s[0:n]
+	}
+	return s
+}
+
+// tabbed splits a line of three tab-separated fields: the source, the case and its class.
+fn tabbed(line str) Case {
+	let (source, rest, ok1) = twine.Cut(line, "\t")
+	let (c, want, ok2) = twine.Cut(rest, "\t")
+	ci.Check(ok1 && ok2, "a line without three fields: " + head(line, 80))
+	return Case{Line: c, Want: want, Source: source}
+}
+
+// vectorCases are the cases of the pinned vectors, as bench/ref/mldsa_vectors prints them.
+fn vectorCases() []Case {
+	let dir = ci.Join(ci.Root(), "bin/ci")
+	ci.Mkdirs(dir)
+	let out = ci.Exec([]str{"go", "run", "./bench/ref/mldsa_vectors"}, ci.Root(), 300)
+	ci.Must(out, "go run bench/ref/mldsa_vectors")
+	mut cases = []Case{}
+	for line in ci.Lines(out.Stdout) {
+		cases = append(cases, tabbed(line))
+	}
+	return cases
+}
+
+// golden is the corpus of bench/ref/mldsa: each line is a case and its class, after a tab.
+fn golden() []Case {
+	mut out = []Case{}
+	for line in ci.Lines(ci.Read(GOLDEN)) {
+		let (c, want, ok) = twine.Cut(line, "\t")
+		ci.Check(ok, "golden line without a class: " + head(line, 80))
+		out = append(out, Case{Line: c, Want: want, Source: "golden"})
+	}
+	return out
+}
+
+// actual is the class of one answer of the fixture ("op result"), in the form the expected class is written in.
+fn actual(answer str, want str) str {
+	let (_, rest, _) = twine.Cut(answer, " ")
+	if rest == "ok" {
+		return "ok"
+	}
+	if twine.HasPrefix(rest, "fault") {
+		return "fault"
+	}
+	if twine.HasPrefix(want, "sha256:") {
+		let raw = seal.HexDecode(rest) catch err {
+			return "bad hex: " + say.Str(err)
+		}
+		return "sha256:" + seal.Hex(seal.Sha256(str(raw)))
+	}
+	return "hex:" + rest
+}
+
+// fixture runs the Tin side on the lines and returns its answers, in order.
+fn fixture(exe str, lines []str) []str {
+	let out = ci.ExecIn([]str{exe}, ci.Root(), 900, twine.Join(lines, "\n") + "\n", []str{})
+	ci.Must(out, "mldsa fixture")
+	return ci.Lines(out.Stdout)
+}
+
+// liveGo reports whether the installed Go has crypto/mldsa (Go 1.27 and later).
+fn liveGo() bool {
+	let probe = ci.Exec([]str{"go", "list", "crypto/mldsa"}, ci.Root(), 120)
+	return probe.Code == 0
+}
+
+// goClasses is the Go twin's class of each case line, from its classes mode.
+fn goClasses(lines []str) []str {
+	let out = ci.ExecIn([]str{"go", "run", "./bench/ref/mldsa", "classes"}, ci.Root(), 900, twine.Join(lines, "\n") + "\n", []str{})
+	ci.Must(out, "go run bench/ref/mldsa classes")
+	return ci.Lines(out.Stdout)
+}
+
+// randomCases makes randomized signatures of the fixture for each parameter set, with fresh seeds, messages and contexts,
+// and the verification lines of them: each signature must verify in Go, and the same one with its last byte changed must not.
+fn randomCases(exe str) ([]str, []str) {
+	mut asks = []str{}
+	for n in []str{"44", "65", "87"} {
+		for k in 0..3 {
+			let seed = seal.Hex(seal.RandomBytes(32))
+			let msg = seal.Hex(seal.RandomBytes(1 + 37*k))
+			let ctx = seal.Hex(seal.RandomBytes(10 + 90*k))
+			let rnd = seal.Hex(seal.RandomBytes(32))
+			asks = append(asks, "pk " + n + " " + seed)
+			asks = append(asks, "sign " + n + " " + seed + " " + msg + " " + ctx + " " + rnd)
+		}
+	}
+	let answers = fixture(exe, asks)
+	ci.Check(len(answers) == len(asks), "the fixture answered " + mint.Itoa(len(answers)) + " of " + mint.Itoa(len(asks)) + " random cases")
+	mut verify = []str{}
+	mut wants = []str{}
+	for i in 0..len(answers) / 2 {
+		let (_, pk, _) = twine.Cut(answers[2*i], " ")
+		let (_, sig, _) = twine.Cut(answers[2*i+1], " ")
+		ci.Check(!twine.HasPrefix(sig, "fault"), "Tin refused its own randomized signature: " + head(answers[2*i+1], 80))
+		// the fields of a sign line are: sign, set, seed, msg, ctx, rnd
+		let f = twine.Fields(asks[2*i+1])
+		verify = append(verify, "vfy " + f[1] + " " + pk + " " + f[3] + " " + f[4] + " " + sig)
+		wants = append(wants, "ok")
+		mut last = "00"
+		if sig[len(sig)-2:] == "00" {
+			last = "01"
+		}
+		verify = append(verify, "vfy " + f[1] + " " + pk + " " + f[3] + " " + f[4] + " " + sig[0:len(sig)-2] + last)
+		wants = append(wants, "fault")
+	}
+	return verify, wants
+}
+
+fn main() {
+	// the pinned vectors and the golden corpus, in one list of cases
+	mut cases = vectorCases()
+	cases = append(cases, golden()...)
+
+	let dir = ci.Join(ci.Root(), "bin/ci")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "mldsa-")
+	let exe = ci.Join(work, "mldsa")
+	ci.BuildTin("tools/ci/fixtures/mldsa.tin", exe, "", []str{})
+
+	// the fixture runs in chunks of 300 cases, so no single input or output is large
+	mut answers = []str{}
+	mut start = 0
+	for start < len(cases) {
+		mut end = start + 300
+		if end > len(cases) {
+			end = len(cases)
+		}
+		mut part = []str{}
+		for i in start..end {
+			part = append(part, cases[i].Line)
+		}
+		answers = append(answers, fixture(exe, part)...)
+		start = end
+	}
+	ci.Check(len(answers) == len(cases), "the fixture answered " + mint.Itoa(len(answers)) + " of " + mint.Itoa(len(cases)) + " cases")
+
+	mut bad = 0
+	mut passed = map[str]i64{}
+	mut total = map[str]i64{}
+	for i in 0..len(cases) {
+		let c = cases[i]
+		total[c.Source] = total[c.Source] + 1
+		let got = actual(answers[i], c.Want)
+		if got == c.Want {
+			passed[c.Source] = passed[c.Source] + 1
+			continue
+		}
+		bad += 1
+		if bad <= 10 {
+			say.Line("MISMATCH", c.Source, head(c.Line, 100), "want", head(c.Want, 40), "got", head(got, 40))
+		}
+	}
+	ci.Check(bad == 0, mint.Itoa(bad) + " ML-DSA cases differ from their vectors or from the Go twin's corpus")
+	for src in []str{"acvp keyGen 44", "acvp keyGen 65", "acvp keyGen 87", "acvp sigGen 44", "acvp sigGen 65", "acvp sigGen 87", "acvp sigVer 44", "acvp sigVer 65", "acvp sigVer 87", "wycheproof verify 44", "wycheproof verify 65", "wycheproof verify 87", "wycheproof sign 44", "wycheproof sign 65", "wycheproof sign 87", "golden"} {
+		say.Line("  ", src, mint.Itoa(passed[src]), "of", mint.Itoa(total[src]))
+	}
+
+	// the Go twin: live only where the installed Go has crypto/mldsa, otherwise the pinned corpus above is the twin
+	if liveGo() {
+		mut goLines = []str{}
+		mut goWants = []str{}
+		for c in cases {
+			if c.Source == "golden" {
+				goLines = append(goLines, c.Line)
+				goWants = append(goWants, c.Want)
+			}
+		}
+		let classes = goClasses(goLines)
+		ci.Check(len(classes) == len(goLines), "the Go twin answered " + mint.Itoa(len(classes)) + " of " + mint.Itoa(len(goLines)) + " golden cases")
+		for i in 0..len(goLines) {
+			ci.Check(classes[i] == goWants[i], "golden drift from the live Go twin at: " + head(goLines[i], 80))
+		}
+		let (verify, wants) = randomCases(exe)
+		let vclasses = goClasses(verify)
+		ci.Check(len(vclasses) == len(verify), "the Go twin answered " + mint.Itoa(len(vclasses)) + " of " + mint.Itoa(len(verify)) + " Tin signatures")
+		for i in 0..len(verify) {
+			ci.Check(vclasses[i] == wants[i], "the Go twin disagrees with Tin's randomized signature: " + head(verify[i], 80))
+		}
+		say.Line("  ", "live Go twin: no golden drift;", mint.Itoa(len(verify)/2), "randomized Tin signatures verified in Go, each tampered one refused")
+	} else {
+		say.Line("  ", "live Go twin skipped: the installed Go has no crypto/mldsa (Go 1.27 adds it); the pinned corpus stands")
+	}
+
+	ci.Remove(work)
+	ci.Pass("ML-DSA: " + mint.Itoa(len(cases)) + " cases agree with the FIPS 204 (ACVP) and Wycheproof vectors and the Go twin's corpus")
+}

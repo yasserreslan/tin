@@ -82,6 +82,7 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, sel, "Add Cursor Below", "\xef\x9c\x81", cmd | alt, editor.CmdCursorBelow)
 	item(m, sel, "Add Cursor Above", "\xef\x9c\x80", cmd | alt, editor.CmdCursorAbove)
 	appkit.AddSeparator(sel)
+	item(m, sel, "Select Line", "l", ctrl, editor.CmdSelectLine)
 	item(m, sel, "Select All", "a", cmd, editor.CmdSelectAll)
 	appkit.AddSeparator(sel)
 	item(m, sel, "Move Line Up", "\xef\x9c\x80", alt, editor.CmdMoveLineUp)
@@ -111,6 +112,9 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, view, "Toggle Output Panel", "j", cmd, workspace.CmdToggleOutput)
 	item(m, view, "Toggle Terminal", "`", ctrl, workspace.CmdToggleTerminal)
 	item(m, view, "Reveal in Project Panel", "r", cmd | shift, workspace.CmdRevealInProject)
+	appkit.AddSeparator(view)
+	item(m, view, "Reveal in Finder", "y", cmd | shift, workspace.CmdRevealFinder)
+	item(m, view, "Copy File Path", "", 0, workspace.CmdCopyPath)
 	appkit.AddSeparator(view)
 	appkit.AddSystemItem(view, "Enter Full Screen", "toggleFullScreen:", "f", cmd | ctrl)
 

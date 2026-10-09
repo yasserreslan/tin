@@ -1,0 +1,164 @@
+package main
+
+import "anvil"
+import "atomic"
+import "say"
+import "mint"
+import "quarry"
+import "tide"
+import "wire"
+
+// The server of tools/ci/wire_stream_check.tin (#774): bodies of any size, streamed both ways. The pattern is byte i = i % 251.
+//
+//	POST /sink         (Router.Stream) reads the body as it arrives and answers "len=N bad=B" (B bytes off the pattern)
+//	GET /source?n=N    streams N bytes of the pattern, chunked (&len=1: with a Content-Length)
+//	GET /slow          streams the pattern 64 KiB every 20 ms for a minute; a client that leaves is counted
+//	GET /left          how many /slow responses ended because their client left
+//	GET /proxy?to=URL  reads URL with wire.DoStream and answers "proxied len=N bad=B" (recorded and replayed, #241)
+//	GET /              the client's address (a kept connection keeps it)
+//
+// With TLS_CERT and TLS_KEY it serves HTTPS.
+
+// the server runs on one core (TIN_CORES=1)
+let left = atomic.NewInt(0)
+
+// block is 256 rounds of the pattern: a stream of whole blocks keeps the pattern going.
+fn block() []u8 {
+	let b = make([]u8, 251 * 256)
+	for i in 0..len(b) {
+		b[i] = u8(i % 251)
+	}
+	return b
+}
+
+fn sink(q anvil.Req, w mut anvil.Out) {
+	let r = q.BodyStream()
+	mut buf = make([]u8, 65536)
+	mut n = 0
+	mut bad = 0
+	for {
+		let k = r.Read(mut buf) catch e {
+			w.Status(400)
+			w.Text("fault {e}")
+			return
+		}
+		if k == 0 {
+			break
+		}
+		mut want = n % 251
+		for i in 0..k {
+			if buf[i] != u8(want) {
+				bad += 1
+			}
+			want += 1
+			if want == 251 {
+				want = 0
+			}
+		}
+		n += k
+	}
+	w.Text("len={n} bad={bad}")
+}
+
+fn source(q anvil.Req, w mut anvil.Out) {
+	let n = mint.Atoi(q.Param("n")) catch _ {
+		0
+	}
+	w.Type("application/octet-stream")
+	w.Stream() catch _ {
+		return
+	}
+	if q.Param("len") == "1" {
+		w.Length(n) catch _ {
+			return
+		}
+	}
+	let b = block()
+	mut sent = 0
+	for sent < n {
+		mut k = len(b)
+		if n-sent < k {
+			k = n - sent
+		}
+		w.Write(b[:k]) catch _ {
+			return
+		}
+		sent += k
+	}
+}
+
+fn slow(q anvil.Req, w mut anvil.Out) {
+	w.Type("application/octet-stream")
+	w.Stream() catch _ {
+		return
+	}
+	let b = block()
+	for i in 0..3000 {
+		let err = w.Write(b)
+		let err2 = w.Flush()
+		if err != nil || err2 != nil || w.Closed() {
+			left.Add(1)
+			return
+		}
+		tide.Sleep(20 * 1000000)
+	}
+}
+
+fn proxy(q anvil.Req, w mut anvil.Out) {
+	mut s = wire.DoStream("GET", q.Param("to"), []str{}, wire.NoBody{}, wire.Options{Timeout: 0, MaxBody: 1 << 30, MaxIdle: 0}) catch e {
+		w.Status(502)
+		w.Text("fault {e}")
+		return
+	}
+	mut buf = make([]u8, 65536)
+	mut n = 0
+	mut bad = 0
+	for {
+		let k = s.Read(mut buf) catch e {
+			w.Status(502)
+			w.Text("fault {e}")
+			return
+		}
+		if k == 0 {
+			break
+		}
+		for i in 0..k {
+			if buf[i] != u8((n+i) % 251) {
+				bad += 1
+			}
+		}
+		n += k
+	}
+	w.Text("proxied len={n} bad={bad}")
+}
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Stream("POST", "/sink", sink)
+	r.Get("/source", source)
+	r.Get("/slow", slow)
+	r.Get("/proxy", proxy)
+	r.Get("/left", fn(q anvil.Req, w mut anvil.Out) {
+		w.Text("{left.Load()}")
+	})
+	r.Get("/", fn(q anvil.Req, w mut anvil.Out) {
+		w.Text(q.RemoteAddr())
+	})
+	if quarry.Getenv("TLS_CERT") != "" {
+		let cert = quarry.ReadFile(quarry.Getenv("TLS_CERT")) catch err {
+			say.Line(err)
+			return
+		}
+		let key = quarry.ReadFile(quarry.Getenv("TLS_KEY")) catch err {
+			say.Line(err)
+			return
+		}
+		r.ServeTLS(":8080", cert, key) catch err {
+			say.Line(err)
+		}
+		return
+	}
+	r.Serve(":8080") catch err {
+		say.Line(err)
+	}
+}

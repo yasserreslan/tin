@@ -1,0 +1,613 @@
+// Package tar reads and writes bounded ustar archives with PAX and GNU long-name extensions.
+// Reader applies PAX records (x) to the next entry, global PAX records (g) to every later entry until a record with the same keyword replaces or empties them, and GNU long name and link entries (L, K) to the next entry; those extension entries are consumed by Next and never returned.
+// Writer stores a name up to 100 bytes directly or splits a path at a slash into the 155-byte prefix and 100-byte name fields; otherwise, and for a link name, user or group name, uid or gid past 7 octal digits, or an mtime with a fraction or past the octal field, it writes a PAX entry before the header and truncates the ustar field. It never writes GNU records.
+// Reader uses the supplied archive bytes; Writer buffers at most MaxArchiveSize bytes, and extension payloads are limited to MaxExtensionSize. Sparse formats are not supported.
+package tar
+
+import "say"
+
+// BlockSize is the size of a tar header and data-alignment block.
+const BlockSize = 512
+// MaxArchiveSize bounds archives built by Writer and accepted by the default examples.
+const MaxArchiveSize = 67108864
+// MaxExtensionSize bounds the payload of one PAX or GNU extension entry, read or written.
+const MaxExtensionSize = 1048576
+
+// TypeFlag identifies the kind of an archive entry.
+type TypeFlag enum {
+	Regular
+	Directory
+	Symlink
+	HardLink
+	Fifo
+	Character
+	Block
+	PAX
+	GNULongName
+	GNULongLink
+}
+
+// Header describes one tar archive entry; MtimeNsec is the fraction of Mtime, in nanoseconds.
+type Header struct {
+	Name str
+	Mode i64
+	Uid i64
+	Gid i64
+	Size i64
+	Mtime i64
+	MtimeNsec i64
+	Type TypeFlag
+	Linkname str
+	Uname str
+	Gname str
+	Devmajor i64
+	Devminor i64
+}
+
+// Reader reads entries from a bounded archive in order.
+type Reader struct {
+	data []u8
+	at i64
+	left i64
+	pad i64
+	maxBytes i64
+	ended bool
+	ext bool
+	global map[str]str
+	local map[str]str
+	longName str
+	longLink str
+}
+
+// NewReader creates a reader over an archive, rejecting inputs above limit bytes.
+fn NewReader(data []u8, maxBytes i64) !Reader {
+	if maxBytes < 0 {
+		fail "tar: negative archive limit"
+	}
+	if i64(len(data)) > maxBytes {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
+	return Reader{data: data, at: 0, left: 0, pad: 0, maxBytes: maxBytes, ended: false, ext: false, global: map[str]str{}, local: map[str]str{}, longName: "", longLink: ""}
+}
+
+// Next advances to the next header, returning nil at the end of the archive.
+fn (r mut Reader) Next() !?Header {
+	if r.ended {
+		return nil
+	}
+	if r.left > 0 {
+		if r.left > i64(len(r.data)) - r.at {
+			fail "tar: unexpected EOF in file data"
+		}
+		r.at += r.left
+		r.left = 0
+	}
+	if r.pad > 0 {
+		if r.pad > i64(len(r.data)) - r.at { fail "tar: unexpected EOF in file data padding" }
+		r.at += r.pad
+		r.pad = 0
+	}
+	for {
+		if r.at + BlockSize > i64(len(r.data)) {
+			fail "tar: unexpected EOF in header"
+		}
+		let b = r.data[r.at:r.at+BlockSize]
+		if zeroBlock(b) {
+			if r.ext {
+				fail "tar: extension entry is not followed by a file"
+			}
+			r.ended = true
+			return nil
+		}
+		let expected = octal(b, 148, 8)
+		mut sum = i64(0)
+		for i in 0..BlockSize {
+			if i >= 148 && i < 156 {
+				sum += 32
+			} else {
+				sum += i64(b[i])
+			}
+		}
+		if expected < 0 || sum != expected {
+			fail "tar: invalid header checksum"
+		}
+		let size = octal(b, 124, 12)
+		let mode = octal(b, 100, 8)
+		let uid = octal(b, 108, 8)
+		let gid = octal(b, 116, 8)
+		let mtime = octal(b, 136, 12)
+		if size < 0 || mode < 0 || uid < 0 || gid < 0 || mtime < 0 { fail "tar: invalid octal header field" }
+		let f = b[156]
+		if f == u8('x') || f == u8('g') || f == u8('L') || f == u8('K') {
+			r.at += BlockSize
+			try r.extension(f, size)
+			continue
+		}
+		mut ty = TypeFlag.Regular
+		if f == u8('5') { ty = TypeFlag.Directory }
+		if f == u8('2') { ty = TypeFlag.Symlink }
+		if f == u8('1') { ty = TypeFlag.HardLink }
+		if f == u8('6') { ty = TypeFlag.Fifo }
+		if f == u8('3') { ty = TypeFlag.Character }
+		if f == u8('4') { ty = TypeFlag.Block }
+		if f != 0 && f != u8('0') && f != u8('5') && f != u8('2') && f != u8('1') && f != u8('6') && f != u8('3') && f != u8('4') && f != u8('7') {
+			fail "tar: unsupported type flag"
+		}
+		let name = cstring(b, 0, 100)
+		let prefix = cstring(b, 345, 155)
+		mut fullName = name
+		if prefix != "" { fullName = prefix + "/" + name }
+		mut h = Header{Name: fullName, Mode: mode, Uid: uid, Gid: gid, Size: size, Mtime: mtime, MtimeNsec: 0, Type: ty, Linkname: cstring(b, 157, 100), Uname: cstring(b, 265, 32), Gname: cstring(b, 297, 32), Devmajor: octal(b, 329, 8), Devminor: octal(b, 337, 8)}
+		r.at += BlockSize
+		try applyRecords(mut h, r.global, r.local, r.longName, r.longLink)
+		if h.Size < 0 || h.Size > r.maxBytes {
+			fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: file size exceeds limit"))
+		}
+		r.left = h.Size
+		r.pad = (BlockSize - h.Size % BlockSize) % BlockSize
+		r.ext = false
+		if len(r.local) > 0 {
+			r.local = map[str]str{}
+		}
+		r.longName = ""
+		r.longLink = ""
+		return h
+	}
+}
+
+// Read returns the current entry's next bytes, or zero at its end.
+fn (r mut Reader) Read(buf mut []u8) !i64 {
+	if r.left == 0 || len(buf) == 0 {
+		return 0
+	}
+	let n = min(i64(len(buf)), r.left)
+	if r.at + n > i64(len(r.data)) {
+		fail "tar: unexpected EOF in file data"
+	}
+	for i in 0..n {
+		buf[i] = r.data[r.at+i]
+	}
+	r.at += n
+	r.left -= n
+	return n
+}
+
+// extension consumes the payload of an x, g, L or K entry whose header is at r.at, keeping its records for the entries that follow.
+fn (r mut Reader) extension(kind u8, size i64) ! {
+	if size > MaxExtensionSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: extension entry exceeds limit"))
+	}
+	if size > i64(len(r.data)) - r.at {
+		fail "tar: unexpected EOF in extension data"
+	}
+	let payload = r.data[r.at:r.at+size]
+	r.at += size
+	let pad = (BlockSize - size % BlockSize) % BlockSize
+	if pad > i64(len(r.data)) - r.at {
+		fail "tar: unexpected EOF in extension padding"
+	}
+	r.at += pad
+	if kind != u8('g') {
+		r.ext = true
+	}
+	if kind == u8('x') {
+		let recs = try parsePAX(payload)
+		r.local = recs
+	}
+	if kind == u8('g') {
+		let recs = try parsePAX(payload)
+		for k, v in recs {
+			if v == "" {
+				delete(r.global, k)
+			} else {
+				r.global[k] = v
+			}
+		}
+	}
+	if kind == u8('L') {
+		r.longName = cstring(payload, 0, size)
+	}
+	if kind == u8('K') {
+		r.longLink = cstring(payload, 0, size)
+	}
+	return
+}
+
+// Writer constructs a ustar archive in bounded memory, with a PAX entry before a header whose fields do not fit ustar.
+type Writer struct {
+	data []u8
+	closed bool
+	pending i64
+}
+
+// NewWriter creates an empty archive writer.
+fn NewWriter() Writer {
+	return Writer{data: []u8{}, closed: false, pending: 0}
+}
+
+// WriteHeader appends a header, preceded by a PAX entry when a field needs one; the following Write calls must provide Size bytes.
+fn (w mut Writer) WriteHeader(h Header) ! {
+	if w.closed || w.pending > 0 {
+		fail "tar: invalid writer state"
+	}
+	let previousRem = len(w.data) % BlockSize
+	if previousRem > 0 {
+		let needed = BlockSize - previousRem
+		if i64(len(w.data)) + needed + BlockSize > MaxArchiveSize {
+			fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+		}
+		for i in 0..needed { w.data = append(w.data, 0) }
+	}
+	if len(h.Name) == 0 || h.Size < 0 || h.Size > 0o77777777777 || h.Mode < 0 || h.Mode > 0o7777777 || h.Uid < 0 || h.Gid < 0 || h.Mtime < 0 || h.MtimeNsec < 0 || h.MtimeNsec > 999999999 {
+		fail "tar: header field is outside ustar limits"
+	}
+	if hasNUL(h.Name) || hasNUL(h.Linkname) || hasNUL(h.Uname) || hasNUL(h.Gname) {
+		fail "tar: header string contains NUL"
+	}
+	if h.Type == TypeFlag.PAX || h.Type == TypeFlag.GNULongName || h.Type == TypeFlag.GNULongLink {
+		fail "tar: extension records are read-only"
+	}
+	if h.Type != TypeFlag.Regular && h.Type != TypeFlag.Directory && h.Type != TypeFlag.Symlink && h.Type != TypeFlag.HardLink && h.Type != TypeFlag.Fifo && h.Type != TypeFlag.Character && h.Type != TypeFlag.Block {
+		fail "tar: unsupported writer type flag"
+	}
+	if h.Type == TypeFlag.Symlink || h.Type == TypeFlag.HardLink {
+		if h.Size != 0 {
+			fail "tar: invalid link header"
+		}
+	}
+	// The PAX records carry every field that does not fit; the ustar fields keep a truncated value or zero.
+	mut recs = ""
+	mut name = h.Name
+	mut prefix = ""
+	let split = splitName(h.Name)
+	if split != nil {
+		name = split.name
+		prefix = split.prefix
+	} else {
+		recs += paxRecord("path", h.Name)
+		name = h.Name[0:100]
+	}
+	mut link = h.Linkname
+	if len(link) > 100 {
+		recs += paxRecord("linkpath", link)
+		link = link[0:100]
+	}
+	mut uname = h.Uname
+	if len(uname) > 32 {
+		recs += paxRecord("uname", uname)
+		uname = uname[0:32]
+	}
+	mut gname = h.Gname
+	if len(gname) > 32 {
+		recs += paxRecord("gname", gname)
+		gname = gname[0:32]
+	}
+	mut uid = h.Uid
+	if uid > 0o7777777 {
+		recs += paxRecord("uid", say.Fmt("%d", uid))
+		uid = 0
+	}
+	mut gid = h.Gid
+	if gid > 0o7777777 {
+		recs += paxRecord("gid", say.Fmt("%d", gid))
+		gid = 0
+	}
+	mut mtime = h.Mtime
+	if h.MtimeNsec != 0 || mtime > 0o77777777777 {
+		recs += paxRecord("mtime", paxTimeText(h.Mtime, h.MtimeNsec))
+		if mtime > 0o77777777777 { mtime = 0 }
+	}
+	let recLen = i64(len(recs))
+	if recLen > MaxExtensionSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: extension records exceed limit"))
+	}
+	mut extBlocks = i64(0)
+	if recLen > 0 {
+		extBlocks = BlockSize + (recLen + BlockSize - 1) / BlockSize * BlockSize
+	}
+	if i64(len(w.data)) + extBlocks + BlockSize > MaxArchiveSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
+	if recLen > 0 {
+		let entry = ustarBlock(Header{Name: "PaxHeaders.0/" + baseName(h.Name), Mode: 0o644, Size: recLen, Type: TypeFlag.PAX}, "")
+		w.data = append(w.data, entry...)
+		w.data = append(w.data, []u8(recs)...)
+		let rem = recLen % BlockSize
+		if rem > 0 {
+			for i in 0..(BlockSize - rem) { w.data = append(w.data, 0) }
+		}
+	}
+	let block = ustarBlock(Header{Name: name, Mode: h.Mode, Uid: uid, Gid: gid, Size: h.Size, Mtime: mtime, Type: h.Type, Linkname: link, Uname: uname, Gname: gname, Devmajor: h.Devmajor, Devminor: h.Devminor}, prefix)
+	w.data = append(w.data, block...)
+	w.pending = h.Size
+	return
+}
+
+// Write appends file content and returns its byte count.
+fn (w mut Writer) Write(data []u8) !i64 {
+	if w.closed || i64(len(data)) > w.pending {
+		fail "tar: invalid writer state"
+	}
+	if i64(len(w.data)) + i64(len(data)) > MaxArchiveSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
+	w.data = append(w.data, data...)
+	w.pending -= i64(len(data))
+	return i64(len(data))
+}
+
+// Close pads the final entry and writes the two zero blocks ending the archive.
+fn (w mut Writer) Close() ! {
+	if w.closed { return }
+	if w.pending != 0 { fail "tar: file data is shorter than header size" }
+	let rem = len(w.data) % BlockSize
+	mut padded = i64(0)
+	if rem > 0 { padded = BlockSize - rem }
+	if i64(len(w.data)) + padded + BlockSize * 2 > MaxArchiveSize {
+		fail cast(fault, rt_fault_wrap(rt_fault_limit(), "tar: archive exceeds limit"))
+	}
+	if rem > 0 {
+		for i in rem..BlockSize { w.data = append(w.data, 0) }
+	}
+	for i in 0..(BlockSize * 2) { w.data = append(w.data, 0) }
+	w.closed = true
+	return
+}
+
+// Bytes returns the archive bytes after Close.
+fn (w Writer) Bytes() ![]u8 {
+	if !w.closed { fail "tar: writer is not closed" }
+	return w.data
+}
+
+// applyRecords sets the fields that the global and per-file PAX records and the GNU names give, the per-file records and names winning.
+fn applyRecords(h mut Header, global map[str]str, local map[str]str, longName str, longLink str) ! {
+	for k, v in global {
+		try applyRecord(mut h, k, v)
+	}
+	for k, v in local {
+		try applyRecord(mut h, k, v)
+	}
+	if longName != "" { h.Name = longName }
+	if longLink != "" { h.Linkname = longLink }
+	return
+}
+
+// applyRecord sets one field from a PAX record; an empty value and an unknown keyword leave the field alone.
+fn applyRecord(h mut Header, key str, value str) ! {
+	if value == "" { return }
+	if key == "path" {
+		h.Name = value
+	} else if key == "linkpath" {
+		h.Linkname = value
+	} else if key == "uname" {
+		h.Uname = value
+	} else if key == "gname" {
+		h.Gname = value
+	} else if key == "uid" {
+		h.Uid = try paxNumber(key, value)
+	} else if key == "gid" {
+		h.Gid = try paxNumber(key, value)
+	} else if key == "size" {
+		h.Size = try paxNumber(key, value)
+	} else if key == "mtime" {
+		let (sec, nsec) = try paxTime(value)
+		h.Mtime = sec
+		h.MtimeNsec = nsec
+	}
+	return
+}
+
+// parsePAX reads the records of an x or g entry: each is "LEN key=value" followed by a newline, LEN counting the whole record.
+fn parsePAX(p []u8) !map[str]str {
+	mut recs = map[str]str{}
+	let total = i64(len(p))
+	mut at = i64(0)
+	for at < total {
+		mut n = i64(0)
+		mut i = at
+		for i < total && p[i] >= u8('0') && p[i] <= u8('9') {
+			n = n * 10 + i64(p[i] - u8('0'))
+			if n > total { fail "tar: malformed pax record length" }
+			i += 1
+		}
+		if i == at || i >= total || p[i] != u8(' ') { fail "tar: malformed pax record length" }
+		let end = at + n
+		if end < i + 2 || end > total { fail "tar: malformed pax record length" }
+		if p[end-1] != u8('\n') { fail "tar: malformed pax record" }
+		let body = p[i+1:end-1]
+		let blen = i64(len(body))
+		mut eq = i64(-1)
+		for j in 0..blen {
+			if body[j] == u8('=') {
+				eq = j
+				break
+			}
+		}
+		if eq <= 0 { fail "tar: malformed pax record" }
+		if hasNULBytes(body) { fail "tar: malformed pax record" }
+		let key = str(body[0:eq])
+		let value = str(body[eq+1:blen])
+		recs[key] = value
+		at = end
+	}
+	return recs
+}
+
+// paxNumber parses the decimal value of a numeric PAX record, failing on anything but digits or on overflow.
+fn paxNumber(key str, s str) !i64 {
+	if len(s) == 0 { fail "tar: invalid pax " + key + " record" }
+	mut v = i64(0)
+	for i in 0..len(s) {
+		let c = s[i]
+		if c < u8('0') || c > u8('9') { fail "tar: invalid pax " + key + " record" }
+		let d = i64(c - u8('0'))
+		if v > (9223372036854775807 - d) / 10 { fail "tar: pax " + key + " record overflows" }
+		v = v * 10 + d
+	}
+	return v
+}
+
+// paxTime parses a PAX time "seconds[.fraction]" into whole seconds and nanoseconds, keeping nine fraction digits.
+fn paxTime(s str) !(i64, i64) {
+	mut dot = len(s)
+	for i in 0..len(s) {
+		if s[i] == u8('.') {
+			dot = i
+			break
+		}
+	}
+	let sec = try paxNumber("mtime", s[0:dot])
+	mut nsec = i64(0)
+	mut digits = i64(0)
+	if dot < len(s) {
+		for i in dot+1..len(s) {
+			let c = s[i]
+			if c < u8('0') || c > u8('9') { fail "tar: invalid pax mtime record" }
+			if digits < 9 {
+				nsec = nsec * 10 + i64(c - u8('0'))
+				digits += 1
+			}
+		}
+	}
+	for digits < 9 {
+		nsec = nsec * 10
+		digits += 1
+	}
+	return sec, nsec
+}
+
+// paxRecord formats one PAX record: its decimal length, a space, key=value and a newline.
+fn paxRecord(key str, value str) str {
+	let body = " " + key + "=" + value + "\n"
+	mut n = i64(len(body))
+	for {
+		let total = i64(len(body)) + i64(len(say.Fmt("%d", n)))
+		if total == n { break }
+		n = total
+	}
+	return say.Fmt("%d", n) + body
+}
+
+// paxTimeText formats an mtime as PAX does: whole seconds, then the nanoseconds without trailing zeros.
+fn paxTimeText(sec i64, nsec i64) str {
+	if nsec == 0 { return say.Fmt("%d", sec) }
+	let frac = say.Fmt("%09d", nsec)
+	mut end = len(frac)
+	for end > 0 && frac[end-1] == u8('0') { end -= 1 }
+	return say.Fmt("%d", sec) + "." + frac[0:end]
+}
+
+// ustarBlock encodes a header block; prefix is the ustar prefix field (empty unless the name was split).
+fn ustarBlock(h Header, prefix str) []u8 {
+	mut b = make([]u8, BlockSize)
+	putString(mut b, 0, 100, h.Name)
+	putOctal(mut b, 100, 8, h.Mode)
+	putOctal(mut b, 108, 8, h.Uid)
+	putOctal(mut b, 116, 8, h.Gid)
+	putOctal(mut b, 124, 12, h.Size)
+	putOctal(mut b, 136, 12, h.Mtime)
+	for i in 148..156 { b[i] = u8(' ') }
+	b[156] = match h.Type {
+		TypeFlag.Regular => u8('0')
+		TypeFlag.Directory => u8('5')
+		TypeFlag.Symlink => u8('2')
+		TypeFlag.HardLink => u8('1')
+		TypeFlag.Fifo => u8('6')
+		TypeFlag.Character => u8('3')
+		TypeFlag.Block => u8('4')
+		TypeFlag.PAX => u8('x')
+		_ => u8('0')
+	}
+	putString(mut b, 157, 100, h.Linkname)
+	putString(mut b, 265, 32, h.Uname)
+	putString(mut b, 297, 32, h.Gname)
+	putOctal(mut b, 329, 8, h.Devmajor)
+	putOctal(mut b, 337, 8, h.Devminor)
+	putString(mut b, 345, 155, prefix)
+	putString(mut b, 257, 6, "ustar")
+	b[262] = 0
+	putString(mut b, 263, 2, "00")
+	mut sum = i64(0)
+	for x in b { sum += i64(x) }
+	putOctal(mut b, 148, 7, sum)
+	b[155] = 0
+	return b
+}
+
+fn zeroBlock(b []u8) bool {
+	for x in b { if x != 0 { return false } }
+	return true
+}
+
+fn hasNUL(s str) bool {
+	for i in 0..len(s) {
+		if s[i] == 0 { return true }
+	}
+	return false
+}
+
+fn hasNULBytes(b []u8) bool {
+	for x in b { if x == 0 { return true } }
+	return false
+}
+
+fn baseName(name str) str {
+	mut start = i64(0)
+	for i in 0..len(name) {
+		if name[i] == u8('/') { start = i + 1 }
+	}
+	return name[start:len(name)]
+}
+
+fn cstring(b []u8, at i64, n i64) str {
+	mut end = at
+	for end < at+n && b[end] != 0 { end += 1 }
+	return str(b[at:end])
+}
+
+fn octal(b []u8, at i64, n i64) i64 {
+	mut i = at
+	for i < at+n && (b[i] == 0 || b[i] == u8(' ')) { i += 1 }
+	mut v = i64(0)
+	mut any = false
+	for i < at+n && b[i] >= u8('0') && b[i] <= u8('7') {
+		any = true
+		v = v * 8 + i64(b[i] - u8('0'))
+		i += 1
+	}
+	if !any { return -1 }
+	return v
+}
+
+fn putString(b mut []u8, at i64, n i64, s str) {
+	for i in 0..min(n, i64(len(s))) { b[at+i] = s[i] }
+}
+
+// splitName finds the ustar prefix/name split or returns nil when the path does not fit.
+fn splitName(name str) ?nameParts {
+	if len(name) <= 100 { return nameParts{name: name, prefix: ""} }
+	mut i = len(name) - 1
+	for i > 0 {
+		if name[i] == '/' && i <= 155 && len(name) - i - 1 <= 100 {
+			return nameParts{name: name[i+1:], prefix: name[0:i]}
+		}
+		i -= 1
+	}
+	return nil
+}
+
+type nameParts value struct {
+	name str
+	prefix str
+}
+
+fn putOctal(b mut []u8, at i64, n i64, value i64) {
+	mut v = value
+	mut i = at+n-1
+	for i > at {
+		b[i] = u8('0' + v % 8)
+		v /= 8
+		i -= 1
+	}
+}

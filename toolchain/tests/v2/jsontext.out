@@ -1,0 +1,51 @@
+{ {
+" a
+[ [
+0 1
+0 2.5
+" xé
+t true
+n null
+] ]
+} }
+end
+0 1
+0 2
+" x
+end
+[ [
+0 1
+error: jsontext: invalid character ',' at start of value after offset 2
+{ {
+" a
+error: jsontext: invalid character '1' after object name (expecting ':') within "/a" after offset 5
+error: jsontext: unexpected EOF after offset 3
+error: jsontext: invalid escape sequence `\x` in string after offset 1
+{ {
+" a
+0 1
+error: jsontext: duplicate object member name "a"
+{ {
+" a
+0 1
+" a
+0 2
+} }
+end
+value: {"a" : [1, 2] }
+value: 3
+value: "s"
+end
+error: jsontext: invalid character ']' at start of value within "/1" after offset 3
+error: jsontext: invalid UTF-8 after offset 1
+"{\"a\":[1,{\"b\":null}],\"c\":\"<&>\"}\n"
+"{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    }\n  ],\n  \"c\": []\n}\n"
+"{\n\t\"a\": 1,\n\t\"b\": [\n\t\ttrue\n\t]\n}\n"
+"{\"a\": 1, \"b\": [true]}\n"
+"\"\\u003c\\u0026\\u003e\\b\\f\\n\"\n"
+"\"\u2028\"\n"
+"\"\\u2028\"\n"
+"[-3,18446744073709551615,1e+21,100000000000000000000,0.000001,1e-7,0.1,123456789.5,true,null,\"a\\\"b\"]\n"
+42 1.5 true
+0 false
+"{\n  \"x\": [\n    1,\n    2\n  ]\n}\n"

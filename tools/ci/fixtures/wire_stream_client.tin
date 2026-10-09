@@ -1,0 +1,165 @@
+package main
+
+import "fault"
+import "mint"
+import "quarry"
+import "say"
+import "tide"
+import "tls"
+import "wire"
+
+// The client of tools/ci/wire_stream_check.tin (#774): wire.DoStream with bodies of any size. The pattern is byte i = i % 251.
+//
+//	up URL N       POSTs N bytes of the pattern, chunked, and prints the status and the answer
+//	upcl URL N     the same with a Content-Length
+//	down URL N     GETs and reads the body 64 KiB at a time, and prints "got=N bad=B"
+//	cancel URL     reads /slow inside a within of 300 ms and prints how the read ended
+//	reuse URL      GETs twice, reading to the end, and prints both answers (the server's view of the client's address)
+//
+// INSECURE=1 accepts any certificate (the check's own).
+
+// Pattern is a body of n bytes of the pattern.
+type Pattern struct {
+	left i64
+	pos  i64
+}
+
+fn (p mut Pattern) Read(buf mut []u8) !i64 {
+	mut n = len(buf)
+	if n > p.left {
+		n = p.left
+	}
+	mut v = p.pos % 251
+	for i in 0..n {
+		buf[i] = u8(v)
+		v += 1
+		if v == 251 {
+			v = 0
+		}
+	}
+	p.left -= n
+	p.pos += n
+	return n
+}
+
+fn opts() wire.Options {
+	mut o = wire.Options{Timeout: 600 * 1000000000, MaxBody: 1 << 40, MaxIdle: 0}
+	if quarry.Getenv("INSECURE") == "1" {
+		o.TLS = tls.Config{ServerName: "", RootCAs: "", ALPN: []str{}, Timeout: 0, InsecureSkipVerify: true}
+	}
+	return o
+}
+
+fn readAll(s mut wire.Stream) !str {
+	mut out = []u8{}
+	mut buf = make([]u8, 4096)
+	for {
+		let k = try s.Read(mut buf)
+		if k == 0 {
+			break
+		}
+		out = append(out, buf[:k]...)
+	}
+	return str(out)
+}
+
+fn up(url str, n i64, declared bool) ! {
+	mut headers = []str{"Content-Type", "application/octet-stream"}
+	if declared {
+		headers = append(headers, "Content-Length", mint.Itoa(n))
+	}
+	let t0 = tide.Now()
+	mut s = try wire.DoStream("POST", url, headers, Pattern{left: n, pos: 0}, opts())
+	let body = try readAll(mut s)
+	say.Line("status={s.Status} {body} seconds={tide.Since(t0) / 1000000000}")
+}
+
+fn down(url str) ! {
+	let t0 = tide.Now()
+	mut s = try wire.DoStream("GET", url, []str{}, wire.NoBody{}, opts())
+	mut buf = make([]u8, 65536)
+	mut got = 0
+	mut bad = 0
+	for {
+		let k = try s.Read(mut buf)
+		if k == 0 {
+			break
+		}
+		mut want = got % 251
+		for i in 0..k {
+			if buf[i] != u8(want) {
+				bad += 1
+			}
+			want += 1
+			if want == 251 {
+				want = 0
+			}
+		}
+		got += k
+	}
+	say.Line("status={s.Status} got={got} bad={bad} length={s.Length()} seconds={tide.Since(t0) / 1000000000}")
+}
+
+fn slowRead(url str) !i64 {
+	mut s = try wire.DoStream("GET", url, []str{}, wire.NoBody{}, opts())
+	mut buf = make([]u8, 65536)
+	mut got = 0
+	for {
+		let k = try s.Read(mut buf)
+		if k == 0 {
+			break
+		}
+		got += k
+	}
+	return got
+}
+
+fn cancel(url str) {
+	let t0 = tide.Now()
+	let got = within 300ms {
+		try slowRead(url)
+	} catch err {
+		say.Line("ended: {err} deadline={fault.Is(err, fault.DeadlineExceeded)} ms={tide.Since(t0) / 1000000}")
+		-1
+	}
+	if got >= 0 {
+		say.Line("ended: the whole body ({got} bytes)")
+	}
+}
+
+fn reuse(url str) ! {
+	mut a = try wire.DoStream("GET", url, []str{}, wire.NoBody{}, opts())
+	let first = try readAll(mut a)
+	mut b = try wire.DoStream("GET", url, []str{}, wire.NoBody{}, opts())
+	let second = try readAll(mut b)
+	say.Line("first={first} second={second}")
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) < 3 {
+		say.Line("usage: wire_stream_client up|upcl|down|cancel|reuse URL [N]")
+		quarry.Exit(2)
+	}
+	let url = args[2]
+	mut n = 0
+	if len(args) > 3 {
+		n = mint.Atoi(args[3]) catch _ {
+			0
+		}
+	}
+	let err = match args[1] {
+		"up" => up(url, n, false),
+		"upcl" => up(url, n, true),
+		"down" => down(url),
+		"reuse" => reuse(url),
+		_ => {
+			cancel(url)
+			nil
+		},
+	}
+	if err != nil {
+		say.Line("fault: {err}")
+		quarry.Exit(1)
+	}
+}

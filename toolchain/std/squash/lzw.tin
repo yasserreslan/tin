@@ -67,7 +67,14 @@ fn (b mut lzwBits) flush() {
 // the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the
 // stream ends with the end code.
 fn Lzw(data str, order i64) str {
-	let litWidth = 8
+	return LzwWidth(data, order, 8)
+}
+
+// LzwWidth compresses bytes with the given literal width (2 through 8), as GIF requires.
+fn LzwWidth(data str, order i64, litWidth i64) str {
+	if litWidth < 2 || litWidth > 8 {
+		panic("squash: lzw: invalid literal width")
+	}
 	let clear = u64(1) << u64(litWidth)
 	let eof = clear + 1
 	// Go's writer counts 4095 as the last code: 4095 is where a clear code restarts the dictionary.
@@ -161,7 +168,14 @@ fn (r mut lzwRead) code(width i64) i64 {
 
 // Unlzw decompresses an LZW stream of the given order, failing past max bytes.
 fn Unlzw(data str, order i64, max i64) !str {
-	let litWidth = 8
+	return try UnlzwWidth(data, order, max, 8)
+}
+
+// UnlzwWidth decompresses an LZW stream with the given literal width (2 through 8).
+fn UnlzwWidth(data str, order i64, max i64, litWidth i64) !str {
+	if litWidth < 2 || litWidth > 8 {
+		fail say.Fault("squash: lzw: invalid literal width")
+	}
 	let clear = i64(1) << litWidth
 	let eof = clear + 1
 	let maxWidth = 12

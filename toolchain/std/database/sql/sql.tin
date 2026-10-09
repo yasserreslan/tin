@@ -1,6 +1,10 @@
 // Package sql provides a generic, task-aware database client and driver registry.
 package sql
 
+import "fault"
+import "mint"
+import "say"
+
 // Value is one database value returned by a driver.
 type Value enum {
 	Null // Null is SQL NULL.
@@ -29,9 +33,9 @@ shape Conn {
 	Prepare(query query) !dyn Stmt
 	// Begin starts a transaction on this connection.
 	Begin() !dyn Conn
-	// Finish commits or rolls back a transaction.
+	// Finish commits or rolls back a transaction (the bool is true for a commit).
 	Finish(commit bool) !bool
-	// SetMaxOpen sets the process-wide open connection limit.
+	// SetMaxOpen sets the process-wide open connection limit (0: no limit).
 	SetMaxOpen(n i64) !bool
 	// SetMaxIdle sets the per-core idle connection limit.
 	SetMaxIdle(n i64) !bool
@@ -49,6 +53,376 @@ shape Stmt {
 	Close() !
 }
 
+// Dest receives one column's value: Set converts it to the destination's type, as Go's Scan does.
+shape Dest {
+	// Set stores the column value, or fails with Go's conversion error.
+	mut Set(v Value) !
+}
+
+// Int64 is a scan destination for an integer column; NULL is an error, as in Go.
+type Int64 struct {
+	v i64
+}
+
+// NewInt64 makes an Int64 destination.
+fn NewInt64() Int64 {
+	return Int64{v: 0}
+}
+
+// Get returns the stored value.
+fn (d Int64) Get() i64 {
+	return d.v
+}
+
+// Set stores the column value as an integer.
+fn (d mut Int64) Set(v Value) ! {
+	d.v = try scanInt(v)
+}
+
+// Float64 is a scan destination for a floating-point column; NULL is an error, as in Go.
+type Float64 struct {
+	v f64
+}
+
+// NewFloat64 makes a Float64 destination.
+fn NewFloat64() Float64 {
+	return Float64{v: 0.0}
+}
+
+// Get returns the stored value.
+fn (d Float64) Get() f64 {
+	return d.v
+}
+
+// Set stores the column value as a float.
+fn (d mut Float64) Set(v Value) ! {
+	d.v = try scanFloat(v)
+}
+
+// String is a scan destination for a text column; NULL is an error, as in Go.
+type String struct {
+	v str
+}
+
+// NewString makes a String destination.
+fn NewString() String {
+	return String{v: ""}
+}
+
+// Get returns the stored value.
+fn (d String) Get() str {
+	return d.v
+}
+
+// Set stores the column value as text.
+fn (d mut String) Set(v Value) ! {
+	d.v = try scanString(v)
+}
+
+// Bool is a scan destination for a boolean column; NULL is an error, as in Go.
+type Bool struct {
+	v bool
+}
+
+// NewBool makes a Bool destination.
+fn NewBool() Bool {
+	return Bool{v: false}
+}
+
+// Get returns the stored value.
+fn (d Bool) Get() bool {
+	return d.v
+}
+
+// Set stores the column value as a boolean.
+fn (d mut Bool) Set(v Value) ! {
+	d.v = try scanBool(v)
+}
+
+// Bytes is a scan destination for a binary or text column; NULL leaves it empty, as in Go.
+type Bytes struct {
+	v []u8
+}
+
+// NewBytes makes a Bytes destination.
+fn NewBytes() Bytes {
+	return Bytes{v: []u8{}}
+}
+
+// Get returns the stored bytes.
+fn (d Bytes) Get() []u8 {
+	return d.v
+}
+
+// Set stores the column value as bytes.
+fn (d mut Bytes) Set(v Value) ! {
+	d.v = try scanBytes(v)
+}
+
+// NullInt64 is a scan destination for an integer column that may be NULL.
+type NullInt64 struct {
+	v ?i64
+}
+
+// NewNullInt64 makes a NullInt64 destination.
+fn NewNullInt64() NullInt64 {
+	return NullInt64{v: nil}
+}
+
+// Get returns the stored value, nil for NULL.
+fn (d NullInt64) Get() ?i64 {
+	return d.v
+}
+
+// Set stores the column value, or nil for NULL.
+fn (d mut NullInt64) Set(v Value) ! {
+	match v {
+		Null => {
+			d.v = nil
+		}
+		_ => {
+			d.v = try scanInt(v)
+		}
+	}
+}
+
+// NullFloat64 is a scan destination for a floating-point column that may be NULL.
+type NullFloat64 struct {
+	v ?f64
+}
+
+// NewNullFloat64 makes a NullFloat64 destination.
+fn NewNullFloat64() NullFloat64 {
+	return NullFloat64{v: nil}
+}
+
+// Get returns the stored value, nil for NULL.
+fn (d NullFloat64) Get() ?f64 {
+	return d.v
+}
+
+// Set stores the column value, or nil for NULL.
+fn (d mut NullFloat64) Set(v Value) ! {
+	match v {
+		Null => {
+			d.v = nil
+		}
+		_ => {
+			d.v = try scanFloat(v)
+		}
+	}
+}
+
+// NullString is a scan destination for a text column that may be NULL.
+type NullString struct {
+	v ?str
+}
+
+// NewNullString makes a NullString destination.
+fn NewNullString() NullString {
+	return NullString{v: nil}
+}
+
+// Get returns the stored value, nil for NULL.
+fn (d NullString) Get() ?str {
+	return d.v
+}
+
+// Set stores the column value, or nil for NULL.
+fn (d mut NullString) Set(v Value) ! {
+	match v {
+		Null => {
+			d.v = nil
+		}
+		_ => {
+			d.v = try scanString(v)
+		}
+	}
+}
+
+// NullBool is a scan destination for a boolean column that may be NULL.
+type NullBool struct {
+	v ?bool
+}
+
+// NewNullBool makes a NullBool destination.
+fn NewNullBool() NullBool {
+	return NullBool{v: nil}
+}
+
+// Get returns the stored value, nil for NULL.
+fn (d NullBool) Get() ?bool {
+	return d.v
+}
+
+// Set stores the column value, or nil for NULL.
+fn (d mut NullBool) Set(v Value) ! {
+	match v {
+		Null => {
+			d.v = nil
+		}
+		_ => {
+			d.v = try scanBool(v)
+		}
+	}
+}
+
+// NullBytes is a scan destination for a binary or text column that may be NULL.
+type NullBytes struct {
+	v ?[]u8
+}
+
+// NewNullBytes makes a NullBytes destination.
+fn NewNullBytes() NullBytes {
+	return NullBytes{v: nil}
+}
+
+// Get returns the stored bytes, nil for NULL.
+fn (d NullBytes) Get() ?[]u8 {
+	return d.v
+}
+
+// Set stores the column value, or nil for NULL.
+fn (d mut NullBytes) Set(v Value) ! {
+	match v {
+		Null => {
+			d.v = nil
+		}
+		_ => {
+			d.v = try scanBytes(v)
+		}
+	}
+}
+
+// scanInt converts a column value to an int64 as Go's Scan does (a float must hold a whole number, text must parse).
+fn scanInt(v Value) !i64 {
+	match v {
+		Null => {
+			fail "converting NULL to int64 is unsupported"
+		}
+		Int(n) => {
+			return n
+		}
+		Float(f) => {
+			return try parseInt64(mint.FormatFloat(f, 'g', -1), "float64")
+		}
+		Text(s) => {
+			return try parseInt64(s, "string")
+		}
+	}
+	fail "sql: unreachable value"
+}
+
+// parseInt64 parses a base-10 int64 from text that came from a column of the kind (Go's wording).
+fn parseInt64(s str, kind str) !i64 {
+	mut reason = "invalid syntax"
+	let n = mint.ParseInt(s, 10) catch err {
+		if fault.Is(err, mint.ErrRange) { reason = "value out of range" }
+		fail say.Fmt("converting driver.Value type %s (%s) to a int64: %s", kind, mint.Quote(s), reason)
+	}
+	return n
+}
+
+// scanFloat converts a column value to a float64 as Go's Scan does.
+fn scanFloat(v Value) !f64 {
+	match v {
+		Null => {
+			fail "converting NULL to float64 is unsupported"
+		}
+		Int(n) => {
+			return f64(n)
+		}
+		Float(f) => {
+			return f
+		}
+		Text(s) => {
+			return try parseFloat64(s)
+		}
+	}
+	fail "sql: unreachable value"
+}
+
+// parseFloat64 parses a float64 from column text, with Go's wording for a failure.
+fn parseFloat64(s str) !f64 {
+	mut reason = "invalid syntax"
+	let f = mint.ParseFloat(s) catch err {
+		if fault.Is(err, mint.ErrRange) { reason = "value out of range" }
+		fail say.Fmt("converting driver.Value type string (%s) to a float64: %s", mint.Quote(s), reason)
+	}
+	return f
+}
+
+// scanString converts a column value to text as Go's Scan does (a number is written in decimal).
+fn scanString(v Value) !str {
+	match v {
+		Null => {
+			fail "converting NULL to string is unsupported"
+		}
+		Int(n) => {
+			return mint.Itoa(n)
+		}
+		Float(f) => {
+			return mint.FormatFloat(f, 'g', -1)
+		}
+		Text(s) => {
+			return s
+		}
+	}
+	fail "sql: unreachable value"
+}
+
+// scanBool converts a column value to a boolean as Go's driver.Bool does (1 and 0, or text strconv.ParseBool reads).
+fn scanBool(v Value) !bool {
+	match v {
+		Null => {
+			fail "sql/driver: couldn't convert <nil> (<nil>) into type bool"
+		}
+		Int(n) => {
+			if n == 1 { return true }
+			if n == 0 { return false }
+			fail say.Fmt("sql/driver: couldn't convert %d into type bool", n)
+		}
+		Float(f) => {
+			fail say.Fmt("sql/driver: couldn't convert %s (float64) into type bool", mint.FormatFloat(f, 'g', -1))
+		}
+		Text(s) => {
+			let b = mint.ParseBool(s) catch _ {
+				fail "sql/driver: couldn't convert " + mint.Quote(s) + " into type bool"
+			}
+			return b
+		}
+	}
+	fail "sql: unreachable value"
+}
+
+// scanBytes converts a column value to bytes as Go's Scan does: NULL is empty, a number is its decimal text.
+fn scanBytes(v Value) ![]u8 {
+	match v {
+		Null => {
+			return []u8{}
+		}
+		Int(n) => {
+			return textBytes(mint.Itoa(n))
+		}
+		Float(f) => {
+			return textBytes(mint.FormatFloat(f, 'g', -1))
+		}
+		Text(s) => {
+			return textBytes(s)
+		}
+	}
+	fail "sql: unreachable value"
+}
+
+// textBytes is a fresh copy of s as bytes.
+fn textBytes(s str) []u8 {
+	mut b = make([]u8, 0, len(s))
+	for i in 0..len(s) {
+		b = append(b, s[i])
+	}
+	return b
+}
+
 // Rows is a materialized result set with a deterministic cursor.
 type Rows struct {
 	columns []str
@@ -64,6 +438,7 @@ fn NewRows(columns []str, values [][]Value) Rows {
 
 // Row holds the first row of a query result, or its query fault.
 type Row struct {
+	columns []str
 	values []Value
 	err fault
 }
@@ -78,7 +453,7 @@ type dbState struct {
 	closed bool
 }
 
-// Stmt is a prepared statement tied to its database connection.
+// Statement is a prepared statement tied to its database connection.
 type Statement struct {
 	state statementState
 }
@@ -101,20 +476,78 @@ type txState struct {
 
 // ErrNoRows is returned by Scan when a query has no rows.
 let ErrNoRows = fault("sql: no rows in result set")
-mut drivers = map[str]?dyn Driver{}
 
-// Register adds a driver under a unique non-empty name.
+// driverEntry is one registered driver. The registry is process-wide: entries are linked by
+// their pointers (shared mut, under regLock), and each one is kept in the ingot heap for good.
+type driverEntry struct {
+	name str
+	driver dyn Driver
+	next i64 // the next entry (a driverEntry pointer), 0 at the end
+}
+
+shared mut regLock i64
+shared mut regHead i64 // the newest driverEntry, or 0
+
+// regAcquire takes the registry lock, spinning while another core holds it.
+fn regAcquire() {
+	for __atomic_swap(&regLock, 1) != 0 {
+		__yield()
+	}
+}
+
+// regRelease gives the registry lock back.
+fn regRelease() {
+	__atomic_store(&regLock, 0)
+}
+
+// Register makes a driver available by name to every core; a name already registered is refused, as in Go.
 fn Register(name str, driver dyn Driver) ! {
-	if name == "" { fail "sql: Register called with empty name" }
-	let previous = drivers[name]
-	if previous != nil { fail "sql: Register called twice for driver " + name }
-	drivers[name] = driver
+	regAcquire()
+	mut p = regHead
+	mut dup = false
+	for p != 0 {
+		let e = cast(driverEntry, p)
+		if e.name == name {
+			dup = true
+			break
+		}
+		p = e.next
+	}
+	if !dup {
+		regHead = cast(i64, keep(driverEntry{name: name, driver: driver, next: regHead}))
+	}
+	regRelease()
+	if dup { fail "sql: Register called twice for driver " + name }
+}
+
+// lookupDriver is the driver registered under name, nil when there is none.
+fn lookupDriver(name str) ?dyn Driver {
+	regAcquire()
+	mut p = regHead
+	mut found ?dyn Driver = nil
+	for p != 0 {
+		let e = cast(driverEntry, p)
+		if e.name == name {
+			found = e.driver
+			break
+		}
+		p = e.next
+	}
+	regRelease()
+	return found
 }
 
 // Drivers returns the registered names in lexical order.
 fn Drivers() []str {
 	mut names = []str{}
-	for name, driver in drivers { if driver != nil { names = append(names, name) } }
+	regAcquire()
+	mut p = regHead
+	for p != 0 {
+		let e = cast(driverEntry, p)
+		names = append(names, e.name)
+		p = e.next
+	}
+	regRelease()
 	for i in 1..len(names) {
 		let name = names[i]
 		mut j = i
@@ -129,10 +562,11 @@ fn Drivers() []str {
 
 // Open opens a database by its registered driver name and data source name.
 fn Open(driverName str, dataSourceName str) !DB {
-	let driver = drivers[driverName]
-	if driver == nil { fail "sql: unknown driver \"" + driverName + "\" (forgotten import?)" }
-	let conn = try driver.Open(dataSourceName)
-	return DB{state: dbState{conn: conn, closed: false}}
+	if let driver = lookupDriver(driverName) {
+		let conn = try driver.Open(dataSourceName)
+		return DB{state: dbState{conn: conn, closed: false}}
+	}
+	fail "sql: unknown driver \"" + driverName + "\" (forgotten import?)"
 }
 
 // Close closes the database and prevents later operations.
@@ -163,9 +597,9 @@ fn (db DB) Query(query query) !Rows {
 
 // QueryRow executes query and returns its first row or deferred query fault.
 fn (db DB) QueryRow(query query) Row {
-	let rows = db.Query(query) catch err { return Row{values: []Value{}, err: err} }
-	if len(rows.values) == 0 { return Row{values: []Value{}, err: ErrNoRows} }
-	return Row{values: rows.values[0], err: nil}
+	let rows = db.Query(query) catch err { return Row{columns: []str{}, values: []Value{}, err: err} }
+	if len(rows.values) == 0 { return Row{columns: rows.columns, values: []Value{}, err: ErrNoRows} }
+	return Row{columns: rows.columns, values: rows.values[0], err: nil}
 }
 
 // Exec executes a statement and returns its result.
@@ -180,16 +614,16 @@ fn (db DB) Exec(query query) !Result {
 	return result
 }
 
-// SetMaxOpen sets the process-wide cap on open connections.
-fn (db DB) SetMaxOpen(n i64) !bool {
+// SetMaxOpen sets the process-wide cap on open connections (0: no cap); it takes effect at once, also after use.
+fn (db DB) SetMaxOpen(n i64) ! {
 	if db.state.closed { fail "sql: database is closed" }
-	return try db.state.conn.SetMaxOpen(n)
+	let _ = try db.state.conn.SetMaxOpen(n)
 }
 
-// SetMaxIdle sets the per-core cap on idle connections.
-fn (db DB) SetMaxIdle(n i64) !bool {
+// SetMaxIdle sets the per-core cap on idle connections (0: none kept); it takes effect at once, also after use.
+fn (db DB) SetMaxIdle(n i64) ! {
 	if db.state.closed { fail "sql: database is closed" }
-	return try db.state.conn.SetMaxIdle(n)
+	let _ = try db.state.conn.SetMaxIdle(n)
 }
 
 // Close closes a prepared statement.
@@ -229,13 +663,33 @@ fn (r Rows) Values() []Value {
 	return r.values[r.index-1]
 }
 
+// Scan copies the current row into the destinations, one per column, as Go's Rows.Scan does.
+fn (r Rows) Scan(dests ...dyn Dest) ! {
+	if r.closed { fail "sql: Rows are closed" }
+	if r.index <= 0 || r.index > len(r.values) { fail "sql: Scan called without calling Next" }
+	try scanRow(r.columns, r.values[r.index-1], dests)
+}
+
 // Close marks the rows exhausted.
 fn (r mut Rows) Close() ! { r.closed = true }
 
-// Scan returns the row values or its deferred query fault.
-fn (r Row) Scan() ![]Value {
+// Scan copies the row into the destinations, or fails with its query fault or ErrNoRows.
+fn (r Row) Scan(dests ...dyn Dest) ! {
 	if r.err != nil { fail r.err }
-	return r.values
+	try scanRow(r.columns, r.values, dests)
+}
+
+// scanRow converts each value into its destination, with Go's column error wording.
+fn scanRow(columns []str, values []Value, dests []dyn Dest) ! {
+	if len(dests) != len(values) {
+		fail say.Fmt("sql: expected %d destination arguments in Scan, not %d", len(values), len(dests))
+	}
+	for i in 0..len(values) {
+		mut d = dests[i]
+		d.Set(values[i]) catch err {
+			try fault.Wrap(err, say.Fmt("sql: Scan error on column index %d, name %s", i, mint.Quote(columns[i])))
+		}
+	}
 }
 
 // LastInsertId returns the inserted ID when the driver reports one.
