@@ -1,0 +1,17 @@
+// Package nestedkey holds a value struct key whose field struct is declared after it, for the nested map keys of #841.
+package nestedkey
+
+// Id is an id, a value struct key.
+type Id value struct {
+	p Part
+}
+
+// MakeId returns the Id of s.
+fn MakeId(s str) Id {
+	return Id{p: Part{s: s}}
+}
+
+// Part is a part of an Id, declared after the Id that holds it.
+type Part struct {
+	s str
+}

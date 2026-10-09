@@ -1,0 +1,24 @@
+package main
+
+import "constraints"
+import "say"
+
+// S holds a Pair of Outer, which is declared after it. Outer holds a slice, so it is not comparable and the constraint
+// fails once the declarations are resolved (#841).
+type Pair[T constraints.Comparable] struct {
+	n i64
+}
+
+type S struct {
+	p Pair[Outer]
+}
+
+type Outer struct {
+	s S
+	items []i64
+}
+
+fn main() {
+	let s = S{p: Pair[Outer]{n: 1}}
+	say.Line(s.p.n)
+}

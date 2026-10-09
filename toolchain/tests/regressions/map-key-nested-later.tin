@@ -1,0 +1,27 @@
+package main
+
+import "say"
+
+// Bag keys a struct field's map by a struct whose field struct is declared further on, and that one holds a third (#841):
+// key_first resolves the key's field structs recursively, so key_valid reads each of them.
+type Bag struct {
+	m map[Outer]i64
+}
+
+type Outer struct {
+	k Mid
+}
+
+type Mid struct {
+	j Inner
+}
+
+type Inner struct {
+	n i64
+}
+
+fn main() {
+	mut x = Bag{m: map[Outer]i64{}}
+	x.m[Outer{k: Mid{j: Inner{n: 1}}}] = 1
+	say.Line(len(x.m), x.m[Outer{k: Mid{j: Inner{n: 1}}}])
+}

@@ -1,0 +1,34 @@
+package main
+
+import "say"
+
+// Holder keys its maps by a value struct whose field struct is declared further on, and by a struct with an enum
+// field declared further on (#841): both field types are resolved before key_valid reads them.
+type Holder struct {
+	v map[Tag]i64
+	p map[Paint]i64
+}
+
+type Tag value struct {
+	in Inner
+}
+
+type Inner struct {
+	n i64
+}
+
+type Paint struct {
+	c Color
+}
+
+type Color enum {
+	Red
+	Blue
+}
+
+fn main() {
+	mut h = Holder{v: map[Tag]i64{}, p: map[Paint]i64{}}
+	h.v[Tag{in: Inner{n: 1}}] = 1
+	h.p[Paint{c: Color.Blue}] = 2
+	say.Line(len(h.v), h.v[Tag{in: Inner{n: 1}}], len(h.p), h.p[Paint{c: Color.Blue}])
+}

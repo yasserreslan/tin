@@ -1668,7 +1668,7 @@ fn map_make_call(pos i64, t Ty) i64 {
 }
 
 // key_valid reports whether t can be a map key: str, numbers, bool, or structs and enums
-// made of those (compared by value).
+// made of those (compared by value). It is 2, undecided, while a struct it reads has no fields yet (#841).
 fn key_valid(t Ty, path []Ty) i64 {
 	let k = kind_of(t)
 	if k == K_STRING || k == K_BOOL || is_integer_t(cast(i64, t)) != 0 || is_float_t(cast(i64, t)) != 0 {
@@ -1681,6 +1681,11 @@ fn key_valid(t Ty, path []Ty) i64 {
 	if k != K_STRUCT {
 		return 0
 	}
+	// A struct whose fields are not set yet is declared further on or still being resolved: undecided (2) until the
+	// declarations are resolved (#841).
+	if cast(i64, t.fields) == 0 {
+		return 2
+	}
 	mut i = 0
 	for i < len(path) {
 		if cast(i64, path[i]) == cast(i64, t) {
@@ -1692,7 +1697,10 @@ fn key_valid(t Ty, path []Ty) i64 {
 	mut ok = 1
 	mut fi = 0
 	for fi < len(t.fields) && ok != 0 {
-		ok = key_valid(cast(Ty, field_type(t, fi)), path)
+		let fv = key_valid(cast(Ty, field_type(t, fi)), path)
+		if fv != 1 {
+			ok = fv
+		}
 		fi = fi + 1
 	}
 	slice_truncate(path, len(path) - 1)

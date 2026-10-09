@@ -1280,5 +1280,72 @@
       "exit": 1,
       "stderr_contains": "request memory stored into global"
     }
+  },
+  {
+    "source": "map-key-nested-later.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1 1\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "map-key-nested-value-later.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1 1 1 2\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "map-key-nested-foreign.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1 1\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "map-key-nested-later-bad.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "E201 MAP_KEY"
+    }
+  },
+  {
+    "source": "map-key-nested-cycle-bad.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "E201 MAP_KEY"
+    }
+  },
+  {
+    "source": "comparable-generic-later.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "comparable-generic-later-bad.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "E511 NOT_COMPARABLE"
+    }
   }
 ]

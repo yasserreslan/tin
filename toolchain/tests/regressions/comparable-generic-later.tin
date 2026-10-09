@@ -1,0 +1,23 @@
+package main
+
+import "constraints"
+import "say"
+
+// S holds a Pair of Outer, which is declared after it and holds S. Outer is comparable, so the Comparable constraint
+// holds once the declarations are resolved (#841).
+type Pair[T constraints.Comparable] struct {
+	n i64
+}
+
+type S struct {
+	p Pair[Outer]
+}
+
+type Outer struct {
+	s S
+}
+
+fn main() {
+	let s = S{p: Pair[Outer]{n: 1}}
+	say.Line(s.p.n)
+}

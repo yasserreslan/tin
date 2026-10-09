@@ -344,6 +344,9 @@ fn resolve_type(tx i64) i64 {
 		let mkt = resolve_type(cast(TypeExpr, tx).a)
 		key_first(cast(Ty, mkt))
 		secret_map_key(cast(Node, tx).pos, mkt)
+		if key_valid(cast(Ty, mkt), cast([]Ty, []i64{})) == 2 {
+			key_later(cast(Ty, mkt), cast(Node, tx).pos)
+		}
 		if key_valid(cast(Ty, mkt), cast([]Ty, []i64{})) == 0 {
 			err_code_type(cast(Node, tx).pos, "E201 MAP_KEY", "a map key must compare by value (str, numbers, bool, or structs and enums of those), not ", mkt, "")
 		}
@@ -865,10 +868,57 @@ fn key_first(t Ty) {
 			ck_tbind = []i64{}
 			resolve_fields(b, cast(TypeExpr, d.type_))
 			layout_struct(b)
+			// key_valid reads the fields of the key's fields too: a struct among them declared further on is resolved here (#841).
+			mut fi = 0
+			for fi < len(b.fields) {
+				key_first(cast(Ty, field_type(b, fi)))
+				fi = fi + 1
+			}
 			set_file(file)
 			ck_tbind = saved_tbind
 			return
 		}
+		i = i + 1
+	}
+}
+
+// key_later and shape_later hold the map keys and Comparable constraints checked while a struct they read had no fields
+// yet (#841). later_checks decides them once every declaration is resolved.
+shared mut key_later_t []i64 = []i64{}
+shared mut key_later_pos []i64 = []i64{}
+shared mut shape_later_t []i64 = []i64{}
+shared mut shape_later_pos []i64 = []i64{}
+shared mut shape_later_sd []i64 = []i64{}
+
+// key_later defers the map key check of t, written at pos (#841).
+fn key_later(t Ty, pos i64) {
+	key_later_t = append(key_later_t, cast(i64, t))
+	key_later_pos = append(key_later_pos, pos)
+}
+
+// shape_later defers the Comparable check of t against shape sd, at pos (#841).
+fn shape_later(pos i64, t Ty, sd Decl) {
+	shape_later_t = append(shape_later_t, cast(i64, t))
+	shape_later_pos = append(shape_later_pos, pos)
+	shape_later_sd = append(shape_later_sd, cast(i64, sd))
+}
+
+// later_checks decides the deferred map keys and Comparable constraints: a map key must compare by value, and a type
+// argument must satisfy Comparable (#841). The lengths are taken first, so a check that defers again here is not queued.
+fn later_checks() {
+	let nk = len(key_later_t)
+	mut i = 0
+	for i < nk {
+		let kt = cast(Ty, key_later_t[i])
+		if key_valid(kt, cast([]Ty, []i64{})) == 0 {
+			err_code_type(key_later_pos[i], "E201 MAP_KEY", "a map key must compare by value (str, numbers, bool, or structs and enums of those), not ", cast(i64, kt), "")
+		}
+		i = i + 1
+	}
+	let ns = len(shape_later_t)
+	i = 0
+	for i < ns {
+		check_shape(shape_later_pos[i], cast(Ty, shape_later_t[i]), cast(Decl, shape_later_sd[i]), []i64{})
 		i = i + 1
 	}
 }
@@ -1090,6 +1140,11 @@ fn check() {
 	safe_pairs = []i64{}
 	len_aliases = []i64{}
 	named_seen = []i64{}
+	key_later_t = []i64{}
+	key_later_pos = []i64{}
+	shape_later_t = []i64{}
+	shape_later_pos = []i64{}
+	shape_later_sd = []i64{}
 	// Global initializers are checked outside any function (#627).
 	al_reset()
 	dyn_tables = []i64{}
@@ -1188,6 +1243,7 @@ fn check() {
 		i = i + 1
 	}
 	shapes_declared()
+	later_checks()
 	lifecycle_decls()
 	i = 0
 	let ndecl = len(prog_fns)

@@ -1,0 +1,19 @@
+package main
+
+import "say"
+
+// Pair maps by Outer, whose field Inner holds a slice and so cannot be a key (#841): E201 whatever the declaration order.
+type Pair map[Outer]i64
+
+type Outer struct {
+	k Inner
+}
+
+type Inner struct {
+	items []i64
+}
+
+fn main() {
+	let p = Pair{}
+	say.Line(len(p))
+}
