@@ -1,0 +1,150 @@
+{
+  "vsId": 42,
+  "algorithm": "ML-DSA",
+  "mode": "keyGen",
+  "revision": "FIPS204",
+  "isSample": false,
+  "testGroups": [
+    {
+      "tgId": 1,
+      "testType": "AFT",
+      "parameterSet": "ML-DSA-44",
+      "tests": [
+        {
+          "tcId": 1,
+          "seed": "7194B13C95231010AFD2C909992BD2003BA6F437C3886BDBE3F6B867A14BA161"
+        },
+        {
+          "tcId": 2,
+          "seed": "2EBE5A4123398DFBCD5BDF0A42EBDD03112BE3BC88A6E9B78D93120AB8D0120E"
+        },
+        {
+          "tcId": 3,
+          "seed": "2AA7609556919CCE9893561BB4120CDD9CFF12734267A8CCB4B2D2CA93066E1E"
+        },
+        {
+          "tcId": 4,
+          "seed": "5506D95C5C36BA3B22F1B237D8B8EDEBE81554745188E7E0A4AD671798820482"
+        },
+        {
+          "tcId": 5,
+          "seed": "AC83349C89E58131FD8D2DFC933B966C71F20614A220ECB99C7203710B9EFB26"
+        },
+        {
+          "tcId": 6,
+          "seed": "E0C3AF912D78950DC960D7474DC7B930D76E620D51E41CF9E15726B2A1751391"
+        },
+        {
+          "tcId": 7,
+          "seed": "465D3CCD2A180714B05DE7192CFD27C47AB53D37C8C3C728A1C11317B0CE895D"
+        },
+        {
+          "tcId": 8,
+          "seed": "EACE11DCE6D25D4E8B35AC58E8E2B68D3A65EC6E88411BDAF353227E602BD839"
+        },
+        {
+          "tcId": 9,
+          "seed": "5C4C6FD87DBC03B72EF802F76E31087EE4625AD9F7196501E4CB48B1C3CEFFA7"
+        },
+        {
+          "tcId": 10,
+          "seed": "0E422CE433EE6E9B9C640C2C3B9CFEA51CD2BAAAF5538E3FC7E1CB4456052165"
+        }
+      ]
+    },
+    {
+      "tgId": 2,
+      "testType": "AFT",
+      "parameterSet": "ML-DSA-65",
+      "tests": [
+        {
+          "tcId": 26,
+          "seed": "A991FD42B071D49C48AE3E75C647459E0DAAD1E1BA356A04801912D3294BCFF8"
+        },
+        {
+          "tcId": 27,
+          "seed": "494F29AD1C93ABB2B9545BD14CC575A98ECD3062137B439B49EB1A8CC6652FC6"
+        },
+        {
+          "tcId": 28,
+          "seed": "C4EC434D7FEDDCBFF68B77A80E45935F3E363289A493E49ACBAE366E5C6B3D01"
+        },
+        {
+          "tcId": 29,
+          "seed": "37EB816D244578E6DE586AD200BCA1DA2ACFA6B0443E024B1A94E43AB08F8794"
+        },
+        {
+          "tcId": 30,
+          "seed": "F7BA5BEE3E1EF18905C788FC6F9FB838B3E346F4B2908E8585269297098CAFFB"
+        },
+        {
+          "tcId": 31,
+          "seed": "3CAF99A3E33B5BF5BF133760DCB35E79D7C7F542126DA7A8E50F1F8EE32EAFD4"
+        },
+        {
+          "tcId": 32,
+          "seed": "D315E80BD75DF48CB68B90968739EA0D2A341DD744F195BD160571B414931FA7"
+        },
+        {
+          "tcId": 33,
+          "seed": "910B4E8BAE0CA006A536502938A5552AA0F363C6A5410712BB5F6814BDE0782B"
+        },
+        {
+          "tcId": 34,
+          "seed": "73EB59029CC39C4AFD32E675B302ECF6EF79A61D22A96C3DD94CA6181E02F07E"
+        },
+        {
+          "tcId": 35,
+          "seed": "71FCE07AE3CB11B522AF23931B0ED0DBA1054C5441C4AAA9F050EF54738EB286"
+        }
+      ]
+    },
+    {
+      "tgId": 3,
+      "testType": "AFT",
+      "parameterSet": "ML-DSA-87",
+      "tests": [
+        {
+          "tcId": 51,
+          "seed": "A16F5B0796703E2D1A0140A35CBF36EFABE70E752BA59B6A9A0E9C4B05302F73"
+        },
+        {
+          "tcId": 52,
+          "seed": "E46D458A660285930D9656A88D14E751730CAE7A4975B6E4FBE69E80E3F01E7F"
+        },
+        {
+          "tcId": 53,
+          "seed": "719BCE87E014ABDB6A0F77EA1C84EAC7DD674D5B03B27ECE154BA7FDDE8A0458"
+        },
+        {
+          "tcId": 54,
+          "seed": "0CC745C7F94D826EC3A5DB9F4B3C406DC717FFCACD83BB6156AEF69FF1DD3E68"
+        },
+        {
+          "tcId": 55,
+          "seed": "EC7CF913761B6A95C56B961B6A381E874F3CDAAE96C16D9308BFE77E14A053AD"
+        },
+        {
+          "tcId": 56,
+          "seed": "C5AD6D89CF640A7E1F4BC0EFFCBDD813B2B3C451BE845ABE87D67D9CFC6A63E8"
+        },
+        {
+          "tcId": 57,
+          "seed": "9EF5FEBA72B096566A82BF25E4D23170DD152A7D51DD9C96C02711C86410574C"
+        },
+        {
+          "tcId": 58,
+          "seed": "13E3AEDDD5BA68BC581074FCA53D1E883A151EE4D19CEB7DAD9371EF21AD30F7"
+        },
+        {
+          "tcId": 59,
+          "seed": "073D68A1FF8C0221BAE1B6E803F38FC9E1A809DAABA84E6D24D414677CC13E6F"
+        },
+        {
+          "tcId": 60,
+          "seed": "FF8D6A9352021FF5E05F33A5C355B544655D51A9527EB02A0191EFA65EBB31F4"
+        }
+      ]
+    }
+  ]
+}

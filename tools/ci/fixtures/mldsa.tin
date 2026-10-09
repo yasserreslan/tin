@@ -1,0 +1,191 @@
+package main
+
+// The ML-DSA check, Tin side (#917): reads one case per line on stdin and prints one line per case, so
+// tools/ci/mldsa_check.tin can judge it against the FIPS 204 (ACVP) and Wycheproof vectors, and so the
+// corpus of the Go twin (bench/ref/mldsa) can be compared line by line. Every field is hex, "-" is empty.
+// The line forms: pk SET SEED; esk SET SEED; sign SET SEED MSG CTX RND; mu SET SEED MU RND;
+// esign SET SK MSG CTX RND; emu SET SK MU RND; vfy SET PK MSG CTX SIG; vmu SET PK MU SIG. RND "-" is the
+// deterministic signing (a zero nonce), and SET is 44, 65 or 87. decompose SET hashes Decompose over every r below q.
+
+import "nist"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		let f = twine.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		// each case runs in an arena, so the keys and matrices of one case are freed before the next
+		let out = arena {
+			run(f)
+		}
+		say.Line(f[0], out)
+	}
+}
+
+// run handles one case; a fault is printed with its message, so a size error and a failed check differ.
+fn run(f []str) str {
+	let r = dispatch(f) catch err {
+		return "fault " + say.Str(err)
+	}
+	return r
+}
+
+// dispatch computes the result of one case. A short line is padded with "-" (empty fields), so the library refuses it.
+fn dispatch(given []str) !str {
+	mut f = given
+	for len(f) < 6 {
+		f = append(f, "-")
+	}
+	let k = f[0]
+	let p = try params(f[1])
+	if k == "decompose" {
+		// Decompose of every r below q, in order, hashed with FNV-1a (64 bits) over the high part and r0 + 2^23
+		mut h = u64(1469598103934665603)
+		for r in 0..8380417 {
+			let (r1, r0) = nist.MLDSADecompose(p, r)
+			h = (h ^ u64(r1)) *% 1099511628211
+			h = (h ^ u64(r0+8388608)) *% 1099511628211
+		}
+		return say.Fmt("%016x", h)
+	}
+	if k == "pk" {
+		let seed = try bytesOf(f[2])
+		let pk = try nist.MLDSAPublicKey(p, seed)
+		return seal.Hex(pk)
+	}
+	if k == "esk" {
+		let seed = try bytesOf(f[2])
+		let sk = try nist.MLDSAExpandedKey(p, seed)
+		return seal.Hex(sk)
+	}
+	if k == "sign" {
+		let seed = try bytesOf(f[2])
+		let msg = try bytesOf(f[3])
+		let ctx = try bytesOf(f[4])
+		if f[5] == "-" {
+			let sig = try nist.MLDSASignDeterministic(p, seed, msg, ctx)
+			return seal.Hex(sig)
+		}
+		let pk = try nist.MLDSAPublicKey(p, seed)
+		let rnd = try rnd_of(f[5])
+		let sig = try nist.MLDSASignMuDerand(p, seed, mu_of(seal.Shake256(str(pk), 64), ctx, msg), rnd)
+		return seal.Hex(sig)
+	}
+	if k == "mu" {
+		let seed = try bytesOf(f[2])
+		let mu = try bytesOf(f[3])
+		if f[4] == "-" {
+			let sig = try nist.MLDSASignMuDeterministic(p, seed, mu)
+			return seal.Hex(sig)
+		}
+		let rnd = try rnd_of(f[4])
+		let sig = try nist.MLDSASignMuDerand(p, seed, mu, rnd)
+		return seal.Hex(sig)
+	}
+	if k == "esign" {
+		let sk = try bytesOf(f[2])
+		let msg = try bytesOf(f[3])
+		let ctx = try bytesOf(f[4])
+		let rnd = try rnd_of(f[5])
+		let sig = try nist.MLDSASignExpandedMuDerand(p, sk, mu_of(sk[64:128], ctx, msg), rnd)
+		return seal.Hex(sig)
+	}
+	if k == "emu" {
+		let sk = try bytesOf(f[2])
+		let mu = try bytesOf(f[3])
+		let rnd = try rnd_of(f[4])
+		let sig = try nist.MLDSASignExpandedMuDerand(p, sk, mu, rnd)
+		return seal.Hex(sig)
+	}
+	if k == "vfy" {
+		let pk = try bytesOf(f[2])
+		let msg = try bytesOf(f[3])
+		let ctx = try bytesOf(f[4])
+		let sig = try bytesOf(f[5])
+		try nist.MLDSAVerify(p, pk, msg, sig, ctx)
+		return "ok"
+	}
+	if k == "vmu" {
+		let pk = try bytesOf(f[2])
+		let mu = try bytesOf(f[3])
+		let sig = try bytesOf(f[4])
+		try nist.MLDSAVerifyMu(p, pk, mu, sig)
+		return "ok"
+	}
+	if k == "vint" {
+		// the internal interface: the field is M' (already formatted), so mu = H(tr || M').
+		let pk = try bytesOf(f[2])
+		let mprime = try bytesOf(f[3])
+		let sig = try bytesOf(f[4])
+		let mu = internal_mu(seal.Shake256(str(pk), 64), mprime)
+		try nist.MLDSAVerifyMu(p, pk, mu, sig)
+		return "ok"
+	}
+	if k == "eint" {
+		// the internal interface for signing with an expanded key: mu = H(tr || M') with tr from sk.
+		let sk = try bytesOf(f[2])
+		let mprime = try bytesOf(f[3])
+		let rnd = try rnd_of(f[4])
+		let sig = try nist.MLDSASignExpandedMuDerand(p, sk, internal_mu(sk[64:128], mprime), rnd)
+		return seal.Hex(sig)
+	}
+	fail "unknown case " + k
+}
+
+// params is the parameter set named by its number.
+fn params(name str) !nist.MLDSAParams {
+	if name == "44" {
+		return nist.MLDSA44
+	}
+	if name == "65" {
+		return nist.MLDSA65
+	}
+	if name == "87" {
+		return nist.MLDSA87
+	}
+	fail "unknown parameter set " + name
+}
+
+// bytesOf reads a hex field; "-" is empty.
+fn bytesOf(s str) ![]u8 {
+	if s == "-" {
+		return []u8{}
+	}
+	return try seal.HexDecode(s)
+}
+
+// rnd_of is the 32-byte nonce of a randomized case, or 32 zero bytes for the deterministic one ("-").
+fn rnd_of(s str) ![]u8 {
+	if s == "-" {
+		return make([]u8, 32)
+	}
+	return try bytesOf(s)
+}
+
+// internal_mu is the message representative of the internal interface: SHAKE-256(tr || M', 64).
+fn internal_mu(tr []u8, mprime []u8) []u8 {
+	mut in = make([]u8, 0, 64+len(mprime))
+	in = append(in, tr...)
+	in = append(in, mprime...)
+	return seal.Shake256(str(in), 64)
+}
+
+// mu_of is the message representative of the pure mode, SHAKE-256(tr || 0 || |ctx| || ctx || msg, 64), from tr
+// (the hash of the public key, or the expanded key's tr): the path a case takes to a randomized nonce.
+fn mu_of(tr []u8, ctx []u8, msg []u8) []u8 {
+	mut in = make([]u8, 0, 66+len(ctx)+len(msg))
+	in = append(in, tr...)
+	in = append(in, 0, u8(len(ctx)))
+	in = append(in, ctx...)
+	in = append(in, msg...)
+	return seal.Shake256(str(in), 64)
+}
