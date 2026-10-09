@@ -1,0 +1,244 @@
+package main
+
+// A value struct returned through !T is written into the caller's destination, not a pool copy
+// (#893): every form of call below gets its value and fault right, a fault leaves the value
+// zero, and a call that succeeds uses no request-pool memory (the pool's used bytes do not move).
+
+import "say"
+
+type W value struct {
+	a i64
+	b i64
+	c i64
+	d i64
+}
+
+type P value struct {
+	a i64
+	b i64
+}
+
+type Named value struct {
+	id   i64
+	s    str
+	code u8
+}
+
+type Mk value struct {
+	k i64
+}
+
+// Three bytes: the copy into the destination ends with a 2-byte and a 1-byte store.
+type Tri value struct {
+	a u8
+	b u8
+	c u8
+}
+
+shape Maker {
+	Make(n i64) !W
+}
+
+let errStart = fault("start")
+
+fn mkW(n i64) !W {
+	if n == 0 {
+		fail "zero"
+	}
+	return W{a: n, b: n + 1, c: n + 2, d: n + 3}
+}
+
+fn mkNamed(id i64) !Named {
+	if id < 0 {
+		fail "negative id"
+	}
+	return Named{id: id, s: "named", code: 9}
+}
+
+fn plainW(n i64) W {
+	return W{a: n * 10, b: 0, c: 0, d: 0}
+}
+
+fn plainP(n i64) P {
+	return P{a: n, b: -n}
+}
+
+// A value returned by a call: through the call's own destination (W) or a register pair (P).
+fn passW(n i64) !W {
+	return plainW(n)
+}
+
+fn passP(n i64) !P {
+	return plainP(n)
+}
+
+fn direct(n i64) !W {
+	return try mkW(n)
+}
+
+fn viaTry(n i64) !W {
+	let w = try mkW(n)
+	return W{a: w.a * 100, b: w.b, c: w.c, d: w.d}
+}
+
+fn depth(n i64) !W {
+	if n == 0 {
+		return W{a: 0, b: 0, c: 0, d: 0}
+	}
+	let inner = try depth(n - 1)
+	return W{a: inner.a + n, b: inner.b, c: inner.c, d: inner.d}
+}
+
+fn (w W) shift(n i64) !W {
+	if n < 0 {
+		fail "negative shift"
+	}
+	return W{a: w.a + n, b: w.b + n, c: w.c + n, d: w.d + n}
+}
+
+fn (m Mk) Make(n i64) !W {
+	let w = try mkW(n + m.k)
+	return w
+}
+
+// A dyn receiver that is a parameter, and one that is the value of a call: the dyn call is then
+// wrapped in a sequence, and its destination must reach the call inside it.
+fn dynTry(m dyn Maker, n i64) !W {
+	let w = try m.Make(n)
+	return w
+}
+
+fn makeMaker(k i64) dyn Maker {
+	return Mk{k: k}
+}
+
+fn mkTri(n u8) !Tri {
+	if n == 0 {
+		fail "tri zero"
+	}
+	return Tri{a: n, b: n + 1, c: n + 2}
+}
+
+// A parameter and a local, returned as they are.
+fn echo(w W) !W {
+	return w
+}
+
+fn localW(n i64) !W {
+	let w = W{a: n, b: n, c: n, d: n}
+	return w
+}
+
+// A value struct that comes back from a task through wait.
+fn spawnW(n i64) !W {
+	mut got = W{a: 0, b: 0, c: 0, d: 0}
+	scope s {
+		let t = s.spawn(fn() !W {
+			return try mkW(n)
+		})
+		let w = try t.wait()
+		got = W{a: w.a + 1000, b: w.b, c: w.c, d: w.d}
+	}
+	return got
+}
+
+fn main() {
+	mut p = rt_pool_used()
+	let (w, err) = mkW(3)
+	let used = rt_pool_used() - p
+	say.Line("let", used, w.a, w.b, w.c, w.d, err == nil)
+
+	p = rt_pool_used()
+	let v = viaTry(4) catch err {
+		say.Line("viaTry", err)
+		W{a: -1, b: -1, c: -1, d: -1}
+	}
+	let usedTry = rt_pool_used() - p
+	say.Line("try", usedTry, v.a, v.b, v.c, v.d)
+
+	p = rt_pool_used()
+	let w3 = mkW(5) catch err {
+		say.Line("catch fault", err)
+		W{a: -1, b: -1, c: -1, d: -1}
+	}
+	let usedCatch = rt_pool_used() - p
+	say.Line("catch", usedCatch, w3.a, w3.d)
+
+	mut w4 = W{a: 0, b: 0, c: 0, d: 0}
+	mut e4 = errStart
+	w4, e4 = mkW(4)
+	say.Line("assign", w4.a, w4.d, e4 == nil)
+
+	p = rt_pool_used()
+	let (pw, perr) = passW(4)
+	let usedPass = rt_pool_used() - p
+	say.Line("pass", usedPass, pw.a, pw.b, perr == nil)
+
+	p = rt_pool_used()
+	let (pp, perr2) = passP(4)
+	let usedPassP = rt_pool_used() - p
+	say.Line("passP", usedPassP, pp.a, pp.b, perr2 == nil)
+
+	let (d1, derr) = direct(0)
+	say.Line("direct fault", d1.a, derr != nil)
+
+	let dep = depth(3) catch err {
+		say.Line("depth fault", err)
+		W{a: -1, b: -1, c: -1, d: -1}
+	}
+	say.Line("depth", dep.a, dep.b, dep.c, dep.d)
+
+	mut fv fn(i64) !W = mkW
+	let (fw, ferr) = fv(5)
+	say.Line("funcvalue", fw.a, fw.d, ferr == nil)
+
+	let base = W{a: 1, b: 2, c: 3, d: 4}
+	let (sh, serr) = base.shift(10)
+	say.Line("method", sh.a, sh.b, sh.c, sh.d, serr == nil)
+	let (sh2, serr2) = base.shift(-1)
+	say.Line("method fault", sh2.a, serr2 != nil)
+
+	let mk dyn Maker = Mk{k: 1}
+	p = rt_pool_used()
+	let (dw, derr3) = mk.Make(2)
+	let usedDyn = rt_pool_used() - p
+	say.Line("dyn", usedDyn, dw.a, dw.d, derr3 == nil)
+
+	let (dt, dterr) = dynTry(mk, 4)
+	say.Line("dynTry", dt.a, dt.d, dterr == nil)
+	let (rc, rerr) = makeMaker(3).Make(2)
+	say.Line("receiver call", rc.a, rc.d, rerr == nil)
+	let (zc, zerr) = makeMaker(0).Make(0)
+	say.Line("receiver fault", zc.a, zc.d, zerr != nil)
+
+	mut total = 0
+	for i in 0..4 {
+		let (lw, lerr) = mkW(i)
+		if lerr == nil {
+			total += lw.a
+		}
+	}
+	say.Line("loop", total)
+
+	let (nm, nerr) = mkNamed(7)
+	say.Line("named", nm.id, nm.s, nm.code, nerr == nil)
+	let (nm2, nerr2) = mkNamed(-1)
+	say.Line("named fault", nm2.id, nm2.code, nerr2 != nil)
+
+	let (tr, terr) = mkTri(7)
+	say.Line("tri", tr.a, tr.b, tr.c, terr == nil)
+	let (tr2, terr2) = mkTri(0)
+	say.Line("tri fault", tr2.a, tr2.c, terr2 != nil)
+
+	let (ec, eerr) = echo(W{a: 2, b: 3, c: 4, d: 5})
+	say.Line("echo", ec.a, ec.b, ec.c, ec.d, eerr == nil)
+	let (lc, lerr) = localW(9)
+	say.Line("local", lc.a, lc.b, lc.c, lc.d, lerr == nil)
+
+	let sp = spawnW(6) catch err {
+		say.Line("spawn fault", err)
+		W{a: -1, b: -1, c: -1, d: -1}
+	}
+	say.Line("spawn", sp.a, sp.b, sp.c, sp.d)
+	say.Line("done")
+}

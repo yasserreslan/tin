@@ -4019,9 +4019,9 @@ fn check_fn(f Fn) {
 		ck_defers = cast([]i64, 0)
 		ck_defer_mark = 0
 	}
-	if returns_value_struct(f) != 0 && dest_fn(f) == 0 {
+	if returns_value_struct(f) != 0 && dest_fn(f) == 0 && dest_bang_fn(f) == 0 {
 		// Several results: each value struct goes back as a pool copy. One result is written to
-		// the caller's destination instead (vd_return, #631 A2).
+		// the caller's destination instead (vd_return, #631 A2), and a !T's value and fault too (#893).
 		value_returns(cast(Block, f.body).stmts)
 	}
 	// Code after a return already reported (E264) is why the end is not a return.

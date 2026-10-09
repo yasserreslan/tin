@@ -1,0 +1,26 @@
+package main
+
+// A !T whose value holds request memory is still refused as a global's value (#893): the value
+// is no longer a pool copy, so the check must follow what its fields hold, not the copy.
+
+import "say"
+
+type H value struct {
+	s str
+}
+
+mut saved H
+
+fn mkH(x str) !H {
+	return H{s: x + "!"}
+}
+
+fn main() {
+	let (h, err) = mkH("a")
+	if err != nil {
+		say.Line(err)
+		return
+	}
+	saved = h
+	say.Line(saved.s)
+}
