@@ -1,0 +1,991 @@
+package html
+
+import "twine"
+
+// span is a byte range [start, end) of the input.
+type span value struct {
+	start i64
+	end i64
+}
+
+// attrSpan is one attribute of the current tag: the spans of its key and its value.
+type attrSpan value struct {
+	key span
+	val span
+}
+
+// Tokenizer returns the tokens of an HTML document, one Next call at a time, as Go's Tokenizer does. The text is read in full.
+type Tokenizer struct {
+	text str
+	tt i64
+	eof bool
+	raw span
+	data span
+	pendingKey span
+	pendingVal span
+	attr []attrSpan
+	attrNames map[str]bool
+	nAttrReturned i64
+	rawTag str
+	textIsRaw bool
+	convertNUL bool
+	allowCDATA bool
+}
+
+// The states of the script data tokenization (WHATWG 13.2.5.4 to 13.2.5.43), as integers.
+const scrData = 0
+
+const scrLT = 1
+
+const scrEndTagOpen = 2
+
+const scrEscStart = 3
+
+const scrEscStartDash = 4
+
+const scrEsc = 5
+
+const scrEscDash = 6
+
+const scrEscDashDash = 7
+
+const scrEscLT = 8
+
+const scrEscEndTagOpen = 9
+
+const scrDblStart = 10
+
+const scrDbl = 11
+
+const scrDblDash = 12
+
+const scrDblDashDash = 13
+
+const scrDblLT = 14
+
+const scrDblEnd = 15
+
+// scriptWord is the word a double-escaped script data section starts with.
+const scriptWord = "script"
+
+// NewTokenizer returns a tokenizer of text.
+fn NewTokenizer(text str) Tokenizer {
+	return Tokenizer{text: text, tt: ErrorToken, eof: false, raw: span{start: 0, end: 0}, data: span{start: 0, end: 0}, pendingKey: span{start: 0, end: 0}, pendingVal: span{start: 0, end: 0}, attr: []attrSpan{}, attrNames: map[str]bool{}, nAttrReturned: 0, rawTag: "", textIsRaw: false, convertNUL: false, allowCDATA: false}
+}
+
+// NewTokenizerFragment returns a tokenizer of text that is the content of an element named contextTag, such as "div" or "script":
+// the content of a raw-text element is not parsed for tags.
+fn NewTokenizerFragment(text str, contextTag str) Tokenizer {
+	mut z = NewTokenizer(text)
+	let s = twine.ToLower(contextTag)
+	if s == "title" || s == "textarea" {
+		z.rawTag = s
+	} else if s == "style" || s == "xmp" || s == "iframe" || s == "noembed" || s == "noframes" || s == "script" || s == "noscript" || s == "plaintext" {
+		z.rawTag = "plaintext"
+	}
+	return z
+}
+
+// AllowCDATA sets whether <![CDATA[foo]]> is the text foo; by default it is a bogus comment, as outside foreign content.
+fn (z mut Tokenizer) AllowCDATA(allow bool) {
+	z.allowCDATA = allow
+}
+
+// NextIsNotRawText makes the next token an ordinary token even when the previous start tag opened a raw-text element.
+fn (z mut Tokenizer) NextIsNotRawText() {
+	z.rawTag = ""
+}
+
+// Err fails with ErrEOF after a token that ended the input, and succeeds otherwise.
+fn (z Tokenizer) Err() ! {
+	if z.tt != ErrorToken {
+		return
+	}
+	fail ErrEOF
+}
+
+// Raw returns the input bytes of the current token. Consecutive tokens' raw bytes partition the input.
+fn (z Tokenizer) Raw() str {
+	return z.text[z.raw.start:z.raw.end]
+}
+
+// readByte returns the next byte, or sets eof (and returns 0) at the end of the input.
+fn (z mut Tokenizer) readByte() u8 {
+	if z.raw.end >= len(z.text) {
+		z.eof = true
+		return 0
+	}
+	let c = z.text[z.raw.end]
+	z.raw.end += 1
+	return c
+}
+
+// isSpace reports whether c is one of the white space bytes of the tokenizer.
+fn isSpace(c u8) bool {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f'
+}
+
+// skipWhiteSpace moves past white space; the first other byte is read again.
+fn (z mut Tokenizer) skipWhiteSpace() {
+	if z.eof {
+		return
+	}
+	for {
+		let c = z.readByte()
+		if z.eof {
+			return
+		}
+		if !isSpace(c) {
+			z.raw.end -= 1
+			return
+		}
+	}
+}
+
+// dataIs reports whether the data span, case-insensitively, is name (which is lower-case).
+fn (z Tokenizer) dataIs(name str) bool {
+	if z.data.end-z.data.start != len(name) {
+		return false
+	}
+	for i in 0..len(name) {
+		mut c = z.text[z.data.start+i]
+		if 'A' <= c && c <= 'Z' {
+			c += 32
+		}
+		if c != name[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// readRawOrRCDATA reads the text of a raw-text or RCDATA element up to its end tag.
+fn (z mut Tokenizer) readRawOrRCDATA() {
+	if z.rawTag == "script" {
+		z.readScript()
+		z.textIsRaw = true
+		z.rawTag = ""
+		return
+	}
+	for {
+		let c = z.readByte()
+		if z.eof {
+			break
+		}
+		if c != '<' {
+			continue
+		}
+		let slash = z.readByte()
+		if z.eof {
+			break
+		}
+		if slash != '/' {
+			z.raw.end -= 1
+			continue
+		}
+		if z.readRawEndTag() || z.eof {
+			break
+		}
+	}
+	z.data.end = z.raw.end
+	// The text of textarea and title can hold references.
+	z.textIsRaw = z.rawTag != "textarea" && z.rawTag != "title"
+	z.rawTag = ""
+}
+
+// readRawEndTag reads an end tag of rawTag, like "</script>" after its "</": it backs up to the '<' and returns true when the
+// tag is complete, and returns false otherwise.
+fn (z mut Tokenizer) readRawEndTag() bool {
+	for i in 0..len(z.rawTag) {
+		let c = z.readByte()
+		if z.eof {
+			return false
+		}
+		if c != z.rawTag[i] && c != z.rawTag[i]-32 {
+			z.raw.end -= 1
+			return false
+		}
+	}
+	let c = z.readByte()
+	if z.eof {
+		return false
+	}
+	if isSpace(c) || c == '/' || c == '>' {
+		z.raw.end -= 3 + len(z.rawTag)
+		return true
+	}
+	z.raw.end -= 1
+	return false
+}
+
+// readScript reads script data up to the </script> that closes it, with the escaping rules of the script data states.
+fn (z mut Tokenizer) readScript() {
+	z.scanScript()
+	z.data.end = z.raw.end
+}
+
+// scanScript is the state machine of readScript. Each state reads the bytes it needs, and a byte that does not belong to the
+// state is read again in the next one.
+fn (z mut Tokenizer) scanScript() {
+	mut st = scrData
+	for {
+		if st == scrData {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '<' {
+				st = scrLT
+			}
+		} else if st == scrLT {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '/' {
+				st = scrEndTagOpen
+			} else if c == '!' {
+				st = scrEscStart
+			} else {
+				z.raw.end -= 1
+				st = scrData
+			}
+		} else if st == scrEndTagOpen {
+			if z.readRawEndTag() || z.eof {
+				return
+			}
+			st = scrData
+		} else if st == scrEscStart {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrEscStartDash
+			} else {
+				z.raw.end -= 1
+				st = scrData
+			}
+		} else if st == scrEscStartDash {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrEscDashDash
+			} else {
+				z.raw.end -= 1
+				st = scrData
+			}
+		} else if st == scrEsc {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrEscDash
+			} else if c == '<' {
+				st = scrEscLT
+			}
+		} else if st == scrEscDash {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrEscDashDash
+			} else if c == '<' {
+				st = scrEscLT
+			} else {
+				st = scrEsc
+			}
+		} else if st == scrEscDashDash {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrEscDashDash
+			} else if c == '<' {
+				st = scrEscLT
+			} else if c == '>' {
+				st = scrData
+			} else {
+				st = scrEsc
+			}
+		} else if st == scrEscLT {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '/' {
+				st = scrEscEndTagOpen
+			} else if isAlpha(c) {
+				st = scrDblStart
+			} else {
+				z.raw.end -= 1
+				st = scrData
+			}
+		} else if st == scrEscEndTagOpen {
+			if z.readRawEndTag() || z.eof {
+				return
+			}
+			st = scrEsc
+		} else if st == scrDblStart {
+			// The word "script" (in either case) must follow the '<' of a double escape.
+			z.raw.end -= 1
+			mut matched = true
+			for i in 0..len(scriptWord) {
+				let c = z.readByte()
+				if z.eof {
+					return
+				}
+				if c != scriptWord[i] && c != scriptWord[i]-32 {
+					z.raw.end -= 1
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				st = scrEsc
+			} else {
+				let c = z.readByte()
+				if z.eof {
+					return
+				}
+				if isSpace(c) || c == '/' || c == '>' {
+					st = scrDbl
+				} else {
+					z.raw.end -= 1
+					st = scrEsc
+				}
+			}
+		} else if st == scrDbl {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrDblDash
+			} else if c == '<' {
+				st = scrDblLT
+			}
+		} else if st == scrDblDash {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrDblDashDash
+			} else if c == '<' {
+				st = scrDblLT
+			} else {
+				st = scrDbl
+			}
+		} else if st == scrDblDashDash {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '-' {
+				st = scrDblDashDash
+			} else if c == '<' {
+				st = scrDblLT
+			} else if c == '>' {
+				st = scrData
+			} else {
+				st = scrDbl
+			}
+		} else if st == scrDblLT {
+			let c = z.readByte()
+			if z.eof {
+				return
+			}
+			if c == '/' {
+				st = scrDblEnd
+			} else {
+				z.raw.end -= 1
+				st = scrDbl
+			}
+		} else {
+			// scrDblEnd: "</script" that ends the double escape goes back to the escaped state.
+			if z.readRawEndTag() {
+				z.raw.end += 9
+				st = scrEsc
+			} else {
+				if z.eof {
+					return
+				}
+				st = scrDbl
+			}
+		}
+	}
+}
+
+// isAlpha reports whether c is an ASCII letter.
+fn isAlpha(c u8) bool {
+	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+}
+
+// abruptCommentEnd is where the data of a comment that the input ended in stops: the dashes and the "!" of its end are not data.
+fn (z Tokenizer) abruptCommentEnd() i64 {
+	if z.raw.end-z.raw.start >= 4 {
+		let body = z.text[z.raw.start+4:z.raw.end]
+		if twine.HasSuffix(body, "--!") {
+			return z.raw.end - 3
+		} else if twine.HasSuffix(body, "--") {
+			return z.raw.end - 2
+		} else if twine.HasSuffix(body, "-") {
+			return z.raw.end - 1
+		}
+	}
+	return z.raw.end
+}
+
+// readComment reads a comment after its "<!--".
+fn (z mut Tokenizer) readComment() {
+	z.data.start = z.raw.end
+	z.scanComment()
+	// A comment with no data, like <!-->, has an empty data span.
+	if z.data.end < z.data.start {
+		z.data.end = z.data.start
+	}
+}
+
+// scanComment finds the end of a comment and sets its data span.
+fn (z mut Tokenizer) scanComment() {
+	mut dashes = 0
+	mut beginning = true
+	for {
+		let c = z.readByte()
+		if z.eof {
+			z.data.end = z.abruptCommentEnd()
+			return
+		}
+		if c == '-' {
+			dashes += 1
+			continue
+		}
+		if c == '>' && (dashes >= 2 || beginning) {
+			z.data.end = z.raw.end - 3
+			return
+		}
+		if c == '!' && dashes >= 2 {
+			let next = z.readByte()
+			if z.eof {
+				z.data.end = z.abruptCommentEnd()
+				return
+			}
+			if next == '>' {
+				z.data.end = z.raw.end - 4
+				return
+			}
+			if next == '-' {
+				dashes = 1
+				beginning = false
+				continue
+			}
+		}
+		dashes = 0
+		beginning = false
+	}
+}
+
+// readUntilCloseAngle reads up to and including the next '>'; the data is what comes before it.
+fn (z mut Tokenizer) readUntilCloseAngle() {
+	z.data.start = z.raw.end
+	for {
+		let c = z.readByte()
+		if z.eof {
+			z.data.end = z.raw.end
+			return
+		}
+		if c == '>' {
+			z.data.end = z.raw.end - 1
+			return
+		}
+	}
+}
+
+// readMarkupDeclaration reads what follows "<!": a comment, a doctype, a CDATA section or a bogus comment.
+fn (z mut Tokenizer) readMarkupDeclaration() i64 {
+	z.data.start = z.raw.end
+	let first = z.readByte()
+	if z.eof {
+		z.data.end = z.raw.end
+		return CommentToken
+	}
+	let second = z.readByte()
+	if z.eof {
+		z.data.end = z.raw.end
+		if first == '>' {
+			z.data.end -= 1
+		}
+		return CommentToken
+	}
+	if first == '-' && second == '-' {
+		z.readComment()
+		return CommentToken
+	}
+	z.raw.end -= 2
+	if z.readDoctype() {
+		return DoctypeToken
+	}
+	if z.allowCDATA && z.readCDATA() {
+		z.convertNUL = true
+		return TextToken
+	}
+	// A bogus comment.
+	z.readUntilCloseAngle()
+	return CommentToken
+}
+
+// readDoctype reads a doctype after "<!" when it starts with "DOCTYPE" in either case, and returns false (with the input
+// backed up) when it does not.
+fn (z mut Tokenizer) readDoctype() bool {
+	let word = "DOCTYPE"
+	for i in 0..len(word) {
+		let c = z.readByte()
+		if z.eof {
+			// The input ended inside the keyword: it is read again as a bogus comment.
+			z.raw.end = z.data.start
+			z.eof = false
+			return false
+		}
+		if c != word[i] && c != word[i]+32 {
+			z.raw.end = z.data.start
+			return false
+		}
+	}
+	z.skipWhiteSpace()
+	if z.eof {
+		z.data.start = z.raw.end
+		z.data.end = z.raw.end
+		return true
+	}
+	z.readUntilCloseAngle()
+	return true
+}
+
+// readCDATA reads a CDATA section after "<!" when it starts with "[CDATA[", and returns false (with the input backed up) when it
+// does not.
+fn (z mut Tokenizer) readCDATA() bool {
+	let word = "[CDATA["
+	for i in 0..len(word) {
+		let c = z.readByte()
+		if z.eof {
+			z.raw.end = z.data.start
+			z.eof = false
+			return false
+		}
+		if c != word[i] {
+			z.raw.end = z.data.start
+			return false
+		}
+	}
+	z.data.start = z.raw.end
+	mut brackets = 0
+	for {
+		let c = z.readByte()
+		if z.eof {
+			z.data.end = z.raw.end
+			return true
+		}
+		if c == ']' {
+			brackets += 1
+		} else if c == '>' {
+			if brackets >= 2 {
+				z.data.end = z.raw.end - 3
+				return true
+			}
+			brackets = 0
+		} else {
+			brackets = 0
+		}
+	}
+}
+
+// readStartTag reads a start tag after its "<" and the first letter of its name, and returns its token type.
+fn (z mut Tokenizer) readStartTag() i64 {
+	z.readTag(true)
+	if z.eof {
+		return ErrorToken
+	}
+	// Some elements' content is raw text: the next token is read without tags.
+	mut c = z.text[z.data.start]
+	if 'A' <= c && c <= 'Z' {
+		c += 32
+	}
+	mut raw = false
+	if c == 'i' {
+		raw = z.dataIs("iframe")
+	} else if c == 'n' {
+		raw = z.dataIs("noembed") || z.dataIs("noframes") || z.dataIs("noscript")
+	} else if c == 'p' {
+		raw = z.dataIs("plaintext")
+	} else if c == 's' {
+		raw = z.dataIs("script") || z.dataIs("style")
+	} else if c == 't' {
+		raw = z.dataIs("textarea") || z.dataIs("title")
+	} else if c == 'x' {
+		raw = z.dataIs("xmp")
+	}
+	if raw {
+		z.rawTag = asciiLower(z.text[z.data.start:z.data.end])
+	}
+	// A self-closing tag ends with a slash before its '>', unless that slash is the unquoted value of the last attribute.
+	let nAttrs = len(z.attr)
+	if z.text[z.raw.end-2] == '/' && (nAttrs == 0 || z.raw.end-2 != z.attr[nAttrs-1].val.end-1) {
+		return SelfClosingTagToken
+	}
+	return StartTagToken
+}
+
+// readTag reads a tag's name and attributes after its "<" or "</" and its first letter. With saveAttr the attributes are kept in
+// attr, the first of each name only.
+fn (z mut Tokenizer) readTag(saveAttr bool) {
+	z.attr = z.attr[:0]
+	z.nAttrReturned = 0
+	z.attrNames = map[str]bool{}
+	z.readTagName()
+	z.skipWhiteSpace()
+	if z.eof {
+		return
+	}
+	for {
+		let c = z.readByte()
+		if z.eof || c == '>' {
+			break
+		}
+		z.raw.end -= 1
+		z.readTagAttrKey()
+		z.readTagAttrVal()
+		let key = asciiLower(z.text[z.pendingKey.start:z.pendingKey.end])
+		if saveAttr && z.pendingKey.start != z.pendingKey.end && !z.attrNames[key] {
+			z.attr = append(z.attr, attrSpan{key: z.pendingKey, val: z.pendingVal})
+			z.attrNames[key] = true
+		}
+		z.skipWhiteSpace()
+		if z.eof {
+			break
+		}
+	}
+}
+
+// readTagName sets data to the name in "<div k=v>". The first letter of the name has been read.
+fn (z mut Tokenizer) readTagName() {
+	z.data.start = z.raw.end - 1
+	for {
+		let c = z.readByte()
+		if z.eof {
+			z.data.end = z.raw.end
+			return
+		}
+		if isSpace(c) {
+			z.data.end = z.raw.end - 1
+			return
+		}
+		if c == '/' || c == '>' {
+			z.raw.end -= 1
+			z.data.end = z.raw.end
+			return
+		}
+	}
+}
+
+// readTagAttrKey sets pendingKey to the key in "<div k=v>".
+fn (z mut Tokenizer) readTagAttrKey() {
+	z.pendingKey.start = z.raw.end
+	for {
+		let c = z.readByte()
+		if z.eof {
+			z.pendingKey.end = z.raw.end
+			return
+		}
+		// An '=' that starts the name is part of it (WHATWG 13.2.5.32).
+		if c == '=' && z.pendingKey.start+1 == z.raw.end {
+			continue
+		}
+		if c == '=' || isSpace(c) || c == '/' || c == '>' {
+			z.raw.end -= 1
+			z.pendingKey.end = z.raw.end
+			return
+		}
+	}
+}
+
+// readTagAttrVal sets pendingVal to the value after the key in "<div k=v>", empty when there is none.
+fn (z mut Tokenizer) readTagAttrVal() {
+	z.pendingVal.start = z.raw.end
+	z.pendingVal.end = z.raw.end
+	z.skipWhiteSpace()
+	if z.eof {
+		return
+	}
+	let c = z.readByte()
+	if z.eof {
+		return
+	}
+	// A slash ends the attribute: the tag is self-closing (WHATWG 13.2.5.34).
+	if c == '/' {
+		return
+	}
+	if c != '=' {
+		z.raw.end -= 1
+		return
+	}
+	z.skipWhiteSpace()
+	if z.eof {
+		return
+	}
+	let quote = z.readByte()
+	if z.eof {
+		return
+	}
+	if quote == '>' {
+		z.raw.end -= 1
+		return
+	}
+	if quote == '\'' || quote == '"' {
+		z.pendingVal.start = z.raw.end
+		for {
+			let v = z.readByte()
+			if z.eof {
+				z.pendingVal.end = z.raw.end
+				return
+			}
+			if v == quote {
+				z.pendingVal.end = z.raw.end - 1
+				return
+			}
+		}
+	}
+	// An unquoted value ends at white space or at '>'.
+	z.pendingVal.start = z.raw.end - 1
+	for {
+		let v = z.readByte()
+		if z.eof {
+			z.pendingVal.end = z.raw.end
+			return
+		}
+		if isSpace(v) {
+			z.pendingVal.end = z.raw.end - 1
+			return
+		}
+		if v == '>' {
+			z.raw.end -= 1
+			z.pendingVal.end = z.raw.end
+			return
+		}
+	}
+}
+
+// Next scans the next token and returns its type: ErrorToken at the end of the input.
+fn (z mut Tokenizer) Next() i64 {
+	z.raw.start = z.raw.end
+	z.data.start = z.raw.end
+	z.data.end = z.raw.end
+	if z.eof {
+		z.tt = ErrorToken
+		return z.tt
+	}
+	if z.rawTag != "" {
+		if z.rawTag == "plaintext" {
+			// Everything up to the end of the input is text.
+			for !z.eof {
+				z.readByte()
+			}
+			z.data.end = z.raw.end
+			z.textIsRaw = true
+		} else {
+			z.readRawOrRCDATA()
+		}
+		if z.data.end > z.data.start {
+			z.tt = TextToken
+			z.convertNUL = true
+			return z.tt
+		}
+	}
+	z.textIsRaw = false
+	z.convertNUL = false
+	for {
+		mut c = z.readByte()
+		if z.eof {
+			break
+		}
+		if c != '<' {
+			continue
+		}
+		// The '<' is part of a tag, a comment or a doctype only when a letter, '/', '!' or '?' follows it.
+		c = z.readByte()
+		if z.eof {
+			break
+		}
+		mut tokenType = CommentToken
+		if isAlpha(c) {
+			tokenType = StartTagToken
+		} else if c == '/' {
+			tokenType = EndTagToken
+		} else if c != '!' && c != '?' {
+			z.raw.end -= 1
+			continue
+		}
+		// Text before the '<' is a token of its own; the tag is read by the next call.
+		let lt = z.raw.end - 2
+		if z.raw.start < lt {
+			z.raw.end = lt
+			z.data.end = lt
+			z.tt = TextToken
+			return z.tt
+		}
+		if tokenType == StartTagToken {
+			z.tt = z.readStartTag()
+			return z.tt
+		}
+		if tokenType == EndTagToken {
+			c = z.readByte()
+			if z.eof {
+				break
+			}
+			if c == '>' {
+				// "</>" makes an empty comment, so that Raw still shows it.
+				z.tt = CommentToken
+				return z.tt
+			}
+			if isAlpha(c) {
+				z.readTag(false)
+				if z.eof {
+					z.tt = ErrorToken
+				} else {
+					z.tt = EndTagToken
+				}
+				return z.tt
+			}
+			z.raw.end -= 1
+			z.readUntilCloseAngle()
+			z.tt = CommentToken
+			return z.tt
+		}
+		// A comment, a doctype, or a processing instruction (a bogus comment).
+		if c == '!' {
+			z.tt = z.readMarkupDeclaration()
+			return z.tt
+		}
+		z.raw.end -= 1
+		z.readUntilCloseAngle()
+		z.tt = CommentToken
+		return z.tt
+	}
+	if z.raw.start < z.raw.end {
+		z.data.end = z.raw.end
+		z.tt = TextToken
+		return z.tt
+	}
+	z.tt = ErrorToken
+	return z.tt
+}
+
+// replaceNUL replaces each NUL byte of s with the replacement character.
+fn replaceNUL(s str) str {
+	if !twine.ContainsByte(s, 0) {
+		return s
+	}
+	return twine.ReplaceAll(s, "\x00", "�")
+}
+
+// convertNewlines turns each "\r\n" and each lone "\r" of s into "\n".
+fn convertNewlines(s str) str {
+	if !twine.ContainsByte(s, '\r') {
+		return s
+	}
+	mut b = twine.NewBuilder(len(s))
+	mut i = 0
+	for i < len(s) {
+		let c = s[i]
+		if c == '\r' {
+			b.Byte('\n')
+			if i+1 < len(s) && s[i+1] == '\n' {
+				i += 1
+			}
+		} else {
+			b.Byte(c)
+		}
+		i += 1
+	}
+	return b.String()
+}
+
+// Text returns the unescaped text of the current text, comment or doctype token; it is empty for the other tokens. The data is
+// taken: a second call returns "".
+fn (z mut Tokenizer) Text() str {
+	if z.tt != TextToken && z.tt != CommentToken && z.tt != DoctypeToken {
+		return ""
+	}
+	mut s = z.text[z.data.start:z.data.end]
+	z.data.start = z.raw.end
+	z.data.end = z.raw.end
+	s = convertNewlines(s)
+	if (z.convertNUL || z.tt == CommentToken) && twine.ContainsByte(s, 0) {
+		s = replaceNUL(s)
+	}
+	if !z.textIsRaw {
+		s = unescape(s, false)
+	}
+	return s
+}
+
+// asciiLower returns s with its ASCII upper-case letters lower-cased.
+fn asciiLower(s str) str {
+	mut b = twine.NewBuilder(len(s))
+	for i in 0..len(s) {
+		let c = s[i]
+		if 'A' <= c && c <= 'Z' {
+			b.Byte(c + 32)
+		} else {
+			b.Byte(c)
+		}
+	}
+	return b.String()
+}
+
+// TagName returns the lower-cased name of the current tag and whether it has attributes; the data is taken, as with Text.
+fn (z mut Tokenizer) TagName() (str, bool) {
+	if z.data.start < z.data.end && (z.tt == StartTagToken || z.tt == EndTagToken || z.tt == SelfClosingTagToken) {
+		let s = replaceNUL(z.text[z.data.start:z.data.end])
+		z.data.start = z.raw.end
+		z.data.end = z.raw.end
+		return asciiLower(s), z.nAttrReturned < len(z.attr)
+	}
+	return "", false
+}
+
+// TagAttr returns the next attribute of the current start or self-closing tag, with a lower-cased key and an unescaped value,
+// and whether more attributes follow.
+fn (z mut Tokenizer) TagAttr() (str, str, bool) {
+	if z.nAttrReturned < len(z.attr) && (z.tt == StartTagToken || z.tt == SelfClosingTagToken) {
+		let x = z.attr[z.nAttrReturned]
+		z.nAttrReturned += 1
+		let key = replaceNUL(z.text[x.key.start:x.key.end])
+		let val = replaceNUL(z.text[x.val.start:x.val.end])
+		return asciiLower(key), unescape(convertNewlines(val), true), z.nAttrReturned < len(z.attr)
+	}
+	return "", "", false
+}
+
+// Token returns the current token, with its data and attributes (which stay valid after the next Next call).
+fn (z mut Tokenizer) Token() Token {
+	mut t = Token{Type: z.tt, Data: "", Attr: []Attribute{}}
+	if z.tt == TextToken || z.tt == CommentToken || z.tt == DoctypeToken {
+		t.Data = z.Text()
+	} else if z.tt == StartTagToken || z.tt == SelfClosingTagToken || z.tt == EndTagToken {
+		let (name, more) = z.TagName()
+		t.Data = name
+		mut moreAttr = more
+		for moreAttr {
+			let (key, val, next) = z.TagAttr()
+			t.Attr = append(t.Attr, Attribute{Namespace: "", Key: key, Val: val})
+			moreAttr = next
+		}
+	}
+	return t
+}

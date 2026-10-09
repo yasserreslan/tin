@@ -1,0 +1,2187 @@
+package html
+
+import "say"
+import "twine"
+
+// The scopes an element can be in, as Go's scope.
+const scopeDefault = 0
+
+const scopeListItem = 1
+
+const scopeButton = 2
+
+const scopeTable = 3
+
+const scopeTableRow = 4
+
+const scopeTableBody = 5
+
+// The insertion modes of the tree builder.
+const imInitial = 0
+
+const imBeforeHTML = 1
+
+const imBeforeHead = 2
+
+const imInHead = 3
+
+const imInHeadNoscript = 4
+
+const imAfterHead = 5
+
+const imInBody = 6
+
+const imText = 7
+
+const imInTable = 8
+
+const imInCaption = 9
+
+const imInColumnGroup = 10
+
+const imInTableBody = 11
+
+const imInRow = 12
+
+const imInCell = 13
+
+const imAfterBody = 14
+
+const imAfterAfterBody = 15
+
+// whitespace is the set of white space bytes the tree builder trims.
+const whitespace = " \t\r\n\f"
+
+// parser is the state of one parse: the tokenizer, the current token, the arena of nodes, the stack of open elements, the list of
+// active formatting elements and the insertion mode.
+type parser struct {
+	tokenizer Tokenizer
+	tok Token
+	hasSelfClosingToken bool
+	nodes []treeNode
+	doc i64
+	oe []i64
+	afe []i64
+	head i64
+	form i64
+	scripting bool
+	framesetOK bool
+	im i64
+	originalIM i64
+	fosterParenting bool
+	quirks bool
+	failed str
+}
+
+// newParser returns a parser of text, with the root and the scope marker in place.
+fn newParser(text str) parser {
+	mut p = parser{tokenizer: NewTokenizer(text), tok: Token{Type: ErrorToken, Data: "", Attr: []Attribute{}}, hasSelfClosingToken: false, nodes: []treeNode{}, doc: -1, oe: []i64{}, afe: []i64{}, head: -1, form: -1, scripting: true, framesetOK: true, im: imInitial, originalIM: -1, fosterParenting: false, quirks: false, failed: ""}
+	p.newNode(scopeMarkerNode, "", "", []Attribute{})
+	p.doc = p.newNode(DocumentNode, "", "", []Attribute{})
+	return p
+}
+
+// top returns the current node: the last open element, or the document.
+fn (p parser) top() i64 {
+	if len(p.oe) > 0 {
+		return p.oe[len(p.oe)-1]
+	}
+	return p.doc
+}
+
+// oeTop returns the last open element, or -1 when none is open.
+fn (p parser) oeTop() i64 {
+	if len(p.oe) > 0 {
+		return p.oe[len(p.oe)-1]
+	}
+	return -1
+}
+
+// oeIndex returns the position of n in the open elements, searched from the top, or -1.
+fn (p parser) oeIndex(n i64) i64 {
+	let top1 = len(p.oe) - 1
+	for k1 in 0..top1+1 {
+		let i = top1 - k1
+		if p.oe[i] == n {
+			return i
+		}
+	}
+	return -1
+}
+
+// oeContains reports whether an HTML element with the name is open.
+fn (p parser) oeContains(name str) bool {
+	for n in p.oe {
+		if p.nodes[n].ns == "" && p.nodes[n].data == name {
+			return true
+		}
+	}
+	return false
+}
+
+// oeRemove takes n out of the open elements.
+fn (p mut parser) oeRemove(n i64) {
+	let i = p.oeIndex(n)
+	if i != -1 {
+		p.oe = append(p.oe[:i], p.oe[i+1:]...)
+	}
+}
+
+// oeInsert puts n at position i of the open elements.
+fn (p mut parser) oeInsert(i i64, n i64) {
+	p.oe = append(p.oe, -1)
+	let top2 = len(p.oe) - 1
+	for k2 in 0..top2-i {
+		let k = top2 - k2
+		p.oe[k] = p.oe[k-1]
+	}
+	p.oe[i] = n
+}
+
+// popOE removes and returns the last open element.
+fn (p mut parser) popOE() i64 {
+	let n = p.oe[len(p.oe)-1]
+	p.oe = p.oe[:len(p.oe)-1]
+	return n
+}
+
+// afeIndex returns the position of n in the active formatting elements, or -1.
+fn (p parser) afeIndex(n i64) i64 {
+	let top3 = len(p.afe) - 1
+	for k3 in 0..top3+1 {
+		let i = top3 - k3
+		if p.afe[i] == n {
+			return i
+		}
+	}
+	return -1
+}
+
+// afeRemove takes n out of the active formatting elements.
+fn (p mut parser) afeRemove(n i64) {
+	let i = p.afeIndex(n)
+	if i != -1 {
+		p.afe = append(p.afe[:i], p.afe[i+1:]...)
+	}
+}
+
+// afeInsert puts n at position i of the active formatting elements.
+fn (p mut parser) afeInsert(i i64, n i64) {
+	p.afe = append(p.afe, -1)
+	let top4 = len(p.afe) - 1
+	for k4 in 0..top4-i {
+		let k = top4 - k4
+		p.afe[k] = p.afe[k-1]
+	}
+	p.afe[i] = n
+}
+
+// isScopeStop reports whether an element of the namespace and name stops the default, list item and button scopes.
+fn isScopeStop(ns str, name str) bool {
+	if ns == "" {
+		return name == "applet" || name == "caption" || name == "html" || name == "table" || name == "td" || name == "th" || name == "marquee" || name == "object" || name == "template" || name == "select"
+	} else if ns == "math" {
+		return name == "annotation-xml" || name == "mi" || name == "mn" || name == "mo" || name == "ms" || name == "mtext"
+	} else if ns == "svg" {
+		return name == "desc" || name == "foreignObject" || name == "title"
+	}
+	return false
+}
+
+// indexOfElementInScope returns the position of the nearest open element named in names, when no element stops it, or -1.
+fn (p parser) indexOfElementInScope(s i64, names []str) i64 {
+	let top5 = len(p.oe) - 1
+	for k5 in 0..top5+1 {
+		let i = top5 - k5
+		let n = p.oe[i]
+		let tag = p.nodes[n].data
+		if p.nodes[n].ns == "" {
+			for t in names {
+				if t == tag {
+					return i
+				}
+			}
+			if s == scopeListItem {
+				if tag == "ol" || tag == "ul" {
+					return -1
+				}
+			} else if s == scopeButton {
+				if tag == "button" {
+					return -1
+				}
+			} else if s == scopeTable {
+				if tag == "html" || tag == "table" || tag == "template" {
+					return -1
+				}
+			}
+		}
+		if s == scopeDefault || s == scopeListItem || s == scopeButton {
+			if isScopeStop(p.nodes[n].ns, tag) {
+				return -1
+			}
+		}
+	}
+	return -1
+}
+
+// elementInScope reports whether an open element named in names is in the scope s.
+fn (p parser) elementInScope(s i64, names []str) bool {
+	return p.indexOfElementInScope(s, names) != -1
+}
+
+// popUntil pops the open elements up to and including the nearest one named in names that is in the scope s.
+fn (p mut parser) popUntil(s i64, names []str) bool {
+	let i = p.indexOfElementInScope(s, names)
+	if i != -1 {
+		p.oe = p.oe[:i]
+		return true
+	}
+	return false
+}
+
+// clearStackToContext pops the open elements down to the table context s.
+fn (p mut parser) clearStackToContext(s i64) {
+	let top6 = len(p.oe) - 1
+	for k6 in 0..top6+1 {
+		let i = top6 - k6
+		let tag = p.nodes[p.oe[i]].data
+		let stop = (s == scopeTable && (tag == "html" || tag == "table" || tag == "template")) || (s == scopeTableRow && (tag == "html" || tag == "tr" || tag == "template")) || (s == scopeTableBody && (tag == "html" || tag == "tbody" || tag == "tfoot" || tag == "thead" || tag == "template"))
+		if stop {
+			p.oe = p.oe[:i+1]
+			return
+		}
+	}
+}
+
+// isSpecial reports whether n is one of the special elements of the tree builder.
+fn (p parser) isSpecial(n i64) bool {
+	let ns = p.nodes[n].ns
+	let name = p.nodes[n].data
+	if ns == "" || ns == "html" {
+		return isSpecialName(name)
+	} else if ns == "math" {
+		return name == "mi" || name == "mo" || name == "mn" || name == "ms" || name == "mtext" || name == "annotation-xml"
+	} else if ns == "svg" {
+		return name == "foreignObject" || name == "desc" || name == "title"
+	}
+	return false
+}
+
+// isSpecialName reports whether an HTML element named name is special.
+fn isSpecialName(name str) bool {
+	match name {
+		"address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote", "body", "br", "button", "caption", "center", "col", "colgroup", "dd", "details", "dir", "div", "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "keygen", "li", "link", "listing", "main", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre", "script", "section", "select", "source", "style", "summary", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp" => {
+			return true
+		}
+		_ => {
+			return false
+		}
+	}
+	return false
+}
+
+// generateImpliedEndTags pops the open elements that end implicitly, except one named in exceptions.
+fn (p mut parser) generateImpliedEndTags(exceptions []str) {
+	mut i = len(p.oe) - 1
+	for i >= 0 {
+		let n = p.oe[i]
+		if p.nodes[n].typ != ElementNode {
+			break
+		}
+		let tag = p.nodes[n].data
+		let implied = tag == "dd" || tag == "dt" || tag == "li" || tag == "optgroup" || tag == "option" || tag == "p" || tag == "rb" || tag == "rp" || tag == "rt" || tag == "rtc"
+		if !implied {
+			break
+		}
+		mut excepted = false
+		for e in exceptions {
+			if tag == e {
+				excepted = true
+			}
+		}
+		if excepted {
+			break
+		}
+		i -= 1
+	}
+	p.oe = p.oe[:i+1]
+}
+
+// addChild adds n at the insertion point (fostered when the table rules say so) and opens it when it is an element.
+fn (p mut parser) addChild(n i64) {
+	if p.shouldFosterParent() {
+		p.fosterParent(n)
+	} else {
+		p.appendChild(p.top(), n)
+	}
+	if p.nodes[n].typ == ElementNode {
+		p.insertOpenElement(n)
+	}
+}
+
+// insertOpenElement opens the element n.
+fn (p mut parser) insertOpenElement(n i64) {
+	p.oe = append(p.oe, n)
+	if len(p.oe) > 512 {
+		p.failed = "html: open stack of elements exceeds 512 nodes"
+	}
+}
+
+// shouldFosterParent reports whether content goes before the table, as the table rules say.
+fn (p parser) shouldFosterParent() bool {
+	if p.fosterParenting {
+		let tag = p.nodes[p.top()].data
+		return tag == "table" || tag == "tbody" || tag == "tfoot" || tag == "thead" || tag == "tr"
+	}
+	return false
+}
+
+// fosterParent inserts n before the last table of the open elements.
+fn (p mut parser) fosterParent(n i64) {
+	mut table = i64(-1)
+	mut ti = i64(-1)
+	let top7 = len(p.oe) - 1
+	for k7 in 0..top7+1 {
+		let i = top7 - k7
+		if p.nodes[p.oe[i]].data == "table" {
+			table = p.oe[i]
+			ti = i
+			break
+		}
+	}
+	mut parent = i64(-1)
+	if table == -1 {
+		parent = p.oe[0]
+	} else {
+		parent = p.nodes[table].parent
+	}
+	if parent == -1 {
+		parent = p.oe[ti-1]
+	}
+	mut prev = i64(-1)
+	if table != -1 {
+		prev = p.nodes[table].prev
+	} else {
+		prev = p.nodes[parent].last
+	}
+	if prev != -1 && p.nodes[prev].typ == TextNode && p.nodes[n].typ == TextNode {
+		p.nodes[prev].data += p.nodes[n].data
+		return
+	}
+	p.insertBefore(parent, n, table)
+}
+
+// addText adds text at the insertion point, merged with a text node before it.
+fn (p mut parser) addText(text str) {
+	if text == "" {
+		return
+	}
+	if p.shouldFosterParent() {
+		let t = p.newNode(TextNode, text, "", []Attribute{})
+		p.fosterParent(t)
+		return
+	}
+	let last = p.nodes[p.top()].last
+	if last != -1 && p.nodes[last].typ == TextNode {
+		p.nodes[last].data += text
+		return
+	}
+	let t = p.newNode(TextNode, text, "", []Attribute{})
+	p.addChild(t)
+}
+
+// attrLess orders attributes by namespace, key and value, as Go's attrCompare does.
+fn attrLess(a Attribute, b Attribute) bool {
+	if a.Namespace != b.Namespace {
+		return a.Namespace < b.Namespace
+	}
+	if a.Key != b.Key {
+		return a.Key < b.Key
+	}
+	return a.Val < b.Val
+}
+
+// sortAttrs sorts attrs in place (insertion sort: attribute lists are short).
+fn sortAttrs(attrs []Attribute) {
+	for i in 1..len(attrs) {
+		mut k = i
+		for k > 0 && attrLess(attrs[k], attrs[k-1]) {
+			let t = attrs[k]
+			attrs[k] = attrs[k-1]
+			attrs[k-1] = t
+			k -= 1
+		}
+	}
+}
+
+// sameAttrs reports whether two attribute lists are equal element by element.
+fn sameAttrs(a []Attribute, b []Attribute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i in 0..len(a) {
+		if a[i].Namespace != b[i].Namespace || a[i].Key != b[i].Key || a[i].Val != b[i].Val {
+			return false
+		}
+	}
+	return true
+}
+
+// addElement adds the current token as an element at the insertion point.
+fn (p mut parser) addElement() {
+	let n = p.newNode(ElementNode, p.tok.Data, "", p.tok.Attr)
+	p.addChild(n)
+}
+
+// addFormattingElement adds the current token as a formatting element, and keeps at most three identical ones after the last
+// scope marker.
+fn (p mut parser) addFormattingElement() {
+	let tagName = p.tok.Data
+	let attr = p.tok.Attr
+	p.addElement()
+	sortAttrs(attr)
+	mut identical = 0
+	let top8 = len(p.afe) - 1
+	for k8 in 0..top8+1 {
+		let i = top8 - k8
+		let n = p.afe[i]
+		if p.nodes[n].typ == scopeMarkerNode {
+			break
+		}
+		if p.nodes[n].typ != ElementNode {
+			continue
+		}
+		if p.nodes[n].ns != "" {
+			continue
+		}
+		if p.nodes[n].data != tagName {
+			continue
+		}
+		if !sameAttrs(p.nodes[n].attr, attr) {
+			continue
+		}
+		identical += 1
+		if identical >= 3 {
+			p.afeRemove(n)
+		}
+	}
+	let top = p.top()
+	sortAttrs(p.nodes[top].attr)
+	p.afe = append(p.afe, top)
+}
+
+// clearActiveFormattingElements pops the active formatting elements up to the last scope marker.
+fn (p mut parser) clearActiveFormattingElements() {
+	for {
+		let n = p.afe[len(p.afe)-1]
+		p.afe = p.afe[:len(p.afe)-1]
+		if len(p.afe) == 0 || p.nodes[n].typ == scopeMarkerNode {
+			return
+		}
+	}
+}
+
+// reconstructActiveFormattingElements reopens the formatting elements that were closed by a misnested end tag.
+fn (p mut parser) reconstructActiveFormattingElements() {
+	if len(p.afe) == 0 {
+		return
+	}
+	mut n = p.afe[len(p.afe)-1]
+	if p.nodes[n].typ == scopeMarkerNode || p.oeIndex(n) != -1 {
+		return
+	}
+	mut i = len(p.afe) - 1
+	for p.nodes[n].typ != scopeMarkerNode && p.oeIndex(n) == -1 {
+		if i == 0 {
+			i = -1
+			break
+		}
+		i -= 1
+		n = p.afe[i]
+	}
+	for {
+		i += 1
+		let clone = p.cloneNode(p.afe[i])
+		p.addChild(clone)
+		p.afe[i] = clone
+		if i == len(p.afe)-1 {
+			break
+		}
+	}
+}
+
+// acknowledgeSelfClosingTag clears the self-closing flag of the current token.
+fn (p mut parser) acknowledgeSelfClosingTag() {
+	p.hasSelfClosingToken = false
+}
+
+// resetInsertionMode sets the insertion mode from the open elements.
+fn (p mut parser) resetInsertionMode() {
+	let top9 = len(p.oe) - 1
+	for k9 in 0..top9+1 {
+		let i = top9 - k9
+		let n = p.oe[i]
+		let last = i == 0
+		let tag = p.nodes[n].data
+		if tag == "td" || tag == "th" {
+			p.im = imInCell
+		} else if tag == "tr" {
+			p.im = imInRow
+		} else if tag == "tbody" || tag == "thead" || tag == "tfoot" {
+			p.im = imInTableBody
+		} else if tag == "caption" {
+			p.im = imInCaption
+		} else if tag == "colgroup" {
+			p.im = imInColumnGroup
+		} else if tag == "table" {
+			p.im = imInTable
+		} else if tag == "head" {
+			p.im = imInHead
+		} else if tag == "body" {
+			p.im = imInBody
+		} else if tag == "html" {
+			if p.head == -1 {
+				p.im = imBeforeHead
+			} else {
+				p.im = imAfterHead
+			}
+		} else {
+			if last {
+				p.im = imInBody
+				return
+			}
+			continue
+		}
+		return
+	}
+}
+
+// parseImpliedToken runs an end or start tag that the parser makes up (html, head, body, ...) through the modes.
+fn (p mut parser) parseImpliedToken(typ i64, data str) {
+	let realTok = p.tok
+	let realSelfClosing = p.hasSelfClosingToken
+	p.tok = Token{Type: typ, Data: data, Attr: []Attribute{}}
+	p.hasSelfClosingToken = false
+	p.parseCurrentToken()
+	p.tok = realTok
+	p.hasSelfClosingToken = realSelfClosing
+}
+
+// parseCurrentToken runs the current token through the foreign content rules or the insertion mode until one consumes it.
+fn (p mut parser) parseCurrentToken() {
+	if p.tok.Type == SelfClosingTagToken {
+		p.hasSelfClosingToken = true
+		p.tok.Type = StartTagToken
+	}
+	mut consumed = false
+	for !consumed {
+		if p.inForeignContent() {
+			consumed = p.parseForeignContent()
+		} else {
+			consumed = p.runIM()
+		}
+	}
+	if p.hasSelfClosingToken {
+		p.hasSelfClosingToken = false
+	}
+}
+
+// runIM runs the current token through the insertion mode.
+fn (p mut parser) runIM() bool {
+	let m = p.im
+	if m == imInitial {
+		return p.initialIM()
+	} else if m == imBeforeHTML {
+		return p.beforeHTMLIM()
+	} else if m == imBeforeHead {
+		return p.beforeHeadIM()
+	} else if m == imInHead {
+		return p.inHeadIM()
+	} else if m == imInHeadNoscript {
+		return p.inHeadNoscriptIM()
+	} else if m == imAfterHead {
+		return p.afterHeadIM()
+	} else if m == imInBody {
+		return p.inBodyIM()
+	} else if m == imText {
+		return p.textIM()
+	} else if m == imInTable {
+		return p.inTableIM()
+	} else if m == imInCaption {
+		return p.inCaptionIM()
+	} else if m == imInColumnGroup {
+		return p.inColumnGroupIM()
+	} else if m == imInTableBody {
+		return p.inTableBodyIM()
+	} else if m == imInRow {
+		return p.inRowIM()
+	} else if m == imInCell {
+		return p.inCellIM()
+	} else if m == imAfterBody {
+		return p.afterBodyIM()
+	}
+	return p.afterAfterBodyIM()
+}
+
+// isBlank reports whether s is all white space.
+fn isBlank(s str) bool {
+	return twine.TrimLeft(s, whitespace) == ""
+}
+
+// addCommentChild adds the current comment token as a child of parent, without opening it.
+fn (p mut parser) addCommentTo(parent i64) {
+	let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+	p.appendChild(parent, n)
+}
+
+// initialIM is the initial insertion mode: a doctype, or else the quirks mode.
+fn (p mut parser) initialIM() bool {
+	if p.tok.Type == TextToken {
+		p.tok.Data = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(p.tok.Data) == 0 {
+			return true
+		}
+	} else if p.tok.Type == CommentToken {
+		p.addCommentTo(p.doc)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		let (name, attrs, quirks) = parseDoctype(p.tok.Data)
+		let n = p.newNode(DoctypeNode, name, "", attrs)
+		p.appendChild(p.doc, n)
+		p.quirks = quirks
+		p.im = imBeforeHTML
+		return true
+	}
+	p.quirks = true
+	p.im = imBeforeHTML
+	return false
+}
+
+// beforeHTMLIM is the mode before the html element.
+fn (p mut parser) beforeHTMLIM() bool {
+	if p.tok.Type == DoctypeToken {
+		return true
+	} else if p.tok.Type == TextToken {
+		p.tok.Data = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(p.tok.Data) == 0 {
+			return true
+		}
+	} else if p.tok.Type == StartTagToken {
+		if p.tok.Data == "html" {
+			p.addElement()
+			p.im = imBeforeHead
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "head" || tag == "body" || tag == "html" || tag == "br" {
+			p.parseImpliedToken(StartTagToken, "html")
+			return false
+		}
+		return true
+	} else if p.tok.Type == CommentToken {
+		p.addCommentTo(p.doc)
+		return true
+	}
+	p.parseImpliedToken(StartTagToken, "html")
+	return false
+}
+
+// beforeHeadIM is the mode before the head element.
+fn (p mut parser) beforeHeadIM() bool {
+	if p.tok.Type == TextToken {
+		p.tok.Data = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(p.tok.Data) == 0 {
+			return true
+		}
+	} else if p.tok.Type == StartTagToken {
+		if p.tok.Data == "head" {
+			p.addElement()
+			p.head = p.top()
+			p.im = imInHead
+			return true
+		} else if p.tok.Data == "html" {
+			return p.inBodyIM()
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "head" || tag == "body" || tag == "html" || tag == "br" {
+			p.parseImpliedToken(StartTagToken, "head")
+			return false
+		}
+		return true
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		return true
+	}
+	p.parseImpliedToken(StartTagToken, "head")
+	return false
+}
+
+// inHeadIM is the mode inside the head element.
+fn (p mut parser) inHeadIM() bool {
+	if p.tok.Type == TextToken {
+		let s = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(s) < len(p.tok.Data) {
+			p.addText(p.tok.Data[:len(p.tok.Data)-len(s)])
+			if s == "" {
+				return true
+			}
+			p.tok.Data = s
+		}
+	} else if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "html" {
+			return p.inBodyIM()
+		} else if tag == "base" || tag == "basefont" || tag == "bgsound" || tag == "link" || tag == "meta" {
+			p.addElement()
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+			return true
+		} else if tag == "noscript" {
+			if p.scripting {
+				p.parseGenericRawTextElement()
+				return true
+			}
+			p.addElement()
+			p.im = imInHeadNoscript
+			p.tokenizer.NextIsNotRawText()
+			return true
+		} else if tag == "script" || tag == "title" {
+			p.addElement()
+			p.setOriginalIM()
+			p.im = imText
+			return true
+		} else if tag == "noframes" || tag == "style" {
+			p.parseGenericRawTextElement()
+			return true
+		} else if tag == "head" {
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "head" {
+			p.popOE()
+			p.im = imAfterHead
+			return true
+		} else if tag == "body" || tag == "html" || tag == "br" {
+			p.parseImpliedToken(EndTagToken, "head")
+			return false
+		}
+		return true
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		return true
+	}
+	p.parseImpliedToken(EndTagToken, "head")
+	return false
+}
+
+// inHeadNoscriptIM is the mode inside a noscript element in the head (scripting is on, so it is not reached by default).
+fn (p mut parser) inHeadNoscriptIM() bool {
+	if p.tok.Type == DoctypeToken {
+		return true
+	} else if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "html" {
+			return p.inBodyIM()
+		} else if tag == "basefont" || tag == "bgsound" || tag == "link" || tag == "meta" || tag == "noframes" || tag == "style" {
+			return p.inHeadIM()
+		} else if tag == "head" {
+			return true
+		} else if tag == "noscript" {
+			p.tokenizer.NextIsNotRawText()
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag != "noscript" && tag != "br" {
+			return true
+		}
+	} else if p.tok.Type == TextToken {
+		let s = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(s) == 0 {
+			return p.inHeadIM()
+		}
+	} else if p.tok.Type == CommentToken {
+		return p.inHeadIM()
+	}
+	p.popOE()
+	p.im = imInHead
+	if p.tok.Data == "noscript" {
+		return true
+	}
+	return false
+}
+
+// afterHeadIM is the mode after the head element.
+fn (p mut parser) afterHeadIM() bool {
+	if p.tok.Type == TextToken {
+		let s = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(s) < len(p.tok.Data) {
+			p.addText(p.tok.Data[:len(p.tok.Data)-len(s)])
+			if s == "" {
+				return true
+			}
+			p.tok.Data = s
+		}
+	} else if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "html" {
+			return p.inBodyIM()
+		} else if tag == "body" {
+			p.addElement()
+			p.framesetOK = false
+			p.im = imInBody
+			return true
+		} else if tag == "base" || tag == "basefont" || tag == "bgsound" || tag == "link" || tag == "meta" || tag == "noframes" || tag == "script" || tag == "style" || tag == "title" {
+			p.oe = append(p.oe, p.head)
+			let r = p.inHeadIM()
+			p.oeRemove(p.head)
+			return r
+		} else if tag == "head" {
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "body" || tag == "html" || tag == "br" {
+		} else {
+			return true
+		}
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		return true
+	}
+	p.parseImpliedToken(StartTagToken, "body")
+	p.framesetOK = true
+	if p.tok.Type == ErrorToken {
+		return true
+	}
+	return false
+}
+
+// copyAttributes adds the attributes of the current tag that node n does not have yet.
+fn (p mut parser) copyAttributes(n i64) {
+	if len(p.tok.Attr) == 0 {
+		return
+	}
+	for a in p.tok.Attr {
+		mut found = false
+		for b in p.nodes[n].attr {
+			if b.Key == a.Key {
+				found = true
+			}
+		}
+		if !found {
+			p.nodes[n].attr = append(p.nodes[n].attr, a)
+		}
+	}
+}
+
+// inBodyIM is the main insertion mode: the content of the body.
+fn (p mut parser) inBodyIM() bool {
+	if p.tok.Type == TextToken {
+		mut d = p.tok.Data
+		let top = p.oeTop()
+		if top != -1 {
+			let tag = p.nodes[top].data
+			if (tag == "pre" || tag == "listing") && p.nodes[top].first == -1 {
+				if len(d) > 0 && d[0] == '\r' {
+					d = d[1:]
+				}
+				if len(d) > 0 && d[0] == '\n' {
+					d = d[1:]
+				}
+			}
+		}
+		d = twine.ReplaceAll(d, "\x00", "")
+		if d == "" {
+			return true
+		}
+		p.reconstructActiveFormattingElements()
+		p.addText(d)
+		if p.framesetOK && !isBlank(d) {
+			p.framesetOK = false
+		}
+		return true
+	} else if p.tok.Type == StartTagToken {
+		return p.inBodyStartTag()
+	} else if p.tok.Type == EndTagToken {
+		return p.inBodyEndTag()
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+	}
+	return true
+}
+
+// inBodyStartTag handles a start tag in the body.
+fn (p mut parser) inBodyStartTag() bool {
+	let tag = p.tok.Data
+	match tag {
+		"html" => {
+			if len(p.oe) > 0 {
+				p.copyAttributes(p.oe[0])
+			}
+		}
+		"base", "basefont", "bgsound", "link", "meta", "noframes", "script", "style", "title" => {
+			return p.inHeadIM()
+		}
+		"body" => {
+			if len(p.oe) >= 2 {
+				let body = p.oe[1]
+				if p.nodes[body].typ == ElementNode && p.nodes[body].data == "body" {
+					p.framesetOK = false
+					p.copyAttributes(body)
+				}
+			}
+		}
+		"address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu", "nav", "ol", "p", "search", "section", "summary", "ul" => {
+			p.popUntil(scopeButton, []str{"p"})
+			p.addElement()
+		}
+		"h1", "h2", "h3", "h4", "h5", "h6" => {
+			p.popUntil(scopeButton, []str{"p"})
+			let top = p.oeTop()
+			if top != -1 {
+				let t = p.nodes[top].data
+				if t == "h1" || t == "h2" || t == "h3" || t == "h4" || t == "h5" || t == "h6" {
+					p.popOE()
+				}
+			}
+			p.addElement()
+		}
+		"pre", "listing" => {
+			p.popUntil(scopeButton, []str{"p"})
+			p.addElement()
+			p.framesetOK = false
+		}
+		"form" => {
+			if p.form != -1 {
+				return true
+			}
+			p.popUntil(scopeButton, []str{"p"})
+			p.addElement()
+			p.form = p.top()
+		}
+		"li" => {
+			p.framesetOK = false
+			let top10 = len(p.oe) - 1
+			for k10 in 0..top10+1 {
+				let i = top10 - k10
+				let node = p.oe[i]
+				let name = p.nodes[node].data
+				if name == "li" {
+					p.oe = p.oe[:i]
+					break
+				}
+				if name == "address" || name == "div" || name == "p" {
+					continue
+				}
+				if !p.isSpecial(node) {
+					continue
+				}
+				break
+			}
+			p.popUntil(scopeButton, []str{"p"})
+			p.addElement()
+		}
+		"dd", "dt" => {
+			p.framesetOK = false
+			let top11 = len(p.oe) - 1
+			for k11 in 0..top11+1 {
+				let i = top11 - k11
+				let node = p.oe[i]
+				let name = p.nodes[node].data
+				if name == "dd" || name == "dt" {
+					p.oe = p.oe[:i]
+					break
+				}
+				if name == "address" || name == "div" || name == "p" {
+					continue
+				}
+				if !p.isSpecial(node) {
+					continue
+				}
+				break
+			}
+			p.popUntil(scopeButton, []str{"p"})
+			p.addElement()
+		}
+		"plaintext" => {
+			p.popUntil(scopeButton, []str{"p"})
+			p.addElement()
+		}
+		"button" => {
+			if p.elementInScope(scopeDefault, []str{"button"}) {
+				p.generateImpliedEndTags([]str{})
+				p.popUntil(scopeDefault, []str{"button"})
+			}
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+			p.framesetOK = false
+		}
+		"a" => {
+			mut i = len(p.afe) - 1
+			for i >= 0 && p.nodes[p.afe[i]].typ != scopeMarkerNode {
+				let n = p.afe[i]
+				if p.nodes[n].typ == ElementNode && p.nodes[n].data == "a" {
+					p.inBodyEndTagFormatting("a")
+					p.oeRemove(n)
+					p.afeRemove(n)
+					break
+				}
+				i -= 1
+			}
+			p.reconstructActiveFormattingElements()
+			p.addFormattingElement()
+		}
+		"b", "big", "code", "em", "font", "i", "s", "small", "strike", "strong", "tt", "u" => {
+			p.reconstructActiveFormattingElements()
+			p.addFormattingElement()
+		}
+		"nobr" => {
+			p.reconstructActiveFormattingElements()
+			if p.elementInScope(scopeDefault, []str{"nobr"}) {
+				p.inBodyEndTagFormatting("nobr")
+				p.reconstructActiveFormattingElements()
+			}
+			p.addFormattingElement()
+		}
+		"table" => {
+			if !p.quirks {
+				p.popUntil(scopeButton, []str{"p"})
+			}
+			p.addElement()
+			p.framesetOK = false
+			p.im = imInTable
+			return true
+		}
+		"area", "br", "embed", "img", "keygen", "wbr" => {
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+			p.framesetOK = false
+		}
+		"input" => {
+			p.popUntil(scopeDefault, []str{"select"})
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+			for t in p.tok.Attr {
+				if t.Key == "type" && twine.EqualFold(t.Val, "hidden") {
+					return true
+				}
+			}
+			p.framesetOK = false
+		}
+		"param", "source", "track" => {
+			p.addElement()
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+		}
+		"hr" => {
+			if p.elementInScope(scopeButton, []str{"p"}) {
+				p.generateImpliedEndTags([]str{"p"})
+				p.popUntil(scopeDefault, []str{"p"})
+			}
+			if p.elementInScope(scopeDefault, []str{"select"}) {
+				p.generateImpliedEndTags([]str{})
+			}
+			p.addElement()
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+			p.framesetOK = false
+		}
+		"image" => {
+			p.tok.Data = "img"
+			return false
+		}
+		"textarea" => {
+			p.addElement()
+			p.setOriginalIM()
+			p.framesetOK = false
+			p.im = imText
+		}
+		"xmp" => {
+			p.popUntil(scopeButton, []str{"p"})
+			p.reconstructActiveFormattingElements()
+			p.framesetOK = false
+			p.parseGenericRawTextElement()
+		}
+		"iframe" => {
+			p.framesetOK = false
+			p.parseGenericRawTextElement()
+		}
+		"noembed" => {
+			p.parseGenericRawTextElement()
+		}
+		"noscript" => {
+			if p.scripting {
+				p.parseGenericRawTextElement()
+				return true
+			}
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+			p.tokenizer.NextIsNotRawText()
+		}
+		"select" => {
+			if p.popUntil(scopeDefault, []str{"select"}) {
+				return true
+			}
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+			p.framesetOK = false
+			return true
+		}
+		"option" => {
+			if p.elementInScope(scopeDefault, []str{"select"}) {
+				p.generateImpliedEndTags([]str{"optgroup"})
+			} else if p.nodes[p.top()].data == "option" {
+				p.popOE()
+			}
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+		}
+		"optgroup" => {
+			if p.elementInScope(scopeDefault, []str{"select"}) {
+				p.generateImpliedEndTags([]str{})
+			} else if p.nodes[p.top()].data == "option" {
+				p.popOE()
+			}
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+		}
+		"rb", "rtc" => {
+			if p.elementInScope(scopeDefault, []str{"ruby"}) {
+				p.generateImpliedEndTags([]str{})
+			}
+			p.addElement()
+		}
+		"rp", "rt" => {
+			if p.elementInScope(scopeDefault, []str{"ruby"}) {
+				p.generateImpliedEndTags([]str{"rtc"})
+			}
+			p.addElement()
+		}
+		"math", "svg" => {
+			p.reconstructActiveFormattingElements()
+			if tag == "math" {
+				adjustAttributeNames(p.tok.Attr, "math")
+			} else {
+				adjustAttributeNames(p.tok.Attr, "svg")
+			}
+			adjustForeignAttributes(p.tok.Attr)
+			p.addElement()
+			p.nodes[p.top()].ns = tag
+			if p.hasSelfClosingToken {
+				p.popOE()
+				p.acknowledgeSelfClosingTag()
+			}
+			return true
+		}
+		"caption", "col", "colgroup", "frame", "head", "tbody", "td", "tfoot", "th", "thead", "tr" => {
+		}
+		_ => {
+			p.reconstructActiveFormattingElements()
+			p.addElement()
+		}
+	}
+	return true
+}
+
+// inBodyEndTag handles an end tag in the body.
+fn (p mut parser) inBodyEndTag() bool {
+	let tag = p.tok.Data
+	match tag {
+		"body" => {
+			if p.elementInScope(scopeDefault, []str{"body"}) {
+				p.im = imAfterBody
+			}
+		}
+		"html" => {
+			if p.elementInScope(scopeDefault, []str{"body"}) {
+				p.parseImpliedToken(EndTagToken, "body")
+				return false
+			}
+			return true
+		}
+		"address", "article", "aside", "blockquote", "button", "center", "details", "dialog", "dir", "div", "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "listing", "main", "menu", "nav", "ol", "pre", "search", "section", "select", "summary", "ul" => {
+			if !p.elementInScope(scopeDefault, []str{tag}) {
+				return true
+			}
+			p.generateImpliedEndTags([]str{})
+			p.popUntil(scopeDefault, []str{tag})
+		}
+		"form" => {
+			let node = p.form
+			p.form = -1
+			let i = p.indexOfElementInScope(scopeDefault, []str{"form"})
+			if node == -1 || i == -1 || p.oe[i] != node {
+				return true
+			}
+			p.generateImpliedEndTags([]str{})
+			p.oeRemove(node)
+		}
+		"p" => {
+			if !p.elementInScope(scopeButton, []str{"p"}) {
+				p.parseImpliedToken(StartTagToken, "p")
+			}
+			p.popUntil(scopeButton, []str{"p"})
+		}
+		"li" => {
+			p.popUntil(scopeListItem, []str{"li"})
+		}
+		"dd", "dt" => {
+			p.popUntil(scopeDefault, []str{tag})
+		}
+		"h1", "h2", "h3", "h4", "h5", "h6" => {
+			p.popUntil(scopeDefault, []str{"h1", "h2", "h3", "h4", "h5", "h6"})
+		}
+		"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u" => {
+			p.inBodyEndTagFormatting(tag)
+		}
+		"applet", "marquee", "object" => {
+			if p.popUntil(scopeDefault, []str{tag}) {
+				p.clearActiveFormattingElements()
+			}
+		}
+		"br" => {
+			p.tok.Type = StartTagToken
+			return false
+		}
+		_ => {
+			p.inBodyEndTagOther(tag)
+		}
+	}
+	return true
+}
+
+// inBodyEndTagFormatting is the adoption agency algorithm: it closes a misnested formatting element, up to eight times.
+fn (p mut parser) inBodyEndTagFormatting(tagName str) {
+	let cur = p.oeTop()
+	if cur != -1 && p.nodes[cur].data == tagName && p.afeIndex(cur) == -1 {
+		p.popOE()
+		return
+	}
+	for outer in 0..8 {
+		mut fe = i64(-1)
+		mut j = len(p.afe) - 1
+		for j >= 0 {
+			let e = p.afe[j]
+			if p.nodes[e].typ == scopeMarkerNode {
+				break
+			}
+			if p.nodes[e].data == tagName {
+				fe = e
+				break
+			}
+			j -= 1
+		}
+		if fe == -1 {
+			p.inBodyEndTagOther(tagName)
+			return
+		}
+		let feIndex = p.oeIndex(fe)
+		if feIndex == -1 {
+			p.afeRemove(fe)
+			return
+		}
+		if !p.elementInScope(scopeDefault, []str{tagName}) {
+			return
+		}
+		mut furthest = i64(-1)
+		for k in feIndex..len(p.oe) {
+			if p.isSpecial(p.oe[k]) {
+				furthest = p.oe[k]
+				break
+			}
+		}
+		if furthest == -1 {
+			mut e = p.popOE()
+			for e != fe {
+				e = p.popOE()
+			}
+			p.afeRemove(e)
+			return
+		}
+		let commonAncestor = p.oe[feIndex-1]
+		mut bookmark = p.afeIndex(fe)
+		mut lastNode = furthest
+		mut node = furthest
+		mut x = p.oeIndex(node)
+		mut jj = 0
+		for {
+			jj += 1
+			x -= 1
+			node = p.oe[x]
+			if node == fe {
+				break
+			}
+			let ni = p.afeIndex(node)
+			if jj > 3 && ni > -1 {
+				p.afeRemove(node)
+				if ni <= bookmark {
+					bookmark -= 1
+				}
+				continue
+			}
+			if p.afeIndex(node) == -1 {
+				p.oeRemove(node)
+				continue
+			}
+			let clone = p.cloneNode(node)
+			p.afe[p.afeIndex(node)] = clone
+			p.oe[p.oeIndex(node)] = clone
+			node = clone
+			if lastNode == furthest {
+				bookmark = p.afeIndex(node) + 1
+			}
+			if p.nodes[lastNode].parent != -1 {
+				p.removeChild(p.nodes[lastNode].parent, lastNode)
+			}
+			p.appendChild(node, lastNode)
+			lastNode = node
+		}
+		if p.nodes[lastNode].parent != -1 {
+			p.removeChild(p.nodes[lastNode].parent, lastNode)
+		}
+		let ca = p.nodes[commonAncestor].data
+		if ca == "table" || ca == "tbody" || ca == "tfoot" || ca == "thead" || ca == "tr" {
+			p.fosterParent(lastNode)
+		} else {
+			p.appendChild(commonAncestor, lastNode)
+		}
+		let clone = p.cloneNode(fe)
+		p.reparentChildren(clone, furthest)
+		p.appendChild(furthest, clone)
+		let oldLoc = p.afeIndex(fe)
+		if oldLoc != -1 && oldLoc < bookmark {
+			bookmark -= 1
+		}
+		p.afeRemove(fe)
+		p.afeInsert(bookmark, clone)
+		p.oeRemove(fe)
+		p.oeInsert(p.oeIndex(furthest)+1, clone)
+	}
+}
+
+// inBodyEndTagOther closes the nearest open element named tagName, unless a special element is in the way.
+fn (p mut parser) inBodyEndTagOther(tagName str) {
+	let top12 = len(p.oe) - 1
+	for k12 in 0..top12+1 {
+		let i = top12 - k12
+		if p.nodes[p.oe[i]].ns == "" && p.nodes[p.oe[i]].data == tagName {
+			p.oe = p.oe[:i]
+			break
+		}
+		if p.isSpecial(p.oe[i]) {
+			break
+		}
+	}
+}
+
+// parseGenericRawTextElement adds the current element and reads its text as raw text.
+fn (p mut parser) parseGenericRawTextElement() {
+	p.addElement()
+	p.originalIM = p.im
+	p.im = imText
+}
+
+// setOriginalIM remembers the insertion mode to return to after raw text.
+fn (p mut parser) setOriginalIM() {
+	p.originalIM = p.im
+}
+
+// textIM is the mode of the content of a raw-text element: its text, and the end tag that closes it.
+fn (p mut parser) textIM() bool {
+	if p.tok.Type == ErrorToken {
+		p.popOE()
+	} else if p.tok.Type == TextToken {
+		mut d = p.tok.Data
+		let top = p.oeTop()
+		if top != -1 && p.nodes[top].data == "textarea" && p.nodes[top].first == -1 {
+			if len(d) > 0 && d[0] == '\r' {
+				d = d[1:]
+			}
+			if len(d) > 0 && d[0] == '\n' {
+				d = d[1:]
+			}
+		}
+		if d == "" {
+			return true
+		}
+		p.addText(d)
+		return true
+	} else if p.tok.Type == EndTagToken {
+		p.popOE()
+	}
+	p.im = p.originalIM
+	p.originalIM = -1
+	return p.tok.Type == EndTagToken
+}
+
+// inTableIM is the mode inside a table.
+fn (p mut parser) inTableIM() bool {
+	if p.tok.Type == TextToken {
+		p.tok.Data = twine.ReplaceAll(p.tok.Data, "\x00", "")
+		let top = p.oeTop()
+		let tag = p.nodes[top].data
+		if tag == "table" || tag == "tbody" || tag == "tfoot" || tag == "thead" || tag == "tr" {
+			if isBlank(p.tok.Data) {
+				p.addText(p.tok.Data)
+				return true
+			}
+		}
+	} else if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "caption" {
+			p.clearStackToContext(scopeTable)
+			p.afe = append(p.afe, 0)
+			p.addElement()
+			p.im = imInCaption
+			return true
+		} else if tag == "colgroup" {
+			p.clearStackToContext(scopeTable)
+			p.addElement()
+			p.im = imInColumnGroup
+			return true
+		} else if tag == "col" {
+			p.parseImpliedToken(StartTagToken, "colgroup")
+			return false
+		} else if tag == "tbody" || tag == "tfoot" || tag == "thead" {
+			p.clearStackToContext(scopeTable)
+			p.addElement()
+			p.im = imInTableBody
+			return true
+		} else if tag == "td" || tag == "th" || tag == "tr" {
+			p.parseImpliedToken(StartTagToken, "tbody")
+			return false
+		} else if tag == "table" {
+			if p.popUntil(scopeTable, []str{"table"}) {
+				p.resetInsertionMode()
+				return false
+			}
+			return true
+		} else if tag == "style" || tag == "script" {
+			return p.inHeadIM()
+		} else if tag == "input" {
+			for t in p.tok.Attr {
+				if t.Key == "type" && twine.EqualFold(t.Val, "hidden") {
+					p.addElement()
+					p.popOE()
+					return true
+				}
+			}
+		} else if tag == "form" {
+			if p.form != -1 {
+				return true
+			}
+			p.addElement()
+			p.form = p.popOE()
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "table" {
+			if p.popUntil(scopeTable, []str{"table"}) {
+				p.resetInsertionMode()
+				return true
+			}
+			return true
+		} else if tag == "body" || tag == "caption" || tag == "col" || tag == "colgroup" || tag == "html" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr" {
+			return true
+		}
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		return true
+	} else if p.tok.Type == ErrorToken {
+		return p.inBodyIM()
+	}
+	p.fosterParenting = true
+	let r = p.inBodyIM()
+	p.fosterParenting = false
+	return r
+}
+
+// inCaptionIM is the mode inside a caption.
+fn (p mut parser) inCaptionIM() bool {
+	if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "caption" || tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "thead" || tag == "tr" {
+			if !p.popUntil(scopeTable, []str{"caption"}) {
+				return true
+			}
+			p.clearActiveFormattingElements()
+			p.im = imInTable
+			return false
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "caption" {
+			if p.popUntil(scopeTable, []str{"caption"}) {
+				p.clearActiveFormattingElements()
+				p.im = imInTable
+			}
+			return true
+		} else if tag == "table" {
+			if !p.popUntil(scopeTable, []str{"caption"}) {
+				return true
+			}
+			p.clearActiveFormattingElements()
+			p.im = imInTable
+			return false
+		} else if tag == "body" || tag == "col" || tag == "colgroup" || tag == "html" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr" {
+			return true
+		}
+	}
+	return p.inBodyIM()
+}
+
+// inColumnGroupIM is the mode inside a colgroup.
+fn (p mut parser) inColumnGroupIM() bool {
+	if p.tok.Type == TextToken {
+		let s = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(s) < len(p.tok.Data) {
+			p.addText(p.tok.Data[:len(p.tok.Data)-len(s)])
+			if s == "" {
+				return true
+			}
+			p.tok.Data = s
+		}
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		return true
+	} else if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "html" {
+			return p.inBodyIM()
+		} else if tag == "col" {
+			p.addElement()
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "colgroup" {
+			if p.nodes[p.oeTop()].data == "colgroup" {
+				p.popOE()
+				p.im = imInTable
+			}
+			return true
+		} else if tag == "col" {
+			return true
+		}
+	} else if p.tok.Type == ErrorToken {
+		return p.inBodyIM()
+	}
+	if p.nodes[p.oeTop()].data != "colgroup" {
+		return true
+	}
+	p.popOE()
+	p.im = imInTable
+	return false
+}
+
+// inTableBodyIM is the mode inside a tbody, thead or tfoot.
+fn (p mut parser) inTableBodyIM() bool {
+	if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "tr" {
+			p.clearStackToContext(scopeTableBody)
+			p.addElement()
+			p.im = imInRow
+			return true
+		} else if tag == "td" || tag == "th" {
+			p.parseImpliedToken(StartTagToken, "tr")
+			return false
+		} else if tag == "caption" || tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "tfoot" || tag == "thead" {
+			if p.popUntil(scopeTable, []str{"tbody", "thead", "tfoot"}) {
+				p.im = imInTable
+				return false
+			}
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "tbody" || tag == "tfoot" || tag == "thead" {
+			if p.elementInScope(scopeTable, []str{tag}) {
+				p.clearStackToContext(scopeTableBody)
+				p.popOE()
+				p.im = imInTable
+			}
+			return true
+		} else if tag == "table" {
+			if p.popUntil(scopeTable, []str{"tbody", "thead", "tfoot"}) {
+				p.im = imInTable
+				return false
+			}
+			return true
+		} else if tag == "body" || tag == "caption" || tag == "col" || tag == "colgroup" || tag == "html" || tag == "td" || tag == "th" || tag == "tr" {
+			return true
+		}
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+		return true
+	}
+	return p.inTableIM()
+}
+
+// inRowIM is the mode inside a tr.
+fn (p mut parser) inRowIM() bool {
+	if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "td" || tag == "th" {
+			p.clearStackToContext(scopeTableRow)
+			p.addElement()
+			p.afe = append(p.afe, 0)
+			p.im = imInCell
+			return true
+		} else if tag == "caption" || tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "tfoot" || tag == "thead" || tag == "tr" {
+			if p.elementInScope(scopeTable, []str{"tr"}) {
+				p.clearStackToContext(scopeTableRow)
+				p.popOE()
+				p.im = imInTableBody
+				return false
+			}
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "tr" {
+			if p.elementInScope(scopeTable, []str{"tr"}) {
+				p.clearStackToContext(scopeTableRow)
+				p.popOE()
+				p.im = imInTableBody
+				return true
+			}
+			return true
+		} else if tag == "table" {
+			if p.elementInScope(scopeTable, []str{"tr"}) {
+				p.clearStackToContext(scopeTableRow)
+				p.popOE()
+				p.im = imInTableBody
+				return false
+			}
+			return true
+		} else if tag == "tbody" || tag == "tfoot" || tag == "thead" {
+			if p.elementInScope(scopeTable, []str{tag}) && p.elementInScope(scopeTable, []str{"tr"}) {
+				p.clearStackToContext(scopeTableRow)
+				p.popOE()
+				p.im = imInTableBody
+				return false
+			}
+			return true
+		} else if tag == "body" || tag == "caption" || tag == "col" || tag == "colgroup" || tag == "html" || tag == "td" || tag == "th" {
+			return true
+		}
+	}
+	return p.inTableIM()
+}
+
+// inCellIM is the mode inside a td or th.
+fn (p mut parser) inCellIM() bool {
+	if p.tok.Type == StartTagToken {
+		let tag = p.tok.Data
+		if tag == "caption" || tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr" {
+			if p.popUntil(scopeTable, []str{"td", "th"}) {
+				p.clearActiveFormattingElements()
+				p.im = imInRow
+				return false
+			}
+			return true
+		}
+	} else if p.tok.Type == EndTagToken {
+		let tag = p.tok.Data
+		if tag == "td" || tag == "th" {
+			if !p.popUntil(scopeTable, []str{tag}) {
+				return true
+			}
+			p.clearActiveFormattingElements()
+			p.im = imInRow
+			return true
+		} else if tag == "body" || tag == "caption" || tag == "col" || tag == "colgroup" || tag == "html" {
+			return true
+		} else if tag == "table" || tag == "tbody" || tag == "tfoot" || tag == "thead" || tag == "tr" {
+			if !p.elementInScope(scopeTable, []str{tag}) {
+				return true
+			}
+			if p.popUntil(scopeTable, []str{"td", "th"}) {
+				p.clearActiveFormattingElements()
+			}
+			p.im = imInRow
+			return false
+		}
+	}
+	return p.inBodyIM()
+}
+
+// afterBodyIM is the mode after the body element.
+fn (p mut parser) afterBodyIM() bool {
+	if p.tok.Type == ErrorToken {
+		return true
+	} else if p.tok.Type == TextToken {
+		let s = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(s) == 0 {
+			return p.inBodyIM()
+		}
+	} else if p.tok.Type == StartTagToken {
+		if p.tok.Data == "html" {
+			return p.inBodyIM()
+		}
+	} else if p.tok.Type == EndTagToken {
+		if p.tok.Data == "html" {
+			p.im = imAfterAfterBody
+			return true
+		}
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.appendChild(p.oe[0], n)
+		return true
+	}
+	p.im = imInBody
+	return false
+}
+
+// afterAfterBodyIM is the mode after the html element's end tag.
+fn (p mut parser) afterAfterBodyIM() bool {
+	if p.tok.Type == ErrorToken {
+		return true
+	} else if p.tok.Type == TextToken {
+		let s = twine.TrimLeft(p.tok.Data, whitespace)
+		if len(s) == 0 {
+			return p.inBodyIM()
+		}
+	} else if p.tok.Type == StartTagToken {
+		if p.tok.Data == "html" {
+			return p.inBodyIM()
+		}
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.appendChild(p.doc, n)
+		return true
+	} else if p.tok.Type == DoctypeToken {
+		return p.inBodyIM()
+	}
+	p.im = imInBody
+	return false
+}
+
+// inForeignContent reports whether the current token is handled by the rules of svg and math content.
+fn (p parser) inForeignContent() bool {
+	if len(p.oe) == 0 {
+		return false
+	}
+	let n = p.oeTop()
+	let ns = p.nodes[n].ns
+	if ns == "" {
+		return false
+	}
+	let name = p.nodes[n].data
+	if ns == "math" && (name == "mi" || name == "mo" || name == "mn" || name == "ms" || name == "mtext") {
+		if p.tok.Type == StartTagToken && p.tok.Data != "mglyph" && p.tok.Data != "malignmark" {
+			return false
+		}
+		if p.tok.Type == TextToken {
+			return false
+		}
+	}
+	if ns == "math" && name == "annotation-xml" && p.tok.Type == StartTagToken && p.tok.Data == "svg" {
+		return false
+	}
+	if p.isHTMLIntegrationPoint(n) && (p.tok.Type == StartTagToken || p.tok.Type == TextToken) {
+		return false
+	}
+	if p.tok.Type == ErrorToken {
+		return false
+	}
+	return true
+}
+
+// isHTMLIntegrationPoint reports whether n is an svg or math element that holds HTML.
+fn (p parser) isHTMLIntegrationPoint(n i64) bool {
+	if p.nodes[n].typ != ElementNode {
+		return false
+	}
+	let ns = p.nodes[n].ns
+	let name = p.nodes[n].data
+	if ns == "math" && name == "annotation-xml" {
+		for a in p.nodes[n].attr {
+			if a.Key == "encoding" {
+				if twine.EqualFold(a.Val, "text/html") || twine.EqualFold(a.Val, "application/xhtml+xml") {
+					return true
+				}
+			}
+		}
+	}
+	if ns == "svg" {
+		return name == "desc" || name == "foreignObject" || name == "title"
+	}
+	return false
+}
+
+// parseForeignContent handles a token inside svg or math content.
+fn (p mut parser) parseForeignContent() bool {
+	if p.tok.Type == TextToken {
+		if p.framesetOK {
+			p.framesetOK = twine.TrimLeft(p.tok.Data, whitespace+"\x00") == ""
+		}
+		p.tok.Data = twine.ReplaceAll(p.tok.Data, "\x00", "�")
+		p.addText(p.tok.Data)
+	} else if p.tok.Type == CommentToken {
+		let n = p.newNode(CommentNode, p.tok.Data, "", []Attribute{})
+		p.addChild(n)
+	} else if p.tok.Type == StartTagToken {
+		mut b = isBreakout(p.tok.Data)
+		if p.tok.Data == "font" {
+			for attr in p.tok.Attr {
+				if attr.Key == "color" || attr.Key == "face" || attr.Key == "size" {
+					b = true
+				}
+			}
+		}
+		if b {
+			let top13 = len(p.oe) - 1
+			for k13 in 0..top13+1 {
+				let i = top13 - k13
+				let n = p.oe[i]
+				if p.nodes[n].ns == "" || p.isHTMLIntegrationPoint(n) || p.isMathTextIntegrationPoint(n) {
+					p.oe = p.oe[:i+1]
+					break
+				}
+			}
+			return p.runIM()
+		}
+		let current = p.oeTop()
+		let ns = p.nodes[current].ns
+		if ns == "math" {
+			adjustAttributeNames(p.tok.Attr, "math")
+		} else if ns == "svg" {
+			let x = svgTagName(p.tok.Data)
+			if x != "" {
+				p.tok.Data = x
+			}
+			adjustAttributeNames(p.tok.Attr, "svg")
+		}
+		adjustForeignAttributes(p.tok.Attr)
+		let n = p.newNode(ElementNode, p.tok.Data, "", p.tok.Attr)
+		p.addChild(n)
+		p.nodes[n].ns = ns
+		if ns != "" {
+			p.tokenizer.NextIsNotRawText()
+		}
+		if p.hasSelfClosingToken {
+			p.popOE()
+			p.acknowledgeSelfClosingTag()
+		}
+	} else if p.tok.Type == EndTagToken {
+		let last = p.oe[len(p.oe)-1]
+		if twine.EqualFold(p.nodes[last].data, p.tok.Data) {
+			p.oe = p.oe[:len(p.oe)-1]
+			return true
+		}
+		let top14 = len(p.oe) - 1
+		for k14 in 0..top14+1 {
+			let i = top14 - k14
+			if twine.EqualFold(p.nodes[p.oe[i]].data, p.tok.Data) {
+				p.oe = p.oe[:i]
+				return true
+			}
+			if i > 0 && p.nodes[p.oe[i-1]].ns == "" {
+				break
+			}
+		}
+		return p.runIM()
+	}
+	return true
+}
+
+// isMathTextIntegrationPoint reports whether n is a math token element (mi, mo, mn, ms or mtext).
+fn (p parser) isMathTextIntegrationPoint(n i64) bool {
+	if p.nodes[n].ns != "math" {
+		return false
+	}
+	let name = p.nodes[n].data
+	return name == "mi" || name == "mo" || name == "mn" || name == "ms" || name == "mtext"
+}
+
+// isBreakout reports whether an HTML start tag named name ends foreign content.
+fn isBreakout(name str) bool {
+	match name {
+		"b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup", "table", "tt", "u", "ul", "var" => {
+			return true
+		}
+		_ => {
+			return false
+		}
+	}
+	return false
+}
+
+// svgTagName returns the case-corrected name of an svg element, or "" when the name is already right.
+fn svgTagName(name str) str {
+	match name {
+		"altglyph" => { return "altGlyph" }
+		"altglyphdef" => { return "altGlyphDef" }
+		"altglyphitem" => { return "altGlyphItem" }
+		"animatecolor" => { return "animateColor" }
+		"animatemotion" => { return "animateMotion" }
+		"animatetransform" => { return "animateTransform" }
+		"clippath" => { return "clipPath" }
+		"feblend" => { return "feBlend" }
+		"fecolormatrix" => { return "feColorMatrix" }
+		"fecomponenttransfer" => { return "feComponentTransfer" }
+		"fecomposite" => { return "feComposite" }
+		"feconvolvematrix" => { return "feConvolveMatrix" }
+		"fediffuselighting" => { return "feDiffuseLighting" }
+		"fedisplacementmap" => { return "feDisplacementMap" }
+		"fedistantlight" => { return "feDistantLight" }
+		"feflood" => { return "feFlood" }
+		"fefunca" => { return "feFuncA" }
+		"fefuncb" => { return "feFuncB" }
+		"fefuncg" => { return "feFuncG" }
+		"fefuncr" => { return "feFuncR" }
+		"fegaussianblur" => { return "feGaussianBlur" }
+		"feimage" => { return "feImage" }
+		"femerge" => { return "feMerge" }
+		"femergenode" => { return "feMergeNode" }
+		"femorphology" => { return "feMorphology" }
+		"feoffset" => { return "feOffset" }
+		"fepointlight" => { return "fePointLight" }
+		"fespecularlighting" => { return "feSpecularLighting" }
+		"fespotlight" => { return "feSpotLight" }
+		"fetile" => { return "feTile" }
+		"feturbulence" => { return "feTurbulence" }
+		"foreignobject" => { return "foreignObject" }
+		"glyphref" => { return "glyphRef" }
+		"lineargradient" => { return "linearGradient" }
+		"radialgradient" => { return "radialGradient" }
+		"textpath" => { return "textPath" }
+		_ => { return "" }
+	}
+	return ""
+}
+
+// adjustAttributeNames renames the attributes of a tag to their svg or math spelling.
+fn adjustAttributeNames(attrs []Attribute, which str) {
+	for i in 0..len(attrs) {
+		let k = attrs[i].Key
+		if which == "math" {
+			if k == "definitionurl" {
+				attrs[i].Key = "definitionURL"
+			}
+		} else {
+			let x = svgAttrName(k)
+			if x != "" {
+				attrs[i].Key = x
+			}
+		}
+	}
+}
+
+// svgAttrName returns the case-corrected name of an svg attribute, or "" when it has none.
+fn svgAttrName(name str) str {
+	match name {
+		"attributename" => { return "attributeName" }
+		"attributetype" => { return "attributeType" }
+		"basefrequency" => { return "baseFrequency" }
+		"baseprofile" => { return "baseProfile" }
+		"calcmode" => { return "calcMode" }
+		"clippathunits" => { return "clipPathUnits" }
+		"diffuseconstant" => { return "diffuseConstant" }
+		"edgemode" => { return "edgeMode" }
+		"filterunits" => { return "filterUnits" }
+		"glyphref" => { return "glyphRef" }
+		"gradienttransform" => { return "gradientTransform" }
+		"gradientunits" => { return "gradientUnits" }
+		"kernelmatrix" => { return "kernelMatrix" }
+		"kernelunitlength" => { return "kernelUnitLength" }
+		"keypoints" => { return "keyPoints" }
+		"keysplines" => { return "keySplines" }
+		"keytimes" => { return "keyTimes" }
+		"lengthadjust" => { return "lengthAdjust" }
+		"limitingconeangle" => { return "limitingConeAngle" }
+		"markerheight" => { return "markerHeight" }
+		"markerunits" => { return "markerUnits" }
+		"markerwidth" => { return "markerWidth" }
+		"maskcontentunits" => { return "maskContentUnits" }
+		"maskunits" => { return "maskUnits" }
+		"numoctaves" => { return "numOctaves" }
+		"pathlength" => { return "pathLength" }
+		"patterncontentunits" => { return "patternContentUnits" }
+		"patterntransform" => { return "patternTransform" }
+		"patternunits" => { return "patternUnits" }
+		"pointsatx" => { return "pointsAtX" }
+		"pointsaty" => { return "pointsAtY" }
+		"pointsatz" => { return "pointsAtZ" }
+		"preservealpha" => { return "preserveAlpha" }
+		"preserveaspectratio" => { return "preserveAspectRatio" }
+		"primitiveunits" => { return "primitiveUnits" }
+		"refx" => { return "refX" }
+		"refy" => { return "refY" }
+		"repeatcount" => { return "repeatCount" }
+		"repeatdur" => { return "repeatDur" }
+		"requiredextensions" => { return "requiredExtensions" }
+		"requiredfeatures" => { return "requiredFeatures" }
+		"specularconstant" => { return "specularConstant" }
+		"specularexponent" => { return "specularExponent" }
+		"spreadmethod" => { return "spreadMethod" }
+		"startoffset" => { return "startOffset" }
+		"stddeviation" => { return "stdDeviation" }
+		"stitchtiles" => { return "stitchTiles" }
+		"surfacescale" => { return "surfaceScale" }
+		"systemlanguage" => { return "systemLanguage" }
+		"tablevalues" => { return "tableValues" }
+		"targetx" => { return "targetX" }
+		"targety" => { return "targetY" }
+		"textlength" => { return "textLength" }
+		"viewbox" => { return "viewBox" }
+		"viewtarget" => { return "viewTarget" }
+		"xchannelselector" => { return "xChannelSelector" }
+		"ychannelselector" => { return "yChannelSelector" }
+		"zoomandpan" => { return "zoomAndPan" }
+		_ => { return "" }
+	}
+	return ""
+}
+
+// adjustForeignAttributes gives the xlink, xml and xmlns attributes their namespace.
+fn adjustForeignAttributes(attrs []Attribute) {
+	for i in 0..len(attrs) {
+		let k = attrs[i].Key
+		if !twine.HasPrefix(k, "x") {
+			continue
+		}
+		match k {
+			"xlink:actuate", "xlink:arcrole", "xlink:href", "xlink:role", "xlink:show", "xlink:title", "xlink:type", "xml:lang", "xml:space", "xmlns:xlink" => {
+				let j = twine.IndexByte(k, ':')
+				attrs[i].Namespace = k[:j]
+				attrs[i].Key = k[j+1:]
+			}
+			_ => {
+			}
+		}
+	}
+}
+
+// parseDoctype reads the name, the public and system identifiers and the quirks flag of a doctype's text, as Go's parseDoctype.
+fn parseDoctype(s str) (str, []Attribute, bool) {
+	mut attrs = []Attribute{}
+	mut space = twine.IndexAny(s, whitespace)
+	if space == -1 {
+		space = len(s)
+	}
+	mut quirks = false
+	if s[:space] != "html" {
+		quirks = true
+	}
+	let name = twine.ToLower(s[:space])
+	mut rest = twine.TrimLeft(s[space:], whitespace)
+	if len(rest) < 6 {
+		return name, attrs, quirks || rest != ""
+	}
+	mut key = twine.ToLower(rest[:6])
+	rest = rest[6:]
+	for key == "public" || key == "system" {
+		rest = twine.TrimLeft(rest, whitespace)
+		if rest == "" {
+			break
+		}
+		let quote = rest[0]
+		if quote != '"' && quote != '\'' {
+			break
+		}
+		rest = rest[1:]
+		let q = twine.IndexByte(rest, quote)
+		mut id = rest
+		if q == -1 {
+			rest = ""
+		} else {
+			id = rest[:q]
+			rest = rest[q+1:]
+		}
+		attrs = append(attrs, Attribute{Namespace: "", Key: key, Val: id})
+		if key == "public" {
+			key = "system"
+		} else {
+			key = ""
+		}
+	}
+	if key != "" || rest != "" {
+		quirks = true
+	} else if len(attrs) > 0 {
+		if attrs[0].Key == "public" {
+			let public = twine.ToLower(attrs[0].Val)
+			if public == "-//w3o//dtd w3 html strict 3.0//en//" || public == "-/w3d/dtd html 4.0 transitional/en" || public == "html" {
+				quirks = true
+			} else {
+				for q in quirkyIDs() {
+					if twine.HasPrefix(public, q) {
+						quirks = true
+						break
+					}
+				}
+			}
+			if len(attrs) == 1 && (twine.HasPrefix(public, "-//w3c//dtd html 4.01 frameset//") || twine.HasPrefix(public, "-//w3c//dtd html 4.01 transitional//")) {
+				quirks = true
+			}
+		}
+		let lastAttr = attrs[len(attrs)-1]
+		if lastAttr.Key == "system" && twine.EqualFold(lastAttr.Val, "http://www.ibm.com/data/dtd/v11/ibmxhtml1-transitional.dtd") {
+			quirks = true
+		}
+	}
+	return name, attrs, quirks
+}
+
+// quirkyIDs are the public identifiers that put a document in quirks mode when they start the identifier.
+fn quirkyIDs() []str {
+	return []str{"+//silmaril//dtd html pro v0r11 19970101//", "-//advasoft ltd//dtd html 3.0 aswedit + extensions//", "-//as//dtd html 3.0 aswedit + extensions//", "-//ietf//dtd html 2.0 level 1//", "-//ietf//dtd html 2.0 level 2//", "-//ietf//dtd html 2.0 strict level 1//", "-//ietf//dtd html 2.0 strict level 2//", "-//ietf//dtd html 2.0 strict//", "-//ietf//dtd html 2.0//", "-//ietf//dtd html 2.1e//", "-//ietf//dtd html 3.0//", "-//ietf//dtd html 3.2 final//", "-//ietf//dtd html 3.2//", "-//ietf//dtd html 3//", "-//ietf//dtd html level 0//", "-//ietf//dtd html level 1//", "-//ietf//dtd html level 2//", "-//ietf//dtd html level 3//", "-//ietf//dtd html strict level 0//", "-//ietf//dtd html strict level 1//", "-//ietf//dtd html strict level 2//", "-//ietf//dtd html strict level 3//", "-//ietf//dtd html strict//", "-//ietf//dtd html//", "-//metrius//dtd metrius presentational//", "-//microsoft//dtd internet explorer 2.0 html strict//", "-//microsoft//dtd internet explorer 2.0 html//", "-//microsoft//dtd internet explorer 2.0 tables//", "-//microsoft//dtd internet explorer 3.0 html strict//", "-//microsoft//dtd internet explorer 3.0 html//", "-//microsoft//dtd internet explorer 3.0 tables//", "-//netscape comm. corp.//dtd html//", "-//netscape comm. corp.//dtd strict html//", "-//o'reilly and associates//dtd html 2.0//", "-//o'reilly and associates//dtd html extended 1.0//", "-//o'reilly and associates//dtd html extended relaxed 1.0//", "-//softquad software//dtd hotmetal pro 6.0::19990601::extensions to html 4.0//", "-//softquad//dtd hotmetal pro 4.0::19971010::extensions to html 4.0//", "-//spyglass//dtd html 2.0 extended//", "-//sq//dtd html 2.0 hotmetal + extensions//", "-//sun microsystems corp.//dtd hotjava html//", "-//sun microsystems corp.//dtd hotjava strict html//", "-//w3c//dtd html 3 1995-03-24//", "-//w3c//dtd html 3.2 draft//", "-//w3c//dtd html 3.2 final//", "-//w3c//dtd html 3.2//", "-//w3c//dtd html 3.2s draft//", "-//w3c//dtd html 4.0 frameset//", "-//w3c//dtd html 4.0 transitional//", "-//w3c//dtd html experimental 19960712//", "-//w3c//dtd html experimental 970421//", "-//w3c//dtd w3 html//", "-//w3o//dtd w3 html 3.0//", "-//webtechs//dtd mozilla html 2.0//", "-//webtechs//dtd mozilla html//"}
+}
+
+// Parse builds the tree of an HTML document, as Go's html.Parse does (scripting enabled; the template and frameset modes are not
+// supported). A tree that the tree builder cannot make, such as one nested more than 512 elements deep, is a fault.
+fn Parse(text str) !Document {
+	mut p = newParser(text)
+	p.parseAll()
+	if p.failed != "" {
+		fail say.Fault("%s", p.failed)
+	}
+	return Document{nodes: p.nodes}
+}
+
+// parseAll reads the tokens of the input and runs each one through the tree builder until the end of the input.
+fn (p mut parser) parseAll() {
+	mut done = false
+	for !done {
+		let n = p.oeTop()
+		p.tokenizer.AllowCDATA(n != -1 && p.nodes[n].ns != "")
+		p.tokenizer.Next()
+		p.tok = p.tokenizer.Token()
+		if p.tok.Type == ErrorToken {
+			done = true
+		}
+		p.parseCurrentToken()
+		if p.failed != "" {
+			return
+		}
+	}
+}

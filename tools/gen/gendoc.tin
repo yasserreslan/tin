@@ -84,6 +84,7 @@ fn packages() []str {
 		"stencil", "text templates loaded at run time (text/template)",
 		"column", "aligned text columns (text/tabwriter)",
 		"scroll", "XML tokenizer and writer (encoding/xml)",
+		"html", "HTML tokenizer and escaping (html, golang.org/x/net/html)",
 		"lasso", "regular expressions with linear-time matching (regexp)",
 		"pack", "numbers as bytes: byte order and varints (encoding/binary)",
 		"mime", "media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart)",

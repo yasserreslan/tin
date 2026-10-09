@@ -64,6 +64,8 @@ jobs:
         run: sh tools/ci/tin.sh abacus_check
       - name: XML token streams against Go's encoding/xml (RSS, SOAP, S3, SVG)
         run: sh tools/ci/tin.sh scroll_check
+      - name: HTML tokens and escaping against golang.org/x/net/html (pages, generated documents, every named reference)
+        run: sh tools/ci/tin.sh html_check
       - name: Regular expressions against Go's regexp (12,000 pairs and the ported tables)
         run: sh tools/ci/tin.sh lasso_check
       - name: HTML template URL attributes against Go's html/template (3,000 template/value pairs)

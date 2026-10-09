@@ -67,6 +67,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [stencil](#stencil) | text templates loaded at run time (text/template) |
 | [column](#column) | aligned text columns (text/tabwriter) |
 | [scroll](#scroll) | XML tokenizer and writer (encoding/xml) |
+| [html](#html) | HTML tokenizer and escaping (html, golang.org/x/net/html) |
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
@@ -2702,6 +2703,49 @@ Package scroll is a safe, streaming XML tokenizer and writer, like Go's encoding
 - `(w mut Writer) ProcInst(target str, inst str) !`: ProcInst writes a processing instruction.
 - `(w mut Writer) Directive(s str)`: Directive writes a directive such as a doctype, passed through unchanged.
 - `(w mut Writer) WriteToken(t Token) !`: WriteToken writes one token, which must nest correctly.
+
+## html
+
+Package html tokenizes, parses and escapes HTML, as Go's html and golang.org/x/net/html do: EscapeString and UnescapeString for text and attribute values; a Tokenizer that splits a document into text, tags, attributes, comments and doctypes with the WHATWG tokenization rules (raw text in script, style, textarea, title and the other raw elements; bogus comments; the legacy references without a semicolon); and Parse, which builds the document tree with the tree-construction rules (implicit closes, the adoption agency, tables, select, svg and math content). Parse does not support the template and frameset modes. The tokenizer reads a whole string, so its tokens are the same as Go's over a reader. The Go twins (bench/ref/html and tools/ci/html_check.tin) compare the token streams and the trees over a corpus of pages and generated documents.
+
+- `EscapeString(s str) str`: EscapeString escapes the characters <, >, &, ' and " and a carriage return to references, as Go's html.EscapeString does.
+- `UnescapeString(s str) str`: UnescapeString replaces the character references in s with the characters they stand for, as Go's html.UnescapeString does.
+- `const ErrorToken = 0`: ErrorToken means that the input has ended (or failed): Err says why.
+- `const TextToken = 1`: TextToken is a run of text.
+- `const StartTagToken = 2`: StartTagToken is a start tag, like <a>.
+- `const EndTagToken = 3`: EndTagToken is an end tag, like </a>.
+- `const SelfClosingTagToken = 4`: SelfClosingTagToken is a tag written with a trailing slash, like <br/>.
+- `const CommentToken = 5`: CommentToken is a comment, a bogus comment, a processing instruction or an empty "</>".
+- `const DoctypeToken = 6`: DoctypeToken is a <!DOCTYPE ...> declaration.
+- `type Attribute struct`: Attribute is one attribute of a tag: Namespace is always empty (it is for the parser), Key is lower-cased and Val is unescaped.
+- `type Token struct`: Token is one token: Data is the tag name (lower-cased), the text, the comment or the doctype, unescaped; Attr holds the attributes of a tag.
+- `Parse(text str) !Document`: Parse builds the tree of an HTML document, as Go's html.Parse does (scripting enabled; the template and frameset modes are not supported). A tree that the tree builder cannot make, such as one nested more than 512 elements deep, is a fault.
+- `type Tokenizer struct`: Tokenizer returns the tokens of an HTML document, one Next call at a time, as Go's Tokenizer does. The text is read in full.
+- `NewTokenizer(text str) Tokenizer`: NewTokenizer returns a tokenizer of text.
+- `NewTokenizerFragment(text str, contextTag str) Tokenizer`: NewTokenizerFragment returns a tokenizer of text that is the content of an element named contextTag, such as "div" or "script": the content of a raw-text element is not parsed for tags.
+- `(z mut Tokenizer) AllowCDATA(allow bool)`: AllowCDATA sets whether <![CDATA[foo]]> is the text foo; by default it is a bogus comment, as outside foreign content.
+- `(z mut Tokenizer) NextIsNotRawText()`: NextIsNotRawText makes the next token an ordinary token even when the previous start tag opened a raw-text element.
+- `(z Tokenizer) Err() !`: Err fails with ErrEOF after a token that ended the input, and succeeds otherwise.
+- `(z Tokenizer) Raw() str`: Raw returns the input bytes of the current token. Consecutive tokens' raw bytes partition the input.
+- `(z mut Tokenizer) Next() i64`: Next scans the next token and returns its type: ErrorToken at the end of the input.
+- `(z mut Tokenizer) Text() str`: Text returns the unescaped text of the current text, comment or doctype token; it is empty for the other tokens. The data is taken: a second call returns "".
+- `(z mut Tokenizer) TagName() (str, bool)`: TagName returns the lower-cased name of the current tag and whether it has attributes; the data is taken, as with Text.
+- `(z mut Tokenizer) TagAttr() (str, str, bool)`: TagAttr returns the next attribute of the current start or self-closing tag, with a lower-cased key and an unescaped value, and whether more attributes follow.
+- `(z mut Tokenizer) Token() Token`: Token returns the current token, with its data and attributes (which stay valid after the next Next call).
+- `const ErrorNode = 0`: ErrorNode is the zero node type; no node has it.
+- `const TextNode = 1`: TextNode is a run of text.
+- `const DocumentNode = 2`: DocumentNode is the root of a parsed document.
+- `const ElementNode = 3`: ElementNode is an element: Data is its name and Namespace is "", "svg" or "math".
+- `const CommentNode = 4`: CommentNode is a comment.
+- `const DoctypeNode = 5`: DoctypeNode is a document type declaration: Data is its lower-cased name and Attr holds its public and system identifiers.
+- `type Document struct`: Document is a parsed tree: node 0 is the root, and the other nodes are reached through Child and Next.
+- `(d Document) Root() i64`: Root returns the document node.
+- `(d Document) Type(n i64) i64`: Type returns the node type of node n (one of the node type constants).
+- `(d Document) Data(n i64) str`: Data returns the name of an element, the text of a text or comment node, or the name of a doctype.
+- `(d Document) Namespace(n i64) str`: Namespace returns the namespace of an element: "" for HTML, "svg" or "math".
+- `(d Document) Attrs(n i64) []Attribute`: Attrs returns the attributes of node n.
+- `(d Document) FirstChild(n i64) i64`: FirstChild returns the first child of node n, or -1 when it has none.
+- `(d Document) NextSibling(n i64) i64`: NextSibling returns the node after n under the same parent, or -1 when n is the last.
 
 ## lasso
 

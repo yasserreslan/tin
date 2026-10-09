@@ -1,0 +1,155 @@
+package html
+
+// The node types, as Go's NodeType.
+
+// ErrorNode is the zero node type; no node has it.
+const ErrorNode = 0
+
+// TextNode is a run of text.
+const TextNode = 1
+
+// DocumentNode is the root of a parsed document.
+const DocumentNode = 2
+
+// ElementNode is an element: Data is its name and Namespace is "", "svg" or "math".
+const ElementNode = 3
+
+// CommentNode is a comment.
+const CommentNode = 4
+
+// DoctypeNode is a document type declaration: Data is its lower-cased name and Attr holds its public and system identifiers.
+const DoctypeNode = 5
+
+// scopeMarkerNode marks the start of a scope in the list of active formatting elements; it is node 0 of every tree.
+const scopeMarkerNode = 7
+
+// treeNode is one node of the tree, stored in the parser's arena: links are indexes into the arena, -1 when there is none.
+type treeNode struct {
+	typ    i64
+	data   str
+	ns     str
+	attr   []Attribute
+	parent i64
+	first  i64
+	last   i64
+	prev   i64
+	next   i64
+}
+
+// Document is a parsed tree: node 0 is the root, and the other nodes are reached through Child and Next.
+type Document struct {
+	nodes []treeNode
+}
+
+// Root returns the document node.
+fn (d Document) Root() i64 {
+	return 1
+}
+
+// Type returns the node type of node n (one of the node type constants).
+fn (d Document) Type(n i64) i64 {
+	return d.nodes[n].typ
+}
+
+// Data returns the name of an element, the text of a text or comment node, or the name of a doctype.
+fn (d Document) Data(n i64) str {
+	return d.nodes[n].data
+}
+
+// Namespace returns the namespace of an element: "" for HTML, "svg" or "math".
+fn (d Document) Namespace(n i64) str {
+	return d.nodes[n].ns
+}
+
+// Attrs returns the attributes of node n.
+fn (d Document) Attrs(n i64) []Attribute {
+	return d.nodes[n].attr
+}
+
+// FirstChild returns the first child of node n, or -1 when it has none.
+fn (d Document) FirstChild(n i64) i64 {
+	return d.nodes[n].first
+}
+
+// NextSibling returns the node after n under the same parent, or -1 when n is the last.
+fn (d Document) NextSibling(n i64) i64 {
+	return d.nodes[n].next
+}
+
+// newNode adds a node to the arena, detached, and returns its index.
+fn (p mut parser) newNode(typ i64, data str, ns str, attr []Attribute) i64 {
+	p.nodes = append(p.nodes, treeNode{typ: typ, data: data, ns: ns, attr: attr, parent: -1, first: -1, last: -1, prev: -1, next: -1})
+	return len(p.nodes) - 1
+}
+
+// appendChild makes child the last child of parent; child must be detached.
+fn (p mut parser) appendChild(parent i64, child i64) {
+	let last = p.nodes[parent].last
+	if last != -1 {
+		p.nodes[last].next = child
+	} else {
+		p.nodes[parent].first = child
+	}
+	p.nodes[parent].last = child
+	p.nodes[child].parent = parent
+	p.nodes[child].prev = last
+}
+
+// insertBefore makes child a child of parent, before oldChild, or last when oldChild is -1.
+fn (p mut parser) insertBefore(parent i64, child i64, oldChild i64) {
+	mut prev = p.nodes[parent].last
+	mut next = i64(-1)
+	if oldChild != -1 {
+		prev = p.nodes[oldChild].prev
+		next = oldChild
+	}
+	if prev != -1 {
+		p.nodes[prev].next = child
+	} else {
+		p.nodes[parent].first = child
+	}
+	if next != -1 {
+		p.nodes[next].prev = child
+	} else {
+		p.nodes[parent].last = child
+	}
+	p.nodes[child].parent = parent
+	p.nodes[child].prev = prev
+	p.nodes[child].next = next
+}
+
+// removeChild detaches child from parent.
+fn (p mut parser) removeChild(parent i64, child i64) {
+	if p.nodes[parent].first == child {
+		p.nodes[parent].first = p.nodes[child].next
+	}
+	let next = p.nodes[child].next
+	if next != -1 {
+		p.nodes[next].prev = p.nodes[child].prev
+	}
+	if p.nodes[parent].last == child {
+		p.nodes[parent].last = p.nodes[child].prev
+	}
+	let prev = p.nodes[child].prev
+	if prev != -1 {
+		p.nodes[prev].next = p.nodes[child].next
+	}
+	p.nodes[child].parent = -1
+	p.nodes[child].prev = -1
+	p.nodes[child].next = -1
+}
+
+// reparentChildren moves every child of src to the end of dst.
+fn (p mut parser) reparentChildren(dst i64, src i64) {
+	for p.nodes[src].first != -1 {
+		let child = p.nodes[src].first
+		p.removeChild(src, child)
+		p.appendChild(dst, child)
+	}
+}
+
+// cloneNode makes a detached element with the name and attributes of n, as Go's clone does: the namespace is not copied.
+fn (p mut parser) cloneNode(n i64) i64 {
+	let attr = append([]Attribute{}, p.nodes[n].attr...)
+	return p.newNode(p.nodes[n].typ, p.nodes[n].data, "", attr)
+}
