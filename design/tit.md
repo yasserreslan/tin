@@ -167,7 +167,8 @@ Large files need no fifth kind: a blob over 8 MiB keeps its id and is stored in 
   objects/ab/cdef…        loose objects (section 5)
   objects/chunks/ab/cdef… the chunks of large blobs (section 5)
   packs/<hex>.pack        packs and their indexes (section 6), named by the pack's trailing hash; adopt and
-  packs/<hex>.idx         repack write commits and tags, trees, and blobs in packs of their own
+  packs/<hex>.idx         repack write commits and tags, trees, and blobs in packs of their own (adopt merges
+                          its batches' packs of each kind into one at its end)
   refs/heads/<name>       branches; refs/tags/<name>; refs/remotes/<remote>/<name>
   packed-refs             refs packed into one file
   changes/kz/vqt…         the change index (section 8)

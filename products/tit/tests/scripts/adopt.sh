@@ -1,8 +1,9 @@
 #!/bin/sh
 # tit adopt against git itself (#789): the logs of every branch and tag equal git's commit for commit, the working
 # directory is clean for both, a second adopt takes only the new commit, a git worktree adopts, a shallow clone is
-# refused, an adopt cut by SIGTERM finishes when run again without redoing its finished packs, and two adopts write
-# byte-identical packs. Usage: adopt.sh <tit> <empty directory>
+# refused, an adopt cut by SIGTERM finishes when run again without redoing its finished packs, two adopts write
+# byte-identical packs, and an adopt in several batches ends with three packs (one of each kind, #807) and the same
+# history as one batch, while an adopt of one batch adds its three. Usage: adopt.sh <tit> <empty directory>
 set -eu
 tit=$1
 d=$2
@@ -56,6 +57,7 @@ printf 'four\n' >> a.txt && commit -am fourth
 same "a second adopt" "$("$tit" adopt | head -1 | sed 's/ from .*;/;/')" "Adopted 3 objects (1 commit or tag); 1 ref moved."
 same "a third" "$("$tit" adopt | sed 's/ in .*//')" "Nothing new"
 same "log after" "$("$tit" log --format=git-id)" "$(git log --format=%H)"
+same "packs after two adopts of one batch each" "$(ls .tit/packs | grep -c '\.pack$')" 6
 
 git worktree add -q "$d/wt" side
 cd "$d/wt"
@@ -109,3 +111,18 @@ cd "$d/big3"
 TIT_ADOPT_BATCH_MB=2 "$tit" adopt > /dev/null
 [ "$(ls "$d/big2/.tit/packs" | sort)" = "$(ls "$d/big3/.tit/packs" | sort)" ] || fail "two adopts wrote different packs"
 echo "ok two adopts (one core, all cores) write byte-identical packs"
+
+# several batches end as three packs, one of each kind (#807), with the objects and history of one batch
+packs() {
+	ls "$1/.tit/packs" | grep -c '\.pack$'
+}
+same "packs after an adopt in several batches" "$(packs "$d/big3")" 3
+same "log after an adopt in several batches" "$("$tit" log --format=git-id)" "$(git log --format=%H)"
+rm -rf "$d/big4"
+cp -R "$d/big3" "$d/big4"
+rm -rf "$d/big4/.tit"
+cd "$d/big4"
+"$tit" adopt > /dev/null
+same "packs after an adopt in one batch" "$(packs "$d/big4")" 3
+same "ids of one batch and of several" "$(cd "$d/big3" && "$tit" log --format=id)" "$("$tit" log --format=id)"
+same "diff of one batch and of several" "$(cd "$d/big3" && "$tit" diff HEAD~150 HEAD | cksum)" "$("$tit" diff HEAD~150 HEAD | cksum)"

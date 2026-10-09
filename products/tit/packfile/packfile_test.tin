@@ -495,3 +495,84 @@ fn TestKeep(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// Merge joins packs into one (#807): every object reads back from it with its content, an object two packs hold is
+// copied once, the deltas stay deltas, the pack verifies, the same packs merge into the same pack, and a damaged pack
+// is refused with nothing left behind.
+fn TestMerge(t mut crucible.T) {
+	let d = fresh("merge")
+	mut s = store.NewMem()
+	mut all = []object.Id{}
+	mut text = ""
+	for i in 0..70 {
+		text = text + "line {i} of a file that grows a line at a time, so each version deltas well against the last\n"
+		let id = s.PutRaw(object.Kind.Blob, text) catch _ {
+			object.NoId
+		}
+		all = append(all, id)
+	}
+	let tree = s.Put(object.Object.Tree([]object.Entry{object.Entry{Mode: object.Mode.File, Name: "f", Id: all[0]}})) catch _ {
+		object.NoId
+	}
+	mut paths = []str{}
+	mut deltas = 0
+	for part in [][]object.Id{all[0:40], all[30:70], []object.Id{tree}} {
+		mut p = Write(mut s, part, d) catch e {
+			t.Error("write: {e}")
+			return
+		}
+		deltas += p.Deltas()
+		paths = append(paths, p.Path)
+	}
+	mut m = Merge(paths, d) catch e {
+		t.Error("merge: {e}")
+		return
+	}
+	crucible.Equal(mut t, "count", m.Count, 71)
+	t.True("the deltas stay deltas", m.Deltas() > 0 && m.Deltas() <= deltas)
+	for id in all {
+		let (_, want) = s.GetRaw(id) catch _ {
+			return
+		}
+		let (_, have) = m.GetRaw(id) catch e {
+			t.Error("{id.Hex()}: {e}")
+			return
+		}
+		t.True("content", have == want)
+	}
+	let (tk, _, terr) = m.GetRaw(tree)
+	t.True("the tree", terr == nil && tk == object.Kind.Tree)
+	t.NoFault("verify", m.Verify())
+	t.True("the packs merged are left", quarry.Exists(paths[0]) && quarry.Exists(paths[1]) && quarry.Exists(paths[2]))
+	let again = Merge(paths, d) catch e {
+		t.Error("merge again: {e}")
+		return
+	}
+	crucible.Equal(mut t, "the same packs make the same pack", again.Path, m.Path)
+	let raw = quarry.ReadFile(paths[1]) catch _ {
+		return
+	}
+	mut b = []u8(raw)
+	b[len(b) / 2] = b[len(b) / 2] ^ 0x41
+	quarry.WriteFile(paths[1], str(b)) catch _ {
+		return
+	}
+	let before = quarry.ReadDir(d) catch _ {
+		return
+	}
+	let other = fresh("merge-other")
+	let (_, bad) = Merge(paths, other)
+	t.HasFault("a damaged pack", bad)
+	let left = quarry.ReadDir(other) catch _ {
+		[]str{}
+	}
+	crucible.Equal(mut t, "nothing left behind", len(left), 0)
+	let after = quarry.ReadDir(d) catch _ {
+		return
+	}
+	crucible.Equal(mut t, "the packs as they were", len(after), len(before))
+	quarry.RemoveAll(d) catch _ {
+	}
+	quarry.RemoveAll(other) catch _ {
+	}
+}

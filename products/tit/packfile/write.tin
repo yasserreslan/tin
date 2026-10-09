@@ -120,7 +120,13 @@ fn Write[S store.ObjectStore](s mut S, ids []object.Id, dir str) !Pack {
 // finish writes a pack (its bytes, trailing hash included) and its index: the ids sorted, with their offsets and CRCs;
 // both go to temporary files, synced, then renamed to the pack's hash.
 fn finish(dir str, tmp str, pack str, ids []object.Id, offs []i64, crcs []u32) !Pack {
-	let sum = pack[len(pack) - 32:]
+	try writeSynced(tmp + ".pack", pack)
+	return try install(dir, tmp, pack[len(pack) - 32:], ids, offs, crcs)
+}
+
+// install writes the index of the pack written and synced at tmp.pack, whose trailing hash is sum, and renames both
+// to the pack's hash (Merge writes its pack a piece at a time, then installs it as finish does).
+fn install(dir str, tmp str, sum str, ids []object.Id, offs []i64, crcs []u32) !Pack {
 	let hex = seal.Hex([]u8(sum))
 	mut order = make([]i64, 0, len(ids))
 	for i in 0..len(ids) {
@@ -161,7 +167,6 @@ fn finish(dir str, tmp str, pack str, ids []object.Id, offs []i64, crcs []u32) !
 	}
 	appendStr(mut idx, sum)
 	appendStr(mut idx, str(seal.Sha256(str(idx))))
-	try writeSynced(tmp + ".pack", pack)
 	try writeSynced(tmp + ".idx", str(idx))
 	let final = dir + "/" + hex
 	crash.Point()
