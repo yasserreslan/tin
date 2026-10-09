@@ -1,0 +1,102 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "twine"
+
+// Compare gob with Go's encoding/gob in both directions.
+//
+// Each seed of a corpus (a kind of value, and a count of values from a generator both sides run in the same order) is
+// encoded by bench/ref/gob (Go, one process per seed, because Go's type ids are per process) and by
+// tools/ci/fixtures/gob.tin (Tin): the bytes must be the same. Then every stream both sides wrote is decoded by both,
+// and each value they print must be the same: Tin reads Go's bytes and Go reads Tin's.
+
+const SEEDS = 330
+
+// run feeds the lines to exe and returns its output lines.
+fn run(exe str, lines []str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, twine.Join(lines, "\n") + "\n", []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+// compare fails with the first differing lines when the two sides disagree, and returns the number of lines.
+fn compare(what str, want []str, got []str) i64 {
+	ci.Check(len(got) == len(want), what + ": " + mint.Itoa(i64(len(got))) + " lines against Go's " + mint.Itoa(i64(len(want))))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("line " + mint.Itoa(i64(i+1)) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, what + ": " + mint.Itoa(i64(bad)) + " lines differ")
+	return i64(len(want))
+}
+
+// trimmed is line without its trailing newline.
+fn trimmed(line str) str {
+	return twine.TrimSuffix(line, "\n")
+}
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/gob")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "gob-")
+	let tin = ci.Join(work, "gob-tin")
+	ci.BuildTin("tools/ci/fixtures/gob.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "gob-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/gob"}, ci.Root(), 300), "go build gob")
+
+	// Encode: Go encodes each seed in its own process, so its type ids are those of a fresh encoder, as Tin's are.
+	mut seedLines = []str{}
+	mut goStreams = []str{}
+	for seed in 0..SEEDS {
+		seedLines = append(seedLines, "E " + mint.Itoa(i64(seed)))
+		let o = ci.Exec([]str{goexe, "encode", mint.Itoa(i64(seed))}, ci.Root(), 60)
+		ci.Must(o, "gob encode")
+		goStreams = append(goStreams, trimmed(ci.Lines(o.Stdout)[0]))
+	}
+	let tinOut = run(tin, seedLines)
+	mut tinStreams = []str{}
+	for line in tinOut {
+		tinStreams = append(tinStreams, twine.TrimPrefix(trimmed(line), "E "))
+	}
+	let encoded = compare("gob encode", goStreams, tinStreams)
+
+	// Decode: every stream from either side, read by both, one line per value.
+	mut decodeGo = []str{}
+	mut decodeTin = []str{}
+	for seed in 0..SEEDS {
+		let s = mint.Itoa(i64(seed))
+		decodeGo = append(decodeGo, s + " " + goStreams[seed])
+		decodeTin = append(decodeTin, "D " + s + " " + goStreams[seed])
+		decodeGo = append(decodeGo, s + " " + tinStreams[seed])
+		decodeTin = append(decodeTin, "D " + s + " " + tinStreams[seed])
+	}
+	// Damaged streams: each Go stream cut short at a third, at half and one byte short, decoded by both sides.
+	for seed in 0..SEEDS {
+		let s = mint.Itoa(i64(seed))
+		let h = goStreams[seed]
+		let cuts = []i64{len(h) / 3 / 2 * 2, len(h) / 2 / 2 * 2, len(h) - 2}
+		for cut in cuts {
+			if cut < 0 {
+				continue
+			}
+			decodeGo = append(decodeGo, s + " " + h[0:cut])
+			decodeTin = append(decodeTin, "D " + s + " " + h[0:cut])
+		}
+	}
+	let decodeWant = run(goexe, decodeGo)
+	let decodeGot = run(tin, decodeTin)
+	let values = compare("gob decode", decodeWant, decodeGot)
+
+	ci.Remove(work)
+	ci.Pass("gob: " + mint.Itoa(i64(encoded)) + " seeds encode to the same bytes as Go, and " + mint.Itoa(values) + " decoded lines match Go's encoding/gob in both directions")
+}

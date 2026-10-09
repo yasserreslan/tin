@@ -1,0 +1,967 @@
+package gob
+
+// Package gob writes and reads Go's gob streams (encoding/gob): the messages of type descriptions and values,
+// the integers and floats of the wire, and struct fields sent by number with their zero values left out. Tin has no
+// reflection, so a type is declared in a Schema (builtin types, slices, maps and structs made with its methods) and a
+// value is a Value built for that type; an Encoder sends each type once and a Decoder reads the types a stream sends
+// and matches its values to the local schema by field name, as Go does.
+//
+//	let s = gob.NewSchema()
+//	let inner = s.Struct("Inner")
+//	s.AddField(inner, "A", gob.Int)
+//	s.AddField(inner, "B", gob.String)
+//	let e = gob.NewEncoder(s)
+//	let msg = try e.Encode(inner, gob.StructV([]gob.Value{gob.IntV(1), gob.StringV("x")}))
+//	let d = gob.NewDecoder(msg)
+//	let v = try d.Decode(s, inner)
+//
+// Not supported: GobEncoder, BinaryMarshaler and TextMarshaler hooks, interfaces, arrays, pointers, complex numbers
+// and the registration of types by name.
+
+import "bits"
+import "gauge"
+import "mint"
+
+// KindBool is the kind of bool values.
+const KindBool = 1
+// KindInt is the kind of int values (every signed integer width).
+const KindInt = 2
+// KindUint is the kind of uint values.
+const KindUint = 3
+// KindFloat is the kind of float64 values.
+const KindFloat = 4
+// KindString is the kind of string values.
+const KindString = 5
+// KindBytes is the kind of []byte values.
+const KindBytes = 6
+// KindSlice is the kind of slices.
+const KindSlice = 7
+// KindMap is the kind of maps.
+const KindMap = 8
+// KindStruct is the kind of structs.
+const KindStruct = 9
+
+// Bool is the handle of the builtin bool type.
+const Bool = 0
+// Int is the handle of the builtin int type.
+const Int = 1
+// Uint is the handle of the builtin uint type.
+const Uint = 2
+// Float is the handle of the builtin float64 type.
+const Float = 3
+// String is the handle of the builtin string type.
+const String = 4
+// Bytes is the handle of the builtin []byte type.
+const Bytes = 5
+
+// firstUserID is the lowest wire type id a stream gives a user type (Go's firstUserId).
+const firstUserID = 64
+
+// Field is a struct field of a Schema: its name and the type handle of its values.
+type Field struct {
+	Name str
+	Type i64
+}
+
+// typeDef is a type of a Schema: its kind, its name (structs), its element type (slices and maps), its key type (maps)
+// and its fields (structs).
+type typeDef struct {
+	kind   i64
+	name   str
+	elem   i64
+	key    i64
+	fields []Field
+}
+
+// Schema is the set of types a stream is made of.
+type Schema struct {
+	defs []typeDef
+}
+
+// NewSchema returns a schema holding the builtin types Bool, Int, Uint, Float, String and Bytes.
+fn NewSchema() Schema {
+	mut defs = []typeDef{}
+	defs = append(defs, typeDef{kind: KindBool})
+	defs = append(defs, typeDef{kind: KindInt})
+	defs = append(defs, typeDef{kind: KindUint})
+	defs = append(defs, typeDef{kind: KindFloat})
+	defs = append(defs, typeDef{kind: KindString})
+	defs = append(defs, typeDef{kind: KindBytes})
+	return Schema{defs: defs}
+}
+
+// Slice declares the type of slices of elem and returns its handle.
+fn (s mut Schema) Slice(elem i64) i64 {
+	s.defs = append(s.defs, typeDef{kind: KindSlice, elem: elem})
+	return i64(len(s.defs) - 1)
+}
+
+// Map declares the type of maps from key to elem and returns its handle.
+fn (s mut Schema) Map(key i64, elem i64) i64 {
+	s.defs = append(s.defs, typeDef{kind: KindMap, key: key, elem: elem})
+	return i64(len(s.defs) - 1)
+}
+
+// Struct declares a struct type named name, with no fields yet, and returns its handle; AddField adds the fields.
+fn (s mut Schema) Struct(name str) i64 {
+	s.defs = append(s.defs, typeDef{kind: KindStruct, name: name})
+	return i64(len(s.defs) - 1)
+}
+
+// AddField appends the field name of type typ to the struct type t; a field is sent in the order added.
+fn (s mut Schema) AddField(t i64, name str, typ i64) ! {
+	if t < 0 || t >= i64(len(s.defs)) || s.defs[t].kind != KindStruct {
+		fail "gob: AddField of a type that is not a struct"
+	}
+	mut d = s.defs[t]
+	d.fields = append(d.fields, Field{Name: name, Type: typ})
+	s.defs[t] = d
+	return
+}
+
+// Kind returns the kind of the type t.
+fn (s Schema) Kind(t i64) i64 {
+	return s.defs[t].kind
+}
+
+// Value is a value of a Schema type: its number (I, U or F), its flag (B), its text or bytes (S), and the elements,
+// fields or map values it holds (Items) and the map keys (Keys).
+type Value struct {
+	I     i64
+	U     u64
+	F     f64
+	B     bool
+	S     str
+	Items []Value
+	Keys  []Value
+}
+
+// IntV is an Int value.
+fn IntV(v i64) Value {
+	return Value{I: v}
+}
+
+// UintV is a Uint value.
+fn UintV(v u64) Value {
+	return Value{U: v}
+}
+
+// FloatV is a Float value.
+fn FloatV(v f64) Value {
+	return Value{F: v}
+}
+
+// BoolV is a Bool value.
+fn BoolV(v bool) Value {
+	return Value{B: v}
+}
+
+// StringV is a String value.
+fn StringV(v str) Value {
+	return Value{S: v}
+}
+
+// BytesV is a Bytes value.
+fn BytesV(v []u8) Value {
+	return Value{S: str(v)}
+}
+
+// SliceV is a slice value holding items.
+fn SliceV(items []Value) Value {
+	return Value{Items: items}
+}
+
+// MapV is a map value holding keys and their values, in the same order.
+fn MapV(keys []Value, vals []Value) Value {
+	return Value{Keys: keys, Items: vals}
+}
+
+// StructV is a struct value holding its fields in declaration order.
+fn StructV(fields []Value) Value {
+	return Value{Items: fields}
+}
+
+// zeroValue is the zero value of the type t: zero numbers, empty strings and slices, and a struct of zero fields.
+fn zeroValue(s Schema, t i64) Value {
+	if s.defs[t].kind != KindStruct {
+		return Value{}
+	}
+	mut items = []Value{}
+	for f in s.defs[t].fields {
+		items = append(items, zeroValue(s, f.Type))
+	}
+	return Value{Items: items}
+}
+
+// appendUint appends x in the gob unsigned form: one byte below 128, else the byte count (negated) and the big-endian bytes.
+fn appendUint(b []u8, x u64) []u8 {
+	mut out = b
+	if x <= 0x7f {
+		out = append(out, u8(x))
+		return out
+	}
+	mut n = i64(0)
+	mut v = x
+	for v > 0 {
+		n += 1
+		v = v >> 8
+	}
+	out = append(out, u8(256-n))
+	for i in 0..n {
+		out = append(out, u8(x>>u64(8*(n-1-i))))
+	}
+	return out
+}
+
+// appendInt appends i in the gob signed form: the magnitude shifted left, with the low bit set for negatives.
+fn appendInt(b []u8, i i64) []u8 {
+	mut x = u64(i) << 1
+	if i < 0 {
+		x = u64(0-(i+1))<<1 | 1
+	}
+	return appendUint(b, x)
+}
+
+// appendString appends the length and the bytes of s.
+fn appendString(b []u8, s str) []u8 {
+	mut out = appendUint(b, u64(len(s)))
+	for i in 0..len(s) {
+		out = append(out, s[i])
+	}
+	return out
+}
+
+// Encoder writes values of a Schema as a gob stream. It keeps the types it has described, so a type is sent once.
+type Encoder struct {
+	schema Schema
+	ids    []i64
+	names  []str
+	sent   []bool
+	next   i64
+	buf    []u8
+}
+
+// NewEncoder returns an encoder for the types of s.
+fn NewEncoder(s Schema) Encoder {
+	mut ids = []i64{}
+	mut names = []str{}
+	mut sent = []bool{}
+	for i in 0..len(s.defs) {
+		ids = append(ids, 0)
+		names = append(names, "")
+		sent = append(sent, false)
+	}
+	ids[Bool] = 1
+	ids[Int] = 2
+	ids[Uint] = 3
+	ids[Float] = 4
+	ids[String] = 6
+	ids[Bytes] = 5
+	return Encoder{schema: s, ids: ids, names: names, sent: sent, next: firstUserID}
+}
+
+// Encode returns the messages that send a value of type t: the descriptions of the types not sent yet, then the value.
+fn (e mut Encoder) Encode(t i64, v Value) ![]u8 {
+	e.buf = []u8{}
+	e.create(t, false)
+	e.sendType(t)
+	mut body = appendInt([]u8{}, e.ids[t])
+	if e.schema.Kind(t) == KindStruct {
+		body = try e.encodeStruct(body, t, v)
+	} else {
+		body = appendUint(body, 0)
+		body = try e.encodeValue(body, t, v)
+	}
+	e.message(body)
+	return e.buf
+}
+
+// take returns the next wire type id.
+fn (e mut Encoder) take() i64 {
+	let id = e.next
+	e.next += 1
+	return id
+}
+
+// create gives the type t its wire id, in the order Go's encoder does: a struct before its fields, a slice or map after
+// its element types, and a slice or map named (as Go names it) only when it is a struct field.
+fn (e mut Encoder) create(t i64, field bool) {
+	if e.ids[t] != 0 {
+		return
+	}
+	let d = e.schema.defs[t]
+	if d.kind == KindStruct {
+		e.ids[t] = e.take()
+		for f in d.fields {
+			e.create(f.Type, true)
+		}
+		return
+	}
+	if d.kind == KindMap {
+		e.create(d.key, false)
+	}
+	e.create(d.elem, false)
+	e.ids[t] = e.take()
+	if field {
+		e.names[t] = e.goName(t)
+	}
+}
+
+// goName is the name Go gives an unnamed type: its Go spelling, with the package main qualifier on struct types.
+fn (e Encoder) goName(t i64) str {
+	let d = e.schema.defs[t]
+	if d.kind == KindBool {
+		return "bool"
+	}
+	if d.kind == KindInt {
+		return "int"
+	}
+	if d.kind == KindUint {
+		return "uint"
+	}
+	if d.kind == KindFloat {
+		return "float64"
+	}
+	if d.kind == KindString {
+		return "string"
+	}
+	if d.kind == KindBytes {
+		return "[]uint8"
+	}
+	if d.kind == KindStruct {
+		return "main." + d.name
+	}
+	if d.kind == KindMap {
+		return "map[" + e.goName(d.key) + "]" + e.goName(d.elem)
+	}
+	return "[]" + e.goName(d.elem)
+}
+
+// message appends a message: its length and body.
+fn (e mut Encoder) message(body []u8) {
+	e.buf = appendUint(e.buf, u64(len(body)))
+	for c in body {
+		e.buf = append(e.buf, c)
+	}
+}
+
+// sendType appends the description of t, after those of the types it is made of (as Go's sendType: the type first,
+// then its parts). Builtin types need none.
+fn (e mut Encoder) sendType(t i64) {
+	if t < 6 || e.sent[t] {
+		return
+	}
+	e.sent[t] = true
+	let d = e.schema.defs[t]
+	mut body = appendInt([]u8{}, 0-e.ids[t])
+	body = e.wireType(body, t)
+	e.message(body)
+	if d.kind == KindStruct {
+		for f in d.fields {
+			e.sendType(f.Type)
+		}
+	} else if d.kind == KindMap {
+		e.sendType(d.key)
+		e.sendType(d.elem)
+	} else {
+		e.sendType(d.elem)
+	}
+}
+
+// wireType appends the wireType of t: the one of its kinds that is set, with its name and id.
+fn (e Encoder) wireType(b []u8, t i64) []u8 {
+	let d = e.schema.defs[t]
+	mut out = b
+	if d.kind == KindStruct {
+		out = appendUint(out, 3)
+		out = appendUint(out, 1)
+		out = e.commonType(out, d.name, e.ids[t])
+		out = appendUint(out, 1)
+		out = appendUint(out, u64(len(d.fields)))
+		for f in d.fields {
+			out = appendUint(out, 1)
+			out = appendString(out, f.Name)
+			out = appendUint(out, 1)
+			out = appendInt(out, e.ids[f.Type])
+			out = appendUint(out, 0)
+		}
+		out = appendUint(out, 0)
+		return appendUint(out, 0)
+	}
+	if d.kind == KindMap {
+		out = appendUint(out, 4)
+		out = appendUint(out, 1)
+		out = e.commonType(out, e.names[t], e.ids[t])
+		out = appendUint(out, 1)
+		out = appendInt(out, e.ids[d.key])
+		out = appendUint(out, 1)
+		out = appendInt(out, e.ids[d.elem])
+		out = appendUint(out, 0)
+		return appendUint(out, 0)
+	}
+	out = appendUint(out, 2)
+	out = appendUint(out, 1)
+	out = e.commonType(out, e.names[t], e.ids[t])
+	out = appendUint(out, 1)
+	out = appendInt(out, e.ids[d.elem])
+	out = appendUint(out, 0)
+	return appendUint(out, 0)
+}
+
+// commonType appends a CommonType: the name when there is one, then the id.
+fn (e Encoder) commonType(b []u8, name str, id i64) []u8 {
+	mut out = b
+	mut delta = u64(2)
+	if name != "" {
+		out = appendUint(out, 1)
+		out = appendString(out, name)
+		delta = 1
+	}
+	out = appendUint(out, delta)
+	out = appendInt(out, id)
+	return appendUint(out, 0)
+}
+
+// sendsField reports whether a struct field holding v is sent: a struct always, any other kind when it is not zero.
+fn (e Encoder) sendsField(t i64, v Value) bool {
+	let k = e.schema.Kind(t)
+	if k == KindStruct {
+		return true
+	}
+	if k == KindBool {
+		return v.B
+	}
+	if k == KindInt {
+		return v.I != 0
+	}
+	if k == KindUint {
+		return v.U != 0
+	}
+	if k == KindFloat {
+		return v.F != 0
+	}
+	if k == KindString || k == KindBytes {
+		return len(v.S) > 0
+	}
+	return len(v.Keys) > 0 || len(v.Items) > 0
+}
+
+// encodeStruct appends the fields of a struct value: each sent field by its number delta, then the terminator 0.
+fn (e Encoder) encodeStruct(b []u8, t i64, v Value) ![]u8 {
+	let d = e.schema.defs[t]
+	if len(v.Items) != len(d.fields) {
+		fail "gob: struct value has " + mint.Itoa(i64(len(v.Items))) + " fields, want " + mint.Itoa(i64(len(d.fields)))
+	}
+	mut out = b
+	mut fieldnum = i64(-1)
+	for i in 0..len(d.fields) {
+		let fv = v.Items[i]
+		if !e.sendsField(d.fields[i].Type, fv) {
+			continue
+		}
+		out = appendUint(out, u64(i64(i)-fieldnum))
+		fieldnum = i64(i)
+		out = try e.encodeValue(out, d.fields[i].Type, fv)
+	}
+	return appendUint(out, 0)
+}
+
+// encodeValue appends a value of type t, zero or not (a slice or map element, or a singleton).
+fn (e Encoder) encodeValue(b []u8, t i64, v Value) ![]u8 {
+	let d = e.schema.defs[t]
+	mut out = b
+	if d.kind == KindBool {
+		if v.B {
+			return appendUint(out, 1)
+		}
+		return appendUint(out, 0)
+	}
+	if d.kind == KindInt {
+		return appendInt(out, v.I)
+	}
+	if d.kind == KindUint {
+		return appendUint(out, v.U)
+	}
+	if d.kind == KindFloat {
+		return appendUint(out, bits.ReverseBytes64(gauge.F64bits(v.F)))
+	}
+	if d.kind == KindString || d.kind == KindBytes {
+		return appendString(out, v.S)
+	}
+	if d.kind == KindStruct {
+		return try e.encodeStruct(out, t, v)
+	}
+	if d.kind == KindMap {
+		out = appendUint(out, u64(len(v.Keys)))
+		for i in 0..len(v.Keys) {
+			out = try e.encodeValue(out, d.key, v.Keys[i])
+			out = try e.encodeValue(out, d.elem, v.Items[i])
+		}
+		return out
+	}
+	out = appendUint(out, u64(len(v.Items)))
+	for item in v.Items {
+		out = try e.encodeValue(out, d.elem, item)
+	}
+	return out
+}
+
+// reader reads the bytes of one message from at.
+type reader struct {
+	b  []u8
+	at i64
+}
+
+// readUint reads an unsigned integer in the gob form.
+fn (r mut reader) readUint() !u64 {
+	if r.at >= i64(len(r.b)) {
+		fail "unexpected EOF"
+	}
+	let c = r.b[r.at]
+	r.at += 1
+	if c <= 0x7f {
+		return u64(c)
+	}
+	let n = 256 - i64(c)
+	if n > 8 {
+		fail "gob: encoded unsigned integer out of range"
+	}
+	if r.at+n > i64(len(r.b)) {
+		fail "unexpected EOF"
+	}
+	mut v = u64(0)
+	for i in 0..n {
+		v = v<<8 | u64(r.b[r.at+i])
+	}
+	r.at += n
+	return v
+}
+
+// readInt reads a signed integer in the gob form.
+fn (r mut reader) readInt() !i64 {
+	let u = try r.readUint()
+	if u&1 == 1 {
+		let m = i64(u >> 1)
+		return -m - 1
+	}
+	return i64(u >> 1)
+}
+
+// readStr reads a length and that many bytes.
+fn (r mut reader) readStr() !str {
+	let n = try r.readUint()
+	if n > u64(len(r.b))-u64(r.at) {
+		fail "gob: invalid string length " + mint.Itoa(i64(n)) + ": exceeds input size " + mint.Itoa(i64(len(r.b))-r.at)
+	}
+	let s = str(r.b[r.at : r.at+i64(n)])
+	r.at += i64(n)
+	return s
+}
+
+// readCount reads the element count of a slice or map: it cannot exceed the bytes left, as each element takes one.
+fn (r mut reader) readCount() !i64 {
+	let n = try r.readUint()
+	if n > u64(len(r.b))-u64(r.at) {
+		fail "gob: decoding array or slice: length exceeds input size (" + mint.Itoa(i64(n)) + " elements)"
+	}
+	return i64(n)
+}
+
+// remoteType is a type the stream described: its kind, its name (structs), its element and key type ids, and its fields.
+type remoteType struct {
+	kind   i64
+	name   str
+	elem   i64
+	key    i64
+	fields []remoteField
+}
+
+// remoteField is a field the stream described: its name and its type id.
+type remoteField struct {
+	name str
+	typ  i64
+}
+
+// Decoder reads the messages of a gob stream.
+type Decoder struct {
+	buf    []u8
+	at     i64
+	remote []remoteType
+}
+
+// NewDecoder returns a decoder of the stream b.
+fn NewDecoder(b []u8) Decoder {
+	return Decoder{buf: b}
+}
+
+// typeOf returns the type with wire id id: a builtin one, or one the stream described.
+fn (d Decoder) typeOf(id i64) !remoteType {
+	if id == 1 {
+		return remoteType{kind: KindBool}
+	}
+	if id == 2 {
+		return remoteType{kind: KindInt}
+	}
+	if id == 3 {
+		return remoteType{kind: KindUint}
+	}
+	if id == 4 {
+		return remoteType{kind: KindFloat}
+	}
+	if id == 5 {
+		return remoteType{kind: KindBytes}
+	}
+	if id == 6 {
+		return remoteType{kind: KindString}
+	}
+	let k = id - firstUserID
+	if k < 0 || k >= i64(len(d.remote)) || d.remote[k].kind == 0 {
+		fail "gob: unknown type id or corrupted data"
+	}
+	return d.remote[k]
+}
+
+// Decode reads the next value of the stream as a value of the type t of s, reading the type descriptions before it.
+fn (d mut Decoder) Decode(s Schema, t i64) !Value {
+	let start = d.at
+	for {
+		if d.at >= i64(len(d.buf)) {
+			if d.at == start {
+				fail "EOF"
+			}
+			fail "unexpected EOF"
+		}
+		mut outer = reader{b: d.buf, at: d.at}
+		let n = try outer.readUint()
+		if n > u64(len(d.buf))-u64(outer.at) {
+			fail "unexpected EOF"
+		}
+		let end = outer.at + i64(n)
+		d.at = end
+		mut r = reader{b: d.buf[outer.at:end], at: 0}
+		let id = try r.readInt()
+		if id < 0 {
+			try d.define(-id, mut r)
+			continue
+		}
+		if s.Kind(t) != KindStruct {
+			let delta = try r.readUint()
+			if delta != 0 {
+				fail "gob: decode: corrupted data: non-zero delta for singleton"
+			}
+		}
+		return try d.value(mut r, s, t, id)
+	}
+	return Value{}
+}
+
+// define reads the wireType of the description with id id (given without its sign) and records the type.
+fn (d mut Decoder) define(id i64, r mut reader) ! {
+	mut rt = remoteType{}
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		fieldnum += i64(delta)
+		if fieldnum == 1 {
+			rt = try readSliceType(mut r)
+			rt.kind = KindSlice
+		} else if fieldnum == 2 {
+			rt = try readStructType(mut r)
+		} else if fieldnum == 3 {
+			rt = try readMapType(mut r)
+		} else {
+			fail "gob: unsupported wire type"
+		}
+	}
+	let k = id - firstUserID
+	if k < 0 {
+		fail "gob: unknown type id or corrupted data"
+	}
+	for i64(len(d.remote)) <= k {
+		d.remote = append(d.remote, remoteType{})
+	}
+	d.remote[k] = rt
+	return
+}
+
+// readCommonName reads a CommonType and returns its name.
+fn readCommonName(r mut reader) !str {
+	mut name = ""
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		fieldnum += i64(delta)
+		if fieldnum == 0 {
+			name = try r.readStr()
+		} else if fieldnum == 1 {
+			let _id = try r.readInt()
+		} else {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+	}
+	return name
+}
+
+// readSliceType reads a sliceType: its name and its element id.
+fn readSliceType(r mut reader) !remoteType {
+	mut out = remoteType{kind: KindSlice}
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		fieldnum += i64(delta)
+		if fieldnum == 0 {
+			out.name = try readCommonName(mut r)
+		} else if fieldnum == 1 {
+			out.elem = try r.readInt()
+		} else {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+	}
+	return out
+}
+
+// readMapType reads a mapType: its name, its key id and its element id.
+fn readMapType(r mut reader) !remoteType {
+	mut out = remoteType{kind: KindMap}
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		fieldnum += i64(delta)
+		if fieldnum == 0 {
+			out.name = try readCommonName(mut r)
+		} else if fieldnum == 1 {
+			out.key = try r.readInt()
+		} else if fieldnum == 2 {
+			out.elem = try r.readInt()
+		} else {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+	}
+	return out
+}
+
+// readStructType reads a structType: its name and its fields, in the order sent.
+fn readStructType(r mut reader) !remoteType {
+	mut out = remoteType{kind: KindStruct}
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		fieldnum += i64(delta)
+		if fieldnum == 0 {
+			out.name = try readCommonName(mut r)
+		} else if fieldnum == 1 {
+			let n = try r.readCount()
+			for i in 0..n {
+				let f = try readFieldType(mut r)
+				out.fields = append(out.fields, f)
+			}
+		} else {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+	}
+	return out
+}
+
+// readFieldType reads a fieldType: its name and its type id.
+fn readFieldType(r mut reader) !remoteField {
+	mut out = remoteField{}
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		fieldnum += i64(delta)
+		if fieldnum == 0 {
+			out.name = try r.readStr()
+		} else if fieldnum == 1 {
+			out.typ = try r.readInt()
+		} else {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+	}
+	return out
+}
+
+// kindName is the Go spelling of a builtin kind, or the kind's word for a composite one.
+fn kindName(kind i64) str {
+	if kind == KindBool {
+		return "bool"
+	}
+	if kind == KindInt {
+		return "int"
+	}
+	if kind == KindUint {
+		return "uint"
+	}
+	if kind == KindFloat {
+		return "float64"
+	}
+	if kind == KindString {
+		return "string"
+	}
+	if kind == KindBytes {
+		return "[]uint8"
+	}
+	if kind == KindSlice {
+		return "slice"
+	}
+	if kind == KindMap {
+		return "map"
+	}
+	return "struct"
+}
+
+// Fields returns the fields of the struct type t, in declaration order.
+fn (s Schema) Fields(t i64) []Field {
+	return s.defs[t].fields
+}
+
+// localIndex returns the index of the field named name in the struct type t, or -1.
+fn localIndex(s Schema, t i64, name str) i64 {
+	let fields = s.defs[t].fields
+	for i in 0..len(fields) {
+		if fields[i].Name == name {
+			return i64(i)
+		}
+	}
+	return -1
+}
+
+// value reads a value of the remote type id into a value of the local type t of s.
+fn (d Decoder) value(r mut reader, s Schema, t i64, id i64) !Value {
+	let rt = try d.typeOf(id)
+	let kind = s.Kind(t)
+	if rt.kind != kind {
+		fail "gob: decoding into local type " + kindName(kind) + ", received remote type " + kindName(rt.kind)
+	}
+	if kind == KindBool {
+		let u = try r.readUint()
+		return BoolV(u != 0)
+	}
+	if kind == KindInt {
+		let i = try r.readInt()
+		return IntV(i)
+	}
+	if kind == KindUint {
+		let u = try r.readUint()
+		return UintV(u)
+	}
+	if kind == KindFloat {
+		let u = try r.readUint()
+		return FloatV(gauge.F64frombits(bits.ReverseBytes64(u)))
+	}
+	if kind == KindString || kind == KindBytes {
+		let text = try r.readStr()
+		return Value{S: text}
+	}
+	if kind == KindSlice {
+		let n = try r.readCount()
+		mut items = []Value{}
+		for i in 0..n {
+			let item = try d.value(mut r, s, s.defs[t].elem, rt.elem)
+			items = append(items, item)
+		}
+		return SliceV(items)
+	}
+	if kind == KindMap {
+		let n = try r.readCount()
+		mut keys = []Value{}
+		mut vals = []Value{}
+		for i in 0..n {
+			let k = try d.value(mut r, s, s.defs[t].key, rt.key)
+			keys = append(keys, k)
+			let v = try d.value(mut r, s, s.defs[t].elem, rt.elem)
+			vals = append(vals, v)
+		}
+		return MapV(keys, vals)
+	}
+	return try d.structValue(mut r, s, t, rt)
+}
+
+// structValue reads the fields of a struct the stream sent: a field the local type has is stored by name, any other is
+// skipped, and a local field the stream did not send keeps its zero value.
+fn (d Decoder) structValue(r mut reader, s Schema, t i64, rt remoteType) !Value {
+	let local = s.defs[t]
+	mut vals = []Value{}
+	for f in local.fields {
+		vals = append(vals, zeroValue(s, f.Type))
+	}
+	mut fieldnum = i64(-1)
+	for {
+		let delta = try r.readUint()
+		if delta == 0 {
+			break
+		}
+		if delta > u64(len(rt.fields)) {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+		fieldnum += i64(delta)
+		if fieldnum >= i64(len(rt.fields)) {
+			fail "gob: bad data: field numbers out of bounds"
+		}
+		let rf = rt.fields[fieldnum]
+		let j = localIndex(s, t, rf.name)
+		if j < 0 {
+			try d.skip(mut r, rf.typ)
+		} else {
+			vals[j] = try d.value(mut r, s, local.fields[j].Type, rf.typ)
+		}
+	}
+	return StructV(vals)
+}
+
+// skip reads past a value of the remote type id that the local type has no field for.
+fn (d Decoder) skip(r mut reader, id i64) ! {
+	let rt = try d.typeOf(id)
+	if rt.kind == KindInt {
+		let _i = try r.readInt()
+	} else if rt.kind == KindString || rt.kind == KindBytes {
+		let _s = try r.readStr()
+	} else if rt.kind == KindSlice {
+		let n = try r.readCount()
+		for i in 0..n {
+			try d.skip(mut r, rt.elem)
+		}
+	} else if rt.kind == KindMap {
+		let n = try r.readCount()
+		for i in 0..n {
+			try d.skip(mut r, rt.key)
+			try d.skip(mut r, rt.elem)
+		}
+	} else if rt.kind == KindStruct {
+		mut fieldnum = i64(-1)
+		for {
+			let delta = try r.readUint()
+			if delta == 0 {
+				break
+			}
+			if delta > u64(len(rt.fields)) {
+				fail "gob: bad data: field numbers out of bounds"
+			}
+			fieldnum += i64(delta)
+			if fieldnum >= i64(len(rt.fields)) {
+				fail "gob: bad data: field numbers out of bounds"
+			}
+			try d.skip(mut r, rt.fields[fieldnum].typ)
+		}
+	} else {
+		let _u = try r.readUint()
+	}
+	return
+}

@@ -76,6 +76,8 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [html](#html) | HTML tokenizer and escaping (html, golang.org/x/net/html) |
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
+| [asn1](#asn1) | ASN.1 DER: tags, lengths, object identifiers, bit strings and times (encoding/asn1) |
+| [gob](#gob) | Go's gob streams: type descriptions, values and the encoder and decoder over a schema (encoding/gob) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
 | [mail](#mail) | RFC 5322 message and address parsing (net/mail) |
 | [textproto](#textproto) | line-oriented and dot-framed protocol I/O (net/textproto) |
@@ -2941,6 +2943,116 @@ Package html tokenizes, parses and escapes HTML, as Go's html and golang.org/x/n
 - `Uvarint(b []u8) !(u64, i64)`: Uvarint reads a variable-length unsigned integer and returns it with the number of bytes it took. A cut-off or over-long encoding fails with a fault.
 - `PutVarint(b mut []u8, v i64) []u8`: PutVarint appends v in the zigzag varint form (Go's Varint): small magnitudes take few bytes, negative numbers too.
 - `Varint(b []u8) !(i64, i64)`: Varint reads a zigzag varint and returns it with the number of bytes it took.
+
+## asn1
+
+- `const ClassUniversal = 0`: ClassUniversal is the class of the universal types.
+- `const ClassApplication = 1`: ClassApplication is the class of application-defined tags.
+- `const ClassContextSpecific = 2`: ClassContextSpecific is the class of the [n] tags of a type, such as EXPLICIT and IMPLICIT tags.
+- `const ClassPrivate = 3`: ClassPrivate is the class of private tags.
+- `const TagBoolean = 1`: TagBoolean is the universal tag of BOOLEAN.
+- `const TagInteger = 2`: TagInteger is the universal tag of INTEGER.
+- `const TagBitString = 3`: TagBitString is the universal tag of BIT STRING.
+- `const TagOctetString = 4`: TagOctetString is the universal tag of OCTET STRING.
+- `const TagNull = 5`: TagNull is the universal tag of NULL.
+- `const TagOID = 6`: TagOID is the universal tag of OBJECT IDENTIFIER.
+- `const TagEnum = 10`: TagEnum is the universal tag of ENUMERATED.
+- `const TagUTF8String = 12`: TagUTF8String is the universal tag of UTF8String.
+- `const TagSequence = 16`: TagSequence is the universal tag of SEQUENCE and SEQUENCE OF.
+- `const TagSet = 17`: TagSet is the universal tag of SET and SET OF.
+- `const TagNumericString = 18`: TagNumericString is the universal tag of NumericString.
+- `const TagPrintableString = 19`: TagPrintableString is the universal tag of PrintableString.
+- `const TagT61String = 20`: TagT61String is the universal tag of T61String.
+- `const TagIA5String = 22`: TagIA5String is the universal tag of IA5String.
+- `const TagUTCTime = 23`: TagUTCTime is the universal tag of UTCTime.
+- `const TagGeneralizedTime = 24`: TagGeneralizedTime is the universal tag of GeneralizedTime.
+- `type RawValue struct`: RawValue is one element: its class, its tag, whether its contents are constructed, the contents and, for a parsed element, its whole encoding (Go's asn1.RawValue).
+- `type ObjectIdentifier struct`: ObjectIdentifier is a sequence of arcs, such as 1.2.840.113549.
+- `type BitString struct`: BitString is a bit string: its bytes, most significant bit first, and its length in bits. Its bytes are ceil(BitLength / 8) long, and the unused bits of the last byte are zero.
+- `type DateTime struct`: DateTime is a UTCTime or GeneralizedTime in UTC: its year, month, day, hour, minute and second.
+- `OIDFromArcs(arcs []i64) !ObjectIdentifier`: OIDFromArcs returns the object identifier with the given arcs: at least two, the first 0, 1 or 2, the second below 40 unless the first is 2.
+- `ParseOID(s str) !ObjectIdentifier`: ParseOID returns the object identifier written as dotted decimal arcs, such as "1.2.840.113549".
+- `(o ObjectIdentifier) Arcs() []i64`: Arcs returns a copy of the arcs of o.
+- `(o ObjectIdentifier) Equal(other ObjectIdentifier) bool`: Equal reports whether o and other have the same arcs.
+- `(o ObjectIdentifier) String() str`: String returns the dotted decimal form of o, such as "1.2.840.113549"; the zero value is "".
+- `(b BitString) At(i i64) i64`: At returns the bit at index i (0 for the first bit), or 0 outside the string.
+- `(b BitString) RightAlign() []u8`: RightAlign returns the bytes of b with the unused bits of the last byte shifted out, as Go's RightAlign does.
+- `Marshal(r RawValue) []u8`: Marshal returns the encoding of r: its FullBytes when it has them, else its header and contents.
+- `Element(class i64, tag i64, compound bool, contents []u8) []u8`: Element returns the encoding of an element with the given class, tag, compound flag and contents.
+- `Concat(parts [][]u8) []u8`: Concat returns the encodings in parts joined end to end.
+- `Int(v i64) []u8`: Int returns the DER encoding of the INTEGER v, in the fewest two's complement octets.
+- `IntegerBytes(content []u8) ![]u8`: IntegerBytes returns the INTEGER whose contents are the two's complement bytes content, which must be minimal.
+- `Bool(v bool) []u8`: Bool returns the DER encoding of the BOOLEAN v: 0xff for true and 0x00 for false.
+- `Null() []u8`: Null returns the DER encoding of NULL.
+- `OID(o ObjectIdentifier) ![]u8`: OID returns the DER encoding of the object identifier o, which fails when o is the zero value.
+- `Octets(b []u8) []u8`: Octets returns the DER encoding of the OCTET STRING b.
+- `Bits(b BitString) ![]u8`: Bits returns the DER encoding of the BIT STRING b. Its bytes must be ceil(BitLength / 8) long.
+- `UTF8(s str) []u8`: UTF8 returns the DER encoding of the UTF8String s. As in Go, the bytes are written without a UTF-8 check.
+- `Printable(s str) ![]u8`: Printable returns the DER encoding of the PrintableString s.
+- `IA5(s str) ![]u8`: IA5 returns the DER encoding of the IA5String s, which must be ASCII.
+- `Numeric(s str) ![]u8`: Numeric returns the DER encoding of the NumericString s: digits and spaces.
+- `UTCTime(t DateTime) ![]u8`: UTCTime returns the DER encoding of t as a UTCTime, for the years 1950 to 2049.
+- `GeneralizedTime(t DateTime) ![]u8`: GeneralizedTime returns the DER encoding of t as a GeneralizedTime, for the years 0 to 9999.
+- `Seq(contents []u8) []u8`: Seq returns the DER encoding of a SEQUENCE whose contents are the encodings in contents.
+- `Set(contents []u8) []u8`: Set returns the DER encoding of a SET whose contents are the encodings in contents, in the order given.
+- `Explicit(tag i64, inner []u8) []u8`: Explicit wraps the encoding inner in a context-specific constructed tag [tag] (an EXPLICIT tag).
+- `Implicit(tag i64, r RawValue) []u8`: Implicit returns r with the context-specific tag [tag] in place of its own tag (an IMPLICIT tag).
+- `Unmarshal(b []u8) !(RawValue, []u8)`: Unmarshal reads the element at the start of b and returns it with the bytes after it. Its Bytes and FullBytes are views of b.
+- `Elements(b []u8) ![]RawValue`: Elements returns the elements of b, which must hold whole elements only (the contents of a SEQUENCE or SET).
+- `Expect(r RawValue, class i64, tag i64, compound bool) !`: Expect fails unless r has the class, tag and compound flag given.
+- `IntValue(r RawValue) !i64`: IntValue reads an INTEGER that fits in an i64.
+- `IntegerContent(r RawValue) ![]u8`: IntegerContent returns the two's complement contents of an INTEGER, of any length.
+- `BoolValue(r RawValue) !bool`: BoolValue reads a BOOLEAN: 0x00 is false and 0xff is true.
+- `NullValue(r RawValue) !`: NullValue reads a NULL. Its contents are not checked, as in Go's encoding/asn1.
+- `OIDValue(r RawValue) !ObjectIdentifier`: OIDValue reads an OBJECT IDENTIFIER.
+- `BitsValue(r RawValue) !BitString`: BitsValue reads a BIT STRING.
+- `OctetsValue(r RawValue) ![]u8`: OctetsValue reads an OCTET STRING.
+- `StringValue(r RawValue) !str`: StringValue reads a string of the UTF8, Numeric, Printable, T61 or IA5 tag as UTF-8 text (T61 as Latin-1, as Go does).
+- `TimeValue(r RawValue) !DateTime`: TimeValue reads a UTCTime (years 1950 to 2049) or a GeneralizedTime in UTC.
+- `ExplicitValue(r RawValue, tag i64) !RawValue`: ExplicitValue reads the element inside an EXPLICIT tag [tag] that r is.
+
+## gob
+
+- `const KindBool = 1`: KindBool is the kind of bool values.
+- `const KindInt = 2`: KindInt is the kind of int values (every signed integer width).
+- `const KindUint = 3`: KindUint is the kind of uint values.
+- `const KindFloat = 4`: KindFloat is the kind of float64 values.
+- `const KindString = 5`: KindString is the kind of string values.
+- `const KindBytes = 6`: KindBytes is the kind of []byte values.
+- `const KindSlice = 7`: KindSlice is the kind of slices.
+- `const KindMap = 8`: KindMap is the kind of maps.
+- `const KindStruct = 9`: KindStruct is the kind of structs.
+- `const Bool = 0`: Bool is the handle of the builtin bool type.
+- `const Int = 1`: Int is the handle of the builtin int type.
+- `const Uint = 2`: Uint is the handle of the builtin uint type.
+- `const Float = 3`: Float is the handle of the builtin float64 type.
+- `const String = 4`: String is the handle of the builtin string type.
+- `const Bytes = 5`: Bytes is the handle of the builtin []byte type.
+- `type Field struct`: Field is a struct field of a Schema: its name and the type handle of its values.
+- `type Schema struct`: Schema is the set of types a stream is made of.
+- `NewSchema() Schema`: NewSchema returns a schema holding the builtin types Bool, Int, Uint, Float, String and Bytes.
+- `(s mut Schema) Slice(elem i64) i64`: Slice declares the type of slices of elem and returns its handle.
+- `(s mut Schema) Map(key i64, elem i64) i64`: Map declares the type of maps from key to elem and returns its handle.
+- `(s mut Schema) Struct(name str) i64`: Struct declares a struct type named name, with no fields yet, and returns its handle; AddField adds the fields.
+- `(s mut Schema) AddField(t i64, name str, typ i64) !`: AddField appends the field name of type typ to the struct type t; a field is sent in the order added.
+- `(s Schema) Kind(t i64) i64`: Kind returns the kind of the type t.
+- `type Value struct`: Value is a value of a Schema type: its number (I, U or F), its flag (B), its text or bytes (S), and the elements, fields or map values it holds (Items) and the map keys (Keys).
+- `IntV(v i64) Value`: IntV is an Int value.
+- `UintV(v u64) Value`: UintV is a Uint value.
+- `FloatV(v f64) Value`: FloatV is a Float value.
+- `BoolV(v bool) Value`: BoolV is a Bool value.
+- `StringV(v str) Value`: StringV is a String value.
+- `BytesV(v []u8) Value`: BytesV is a Bytes value.
+- `SliceV(items []Value) Value`: SliceV is a slice value holding items.
+- `MapV(keys []Value, vals []Value) Value`: MapV is a map value holding keys and their values, in the same order.
+- `StructV(fields []Value) Value`: StructV is a struct value holding its fields in declaration order.
+- `type Encoder struct`: Encoder writes values of a Schema as a gob stream. It keeps the types it has described, so a type is sent once.
+- `NewEncoder(s Schema) Encoder`: NewEncoder returns an encoder for the types of s.
+- `(e mut Encoder) Encode(t i64, v Value) ![]u8`: Encode returns the messages that send a value of type t: the descriptions of the types not sent yet, then the value.
+- `type Decoder struct`: Decoder reads the messages of a gob stream.
+- `NewDecoder(b []u8) Decoder`: NewDecoder returns a decoder of the stream b.
+- `(d mut Decoder) Decode(s Schema, t i64) !Value`: Decode reads the next value of the stream as a value of the type t of s, reading the type descriptions before it.
+- `(s Schema) Fields(t i64) []Field`: Fields returns the fields of the struct type t, in declaration order.
 
 ## mime
 

@@ -1,0 +1,356 @@
+package main
+
+// The gob twin, Tin side: encodes the seeds of bench/ref/gob with gob's Encoder, and decodes the streams (both sides'
+// bytes) with its Decoder, printing each value as bench/ref/gob prints it (#913).
+//
+//	E <seed>          the stream of the seed's values, as "E <hex>"
+//	D <seed> <hex>    one "R <value>" line per value of the stream, or "ERR <fault>"
+
+import "gob"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+// rng is the generator bench/ref/gob uses: a 64-bit linear congruential state, drawn in the same order.
+type rng struct {
+	s u64
+}
+
+// next draws the next state.
+fn (r mut rng) next() u64 {
+	r.s = r.s*%6364136223846793005 +% 1442695040888963407
+	return r.s
+}
+
+// drawInt draws an int: a value shifted right by a random count, zero a quarter of the time.
+fn (r mut rng) drawInt() i64 {
+	let x = i64(r.next())
+	let k = r.next() % 64
+	mut v = x >> k
+	if r.next()%4 == 0 {
+		v = 0
+	}
+	return v
+}
+
+// drawUint draws a uint: a value shifted right by a random count, zero a quarter of the time.
+fn (r mut rng) drawUint() u64 {
+	let value = r.next()
+	let k = r.next() % 64
+	mut u = value >> k
+	if r.next()%4 == 0 {
+		u = 0
+	}
+	return u
+}
+
+// drawFloat draws a float: zero a quarter of the time, else a shifted integer divided by a power of two.
+fn (r mut rng) drawFloat() f64 {
+	if r.next()%4 == 0 {
+		return 0.0
+	}
+	let value = r.next()
+	let k = r.next() % 64
+	let v = i64(value >> k)
+	let div = r.next() % 30
+	return f64(v) / f64(i64(1)<<div)
+}
+
+// drawBytes draws n random bytes, n from 0 to max.
+fn (r mut rng) drawBytes(max u64) []u8 {
+	let n = r.next() % (max + 1)
+	mut out = []u8{}
+	for i in 0..i64(n) {
+		out = append(out, u8(r.next()))
+	}
+	return out
+}
+
+// drawFlag draws a bool.
+fn (r mut rng) drawFlag() bool {
+	return r.next()%2 == 0
+}
+
+// drawInner draws an Inner value: its A, then its B (6 bytes at most).
+fn (r mut rng) drawInner() gob.Value {
+	let a = r.drawInt()
+	let b = r.drawBytes(6)
+	return gob.StructV([]gob.Value{gob.IntV(a), gob.StringV(str(b))})
+}
+
+// drawRec draws a Rec value: its fields in declaration order, as bench/ref/gob's rec draws them.
+fn (r mut rng) drawRec() gob.Value {
+	mut ints = []gob.Value{}
+	let n = r.next() % 5
+	for i in 0..i64(n) {
+		ints = append(ints, gob.IntV(r.drawInt()))
+	}
+	let u = r.drawUint()
+	let f = r.drawFloat()
+	let s = r.drawBytes(8)
+	let bs = r.drawBytes(8)
+	let flag = r.drawFlag()
+	let inVal = r.drawInner()
+	mut keys = []gob.Value{}
+	mut vals = []gob.Value{}
+	if r.next()%2 == 0 {
+		let k = r.drawBytes(4)
+		let v = r.drawInt()
+		keys = append(keys, gob.StringV(str(k)))
+		vals = append(vals, gob.IntV(v))
+	}
+	mut arr = []gob.Value{}
+	let m = r.next() % 4
+	for i in 0..i64(m) {
+		arr = append(arr, r.drawInner())
+	}
+	return gob.StructV([]gob.Value{gob.SliceV(ints), gob.UintV(u), gob.FloatV(f), gob.StringV(str(s)), gob.BytesV(bs), gob.BoolV(flag), inVal, gob.MapV(keys, vals), gob.SliceV(arr)})
+}
+
+// drawValue draws the value of a seed kind, as bench/ref/gob's value does.
+fn (r mut rng) drawValue(kind i64) gob.Value {
+	if kind == 0 {
+		return r.drawInner()
+	}
+	if kind == 1 {
+		return r.drawRec()
+	}
+	if kind == 2 {
+		return gob.IntV(r.drawInt())
+	}
+	if kind == 3 {
+		return gob.StringV(str(r.drawBytes(8)))
+	}
+	if kind == 4 {
+		mut items = []gob.Value{}
+		let n = r.next() % 5
+		for i in 0..i64(n) {
+			items = append(items, gob.IntV(r.drawInt()))
+		}
+		return gob.SliceV(items)
+	}
+	if kind == 5 {
+		mut keys = []gob.Value{}
+		mut vals = []gob.Value{}
+		if r.next()%2 == 0 {
+			let k = r.drawBytes(4)
+			let v = r.drawInt()
+			keys = append(keys, gob.StringV(str(k)))
+			vals = append(vals, gob.IntV(v))
+		}
+		return gob.MapV(keys, vals)
+	}
+	if kind == 6 {
+		return gob.FloatV(r.drawFloat())
+	}
+	if kind == 7 {
+		return gob.BoolV(r.drawFlag())
+	}
+	if kind == 8 {
+		return gob.UintV(r.drawUint())
+	}
+	if kind == 9 {
+		mut items = []gob.Value{}
+		let n = r.next() % 4
+		for i in 0..i64(n) {
+			items = append(items, r.drawInner())
+		}
+		return gob.SliceV(items)
+	}
+	return gob.BytesV(r.drawBytes(8))
+}
+
+// corpus is the schema of the corpus and the root type of each seed kind.
+type corpus struct {
+	s    gob.Schema
+	root []i64
+}
+
+// makeCorpus declares Inner and Rec, the slice and map types they use, and the root type of each kind.
+fn makeCorpus() !corpus {
+	mut s = gob.NewSchema()
+	let inner = s.Struct("Inner")
+	try s.AddField(inner, "A", gob.Int)
+	try s.AddField(inner, "B", gob.String)
+	let rec = s.Struct("Rec")
+	let ints = s.Slice(gob.Int)
+	let mapSI = s.Map(gob.String, gob.Int)
+	let sInner = s.Slice(inner)
+	try s.AddField(rec, "Ints", ints)
+	try s.AddField(rec, "U", gob.Uint)
+	try s.AddField(rec, "F", gob.Float)
+	try s.AddField(rec, "S", gob.String)
+	try s.AddField(rec, "Bs", gob.Bytes)
+	try s.AddField(rec, "Flag", gob.Bool)
+	try s.AddField(rec, "In", inner)
+	try s.AddField(rec, "M", mapSI)
+	try s.AddField(rec, "Arr", sInner)
+	let roots = []i64{inner, rec, gob.Int, gob.String, ints, mapSI, gob.Float, gob.Bool, gob.Uint, sInner, gob.Bytes}
+	return corpus{s: s, root: roots}
+}
+
+// seedKind is the kind a seed draws: seed % 11.
+fn seedKind(seed i64) i64 {
+	return seed % 11
+}
+
+// seedCount is how many values a seed's stream holds: 1 + (seed / 11) % 3.
+fn seedCount(seed i64) i64 {
+	return 1 + (seed/11)%3
+}
+
+// encodeSeed encodes the values of the seed with one encoder, as bench/ref/gob's encodeSeed does.
+fn encodeSeed(c corpus, seed i64) ![]u8 {
+	mut enc = gob.NewEncoder(c.s)
+	mut r = rng{s: u64(seed)}
+	let kind = seedKind(seed)
+	mut out = []u8{}
+	for i in 0..seedCount(seed) {
+		let v = r.drawValue(kind)
+		let msg = try enc.Encode(c.root[kind], v)
+		for b in msg {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// decimal prints an i64 in decimal.
+fn decimal(v i64) str {
+	return mint.Itoa(v)
+}
+
+// hexOf is the hex of the string bytes of v.
+fn hexOf(v gob.Value) str {
+	return seal.Hex([]u8(v.S))
+}
+
+// innerText prints an Inner value: Inner{A:n B:hex}.
+fn innerText(v gob.Value) str {
+	return "Inner{{A:" + decimal(v.Items[0].I) + " B:" + hexOf(v.Items[1]) + "}}"
+}
+
+// listText prints the elements of a slice of values with the text function, space separated, in brackets.
+fn listText(items []gob.Value, kind i64) str {
+	mut parts = []str{}
+	for item in items {
+		if kind == 0 {
+			parts = append(parts, decimal(item.I))
+		} else {
+			parts = append(parts, innerText(item))
+		}
+	}
+	return "[" + twine.Join(parts, " ") + "]"
+}
+
+// mapText prints a map value: map{hex:value ...}, with the keys as bytes and the values as ints.
+fn mapText(v gob.Value) str {
+	mut parts = []str{}
+	for i in 0..len(v.Keys) {
+		parts = append(parts, hexOf(v.Keys[i]) + ":" + decimal(v.Items[i].I))
+	}
+	return "map{{" + twine.Join(parts, " ") + "}}"
+}
+
+// recText prints a Rec value as bench/ref/gob's text prints it.
+fn recText(v gob.Value) str {
+	let f = v.Items
+	return "Rec{{Ints:" + listText(f[0].Items, 0) + " U:" + say.Fmt("%d", f[1].U) + " F:" + say.Fmt("%v", f[2].F) + " S:" + hexOf(f[3]) + " Bs:" + seal.Hex([]u8(f[4].S)) + " Flag:" + boolText(f[5].B) + " In:" + innerText(f[6]) + " M:" + mapText(f[7]) + " Arr:" + listText(f[8].Items, 1) + "}}"
+}
+
+// boolText is "true" or "false".
+fn boolText(b bool) str {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// valueText prints a decoded value of the seed kind as bench/ref/gob's text does.
+fn valueText(kind i64, v gob.Value) str {
+	if kind == 0 {
+		return innerText(v)
+	}
+	if kind == 1 {
+		return recText(v)
+	}
+	if kind == 2 {
+		return decimal(v.I)
+	}
+	if kind == 3 {
+		return hexOf(v)
+	}
+	if kind == 4 {
+		return listText(v.Items, 0)
+	}
+	if kind == 5 {
+		return mapText(v)
+	}
+	if kind == 6 {
+		return say.Fmt("%v", v.F)
+	}
+	if kind == 7 {
+		return boolText(v.B)
+	}
+	if kind == 8 {
+		return say.Fmt("%d", v.U)
+	}
+	if kind == 9 {
+		return listText(v.Items, 1)
+	}
+	return seal.Hex([]u8(v.S))
+}
+
+// decodeLine decodes the stream of a "D <seed> <hex>" line and prints one line per value.
+fn decodeLine(c corpus, seed i64, hexText str) {
+	let stream = seal.HexDecode(hexText) catch err {
+		say.Line("ERR", err)
+		return
+	}
+	let kind = seedKind(seed)
+	mut d = gob.NewDecoder(stream)
+	for i in 0..seedCount(seed) {
+		let v = d.Decode(c.s, c.root[kind]) catch err {
+			say.Line("ERR", err)
+			return
+		}
+		say.Line("R " + valueText(kind, v))
+	}
+}
+
+fn main() {
+	let c = makeCorpus() catch err {
+		say.Line("fault", err)
+		return
+	}
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		if len(line) < 2 {
+			continue
+		}
+		if line[0] == 'E' {
+			let seed = mint.Atoi(line[2:]) catch err {
+				say.Line("fault", err)
+				return
+			}
+			let stream = encodeSeed(c, seed) catch err {
+				say.Line("ERR", err)
+				continue
+			}
+			say.Line("E " + seal.Hex(stream))
+		} else if line[0] == 'D' {
+			let rest = line[2:]
+			let (seedText, hexText, _) = twine.Cut(rest, " ")
+			let seed = mint.Atoi(seedText) catch err {
+				say.Line("fault", err)
+				return
+			}
+			decodeLine(c, seed, hexText)
+		}
+	}
+}

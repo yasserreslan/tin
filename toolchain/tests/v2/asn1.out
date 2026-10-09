@@ -1,0 +1,73 @@
+oid 1.2.840.113549.1.1.1 true 7
+oid der 06092a864886f70d010101
+oid read 1.2.840.113549.1.1.1
+oid text 2.5.4.3
+oid zero fault: asn1: syntax error: zero length OBJECT IDENTIFIER
+oid high arc 2.130992
+arcs fault: asn1: structure error: invalid object identifier fault: asn1: structure error: invalid object identifier fault: asn1: structure error: invalid object identifier 2.40 fault: asn1: structure error: invalid object identifier
+parse 2.999.1 fault: asn1: structure error: invalid object identifier fault: asn1: structure error: invalid object identifier fault: asn1: structure error: invalid object identifier
+int 0 020100
+int 127 02017f
+int 128 02020080
+int -128 020180
+int -129 0202ff7f
+int max 02087fffffffffffffff
+int min 02088000000000000000
+int read -128 128 fault: asn1: structure error: empty integer
+int bad fault: asn1: structure error: integer not minimally-encoded fault: asn1: structure error: integer too large
+integer content 010000000000000000
+true 0101ff
+false 010100
+bool read true false fault: asn1: syntax error: invalid boolean
+null 0500
+utf8 0c0368c3a9
+printable 13054120622d39
+ia5 1603614062
+numeric 120431322033
+string read hé A b-9 12 3
+string faults fault: asn1: structure error: PrintableString contains invalid character fault: asn1: structure error: PrintableString contains invalid character fault: asn1: structure error: IA5String contains invalid character fault: asn1: structure error: NumericString contains invalid character
+t61 read éA
+utf8 bad fault: asn1: invalid UTF-8 string
+bits 030205a0
+bits read 3 bits a0 9 bits ff80 0 bits 
+bits bad fault: asn1: syntax error: invalid padding bits in BIT STRING fault: asn1: syntax error: invalid padding bits in BIT STRING fault: asn1: syntax error: zero length BIT STRING
+at 1 0 1 0 05
+at2 1 0 0fff
+octets 0403010203
+octets read dead
+element 420101
+raw marshal 0402dead
+raw full 040109
+utctime 170d3234303330353130323033305a
+generalized 180f32303531303130323030303030305a
+time read 2024-03-05 10:20:30 2051-01-02 00:00:00 1950-01-01 00:00:00
+time short 2024-01-01 00:00:00
+time bad fault: asn1: invalid UTCTime value fault: asn1: invalid GeneralizedTime value
+time encode fault: asn1: structure error: cannot represent time as UTCTime 180f31393030303232383132303030305a
+time range fault: asn1: time field out of range
+seq 300b0201020101ff0403010203
+set 31050500020101
+explicit a003020102
+implicit 830105
+high tag bf2800
+tag 31 9f1f0101
+long 203 0481c8
+seq read class 0 tag 16 compound true contents 0201020101ff0403010203 rest 0 class 0 tag 17 compound true contents 0500020101 rest 0 class 2 tag 3 compound false contents 05 rest 0
+high read class 2 tag 40 compound true contents  rest 0
+elements  0/2 0/1 0/4  0/2 0/5
+kids 3 2
+explicit read 020102
+explicit faults fault: asn1: structure error: explicit tag has no child fault: asn1: structure error: explicit tag has more than one child fault: asn1: structure error: tags don't match (0 vs 1)
+empty fault: asn1: syntax error: sequence truncated
+indefinite fault: asn1: syntax error: indefinite length found (not DER)
+non-minimal length fault: asn1: structure error: non-minimal length
+leading zero length fault: asn1: structure error: superfluous leading zeros in length
+truncated fault: asn1: syntax error: data truncated
+truncated length fault: asn1: syntax error: truncated tag or length
+non-minimal tag fault: asn1: syntax error: non-minimal tag
+tag truncated fault: asn1: syntax error: truncated base 128 integer
+tag no length fault: asn1: syntax error: truncated tag or length
+elements bad fault: asn1: syntax error: data truncated
+bool bad fault: asn1: syntax error: invalid boolean
+null read class 0 tag 5 compound false contents 00 rest 0
+tags class 0 tag 4 compound false contents  rest 0 class 0 tag 5 compound false contents  rest 0

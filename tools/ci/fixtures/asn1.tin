@@ -1,0 +1,253 @@
+package main
+
+// The asn1 twin, Tin side: reads one case per line on stdin and prints the line bench/ref/asn1 (Go's
+// encoding/asn1) prints for it, so tools/ci/asn1_check.tin can compare them (#913).
+//
+//	S <spec>   the DER encoding of the spec, or ERR with its fault
+//	D <hex>    the rendering of the elements in the bytes, or ERR with its fault
+
+import "asn1"
+import "fault"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+// parser reads the tokens of a spec.
+type parser struct {
+	toks []str
+	at   i64
+}
+
+// list encodes the items up to the closing token (none for the top level).
+fn (p mut parser) list(close str) ![]u8 {
+	mut out = []u8{}
+	for p.at < i64(len(p.toks)) {
+		let t = p.toks[p.at]
+		p.at += 1
+		if t == close {
+			return out
+		}
+		let e = try p.item(t)
+		for c in e {
+			out = append(out, c)
+		}
+	}
+	if close != "" {
+		fail "unterminated " + close
+	}
+	return out
+}
+
+// item encodes the element that token t starts.
+fn (p mut parser) item(t str) ![]u8 {
+	if t == "(" {
+		let kids = try p.list(")")
+		return asn1.Seq(kids)
+	}
+	if t == "[" {
+		let kids = try p.list("]")
+		return asn1.Set(kids)
+	}
+	if twine.HasPrefix(t, "E") && twine.HasSuffix(t, "(") {
+		let n = try mint.Atoi(t[1:len(t)-1])
+		let kids = try p.list(")")
+		return asn1.Explicit(n, kids)
+	}
+	if twine.HasPrefix(t, "C") && twine.HasSuffix(t, "(") {
+		let n = try mint.Atoi(t[1:len(t)-1])
+		let kids = try p.list(")")
+		return asn1.Element(asn1.ClassContextSpecific, n, true, kids)
+	}
+	if t == "n" {
+		return asn1.Null()
+	}
+	if twine.HasPrefix(t, "P") {
+		let (k, hexText, _) = twine.Cut(t[1:], ":")
+		let n = try mint.Atoi(k)
+		let raw = try seal.HexDecode(hexText)
+		return asn1.Element(asn1.ClassContextSpecific, n, false, raw)
+	}
+	let (kind, rest, _) = twine.Cut(t, ":")
+	if kind == "i" {
+		let v = try mint.Atoi(rest)
+		return asn1.Int(v)
+	}
+	if kind == "b" {
+		return asn1.Bool(rest == "1")
+	}
+	if kind == "o" {
+		let o = try oidOf(rest)
+		return try asn1.OID(o)
+	}
+	if kind == "x" {
+		let raw = try seal.HexDecode(rest)
+		return asn1.Octets(raw)
+	}
+	if kind == "k" {
+		let (bits, hexText, _) = twine.Cut(rest, ":")
+		let n = try mint.Atoi(bits)
+		let raw = try seal.HexDecode(hexText)
+		return try asn1.Bits(asn1.BitString{Bytes: raw, BitLength: n})
+	}
+	if kind == "u" || kind == "p" || kind == "a" || kind == "m" {
+		let raw = try seal.HexDecode(rest)
+		let s = str(raw)
+		if kind == "u" {
+			return asn1.UTF8(s)
+		}
+		if kind == "p" {
+			return try asn1.Printable(s)
+		}
+		if kind == "a" {
+			return try asn1.IA5(s)
+		}
+		return try asn1.Numeric(s)
+	}
+	if kind == "t" {
+		return try timeOf(rest)
+	}
+	if kind == "r" {
+		return try seal.HexDecode(rest)
+	}
+	fail "unknown token " + t
+}
+
+// oidOf parses the dotted arcs of an o: token; a bad arc is the same structure fault the encoder gives.
+fn oidOf(text str) !asn1.ObjectIdentifier {
+	mut arcs = []i64{}
+	for part in twine.Split(text, ".") {
+		let v = mint.Atoi(part) catch _ {
+			fail "asn1: structure error: invalid object identifier"
+		}
+		arcs = append(arcs, v)
+	}
+	return try asn1.OIDFromArcs(arcs)
+}
+
+// timeOf encodes a t: token, YYYY-MM-DDThh:mm:ss, as Go's Marshal picks UTCTime for 1950 to 2049 and GeneralizedTime otherwise.
+fn timeOf(text str) ![]u8 {
+	let (date, clock, _) = twine.Cut(text, "T")
+	let dp = twine.Split(date, "-")
+	let cp = twine.Split(clock, ":")
+	let year = try mint.Atoi(dp[0])
+	let month = try mint.Atoi(dp[1])
+	let day = try mint.Atoi(dp[2])
+	let hour = try mint.Atoi(cp[0])
+	let minute = try mint.Atoi(cp[1])
+	let second = try mint.Atoi(cp[2])
+	let t = asn1.DateTime{Year: year, Month: month, Day: day, Hour: hour, Minute: minute, Second: second}
+	if year >= 1950 && year < 2050 {
+		return try asn1.UTCTime(t)
+	}
+	return try asn1.GeneralizedTime(t)
+}
+
+// render prints the elements of b, one at a time, as bench/ref/asn1 does: an error in a later element
+// is reported only once the earlier ones have been read.
+fn render(b []u8) !str {
+	mut parts = []str{}
+	mut rest = b
+	for len(rest) > 0 {
+		let (raw, next) = try asn1.Unmarshal(rest)
+		let s = try renderOne(raw)
+		parts = append(parts, s)
+		rest = next
+	}
+	return twine.Join(parts, " ")
+}
+
+// renderOne prints one element: its class and tag, then its value.
+fn renderOne(r asn1.RawValue) !str {
+	let label = mint.Itoa(r.Class) + "." + mint.Itoa(r.Tag)
+	if r.IsCompound {
+		let inner = try render(r.Bytes)
+		return label + "(" + inner + ")"
+	}
+	if r.Class != 0 {
+		return label + "=raw:" + seal.Hex(r.Bytes)
+	}
+	if r.Tag == asn1.TagBoolean {
+		let v = try asn1.BoolValue(r)
+		return label + "=bool:" + boolText(v)
+	}
+	if r.Tag == asn1.TagInteger {
+		let v = try asn1.IntValue(r)
+		return label + "=int:" + mint.Itoa(v)
+	}
+	if r.Tag == asn1.TagBitString {
+		let v = try asn1.BitsValue(r)
+		return label + "=bits:" + mint.Itoa(v.BitLength) + ":" + seal.Hex(v.Bytes)
+	}
+	if r.Tag == asn1.TagOctetString {
+		let v = try asn1.OctetsValue(r)
+		return label + "=octets:" + seal.Hex(v)
+	}
+	if r.Tag == asn1.TagNull {
+		try asn1.NullValue(r)
+		return label + "=null"
+	}
+	if r.Tag == asn1.TagOID {
+		let v = try asn1.OIDValue(r)
+		return label + "=oid:" + v.String()
+	}
+	if r.Tag == asn1.TagUTF8String || r.Tag == asn1.TagNumericString || r.Tag == asn1.TagPrintableString || r.Tag == asn1.TagT61String || r.Tag == asn1.TagIA5String {
+		let v = try asn1.StringValue(r)
+		return label + "=str:" + seal.Hex([]u8(v))
+	}
+	if r.Tag == asn1.TagUTCTime || r.Tag == asn1.TagGeneralizedTime {
+		let v = try asn1.TimeValue(r)
+		return label + "=time:" + say.Fmt("%04d-%02d-%02dT%02d:%02d:%02dZ", v.Year, v.Month, v.Day, v.Hour, v.Minute, v.Second)
+	}
+	return label + "=raw:" + seal.Hex(r.Bytes)
+}
+
+// boolText is "true" or "false".
+fn boolText(v bool) str {
+	if v {
+		return "true"
+	}
+	return "false"
+}
+
+// classify is the text of a fault the Go side prints: Go's structure and syntax errors in full, and "other error" for the rest.
+fn classify(err fault) str {
+	let msg = fault.Message(err)
+	let structure = twine.HasPrefix(msg, "asn1: structure error: ") || twine.HasPrefix(msg, "asn1: syntax error: ")
+	if structure && !twine.Contains(msg, "tags don't match") {
+		return msg
+	}
+	return "other error"
+}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	for line in twine.Split(body, "\n") {
+		if len(line) < 2 {
+			continue
+		}
+		let arg = line[2:]
+		if line[0] == 'S' {
+			mut p = parser{toks: twine.Fields(arg), at: 0}
+			let b = p.list("") catch err {
+				say.Line("ERR " + classify(err))
+				continue
+			}
+			say.Line("E " + seal.Hex(b))
+		} else if line[0] == 'D' {
+			let raw = seal.HexDecode(arg) catch _ {
+				say.Line("ERR other error")
+				continue
+			}
+			let s = render(raw) catch err {
+				say.Line("ERR " + classify(err))
+				continue
+			}
+			say.Line("R " + s)
+		}
+	}
+}
