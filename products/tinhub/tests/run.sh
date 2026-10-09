@@ -30,6 +30,13 @@ for dir in products/tinhub/*/; do
 	sh ./tin test "$dir" > "$tmp/test.out" 2>&1 || { cat "$tmp/test.out"; echo "FAIL tinhub tests $dir"; exit 1; }
 	echo "PASS tinhub tests $dir"
 done
+# and against a real S3 server when one is given (CI's MinIO on Linux x86-64): TINHUB_TEST_MINIO is its endpoint, with
+# TINHUB_TEST_MINIO_KEY and TINHUB_TEST_MINIO_SECRET
+if [ -n "${TINHUB_TEST_MINIO:-}" ]; then
+	TINHUB_TEST_S3=$TINHUB_TEST_MINIO TINHUB_TEST_S3_KEY=${TINHUB_TEST_MINIO_KEY:-} TINHUB_TEST_S3_SECRET=${TINHUB_TEST_MINIO_SECRET:-} sh ./tin test products/tinhub/packs/ > "$tmp/test.out" 2>&1 || { cat "$tmp/test.out"; echo "FAIL tinhub pack store on MinIO"; exit 1; }
+	grep -q 'TINHUB_TEST_S3 is not set' "$tmp/test.out" && { cat "$tmp/test.out"; echo "FAIL tinhub pack store on MinIO: skipped"; exit 1; }
+	echo "PASS tinhub pack store contract on MinIO"
+fi
 TIN_ROOT=$PWD "$compiler" -o "$tmp/tinhub" products/tinhub/main.tin
 "$tmp/tinhub" version > "$tmp/version.out"
 grep -q '^tinhub [0-9]' "$tmp/version.out" || { cat "$tmp/version.out"; echo "FAIL tinhub version"; exit 1; }

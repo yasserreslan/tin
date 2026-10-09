@@ -207,7 +207,8 @@ normalization/bidirectional/prohibited-input cases; the fixed Unicode 3.2 tables
 `packages/postgres/sasl/sasl.tin` are kept as generated once (RFC 3454 and RFC 4013 pin them to Unicode 3.2, so they never change).
 
 tinhub (`products/tinhub/tests/run.sh`, design/tinhub.md): every native job runs its unit tests and builds the binary;
-where Go is installed the S3 pack store passes the store contract against `bench/ref/s3sig`'s signature-checking fake.
+where Go is installed the S3 pack store passes the store contract against `bench/ref/s3sig`'s signature-checking fake,
+and on `ubuntu-24.04` x86-64 against the MinIO server the S3 step started.
 On `ubuntu-24.04` the same script also runs against the runner's PostgreSQL, in a `tinhub_test` database it empties
 first: the migrations (from an empty database, twice, and two migrators at once applying each migration once), the
 schema's constraints, the event queue (four worker processes run 10,000 jobs and none is lost; a worker killed in the

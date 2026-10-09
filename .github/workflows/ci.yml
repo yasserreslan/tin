@@ -327,7 +327,7 @@ jobs:
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
           sudo -u postgres createdb -O tin tinhub_test
-          TINHUB_TEST_DB=127.0.0.1:5432/tinhub_test TINHUB_TEST_DB_USER=tin TINHUB_TEST_DB_PASSWORD=tinpass sh products/tinhub/tests/run.sh
+          TINHUB_TEST_MINIO=http://127.0.0.1:9000 TINHUB_TEST_MINIO_KEY=tinminio TINHUB_TEST_MINIO_SECRET=tinminiosecret TINHUB_TEST_DB=127.0.0.1:5432/tinhub_test TINHUB_TEST_DB_USER=tin TINHUB_TEST_DB_PASSWORD=tinpass sh products/tinhub/tests/run.sh
       - name: HTTP correctness, RSS stability and shutdown (Linux)
         if: runner.os == 'Linux'
         run: sh tools/ci/tin.sh http_check
