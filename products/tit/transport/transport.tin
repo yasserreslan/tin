@@ -315,5 +315,10 @@ fn ParseSignatureHeader(h str) !(str, str, []u8) {
 
 // SigningPayload is the bytes a request's ed25519 signature covers.
 fn SigningPayload(method str, path str, nonce str, body str) str {
-	return "tit v1 " + method + " " + path + "\n" + nonce + "\n" + seal.Hex(seal.Sha256(body)) + "\n"
+	return SigningPayloadOf(method, path, nonce, seal.Hex(seal.Sha256(body)))
+}
+
+// SigningPayloadOf is SigningPayload for a body whose SHA-256 (hex) is bodyHash: a body streamed through a hasher.
+fn SigningPayloadOf(method str, path str, nonce str, bodyHash str) str {
+	return "tit v1 " + method + " " + path + "\n" + nonce + "\n" + bodyHash + "\n"
 }

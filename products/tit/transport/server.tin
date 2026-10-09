@@ -99,11 +99,7 @@ fn refusal(c Code, message str) ! {
 fn (s mut Server) Handle(method str, path str, signature str, body str, now i64) Reply {
 	let (who, err) = s.authenticate(method, path, signature, body, now)
 	if err != nil {
-		let (c, m) = codeOf(err)
-		if c == Code.Unauthorized || c == Code.NonceExpired {
-			return s.challenge(c, m, now)
-		}
-		return refuse(c, m, "")
+		return s.answerFor(err, now)
 	}
 	let push = twine.HasSuffix(path, "/tit/v1/push")
 	if len(who) == 0 && (push || !s.public) {
@@ -112,42 +108,57 @@ fn (s mut Server) Handle(method str, path str, signature str, body str, now i64)
 	if method == "GET" && twine.HasSuffix(path, "/tit/v1/heads") {
 		let (h, herr) = s.heads(now)
 		if herr != nil {
-			let (c, m) = codeOf(herr)
-			return refuse(c, m, "")
+			return s.answerFor(herr, now)
 		}
 		return Reply{Status: 200, Body: Frame(Kind.HeadsAnswer, Encode(h), "")}
 	}
 	if method == "POST" && twine.HasSuffix(path, "/tit/v1/fetch") {
 		let (answer, ferr) = s.fetch(body)
 		if ferr != nil {
-			let (c, m) = codeOf(ferr)
-			return refuse(c, m, "")
+			return s.answerFor(ferr, now)
 		}
 		return Reply{Status: 200, Body: answer}
 	}
 	if method == "POST" && push {
 		let (answer, perr) = s.push(body, who, now)
 		if perr != nil {
-			let (c, m) = codeOf(perr)
-			mut ref = ""
-			if c == Code.RefChanged || c == Code.Moved || c == Code.Conflicted {
-				let sp = twine.IndexByte(m, ' ')
-				if sp > 0 {
-					ref = m[0:sp]
-				}
-			}
-			return refuse(c, m, ref)
+			return s.answerFor(perr, now)
 		}
 		return Reply{Status: 200, Body: answer}
 	}
 	return refuse(Code.NotFound, "no such request: {method} {path}", "")
 }
 
-// authenticate checks a request's signature: the email it was signed as, "" for an unsigned request. A push's nonce
-// is good once on this server.
-fn (s mut Server) authenticate(method str, path str, signature str, body str, now i64) !str {
+// answerFor is the answer to a request a fault refused: a fresh nonce with a signature's refusal, and the ref or
+// change to blame with a push's.
+fn (s Server) answerFor(err fault, now i64) Reply {
+	let (c, m) = codeOf(err)
+	if c == Code.Unauthorized || c == Code.NonceExpired {
+		return s.challenge(c, m, now)
+	}
+	mut ref = ""
+	if c == Code.RefChanged || c == Code.Moved || c == Code.Conflicted {
+		let sp = twine.IndexByte(m, ' ')
+		if sp > 0 {
+			ref = m[0:sp]
+		}
+	}
+	return refuse(c, m, ref)
+}
+
+// signer is a request's Tit-Signature as far as it can be checked before its body: who signed, the nonce and
+// signature, and the keys that may have made it.
+type signer struct {
+	email str
+	nonce str
+	sig   []u8
+	pubs  []str
+}
+
+// signerOf checks a Tit-Signature header's form, its nonce, and that its email has keys here; nil when unsigned.
+fn (s Server) signerOf(signature str, now i64) !?signer {
 	if len(signature) == 0 {
-		return ""
+		return nil
 	}
 	let (email, nonce, sig) = try ParseSignatureHeader(signature)
 	try CheckNonce(s.key, nonce, now)
@@ -155,16 +166,22 @@ fn (s mut Server) authenticate(method str, path str, signature str, body str, no
 	if !known {
 		try refusal(Code.Unauthorized, "no key of {email} is allowed here")
 	}
-	let payload = SigningPayload(method, path, nonce, body)
+	return signer{email: email, nonce: nonce, sig: sig, pubs: pubs}
+}
+
+// verify checks g's signature over a request whose body's SHA-256 (hex) is bodyHash. A push's nonce is good once on
+// this server.
+fn (s mut Server) verify(g signer, method str, path str, bodyHash str, now i64) ! {
+	let payload = SigningPayloadOf(method, path, g.nonce, bodyHash)
 	mut ok = false
-	for p in pubs {
-		let verr = seal.VerifyEd25519([]u8(p), []u8(payload), sig)
+	for p in g.pubs {
+		let verr = seal.VerifyEd25519([]u8(p), []u8(payload), g.sig)
 		if verr == nil {
 			ok = true
 		}
 	}
 	if !ok {
-		try refusal(Code.Unauthorized, "the signature is not {email}'s")
+		try refusal(Code.Unauthorized, "the signature is not {g.email}'s")
 	}
 	if twine.HasSuffix(path, "/tit/v1/push") {
 		// forget nonces too old to pass CheckNonce, then refuse one seen already
@@ -177,14 +194,23 @@ fn (s mut Server) authenticate(method str, path str, signature str, body str, no
 		for n in stale {
 			delete(s.seen, n)
 		}
-		let (_, used) = s.seen[nonce]
+		let (_, used) = s.seen[g.nonce]
 		if used {
 			try refusal(Code.NonceExpired, "this nonce was used already")
 		}
 		// a server keeps this past the request: keep() copies it into long-lived memory
-		s.seen[keep(nonce)] = now
+		s.seen[keep(g.nonce)] = now
 	}
-	return email
+}
+
+// authenticate checks a request's signature: the email it was signed as, "" for an unsigned request.
+fn (s mut Server) authenticate(method str, path str, signature str, body str, now i64) !str {
+	let g = try s.signerOf(signature, now)
+	if g == nil {
+		return ""
+	}
+	try s.verify(g, method, path, seal.Hex(seal.Sha256(body)), now)
+	return g.email
 }
 
 // objects is the repository's store: its loose objects and every pack.
@@ -323,10 +349,26 @@ fn notCommit(id object.Id) !object.CommitData {
 	fail fault.Wrap(ErrRefused, "BadRequest: {id.Hex()} is not a commit")
 }
 
+// fetchPlan is what a fetch asks for: the objects to send, in the order to send them, and the store and packs they
+// come from.
+type fetchPlan struct {
+	st    store.Layered
+	packs []packfile.Pack
+	send  []object.Id
+}
+
+// fetch is the whole answer to a fetch request, in memory.
 fn (s mut Server) fetch(body str) !str {
+	mut p = try s.planFetch(body)
+	let data = try packfile.Reuse(mut p.st, mut p.packs, p.send)
+	return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(p.send)}), data)
+}
+
+// planFetch reads a fetch request and works out what to send.
+fn (s mut Server) planFetch(body str) !fetchPlan {
 	let (k, header, _) = ReadFrame(body) catch e {
 		try refusal(Code.BadRequest, fault.Message(e))
-		return ""
+		return fetchPlan{st: store.NewLayered([]dyn store.ObjectStore{}), packs: []packfile.Pack{}, send: []object.Id{}}
 	}
 	if k != Kind.FetchRequest {
 		try refusal(Code.BadRequest, "a fetch takes a fetch request")
@@ -352,9 +394,8 @@ fn (s mut Server) fetch(body str) !str {
 			}
 			ids = append(ids, id)
 		}
-		mut opacks = try s.repo.Packs()
-		let odata = try packfile.Reuse(mut st, mut opacks, ids)
-		return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(ids)}), odata)
+		let opacks = try s.repo.Packs()
+		return fetchPlan{st: st, packs: opacks, send: ids}
 	}
 	mut wants = []object.Id{}
 	// an annotated tag is sent itself, and the commit it tags is walked
@@ -428,24 +469,25 @@ fn (s mut Server) fetch(body str) !str {
 		}
 	}
 	// the entries the packs hold already go as they are (packfile.Reuse): no delta search, no recompression
-	mut packs = try s.repo.Packs()
-	let data = try packfile.Reuse(mut st, mut packs, send)
-	return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(send)}), data)
+	let packs = try s.repo.Packs()
+	return fetchPlan{st: st, packs: packs, send: send}
 }
 
-// complete checks that a pushed commit has its tree, its blobs and its parents, in the pack or here.
+// complete checks that a pushed commit has its tree, its blobs and its parents, in the pack or here. checked holds
+// every object checked, true for the commits (the ones whose signatures are checked next).
 fn complete[S store.ObjectStore](st mut S, id object.Id, checked mut map[str]bool) ! {
 	let (_, done) = checked[id.Bytes()]
 	if done {
 		return
 	}
-	checked[id.Bytes()] = true
+	checked[id.Bytes()] = false
 	if !st.Has(id) {
 		try refusal(Code.BadPack, "{id.Hex()} is missing")
 	}
 	let o = try st.Get(id)
 	match o {
 		Commit(c) => {
+			checked[id.Bytes()] = true
 			try complete(mut st, c.Tree, mut checked)
 			for p in c.Parents {
 				if !st.Has(p) {
@@ -455,7 +497,19 @@ fn complete[S store.ObjectStore](st mut S, id object.Id, checked mut map[str]boo
 		}
 		Tree(es) => {
 			for e in es {
-				try complete(mut st, e.Id, mut checked)
+				if e.Mode == object.Mode.Dir {
+					try complete(mut st, e.Id, mut checked)
+					continue
+				}
+				// a file's blob need only be there: reading it would hold every pushed blob in the request's memory
+				let (_, seen) = checked[e.Id.Bytes()]
+				if seen {
+					continue
+				}
+				checked[e.Id.Bytes()] = false
+				if !st.Has(e.Id) {
+					try refusal(Code.BadPack, "{e.Id.Hex()} is missing")
+				}
 			}
 		}
 		Tag(t) => {
@@ -474,27 +528,76 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 	if k != Kind.PushRequest {
 		try refusal(Code.BadRequest, "a push takes a push request")
 	}
+	// the pack to a file, as a streamed push writes it (HandleStream), then the same path for both
+	mut path = ""
+	if len(data) > 0 {
+		if len(data) > s.limits.Pack {
+			try refusal(Code.TooLarge, "a pack of {len(data)} bytes; this server takes {s.limits.Pack}")
+		}
+		path = tempPack(s.repo.TempDir())
+		try quarry.WriteFile(path, data)
+	}
+	return try s.pushFile(header, path, len(data), who, now)
+}
+
+// tempPack is a fresh path in dir for a pack being received.
+fn tempPack(dir str) str {
+	return dir + "/tmp-recv-" + seal.Hex(seal.RandomBytes(8)) + ".pack"
+}
+
+// pushFile is a push whose header is header and whose pack (size bytes) is the file at path ("" for none): the file
+// is checked and indexed where it is (packfile.KeepFile, a range at a time), the push checked against it and the
+// repository, staged and committed (design/tit.md §16). Whatever fails, nothing of the pack is left behind.
+fn (s mut Server) pushFile(header str, path str, size i64, who str, now i64) !str {
+	mut staged = pending{name: ""}
+	let (answer, err) = s.pushChecked(header, path, size, who, now, mut staged)
+	if err != nil {
+		if len(path) > 0 && quarry.Exists(path) {
+			quarry.Remove(path) catch _ {
+			}
+		}
+		if len(staged.name) > 0 {
+			s.repo.Drop(Staged{Name: staged.name}) catch _ {
+				false
+			}
+		}
+		fail err
+	}
+	return answer
+}
+
+// pending is the name of the pack a push staged, for pushFile to drop when the push fails.
+type pending struct {
+	name str
+}
+
+fn (s mut Server) pushChecked(header str, path str, size i64, who str, now i64, staged mut pending) !str {
 	mut req = PushRequest{Changes: []ChangeUpdate{}, Refs: []RefUpdate{}}
 	argoGet(header, mut req) catch e {
 		try refusal(Code.BadRequest, fault.Message(e))
 	}
-	if len(data) > s.limits.Pack {
-		try refusal(Code.TooLarge, "a pack of {len(data)} bytes; this server takes {s.limits.Pack}")
+	if size > s.limits.Pack {
+		try refusal(Code.TooLarge, "a pack of {size} bytes; this server takes {s.limits.Pack}")
 	}
 	if len(req.Refs) + len(req.Changes) > s.limits.Refs {
 		try refusal(Code.TooLarge, "{len(req.Refs) + len(req.Changes)} refs and changes in one push")
 	}
-	// the pack, into memory, in front of the repository
-	mut mem = store.NewMem()
-	mut fresh = []object.Id{}
-	if len(data) > 0 {
-		fresh = packfile.Unpack(data, mut mem, MaxObject) catch e {
+	// the pack, verified and indexed as it lies, in front of the repository (pending: nothing reaches it yet)
+	mut p ?packfile.Pack = nil
+	if len(path) > 0 {
+		let kept = packfile.KeepFile(path, s.repo.TempDir(), MaxObject) catch e {
 			try refusal(Code.BadPack, fault.Message(e))
-			[]object.Id{}
+			return ""
 		}
+		staged.name = kept.Path[len(kept.Path) - 69:len(kept.Path) - 5]
+		p = kept
 	}
 	let here = try s.repo.Objects()
-	mut layers = []dyn store.ObjectStore{mem, here}
+	mut layers = []dyn store.ObjectStore{}
+	if p != nil {
+		layers = append(layers, p)
+	}
+	layers = append(layers, here)
 	mut st = store.NewLayered(layers)
 	// design/tit.md §16 step 2: the checks without the lock, against what the repository holds now (Commit makes
 	// those on versions and refs again under it)
@@ -526,10 +629,12 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 		try complete(mut st, id, mut checked)
 	}
 	// signatures, where the repository keeps a signers file
-	for idb, _ in checked {
+	for idb, isCommit in checked {
+		if !isCommit {
+			continue
+		}
 		let id = try object.IdOf(idb)
-		let (kind, _) = try st.GetRaw(id)
-		if kind != object.Kind.Commit || here.Has(id) {
+		if here.Has(id) {
 			continue
 		}
 		let c = try commitOf(mut st, id)
@@ -547,29 +652,14 @@ fn (s mut Server) push(body str, who str, now i64) !str {
 			}
 		}
 	}
-	// step 3, data first: the new objects as a pack of this repository's own, pending
-	mut keepIds = []object.Id{}
-	for id in fresh {
-		if !here.Has(id) {
-			keepIds = append(keepIds, id)
-		}
-	}
-	mut staged = ""
-	if len(keepIds) > 0 {
-		mut p = try packfile.Write(mut mem, keepIds, s.repo.TempDir())
-		try p.Verify()
+	// step 3, data first: the pack, as it came, pending
+	if p != nil {
 		let sp = try s.repo.Stage(p.Path)
-		staged = sp.Name
+		staged.name = sp.Name
 	}
 	// step 4: versions and refs checked again under the lock, then everything current in one step
-	s.repo.Commit(Update{Who: who, Command: "push by " + who, Changes: req.Changes, Refs: req.Refs, Pack: staged, Time: now * 1000000000}) catch e {
-		if len(staged) > 0 {
-			s.repo.Drop(Staged{Name: staged}) catch _ {
-				false
-			}
-		}
-		fail e
-	}
+	_ = try s.repo.Commit(Update{Who: who, Command: "push by " + who, Changes: req.Changes, Refs: req.Refs, Pack: staged.name, Time: now * 1000000000})
+	staged.name = ""
 	mut names = []str{}
 	for ru in req.Refs {
 		names = append(names, ru.Name)

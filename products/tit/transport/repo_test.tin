@@ -137,6 +137,9 @@ fn TestMemRepoServer(t mut crucible.T) {
 		return
 	}
 	crucible.Equal(mut t, "one ref", len(h.Refs), 1)
+	if len(h.Refs) != 1 {
+		return
+	}
 	crucible.Equal(mut t, "main", h.Refs[0].Target, c1.Hex())
 	let v = m.Newest(cid) catch _ {
 		nil

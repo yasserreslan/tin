@@ -2,6 +2,7 @@ package packfile
 
 import "../object"
 import "../store"
+import "io"
 import "seal"
 import "sift"
 import "squash"
@@ -23,6 +24,25 @@ type reused struct {
 
 // Reuse is a pack of the objects ids (each once), from the packs where they are and s for the rest.
 fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
+	mut b = bytesOut{b: []u8{}}
+	_ = try ReuseTo(mut s, mut packs, ids, mut b)
+	return str(b.b)
+}
+
+// bytesOut collects a pack in memory, for Reuse.
+type bytesOut struct {
+	b []u8
+}
+
+// Write appends data.
+fn (o mut bytesOut) Write(data []u8) !i64 {
+	o.b = append(o.b, data...)
+	return len(data)
+}
+
+// ReuseTo writes the pack Reuse makes to w an entry at a time, as each is made, and gives how many objects it holds:
+// a fetch streams its answer (#1009), and the client has its first bytes long before the server reaches the last.
+fn ReuseTo[S store.ObjectStore, W io.Writer](s mut S, packs mut []Pack, ids []object.Id, w mut W) !i64 {
 	mut seen = map[str]bool{}
 	mut list = []reused{}
 	for id in ids {
@@ -62,10 +82,12 @@ fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
 		}
 		posOf = append(posOf, m)
 	}
-	mut out = []u8{}
-	appendStr(mut out, "TITPACK\x00")
-	appendLE32(mut out, 1)
-	appendLE64(mut out, len(list))
+	mut h = seal.NewSha256()
+	mut head = []u8{}
+	appendStr(mut head, "TITPACK\x00")
+	appendLE32(mut head, 1)
+	appendLE64(mut head, len(list))
+	try put(mut w, mut h, head)
 	mut sent = map[str]bool{}
 	for r in list {
 		mut e = []u8{}
@@ -102,11 +124,17 @@ fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
 			let (kind, body) = try s.GetRaw(id)
 			e = try wholeEntry(kind, body)
 		}
-		out = append(out, e...)
+		try put(mut w, mut h, e)
 		sent[r.raw] = true
 	}
-	appendStr(mut out, str(seal.Sha256(str(out))))
-	return str(out)
+	_ = try w.Write(h.Sum())
+	return len(list)
+}
+
+// put writes b to w and to the pack's hash.
+fn put[W io.Writer](w mut W, h mut seal.Hasher, b []u8) ! {
+	_ = try h.Write(b)
+	_ = try w.Write(b)
 }
 
 // packRank orders the packs, loose objects (-1) last.

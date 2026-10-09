@@ -565,7 +565,8 @@ repos.
 
 ### A push over a Repo
 
-1. The request is read and its pack verified (§6) into a file under `TempDir()` (in memory before #1009).
+1. The request's pack is streamed to a file under `TempDir()` and verified and indexed where it lies (§6,
+   `packfile.KeepFile`, #1009); the signer and nonce are checked before the body is read, the signature after.
 2. Checks without the lock, against what the repository holds now: each change's newest version is the one the push
    replaces (`Moved`), each ref holds the push's `old` (`RefChanged`), every pushed commit is complete, has no
    conflict and verifies against the signers file (`BadPack`, `Conflicted`, `BadSignature`).
