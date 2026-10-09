@@ -35,7 +35,7 @@ The inventory is the 176 packages `go list std` reports for Go 1.26 (without `in
 | structs, methods | yes; fields and methods follow the capitalized-export rule | done |
 | struct embedding | not documented | missing |
 | struct tags | none: attributes checked by the compiler are the plan | design |
-| interfaces, type assertions, type switches | shapes: `shape` declarations (method sets, composition, named unions, generic parameters and instances like `Seq[i64]`), structural satisfaction, static dispatch by monomorphization, and explicit `dyn S` two-word values with method tables, optionals, slices, `keep` and region checks. `!dyn` results (#568), formatting (#569) and map values (#567) work. No type assertions or type switches by design (an `enum` is a closed set); #141 | partial |
+| interfaces, type assertions, type switches | shapes: `shape` declarations (method sets, composition, named unions, generic parameters and instances like `Seq[i64]`), structural satisfaction, static dispatch by monomorphization, and explicit `dyn S` two-word values with method tables, optionals, slices, `keep` and region checks. Map values and `!dyn` results remain deferred. No type assertions or type switches by design (an `enum` is a closed set); #141 | partial |
 | generics | type parameters with imported library shapes `constraints.Any`, `constraints.Comparable` and `sift.Ordered`, plus unions; inference; methods on generic types | partial |
 | function values, closures | capturing closures as region objects with shared cells (Go 1.22 per-iteration loop variables), frame-resident descriptors for closures only the library calls (no pool allocation), deep-copied by keep(), escape into globals rejected, defer with captures; a local closure cannot recurse and cannot capture a mut parameter; cells for every captured variable (by-value copies of never-reassigned variables are a later optimization) | done |
 | method values and expressions | not documented | missing |
@@ -202,7 +202,7 @@ Ordered by import path, as `go list std` prints them.
 | `os/user` |  | missing |  |  |
 | `path` | 8+1 | partial | trail | Clean, Base, Dir, Ext, Join, Split, Match, IsAbs |
 | `path/filepath` | 27+6 | partial | trail | the same, plus Rel; no Walk, WalkDir, Glob, Abs or EvalSymlinks |
-| `plugin` |  | design |  | no dynamic loading |
+| `plugin` |  | design |  | no dynamic loading; extensions are child processes behind a protocol (design/stdlib_plugin.md) |
 | `reflect` | 369+132 | design | compile-time derivation (argo, say) | runtime reflection is not planned; what code uses it for (serialization, validation, mapping rows to structs) becomes derived code |
 | `regexp` | 59+1 | missing |  | needs an RE2-style engine; linear time |
 | `regexp/syntax` |  | missing |  |  |
