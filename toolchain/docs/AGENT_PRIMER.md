@@ -68,7 +68,7 @@ the compiler: write a minimal repro as a test, open an issue and work around it.
 - Params are read-only unless declared `mut` (`fn (b mut Buf) add(...)`, `fn f(xs mut []i64)`).
   Modifying a non-mut param's contents (fields, elements, append, map store) is a compile error. A call
   writes `mut` before every argument for a mut parameter: `f(mut xs)`, `sift.Ints(mut xs)`,
-  `argo.Put(mut buf, v)`; receivers and append/copy/delete take none.
+  `argo.Put(mut buf, v)`; receivers and append/copy/delete take none. A trusted file (the std, packages, runtime and compiler directories) does not report a write into a slice, map or struct parameter, because its code is reviewed and may grow a parameter in place; a value struct parameter is checked everywhere.
 - Enums: `type Shape enum {` one variant per line: `Circle(f64)`, `Rect(f64, f64)`, `Empty` `}`,
   built as `Shape.Circle(2.0)`, read with `match s { Circle(r) => ... Rect(w, h) => ... Empty =>
   ... }` (every variant or `_`; no field access). `==` by value; print as `Rect(3 4)`; JSON

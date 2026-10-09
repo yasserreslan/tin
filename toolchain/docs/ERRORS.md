@@ -3605,6 +3605,8 @@ A slice is a reference: after `mut ys = xs` the two names are one slice, and `ap
 either grows both. Reading the other name after the append is almost always a mistake
 (a "snapshot" that changed), so user code may not.
 
+The check applies to a `.tin` file outside the trusted set (the list at E701). Trusted code is checked by people and may grow a shared slice in place, so the compiler does not follow its aliases there.
+
 ```tin edition=1
 package main
 
@@ -3758,6 +3760,8 @@ Fix: call `body()` inside `Run` (as often as the policy needs) and keep only its
 
 Parameters are read-only unless declared `mut`: changing a parameter's fields, elements or
 map entries, or appending to it, needs `mut` on the parameter (and at the call).
+
+The check applies to a `.tin` file outside the trusted set: `toolchain/std/`, `packages/`, `toolchain/runtime/`, `toolchain/compiler/`, `tools/`, `selfhost/`, and a vendored package granted the unsafe capability. Trusted code is checked by people and may grow a parameter in place, so the compiler does not report it there. A value struct parameter (#631) is checked in every file, since its bytes are its caller's.
 
 ```tin edition=1
 package main
