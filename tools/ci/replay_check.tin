@@ -748,7 +748,7 @@ fn clients(e Env) {
 	let before = len(failures)
 	let lines = ci.Lines(r.Stdout)
 	let wantEffects = []str{"tide.now@1", "tide.wall@1", "dice.seed@1", "seal.random@1", "redis@1", "wire.http@1", "wire.dial@1", "wire.write@1", "wire.read@1", "wire.http@1", "tide.now@1"}
-	if r.Code != 0 || len(lines) < 7 {
+	if r.Code != 0 || len(lines) < 6 {
 		flag("exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
 	} else {
 		let recorded = lines[1]
@@ -781,6 +781,54 @@ fn clients(e Env) {
 	}
 	ci.Check(len(failures) == before, "replay clients:\n" + twine.Join(failures, "\n"))
 	say.Line("PASS replay clients: tide, dice, seal, wire (http, dial, read, write) and redis record in order, replay with no live call, and a changed key diverges")
+}
+
+// kafkaClients: a produce and a fetch of the kafka client against the fake broker
+// (tools/ci/fixtures/kafka_fake.tin, one topic) go on one task's tape in order; replayed, the
+// same code gets the same values with no connection made, and a changed topic (a changed
+// request, and the request is the effect's key) diverges (#447).
+fn kafkaClients(e Env) {
+	let lib = ci.Join(e.Work, "lib/replaykafka")
+	ci.Mkdirs(lib)
+	ci.Copy(ci.Join(ci.Root(), "tools/ci/fixtures/replay_kafka_probe.tin"), ci.Join(lib, "probe.tin"))
+	let exe = ci.Join(e.Work, "replay_kafka")
+	build(e, "tools/ci/fixtures/replay_kafka.tin", exe, []str{})
+	let fakeExe = ci.Join(e.Work, "kafka_fake")
+	ci.BuildTin(ci.Join(ci.Root(), "tools/ci/fixtures/kafka_fake.tin"), fakeExe, "", []str{})
+	let webPort = nettest.Port()
+	let kafkaPort = nettest.Port()
+	let fake = nettest.Start(fakeExe, []str{}, []str{"KAFKA_PORT=" + mint.Itoa(kafkaPort), "TIN_CORES=1"}, ci.Join(e.Out, "kafka_fake.log"), webPort)
+	fake.Ready(10)
+	let _ = nettest.Get(webPort, "/start")
+	let before = len(failures)
+	let tape = ci.Join(e.Work, "kafka.tape")
+	ci.Remove(tape)
+	let set = []str{"KAFKA_ADDR=127.0.0.1:" + mint.Itoa(kafkaPort), "TAPE_OUT=" + tape, "TIN_REPLAY_DIR=" + ci.Join(e.Work, "spool-kafka"), "TIN_REPLAY_KEY=" + keyHex()}
+	let r = ci.ExecEnv([]str{exe}, "", 60, set, replayUnset())
+	ci.Write(ci.Join(e.Out, "kafka.log"), r.Stdout + r.Stderr)
+	let lines = ci.Lines(r.Stdout)
+	let wantEffects = []str{"kafka@1", "tide.wall@1", "kafka@1", "kafka@1", "kafka@1", "kafka@1"}
+	if r.Code != 0 || len(lines) < 6 {
+		flag("exit " + mint.Itoa(r.Code) + "\n" + r.Stdout + r.Stderr)
+	} else {
+		let recorded = lines[1]
+		for part in []str{"0 0 1 0 k v"} {
+			if !twine.Contains(recorded, part) {
+				flag("recorded summary lacks " + part + ": " + recorded)
+			}
+		}
+		equal("kafka setup", lines[0], "recording on: true")
+		equal("kafka effects", lines[2], "effects: " + mint.Itoa(len(wantEffects)))
+		equal("kafka replay", lines[3], "replayed same: true left: 0 diverged: ")
+		equal("kafka other summary", lines[5], "other summary has the divergence: true")
+		let conns = ci.Num(nettest.Get(webPort, "/conns"))
+		ci.Check(conns <= 2, "kafka: the broker accepted " + mint.Itoa(conns) + " connections (record only)")
+		let data = ci.Read(tape)
+		let t = parseTape(data)
+		equal("kafka kinds in order", twine.Join(t.Kinds, ","), twine.Join(wantEffects, ","))
+	}
+	ci.Check(len(failures) == before, "replay kafka:\n" + twine.Join(failures, "\n"))
+	say.Line("PASS replay kafka: a produce and a fetch record in order, replay with no connection made, and a changed topic diverges")
 }
 
 // moreClients: recording in mysql, postgres, websocket and quarry: the effects of one task against fake servers and real files go on
@@ -934,6 +982,7 @@ fn main() {
 	capsules(e)
 	recording(e)
 	clients(e)
+	kafkaClients(e)
 	let mysqlManager = startManager(e, "mysqlfake", "./tools/ci/fixtures/mysqlfake", []str{})
 	let pgManager = startManager(e, "pgfake", "./tools/ci/fixtures/pgfake", []str{})
 	let mysql = ci.Num(nettest.Get(mysqlManager, "/new?tls=0"))

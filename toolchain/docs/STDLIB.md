@@ -2953,7 +2953,7 @@ A key picks the partition the way the Java client does (murmur2), so a key lands
 - `(c Client) Committed(group str, topic str, partition i64) !i64`: Committed is the offset group last committed for the partition, or -1 when it has none.
 - `type Mechanism enum`: Mechanism is the SASL mechanism used when Options.Username is set.
 - `type Acks enum`: Acks says which replicas must have a record before Send returns.
-- `type Options struct`: Options says where and how to connect, and how to produce and fetch.
+- `type Options struct`: Options says where and how to connect, and how to produce and fetch. The idempotent producer (Options.NoIdempotence) is on by default with Acks.All; recording a request (TIN_REPLAY_DIR with TIN_REPLAY_KEY) turns it off for that request's sends, so the recorded effects depend on the request only (design/interface_replay.md, kafka@1).
 - `type Client struct`: Client talks to one Kafka cluster. Open it in a global's initializer (which runs on every core) or once in main, not per request.
 - `type Ack struct`: Ack says where Send put a record. Offset is -1 with Acks.NoAck, and when an idempotent retry found the batch already written.
 - `Open(o Options) Client`: Open makes a client for the cluster in o. It connects on first use, on each core.

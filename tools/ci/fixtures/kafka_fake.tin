@@ -136,6 +136,7 @@ fn be64(s str, at i64) i64 {
 // its listener; the check asks for it once before using the broker.
 
 mut fakePort i64
+mut fakeConns i64
 
 fn main() {
 	say.Line(anvil.Serve(":8080", handle))
@@ -155,6 +156,11 @@ fn handle(q anvil.Req, w mut anvil.Out) {
 			}
 		}
 	}
+	if q.Path == "/conns" {
+		// How many connections the broker has accepted: the replay must open none.
+		w.Text("{fakeConns}")
+		return
+	}
 	w.Text("{fakePort}")
 }
 
@@ -164,6 +170,7 @@ fn fake(p str) ! {
 	fakePort = port
 	for {
 		let c = try ln.Accept()
+		fakeConns += 1
 		let kc = keep(c)
 		detach {
 			serve(kc) catch err {
