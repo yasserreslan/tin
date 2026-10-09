@@ -1,0 +1,88 @@
+package syslog
+
+// Collector is the receiving side of a syslog connection: a bound Unix datagram or stream socket, or an IPv4 UDP port. It is what a
+// collector or a test listens with; the messages it reads are the bytes a Writer sent.
+type Collector struct {
+	fd     i64
+	stream bool
+	conn   i64
+}
+
+// Listen binds a collector: network "unixgram" (Read returns one message per datagram), "unix" (a stream: Read returns the next
+// bytes, accepting the next connection once one ends) or "udp" (addr is "a.b.c.d:port"). A Unix path must not exist yet.
+fn Listen(network str, addr str) !Collector {
+	if network == "udp" {
+		let (sa, n) = try sockaddrInet(addr)
+		defer free(sa)
+		let fd = sysSocket(afInet, sockDgram, 0)
+		if fd < 0 {
+			fail "syslog: cannot create a UDP socket"
+		}
+		if sysBind(fd, sa, n) < 0 {
+			rt_sys_close(fd)
+			fail "syslog: cannot bind {addr}"
+		}
+		return Collector{fd: fd, stream: false, conn: -1}
+	}
+	if network != "unixgram" && network != "unix" {
+		fail "listen {network}: unknown network {network}"
+	}
+	mut typ = sockDgram
+	if network == "unix" {
+		typ = sockStream
+	}
+	let fd = sysSocket(afUnix, typ, 0)
+	if fd < 0 {
+		fail "syslog: cannot create a socket for {addr}"
+	}
+	let (sa, n) = try sockaddrUnix(addr)
+	defer free(sa)
+	if sysBind(fd, sa, n) < 0 {
+		rt_sys_close(fd)
+		fail "syslog: cannot bind {addr}"
+	}
+	if typ == sockStream && sysListen(fd, 16) < 0 {
+		rt_sys_close(fd)
+		fail "syslog: cannot listen on {addr}"
+	}
+	return Collector{fd: fd, stream: typ == sockStream, conn: -1}
+}
+
+// Read returns the next message (a datagram, cut to max bytes) or, for a stream, the next bytes of it (at most max).
+fn (c mut Collector) Read(max i64) !str {
+	let buf = calloc(1, max)
+	defer free(buf)
+	if !c.stream {
+		let n = sysRecv(c.fd, buf, max)
+		if n < 0 {
+			fail "syslog: receive failed"
+		}
+		return rt_str_from_raw(buf, n)
+	}
+	for {
+		if c.conn < 0 {
+			c.conn = sysAccept(c.fd)
+			if c.conn < 0 {
+				fail "syslog: accept failed"
+			}
+		}
+		let n = rt_sys_read(c.conn, buf, max)
+		if n < 0 {
+			fail "syslog: read failed"
+		}
+		if n > 0 {
+			return rt_str_from_raw(buf, n)
+		}
+		rt_sys_close(c.conn)
+		c.conn = -1
+	}
+}
+
+// Close closes the collector's sockets; it does not remove a Unix path (the caller does).
+fn (c mut Collector) Close() {
+	if c.conn >= 0 {
+		rt_sys_close(c.conn)
+		c.conn = -1
+	}
+	rt_sys_close(c.fd)
+}

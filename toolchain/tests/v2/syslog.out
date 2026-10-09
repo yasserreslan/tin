@@ -1,0 +1,19 @@
+consts 0 7 0 16 128 184
+"<190>Oct  9 12:00:00 app[42]: hello\n"
+"<11>2026-10-09T12:00:00Z host1 app[7]: line\n"
+"<11>2026-10-09T12:00:00+02:00 h t[1]: \n"
+"<6>Jan  1 00:00:00 t[0]: a\n\n"
+ready addr=:8080 note="two words" empty="" q="a\"b" eq="a=b" ok=x
+log/syslog: invalid priority
+log/syslog: invalid priority
+dial bogus: unknown network bogus
+syslog: localhost is not an IPv4 address (names are not resolved)
+syslog: cannot connect to /tmp/tin-test-syslog-none.sock
+"<134>TS probe[PID]: hello\n"
+wrote 2
+"<133>TS probe[PID]: ab\n"
+"<132>TS probe[PID]: disk pct=91\n"
+"<131>TS probe[PID]: again\n"
+"<30>TS sd[PID]: one\n"
+"<27>TS sd[PID]: two\n"
+"<9>TS HOST udp[PID]: up\n"
