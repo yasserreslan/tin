@@ -476,11 +476,27 @@ fn decodeCommit(body str) !CommitData {
 	if k != len(ls) {
 		fail fault.Wrap(ErrCorrupt, "commit: header after the signature")
 	}
-	let again = try commitBody(c)
-	if again != body {
+	// the message is the body's own tail: only the headers and the signature line are encoded again, and compared in
+	// place (#807: building the whole body again cost as much as the rest of decoding)
+	let head = try commitHeaders(c)
+	let sig = try signatureLine(c.Signature)
+	if len(head) + len(sig) + 1 + len(c.Message) != len(body) || !textAt(body, 0, head) || !textAt(body, len(head), sig) {
 		fail fault.Wrap(ErrCorrupt, "commit: not in canonical form")
 	}
 	return c
+}
+
+// textAt reports whether s holds t at offset at.
+fn textAt(s str, at i64, t str) bool {
+	if at + len(t) > len(s) {
+		return false
+	}
+	for i in 0..len(t) {
+		if s[at + i] != t[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- tags ----
@@ -559,7 +575,7 @@ fn indexFrom(s str, from i64, c u8) i64 {
 }
 
 fn appendStr(out mut []u8, s str) {
-	out = append(out, []u8(s)...)
+	out = append(out, s...)
 }
 
 // parseDecimal reads a non-negative decimal with no sign and no leading zero.

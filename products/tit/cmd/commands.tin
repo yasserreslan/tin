@@ -436,7 +436,7 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 	} else if la.Topo {
 		order = revwalk.Order.Topo
 	}
-	let ids = try revwalk.Walk(mut r.Store, starts, hide, order, la.Most)
+	let (ids, datas) = try revwalk.WalkCommits(mut r.Store, starts, hide, order, la.Most)
 	// --format=git-id: the git id each adopted commit came from, "-" for one made in tit
 	mut gitOf = map[str]str{}
 	if la.Format == "git-id" {
@@ -447,7 +447,8 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 		}
 	}
 	mut first = true
-	for id in ids {
+	for at in 0..len(ids) {
+		let id = ids[at]
 		if la.Format == "id" {
 			o.Line(id.Hex())
 			continue
@@ -461,7 +462,7 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 			}
 			continue
 		}
-		let c = try commitData(mut r, id)
+		let c = datas[at]
 		if la.Format == "change" {
 			o.Line(c.Change.Letters())
 			continue

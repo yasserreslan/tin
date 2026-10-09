@@ -66,6 +66,10 @@ stands for the commit it tags.
 
 Settings: `user.name`, `user.email`, `user.key`, `remote.<name>.url`, `mirror.url`.
 
+Cores: `adopt`, `repack`, `push`, `sync`, `ship`, `add` and `commit` start every core (`TIN_CORES` sets how many) to
+hash, find deltas and compress; the other commands run on one, since starting the cores costs milliseconds, more than
+`log`, `show` or a `status` with a warm stat cache take.
+
 ## Saving work
 
 | command | |
