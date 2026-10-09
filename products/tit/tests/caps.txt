@@ -29,6 +29,7 @@ oplog files
 pack
 packfile files
 policy
+prune files
 quarry files
 relay
 replay files

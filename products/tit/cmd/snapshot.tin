@@ -75,6 +75,8 @@ fn changesWorkdir(c Command) bool {
 		Park(_) => true
 		Focus(_, _) => true
 		Repack(_) => false
+		Prune(_) => false
+		Purge(_) => false
 		Unpark(_) => true
 		Log(_) => false
 		Show(_) => false
