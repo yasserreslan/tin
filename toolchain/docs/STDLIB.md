@@ -707,6 +707,7 @@ Package twine manipulates UTF-8 strings (like Go's strings), with Unicode case m
 - `NewReplacer(oldnew []str) Replacer`: NewReplacer returns a Replacer from a list of old, new string pairs. Replacements are made in the order they appear in the text, without overlapping matches; at one position the old strings are tried in argument order. An empty old string matches at the start and after every byte. It panics when the list has an odd length.
 - `(r Replacer) Replace(s str) str`: Replace returns s with all replacements performed.
 - `IndexByte(s str, c u8) i64`: IndexByte returns the byte offset of the first c in s, or -1.
+- `IndexByteFrom(s str, from i64, c u8) i64`: IndexByteFrom returns the byte offset of the first c in s at or after from, or -1 (also when from is past the end): IndexByte of s[from:] without copying that slice.
 - `LastIndexByte(s str, c u8) i64`: LastIndexByte returns the byte offset of the last c in s, or -1.
 - `Index(s str, sub str) i64`: Index returns the byte offset of the first sub in s, or -1 (0 for an empty sub).
 - `LastIndex(s str, sub str) i64`: LastIndex returns the byte offset of the last sub in s, or -1 (len(s) for an empty sub).

@@ -579,12 +579,7 @@ fn decodeTag(body str) !TagData {
 // ---- helpers ----
 
 fn indexFrom(s str, from i64, c u8) i64 {
-	for i in from..len(s) {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
+	return twine.IndexByteFrom(s, from, c)
 }
 
 fn appendStr(out mut []u8, s str) {

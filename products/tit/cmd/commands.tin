@@ -16,6 +16,7 @@ import "seal"
 import "sift"
 import "tide"
 import "trail"
+import "twine"
 
 // The commands of the first wave: init, status, log, show, cat, config and key.
 
@@ -379,11 +380,13 @@ fn writeCommit(g Global, r mut Repo, id object.Id, c object.CommitData, o mut Ou
 fn splitLines(s str) []str {
 	mut out = []str{}
 	mut start = 0
-	for i in 0..len(s) {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
+	for {
+		let nl = twine.IndexByteFrom(s, start, '\n')
+		if nl < 0 {
+			break
 		}
+		out = append(out, s[start:nl])
+		start = nl + 1
 	}
 	if start < len(s) {
 		out = append(out, s[start:])
