@@ -112,6 +112,9 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, view, "Toggle Terminal", "`", ctrl, workspace.CmdToggleTerminal)
 	item(m, view, "Reveal in Project Panel", "r", cmd | shift, workspace.CmdRevealInProject)
 	appkit.AddSeparator(view)
+	item(m, view, "Reveal in Finder", "y", cmd | shift, workspace.CmdRevealFinder)
+	item(m, view, "Copy File Path", "", 0, workspace.CmdCopyPath)
+	appkit.AddSeparator(view)
 	appkit.AddSystemItem(view, "Enter Full Screen", "toggleFullScreen:", "f", cmd | ctrl)
 
 	let nav = appkit.AddMenu(m, "Go")
