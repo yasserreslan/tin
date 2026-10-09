@@ -2,6 +2,7 @@
 # Accounts end to end (#1012, #1018) against TINHUB_TEST_DB. Usage: signin.sh TINHUB REPO_DRIVER TIT
 #   - tinhub admin invite makes a code; tit key add registers bob's key with it, once;
 #   - bob, who can read the public ada/tin, is refused a push; granted write, his push lands and the API shows it;
+#   - a 50 MB blob streams from the API, and 100 concurrent clones finish with the server's peak memory bounded;
 #   - a browser asks for a login request, bob approves it with tit login, the browser claims it and gets a session
 #     that reads the repository once it is private (anonymous callers get 404); signing out ends it.
 #   - deploy/mirror-sync.sh keeps a repository a mirror of a git repository (adopt, then push with a mirror key).
@@ -84,6 +85,45 @@ echo "$refs" | jq -e '.refs[0].name == "refs/heads/main"' > /dev/null || fail "r
 before=$(cat "$tmp/main.before")
 echo "$refs" | jq -e --arg b "$before" '.refs[0].target != $b' > /dev/null || fail "main did not move: $refs"
 echo "PASS tinhub protocol: a reader's push is refused, a writer's lands"
+
+# 100 concurrent clones, each fetch inside its budget (fetch memory): all finish, and the server's peak memory stays
+# bounded. A fetch holds the objects it sends, so its memory is about the size of what it sends: this runs before the
+# 50 MB file below is pushed.
+hwm0=$(awk '/^VmHWM/ { print $2 }' "/proc/$pid/status" 2>/dev/null || echo 0)
+i=0
+clones=
+while [ $i -lt 100 ]; do
+	i=$((i + 1))
+	(cd "$tmp" && bob clone "$base/ada/tin" "c$i" > "$tmp/c$i.out" 2>&1 && [ "$(cat "$tmp/c$i/b.txt")" = two ]) &
+	clones="$clones $!"
+done
+bad=0
+for c in $clones; do wait "$c" || bad=$((bad + 1)); done
+[ $bad = 0 ] || fail "$bad of 100 concurrent clones failed: $(cat "$tmp/c1.out")"
+if [ -r "/proc/$pid/status" ]; then
+	hwm=$(awk '/^VmHWM/ { print $2 }' "/proc/$pid/status")
+	echo "tinhub: peak memory $((hwm / 1024)) MiB after 100 concurrent clones (was $((hwm0 / 1024)) MiB)"
+	[ "$hwm" -lt $((1024 * 1024)) ] || fail "peak memory $((hwm / 1024)) MiB over 1 GiB"
+fi
+rm -rf "$tmp"/c[0-9]*
+echo "PASS tinhub protocol: 100 concurrent clones"
+
+# a 50 MB blob pushed and read back through the API, streamed in pieces
+cd "$tmp/work"
+head -c 52428800 /dev/urandom > big.bin
+bob add big.bin
+bob commit -m "a big file" > /dev/null
+bob push > "$tmp/out" 2>&1 || fail "the big push: $(cat "$tmp/out")"
+cd "$tmp"
+main=$(curl -sf "$base/api/v1/repos/ada/tin/refs" | jq -r '.refs[0].target')
+curl -s "$base/api/v1/repos/ada/tin/commits/$main" > "$tmp/commit.json"
+treeid=$(jq -r .tree "$tmp/commit.json")
+[ ${#treeid} -eq 64 ] || fail "the commit: $(cat "$tmp/commit.json")"
+blob=$(curl -sf "$base/api/v1/repos/ada/tin/trees/$treeid" | jq -r '.entries[] | select(.name == "big.bin") | .id')
+[ ${#blob} -eq 64 ] || fail "big.bin is not in main's tree: $main $(curl -s "$base/api/v1/repos/ada/tin/trees/$treeid")"
+curl -sf -o "$tmp/big.out" "$base/api/v1/repos/ada/tin/blobs/$blob" || fail "GET the 50 MB blob"
+cmp -s "$tmp/big.out" "$tmp/work/big.bin" || fail "the 50 MB blob differs"
+echo "PASS tinhub api: a 50 MB blob streams"
 
 # a browser signs in with bob's key, and its session reads the private repository
 "$driver" private

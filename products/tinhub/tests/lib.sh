@@ -2,7 +2,7 @@
 # docker), started and killed at will. start_redis fails (status 1) when neither is installed.
 rpid=
 container=
-port=16379
+port=${TINHUB_TEST_REDIS_PORT:-16379}
 stop_redis() {
 	if [ -n "$rpid" ]; then kill -9 "$rpid" 2>/dev/null || true; wait "$rpid" 2>/dev/null || true; rpid=; fi
 	if [ -n "$container" ]; then docker rm -f "$container" > /dev/null 2>&1 || true; container=; fi
