@@ -222,13 +222,29 @@ fn porcelain(rep index.Report, untracked []str, renames map[str]str, idx index.I
 	return out
 }
 
+// conflicted reports whether the index holds a conflict (stages 1 to 3).
+fn conflicted(idx index.Index) bool {
+	for e in idx.Entries {
+		if e.Stage != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 fn doStatus(g Global, short bool, o mut Out) ! {
-	mut r = try open(g)
+	// When the index is the last commit's tree (both known from their caches), status reads no object: the packs are
+	// opened only when it may (#807).
+	mut r = try openWith(g, false)
 	mut idx = try r.readIndex()
 	let head = try r.headCommit()
 	mut tree = object.NoId
 	if head != nil {
-		tree = try r.headTreeOf(head)
+		tree = r.cachedHeadTree(head)
+		if tree == object.NoId || idx.Tree != tree || conflicted(idx) {
+			r = try open(g)
+			tree = try r.headTreeOf(head)
+		}
 	}
 	mut rules = try ignore.Load(r.Ws.Root)
 	let known = idx.Tree != object.NoId

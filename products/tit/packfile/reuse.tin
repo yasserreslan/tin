@@ -35,7 +35,7 @@ fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
 		for k in 0..len(packs) {
 			let pos = packs[k].Find(id)
 			if pos >= 0 {
-				list = append(list, reused{pack: k, off: packs[k].offs[pos], pos: pos, raw: raw})
+				list = append(list, reused{pack: k, off: packs[k].off(pos), pos: pos, raw: raw})
 				found = true
 				break
 			}
@@ -57,8 +57,8 @@ fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
 	mut posOf = []map[i64]i64{}
 	for k in 0..len(packs) {
 		mut m = map[i64]i64{}
-		for i in 0..len(packs[k].offs) {
-			m[packs[k].offs[i]] = i
+		for i in 0..packs[k].Count {
+			m[packs[k].off(i)] = i
 		}
 		posOf = append(posOf, m)
 	}
@@ -76,7 +76,7 @@ fn Reuse[S store.ObjectStore](s mut S, packs mut []Pack, ids []object.Id) !str {
 			if baseOff >= 0 {
 				let (bpos, known) = posOf[r.pack][baseOff]
 				if known {
-					base = p.ids[32 * bpos:32 * bpos + 32]
+					base = p.idx[idsAt + 32 * bpos:idsAt + 32 * bpos + 32]
 				}
 			}
 			if t != typeOfsDelta && t != typeRefDelta {

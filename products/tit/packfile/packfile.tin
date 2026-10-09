@@ -62,13 +62,13 @@ type Pack struct {
 	trailer str
 	loaded  bool
 	data    str
-	ids    str
-	offs   []i64
+	// idx is the index file: its ids, offsets and CRCs are read from it where they are (#807: copying them out on
+	// every open cost more than a status)
+	idx str
 	// ends is the entries' offsets in order, then the trailer's: an entry runs to the next one
 	ends []i64
 	// ranged counts the entries read one by one (entryBytes)
 	ranged i64
-	crcs   []u32
 	fanout []i64
 	cache  map[i64]str
 	kinds  map[i64]object.Kind
@@ -118,9 +118,6 @@ fn Open(path str) !Pack {
 	if count < 0 || count > info.Size || len(idx) != want || idx[0:8] != "TITIDX\x00\x00" || le32(idx, 8) != 1 || le64(idx, 12) != count {
 		fail fault.Wrap(ErrBadPack, "{idxPath}: not the index of this pack")
 	}
-	if str(seal.Sha256(idx[0:len(idx) - 32])) != idx[len(idx) - 32:] {
-		fail fault.Wrap(ErrBadPack, "{idxPath}: its hash does not match")
-	}
 	mut fanout = make([]i64, 256)
 	mut prev = 0
 	for i in 0..256 {
@@ -133,26 +130,31 @@ fn Open(path str) !Pack {
 	if fanout[255] != count {
 		fail fault.Wrap(ErrBadPack, "{idxPath}: the fan-out table does not end at the count")
 	}
-	let idsAt = 20 + 1024
-	let ids = idx[idsAt:idsAt + 32 * count]
-	// in order, each after the one before: compared in place (a slice of a str is a copy)
-	for i in 1..count {
-		if !idBefore(ids, 32 * (i - 1), 32 * i) {
-			fail fault.Wrap(ErrBadPack, "{idxPath}: ids are not in order")
-		}
+	// The index's hash and the order of its ids are checked by Verify (tit verify), as git checks its own indexes
+	// in fsck: an open reads only what it needs, and an offset is checked where it is used.
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ends: []i64{}, ranged: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+}
+
+// idsAt is where the ids start in an index: after its header (20 bytes) and fan-out table (1024).
+const idsAt = 20 + 1024
+
+// off is the offset in the pack of the entry at position i of the index.
+fn (p Pack) off(i i64) i64 {
+	return le64(p.idx, idsAt + 32 * p.Count + 8 * i)
+}
+
+// crc is the CRC-32 of the entry at position i.
+fn (p Pack) crc(i i64) u32 {
+	return u32(le32(p.idx, idsAt + 40 * p.Count + 4 * i))
+}
+
+// offOf is off, checked to lie inside the pack.
+fn (p Pack) offOf(i i64) !i64 {
+	let o = p.off(i)
+	if o < 20 || o >= p.size - 32 {
+		fail fault.Wrap(ErrBadPack, "{p.Path}: an offset outside the pack")
 	}
-	mut offs = make([]i64, count)
-	mut crcs = make([]u32, count)
-	let offAt = idsAt + 32 * count
-	let crcAt = offAt + 8 * count
-	for i in 0..count {
-		offs[i] = le64(idx, offAt + 8 * i)
-		crcs[i] = u32(le32(idx, crcAt + 4 * i))
-		if offs[i] < 20 || offs[i] >= info.Size - 32 {
-			fail fault.Wrap(ErrBadPack, "{idxPath}: an offset outside the pack")
-		}
-	}
-	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", ids: ids, offs: offs, ends: []i64{}, ranged: 0, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+	return o
 }
 
 // idBefore reports whether the 32-byte id at a in ids sorts before the one at b.
@@ -176,11 +178,23 @@ fn (p Pack) Find(id object.Id) i64 {
 	mut hi = p.fanout[first]
 	for lo < hi {
 		let mid = (lo + hi) / 2
-		let at = p.ids[32 * mid:32 * mid + 32]
-		if at == raw {
+		// compared in place: a slice of the index would be a copy per step
+		let at = idsAt + 32 * mid
+		mut c = 0
+		for k in 0..32 {
+			if p.idx[at + k] != raw[k] {
+				if p.idx[at + k] < raw[k] {
+					c = -1
+				} else {
+					c = 1
+				}
+				break
+			}
+		}
+		if c == 0 {
 			return mid
 		}
-		if at < raw {
+		if c < 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
@@ -196,7 +210,7 @@ fn (p Pack) Has(id object.Id) bool {
 
 // IdAt is the id of the object at position i of the index.
 fn (p Pack) IdAt(i i64) object.Id {
-	let id = object.IdOf(p.ids[32 * i:32 * i + 32]) catch _ {
+	let id = object.IdOf(p.idx[idsAt + 32 * i:idsAt + 32 * i + 32]) catch _ {
 		object.NoId
 	}
 	return id
@@ -236,8 +250,10 @@ const wholeUnder = 2 << 20
 fn (p mut Pack) entryBytes(off i64) !str {
 	if len(p.ends) == 0 {
 		// the entries' offsets in order, made the first time an entry's end is wanted
-		mut ends = make([]i64, len(p.offs))
-		copy(ends, p.offs)
+		mut ends = make([]i64, p.Count)
+		for i in 0..p.Count {
+			ends[i] = p.off(i)
+		}
 		sift.Sort(mut ends)
 		p.ends = append(ends, p.size - 32)
 	}
@@ -314,7 +330,7 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 		if pos < 0 {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against {baseId.Hex()}, which this pack lacks")
 		}
-		baseOff = p.offs[pos]
+		baseOff = try p.offOf(pos)
 		if baseOff == off {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against itself")
 		}
@@ -390,7 +406,8 @@ fn (p mut Pack) GetRaw(id object.Id) !(object.Kind, str) {
 	if pos < 0 {
 		fail fault.Wrap(ErrBadPack, "{id.Hex()} is not in {p.Path}")
 	}
-	let (kind, body) = try p.entryAt(p.offs[pos], 0)
+	let off = try p.offOf(pos)
+	let (kind, body) = try p.entryAt(off, 0)
 	if object.Hash(kind, body) != id {
 		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()} in {p.Path}: the content does not match the id")
 	}
@@ -419,8 +436,8 @@ fn (p mut Pack) Deltas() i64 {
 		return 0
 	}
 	mut n = 0
-	for off in p.offs {
-		let t = i64(p.data[off])
+	for i in 0..p.Count {
+		let t = i64(p.data[p.off(i)])
 		if t == typeOfsDelta || t == typeRefDelta {
 			n += 1
 		}
@@ -430,12 +447,22 @@ fn (p mut Pack) Deltas() i64 {
 
 // Verify checks the pack's hash, then reads every entry, checks its CRC and that its content matches its id.
 fn (p mut Pack) Verify() ! {
+	if str(seal.Sha256(p.idx[0:len(p.idx) - 32])) != p.idx[len(p.idx) - 32:] {
+		fail fault.Wrap(ErrBadPack, "{p.Path}: its index's hash does not match")
+	}
+	for i in 1..p.Count {
+		if !idBefore(p.idx, idsAt + 32 * (i - 1), idsAt + 32 * i) {
+			fail fault.Wrap(ErrBadPack, "{p.Path}: its index's ids are not in order")
+		}
+	}
 	try p.load()
 	if str(seal.Sha256(p.data[0:len(p.data) - 32])) != p.data[len(p.data) - 32:] {
 		fail fault.Wrap(ErrBadPack, "{p.Path}: its trailing hash does not match")
 	}
-	mut sorted = make([]i64, len(p.offs))
-	copy(sorted, p.offs)
+	mut sorted = make([]i64, p.Count)
+	for i in 0..p.Count {
+		sorted[i] = try p.offOf(i)
+	}
 	sift.Sort(mut sorted)
 	mut next = map[i64]i64{}
 	for k in 0..len(sorted) {
@@ -447,9 +474,9 @@ fn (p mut Pack) Verify() ! {
 	}
 	for i in 0..p.Count {
 		let id = p.IdAt(i)
-		let off = p.offs[i]
+		let off = p.off(i)
 		let end = next[off]
-		if stamp.Crc32(p.data[off:end]) != p.crcs[i] {
+		if stamp.Crc32(p.data[off:end]) != p.crc(i) {
 			fail fault.Wrap(ErrBadPack, "{id.Hex()}: its CRC does not match")
 		}
 		let (_, _, err) = p.GetRaw(id)
@@ -463,7 +490,7 @@ fn (p mut Pack) Verify() ! {
 // offset delta) or its base's id (a ref delta), and its compressed bytes, as they are in the pack.
 fn (p mut Pack) entry(pos i64) !(i64, i64, i64, str, str) {
 	try p.load()
-	let off = p.offs[pos]
+	let off = try p.offOf(pos)
 	let t = i64(p.data[off])
 	let (size, a) = try p.uvarint(off + 1)
 	mut at = a

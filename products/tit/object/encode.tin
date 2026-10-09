@@ -280,6 +280,29 @@ fn signatureLine(sig str) !str {
 }
 
 fn commitHeaders(c CommitData) !str {
+	mut out = try commitCore(c)
+	for h in c.GitHeaders {
+		let (name, value) = try checkGitHeader(h)
+		appendStr(mut out, "git-{name} ")
+		// each line of the value, the ones after the first continued with a space
+		mut from = 0
+		for {
+			let nl = indexFrom(value, from, '\n')
+			if nl < 0 {
+				appendStr(mut out, value[from:])
+				break
+			}
+			appendStr(mut out, value[from:nl + 1])
+			out = append(out, ' ')
+			from = nl + 1
+		}
+		out = append(out, '\n')
+	}
+	return str(out)
+}
+
+// commitCore is the headers before git's: tree, parents, change, author, committer and conflicts.
+fn commitCore(c CommitData) ![]u8 {
 	if len(c.Tree.raw) != 32 {
 		fail fault.Wrap(ErrCorrupt, "commit: no tree")
 	}
@@ -310,24 +333,7 @@ fn commitHeaders(c CommitData) !str {
 		}
 		appendStr(mut out, "conflict {k}\n")
 	}
-	for h in c.GitHeaders {
-		let (name, value) = try checkGitHeader(h)
-		appendStr(mut out, "git-{name} ")
-		// each line of the value, the ones after the first continued with a space
-		mut from = 0
-		for {
-			let nl = indexFrom(value, from, '\n')
-			if nl < 0 {
-				appendStr(mut out, value[from:])
-				break
-			}
-			appendStr(mut out, value[from:nl + 1])
-			out = append(out, ' ')
-			from = nl + 1
-		}
-		out = append(out, '\n')
-	}
-	return str(out)
+	return out
 }
 
 fn commitBody(c CommitData) !str {
@@ -478,9 +484,16 @@ fn decodeCommit(body str) !CommitData {
 	}
 	// the message is the body's own tail: only the headers and the signature line are encoded again, and compared in
 	// place (#807: building the whole body again cost as much as the rest of decoding)
-	let head = try commitHeaders(c)
+	// The git headers are the body's own lines between the core headers and the signature line, each checked here:
+	// encoding them again would give those lines back, so only the rest is encoded again and compared.
+	let coreBytes = try commitCore(c)
+	let core = str(coreBytes)
+	for h in c.GitHeaders {
+		let (_, _) = try checkGitHeader(h)
+	}
 	let sig = try signatureLine(c.Signature)
-	if len(head) + len(sig) + 1 + len(c.Message) != len(body) || !textAt(body, 0, head) || !textAt(body, len(head), sig) {
+	let sigAt = len(body) - len(c.Message) - 1 - len(sig)
+	if sigAt < len(core) || !textAt(body, 0, core) || !textAt(body, sigAt, sig) || (len(c.GitHeaders) == 0 && sigAt != len(core)) {
 		fail fault.Wrap(ErrCorrupt, "commit: not in canonical form")
 	}
 	return c
