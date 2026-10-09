@@ -790,6 +790,8 @@ fn (g Group) Heartbeat() ! {
 	mut d = newDec(resp)
 	d.i32()
 	let code = d.i16()
+	// The beat time and the rejoin flag are plain fields of the stored member: they are
+	// written in place, so a member polled for a long time holds no copy per heartbeat.
 	m.lastBeat = tide.Now()
 	if code == 27 || code == 22 {
 		m.rejoin = true
@@ -797,10 +799,8 @@ fn (g Group) Heartbeat() ! {
 		m.rejoin = true
 		m.memberID = ""
 	} else if code != 0 {
-		g.put(m)
 		fail kerr(code, "heartbeat in group {m.group}")
 	}
-	g.put(m)
 }
 
 // Poll returns the next records of the member's partitions, waiting up to maxWait (less when a
@@ -864,9 +864,9 @@ fn (g Group) Poll(maxWait i64) ![]Record {
 	// Move each position past what came back; an offset out of range restarts by the policy. A
 	// partition the fetch could not reach (no leader, or the leader refused) keeps its position
 	// and is asked again by the next Poll; the healthy partitions' records are not lost with it
-	// (#444).
-	mut ps = []position{}
-	for _, p in as {
+	// (#444). Only the offsets change, so they are written in place: a consumer loop that never
+	// ends would otherwise drop a kept copy of the member with every Poll (#446).
+	for i, p in as {
 		mut off = p.offset
 		for _, pt in f.Parts {
 			if pt.Topic != p.topic || pt.Partition != p.partition {
@@ -885,10 +885,10 @@ fn (g Group) Poll(maxWait i64) ![]Record {
 				off = pt.Next
 			}
 		}
-		ps = append(ps, position{topic: p.topic, partition: p.partition, offset: off, committed: p.committed})
+		if off != p.offset {
+			as[i].offset = off
+		}
 	}
-	m.assigned = ps
-	g.put(m)
 	return f.Records
 }
 
@@ -927,20 +927,21 @@ fn (g Group) CommitOffsets(parts []TopicPartition) ! {
 	if code != 0 {
 		fail kerr(code, "commit in group {m.group}")
 	}
-	mut ps = []position{}
+	// The committed offsets and the commit time are plain fields of the stored member, written
+	// in place: only the offsets change, and a long-running member holds no copy per commit.
 	let as = m.assigned
-	for _, p in as {
+	for i, p in as {
 		mut committed = p.committed
 		for _, q in parts {
 			if q.Topic == p.topic && q.Partition == p.partition {
 				committed = q.Offset
 			}
 		}
-		ps = append(ps, position{topic: p.topic, partition: p.partition, offset: p.offset, committed: committed})
+		if committed != p.committed {
+			as[i].committed = committed
+		}
 	}
-	m.assigned = ps
 	m.lastCommit = tide.Now()
-	g.put(m)
 }
 
 fn commitBody(group str, gen i64, memberID str, instance str, parts []TopicPartition) []u8 {

@@ -1,0 +1,551 @@
+package main
+
+// A fake Kafka broker for the kafka client's lifecycle checks (#446): it serves one topic (t,
+// one partition) and the group protocol, one request of a connection at a time and in order,
+// each connection in its own task. It remembers, per group, the member id, the generation, the
+// committed offsets and the assignment its leader made; when a member leaves the group it
+// writes the file KAFKA_OUT says ("group", "member", "commit" lines), which is how the check
+// sees that a drain sent the LeaveGroup and the final commit.
+
+import "anvil"
+import "quarry"
+import "tide"
+import "say"
+import "wire"
+
+mut port i64
+mut nextOff i64
+mut batches []str
+
+// commits is "group topic/part" -> the offset committed for it, and "group last" -> the last
+// offset the group committed anywhere.
+let commits = make(map[str]i64)
+
+// members is group -> the member id it gave out; gens is group -> its generation.
+let members = make(map[str]str)
+let gens = make(map[str]i64)
+
+// assigns is group -> the assignment its leader made (echoed to every member).
+let assigns = make(map[str]str)
+
+// ---- encoding ----
+
+fn p8(b mut []u8, v i64) {
+	b = append(b, u8(v))
+}
+
+fn p16(b mut []u8, v i64) {
+	b = append(b, u8(v>>8), u8(v))
+}
+
+fn p32(b mut []u8, v i64) {
+	b = append(b, u8(v>>24), u8(v>>16), u8(v>>8), u8(v))
+}
+
+fn p64(b mut []u8, v i64) {
+	p32(mut b, v>>32)
+	p32(mut b, v)
+}
+
+fn pstr(b mut []u8, s str) {
+	p16(mut b, len(s))
+	b = append(b, s...)
+}
+
+fn pnull(b mut []u8) {
+	p16(mut b, -1)
+}
+
+fn pbytes(b mut []u8, s str) {
+	p32(mut b, len(s))
+	b = append(b, s...)
+}
+
+// ---- decoding ----
+
+type rd struct {
+	s   str
+	pos i64
+}
+
+fn (r mut rd) u(n i64) i64 {
+	mut v = 0
+	for k in 0..n {
+		v = (v << 8) | i64(r.s[r.pos+k])
+	}
+	r.pos += n
+	return v
+}
+
+fn (r mut rd) i16() i64 {
+	let v = r.u(2)
+	if v >= 32768 {
+		return v - 65536
+	}
+	return v
+}
+
+fn (r mut rd) i32() i64 {
+	let v = r.u(4)
+	if v >= 2147483648 {
+		return v - 4294967296
+	}
+	return v
+}
+
+fn (r mut rd) i64() i64 {
+	let hi = r.i32()
+	let lo = r.u(4)
+	return (hi << 32) | lo
+}
+
+fn (r mut rd) str() str {
+	let n = r.i16()
+	if n < 0 {
+		return ""
+	}
+	let s = r.s[r.pos : r.pos+n]
+	r.pos += n
+	return s
+}
+
+fn (r mut rd) bytes() str {
+	let n = r.i32()
+	if n < 0 {
+		return ""
+	}
+	let s = r.s[r.pos : r.pos+n]
+	r.pos += n
+	return s
+}
+
+fn be32(s str, at i64) i64 {
+	mut r = rd{s: s, pos: at}
+	return r.i32()
+}
+
+fn be64(s str, at i64) i64 {
+	mut r = rd{s: s, pos: at}
+	return r.i64()
+}
+
+// ---- serving ----
+
+// The broker's connections are served by tasks, so it runs on an anvil core (TIN_CORES=1,
+// which the check sets: the broker's state is per core). GET /start starts it and waits for
+// its listener; the check asks for it once before using the broker.
+
+mut fakePort i64
+
+fn main() {
+	say.Line(anvil.Serve(":8080", handle))
+}
+
+fn handle(q anvil.Req, w mut anvil.Out) {
+	if fakePort == 0 {
+		let p = quarry.Getenv("KAFKA_PORT")
+		if p != "" {
+			detach {
+				fake(p) catch err {
+					say.Line("fake broker:", err)
+				}
+			}
+			for fakePort == 0 {
+				tide.Wait(1ms) catch _ {}
+			}
+		}
+	}
+	w.Text("{fakePort}")
+}
+
+fn fake(p str) ! {
+	port = mintAtoi(p)
+	let ln = try wire.Listen("127.0.0.1:{p}")
+	fakePort = port
+	for {
+		let c = try ln.Accept()
+		let kc = keep(c)
+		detach {
+			serve(kc) catch err {
+				say.Line("serve:", err)
+			}
+		}
+	}
+}
+
+fn serve(c wire.Conn) ! {
+	mut cn = c
+	defer cn.Close()
+	for {
+		let head = try cn.ReadFull(4)
+		let size = be32(head, 0)
+		let frame = try cn.ReadFull(size)
+		let resp = answer(frame)
+		if len(resp) > 0 {
+			mut out = make([]u8, 0, len(resp)+4)
+			p32(mut out, len(resp))
+			out = append(out, resp...)
+			try cn.Write(str(out))
+		}
+	}
+}
+
+// answer answers one request frame (empty for a request the broker does not answer).
+fn answer(frame str) str {
+	mut r = rd{s: frame, pos: 0}
+	let api = r.i16()
+	r.i16() // version
+	let corr = r.i32()
+	r.str() // client id
+	mut out = make([]u8, 0, 256)
+	p32(mut out, corr)
+	if api == 18 {
+		// ApiVersions.
+		p16(mut out, 0)
+		let apis = []i64{0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 18, 22}
+		p32(mut out, len(apis))
+		for _, a in apis {
+			p16(mut out, a)
+			p16(mut out, 0)
+			p16(mut out, 12)
+		}
+		p32(mut out, 0)
+		return str(out)
+	}
+	if api == 3 {
+		// Metadata: this broker alone, leading partition 0 of t.
+		p32(mut out, 0)
+		p32(mut out, 1)
+		p32(mut out, 1)
+		pstr(mut out, "127.0.0.1")
+		p32(mut out, port)
+		pnull(mut out) // rack
+		pnull(mut out) // cluster id
+		p32(mut out, 1) // the controller: this broker
+		p32(mut out, 1)
+		p16(mut out, 0)
+		pstr(mut out, "t")
+		p8(mut out, 0)
+		p32(mut out, 1)
+		p16(mut out, 0)
+		p32(mut out, 0) // partition 0
+		p32(mut out, 1) // its leader: this broker
+		p32(mut out, 0) // leader epoch
+		p32(mut out, 1)
+		p32(mut out, 1) // replicas
+		p32(mut out, 1)
+		p32(mut out, 1) // isr
+		p32(mut out, 0) // offlines
+		return str(out)
+	}
+	if api == 0 {
+		// Produce: store the batch and answer its base offset (nothing, with acks 0).
+		r.str() // transactional id
+		let acks = r.i16()
+		r.i32() // timeout
+		let nt = r.i32()
+		let topic = r.str()
+		let np = r.i32()
+		_ = nt
+		_ = np
+		let part = r.i32()
+		let batch = r.bytes()
+		let base = nextOff
+		mut stored = make([]u8, 0, len(batch))
+		p64(mut stored, base)
+		stored = append(stored, batch[8:]...)
+		batches = append(batches, str(stored))
+		nextOff = base + be32(batch, 57)
+		if acks == 0 {
+			return ""
+		}
+		p32(mut out, 1)
+		pstr(mut out, topic)
+		p32(mut out, 1)
+		p32(mut out, part)
+		p16(mut out, 0)
+		p64(mut out, base)
+		p64(mut out, -1)
+		p64(mut out, 0)
+		p32(mut out, 0)
+		return str(out)
+	}
+	if api == 1 {
+		// Fetch: every batch whose last offset is at or after the one asked for.
+		r.i32() // replica id
+		r.i32() // max wait
+		r.i32() // min bytes
+		r.i32() // max bytes
+		r.u(1)
+		r.i32() // session id
+		r.i32() // session epoch
+		let nt = r.i32()
+		_ = nt
+		r.str() // topic
+		let np = r.i32()
+		_ = np
+		r.i32() // partition
+		r.i32() // leader epoch
+		let off = r.i64()
+		r.i64() // log start offset
+		r.i32() // max bytes
+		p32(mut out, 0)
+		p16(mut out, 0)
+		p32(mut out, 0)
+		p32(mut out, 1)
+		pstr(mut out, "t")
+		p32(mut out, 1)
+		p32(mut out, 0)
+		p16(mut out, 0)
+		p64(mut out, nextOff)
+		p64(mut out, nextOff)
+		p64(mut out, 0)
+		p32(mut out, 0)
+		mut data = make([]u8, 0, 256)
+		for _, bt in batches {
+			let base = be64(bt, 0)
+			let last = base + be32(bt, 23)
+			if last >= off {
+				data = append(data, bt...)
+			}
+		}
+		pbytes(mut out, str(data))
+		return str(out)
+	}
+	if api == 2 {
+		// ListOffsets: the log start (-2) or the next offset (-1).
+		r.i32() // replica id
+		r.u(1)  // isolation
+		let nt = r.i32()
+		_ = nt
+		r.str() // topic
+		let np = r.i32()
+		_ = np
+		r.i32() // partition
+		r.i32() // leader epoch
+		let ts = r.i64()
+		p32(mut out, 0)
+		p32(mut out, 1)
+		pstr(mut out, "t")
+		p32(mut out, 1)
+		p32(mut out, 0)
+		p16(mut out, 0)
+		p64(mut out, ts)
+		if ts < 0 {
+			p64(mut out, 0) // the earliest offset
+		} else {
+			p64(mut out, nextOff)
+		}
+		p32(mut out, 0)
+		return str(out)
+	}
+	if api == 10 {
+		// FindCoordinator: this broker.
+		p32(mut out, 0)
+		p16(mut out, 0)
+		pnull(mut out)
+		p32(mut out, 1)
+		pstr(mut out, "127.0.0.1")
+		p32(mut out, port)
+		return str(out)
+	}
+	if api == 22 {
+		// InitProducerId: one id, epoch 0.
+		p32(mut out, 0)
+		p16(mut out, 0)
+		p64(mut out, 1000)
+		p16(mut out, 0)
+		return str(out)
+	}
+	if api == 11 || api == 14 || api == 12 || api == 8 || api == 9 || api == 13 {
+		return group(mut r, api)
+	}
+	p32(mut out, 0)
+	p16(mut out, 35)
+	return str(out)
+}
+
+// group answers the group protocol: one group at a time with one member (the client that joins
+// leads and assigns), the way the fake cluster of the strict suite does.
+fn group(r mut rd, api i64) str {
+	mut out = make([]u8, 0, 256)
+	p32(mut out, be32(r.s, 4)) // correlation id
+	p32(mut out, 0)            // throttle
+	let group = r.str()
+	if api == 11 {
+		// JoinGroup: make the member come back with an id, then lead it.
+		r.i32() // session
+		r.i32() // rebalance
+		let mid = r.str()
+		r.str() // instance id
+		r.str() // protocol type
+		let np = r.i32()
+		mut topics = []str{}
+		for i in 0..np {
+			r.str() // protocol name
+			let meta = r.bytes()
+			if i == 0 {
+				topics = subscription(meta)
+			}
+		}
+		if mid == "" {
+			let m = "member-1"
+			members[group] = m
+			p16(mut out, 79) // MEMBER_ID_REQUIRED
+			p32(mut out, -1)
+			pstr(mut out, "")
+			pstr(mut out, "")
+			pstr(mut out, m)
+			p32(mut out, 0)
+			return str(out)
+		}
+		members[group] = mid
+		mut g = gens[group]
+		g += 1
+		gens[group] = g
+		p16(mut out, 0)
+		p32(mut out, g)
+		pstr(mut out, "range")
+		pstr(mut out, mid) // the leader
+		pstr(mut out, mid)
+		p32(mut out, 1)
+		pstr(mut out, mid)
+		pnull(mut out)
+		pbytes(mut out, subMeta(topics))
+		return str(out)
+	}
+	if api == 14 {
+		// SyncGroup: the leader's assignment is echoed to every member. (The client's request
+		// carries no protocol type, as the fake cluster of the strict suite parses it.)
+		r.i32() // generation
+		r.str() // member id
+		r.str() // instance id
+		let na = r.i32()
+		mut asg = ""
+		for i in 0..na {
+			r.str() // member id
+			let a = r.bytes()
+			if i == 0 {
+				asg = a
+			}
+		}
+		if asg != "" {
+			assigns[group] = asg
+		}
+		p16(mut out, 0)
+		pbytes(mut out, assigns[group])
+		return str(out)
+	}
+	if api == 12 {
+		// Heartbeat: the member is alive.
+		p16(mut out, 0)
+		return str(out)
+	}
+	if api == 8 {
+		// OffsetCommit: store each offset, remembering the last one for the group.
+		r.i32() // generation
+		r.str() // member id
+		r.str() // instance id
+		let nt = r.i32()
+		for i in 0..nt {
+			let topic = r.str()
+			let np = r.i32()
+			for j in 0..np {
+				let part = r.i32()
+				let off = r.i64()
+				r.i32() // leader epoch
+				r.str() // metadata
+				commits["{group} {topic}/{part}"] = off
+				commits["{group} last"] = off
+			}
+		}
+		p32(mut out, 1)
+		pstr(mut out, "t")
+		p32(mut out, 1)
+		p32(mut out, 0)
+		p16(mut out, 0)
+		return str(out)
+	}
+	if api == 9 {
+		// OffsetFetch: the committed offset of each partition (the one topic t).
+		let nt = r.i32()
+		mut parts = []i64{}
+		for i in 0..nt {
+			r.str() // topic
+			let np = r.i32()
+			for j in 0..np {
+				parts = append(parts, r.i32())
+			}
+		}
+		p32(mut out, 1)
+		pstr(mut out, "t")
+		p32(mut out, len(parts))
+		for _, part in parts {
+			p32(mut out, part)
+			p64(mut out, commits["{group} t/{part}"])
+			p32(mut out, -1)
+			pnull(mut out)
+			p16(mut out, 0)
+		}
+		p16(mut out, 0)
+		return str(out)
+	}
+	// LeaveGroup: the member is on its way out; report it, with the last offset it committed.
+	r.i32() // member count
+	let m = members[group]
+	let last = commits["{group} last"]
+	say.Line("leave {group} {m} commit {last}")
+	noteLeave(group, m, last)
+	p32(mut out, 1)
+	pstr(mut out, m)
+	pnull(mut out)
+	p16(mut out, 0)
+	return str(out)
+}
+
+// noteLeave writes the file KAFKA_OUT says, so the check sees the departing member.
+fn noteLeave(group str, member str, commit i64) {
+	let path = quarry.Getenv("KAFKA_OUT")
+	if path == "" {
+		return
+	}
+	quarry.WriteFile(path, "group {group}\nmember {member}\ncommit {commit}\n") catch _ {}
+}
+
+// subscription is the topics of a subscription metadata blob.
+fn subscription(meta str) []str {
+	mut r = rd{s: meta, pos: 0}
+	r.i16() // version
+	let nt = r.i32()
+	mut out = []str{}
+	for i in 0..nt {
+		let t = r.str()
+		r.str() // user data
+		out = append(out, t)
+	}
+	return out
+}
+
+fn mintAtoi(s str) i64 {
+	mut v = 0
+	for i in 0..len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return 0
+		}
+		v = v*10 + i64(s[i]-'0')
+	}
+	return v
+}
+
+// subMeta is the subscription metadata the JoinGroup answer carries for the member.
+fn subMeta(topics []str) str {
+	mut b = make([]u8, 0, 32)
+	p16(mut b, 0)
+	p32(mut b, len(topics))
+	for _, t in topics {
+		pstr(mut b, t)
+		p32(mut b, -1)
+	}
+	return str(b)
+}
+
