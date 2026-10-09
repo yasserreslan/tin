@@ -1,0 +1,71 @@
+package main
+
+import "./ci"
+import "say"
+
+// The tar checks: the strict tests against their expected output, Go archive/tar against Tin in both directions for ustar,
+// PAX and GNU entries, and malformed archives that both must reject. main uses ci.Must and ci.Check, which exit 1 on a failure:
+// a fault returned from main is not reported as a failure.
+fn main() {
+	let root = ci.Root()
+	strict(root, "tar")
+	strict(root, "tar_pax")
+	let dir = ci.TempDir(ci.Join(root, "bin/ci"), "tar-")
+	let goexe = ci.Join(dir, "tar-go")
+	let tinexe = ci.Join(dir, "tar-tin")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "tools/ci/fixtures/tar_oracle.go"}, root, 300), "build Go tar oracle")
+	ci.BuildTin("tools/ci/fixtures/tar_interop.tin", tinexe, "", []str{})
+	interop(root, dir, goexe, tinexe)
+	badArchives(root, dir, goexe, tinexe)
+	ci.Remove(dir)
+	say.Line("PASS tar: ustar, PAX and GNU entries with Go archive/tar in both directions, a 32 MiB payload, and malformed archives rejected by both")
+}
+
+// strict compiles toolchain/tests/v2/NAME.tin, runs it and compares its output with NAME.out.
+fn strict(root str, name str) {
+	let exe = ci.Join(root, "bin/ci/" + name + "-strict")
+	ci.BuildTin("toolchain/tests/v2/" + name + ".tin", exe, "", []str{})
+	let result = ci.Exec([]str{exe}, root, 30)
+	ci.Must(result, name + " strict test")
+	let want = ci.Read(ci.Join(root, "toolchain/tests/v2/" + name + ".out"))
+	ci.Check(result.Stdout == want, "tar strict output differs from toolchain/tests/v2/" + name + ".out")
+}
+
+// interop compares the fields and payloads of the archives Go and Tin write, read by the other side.
+fn interop(root str, dir str, goexe str, tinexe str) {
+	let goArchive = ci.Join(dir, "go.tar")
+	let tinArchive = ci.Join(dir, "tin.tar")
+	ci.Must(ci.Exec([]str{goexe, "generate", goArchive}, root, 60), "Go generate tar")
+	let goExpected = ci.Exec([]str{goexe, "verify", goArchive}, root, 60)
+	ci.Must(goExpected, "Go verify its tar archive")
+	let tinReadGo = ci.Exec([]str{tinexe, "read", goArchive}, root, 60)
+	ci.Must(tinReadGo, "Tin read Go tar")
+	ci.Check(sameLines(ci.Lines(tinReadGo.Stdout), ci.Lines(goExpected.Stdout)), "tar: Tin read of Go archive differs from Go fields")
+	let tinWrite = ci.Exec([]str{tinexe, "write", tinArchive}, root, 120)
+	ci.Must(tinWrite, "Tin write tar")
+	let goTin = ci.Exec([]str{goexe, "verify", tinArchive}, root, 120)
+	ci.Must(goTin, "Go read Tin tar")
+	let tinOwn = ci.Exec([]str{tinexe, "read", tinArchive}, root, 60)
+	ci.Must(tinOwn, "Tin read its tar")
+	ci.Check(sameLines(ci.Lines(goTin.Stdout), ci.Lines(tinOwn.Stdout)), "tar: Go read of Tin archive differs from Tin fields")
+	ci.Check(sameLines(ci.Lines(goTin.Stdout), ci.Lines(goExpected.Stdout)), "tar: Tin-written archive differs from the Go-written one")
+}
+
+// badArchives checks that archive/tar and tar.Reader both reject each malformed archive the Go oracle writes.
+fn badArchives(root str, dir str, goexe str, tinexe str) {
+	ci.Must(ci.Exec([]str{goexe, "bad", dir}, root, 60), "Go write malformed tar archives")
+	let names = []str{"bad-length.tar", "bad-equals.tar", "bad-uid.tar", "bad-mtime.tar", "bad-global.tar", "bad-huge.tar", "bad-size.tar"}
+	for name in names {
+		let path = ci.Join(dir, name)
+		let goOut = ci.Exec([]str{goexe, "verify", path}, root, 60)
+		ci.Check(goOut.Code != 0, "Go archive/tar accepted malformed " + name)
+		let tinOut = ci.Exec([]str{tinexe, "read", path}, root, 60)
+		ci.Check(tinOut.Code != 0, "Tin accepted malformed " + name)
+	}
+}
+
+fn sameLines(a []str, b []str) bool {
+	if len(a) != len(b) { return false }
+	for i in 0..len(a) { if a[i] != b[i] { return false } }
+	return true
+}

@@ -1,0 +1,85 @@
+package main
+
+import "say"
+import "tar"
+import "fault"
+
+fn main() ! {
+	mut w = tar.NewWriter()
+	try w.WriteHeader(tar.Header{Name: "hello.txt", Mode: 0o640, Uid: 12, Gid: 34, Size: 5, Mtime: 1700000000, Type: tar.TypeFlag.Regular, Linkname: ""})
+	let data = []u8{'h', 'e', 'l', 'l', 'o'}
+	let n = try w.Write(data)
+	try w.Close()
+	let archive = try w.Bytes()
+	say.Line("written", n, len(archive))
+	mut r = try tar.NewReader(archive, tar.MaxArchiveSize)
+	let h = try r.Next()
+	if h != nil {
+		say.Line("header", h.Name, h.Mode, h.Uid, h.Gid, h.Size, h.Mtime, h.Type)
+		mut got = make([]u8, 5)
+		let count = try r.Read(mut got)
+		say.Line("data", count, str(got))
+	}
+	let end = try r.Next()
+	say.Line("end", end == nil)
+	let limited = tooSmall(archive)
+	say.Line("limit", limited)
+	let badSum = badChecksum(mut archive)
+	say.Line("checksum", badSum)
+	let short = truncated()
+	say.Line("truncated", short)
+	let kinds = try kindArchive()
+	mut kr = try tar.NewReader(kinds, tar.MaxArchiveSize)
+	mut i = i64(0)
+	for i < 3 {
+		let kh = try kr.Next()
+		if kh == nil { fail "missing kind header" }
+		say.Line("kind", kh.Type, kh.Name, kh.Linkname)
+		i += 1
+	}
+	let long = longNameArchive()
+	say.Line("long-name", long)
+}
+
+fn tooSmall(archive []u8) bool {
+	let (_, err) = tar.NewReader(archive, 1)
+	return fault.Is(err, fault.LimitExceeded)
+}
+
+fn badChecksum(archive mut []u8) bool {
+	mut changed = archive
+	changed[0] = u8('X')
+	mut r = tar.NewReader(changed, tar.MaxArchiveSize) catch _ { return true }
+	let _ = r.Next() catch _ { return true }
+	return false
+}
+
+fn truncated() bool {
+	let _ = tar.NewReader([]u8{1, 2, 3}, 512) catch _ { return true }
+	mut r = tar.NewReader([]u8{1, 2, 3}, 512) catch _ { return true }
+	let _ = r.Next() catch _ { return true }
+	return false
+}
+
+fn kindArchive() ![]u8 {
+	mut w = tar.NewWriter()
+	try w.WriteHeader(tar.Header{Name: "dir", Mode: 0o755, Uid: 0, Gid: 0, Size: 0, Mtime: 1, Type: tar.TypeFlag.Directory, Linkname: ""})
+	try w.WriteHeader(tar.Header{Name: "sym", Mode: 0o777, Uid: 2, Gid: 3, Size: 0, Mtime: 4, Type: tar.TypeFlag.Symlink, Linkname: "target"})
+	try w.WriteHeader(tar.Header{Name: "hard", Mode: 0o644, Uid: 5, Gid: 6, Size: 0, Mtime: 7, Type: tar.TypeFlag.HardLink, Linkname: "dir"})
+	try w.Close()
+	return try w.Bytes()
+}
+
+fn longNameArchive() bool {
+	mut name = ""
+	for i in 0..60 { name += "é" }
+	name += "/file"
+	mut w = tar.NewWriter()
+	w.WriteHeader(tar.Header{Name: name, Mode: 0o600, Uid: 1, Gid: 2, Size: 0, Mtime: 3, Type: tar.TypeFlag.Regular, Linkname: ""}) catch _ { return false }
+	w.Close() catch _ { return false }
+	let archive = w.Bytes() catch _ { return false }
+	mut r = tar.NewReader(archive, tar.MaxArchiveSize) catch _ { return false }
+	let h = r.Next() catch _ { return false }
+	if h == nil { return false }
+	return h.Name == name
+}
