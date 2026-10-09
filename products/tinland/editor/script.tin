@@ -87,6 +87,8 @@ fn (ed Editor) dump() {
 //   wrap             toggles word wrap (prints the new state); rowof prints the caret's row on the screen
 //   sort, trim       sorts the touched lines, removes their trailing spaces and tabs
 //   whitespace       toggles the whitespace marks (prints the new state)
+//   tabs             prints how many tabs are open, which is active and its name; closeothers keeps the active
+//   one, closeall leaves one empty tab
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
 fn RunScript(ed mut Editor, script str) {
@@ -229,6 +231,12 @@ fn RunScript(ed mut Editor, script str) {
 			// where the caret is on the screen: its row from the top and its column in that row
 			let dc = textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4)
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
+		} else if step == "tabs" {
+			say.Line("tabs", len(ed.Tabs), ed.Active + 1, ed.Name())
+		} else if step == "closeothers" {
+			ed.closeOthers()
+		} else if step == "closeall" {
+			ed.closeAll()
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
 		} else if twine.HasPrefix(step, "ruler:") {

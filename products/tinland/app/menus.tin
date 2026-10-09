@@ -52,6 +52,8 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, file, "Revert File", "", 0, editor.CmdRevert)
 	appkit.AddSeparator(file)
 	item(m, file, "Close Tab", "w", cmd, editor.CmdClose)
+	item(m, file, "Close Other Tabs", "", 0, editor.CmdCloseOthers)
+	item(m, file, "Close All Tabs", "", 0, editor.CmdCloseAll)
 
 	let edit = appkit.AddMenu(m, "Edit")
 	item(m, edit, "Undo", "z", cmd, editor.CmdUndo)

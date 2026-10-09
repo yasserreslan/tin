@@ -39,6 +39,8 @@ fn commands() []command {
 		command{name: "File: Save As...", cmd: 4},
 		command{name: "File: Revert File", cmd: 28},
 		command{name: "File: Close Tab", cmd: 5},
+		command{name: "File: Close Other Tabs", cmd: 45},
+		command{name: "File: Close All Tabs", cmd: 46},
 		command{name: "Edit: Undo", cmd: 7},
 		command{name: "Edit: Redo", cmd: 8},
 		command{name: "Edit: Find and Replace", cmd: 13},

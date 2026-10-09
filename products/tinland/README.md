@@ -30,7 +30,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+= , Cmd+- , Cmd+0 | zoom in, out, reset the code font |
 | Cmd+Shift+F | search in the project (Return runs it; Aa, ab and .* switch case, whole word and regular expression; Tab goes to the replace box, Return there replaces every match in the project) |
 | Cmd+Alt+N, Cmd+Alt+Shift+N | new file, new folder in the selected folder (the File menu also has Rename and Delete) |
-| Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
+| Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes); File > Close Other Tabs and Close All Tabs do the same for every other tab, or every tab |
 | Cmd+1 to 9, Ctrl+Tab | switch tabs |
 | Cmd+Z, Cmd+Shift+Z | undo, redo |
 | Cmd+X, C, V, Ctrl+L, A | cut, copy, paste, select the caret's line, select all (a cut or copy without a selection takes the line) |
