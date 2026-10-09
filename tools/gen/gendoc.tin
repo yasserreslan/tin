@@ -67,6 +67,7 @@ fn packages() []str {
 		"ledger", "CSV reading and writing (encoding/csv)",
 		"abacus", "arbitrary-precision integers (math/big)",
 		"seal", "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)",
+		"nist", "NIST curves P-224 to P-521, DSA signature verification and FIPS 140-3 status (crypto/elliptic, crypto/dsa, crypto/fips140)",
 		"herald", "logging (log/slog)",
 		"expvar", "published variables and their JSON handler (expvar)",
 		"crucible", "testing helpers (testing)",

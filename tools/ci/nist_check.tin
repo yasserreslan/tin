@@ -1,0 +1,406 @@
+package main
+
+import "./ci"
+import "abacus"
+import "dice"
+import "mint"
+import "nist"
+import "say"
+import "twine"
+
+// Compare nist's crypto/elliptic curves, crypto/dsa verification and crypto/fips140 status with Go's crypto/elliptic,
+// crypto/dsa, crypto/x509 and crypto/fips140 (#927).
+//
+// A corpus is generated from a fixed seed, so both sides see the same cases, and fed to bench/ref/nist and to
+// tools/ci/fixtures/nist.tin. For P-224, P-256, P-384 and P-521: IsOnCurve on the generator, the identity, a point
+// reflected through the x axis, off-curve and out-of-range coordinates; Add, Double and ScalarMult on random points, on
+// identities, on P+(-P), and on invalid points (Go panics, Tin fails); ScalarMult by empty, short, long, all-ones, the
+// order n, n-1 and n+1 scalars; ScalarBaseMult by random scalars and n. DSA: legacy signatures made here with fixed
+// keys and nonces over two generated groups (L1024N160 and L2048N256), verified by Go's dsa.Verify and by DSAVerify, and
+// the same keys and signatures in certificate SubjectPublicKeyInfo and DER forms, parsed by x509.ParsePKIXPublicKey
+// and ParseDSAPublicKeyDER; the bad signatures, bad parameters, bad keys and malformed DER each have a case. FIPS140
+// reports false on both sides.
+
+const SEED = 927
+
+// The NIST curves: names, field byte sizes and orders (hex, Go's elliptic.Params).
+fn curveNames() []str {
+	return []str{"P-224", "P-256", "P-384", "P-521"}
+}
+
+fn curveSizes() []i64 {
+	return []i64{28, 32, 48, 66}
+}
+
+fn curveOrders() []abacus.Int {
+	return []abacus.Int{hexInt("ffffffffffffffffffffffffffff16a2e0b8f03e13dd29455c5c2a3d"), hexInt("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"), hexInt("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973"), hexInt("1fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409")}
+}
+
+// curvePrimes are 2^224 - 2^96 + 1, 2^256 - 2^224 + 2^192 + 2^96 - 1, 2^384 - 2^128 - 2^96 + 2^32 - 1 and 2^521 - 1.
+fn curvePrimes() []abacus.Int {
+	let one = abacus.FromI64(1)
+	let p224 = one.Lsh(224).Sub(one.Lsh(96)).Add(one)
+	let p256 = one.Lsh(256).Sub(one.Lsh(224)).Add(one.Lsh(192)).Add(one.Lsh(96)).Sub(one)
+	let p384 = one.Lsh(384).Sub(one.Lsh(128)).Sub(one.Lsh(96)).Add(one.Lsh(32)).Sub(one)
+	let p521 = one.Lsh(521).Sub(one)
+	return []abacus.Int{p224, p256, p384, p521}
+}
+
+fn curveOf(name str) dyn nist.Curve {
+	if name == "P-224" {
+		return nist.P224()
+	}
+	if name == "P-256" {
+		return nist.P256()
+	}
+	if name == "P-384" {
+		return nist.P384()
+	}
+	return nist.P521()
+}
+
+fn hexInt(s str) abacus.Int {
+	let (v, err) = abacus.Parse(s, 16)
+	if err != nil {
+		panic("bad constant " + s)
+	}
+	return v
+}
+
+fn hex(b []u8) str {
+	if len(b) == 0 {
+		return "-"
+	}
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+fn random(rng mut dice.Rand, n i64) []u8 {
+	mut out = []u8{}
+	for i in 0..n {
+		out = append(out, u8(rng.I64n(256)))
+	}
+	return out
+}
+
+fn txt(v abacus.Int) str {
+	return v.Text(16)
+}
+
+// curveCases are the lines for one curve.
+fn curveCases(rng mut dice.Rand, name str, size i64, p abacus.Int, n abacus.Int) []str {
+	mut lines = []str{}
+	let c = curveOf(name)
+	let one = abacus.FromI64(1)
+
+	// Random points: k*G for random scalars of the field size (the generator's own multiples, from the same seed).
+	mut xs = []abacus.Int{}
+	mut ys = []abacus.Int{}
+	for j in 0..4 {
+		let (x, y) = c.ScalarBaseMult(random(mut rng, size))
+		xs = append(xs, x)
+		ys = append(ys, y)
+	}
+	let (gx, gy) = c.ScalarBaseMult([]u8{1})
+	let bits = p.BitLen()
+	let big = one.Lsh(bits)
+	let off = abacus.FromBytes(random(mut rng, size))
+
+	// IsOnCurve.
+	lines = append(lines, "IS " + name + " " + txt(gx) + " " + txt(gy))
+	lines = append(lines, "IS " + name + " 0 0")
+	lines = append(lines, "IS " + name + " " + txt(gx) + " " + txt(gy.Add(one)))
+	lines = append(lines, "IS " + name + " " + txt(gx) + " " + txt(p.Sub(gy)))
+	lines = append(lines, "IS " + name + " " + txt(p) + " " + txt(gy))
+	lines = append(lines, "IS " + name + " " + txt(gx.Neg()) + " " + txt(gy))
+	lines = append(lines, "IS " + name + " 0 " + txt(gy))
+	lines = append(lines, "IS " + name + " " + txt(gx) + " 0")
+	lines = append(lines, "IS " + name + " " + txt(big) + " " + txt(gy))
+	lines = append(lines, "IS " + name + " " + txt(off) + " " + txt(gy))
+	lines = append(lines, "IS " + name + " " + txt(xs[0]) + " " + txt(ys[1]))
+
+	// Add: random pairs, doubling through Add, P + (-P), identities, and invalid points.
+	let neg0 = p.Sub(ys[0])
+	lines = append(lines, "ADD " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + txt(xs[1]) + " " + txt(ys[1]))
+	lines = append(lines, "ADD " + name + " " + txt(xs[2]) + " " + txt(ys[2]) + " " + txt(xs[2]) + " " + txt(ys[2]))
+	lines = append(lines, "ADD " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + txt(xs[0]) + " " + txt(neg0))
+	lines = append(lines, "ADD " + name + " 0 0 " + txt(xs[3]) + " " + txt(ys[3]))
+	lines = append(lines, "ADD " + name + " " + txt(xs[3]) + " " + txt(ys[3]) + " 0 0")
+	lines = append(lines, "ADD " + name + " 0 0 0 0")
+	lines = append(lines, "ADD " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + txt(xs[1]) + " " + txt(ys[1].Add(one)))
+	lines = append(lines, "ADD " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + txt(p) + " " + txt(ys[1]))
+	lines = append(lines, "ADD " + name + " " + txt(xs[0].Neg()) + " " + txt(ys[0]) + " " + txt(xs[1]) + " " + txt(ys[1]))
+
+	// Double.
+	lines = append(lines, "DBL " + name + " " + txt(xs[0]) + " " + txt(ys[0]))
+	lines = append(lines, "DBL " + name + " " + txt(gx) + " " + txt(gy))
+	lines = append(lines, "DBL " + name + " 0 0")
+	lines = append(lines, "DBL " + name + " " + txt(xs[1]) + " " + txt(ys[1].Add(one)))
+	lines = append(lines, "DBL " + name + " " + txt(xs[2]) + " " + txt(p.Sub(ys[2])))
+
+	// ScalarMult: the empty, short, long, all-ones, order and near-order scalars, on random, identity and invalid points.
+	let nb = n.Bytes()
+	let nm1 = n.Sub(one).Bytes()
+	let np1 = n.Add(one).Bytes()
+	let ones = []u8{}
+	mut onesBuf = ones
+	for i in 0..size {
+		onesBuf = append(onesBuf, 0xff)
+	}
+	lines = append(lines, "MUL " + name + " " + txt(gx) + " " + txt(gy) + " -")
+	lines = append(lines, "MUL " + name + " " + txt(gx) + " " + txt(gy) + " 00")
+	lines = append(lines, "MUL " + name + " " + txt(gx) + " " + txt(gy) + " 01")
+	lines = append(lines, "MUL " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + hex(random(mut rng, size)))
+	lines = append(lines, "MUL " + name + " " + txt(xs[1]) + " " + txt(ys[1]) + " " + hex(random(mut rng, size+1)))
+	lines = append(lines, "MUL " + name + " " + txt(xs[2]) + " " + txt(ys[2]) + " " + hex(random(mut rng, 2*size)))
+	lines = append(lines, "MUL " + name + " " + txt(xs[3]) + " " + txt(ys[3]) + " " + hex(onesBuf))
+	lines = append(lines, "MUL " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + hex(nb))
+	lines = append(lines, "MUL " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + hex(nm1))
+	lines = append(lines, "MUL " + name + " " + txt(xs[0]) + " " + txt(ys[0]) + " " + hex(np1))
+	lines = append(lines, "MUL " + name + " 0 0 " + hex(random(mut rng, size)))
+	lines = append(lines, "MUL " + name + " " + txt(xs[1]) + " " + txt(ys[1].Add(one)) + " " + hex(random(mut rng, size)))
+
+	// ScalarBaseMult.
+	lines = append(lines, "BASE " + name + " " + hex(random(mut rng, size)))
+	lines = append(lines, "BASE " + name + " " + hex(random(mut rng, 2*size)))
+	lines = append(lines, "BASE " + name + " -")
+	lines = append(lines, "BASE " + name + " 01")
+	lines = append(lines, "BASE " + name + " " + hex(nb))
+	lines = append(lines, "BASE " + name + " " + hex(nm1))
+	lines = append(lines, "BASE " + name + " " + hex(np1))
+	return lines
+}
+
+// DER helpers for certificate keys and signatures.
+
+// tlv is one DER element with tag and body, in the length form DER requires.
+fn tlv(tag u8, body []u8) []u8 {
+	mut out = []u8{tag}
+	let k = len(body)
+	if k < 128 {
+		out = append(out, u8(k))
+	} else if k < 256 {
+		out = append(out, 0x81, u8(k))
+	} else {
+		out = append(out, 0x82, u8(k>>8), u8(k))
+	}
+	return append(out, body...)
+}
+
+// derInt is a non-negative DER INTEGER for v.
+fn derInt(v abacus.Int) []u8 {
+	mut body = v.Bytes()
+	if len(body) == 0 {
+		body = []u8{0}
+	}
+	if body[0]&0x80 != 0 {
+		body = append([]u8{0}, body...)
+	}
+	return tlv(0x02, body)
+}
+
+// cat concatenates the parts.
+fn cat(parts [][]u8) []u8 {
+	mut out = []u8{}
+	for p in parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// dsaOID is 1.2.840.10040.4.1 (id-dsa) as DER.
+fn dsaOID() []u8 {
+	return tlv(0x06, []u8{0x2a, 0x86, 0x48, 0xce, 0x38, 0x04, 0x01})
+}
+
+// spki is a DSA SubjectPublicKeyInfo with the parameters p, q and g and the public value y.
+fn spki(p abacus.Int, q abacus.Int, g abacus.Int, y abacus.Int) []u8 {
+	let params = tlv(0x30, cat([][]u8{derInt(p), derInt(q), derInt(g)}))
+	let alg = tlv(0x30, cat([][]u8{dsaOID(), params}))
+	let bits = tlv(0x03, cat([][]u8{[]u8{0}, derInt(y)}))
+	return tlv(0x30, cat([][]u8{alg, bits}))
+}
+
+// derSig is the DER SEQUENCE{r, s} signature.
+fn derSig(r abacus.Int, s abacus.Int) []u8 {
+	return tlv(0x30, cat([][]u8{derInt(r), derInt(s)}))
+}
+
+// dsaCases are the DSA lines for one group: good signatures, bad signatures, bad parameters, and the same through
+// certificate keys and DER signatures.
+fn dsaCases(rng mut dice.Rand, p abacus.Int, q abacus.Int, g abacus.Int) []str {
+	mut lines = []str{}
+	let one = abacus.FromI64(1)
+	let zero = abacus.FromI64(0)
+	let x = abacus.FromBytes(random(mut rng, 18)).Add(one)
+	let y = g.Exp(x, p)
+	let qbytes = q.BitLen() / 8 + 8
+	let params = "DSA " + txt(p) + " " + txt(q) + " " + txt(g) + " " + txt(y)
+	let spkiGood = hex(spki(p, q, g, y))
+
+	mut good = 0
+	mut firstR = zero
+	mut firstS = zero
+	mut firstH = []u8{}
+	for i in 0..10 {
+		let hlen = []i64{0, 20, 32, 48, 64, 100, 20, 32, 5, 33}[i]
+		let h = random(mut rng, hlen)
+		let z = abacus.FromBytes(h)
+		let k = abacus.FromBytes(random(mut rng, qbytes)).Mod(q)
+		if k.IsZero() {
+			continue
+		}
+		let kinv = k.ModInverse(q)
+		if kinv == nil {
+			continue
+		}
+		let ki = kinv
+		let r = g.Exp(k, p).Mod(q)
+		let s = ki.Mul(z.Add(x.Mul(r))).Mod(q)
+		if r.IsZero() || s.IsZero() {
+			continue
+		}
+		good += 1
+		if good == 1 {
+			firstR = r
+			firstS = s
+			firstH = h
+		}
+		lines = append(lines, params + " " + hex(h) + " " + txt(r) + " " + txt(s))
+		lines = append(lines, "SPKI " + spkiGood + " " + hex(h) + " " + hex(derSig(r, s)))
+	}
+
+	// Bad signatures for the first good one: a changed hash, r or s out of range or changed, a wrong key.
+	let h = firstH
+	mut wrongHash = append([]u8{}, h...)
+	if len(wrongHash) > 0 {
+		wrongHash[0] ^= 1
+	} else {
+		wrongHash = []u8{1}
+	}
+	lines = append(lines, params + " " + hex(wrongHash) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, params + " " + hex(h) + " " + txt(firstR.Add(one)) + " " + txt(firstS))
+	lines = append(lines, params + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS.Add(one)))
+	lines = append(lines, params + " " + hex(h) + " 0 " + txt(firstS))
+	lines = append(lines, params + " " + hex(h) + " " + txt(firstR) + " 0")
+	lines = append(lines, params + " " + hex(h) + " " + txt(q) + " " + txt(firstS))
+	lines = append(lines, params + " " + hex(h) + " " + txt(firstR) + " " + txt(q))
+	lines = append(lines, params + " " + hex(h) + " " + txt(firstR.Neg()) + " " + txt(firstS))
+	lines = append(lines, params + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS.Neg()))
+	let wrongY = "DSA " + txt(p) + " " + txt(q) + " " + txt(g) + " " + txt(y.Add(one))
+	lines = append(lines, wrongY + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, "DSA " + txt(p) + " " + txt(q) + " " + txt(g) + " 0 " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+
+	// Bad parameters: no signature verifies under them (P zero, Q at most 1 or not whole bytes long).
+	lines = append(lines, "DSA 0 " + txt(q) + " " + txt(g) + " " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, "DSA " + txt(p) + " 0 " + txt(g) + " " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, "DSA " + txt(p) + " 1 " + txt(g) + " " + txt(y) + " " + hex(h) + " 1 1")
+	lines = append(lines, "DSA " + txt(p) + " " + txt(q.Rsh(1)) + " " + txt(g) + " " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, "DSA " + txt(p) + " " + txt(q.Neg()) + " " + txt(g) + " " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	// Values that still verify or fail on the arithmetic alone: G zero, P negative, Q plus one (even, so usually no inverse).
+	lines = append(lines, "DSA " + txt(p) + " " + txt(q) + " 0 " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, "DSA " + txt(p.Neg()) + " " + txt(q) + " " + txt(g) + " " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+	lines = append(lines, "DSA " + txt(p) + " " + txt(q.Add(one)) + " " + txt(g) + " " + txt(y) + " " + hex(h) + " " + txt(firstR) + " " + txt(firstS))
+
+	// Certificate keys: parameters that x509 rejects, a trailing byte, another algorithm, missing parameters.
+	lines = append(lines, "SPKI " + hex(spki(zero, q, g, y)) + " " + hex(h) + " " + hex(derSig(firstR, firstS)))
+	lines = append(lines, "SPKI " + hex(spki(p, q, g, zero)) + " " + hex(h) + " " + hex(derSig(firstR, firstS)))
+	lines = append(lines, "SPKI " + hex(spki(p, q.Rsh(1), g, y)) + " " + hex(h) + " " + hex(derSig(firstR, firstS)))
+	lines = append(lines, "SPKI " + spkiGood + "00 " + hex(h) + " " + hex(derSig(firstR, firstS)))
+	let rsaOID = tlv(0x06, []u8{0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01})
+	let rsaSPKI = tlv(0x30, cat([][]u8{tlv(0x30, cat([][]u8{rsaOID, []u8{0x05, 0x00}})), tlv(0x03, []u8{0, 0x30, 0x00})}))
+	lines = append(lines, "SPKI " + hex(rsaSPKI) + " " + hex(h) + " " + hex(derSig(firstR, firstS)))
+	let noParams = tlv(0x30, cat([][]u8{tlv(0x30, dsaOID()), tlv(0x03, cat([][]u8{[]u8{0}, derInt(y)}))}))
+	lines = append(lines, "SPKI " + hex(noParams) + " " + hex(h) + " " + hex(derSig(firstR, firstS)))
+
+	// DER signatures: r zero, a negative r, s equal to q, trailing bytes after the sequence.
+	lines = append(lines, "SPKI " + spkiGood + " " + hex(h) + " " + hex(derSig(zero, firstS)))
+	lines = append(lines, "SPKI " + spkiGood + " " + hex(h) + " 30060201ff020101")
+	lines = append(lines, "SPKI " + spkiGood + " " + hex(h) + " " + hex(derSig(firstR, q)))
+	lines = append(lines, "SPKI " + spkiGood + " " + hex(h) + " " + hex(derSig(firstR, firstS)) + "00")
+	lines = append(lines, "SPKI " + spkiGood + " " + hex(h) + " 3000")
+	return lines
+}
+
+// groups are the two generated DSA groups: P, Q and G (hex, from Go's dsa.GenerateParameters).
+fn corpus() []str {
+	mut rng = dice.New(SEED)
+	mut lines = []str{}
+	let names = curveNames()
+	let sizes = curveSizes()
+	let orders = curveOrders()
+	let primes = curvePrimes()
+	for i in 0..4 {
+		lines = append(lines, curveCases(mut rng, names[i], sizes[i], primes[i], orders[i])...)
+	}
+	lines = append(lines, dsaCases(mut rng, hexInt("8c8ce89e19b3a2c4658194db61748bed6a72ac5a0f4fdce1162076b8a67d9d435aae8aa73ad79c22c5ec92570064cae2728bad3e3e4361f29538c013c2fd2f7674c51425d82423e8b2f71cf49385f995eb0f7337093e20513a6b6524fa62a0036616712993989e2f82f4e276912a11755337e3bd22273214ebed1506d7dac065"), hexInt("ecec8f5a0e9607022ffe787aebc85cffb6fabfd3"), hexInt("8b8ac23d222bb3d664a1de1515fbbe3d724fa3728fedc0553cdcc2e209e95da6934ed1894043a78582cbd8a09ab0484875e158eecbdf6b11120784fb38bf5cdc6cf476357db547090d3ddbd9516223a70ced4b376eaa67883ecd6a722b185d8baa8dc7ce7c306694a38bde09f368cc0f58ee7477b0ee738f328217aa6c755b26"))...)
+	lines = append(lines, dsaCases(mut rng, hexInt("ed31fdf786ed917a9481b192f56fe7b432086324d715f25fbdb4ef24ae68e43eadcc56fd86585107d3ccdf25f226b8ea3d4dad188c41d6153d69d62dc3e8c8c5fcc5bdfcc31c73067e1bcc1283e18b8f67a394f046775ad6c43027b9cfb4fe0897743016cf36334269d1378c5fe8ba5602bfee612e0ba79567f1366a1672401ad7fd2d6e1893acb673b14b301335cba8ead42472d1fd8b880428ba162ebdd160bc4e0343bbb91e4d8739873755aa7ad9968aed071fa50325b8d0574bc24e64f4d82e593ea3b598061b4c211b0d226ba4b073f31e80e5007f209514d8d029de775181f4dd32c9c85ec9f1a2519a2cd5f1e8cfd61aac874cdbfccd6db46f1e05fb"), hexInt("ee297ace04d76b3826fe74525b5c311f6968171682af1ac35b58e8d22ee86325"), hexInt("5d1b9912aa0506d2ce1274a5283fb942e6c3147ac660b3365696659bc94333399cb14f614c2004f7de8650d5608c23fe66eccccf43be262fdf91ef824c8a287d649fb8f3a3bbe3f034ab04e22bdce6a1773671edaa7831a64e53b95558ad657a07dce95161621fd4f09aaf7c4972bdfb2c5646182a52731b720cfe726a0ac950fca44663d7c9998b649cf91357d1a1fae6bb3ac12d2c95ed806e8f1a9bcdcbed8315bb5b836996a0fe8ffb1c4f62e7027ec283a7310711737bd9970423a4c9fdd0ac7ab9ceb54249ddb898d84a351f72e1a477f7a8aa7a6c2f01ca2a77a29e9a0cf5eb839dda8415145b90e705ad16ab1b2fa2cac73832e019e6fa4e646d98a"))...)
+	lines = append(lines, "FIPS")
+	return lines
+}
+
+fn run(argv []str, data str, env []str) []str {
+	let o = ci.ExecIn(argv, ci.Root(), 900, data, env)
+	ci.Must(o, argv[0])
+	return ci.Lines(o.Stdout)
+}
+
+fn compare(what str, lines []str, want []str, got []str) {
+	ci.Check(len(got) == len(want), what + ": " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line(what + " line " + mint.Itoa(i + 1) + " (" + short(lines[i]) + "):")
+			say.Line("  Go:  " + short(want[i]))
+			say.Line("  Tin: " + short(got[i]))
+			bad += 1
+			if bad >= 6 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, what + ": " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/nist")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "nist-")
+	let tin = ci.Join(work, "nist-tin")
+	ci.BuildTin("tools/ci/fixtures/nist.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "nist-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/nist"}, ci.Root(), 300), "go build nist")
+	let want = run([]str{goexe}, data, []str{"GODEBUG="})
+	mut verified = 0
+	mut faults = 0
+	for w in want {
+		if twine.Contains(w, "panic") || twine.Contains(w, "unknown") {
+			ci.Check(false, "elliptic: Go refused a case for an unexpected reason: " + short(w))
+		}
+		if twine.Contains(w, " fault") || twine.Contains(w, " rejected") || twine.Contains(w, " bad ") || twine.Contains(w, " false") {
+			faults += 1
+		}
+		if twine.Contains(w, " verified") {
+			verified += 1
+		}
+	}
+	ci.Check(verified >= 20, "elliptic: only " + mint.Itoa(verified) + " signatures verify under Go; the generated signatures are broken")
+	compare("elliptic", lines, want, run([]str{tin}, data, []str{"GODEBUG="}))
+	ci.Remove(work)
+	ci.Pass("elliptic: " + mint.Itoa(len(want)) + " cases (" + mint.Itoa(verified) + " signatures verify, " + mint.Itoa(faults) + " faults or rejections) match Go's crypto/elliptic, crypto/dsa, crypto/x509 and crypto/fips140")
+}
+
+// short keeps a diff line readable: the first and last part of the hex fields.
+fn short(line str) str {
+	if len(line) <= 120 {
+		return line
+	}
+	return line[0:60] + " ... " + line[len(line)-40:len(line)]
+}

@@ -1,0 +1,32 @@
+p256 G 6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296 4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+p256 on curve G true
+p256 on curve identity false
+p256 on curve G+1 in y false
+p256 on curve -x false
+p256 2G 7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978 7775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1
+p256 n*G 0 0
+p256 (n-1)*G has G's x true
+p256 (n-1)*G + G 0 0
+p256 G + identity 6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296 4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+p256 G + (-G) 0 0
+p256 0*G (empty scalar) 0 0
+p256 0*G (two zero bytes) 0 0
+p256 7*identity 0 0
+p256 Add off-curve fault
+p256 Double off-curve fault
+p256 3*off-curve fault
+p224 G b70e0cbd6bb4bf7f321390b94a03c1d356c21122343280d6115c1d21 bd376388b5f723fb4c22dfe6cd4375a05a07476444d5819985007e34
+p224 on curve G true
+p384 on curve G true
+p521 on curve G true
+p521 on curve G with x = 2^521 false
+dsa key p q g y 17 fb 2 3
+dsa r = 0 rejected
+dsa r = q rejected
+dsa s = 0 rejected
+dsa DER r = 0 rejected
+dsa DER truncated rejected
+dsa p = 0 bad parameters
+dsa q = 1 bad parameters
+dsa q of five bits bad parameters
+fips140 false false []
