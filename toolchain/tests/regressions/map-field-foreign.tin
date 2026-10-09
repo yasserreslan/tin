@@ -1,0 +1,40 @@
+package main
+
+import "./namedmap"
+import "say"
+
+// Holder has fields of another package's named map and slice types (#957): a field takes the type a parameter or a
+// literal takes, and the value it holds is that same type.
+type Holder struct {
+	p   namedmap.Params
+	ids namedmap.Ids
+	idx namedmap.Index
+}
+
+// Local is a value struct with a field of another package's named map type (#957).
+type Local value struct {
+	p namedmap.Params
+	n i64
+}
+
+// Later names a map type of this package that is declared after it (#957): a field resolves it on its own.
+type Later struct {
+	t Table
+}
+
+// Table is a named map type of this package, declared after Later.
+type Table map[str]i64
+
+fn count(p namedmap.Params) i64 {
+	return i64(len(p))
+}
+
+fn main() {
+	let h = Holder{p: namedmap.NewParams(), ids: namedmap.Ids([]i64{4, 5}), idx: namedmap.Index{namedmap.Key{A: 1}: "one"}}
+	h.p["a"] = "1"
+	say.Line(count(h.p), len(h.ids), h.p["a"], h.idx[namedmap.Key{A: 1}])
+	let v = Local{p: namedmap.NewParams(), n: 3}
+	say.Line(count(v.p), v.n)
+	let l = Later{t: Table{"x": 7}}
+	say.Line(l.t["x"], len(l.t))
+}
