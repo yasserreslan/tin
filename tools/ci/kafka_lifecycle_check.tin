@@ -1,0 +1,134 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "fault"
+import "hearth"
+import "kafka"
+import "mint"
+import "say"
+import "tide"
+
+// The kafka client's group lifecycle (#446): a drained member leaves the group and commits its
+// last records, and a consumer loop that never ends keeps its memory flat. The fixture
+// (tools/ci/fixtures/kafka_fake.tin) is a fake broker serving one topic and the group
+// protocol; the example itself (examples/kafka.tin, built here with KAFKA_ADDR pointing at it)
+// is the service that is drained; this program is the client of the 10,000 polls.
+
+fn main() {
+	let out = ci.Join(ci.Root(), "bin/ci/kafka_lifecycle")
+	ci.Mkdirs(out)
+	let fakeExe = ci.Join(out, "fake")
+	ci.BuildTin("tools/ci/fixtures/kafka_fake.tin", fakeExe, "", []str{})
+	let webPort = nettest.Port()
+	let kafkaPort = nettest.Port()
+	let outFile = ci.Join(out, "leave.txt")
+	let fakeLog = ci.Join(out, "fake.log")
+	let fake = nettest.Start(fakeExe, []str{}, []str{"KAFKA_OUT=" + outFile, "KAFKA_PORT=" + mint.Itoa(kafkaPort), "TIN_CORES=1"}, fakeLog, webPort)
+	fake.Ready(10)
+	// /start starts the fake broker and waits for its listener.
+	let _ = nettest.Get(webPort, "/start")
+
+	// 10,000 polls from this program, in the pattern the example documents: each Poll in an
+	// arena, its wait inside hearth.Quiet.
+	let addr = "127.0.0.1:{kafkaPort}"
+	let memLines = memory(addr) catch err {
+		[]str{line("the member joined", false, "{err}")}
+	}
+	for line in memLines {
+		say.Line(line)
+		ci.Check(line[0:3] == "ok ", "kafka lifecycle: " + line)
+	}
+
+	// The drain: the example, one member per core, is stopped with SIGTERM while it consumes.
+	let exExe = ci.Join(out, "example")
+	ci.BuildTin("examples/kafka.tin", exExe, "", []str{})
+	let exPort = nettest.Port()
+	let set = []str{"KAFKA_ADDR=" + addr, "KAFKA_TOPIC=t", "TIN_CORES=1"}
+	let web = nettest.Start(exExe, []str{}, set, ci.Join(out, "example.log"), exPort)
+	web.Ready(10)
+	// Let the member join before the records exist, so it reads them from the start.
+	tide.Wait(500ms) catch _ {}
+	for k in 0..3 {
+		nettest.Get(exPort, "/send?topic=t&value=v{k}")
+	}
+	mut consumed = ""
+	for k in 0..100 {
+		consumed = nettest.Get(exPort, "/consumed")
+		if consumed == "3" {
+			break
+		}
+		tide.Wait(100ms) catch _ {}
+	}
+	ci.Check(consumed == "3", "kafka lifecycle: the member consumed 3, not " + consumed)
+
+	// The drain cancels the member's poll task; the member itself is closed in on core.stop,
+	// where the waits still work, and that is what sends the LeaveGroup and the final commit.
+	web.Stop()
+	fake.Stop()
+	mut leave = ""
+	for k in 0..100 {
+		leave = ci.Read(outFile)
+		if leave != "" {
+			break
+		}
+		tide.Wait(100ms) catch _ {}
+	}
+	ci.Check(contains(leave, "group tin-example"), "kafka lifecycle: the coordinator saw the leave: " + leave)
+	ci.Check(contains(leave, "member member-1"), "kafka lifecycle: with the member id: " + leave)
+	ci.Check(contains(leave, "commit 3"), "kafka lifecycle: and the final commit: " + leave)
+	ci.Pass("kafka: a drained member leaves the group and commits")
+}
+
+// memory polls 10,000 times as a member of a group, each Poll in an arena with its wait in
+// hearth.Quiet, and reports one line per check: the polls went, and the core's counted memory
+// stayed flat.
+fn memory(addr str) ![]str {
+	let c = kafka.Open(kafka.Options{Brokers: []str{addr}, ClientID: "tin-memory", Timeout: 10s})
+	let g = try c.Group(kafka.GroupOptions{Group: "memory", Topics: []str{"t"}, Heartbeat: 1s, Start: kafka.Start.Earliest})
+	let (blocks0, bytes0, limbo0) = hearth.RcStats()
+	mut bad = 0
+	for k in 0..10000 {
+		let ok = arena {
+			pollOnce(g, 0)
+		}
+		if !ok {
+			bad += 1
+		}
+	}
+	let (blocks1, bytes1, limbo1) = hearth.RcStats()
+	g.Close() catch _ {}
+	mut out = []str{}
+	out = append(out, line("all 10,000 polls went", bad == 0, mint.Itoa(bad) + " failed"))
+	out = append(out, line("the counted blocks stayed flat", blocks1 <= blocks0+256, "{blocks0} -> {blocks1}"))
+	out = append(out, line("the counted bytes stayed flat", bytes1 <= bytes0+65536, "{bytes0} -> {bytes1}"))
+	out = append(out, line("the limbo stayed flat", limbo1 <= limbo0+256, "{limbo0} -> {limbo1}"))
+	return out
+}
+
+// pollOnce polls once with its wait inside hearth.Quiet: a task that never ends holds back
+// nothing while it waits (#446).
+fn pollOnce(g kafka.Group, maxWait i64) bool {
+	mut ok = false
+	hearth.Quiet(fn() {
+		let (_, err) = g.Poll(maxWait)
+		ok = err == nil
+	})
+	return ok
+}
+
+fn line(label str, good bool, detail str) str {
+	if good {
+		return "ok {label}"
+	}
+	return "FAIL {label}: {detail}"
+}
+
+fn contains(s str, sub str) bool {
+	for i in 0..len(s)-len(sub)+1 {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

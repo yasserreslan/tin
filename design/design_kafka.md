@@ -84,9 +84,19 @@ session timeout; the Java client did exactly that before 0.10.1. So:
 - A handler that may run longer than the session timeout calls `g.Heartbeat()` itself, or the service sets
   `GroupOptions.Session` above its slowest handler.
 - A long-running consumer in an anvil service lives in `detach { ... }` started from `on core.start`:
-  every core can be a member of the group (members are per core, since nothing is shared between cores),
-  and the drain cancels it, which makes it leave the group.
+  every core can be a member of the group (members are per core, since nothing is shared between cores).
+  The drain cancels that task, and after that every wait in it returns at once, so `Close` cannot send
+  its LeaveGroup from there: the member is kept in a per-core global and closed in `on core.stop`,
+  which runs in a fresh root where the waits still work. That is what hands the departing core's
+  partitions to the other members at once, with its last records committed, instead of leaving them
+  to the session timeout (examples/kafka.tin, #446).
+- The poll loop's memory: a detached task's pool is freed only when the task ends, and a task that
+  lives for hours holds back its core's releases while it waits. Each iteration therefore runs in
+  `arena { ... }` (its records, responses and bodies are freed when it ends) with its wait inside
+  `hearth.Quiet` (the task holds back nothing while it waits). Without them a consumer grows without
+  bound (#446).
 - In a plain program the poll loop runs in `main`; calls block the core, which is the only thing it does.
+  Each iteration still wraps its work in an arena when it keeps nothing it allocates.
 
 A member is a value owned by one core: `Group` holds per-core state the same way the connections do.
 
