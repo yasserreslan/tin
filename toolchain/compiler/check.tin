@@ -2502,11 +2502,44 @@ fn make_start(main_fn Fn) {
 	cast(Call, call).args = []i64{}
 	cast(Call, call).fn_ = cast(i64, main_fn)
 	cast(Node, call).type_ = ty_void
-	body.stmts = append(body.stmts, expr_stmt(cast(Node, call)))
+	let mainErr = bind_main_call(pos, body, call, main_fn)
 	life_stop(pos, body)
+	if cast(i64, mainErr) != 0 {
+		// rt_main_exit reports main's fault and does not return (#925).
+		body.stmts = append(body.stmts, expr_stmt(cast(Node, rt_call(pos, "rt_main_exit", args1(sym_ref_node(pos, mainErr)), ty_void))))
+	}
 	body.stmts = append(body.stmts, expr_stmt(cast(Node, rt_call(pos, "rt_exit", cast(i64, []i64{}), ty_void))))
 	prog_fns = append(prog_fns, cast(Fn, f))
 	start_fn = cast(i64, f)
+}
+
+// bind_main_call emits main's call into __start and returns the local holding a !main's fault (0: none), for rt_main_exit (#925).
+fn bind_main_call(pos i64, body Block, call i64, main_fn Fn) Sym {
+	if main_fn.bang == 0 {
+		body.stmts = append(body.stmts, expr_stmt(cast(Node, call)))
+		return cast(Sym, 0)
+	}
+	// The fault is the last result: a lone fault is bound as is, !T is bound with every result.
+	let rs = main_fn.rtypes
+	if len(rs) == 1 {
+		cast(Node, call).type_ = ty_error
+		let tl = temp(pos, call, ty_error)
+		body.stmts = append(body.stmts, cast(i64, tl))
+		return cast(Sym, tl.sym)
+	}
+	let cm = cast(CallMultiStmt, node_new(ST_CALLMULTI, pos))
+	cm.call = call
+	cm.syms = cast([]Sym, []i64{})
+	mut fe = cast(Sym, 0)
+	mut i = 0
+	for i < len(rs) {
+		fe = cast(Sym, declare_local(pos, "$", rs[i]))
+		cm.syms = append(cm.syms, fe)
+		i = i + 1
+	}
+	cast(Node, call).type_ = ty_void
+	body.stmts = append(body.stmts, cast(i64, cm))
+	return fe
 }
 
 // ---- reachability ----

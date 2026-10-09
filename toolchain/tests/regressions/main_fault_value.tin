@@ -1,0 +1,10 @@
+package main
+
+// #925: a !T main that returns a fault reports it too: the fault is its last result.
+
+import "say"
+
+fn main() !i64 {
+	say.Line("before")
+	fail "boom"
+}
