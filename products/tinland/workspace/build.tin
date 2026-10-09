@@ -287,6 +287,8 @@ fn (ws Workspace) statusBar(t mut ui.Tree) {
 	t.Text("Wrap", render.FontUI, wrapColor, ui.Box())
 	t.Close()
 	t.Leaf(ui.Box().Wide(12.0), 0)
+	t.Text(ws.Ed.Counts(), render.FontUI, th.Muted, ui.Box())
+	t.Leaf(ui.Box().Wide(12.0), 0)
 	t.Text(ws.Ed.Name(), render.FontUI, th.Muted, ui.Box())
 	t.Close()
 }
