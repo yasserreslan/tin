@@ -256,24 +256,30 @@ fn (t Txn) SendBatch(topic str, ms []Message) ![]Ack {
 				done[j] = true
 			}
 		}
-		let (base, perr) = t.produce(topic, p, group, now)
-		if perr != nil {
-			// The request may have been written (a deadline, a cancel, a lost answer): the
-			// partition's sequence is unknown now, so the transaction can only abort (#442).
-			let (s1, gerr) = t.get()
-			if gerr == nil {
-				mut s = s1
-				s.failed = true
-				t.put(s)
+		mut from = 0
+		for from < len(group) {
+			let end = batchEnd(group, from, c.rec[rBatchMax])
+			let sub = group[from:end]
+			let (base, perr) = t.produce(topic, p, sub, now)
+			if perr != nil {
+				// The request may have been written (a deadline, a cancel, a lost answer): the
+				// partition's sequence is unknown now, so the transaction can only abort (#442).
+				let (s1, gerr) = t.get()
+				if gerr == nil {
+					mut s = s1
+					s.failed = true
+					t.put(s)
+				}
+				fail perr
 			}
-			fail perr
-		}
-		for k, j in at {
-			mut off = -1
-			if base >= 0 {
-				off = base + k
+			for k, j in at[from:end] {
+				mut off = -1
+				if base >= 0 {
+					off = base + k
+				}
+				acks[j] = Ack{Partition: p, Offset: off}
 			}
-			acks[j] = Ack{Partition: p, Offset: off}
+			from = end
 		}
 	}
 	return acks

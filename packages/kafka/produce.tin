@@ -1,7 +1,6 @@
 package kafka
 
 import "fault"
-import "say"
 import "tide"
 
 // The producer. Each core keeps, per client and partition, an accumulator: the records waiting
@@ -24,18 +23,18 @@ const aWaitCap = 9
 const aBusy = 10   // a batch of this partition is in flight
 const aSeq = 11    // the next sequence number (idempotence)
 const aPidGen = 12 // the producer id generation aSeq counts for
-const accWords = 13
+const aRetry = 13  // records at the head that must go out as one batch (a requeued one), 0 for none
+const accWords = 14
 
 // A waiter (calloc'd words): one record's caller.
 const wTask = 0
 const wState = 1   // 0 waiting, 1 sent, 2 failed
 const wOffset = 2
-const wErr = 3
-const wErrN = 4
-const wOwner = 5   // the caller must send the next batch of this partition
-const wGone = 6    // the caller gave up: free the waiter when its record is done
-const wAcc = 7
-const waiterWords = 8
+const wErr = 3     // a failed record's fault, kept while the waiter outlives the failed call
+const wOwner = 4   // the caller must send the next batch of this partition
+const wGone = 5    // the caller gave up: free the waiter when its record is done
+const wAcc = 6
+const waiterWords = 7
 
 // The per-core accumulator table: open addressing on (client, topic, partition).
 mut accTable i64
@@ -145,12 +144,14 @@ fn accAdd(a i64, m Message, now i64) i64 {
 	return w
 }
 
-fn waiterDone(w i64, state i64, offset i64, msg str) {
+// waiterDone ends one record's wait: state 1 sent (offset where it went, -1 when the broker does
+// not say), 2 failed (the fault, kept so the waiter outlives the failed call). A caller that gave
+// up is not woken: its waiter is freed here.
+fn waiterDone(w i64, state i64, offset i64, err fault) {
 	w[wState] = state
 	w[wOffset] = offset
-	if msg != "" {
-		w[wErr] = keep_raw(msg)
-		w[wErrN] = len(msg)
+	if err != nil {
+		w[wErr] = rt_fault_copy(cast(i64, err), true)
 	}
 	if w[wGone] != 0 {
 		freeWaiter(w)
@@ -164,24 +165,29 @@ fn waiterDone(w i64, state i64, offset i64, msg str) {
 
 fn freeWaiter(w i64) {
 	if w[wErr] != 0 {
-		free(w[wErr])
+		rt_fault_free(w[wErr])
 	}
 	free(w)
 }
 
-// handOffAcc lets the first caller with records still pending send the next batch.
+// handOffAcc lets the first caller with records still pending send the next batch. A caller that
+// gave up is skipped: its records go out with the next batch, but it will not drive one, and its
+// task may already be gone. With no caller left, the partition is free and the next send takes it.
 fn handOffAcc(a i64) {
 	a[aBusy] = 0
-	if a[aWaitN] == 0 {
-		return
-	}
 	let ws = a[aWait]
-	let w = ws[0]
-	a[aBusy] = 1
-	w[wOwner] = 1
-	let t = w[wTask]
-	if t != 0 && t != rt_task_current() {
-		rt_task_wake(t)
+	for i in 0..a[aWaitN] {
+		let w = ws[i]
+		if w[wGone] != 0 {
+			continue
+		}
+		a[aBusy] = 1
+		w[wOwner] = 1
+		let t = w[wTask]
+		if t != 0 && t != rt_task_current() {
+			rt_task_wake(t)
+		}
+		return
 	}
 }
 
@@ -347,56 +353,58 @@ fn (c Client) sendParts(topic str, ms []Message, parts []i64) ![]Ack {
 		}
 		let r = rt_task_park(c.rec[rTimeout])
 		if r != waitReady {
-			// Leave the records to whoever sends them; their outcome is no longer ours.
+			// Leave the records to whoever sends them; their outcome is no longer ours. A
+			// partition this task was handed but never drove (it was interrupted before it
+			// could act) is passed on here (#443): otherwise no batch of it is ever sent.
+			mut hands = []i64{}
 			for _, w in ws {
+				if w[wGone] != 0 {
+					// Already left to the batch that completes it (the requeue path below
+					// marks this task's waiters): it is freed when its record is done.
+					continue
+				}
 				if w[wState] == 0 {
+					if w[wOwner] != 0 {
+						w[wOwner] = 0
+						mut seen = false
+						for _, h in hands {
+							if h == w[wAcc] {
+								seen = true
+							}
+						}
+						if !seen {
+							hands = append(hands, w[wAcc])
+						}
+					}
 					w[wGone] = 1
 				} else {
 					freeWaiter(w)
 				}
 			}
+			for _, a in hands {
+				handOffAcc(a)
+			}
 			if r == waitDeadline {
 				fail cast(fault, rt_wait_fault())
 			}
-			fail "kafka: timed out"
+			fail fault.Wrap(ErrTimedOut, "kafka: timed out waiting for the batch of {topic}")
 		}
 	}
 	mut acks = make([]Ack, 0, len(ms))
-	mut msg = ""
+	mut bad fault = nil
 	for i, w in ws {
-		if w[wState] == 2 && msg == "" {
-			msg = raw_str(w[wErr], w[wErrN])
+		if bad == nil && w[wState] == 2 {
+			// The failed record's fault, copied into this task's pool: the kept one goes with
+			// the waiter, so fault.Is still reaches the fault the failing task saw.
+			bad = cast(fault, rt_fault_copy(w[wErr], false))
 		}
 		acks = append(acks, Ack{Partition: parts[i], Offset: w[wOffset]})
 		freeWaiter(w)
 	}
-	if msg != "" {
-		fail produceFault(msg)
+	if bad != nil {
+		fail bad
 	}
 	return acks
-}
-
-// produceFault turns a failed batch's message back into a fault the caller can test.
-fn produceFault(msg str) ! {
-	for _, e in []fault{ErrMessageTooLarge, ErrNotEnoughReplicas, ErrUnknownTopic, ErrNotLeader, ErrLeaderNotAvailable, ErrTimedOut, ErrNetwork, ErrFenced, ErrProducerState, ErrAuth} {
-		let m = say.Str(e)
-		if len(msg) >= len(m) && contains(msg, m) {
-			fail fault.Wrap(e, msg)
-		}
-	}
-	fail msg
-}
-
-fn contains(s str, sub str) bool {
-	if len(sub) == 0 {
-		return true
-	}
-	for i in 0..len(s)-len(sub)+1 {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 // flush sends the next batch of accumulator a (the caller owns it), then hands the partition on
@@ -412,7 +420,12 @@ fn (c Client) flush(a i64) {
 		}
 	}
 	for {
-		c.sendNext(a)
+		if c.sendNext(a) == 1 {
+			// The caller's own deadline or cancellation ended its send: the batch went back to
+			// the head of the accumulator and the partition was handed on here.
+			handOffAcc(a)
+			return
+		}
 		if a[aWaitN] == 0 {
 			a[aBusy] = 0
 			return
@@ -426,14 +439,23 @@ fn (c Client) flush(a i64) {
 	}
 }
 
-// sendNext sends one batch: the oldest pending records of a, as many as fit.
-fn (c Client) sendNext(a i64) {
-	// Take the records that fit in one batch (at least one).
+// sendNext sends one batch: the oldest pending records of a, as many as fit. It returns 1 when
+// the batch was put back whole, because this caller's own deadline or cancellation ended its
+// send (the frame went out either way); 0 when the batch's records left the accumulator, sent
+// or failed.
+fn (c Client) sendNext(a i64) i64 {
+	// Take the records that fit in one batch (at least one). A requeued batch goes out whole:
+	// its records may already be written, and a later record must not join them (the broker's
+	// DUPLICATE_SEQUENCE_NUMBER answer would drop it).
 	let buf = a[aBuf]
 	mut used = 0
 	mut k = 0
 	let total = a[aWaitN]
-	for k < total {
+	mut stop = total
+	if a[aRetry] > 0 && a[aRetry] < stop {
+		stop = a[aRetry]
+	}
+	for k < stop {
 		let tl = i64(load8(buf+used+8)) | i64(load8(buf+used+9))<<8 | i64(load8(buf+used+10))<<16 | i64(load8(buf+used+11))<<24
 		if k > 0 && used+12+tl > c.rec[rBatchMax] {
 			break
@@ -468,23 +490,34 @@ fn (c Client) sendNext(a i64) {
 			at += 12 + tl
 		}
 	}
-	// The waiters of the batch leave the accumulator; later records move up.
+	// The waiters of the batch, in order. They stay in the accumulator until the batch's
+	// outcome is known: a batch this caller's own boundary cut short goes back whole.
 	mut batch = make([]i64, 0, k)
 	let wsArr = a[aWait]
 	for i in 0..k {
 		batch = append(batch, wsArr[i])
 	}
-	memmove(a[aBuf], a[aBuf]+used, a[aBufN]-used)
-	a[aBufN] -= used
-	memmove(a[aWait], a[aWait]+8*k, 8*(a[aWaitN]-k))
-	a[aWaitN] -= k
 	let topic = raw_str(a[aTopic], a[aTopicN])
 	let part = a[aPart]
 	let (base, err) = c.produceBatch(a, topic, part, recs, k, first, maxTs)
 	if err != nil {
-		let m = say.Str(err)
+		if ownWait(err) {
+			// This caller's own deadline or cancellation: the batch may already be written,
+			// so its records go back to the head of the accumulator (the sequence rolled
+			// back in produceBatch) and the next batch sends them again, whole and before any
+			// record that came later. A written one is not written twice: its retry gets
+			// DUPLICATE_SEQUENCE_NUMBER. This caller gave up on its own records with it; the
+			// others' wait for the next batch.
+			for _, w in batch {
+				if w[wTask] == rt_task_current() {
+					w[wGone] = 1
+				}
+			}
+			a[aRetry] = k
+			return 1
+		}
 		for _, w in batch {
-			waiterDone(w, 2, -1, m)
+			waiterDone(w, 2, -1, err)
 		}
 	} else {
 		for i, w in batch {
@@ -492,9 +525,23 @@ fn (c Client) sendNext(a i64) {
 			if base >= 0 {
 				off = base + i
 			}
-			waiterDone(w, 1, off, "")
+			waiterDone(w, 1, off, nil)
 		}
 	}
+	if a[aRetry] > 0 {
+		a[aRetry] -= k
+	}
+	memmove(a[aBuf], a[aBuf]+used, a[aBufN]-used)
+	a[aBufN] -= used
+	memmove(a[aWait], a[aWait]+8*k, 8*(a[aWaitN]-k))
+	a[aWaitN] -= k
+	return 0
+}
+
+// ownWait reports whether err is this task's own boundary ending its wait (its deadline, or a
+// cancellation reaching it), as opposed to a failure of the request itself.
+fn ownWait(err fault) bool {
+	return fault.Is(err, fault.DeadlineExceeded) || fault.Is(err, fault.Canceled)
 }
 
 // produceBatch sends one batch of k records to its partition's leader, retrying what can be
@@ -521,6 +568,13 @@ fn (c Client) produceBatch(a i64, topic str, part i64, recs []u8, k i64, first i
 		if err == nil {
 			return base
 		}
+		if ownWait(err) {
+			// This caller's own deadline or cancellation ended the wait, and the frame went
+			// out either way: sendNext puts the records back, and the sequence rolls back
+			// with them, so the next batch's retry of this one is not taken for a new batch.
+			rollSeq(a, k, seqTaken)
+			fail err
+		}
 		if fault.Is(err, ErrProducerState) || fault.Is(err, ErrFenced) {
 			// The broker lost this producer's sequence (its state expired, or a leader moved
 			// without it): start a new producer id. The batch may already be written.
@@ -529,12 +583,27 @@ fn (c Client) produceBatch(a i64, topic str, part i64, recs []u8, k i64, first i
 			if attempt+1 < maxAttempts {
 				continue
 			}
-		}
-		if !c.retry(err, topic, attempt) {
+		} else if !c.retry(err, topic, attempt) {
+			// Rejected for good (MESSAGE_TOO_LARGE, INVALID_RECORD, authentication) or
+			// retries exhausted: the sequence rolls back, since only one batch per partition
+			// is in flight and nothing else consumed it. The next batch reuses it instead of
+			// getting OUT_OF_ORDER, which would cost the client a new producer id.
+			rollSeq(a, k, seqTaken)
 			fail err
 		}
 	}
+	rollSeq(a, k, seqTaken)
 	fail "kafka: produce to {topic}/{part} failed"
+}
+
+// rollSeq gives back the k sequence numbers a failed batch took. Only one batch per partition is
+// in flight, so nothing else consumed them; a producer id that was reset meanwhile starts its
+// sequences at 0 anyway.
+fn rollSeq(a i64, k i64, taken bool) {
+	if !taken {
+		return
+	}
+	a[aSeq] = (a[aSeq] + 0x80000000 - k) & 0x7fffffff
 }
 
 // produceOnce sends one Produce request; txid is the transactional id ("" for none).
@@ -582,9 +651,11 @@ fn (c Client) produceOnce(topic str, part i64, batch []u8, acks i64, txid str) !
 	return base
 }
 
-// sendTaped sends for a recorded or replayed request: one batch per partition, sent by this
-// request alone and without a producer id, so its effects depend on the request only and not on
-// what other requests of the core sent before (design/interface_replay.md, kafka@1).
+// sendTaped sends for a recorded or replayed request: one batch per partition per split, sent
+// by this request alone and without a producer id, so its effects depend on the request only and
+// not on what other requests of the core sent before (design/interface_replay.md, kafka@1). It
+// splits by BatchMax the way live mode does, so a batch live mode would split is not refused
+// once the request is recorded.
 fn (c Client) sendTaped(topic str, ms []Message, parts []i64, now i64) ![]Ack {
 	mut acks = make([]Ack, 0, len(ms))
 	for i in 0..len(ms) {
@@ -605,23 +676,45 @@ fn (c Client) sendTaped(topic str, ms []Message, parts []i64, now i64) ![]Ack {
 				done[j] = true
 			}
 		}
-		let batch = encodeBatch(group, now, batchInfo{codec: c.rec[rCodec], producerID: -1, producerEpoch: -1, baseSeq: -1, transactional: false})
-		mut base = -1
-		for attempt in 0..maxAttempts {
-			let (b, err) = c.produceOnce(topic, p, batch, c.rec[rAcks], "")
-			if err == nil {
-				base = b
-				break
+		mut from = 0
+		for from < len(group) {
+			let end = batchEnd(group, from, c.rec[rBatchMax])
+			let sub = group[from:end]
+			let batch = encodeBatch(sub, now, batchInfo{codec: c.rec[rCodec], producerID: -1, producerEpoch: -1, baseSeq: -1, transactional: false})
+			mut base = -1
+			for attempt in 0..maxAttempts {
+				let (b, err) = c.produceOnce(topic, p, batch, c.rec[rAcks], "")
+				if err == nil {
+					base = b
+					break
+				}
+				if !c.retry(err, topic, attempt) {
+					fail err
+				}
 			}
-			if !c.retry(err, topic, attempt) {
-				fail err
+			for k, j in at[from:end] {
+				if base >= 0 {
+					acks[j].Offset = base + k
+				}
 			}
-		}
-		for k, j in at {
-			if base >= 0 {
-				acks[j].Offset = base + k
-			}
+			from = end
 		}
 	}
 	return acks
+}
+
+// batchEnd is where the batch starting at ms[from] ends: as many records as fit in max bytes of
+// records (12 and the tail each, as the live accumulator counts them), at least one.
+fn batchEnd(ms []Message, from i64, max i64) i64 {
+	mut used = 0
+	mut k = 0
+	for from+k < len(ms) {
+		let need = 12 + len(encodeRecordTail(ms[from+k]))
+		if k > 0 && used+need > max {
+			break
+		}
+		used += need
+		k += 1
+	}
+	return from + k
 }
