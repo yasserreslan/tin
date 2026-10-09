@@ -14,9 +14,9 @@ import "twine"
 //
 // expm1's and sincos' arithmetic is Go's, but the compilers fuse multiply-adds differently (arm64 fuses, x86-64 does not, and Go and
 // Tin do not fuse the same products: design/stdlib_verified.md, "gauge: the corpus check"), so these two are allowed exactly one
-// ulp, and never more. FMA is exact everywhere (the software port). The log family is bit-identical on each architecture (#942):
-// Log, Log10, Log1p, Asinh, Acosh and Atanh fuse as Go's do, so log, log10, log1p, asinh, acosh, atanh and erfinv (which uses Log)
-// take no allowance. lgamma uses Log and Sin and cancels near its zero crossings, so it is checked with a relative tolerance.
+// ulp, and never more. FMA is exact everywhere (the software port). Log, Log10, Log1p, Asinh, Acosh and Atanh are bit-identical on
+// each architecture (#942), since they fuse as Go's do, so log, log10, log1p, asinh, acosh, atanh and erfinv (which uses Log) take
+// no allowance. lgamma uses Log and Sin and cancels near its zero crossings, so it is checked with a relative tolerance.
 const GAUGE_INPUTS = 120000
 
 fn funcNames() []str {

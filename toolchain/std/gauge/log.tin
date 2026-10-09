@@ -172,7 +172,7 @@ fn Log1p(x f64) f64 {
 			c += f64(k) * expLn2Lo
 			return f64(k)*expLn2Hi + c
 		}
-		// The products hfsq*(…) stay inline, so the arm64 backend fuses them as Go's does (avoid the division).
+		// hfsq*(…) stays inline, so the arm64 backend fuses it as Go's does; Go's code avoids a division here.
 		if k == 0 {
 			return f - hfsq*(1.0-0.66666666666666666*f)
 		}

@@ -32,7 +32,7 @@ ParseFloat now return 0 with the range fault. toolchain/tests/v2/mint.out record
 
 ## gauge: the corpus check
 
-`bench/ref/gauge/corpus.go` and `corpus.tin` run every transcendental function over the same deterministic inputs (about 20,000 per function: 70 edge cases plus uniform, log-uniform, raw-bit and quarter-integer values, so NaN, infinities, subnormals and arguments up to 1.8e308 are all in) and print a hash of the result bits, or every result with `dump`. The Go side uses Go's pure algorithms for Exp, Exp2, Sinh, Cosh, Tanh and Pow, because `math.Exp` is assembly on arm64 and amd64 and returns 0 for Exp(-745) where the true value rounds to the smallest subnormal. The Log family calls Go's own `math.Log` and `math.Log1p` on each architecture, which `gauge` matches bit for bit (#942).
+`bench/ref/gauge/corpus.go` and `corpus.tin` run every transcendental function over the same deterministic inputs (about 20,000 per function: 70 edge cases plus uniform, log-uniform, raw-bit and quarter-integer values, so NaN, infinities, subnormals and arguments up to 1.8e308 are all in) and print a hash of the result bits, or every result with `dump`. The Go side uses Go's pure algorithms for Exp, Exp2, Sinh, Cosh, Tanh and Pow, because `math.Exp` is assembly on arm64 and amd64 and returns 0 for Exp(-745) where the true value rounds to the smallest subnormal. Log, Log10, Log1p, Asinh, Acosh and Atanh call Go's own `math.Log` and `math.Log1p` on each architecture, which `gauge` matches bit for bit (#942).
 
     go build -o /tmp/ref ./bench/ref/gauge && tin build bench/ref/gauge/corpus.tin -o /tmp/corpus
     /tmp/ref corpus > go.txt; /tmp/corpus corpus > tin.txt
