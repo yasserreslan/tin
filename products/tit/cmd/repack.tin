@@ -7,9 +7,9 @@ import "quarry"
 import "twine"
 
 // tit repack (#778): every pack into three (commits and tags, trees, blobs), its deltas searched again and its entries compressed on every core. adopt
-// leaves a pack for each batch it converts, and each pack is one more index to search for every object read. Loose
-// objects stay as they are (large files among them are kept in chunks). The new pack is in place before the old ones
-// go, so a crash leaves objects twice, never missing.
+// leaves three packs (it merges its batches' packs of each kind), but each later adopt and each fetch adds packs, and
+// each pack is one more index to search for every object read. Loose objects stay as they are (large files among them
+// are kept in chunks). The new pack is in place before the old ones go, so a crash leaves objects twice, never missing.
 
 fn doRepack(g Global, o mut Out) ! {
 	mut r = try open(g)
