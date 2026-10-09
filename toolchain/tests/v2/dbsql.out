@@ -1,14 +1,36 @@
 sql: Register called twice for driver fake
+[ fake pg]
+sql: Register called twice for driver fake
+core 1 scans 4 Ada
+sql: unknown driver "missing" (forgotten import?)
 [id name]
+sql: Scan called without calling Next
 true
+4 Ada
 [Int(4) Text(Ada)]
 false
 3
 17
-[Int(4) Text(Ada)]
-[id name]
-tx committed
-sql: transaction has already been committed or rolled back
+4 Ada
+sql: expected 2 destination arguments in Scan, not 1
+4 2.5 Ada true raw
+true true true true true
+sql: Scan error on column index 0, name "n": converting NULL to int64 is unsupported
+12 1.5 true abc
+sql: Scan error on column index 0, name "n": converting driver.Value type string ("abc") to a int64: invalid syntax
+7
+7
+1.5
+sql: Scan error on column index 0, name "f": converting driver.Value type float64 ("1.5") to a int64: invalid syntax
+3
+true false
+sql: Scan error on column index 0, name "a": sql/driver: couldn't convert 2 into type bool
+bytes
+sql: no rows in result set
+limits changed after use
 sql: database is closed
 sql: database is closed
 sql: statement is closed
+[id name]
+tx committed
+sql: transaction has already been committed or rolled back

@@ -2604,13 +2604,54 @@ Package database groups database interfaces and drivers.
 - `shape Driver { Open(name str) !dyn Conn }`: Driver opens a connection for a driver-specific data source name.
 - `shape Conn`: Conn prepares statements and closes a driver connection.
 - `shape Stmt`: Stmt executes queries and closes a prepared statement.
+- `shape Dest`: Dest receives one column's value: Set converts it to the destination's type, as Go's Scan does.
+- `type Int64 struct`: Int64 is a scan destination for an integer column; NULL is an error, as in Go.
+- `NewInt64() Int64`: NewInt64 makes an Int64 destination.
+- `(d Int64) Get() i64`: Get returns the stored value.
+- `(d mut Int64) Set(v Value) !`: Set stores the column value as an integer.
+- `type Float64 struct`: Float64 is a scan destination for a floating-point column; NULL is an error, as in Go.
+- `NewFloat64() Float64`: NewFloat64 makes a Float64 destination.
+- `(d Float64) Get() f64`: Get returns the stored value.
+- `(d mut Float64) Set(v Value) !`: Set stores the column value as a float.
+- `type String struct`: String is a scan destination for a text column; NULL is an error, as in Go.
+- `NewString() String`: NewString makes a String destination.
+- `(d String) Get() str`: Get returns the stored value.
+- `(d mut String) Set(v Value) !`: Set stores the column value as text.
+- `type Bool struct`: Bool is a scan destination for a boolean column; NULL is an error, as in Go.
+- `NewBool() Bool`: NewBool makes a Bool destination.
+- `(d Bool) Get() bool`: Get returns the stored value.
+- `(d mut Bool) Set(v Value) !`: Set stores the column value as a boolean.
+- `type Bytes struct`: Bytes is a scan destination for a binary or text column; NULL leaves it empty, as in Go.
+- `NewBytes() Bytes`: NewBytes makes a Bytes destination.
+- `(d Bytes) Get() []u8`: Get returns the stored bytes.
+- `(d mut Bytes) Set(v Value) !`: Set stores the column value as bytes.
+- `type NullInt64 struct`: NullInt64 is a scan destination for an integer column that may be NULL.
+- `NewNullInt64() NullInt64`: NewNullInt64 makes a NullInt64 destination.
+- `(d NullInt64) Get() ?i64`: Get returns the stored value, nil for NULL.
+- `(d mut NullInt64) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullFloat64 struct`: NullFloat64 is a scan destination for a floating-point column that may be NULL.
+- `NewNullFloat64() NullFloat64`: NewNullFloat64 makes a NullFloat64 destination.
+- `(d NullFloat64) Get() ?f64`: Get returns the stored value, nil for NULL.
+- `(d mut NullFloat64) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullString struct`: NullString is a scan destination for a text column that may be NULL.
+- `NewNullString() NullString`: NewNullString makes a NullString destination.
+- `(d NullString) Get() ?str`: Get returns the stored value, nil for NULL.
+- `(d mut NullString) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullBool struct`: NullBool is a scan destination for a boolean column that may be NULL.
+- `NewNullBool() NullBool`: NewNullBool makes a NullBool destination.
+- `(d NullBool) Get() ?bool`: Get returns the stored value, nil for NULL.
+- `(d mut NullBool) Set(v Value) !`: Set stores the column value, or nil for NULL.
+- `type NullBytes struct`: NullBytes is a scan destination for a binary or text column that may be NULL.
+- `NewNullBytes() NullBytes`: NewNullBytes makes a NullBytes destination.
+- `(d NullBytes) Get() ?[]u8`: Get returns the stored bytes, nil for NULL.
+- `(d mut NullBytes) Set(v Value) !`: Set stores the column value, or nil for NULL.
 - `type Rows struct`: Rows is a materialized result set with a deterministic cursor.
 - `NewRows(columns []str, values [][]Value) Rows`: NewRows creates a result set from column names and row values.
 - `type Row struct`: Row holds the first row of a query result, or its query fault.
 - `type DB struct`: DB is a database handle backed by the registered driver's connection pool.
-- `type Statement struct`: Stmt is a prepared statement tied to its database connection.
+- `type Statement struct`: Statement is a prepared statement tied to its database connection.
 - `type Tx struct`: Tx is a transaction that uses its connection until it finishes.
-- `Register(name str, driver dyn Driver) !`: Register adds a driver under a unique non-empty name.
+- `Register(name str, driver dyn Driver) !`: Register makes a driver available by name to every core; a name already registered is refused, as in Go.
 - `Drivers() []str`: Drivers returns the registered names in lexical order.
 - `Open(driverName str, dataSourceName str) !DB`: Open opens a database by its registered driver name and data source name.
 - `(db mut DB) Close() !`: Close closes the database and prevents later operations.
@@ -2618,16 +2659,17 @@ Package database groups database interfaces and drivers.
 - `(db DB) Query(query query) !Rows`: Query executes query and returns its rows.
 - `(db DB) QueryRow(query query) Row`: QueryRow executes query and returns its first row or deferred query fault.
 - `(db DB) Exec(query query) !Result`: Exec executes a statement and returns its result.
-- `(db DB) SetMaxOpen(n i64) !bool`: SetMaxOpen sets the process-wide cap on open connections.
-- `(db DB) SetMaxIdle(n i64) !bool`: SetMaxIdle sets the per-core cap on idle connections.
+- `(db DB) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide cap on open connections (0: no cap); it takes effect at once, also after use.
+- `(db DB) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core cap on idle connections (0: none kept); it takes effect at once, also after use.
 - `(s mut Statement) Close() !`: Close closes a prepared statement.
 - `(s Statement) Query() !Rows`: Query executes the prepared query and returns rows.
 - `(s Statement) Exec() !Result`: Exec executes the prepared statement and returns its result.
 - `(r Rows) Columns() []str { return r.columns }`: Columns returns the result column names.
 - `(r mut Rows) Next() bool`: Next advances the cursor and reports whether a row is available.
 - `(r Rows) Values() []Value`: Values returns the current row's values, or an empty slice before Next or after exhaustion.
+- `(r Rows) Scan(dests ...dyn Dest) !`: Scan copies the current row into the destinations, one per column, as Go's Rows.Scan does.
 - `(r mut Rows) Close() ! { r.closed = true }`: Close marks the rows exhausted.
-- `(r Row) Scan() ![]Value`: Scan returns the row values or its deferred query fault.
+- `(r Row) Scan(dests ...dyn Dest) !`: Scan copies the row into the destinations, or fails with its query fault or ErrNoRows.
 - `(r Result) LastInsertId() !i64`: LastInsertId returns the inserted ID when the driver reports one.
 - `(r Result) RowsAffected() !i64 { return r.affected }`: RowsAffected returns the number of rows affected.
 - `(db DB) Begin() !Tx`: Begin starts a transaction on the database connection.
