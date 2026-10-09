@@ -26,7 +26,8 @@ import "twine"
 //   repo_driver crash DIR       a push of c2, a repack of both packs and the retiring of the old ones (TIT_CRASH_AT)
 //   repo_driver check DIR       main reaches only live packs' objects; after a sweep, rows and files agree
 //   repo_driver private         make repository 1 private
-//   repo_driver grant EMAIL ROLE the user with EMAIL gets ROLE (read, write, admin) on repository 1
+//   repo_driver repo NAME       make the empty public repository ada/NAME
+//   repo_driver grant EMAIL ROLE [NAME]  the user with EMAIL gets ROLE (read, write, admin) on ada/NAME (tin)
 
 fn client() postgres.Client {
 	let (o, ok) = db.TestOptions()
@@ -391,11 +392,23 @@ fn main() {
 			}
 		}
 		"check" => check(arg(2))
+		"repo" => {
+			// repo NAME: an empty public repository ada/NAME
+			let name = arg(2)
+			_ = pg.Exec("INSERT INTO repos (owner_id, name, visibility, quota_bytes) VALUES (1, {name}, 'public', 1000000000)") catch err {
+				die("repo", err)
+				postgres.Result{Affected: 0}
+			}
+		}
 		"grant" => {
-			// grant EMAIL ROLE: the user with that email gets ROLE on ada/tin
+			// grant EMAIL ROLE [REPO]: the user with that email gets ROLE on ada/REPO (ada/tin by default)
 			let email = arg(2)
 			let role = arg(3)
-			_ = pg.Exec("INSERT INTO grants (repo_id, user_id, role) SELECT 1, id, {role} FROM users WHERE lower(email) = lower({email})") catch err {
+			mut name = "tin"
+			if len(args) > 4 {
+				name = args[4]
+			}
+			_ = pg.Exec("INSERT INTO grants (repo_id, user_id, role) SELECT r.id, u.id, {role} FROM users u, repos r WHERE lower(u.email) = lower({email}) AND r.owner_id = 1 AND r.name = {name}") catch err {
 				die("grant", err)
 				postgres.Result{Affected: 0}
 			}

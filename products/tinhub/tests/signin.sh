@@ -4,11 +4,14 @@
 #   - bob, who can read the public ada/tin, is refused a push; granted write, his push lands and the API shows it;
 #   - a browser asks for a login request, bob approves it with tit login, the browser claims it and gets a session
 #     that reads the repository once it is private (anonymous callers get 404); signing out ends it.
+#   - deploy/mirror-sync.sh keeps a repository a mirror of a git repository (adopt, then push with a mirror key).
+#   - restarting the server three times while pushes run loses none of them.
 set -eu
 hub=$1
 driver=$2
 tit=$3
 tmp=$(mktemp -d)
+deploy=$(cd "$(dirname "$0")/../deploy" && pwd)
 pid=
 . "$(dirname "$0")/lib.sh"
 cleanup() {
@@ -30,14 +33,17 @@ export TINHUB_SECRETS_NONCE=test-nonce-secret-0123456789 TINHUB_SECRETS_COOKIE=t
 export TINHUB_LISTEN=127.0.0.1:18434 TINHUB_PACKS_DIR="$tmp/node" TINHUB_PACKS_SWEEP=0 TINHUB_REDIS_ADDR="127.0.0.1:$port"
 base=http://$TINHUB_LISTEN
 export TINHUB_PUBLIC_URL="$base"
-"$hub" run > "$tmp/hub.log" 2>&1 &
-pid=$!
-up=0
-for i in $(seq 1 40); do
-	curl -sf "$base/healthz" > /dev/null 2>&1 && { up=1; break; }
-	sleep 0.25
-done
-[ $up = 1 ] || fail "the server did not start"
+start() {
+	"$hub" run >> "$tmp/hub.log" 2>&1 &
+	pid=$!
+	up=0
+	for i in $(seq 1 40); do
+		curl -sf "$base/healthz" > /dev/null 2>&1 && { up=1; break; }
+		sleep 0.25
+	done
+	[ $up = 1 ] || fail "the server did not start"
+}
+start
 
 export TIT_NO_PAGER=1
 bob() {
@@ -99,3 +105,65 @@ curl -sf -b "$tmp/jar" -c "$tmp/jar" -X POST "$base/tit/v1/logout" > /dev/null |
 code=$(curl -s -b "$tmp/jar" -o /dev/null -w '%{http_code}' "$base/api/v1/repos/ada/tin")
 [ "$code" = 404 ] || fail "a read after sign-out: $code"
 echo "PASS tinhub sign-in: a browser session from tit login, and sign-out"
+
+# a git repository mirrored into tinhub by deploy/mirror-sync.sh, with a mirror account's key; twice, the second run
+# carrying only a new commit
+"$driver" repo mirror
+mkdir -p "$tmp/bot"
+botk() {
+	HOME="$tmp/bot" XDG_CONFIG_HOME="$tmp/bot" "$tit" "$@"
+}
+botk config set --user user.name Mirror
+botk config set --user user.email mirror@example.com
+"$hub" admin invite mirror@example.com > "$tmp/invite.out" || fail "the mirror's invite"
+code=$(sed -n 's/^invite for mirror@example.com: \(.*\)$/\1/p' "$tmp/invite.out")
+botk key add "$base" "$code" > "$tmp/out" 2>&1 || fail "the mirror's key: $(cat "$tmp/out")"
+"$driver" grant mirror@example.com write mirror
+export GIT_AUTHOR_NAME=Ada GIT_AUTHOR_EMAIL=ada@example.com GIT_COMMITTER_NAME=Ada GIT_COMMITTER_EMAIL=ada@example.com
+git init -q -b main "$tmp/src"
+printf 'one\n' > "$tmp/src/a.txt"
+git -C "$tmp/src" add a.txt
+git -C "$tmp/src" commit -q -m first
+git clone -q "$tmp/src" "$tmp/mirror"
+(cd "$tmp/mirror" && botk adopt > /dev/null 2>&1 && botk remote add tinhub "$base/ada/mirror") || fail "adopting the git clone"
+HOME="$tmp/bot" XDG_CONFIG_HOME="$tmp/bot" TIT="$tit" sh "$deploy/mirror-sync.sh" "$tmp/mirror" > "$tmp/out" 2>&1 || fail "mirror-sync: $(cat "$tmp/out")"
+printf 'two\n' > "$tmp/src/b.txt"
+git -C "$tmp/src" add b.txt
+git -C "$tmp/src" commit -q -m second
+HOME="$tmp/bot" XDG_CONFIG_HOME="$tmp/bot" TIT="$tit" sh "$deploy/mirror-sync.sh" "$tmp/mirror" > "$tmp/out" 2>&1 || fail "mirror-sync again: $(cat "$tmp/out")"
+(cd "$tmp" && bob clone "$base/ada/mirror" copy > "$tmp/out" 2>&1) || fail "cloning the mirror: $(cat "$tmp/out")"
+[ "$(cat "$tmp/copy/a.txt")" = one ] && [ "$(cat "$tmp/copy/b.txt")" = two ] || fail "the mirror's files: $(ls "$tmp/copy")"
+echo "PASS tinhub mirror: a git repository synced twice, then cloned"
+
+# restarts under load lose no push: bob pushes 20 commits one after another, retrying a push the restart cut off,
+# while the server is stopped (SIGTERM, a drain) and started again three times; every file is on main after
+cd "$tmp/work"
+bob pull > /dev/null 2>&1 || true
+(
+	for i in $(seq 1 20); do
+		printf '%s\n' "$i" > "load$i.txt"
+		bob add "load$i.txt"
+		bob commit -m "load $i" > /dev/null
+		n=0
+		until bob push > "$tmp/push.out" 2>&1; do
+			n=$((n + 1))
+			[ $n -lt 100 ] || { echo "push $i: $(cat "$tmp/push.out")"; exit 1; }
+			sleep 0.1
+		done
+	done
+) > "$tmp/load.out" 2>&1 &
+load=$!
+for r in 1 2 3; do
+	sleep 0.5
+	kill -TERM "$pid"
+	wait "$pid" || true
+	start
+done
+wait $load || fail "the pushes under restarts: $(cat "$tmp/load.out")"
+cd "$tmp"
+rm -rf copy2
+bob clone "$base/ada/tin" copy2 > "$tmp/out" 2>&1 || fail "the clone after the restarts: $(cat "$tmp/out")"
+for i in $(seq 1 20); do
+	[ "$(cat "$tmp/copy2/load$i.txt" 2>/dev/null)" = "$i" ] || fail "push $i was lost across the restarts"
+done
+echo "PASS tinhub restart: 20 pushes across three restarts, none lost"

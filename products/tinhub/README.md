@@ -11,6 +11,8 @@ tinhub run [--config FILE] [--roles node,worker,runner]   # serve; every role by
 tinhub migrate [--config FILE]                             # apply the pending migrations, then exit
 tinhub packs sweep [--config FILE]                         # delete what crashed pushes and repacks left, once
 tinhub packs copy [--config FILE]                          # copy packs.dir into the s3.* bucket; rerun to catch up
+tinhub check [--config FILE]                               # every live pack in the store; refs and packs fingerprints
+tinhub admin invite EMAIL [--site-admin]                   # a one-use code for tit key add
 tinhub version
 ```
 
@@ -53,6 +55,12 @@ Browser sessions live in Redis (`redis.addr`) behind a cookie signed with `secre
 or changing `secrets.cookie` signs everyone out**, and they sign in again with `tit login`; nothing else is lost.
 Without `redis.addr` there are no browser sessions, and key-signed requests still work. See
 [design/tinhub.md §11](../../design/tinhub.md#11-accounts-sign-in-and-sessions-1012).
+
+## Deployment
+
+Phase 1 is one Linux server with every role, Postgres beside it and packs on disk: `deploy/` has the systemd units,
+a container image and compose file, the nightly backup and the restore, and the mirror sync that keeps the Tin repo a
+read-only copy of GitHub. Follow [deploy/RUNBOOK.md](deploy/RUNBOOK.md) for install, upgrade, secrets and restore.
 
 ## Health and shutdown
 

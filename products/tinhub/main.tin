@@ -202,7 +202,6 @@ fn configureProto(c config.Config) {
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
 }
 
-
 // sweeping reports whether this process runs the sweeps: tinhub run, on core 0.
 fn sweeping() bool {
 	return boot.Command == "run" && len(boot.Err) == 0 && hearth.ID() == 0

@@ -88,7 +88,8 @@ are. tinhub imports tit's packages (`object`, `store`, `packfile`, `change`, `tr
 tinhub run [--config FILE] [--roles node,worker,runner]   serve; all roles by default
 tinhub migrate [--config FILE]                             apply the pending migrations, then exit
 tinhub version [-v]                                        the version, and with -v the build's Tin version
-tinhub admin invite --email ADDRESS [--org NAME] [--admin] a one-use invite code for tit key add (§7)
+tinhub admin invite EMAIL [--site-admin] [--config FILE]   a one-use invite code for tit key add (§11)
+tinhub check [--config FILE]                               every live pack is in the store; fingerprints of refs and packs
 tinhub packs copy [--config FILE]                          copy every pack under packs.dir into the s3.* bucket, idempotently
 tinhub packs sweep [--config FILE]                         run the pending and retired sweeps once
 ```
@@ -161,13 +162,16 @@ else 16 random hex digits, echoed in the answer).
 | `GET /healthz`, `GET /readyz`, `GET /metrics` (loopback only) | every node | #1005, #1013 |
 | `GET /<owner>/<repo>/tit/v1/heads`, `POST …/fetch`, `POST …/push` | node | #1018 |
 | `POST /<owner>/<repo>/tit/v1/replay`, `GET …/replay`, `GET …/replay/<id>` | node | #1022 |
-| `POST /tit/v1/login`, `GET\|POST /tit/v1/login/<code>`, `POST /tit/v1/keys` | node | #1012 |
+| `POST /tit/v1/login`, `GET\|POST /tit/v1/login/<code>`, `POST /tit/v1/keys` (also under `/<owner>/<repo>`) | node | #1012 |
+| `POST /tit/v1/login/<code>/session` (the browser's claim), `POST /tit/v1/logout` | node | #1012 |
 | `/api/v1/…` (JSON) | node | #1019 and later |
 | `GET /api/v1/live` (websocket) | node | #1023 |
 
 Owner names (users and orgs share one namespace) and repository names match `[a-z0-9][a-z0-9-]{0,38}` and
 `[A-Za-z0-9._-]{1,100}` (not `.` or `..`, not ending in `.tit`). A private repository answers 404, never 403, to
-anyone who cannot read it, on every route.
+anyone who cannot read it, on every route, with one exception: an unsigned protocol request for a repository that is
+private or does not exist gets the same `Unauthorized` challenge (with a nonce) for both, so tit can sign its next
+attempt (a clone of a private repository, `tit login` under its URL) and the answer still tells nothing apart.
 
 ---
 
@@ -370,9 +374,15 @@ only.
 | nodes | one Linux server, every role | several stateless nodes behind a load balancer (`/readyz`); workers as their own nodes | nodes per region |
 | Postgres | on the same host | a primary and a replica; refs always on the primary | primary plus regional replicas |
 | packs | `packs.store = dir` on local disk | `packs.store = s3`, a pack cache on each node's NVMe | replicated object storage |
-| TLS | anvil (TLS 1.3, HTTP/2), certificates from files, SIGHUP reload | the load balancer or anvil | |
-| backup | nightly `pg_dump` and an incremental copy of new packs | the provider's snapshots plus the same | |
+| TLS | anvil (TLS 1.3, HTTP/2), certificates from files, read again when they change (SIGHUP is ignored) | the load balancer or anvil | |
+| backup | nightly `pg_dump` and an incremental copy of new packs (`deploy/backup.sh`), `tinhub check` after a restore | the provider's snapshots plus the same | |
 | move | | config, then `tinhub packs copy` | |
+
+Phase 1 is `products/tinhub/deploy`: the systemd units (tinhub, the nightly backup, the mirror sync), a container
+image and a compose file with Postgres beside it, the backup and restore scripts, and `RUNBOOK.md` (install, upgrade,
+secrets, restore, the mirror). The Tin repo is imported with `tit adopt` and kept a read-only mirror of GitHub by
+`deploy/mirror-sync.sh` (fetch, `tit adopt` again, push with the mirror account's key, the only one with write
+access); GitHub stays the source of truth, with issues and CI, until the cutover.
 
 **Not in this milestone:** website pages, public CI, public replay (code from anyone), regions.
 
@@ -425,7 +435,10 @@ signed with a registered key (a second or late approval is `Moved`), then `used`
 `tinhub_login`, the code's HMAC under `secrets.cookie`), and only the holder of that token turns the approved code into
 a session, so a code seen on someone's screen is worth nothing. The JSON answers are tit's (`LoginAnswer`,
 `LoginState`; a used code reads as `approved`); refusals are tit error frames, with a fresh nonce on `Unauthorized`.
-`accounts.Service.Handle` answers these routes, at the root or under a repository's URL; the node mounts it.
+`accounts.Service.Handle` answers these routes, at the root or under a repository's URL; the node mounts it through
+`products/tinhub/signin`, which adds the browser's two: `POST /tit/v1/login/<code>/session` claims an approved code
+with the `tinhub_login` cookie and sets `tinhub_session` (HttpOnly, SameSite=Lax, Secure when `public_url` is https),
+and `POST /tit/v1/logout` ends it. `signin.Caller` (the session's user, else 0) is the API's caller.
 
 **Sessions.** A session is the Redis key `tinhub:session:<hex SHA-256(id)>` = `v1 <user id>`, 30 days from sign-in;
 the cookie `tinhub_session` is `<id>.<base64url HMAC-SHA256(secrets.cookie, "tinhub session " + id)>`. A node checks the
