@@ -359,3 +359,361 @@ fn TestConflictLines(t mut crucible.T) {
 	let (_, err) = Body(Object.Commit(bad))
 	t.True("a newline is refused", err != nil)
 }
+
+// richCommit is a commit with what commit leaves out: several parents, conflict lines, and git headers whose values
+// have empty lines, lines starting with a space and a trailing newline, as a real gpgsig has.
+fn richCommit(r mut dice.Rand) CommitData {
+	mut c = commit(mut r)
+	for i in 0..r.Intn(4) {
+		c.Parents = append(c.Parents, someId(mut r))
+	}
+	for i in 0..r.Intn(3) {
+		c.Conflicts = append(c.Conflicts, r.Str(1 + r.Intn(8), "ab\t-x <"))
+	}
+	let names = []str{"gpgsig", "mergetag", "encoding", "x-1"}
+	mut hs = []str{}
+	for i in 0..r.Intn(4) {
+		hs = append(hs, names[r.Intn(len(names))] + " " + r.Str(r.Intn(30), "ab \n=-"))
+	}
+	c.GitHeaders = hs
+	return c
+}
+
+// variant is damaged copy k of body, for k below 6 * len(body) + 1: each byte flipped two ways, deleted, and a newline
+// or a space put before it, every truncation, and the body itself last.
+fn variant(body str, k i64) str {
+	let i = k / 6
+	if i == len(body) {
+		return body
+	}
+	return match k % 6 {
+		0 => flip(body, i, 1)
+		1 => flip(body, i, 0x20)
+		2 => body[0:i] + body[i + 1:]
+		3 => body[0:i] + "\n" + body[i:]
+		4 => body[0:i] + " " + body[i:]
+		_ => body[0:i]
+	}
+}
+
+fn flip(body str, i i64, d u8) str {
+	mut b = []u8(body)
+	b[i] = b[i] ^ d
+	return str(b)
+}
+
+// againstRef decodes b with decodeCommit and the reference: 1 when both accept it and it is canonical, 0 when both
+// reject it with ErrCorrupt, and -1 (with a note) otherwise.
+fn againstRef(b str) (i64, str) {
+	let (got, err) = decodeCommit(b)
+	let (want, refErr) = refDecodeCommit(b)
+	if (err == nil) != (refErr == nil) {
+		return -1, "decodeCommit and the reference differ on {b:q}: {err} / {refErr}"
+	}
+	if err != nil {
+		if !fault.Is(err, ErrCorrupt) {
+			return -1, "a rejection that is not ErrCorrupt: {err}"
+		}
+		return 0, ""
+	}
+	let again = Body(Object.Commit(got)) catch e {
+		return -1, "accepted a body it cannot encode: {b:q}: {e}"
+	}
+	let refAgain = Body(Object.Commit(want)) catch _ {
+		""
+	}
+	if again != b || refAgain != b {
+		return -1, "accepted a non-canonical body: {b:q}"
+	}
+	return 1, ""
+}
+
+// refCounts is what checkAgainstRef found over a body's damaged copies, with the first difference.
+type refCounts struct {
+	accepted i64
+	rejected i64
+	differ   i64
+	note     str
+}
+
+// checkAgainstRef runs againstRef over every damaged copy of body.
+fn checkAgainstRef(body str) refCounts {
+	mut out = refCounts{accepted: 0, rejected: 0, differ: 0, note: ""}
+	for k in 0..6 * len(body) + 1 {
+		let (res, note) = againstRef(variant(body, k))
+		if res == 1 {
+			out.accepted += 1
+		} else if res == 0 {
+			out.rejected += 1
+		} else {
+			if out.differ == 0 {
+				out.note = note
+			}
+			out.differ += 1
+		}
+	}
+	return out
+}
+
+// TestCommitDecoderMatchesReference checks that decodeCommit accepts exactly the bodies the decoder before #807's
+// rewrite accepted, and that each of them is canonical: over generated commits with every kind of header, thousands
+// of damaged copies of their bodies, and every truncation.
+fn TestCommitDecoderMatchesReference(t mut crucible.T) {
+	mut r = dice.New(11)
+	mut accepted = 0
+	mut rejected = 0
+	mut differ = 0
+	for n in 0..60 {
+		let c = richCommit(mut r)
+		let body = Body(Object.Commit(c)) catch e {
+			t.Error("encode: {e}")
+			return
+		}
+		// each body's copies in an arena: they are thousands of strings
+		let got = arena {
+			checkAgainstRef(body)
+		}
+		accepted += got.accepted
+		rejected += got.rejected
+		differ += got.differ
+		if got.differ > 0 {
+			t.Error(got.note)
+		}
+	}
+	crucible.Equal(mut t, "bodies where the decoders differ", differ, 0)
+	t.True("some damaged bodies are still canonical", accepted > 60)
+	t.True("damage is rejected", rejected > 0)
+	t.Log("{accepted} accepted, {rejected} rejected")
+}
+
+// ---- the commit decoder before #807's rewrite, kept as a reference ----
+
+// refDecodeCommit is decodeCommit as it was before it read the body with one cursor: it split the headers into lines
+// and compared the core headers encoded again. TestCommitDecoderMatchesReference checks the two accept the same bodies.
+fn refDecodeCommit(body str) !CommitData {
+	let h = try splitHeaders(body, "commit")
+	let ls = h.lines
+	mut k = 0
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no tree")
+	}
+	let treeHex = field(ls[k], "tree")
+	if treeHex == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: the first line is not tree")
+	}
+	let tree = try parseHexId(treeHex, "commit tree")
+	let none = Person{Name: "", Email: "", When: 0, Zone: 0}
+	mut c = CommitData{Tree: tree, Parents: []Id{}, Change: ChangeId{raw: ""}, Author: none, Committer: none, GitHeaders: []str{}, Signature: "", Message: h.message, Conflicts: []str{}}
+	k += 1
+	for k < len(ls) {
+		let p = field(ls[k], "parent")
+		if p == nil {
+			break
+		}
+		let pid = try parseHexId(p, "commit parent")
+		c.Parents = append(c.Parents, pid)
+		k += 1
+	}
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no change")
+	}
+	let ch = field(ls[k], "change")
+	if ch == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: change expected")
+	}
+	c.Change = try ParseChangeId(ch)
+	k += 1
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no author")
+	}
+	let au = field(ls[k], "author")
+	if au == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: author expected")
+	}
+	c.Author = try refParsePerson(au, "author")
+	k += 1
+	if k >= len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: no committer")
+	}
+	let co = field(ls[k], "committer")
+	if co == nil {
+		fail fault.Wrap(ErrCorrupt, "commit: committer expected")
+	}
+	c.Committer = try refParsePerson(co, "committer")
+	k += 1
+	for k < len(ls) {
+		let cf = field(ls[k], "conflict")
+		if cf == nil {
+			break
+		}
+		c.Conflicts = append(c.Conflicts, cf)
+		k += 1
+	}
+	for k < len(ls) && len(ls[k]) > 4 && ls[k][0:4] == "git-" {
+		// a header's continuation lines joined once (a signature has dozens: adding them one by one was quadratic)
+		mut parts = []str{ls[k][4:]}
+		k += 1
+		for k < len(ls) && len(ls[k]) > 0 && ls[k][0] == ' ' {
+			parts = append(parts, ls[k][1:])
+			k += 1
+		}
+		c.GitHeaders = append(c.GitHeaders, twine.Join(parts, "\n"))
+	}
+	if k < len(ls) {
+		let sig = field(ls[k], "signature")
+		if sig == nil {
+			fail fault.Wrap(ErrCorrupt, "commit: unexpected header {ls[k]}")
+		}
+		c.Signature = try parseSignature(sig)
+		k += 1
+	}
+	if k != len(ls) {
+		fail fault.Wrap(ErrCorrupt, "commit: header after the signature")
+	}
+	// the message is the body's own tail: only the headers and the signature line are encoded again, and compared in
+	// place (#807: building the whole body again cost as much as the rest of decoding)
+	// The git headers are the body's own lines between the core headers and the signature line, each checked here:
+	// encoding them again would give those lines back, so only the rest is encoded again and compared.
+	let coreBytes = try commitCore(c)
+	let core = str(coreBytes)
+	for h in c.GitHeaders {
+		let (_, _) = try checkGitHeader(h)
+	}
+	let sig = try signatureLine(c.Signature)
+	let sigAt = len(body) - len(c.Message) - 1 - len(sig)
+	if sigAt < len(core) || !textAt(body, 0, core) || !textAt(body, sigAt, sig) || (len(c.GitHeaders) == 0 && sigAt != len(core)) {
+		fail fault.Wrap(ErrCorrupt, "commit: not in canonical form")
+	}
+	return c
+}
+
+// refParsePerson is parsePerson as it was before #807's rewrite.
+fn refParsePerson(s str, what str) !Person {
+	let lt = indexFrom(s, 0, '<')
+	let gt = indexFrom(s, 0, '>')
+	if lt < 1 || gt < lt || s[lt - 1] != ' ' || gt + 1 >= len(s) || s[gt + 1] != ' ' {
+		fail fault.Wrap(ErrCorrupt, "{what}: not 'name <email> seconds zone'")
+	}
+	let rest = s[gt + 2:]
+	let sp = indexFrom(rest, 0, ' ')
+	if sp < 0 {
+		fail fault.Wrap(ErrCorrupt, "{what}: no zone")
+	}
+	let when = try parseDecimal(rest[0:sp], what + " time")
+	let z = rest[sp + 1:]
+	if len(z) != 5 || (z[0] != '+' && z[0] != '-') {
+		fail fault.Wrap(ErrCorrupt, "{what}: zone {z} is not +hhmm or -hhmm")
+	}
+	for i in 1..5 {
+		if z[i] < '0' || z[i] > '9' {
+			fail fault.Wrap(ErrCorrupt, "{what}: zone {z} is not +hhmm or -hhmm")
+		}
+	}
+	let hh = i64(z[1] - '0') * 10 + i64(z[2] - '0')
+	let mm = i64(z[3] - '0') * 10 + i64(z[4] - '0')
+	if mm >= 60 {
+		fail fault.Wrap(ErrCorrupt, "{what}: zone minutes {mm}")
+	}
+	mut zone = hh * 60 + mm
+	if z[0] == '-' {
+		if zone == 0 {
+			fail fault.Wrap(ErrCorrupt, "{what}: zone -0000 is written +0000")
+		}
+		zone = 0 - zone
+	}
+	let p = Person{Name: s[0:lt - 1], Email: s[lt + 1:gt], When: when, Zone: zone}
+	try checkPerson(p, what)
+	return p
+}
+
+// refCheckEntries is checkEntries as it was before #807's rewrite, with a map of the names seen and sortKey strings.
+fn refCheckEntries(es []Entry) ! {
+	mut seen = map[str]bool{}
+	for i in 0..len(es) {
+		let e = es[i]
+		try checkName(e.Name)
+		if len(e.Id.raw) != 32 {
+			fail fault.Wrap(ErrCorrupt, "tree: entry {e.Name} has no id")
+		}
+		if seen[e.Name] {
+			fail fault.Wrap(ErrCorrupt, "tree: duplicate name {e.Name}")
+		}
+		seen[e.Name] = true
+		if i > 0 && !(sortKey(es[i - 1]) < sortKey(e)) {
+			fail fault.Wrap(ErrCorrupt, "tree: {e.Name} is out of order")
+		}
+	}
+}
+
+// entryList is a list of entries with names from a small alphabet, so names repeat, are prefixes of each other and
+// sort around "/": sorted by sortKey (with duplicates kept) half of the time.
+fn entryList(r mut dice.Rand) []Entry {
+	let modes = []Mode{Mode.File, Mode.Exec, Mode.Link, Mode.Dir}
+	let id = someId(mut r)
+	mut es = []Entry{}
+	for i in 0..r.Intn(7) {
+		es = append(es, Entry{Mode: modes[r.Intn(4)], Name: r.Str(1 + r.Intn(3), "a-.0"), Id: id})
+	}
+	if r.Intn(2) == 0 {
+		sift.SortFunc(mut es, fn(a Entry, b Entry) i64 {
+			let ka = sortKey(a)
+			let kb = sortKey(b)
+			if ka < kb {
+				return -1
+			}
+			if ka > kb {
+				return 1
+			}
+			return 0
+		})
+	}
+	return es
+}
+
+// TestCheckEntriesMatchesReference checks that checkEntries rejects exactly the entry lists the check before #807's
+// rewrite rejected, and that a tree's sortKey order agrees with keyCompare.
+fn TestCheckEntriesMatchesReference(t mut crucible.T) {
+	mut r = dice.New(5)
+	mut ok = 0
+	mut differ = 0
+	for n in 0..20000 {
+		let es = entryList(mut r)
+		let err = checkEntries(es)
+		let refErr = refCheckEntries(es)
+		if (err == nil) != (refErr == nil) {
+			differ += 1
+			if differ < 5 {
+				t.Error("checkEntries and the reference differ: {err} / {refErr}")
+			}
+		}
+		if err == nil {
+			ok += 1
+		}
+	}
+	crucible.Equal(mut t, "entry lists where the checks differ", differ, 0)
+	t.True("some lists are valid trees", ok > 1000)
+	let names = []str{"a", "a-", "a.", "a0", "aa", "a-b", "b"}
+	for x in names {
+		for y in names {
+			for dx in []bool{false, true} {
+				for dy in []bool{false, true} {
+					mut kx = x
+					if dx {
+						kx = x + "/"
+					}
+					mut ky = y
+					if dy {
+						ky = y + "/"
+					}
+					mut want = 0
+					if kx < ky {
+						want = -1
+					} else if kx > ky {
+						want = 1
+					}
+					crucible.Equal(mut t, "keyCompare {kx} {ky}", keyCompare(x, dx, y, dy), want)
+				}
+			}
+		}
+	}
+}
