@@ -464,7 +464,12 @@ fn doServe(g Global, a ServeArgs, o mut Out) ! {
 	}
 	let keys = try transport.AllowedKeys(allowPath)
 	quarry.Eprintln("tit: serving " + r.Ws.Root + " on http://" + a.Addr + "/ ({len(keys)} keys allowed; " + allowPath + " lists them)")
-	try transport.Serve(a.Addr, r.Ws.Store, allowPath, a.Public)
+	transport.Serve(a.Addr, r.Ws.Store, allowPath, a.Public) catch e {
+		fail e
+	}
+	// stopped (SIGTERM, SIGINT): core 0's requests reset the pool main's values live in (#1056), so nothing made before
+	// serving may be read now; end here (#1055)
+	quarry.Exit(0)
 }
 
 // doSync is tit sync (#797): fetch, rebase the stack onto the remote's trunk (moving the local trunk with it), and push
