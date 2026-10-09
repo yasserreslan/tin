@@ -2,6 +2,7 @@ package main
 
 import "./accounts"
 import "./api"
+import "./bench"
 import "./capsules"
 import "./config"
 import "./db"
@@ -149,6 +150,7 @@ fn handlers() []events.Handler {
 	all = append(all, notify.Handlers(notifyDeps(boot.Conf))...)
 	let cache = repo.NewRefCache(boot.Conf.RedisAddr, "tinhub:", tide.Minute)
 	all = append(all, index.Handlers(indexDeps(boot.Conf, st, cache))...)
+	all = append(all, bench.Handlers(bench.NewDeps(pg, st, boot.Conf.PacksDir, signin.Caller))...)
 	all = append(all, diffs.Handlers(diffs.Deps{Db: pg, Store: st, Cache: cache, Dir: boot.Conf.PacksDir, Auth: signin.Caller})...)
 	return all
 }
@@ -258,6 +260,9 @@ fn configureProto(c config.Config) {
 	runner.Configure(runnerDeps(c, st))
 	index.Configure(indexDeps(c, st, cache))
 	diffs.Configure(diffs.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Auth: signin.Caller})
+	mut bd = bench.NewDeps(pg, st, c.PacksDir, signin.Caller)
+	bd.PublicURL = c.PublicURL
+	bench.Configure(bd)
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
 }
 
@@ -453,6 +458,7 @@ fn routes(c config.Config) anvil.Router {
 		runner.Mount(mut r)
 		index.Mount(mut r)
 		diffs.Mount(mut r)
+		bench.Mount(mut r)
 		proto.Mount(mut r)
 		api.Mount(mut r)
 	}
