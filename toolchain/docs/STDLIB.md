@@ -16,6 +16,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
 | [httptrace](#httptrace) | observable HTTP client phase hooks (net/http/httptrace) |
+| [pprof](#pprof) | HTTP profiling route names and runtime profile availability (net/http/pprof) |
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
 | [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
@@ -31,8 +32,11 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [link](#link) | URLs and their escaping (net/url) |
 | [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
 | [ore](#ore) | byte slices (bytes) |
+| [jsontext](#jsontext) | JSON tokens and values, token by token (encoding/json/jsontext) |
+| [jsonv2](#jsonv2) | JSON Marshal and Unmarshal with options (encoding/json/v2) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
+| [debug](#debug) | ELF executable metadata (debug/elf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [signal](#signal) | operating-system signals (os/signal) |
@@ -534,6 +538,12 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 Package httptrace provides the HTTP client hooks wire can observe on HTTP/1.1 and TLS. DNS and connect hooks are unavailable because wire's platform resolver combines those phases. HTTP/2 requests currently use a separate path and report only GetConn and TLS handshake hooks.
 
 - `type ClientTrace struct`: ClientTrace contains callbacks for observable HTTP client phases.
+
+## pprof
+
+Package pprof exposes Go-compatible profiling route names for anvil and reports which profiles the Tin runtime cannot provide.
+
+- `Register(r mut anvil.Router)`: Register adds the standard pprof route paths to r. Tin currently has no runtime profile source, so profile requests return 501.
 
 ## jar
 
@@ -1176,6 +1186,40 @@ Package ore works on byte slices ([]u8), like Go's bytes. Functions that append 
 - `ToUpper(b []u8) []u8`: ToUpper returns a copy with ASCII letters raised.
 - `Repeat(b []u8, n i64) []u8`: Repeat returns n copies of b (panics when the length overflows).
 
+## jsontext
+
+Package jsontext reads and writes JSON token by token, as Go's encoding/json/jsontext does: a Decoder yields Tokens and whole Values, an Encoder takes them back and formats them with Options. Strings are unescaped in Token.String; numbers, literals and delimiters keep their text. Errors carry Go's messages (#931).
+
+- `type Token struct`: Token is one JSON token: its kind byte and its text (the unescaped string of a string token, the literal of any other).
+- `Bool(b bool) Token`: Bool returns the true or false token.
+- `String(s str) Token`: String returns the string token for s (unescaped text; it is escaped when written).
+- `Int(n i64) Token`: Int returns the number token for n.
+- `Uint(n u64) Token`: Uint returns the number token for n.
+- `Float(n f64) Token`: Float returns the number token for n, in the shortest form that reads back (NaN and infinities are not numbers: their token is the text "NaN" or "Inf", which Encoder refuses).
+- `(t Token) Kind() u8`: Kind returns the token's kind byte: '"', '0', 't', 'f', 'n', '{', '}', '[' or ']'.
+- `(t Token) String() str`: String returns the unescaped text of a string token and the literal of any other token.
+- `(t Token) Bool() bool`: Bool reports whether the token is true.
+- `(t Token) Int() i64`: Int returns the token's number as an integer (0 when it is not one or does not fit).
+- `(t Token) Float() f64`: Float returns the token's number as a float64 (0 when it is not one).
+- `type Options struct`: Options are the jsontext options this package implements (Go's jsontext.Options). Multiline or a non-empty Indent puts each member and element on its own line; each line starts with IndentPrefix and then Indent once per nesting level.
+- `type Decoder struct`: Decoder reads the tokens and values of a JSON text. Top-level values follow one another without separators, as in Go.
+- `NewDecoder(s str, opts Options) Decoder`: NewDecoder returns a Decoder that reads the JSON text s.
+- `type Encoder struct`: Encoder writes tokens and values as JSON text, formatted with its Options. Each complete top-level value ends with a newline.
+- `NewEncoder(opts Options) Encoder`: NewEncoder returns an Encoder that formats with opts.
+- `(e Encoder) Bytes() str`: Bytes returns the JSON text written so far.
+- `(d mut Decoder) ReadToken() !Token`: ReadToken returns the next token. At the end of the input it returns EOF; inside an open object or array, the end of the input is an unexpected EOF.
+- `(d mut Decoder) ReadValue() !str`: ReadValue returns the raw text of the next whole value, from its first byte to its last (the white space between its tokens is kept), or EOF at the end of the input. Go reads a value in one pass, so a comma before a close is reported at the close.
+- `(e mut Encoder) WriteToken(t Token) !`: WriteToken writes the next token: a name where the innermost object expects one, a value otherwise, and the closing delimiter of the innermost container. A complete top-level value ends with a newline.
+- `(e mut Encoder) WriteValue(v str) !`: WriteValue writes the JSON value v (validated, and formatted with the encoder's options).
+
+## jsonv2
+
+Package jsonv2 is encoding/json/v2's surface over argo and jsontext: Marshal and Unmarshal with options (#931). argo does the typed work (its encoders and decoders are generated per type); jsontext rewrites the encoded text with the options and checks text for the v2 rules argo does not apply (malformed text and duplicate member names are refused). The differences from v2 are in README.md.
+
+- `type Options struct`: Options are the v2 options this package implements: the formatting of Marshal's output (jsontext's options), whether Unmarshal accepts duplicate member names, and whether it refuses members that match no field.
+- `Marshal[T constraints.Any](v T, opts Options) !str`: Marshal returns the JSON encoding of v, formatted with opts. It has no newline at the end, as Go's Marshal has none. Strings are not HTML-escaped unless opts asks for it.
+- `Unmarshal[T constraints.Any](s str, v mut T, opts Options) !`: Unmarshal parses the JSON text s into v, a struct, slice or map. Malformed text and duplicate member names are faults (unless AllowDuplicateNames); a member that matches no field is a fault with RejectUnknownMembers. A fault leaves v unchanged.
+
 ## flume
 
 Package flume reads and writes file descriptors through 64 KiB buffers: lines, whole files and buffered output with one write per flush.
@@ -1781,7 +1825,9 @@ let back = try squash.Gunzip(z, 64mb)
 - `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
 - `const LSB = 1`
 - `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `LzwWidth(data str, order i64, litWidth i64) str`: LzwWidth compresses bytes with the given literal width (2 through 8), as GIF requires.
 - `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `UnlzwWidth(data str, order i64, max i64, litWidth i64) !str`: UnlzwWidth decompresses an LZW stream with the given literal width (2 through 8).
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
@@ -1832,7 +1878,9 @@ let back = try squash.Gunzip(z, 64mb)
 - `const MSB = 0`: The code orders: MSB packs the bits of a code most significant first (GIF), LSB least significant first (TIFF).
 - `const LSB = 1`
 - `Lzw(data str, order i64) str`: Lzw compresses data with LZW, literal width 8, as Go's lzw.Writer does: a clear code starts the stream, the dictionary grows to 4096 codes and then a clear code starts it again, and the stream ends with the end code.
+- `LzwWidth(data str, order i64, litWidth i64) str`: LzwWidth compresses bytes with the given literal width (2 through 8), as GIF requires.
 - `Unlzw(data str, order i64, max i64) !str`: Unlzw decompresses an LZW stream of the given order, failing past max bytes.
+- `UnlzwWidth(data str, order i64, max i64, litWidth i64) !str`: UnlzwWidth decompresses an LZW stream with the given literal width (2 through 8).
 - `Snappy(data str) str`: Snappy compresses data as one Snappy block.
 - `Unsnappy(data str, max i64) !str`: Unsnappy decompresses one Snappy block whose length is at most max.
 - `shape Writer`: Writer is what a streaming compressor writes to: io.Writer's method.
@@ -2195,6 +2243,23 @@ Package nist has the NIST curves P-224, P-256, P-384 and P-521 as Go's crypto/el
 - `FIPS140Enforced() bool`: FIPS140Enforced reports whether FIPS 140-3 rules are enforced (Go's Enforced, the only-mode switch). Tin's verdict is always false.
 - `FIPS140Version() str`: FIPS140Version is the version of a frozen FIPS 140-3 module: "" because Tin has none (Go reports "latest" for its unfrozen module).
 - `FIPS140WithoutEnforcement(f fn())`: FIPS140WithoutEnforcement runs f. Tin never enforces FIPS 140-3 rules, so there is nothing to switch off.
+- `type MLDSAParams struct`: MLDSAParams is one parameter set of FIPS 204 (Table 1): the matrix shape k x l, the secret bound eta, the challenge weight tau, the mask bound gamma1, the rounding gamma2, the hint weight omega, the challenge length ctilde (lambda / 4 bytes), the bits of a z coefficient and of a w1 coefficient.
+- `(p MLDSAParams) String() str`: String is the parameter set's name, such as "ML-DSA-44".
+- `(p MLDSAParams) PublicKeySize() i64`: PublicKeySize is the length of a public key in bytes (32 + 320 k).
+- `(p MLDSAParams) SignatureSize() i64`: SignatureSize is the length of a signature in bytes (ctilde + 32 l zbits + omega + k).
+- `(p MLDSAParams) ExpandedKeySize() i64`: ExpandedKeySize is the length of an expanded private key in bytes (2560, 4032 or 4896).
+- `MLDSAGenerateKey(p MLDSAParams) ([]u8, []u8)`: MLDSAGenerateKey makes a key pair from fresh randomness: the 32-byte seed (the private key) and the public key.
+- `MLDSAPublicKey(p MLDSAParams, seed secret []u8) ![]u8`: MLDSAPublicKey is the public key of the 32-byte seed (FIPS 204's KeyGen_internal, Go's PrivateKey.PublicKey).
+- `MLDSAExpandedKey(p MLDSAParams, seed secret []u8) ![]u8`: MLDSAExpandedKey is the FIPS 204 expanded private key of the 32-byte seed (2560, 4032 or 4896 bytes).
+- `MLDSASign(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8`: MLDSASign signs msg with context ctx under the seed with a fresh nonce, as Go's PrivateKey.Sign does.
+- `MLDSASignDeterministic(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8`: MLDSASignDeterministic signs msg with context ctx under the seed with a zero nonce, as Go's SignDeterministic does.
+- `MLDSASignMu(p MLDSAParams, seed secret []u8, mu []u8) ![]u8`: MLDSASignMu signs the message representative mu (64 bytes) under the seed with a fresh nonce (Go's SignExternalMu).
+- `MLDSASignMuDeterministic(p MLDSAParams, seed secret []u8, mu []u8) ![]u8`: MLDSASignMuDeterministic signs mu under the seed with a zero nonce (Go's SignExternalMuDeterministic).
+- `MLDSASignMuDerand(p MLDSAParams, seed secret []u8, mu []u8, rnd secret []u8) ![]u8`: MLDSASignMuDerand signs mu under the seed with the nonce rnd (32 bytes): for known-answer tests only.
+- `MLDSASignExpandedMuDerand(p MLDSAParams, sk secret []u8, mu []u8, rnd secret []u8) ![]u8`: MLDSASignExpandedMuDerand signs mu under the expanded key sk with the nonce rnd: for known-answer tests only.
+- `MLDSAVerify(p MLDSAParams, pk []u8, msg []u8, sig []u8, ctx []u8) !`: MLDSAVerify checks sig as a signature of msg with context ctx under pk; a signature that does not verify fails.
+- `MLDSADecompose(p MLDSAParams, r i64) (i64, i64)`: MLDSADecompose is Decompose (FIPS 204 Algorithm 36) of r in [0, q) for the set: the high part and the centered low part.
+- `MLDSAVerifyMu(p MLDSAParams, pk []u8, mu []u8, sig []u8) !`: MLDSAVerifyMu checks sig as a signature of the message representative mu under pk (the pre-hashed mode).
 
 ## herald
 

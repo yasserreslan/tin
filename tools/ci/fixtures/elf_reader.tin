@@ -1,0 +1,51 @@
+package main
+
+import "debug/elf"
+import "quarry"
+import "say"
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) != 2 {
+		say.Line("usage: elf_reader FILE")
+		return
+	}
+	let f = elf.Open(args[1]) catch err {
+		say.Line(err)
+		return
+	}
+	say.Line("header {f.Header.Class} {f.Header.Machine} {len(f.Segments)} {len(f.Sections)}")
+	for s in f.Sections {
+		say.Line("section {s.Name}")
+	}
+	let symbols = f.Symbols() catch err {
+		say.Line("symbols-error {err}")
+		return
+	}
+	mut names = make([]str, 0, len(symbols))
+	for s in symbols { names = append(names, s.Name) }
+	for i in 1..len(names) {
+		mut j = i
+		for j > 0 && names[j] < names[j-1] {
+			let prev = names[j-1]
+			names[j-1] = names[j]
+			names[j] = prev
+			j -= 1
+		}
+	}
+	for name in names { say.Line("symbol {name}") }
+	let dynamic = f.Dynamic() catch err {
+		say.Line("dynamic-error {err}")
+		return
+	}
+	for d in dynamic { say.Line("dynamic {d.Tag} {d.Value}") }
+	for i, s in f.Sections {
+		if s.Name == ".shstrtab" {
+			let bytes = f.ReadSection(i) catch err {
+				say.Line("section-data-error {err}")
+				return
+			}
+			say.Line("section-data {s.Name} {len(bytes)}")
+		}
+	}
+}

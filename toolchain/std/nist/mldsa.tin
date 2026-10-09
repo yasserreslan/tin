@@ -1,0 +1,961 @@
+package nist
+
+import "seal"
+
+// ---- crypto/mldsa: ML-DSA signatures (FIPS 204) for ML-DSA-44, ML-DSA-65 and ML-DSA-87 (#917) ----
+// The lattice signature scheme over polynomials of 256 coefficients mod q = 8380417: the matrix A and the
+// vectors live in the number-theoretic transform domain, and SHAKE-128 and SHAKE-256 (seal's one-shot XOFs)
+// make every hash and expansion. Go's crypto/mldsa is the model: the parameter sets it exposes, the 32-byte
+// seed as the private key (the public key and signature sizes are FIPS 204's, 1312/1952/2592 and 2420/3309/
+// 4627 bytes), Sign and SignDeterministic with a context of at most 255 bytes, and the pre-hashed mode that
+// takes the message representative mu (Go's SignExternalMu). Verification of mu is here too, since Go's public
+// API does not expose it. HashML-DSA and the XOF variant are not in Go's package and are not here.
+//
+// Secret values (the seed, s1, s2, t0, the nonce K and the signing mask y) meet only branch-free arithmetic:
+// reductions fold by 2^23 = 8191 (mod q) and select with masks, and Decompose is the reference's shifts (the
+// check compares them with the spec's definition for every value below q). Sampling of the secret vectors and
+// of the masks reads the XOF stream until enough coefficients are accepted, and signing repeats its checks
+// until they pass: the number of attempts and of XOF bytes is observable, as Go's own signing loop accepts
+// (Dilithium section 5.5). The public matrix, the challenge and verification touch public data only.
+//
+// The expanded private key (FIPS 204's skEncode, 2560, 4032 or 4896 bytes) is supported for the signing
+// known-answer tests (MLDSASignExpandedMuDerand) and as MLDSAExpandedKey; Go's package does not expose it.
+
+const mldsaQ = 8380417
+
+// ErrMLDSASeed is the fault for a seed that is not 32 bytes long.
+let ErrMLDSASeed = fault("nist: an ML-DSA seed is 32 bytes")
+
+// ErrMLDSAKey is the fault for a public or expanded key of the wrong size for its parameter set.
+let ErrMLDSAKey = fault("nist: an ML-DSA key has the wrong size")
+
+// ErrMLDSASignature is the fault for a signature of the wrong size for its parameter set.
+let ErrMLDSASignature = fault("nist: an ML-DSA signature has the wrong size")
+
+// ErrMLDSAContext is the fault for a context longer than 255 bytes.
+let ErrMLDSAContext = fault("nist: an ML-DSA context is at most 255 bytes")
+
+// ErrMLDSAMu is the fault for a message representative mu that is not 64 bytes long.
+let ErrMLDSAMu = fault("nist: an ML-DSA mu is 64 bytes")
+
+// ErrMLDSAVerify is the fault for a signature that does not verify.
+let ErrMLDSAVerify = fault("nist: ML-DSA signature does not verify")
+
+// MLDSAParams is one parameter set of FIPS 204 (Table 1): the matrix shape k x l, the secret bound eta,
+// the challenge weight tau, the mask bound gamma1, the rounding gamma2, the hint weight omega, the challenge
+// length ctilde (lambda / 4 bytes), the bits of a z coefficient and of a w1 coefficient.
+type MLDSAParams struct {
+	name str
+	k i64
+	l i64
+	eta i64
+	tau i64
+	gamma1 i64
+	gamma2 i64
+	omega i64
+	ctilde i64
+	zbits i64
+	w1bits i64
+}
+
+// MLDSA44 is ML-DSA-44: a 1312-byte public key and a 2420-byte signature.
+let MLDSA44 = MLDSAParams{name: "ML-DSA-44", k: 4, l: 4, eta: 2, tau: 39, gamma1: 131072, gamma2: 95232, omega: 80, ctilde: 32, zbits: 18, w1bits: 6}
+
+// MLDSA65 is ML-DSA-65: a 1952-byte public key and a 3309-byte signature.
+let MLDSA65 = MLDSAParams{name: "ML-DSA-65", k: 6, l: 5, eta: 4, tau: 49, gamma1: 524288, gamma2: 261888, omega: 55, ctilde: 48, zbits: 20, w1bits: 4}
+
+// MLDSA87 is ML-DSA-87: a 2592-byte public key and a 4627-byte signature.
+let MLDSA87 = MLDSAParams{name: "ML-DSA-87", k: 8, l: 7, eta: 2, tau: 60, gamma1: 524288, gamma2: 261888, omega: 75, ctilde: 64, zbits: 20, w1bits: 4}
+
+// String is the parameter set's name, such as "ML-DSA-44".
+fn (p MLDSAParams) String() str {
+	return p.name
+}
+
+// PublicKeySize is the length of a public key in bytes (32 + 320 k).
+fn (p MLDSAParams) PublicKeySize() i64 {
+	return 32 + 320*p.k
+}
+
+// SignatureSize is the length of a signature in bytes (ctilde + 32 l zbits + omega + k).
+fn (p MLDSAParams) SignatureSize() i64 {
+	return p.ctilde + 32*p.l*p.zbits + p.omega + p.k
+}
+
+// ExpandedKeySize is the length of an expanded private key in bytes (2560, 4032 or 4896).
+fn (p MLDSAParams) ExpandedKeySize() i64 {
+	let eb = mldsa_eta_bits(p.eta)
+	return 128 + 32*eb*(p.l+p.k) + 32*13*p.k
+}
+
+// mldsa_eta_bits is the bits of an eta-coded secret coefficient: bitlen(2 eta).
+fn mldsa_eta_bits(eta i64) i64 {
+	if eta == 2 {
+		return 3
+	}
+	return 4
+}
+
+// mldsaZetas[k] is 1753^BitRev8(k) mod q, the twiddles of the transform (FIPS 204 Algorithm 41).
+let mldsaZetas = mldsa_zetas()
+
+fn mldsa_zetas() []i64 {
+	mut out = make([]i64, 256)
+	for k in 0..256 {
+		mut r = 0
+		for b in 0..8 {
+			r = r | ((k >> b) & 1) << (7 - b)
+		}
+		mut v = 1
+		for e in 0..r {
+			v = v * 1753 % mldsaQ
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// mldsa_csub maps [0, 2q) to [0, q) with a mask, not a branch.
+fn mldsa_csub(x i64) i64 {
+	let r = x - mldsaQ
+	return r + (mldsaQ & (r >> 63))
+}
+
+// mldsa_red is x mod q for 0 <= x < 2^50, without a branch: 2^23 = 8191 (mod q) folds the bits above 23
+// down three times (the value stays below 2^40, then 2^31, then 2q), and one mask finishes it.
+fn mldsa_red(x i64) i64 {
+	let a = (x & 8388607) + 8191*(x >> 23)
+	let b = (a & 8388607) + 8191*(a >> 23)
+	let c = (b & 8388607) + 8191*(b >> 23)
+	return mldsa_csub(c)
+}
+
+// mldsa_canon is the representative in [0, q) of x in (-q, q), without a branch.
+fn mldsa_canon(x i64) i64 {
+	return x + (mldsaQ & (x >> 63))
+}
+
+// mldsa_center is the representative of a canonical x in (-q/2, q/2], without a branch.
+fn mldsa_center(x i64) i64 {
+	return x - (mldsaQ & (((mldsaQ-1)/2 - x) >> 63))
+}
+
+// mldsa_abs_at_least is 1 when |x| >= bound for a centered x, and 0 when not, without a branch.
+fn mldsa_abs_at_least(x i64, bound i64) i64 {
+	let s = x >> 63
+	let a = (x ^ s) - s
+	return 1 + ((a - bound) >> 63)
+}
+
+// mldsa_neq is 1 when a != b for values in [0, 2^62), and 0 when they are equal, without a branch.
+fn mldsa_neq(a i64, b i64) i64 {
+	let d = a ^ b
+	return ((d | -d) >> 63) & 1
+}
+
+// mldsa_ntt transforms f in place to the NTT domain (FIPS 204 Algorithm 41); coefficients stay in [0, q).
+fn mldsa_ntt(f mut []i64) {
+	mut k = 0
+	mut n = 128
+	for n >= 1 {
+		for start in (0..256).step(2*n) {
+			k += 1
+			let zeta = mldsaZetas[k]
+			for j in start..start+n {
+				let t = mldsa_red(zeta * f[j+n])
+				let a = f[j]
+				f[j+n] = mldsa_csub(a - t + mldsaQ)
+				f[j] = mldsa_csub(a + t)
+			}
+		}
+		n = n / 2
+	}
+}
+
+// mldsa_intt is the inverse transform (FIPS 204 Algorithm 42), including the factor 256^-1 = 8347681.
+fn mldsa_intt(f mut []i64) {
+	mut k = 256
+	mut n = 1
+	for n < 256 {
+		for start in (0..256).step(2*n) {
+			k -= 1
+			let zeta = mldsaQ - mldsaZetas[k]
+			for j in start..start+n {
+				let t = f[j]
+				let u = f[j+n]
+				f[j] = mldsa_csub(t + u)
+				f[j+n] = mldsa_red(zeta * (t - u + mldsaQ))
+			}
+		}
+		n = n * 2
+	}
+	for j in 0..256 {
+		f[j] = mldsa_red(f[j] * 8347681)
+	}
+}
+
+// mldsa_pmul is the NTT-domain product f ∘ g, reduced to [0, q).
+fn mldsa_pmul(f []i64, g []i64) []i64 {
+	mut out = make([]i64, 256)
+	for c in 0..256 {
+		out[c] = mldsa_red(f[c] * g[c])
+	}
+	return out
+}
+
+// mldsa_dot is the NTT-domain sum of row[j] ∘ v[j] over j, reduced to [0, q): at most seven products (each
+// below q^2 < 2^46) are added before the reduction, which takes inputs below 2^50.
+fn mldsa_dot(row [][]i64, v [][]i64) []i64 {
+	mut acc = make([]i64, 256)
+	for c in 0..256 {
+		mut s = 0
+		for j in 0..len(row) {
+			s = s + row[j][c] * v[j][c]
+		}
+		acc[c] = mldsa_red(s)
+	}
+	return acc
+}
+
+// mldsa_scale is the polynomial sum c s of the challenge c (in the NTT domain) with each vhat[i], back in the
+// coefficient domain: the products c s1, c s2 and c t0 of signing.
+fn mldsa_scale(chat []i64, vhat [][]i64) [][]i64 {
+	mut out = make([][]i64, 0, len(vhat))
+	for i in 0..len(vhat) {
+		mut f = mldsa_pmul(chat, vhat[i])
+		mldsa_intt(mut f)
+		out = append(out, f)
+	}
+	return out
+}
+
+// mldsa_shake128 is the first n bytes of SHAKE-128 of in.
+fn mldsa_shake128(in []u8, n i64) []u8 {
+	return seal.Shake128(str(in), n)
+}
+
+// mldsa_shake256 is the first n bytes of SHAKE-256 of in.
+fn mldsa_shake256(in []u8, n i64) []u8 {
+	return seal.Shake256(str(in), n)
+}
+
+// mldsa_nonce is seed || the 2-byte little-endian counter (IntegerToBytes(counter, 2)).
+fn mldsa_nonce(seed []u8, counter i64) []u8 {
+	mut in = make([]u8, 0, len(seed)+2)
+	in = append(in, seed...)
+	in = append(in, u8(counter), u8(counter>>8))
+	return in
+}
+
+// mldsa_rej_ntt is RejNTTPoly (FIPS 204 Algorithm 30): the NTT-domain polynomial of entry (row, col) of A, read
+// from SHAKE-128 of rho || col || row, three bytes per candidate, 23 bits, accepted below q.
+fn mldsa_rej_ntt(rho []u8, col i64, row i64) []i64 {
+	mut in = make([]u8, 0, len(rho)+2)
+	in = append(in, rho...)
+	in = append(in, u8(col), u8(row))
+	mut budget = 840
+	for {
+		let buf = mldsa_shake128(in, budget)
+		mut a = make([]i64, 256)
+		mut n = 0
+		mut p = 0
+		for p+2 < len(buf) && n < 256 {
+			let t = (i64(buf[p]) | i64(buf[p+1])<<8 | i64(buf[p+2])<<16) & 8388607
+			if t < mldsaQ {
+				a[n] = t
+				n += 1
+			}
+			p += 3
+		}
+		if n == 256 {
+			return a
+		}
+		budget = budget * 2
+	}
+	return make([]i64, 256)
+}
+
+// mldsa_eta_coef is the coefficient of a nibble z for eta, and whether z is accepted (FIPS 204 Algorithm 31).
+fn mldsa_eta_coef(z i64, eta i64) (i64, bool) {
+	if eta == 2 {
+		let q5 = (z * 13) >> 6
+		return 2 - (z - 5*q5), z < 15
+	}
+	return 4 - z, z < 9
+}
+
+// mldsa_rej_bounded is RejBoundedPoly (FIPS 204 Algorithm 31): the polynomial of seed with coefficients in
+// [-eta, eta] (canonical), from SHAKE-256 with the low nibble of each byte first.
+fn mldsa_rej_bounded(seed []u8, eta i64) []i64 {
+	mut budget = 272
+	if eta == 4 {
+		budget = 544
+	}
+	for {
+		let buf = mldsa_shake256(seed, budget)
+		mut a = make([]i64, 256)
+		mut n = 0
+		for p in 0..len(buf) {
+			let b = i64(buf[p])
+			for h in 0..2 {
+				let (c, ok) = mldsa_eta_coef((b >> (4*h)) & 15, eta)
+				if ok && n < 256 {
+					a[n] = mldsa_canon(c)
+					n += 1
+				}
+			}
+		}
+		if n == 256 {
+			return a
+		}
+		budget = budget * 2
+	}
+	return make([]i64, 256)
+}
+
+// mldsa_sample_in_ball is SampleInBall (FIPS 204 Algorithm 29): the challenge with tau coefficients +-1 from
+// SHAKE-256 of ctilde (the first 8 bytes are the signs, then one byte per position until it is at most i).
+fn mldsa_sample_in_ball(ctilde []u8, tau i64) []i64 {
+	mut budget = 272
+	for {
+		let buf = mldsa_shake256(ctilde, budget)
+		mut signs = u64(0)
+		for b in 0..8 {
+			signs = signs | u64(buf[b]) << u64(8*b)
+		}
+		mut c = make([]i64, 256)
+		mut p = 8
+		mut ok = true
+		for i in 256-tau..256 {
+			mut j = 0
+			for {
+				if p >= len(buf) {
+					ok = false
+					break
+				}
+				j = i64(buf[p])
+				p += 1
+				if j <= i {
+					break
+				}
+			}
+			if !ok {
+				break
+			}
+			let sign = (signs >> u64(i-(256-tau))) & 1
+			c[i] = c[j]
+			if sign == 1 {
+				c[j] = mldsaQ - 1
+			} else {
+				c[j] = 1
+			}
+		}
+		if ok {
+			return c
+		}
+		budget = budget * 2
+	}
+	return make([]i64, 256)
+}
+
+// mldsa_pack appends the bits-bit values of f (each below 2^bits), least significant bit first.
+fn mldsa_pack(out mut []u8, f []i64, bits i64) {
+	mut acc = u64(0)
+	mut n = 0
+	for v in f {
+		acc = acc | u64(v)<<u64(n)
+		n += bits
+		for n >= 8 {
+			out = append(out, u8(acc&255))
+			acc = acc >> 8
+			n -= 8
+		}
+	}
+}
+
+// mldsa_unpack reads count values of bits bits each from b at at, least significant bit first.
+fn mldsa_unpack(b []u8, at i64, count i64, bits i64) []i64 {
+	mut f = make([]i64, count)
+	mut acc = u64(0)
+	mut n = 0
+	mut p = at
+	let mask = u64((1 << bits) - 1)
+	for i in 0..count {
+		for n < bits {
+			acc = acc | u64(b[p])<<u64(n)
+			p += 1
+			n += 8
+		}
+		f[i] = i64(acc & mask)
+		acc = acc >> u64(bits)
+		n -= bits
+	}
+	return f
+}
+
+// mldsa_unpack_polys reads n polynomials of bits-bit values from b at at (32 bits bytes each).
+fn mldsa_unpack_polys(b []u8, at i64, n i64, bits i64) [][]i64 {
+	mut out = make([][]i64, 0, n)
+	for i in 0..n {
+		out = append(out, mldsa_unpack(b, at+32*bits*i, 256, bits))
+	}
+	return out
+}
+
+// mldsa_flatten lists the coefficients of polys in order.
+fn mldsa_flatten(polys [][]i64) []i64 {
+	mut out = make([]i64, 0, 256*len(polys))
+	for p in polys {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// mldsa_mask is the mask y of nonce kappa (FIPS 204 Algorithm 34, ExpandMask) from rho'' = SHAKE-256(K || rnd || mu).
+fn mldsa_mask(rhopp []u8, kappa i64, p MLDSAParams) []i64 {
+	let v = mldsa_shake256(mldsa_nonce(rhopp, kappa), 32*p.zbits)
+	mut y = mldsa_unpack(v, 0, 256, p.zbits)
+	for c in 0..256 {
+		y[c] = mldsa_canon(p.gamma1 - y[c])
+	}
+	return y
+}
+
+// mldsa_power2round is Power2Round (FIPS 204 Algorithm 35) of t in [0, q): t1 and t0 in (-2^12, 2^12].
+fn mldsa_power2round(t i64) (i64, i64) {
+	let t1 = (t + 4095) >> 13
+	return t1, t - (t1 << 13)
+}
+
+// mldsa_decompose is Decompose (FIPS 204 Algorithm 36) of r in [0, q): r1 is the high part and r0 the centered
+// low part. The shifts are the reference's; the decompose lines of the check compare them with the definition.
+fn mldsa_decompose(r i64, gamma2 i64) (i64, i64) {
+	mut r1 = (r + 127) >> 7
+	if gamma2 == 95232 {
+		r1 = (r1*11275 + (1 << 23)) >> 24
+		r1 = r1 ^ (((43 - r1) >> 63) & r1)
+	} else {
+		r1 = (r1*1025 + (1 << 21)) >> 22
+		r1 = r1 & 15
+	}
+	let r0 = r - r1*2*gamma2
+	return r1, r0 - (mldsaQ & (((mldsaQ-1)/2 - r0) >> 63))
+}
+
+// mldsa_high is HighBits (FIPS 204 Algorithm 37) of r in [0, q).
+fn mldsa_high(r i64, gamma2 i64) i64 {
+	let (r1, _) = mldsa_decompose(r, gamma2)
+	return r1
+}
+
+// mldsa_use_hint is UseHint (FIPS 204 Algorithm 40) of r in [0, q) with hint h, for m = (q-1)/(2 gamma2).
+fn mldsa_use_hint(h i64, r i64, gamma2 i64) i64 {
+	let m = (mldsaQ - 1) / (2*gamma2)
+	let (r1, r0) = mldsa_decompose(r, gamma2)
+	if h == 0 {
+		return r1
+	}
+	if r0 > 0 {
+		return (r1 + 1) % m
+	}
+	return (r1 - 1 + m) % m
+}
+
+// mldsa_w1_input is mu || w1Encode(w1): the input of the challenge hash (FIPS 204 Algorithm 7, step 12).
+fn mldsa_w1_input(mu []u8, w1 [][]i64, bits i64) []u8 {
+	mut in = make([]u8, 0, len(mu)+32*bits*len(w1))
+	in = append(in, mu...)
+	mldsa_pack(mut in, mldsa_flatten(w1), bits)
+	return in
+}
+
+// mldsa_matrix is A from rho in the NTT domain: row i and column j at i*l + j (FIPS 204 Algorithm 32).
+fn mldsa_matrix(p MLDSAParams, rho []u8) [][]i64 {
+	mut a = make([][]i64, 0, p.k*p.l)
+	for i in 0..p.k {
+		for j in 0..p.l {
+			a = append(a, mldsa_rej_ntt(rho, j, i))
+		}
+	}
+	return a
+}
+
+// mldsaKey is an expanded key: rho, K and tr, the matrix A in the NTT domain, and s1, s2 and t0 in the
+// coefficient domain with their NTT forms (s1h, s2h, t0h).
+type mldsaKey struct {
+	rho []u8
+	kk []u8
+	tr []u8
+	a [][]i64
+	s1 [][]i64
+	s2 [][]i64
+	t0 [][]i64
+	s1h [][]i64
+	s2h [][]i64
+	t0h [][]i64
+}
+
+// mldsa_nttall is the NTT of each polynomial of polys, in a new list.
+fn mldsa_nttall(polys [][]i64) [][]i64 {
+	mut out = make([][]i64, 0, len(polys))
+	for f in polys {
+		mut g = make([]i64, 256)
+		for c in 0..256 {
+			g[c] = f[c]
+		}
+		mldsa_ntt(mut g)
+		out = append(out, g)
+	}
+	return out
+}
+
+// mldsa_expand is the expanded key of the public key's parts (rho, K, s1, s2, t0) of a key pair.
+fn mldsa_expand(p MLDSAParams, rho []u8, kk []u8, tr []u8, s1 [][]i64, s2 [][]i64, t0 [][]i64) mldsaKey {
+	let a = mldsa_matrix(p, rho)
+	return mldsaKey{rho: rho, kk: kk, tr: tr, a: a, s1: s1, s2: s2, t0: t0, s1h: mldsa_nttall(s1), s2h: mldsa_nttall(s2), t0h: mldsa_nttall(t0)}
+}
+
+// mldsa_keygen is ML-DSA.KeyGen_internal (FIPS 204 Algorithm 6) on the seed xi: the public key and the expanded key.
+fn mldsa_keygen(p MLDSAParams, xi []u8) ([]u8, mldsaKey) {
+	mut hin = make([]u8, 0, 34)
+	hin = append(hin, xi...)
+	hin = append(hin, u8(p.k), u8(p.l))
+	let g = mldsa_shake256(hin, 128)
+	let rho = g[0:32]
+	let rhop = g[32:96]
+	let kk = g[96:128]
+	let a = mldsa_matrix(p, rho)
+	mut s1 = make([][]i64, 0, p.l)
+	for r in 0..p.l {
+		s1 = append(s1, mldsa_rej_bounded(mldsa_nonce(rhop, r), p.eta))
+	}
+	mut s2 = make([][]i64, 0, p.k)
+	for r in 0..p.k {
+		s2 = append(s2, mldsa_rej_bounded(mldsa_nonce(rhop, p.l+r), p.eta))
+	}
+	let s1h = mldsa_nttall(s1)
+	mut t1 = make([][]i64, 0, p.k)
+	mut t0 = make([][]i64, 0, p.k)
+	for i in 0..p.k {
+		mut t = mldsa_dot(a[i*p.l:(i+1)*p.l], s1h)
+		mldsa_intt(mut t)
+		mut hi = make([]i64, 256)
+		mut lo = make([]i64, 256)
+		for c in 0..256 {
+			let (h1, l0) = mldsa_power2round(mldsa_red(t[c] + s2[i][c]))
+			hi[c] = h1
+			lo[c] = mldsa_canon(l0)
+		}
+		t1 = append(t1, hi)
+		t0 = append(t0, lo)
+	}
+	mut pk = make([]u8, 0, p.PublicKeySize())
+	pk = append(pk, rho...)
+	mldsa_pack(mut pk, mldsa_flatten(t1), 10)
+	let tr = mldsa_shake256(pk, 64)
+	let key = mldsa_expand(p, rho, kk, tr, s1, s2, t0)
+	return pk, key
+}
+
+// mldsa_key_encode is the expanded key encoding of key (FIPS 204 Algorithm 24, skEncode).
+fn mldsa_key_encode(p MLDSAParams, key mldsaKey) []u8 {
+	let eb = mldsa_eta_bits(p.eta)
+	mut sk = make([]u8, 0, p.ExpandedKeySize())
+	sk = append(sk, key.rho...)
+	sk = append(sk, key.kk...)
+	sk = append(sk, key.tr...)
+	for f in key.s1 {
+		mut v = make([]i64, 256)
+		for c in 0..256 {
+			v[c] = p.eta - mldsa_center(f[c])
+		}
+		mldsa_pack(mut sk, v, eb)
+	}
+	for f in key.s2 {
+		mut v = make([]i64, 256)
+		for c in 0..256 {
+			v[c] = p.eta - mldsa_center(f[c])
+		}
+		mldsa_pack(mut sk, v, eb)
+	}
+	for f in key.t0 {
+		mut v = make([]i64, 256)
+		for c in 0..256 {
+			v[c] = 4096 - mldsa_center(f[c])
+		}
+		mldsa_pack(mut sk, v, 13)
+	}
+	return sk
+}
+
+// mldsa_key_decode is the expanded key of sk (FIPS 204 Algorithm 25, skDecode), with the same fields as keygen's.
+fn mldsa_key_decode(p MLDSAParams, sk []u8) mldsaKey {
+	let eb = mldsa_eta_bits(p.eta)
+	let rho = sk[0:32]
+	let kk = sk[32:64]
+	let tr = sk[64:128]
+	let s1raw = mldsa_unpack_polys(sk, 128, p.l, eb)
+	let s2raw = mldsa_unpack_polys(sk, 128+32*eb*p.l, p.k, eb)
+	let t0raw = mldsa_unpack_polys(sk, 128+32*eb*(p.l+p.k), p.k, 13)
+	mut s1 = make([][]i64, 0, p.l)
+	for f in s1raw {
+		mut g = make([]i64, 256)
+		for c in 0..256 {
+			g[c] = mldsa_canon(p.eta - f[c])
+		}
+		s1 = append(s1, g)
+	}
+	mut s2 = make([][]i64, 0, p.k)
+	for f in s2raw {
+		mut g = make([]i64, 256)
+		for c in 0..256 {
+			g[c] = mldsa_canon(p.eta - f[c])
+		}
+		s2 = append(s2, g)
+	}
+	mut t0 = make([][]i64, 0, p.k)
+	for f in t0raw {
+		mut g = make([]i64, 256)
+		for c in 0..256 {
+			g[c] = mldsa_canon(4096 - f[c])
+		}
+		t0 = append(t0, g)
+	}
+	return mldsa_expand(p, rho, kk, tr, s1, s2, t0)
+}
+
+// mldsa_mu is the message representative mu = SHAKE-256(tr || 0 || |ctx| || ctx || msg, 64) (FIPS 204 Algorithm 2).
+fn mldsa_mu(tr []u8, ctx []u8, msg []u8) []u8 {
+	mut in = make([]u8, 0, 66+len(ctx)+len(msg))
+	in = append(in, tr...)
+	in = append(in, 0, u8(len(ctx)))
+	in = append(in, ctx...)
+	in = append(in, msg...)
+	return mldsa_shake256(in, 64)
+}
+
+// mldsa_sign_mu is ML-DSA.Sign_internal (FIPS 204 Algorithm 7) on the representative mu, with the nonce rnd:
+// the signature under key. Its checks repeat with a fresh mask until they pass; the loop's count is observable.
+fn mldsa_sign_mu(p MLDSAParams, key mldsaKey, mu []u8, rnd []u8) ![]u8 {
+	mut rin = make([]u8, 0, 128)
+	rin = append(rin, key.kk...)
+	rin = append(rin, rnd...)
+	rin = append(rin, mu...)
+	let rhopp = mldsa_shake256(rin, 64)
+	let beta = p.tau * p.eta
+	mut kappa = 0
+	for {
+		if kappa > 65535-p.l {
+			fail "nist: ML-DSA signing did not converge"
+		}
+		mut y = make([][]i64, 0, p.l)
+		for r in 0..p.l {
+			y = append(y, mldsa_mask(rhopp, kappa+r, p))
+		}
+		kappa += p.l
+		let yh = mldsa_nttall(y)
+		mut w = make([][]i64, 0, p.k)
+		mut w1 = make([][]i64, 0, p.k)
+		for i in 0..p.k {
+			mut wi = mldsa_dot(key.a[i*p.l:(i+1)*p.l], yh)
+			mldsa_intt(mut wi)
+			mut hi = make([]i64, 256)
+			for c in 0..256 {
+				hi[c] = mldsa_high(wi[c], p.gamma2)
+			}
+			w = append(w, wi)
+			w1 = append(w1, hi)
+		}
+		let ctilde = mldsa_shake256(mldsa_w1_input(mu, w1, p.w1bits), p.ctilde)
+		let c = mldsa_sample_in_ball(ctilde, p.tau)
+		mut chat = make([]i64, 256)
+		for i in 0..256 {
+			chat[i] = c[i]
+		}
+		mldsa_ntt(mut chat)
+		let cs1 = mldsa_scale(chat, key.s1h)
+		let cs2 = mldsa_scale(chat, key.s2h)
+		let ct0 = mldsa_scale(chat, key.t0h)
+		mut z = make([][]i64, 0, p.l)
+		mut bad = 0
+		for j in 0..p.l {
+			mut zj = make([]i64, 256)
+			for c2 in 0..256 {
+				zj[c2] = mldsa_red(y[j][c2] + cs1[j][c2])
+				bad = bad | mldsa_abs_at_least(mldsa_center(zj[c2]), p.gamma1-beta)
+			}
+			z = append(z, zj)
+		}
+		mut r = make([][]i64, 0, p.k)
+		for i in 0..p.k {
+			mut ri = make([]i64, 256)
+			for c2 in 0..256 {
+				ri[c2] = mldsa_csub(w[i][c2] - cs2[i][c2] + mldsaQ)
+				let (_, r0) = mldsa_decompose(ri[c2], p.gamma2)
+				bad = bad | mldsa_abs_at_least(r0, p.gamma2-beta)
+			}
+			r = append(r, ri)
+		}
+		mut h = make([][]i64, 0, p.k)
+		mut ones = 0
+		for i in 0..p.k {
+			mut hi = make([]i64, 256)
+			for c2 in 0..256 {
+				let rp = mldsa_csub(r[i][c2] + ct0[i][c2])
+				hi[c2] = mldsa_neq(mldsa_high(rp, p.gamma2), mldsa_high(r[i][c2], p.gamma2))
+				ones += hi[c2]
+				bad = bad | mldsa_abs_at_least(mldsa_center(ct0[i][c2]), p.gamma2)
+			}
+			h = append(h, hi)
+		}
+		if bad != 0 || ones > p.omega {
+			continue
+		}
+		mut sig = make([]u8, 0, p.SignatureSize())
+		sig = append(sig, ctilde...)
+		for j in 0..p.l {
+			mut v = make([]i64, 256)
+			for c2 in 0..256 {
+				v[c2] = p.gamma1 - mldsa_center(z[j][c2])
+			}
+			mldsa_pack(mut sig, v, p.zbits)
+		}
+		sig = append(sig, mldsa_hint_pack(h, p)...)
+		return sig
+	}
+	fail "nist: ML-DSA signing did not converge"
+}
+
+// mldsa_hint_pack is HintBitPack (FIPS 204 Algorithm 20): omega + k bytes of hint positions and counts.
+fn mldsa_hint_pack(h [][]i64, p MLDSAParams) []u8 {
+	mut y = make([]u8, p.omega+p.k)
+	mut idx = 0
+	for i in 0..p.k {
+		for j in 0..256 {
+			if h[i][j] != 0 {
+				y[idx] = u8(j)
+				idx += 1
+			}
+		}
+		y[p.omega+i] = u8(idx)
+	}
+	return y
+}
+
+// mldsa_hint_unpack is HintBitUnpack (FIPS 204 Algorithm 21) of the bytes at at; ok is false for a malformed encoding.
+fn mldsa_hint_unpack(y []u8, at i64, p MLDSAParams) ([][]i64, bool) {
+	mut h = make([][]i64, 0, p.k)
+	for i in 0..p.k {
+		h = append(h, make([]i64, 256))
+	}
+	let base = at
+	mut idx = 0
+	for i in 0..p.k {
+		let lim = i64(y[base+p.omega+i])
+		if lim < idx || lim > p.omega {
+			return h, false
+		}
+		let first = idx
+		for idx < lim {
+			let pos = i64(y[base+idx])
+			if idx > first && y[base+idx-1] >= y[base+idx] {
+				return h, false
+			}
+			h[i][pos] = 1
+			idx += 1
+		}
+	}
+	for j in idx..p.omega {
+		if y[base+j] != 0 {
+			return h, false
+		}
+	}
+	return h, true
+}
+
+// mldsa_verify_mu is ML-DSA.Verify_internal (FIPS 204 Algorithm 8) on the representative mu: whether sig is a
+// signature of mu under pk. Every input is public, so this is not constant time.
+fn mldsa_verify_mu(p MLDSAParams, pk []u8, mu []u8, sig []u8) bool {
+	let rho = pk[0:32]
+	let t1 = mldsa_unpack_polys(pk, 32, p.k, 10)
+	let ctilde = sig[0:p.ctilde]
+	let zraw = mldsa_unpack_polys(sig, p.ctilde, p.l, p.zbits)
+	let (h, hok) = mldsa_hint_unpack(sig, p.ctilde+32*p.l*p.zbits, p)
+	if !hok {
+		return false
+	}
+	let beta = p.tau * p.eta
+	mut z = make([][]i64, 0, p.l)
+	for f in zraw {
+		mut g = make([]i64, 256)
+		for c in 0..256 {
+			let v = p.gamma1 - f[c]
+			if v >= p.gamma1-beta || -v >= p.gamma1-beta {
+				return false
+			}
+			g[c] = mldsa_canon(v)
+		}
+		z = append(z, g)
+	}
+	let a = mldsa_matrix(p, rho)
+	let zh = mldsa_nttall(z)
+	mut ch = mldsa_sample_in_ball(ctilde, p.tau)
+	mldsa_ntt(mut ch)
+	mut t1h = make([][]i64, 0, p.k)
+	for f in t1 {
+		mut g = make([]i64, 256)
+		for x in 0..256 {
+			g[x] = f[x] << 13
+		}
+		mldsa_ntt(mut g)
+		t1h = append(t1h, g)
+	}
+	mut w1 = make([][]i64, 0, p.k)
+	for i in 0..p.k {
+		let az = mldsa_dot(a[i*p.l:(i+1)*p.l], zh)
+		let ct = mldsa_pmul(ch, t1h[i])
+		mut wi = make([]i64, 256)
+		for x in 0..256 {
+			wi[x] = mldsa_csub(az[x] - ct[x] + mldsaQ)
+		}
+		mldsa_intt(mut wi)
+		mut hi = make([]i64, 256)
+		for x in 0..256 {
+			hi[x] = mldsa_use_hint(h[i][x], wi[x], p.gamma2)
+		}
+		w1 = append(w1, hi)
+	}
+	let c2 = mldsa_shake256(mldsa_w1_input(mu, w1, p.w1bits), p.ctilde)
+	mut same = 0
+	for x in 0..p.ctilde {
+		same = same | i64(ctilde[x]^c2[x])
+	}
+	return same == 0
+}
+
+// MLDSAGenerateKey makes a key pair from fresh randomness: the 32-byte seed (the private key) and the public key.
+fn MLDSAGenerateKey(p MLDSAParams) ([]u8, []u8) {
+	let seed = seal.RandomBytes(32)
+	let (pk, _) = mldsa_keygen(p, seed)
+	return seed, pk
+}
+
+// MLDSAPublicKey is the public key of the 32-byte seed (FIPS 204's KeyGen_internal, Go's PrivateKey.PublicKey).
+fn MLDSAPublicKey(p MLDSAParams, seed secret []u8) ![]u8 {
+	if len(seed) != 32 {
+		fail ErrMLDSASeed
+	}
+	let (pk, _) = mldsa_keygen(p, seed)
+	return pk
+}
+
+// MLDSAExpandedKey is the FIPS 204 expanded private key of the 32-byte seed (2560, 4032 or 4896 bytes).
+fn MLDSAExpandedKey(p MLDSAParams, seed secret []u8) ![]u8 {
+	if len(seed) != 32 {
+		fail ErrMLDSASeed
+	}
+	let (_, key) = mldsa_keygen(p, seed)
+	return mldsa_key_encode(p, key)
+}
+
+// mldsa_sign_seed signs msg with context ctx under the seed, with the nonce rnd (the pure mode of FIPS 204 Algorithm 2).
+fn mldsa_sign_seed(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8, rnd []u8) ![]u8 {
+	if len(seed) != 32 {
+		fail ErrMLDSASeed
+	}
+	if len(ctx) > 255 {
+		fail ErrMLDSAContext
+	}
+	let (_, key) = mldsa_keygen(p, seed)
+	let mu = mldsa_mu(key.tr, ctx, msg)
+	let sig = try mldsa_sign_mu(p, key, mu, rnd)
+	return sig
+}
+
+// MLDSASign signs msg with context ctx under the seed with a fresh nonce, as Go's PrivateKey.Sign does.
+fn MLDSASign(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8 {
+	let sig = try mldsa_sign_seed(p, seed, msg, ctx, seal.RandomBytes(32))
+	return sig
+}
+
+// MLDSASignDeterministic signs msg with context ctx under the seed with a zero nonce, as Go's SignDeterministic does.
+fn MLDSASignDeterministic(p MLDSAParams, seed secret []u8, msg []u8, ctx []u8) ![]u8 {
+	let sig = try mldsa_sign_seed(p, seed, msg, ctx, make([]u8, 32))
+	return sig
+}
+
+// MLDSASignMu signs the message representative mu (64 bytes) under the seed with a fresh nonce (Go's SignExternalMu).
+fn MLDSASignMu(p MLDSAParams, seed secret []u8, mu []u8) ![]u8 {
+	let sig = try MLDSASignMuDerand(p, seed, mu, seal.RandomBytes(32))
+	return sig
+}
+
+// MLDSASignMuDeterministic signs mu under the seed with a zero nonce (Go's SignExternalMuDeterministic).
+fn MLDSASignMuDeterministic(p MLDSAParams, seed secret []u8, mu []u8) ![]u8 {
+	let sig = try MLDSASignMuDerand(p, seed, mu, make([]u8, 32))
+	return sig
+}
+
+// MLDSASignMuDerand signs mu under the seed with the nonce rnd (32 bytes): for known-answer tests only.
+fn MLDSASignMuDerand(p MLDSAParams, seed secret []u8, mu []u8, rnd secret []u8) ![]u8 {
+	if len(seed) != 32 {
+		fail ErrMLDSASeed
+	}
+	if len(mu) != 64 {
+		fail ErrMLDSAMu
+	}
+	let (_, key) = mldsa_keygen(p, seed)
+	let sig = try mldsa_sign_mu(p, key, mu, rnd)
+	return sig
+}
+
+// MLDSASignExpandedMuDerand signs mu under the expanded key sk with the nonce rnd: for known-answer tests only.
+fn MLDSASignExpandedMuDerand(p MLDSAParams, sk secret []u8, mu []u8, rnd secret []u8) ![]u8 {
+	if len(sk) != p.ExpandedKeySize() {
+		fail ErrMLDSAKey
+	}
+	if len(mu) != 64 {
+		fail ErrMLDSAMu
+	}
+	let key = mldsa_key_decode(p, sk)
+	let sig = try mldsa_sign_mu(p, key, mu, rnd)
+	return sig
+}
+
+// MLDSAVerify checks sig as a signature of msg with context ctx under pk; a signature that does not verify fails.
+fn MLDSAVerify(p MLDSAParams, pk []u8, msg []u8, sig []u8, ctx []u8) ! {
+	if len(ctx) > 255 {
+		fail ErrMLDSAContext
+	}
+	if len(pk) != p.PublicKeySize() {
+		fail ErrMLDSAKey
+	}
+	if len(sig) != p.SignatureSize() {
+		fail ErrMLDSASignature
+	}
+	let mu = mldsa_mu(mldsa_shake256(pk, 64), ctx, msg)
+	if !mldsa_verify_mu(p, pk, mu, sig) {
+		fail ErrMLDSAVerify
+	}
+}
+
+// MLDSADecompose is Decompose (FIPS 204 Algorithm 36) of r in [0, q) for the set: the high part and the centered low part.
+fn MLDSADecompose(p MLDSAParams, r i64) (i64, i64) {
+	return mldsa_decompose(r, p.gamma2)
+}
+
+// MLDSAVerifyMu checks sig as a signature of the message representative mu under pk (the pre-hashed mode).
+fn MLDSAVerifyMu(p MLDSAParams, pk []u8, mu []u8, sig []u8) ! {
+	if len(pk) != p.PublicKeySize() {
+		fail ErrMLDSAKey
+	}
+	if len(mu) != 64 {
+		fail ErrMLDSAMu
+	}
+	if len(sig) != p.SignatureSize() {
+		fail ErrMLDSASignature
+	}
+	if !mldsa_verify_mu(p, pk, mu, sig) {
+		fail ErrMLDSAVerify
+	}
+}

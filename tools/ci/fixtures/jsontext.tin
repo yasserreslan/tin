@@ -1,0 +1,150 @@
+package main
+
+// The jsontext twin, Tin side: read the cases of bench/ref/jsontext (one per line, see that file's header) on stdin and print the line
+// each one gets from toolchain/std/jsontext, so tools/ci/jsontext_check.tin can compare them (#931).
+
+import "fault"
+import "jsontext"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+// tokenLine is the tokens of raw, then the end: EOF, or the decoder's error.
+fn tokenLine(raw str) str {
+	mut d = jsontext.NewDecoder(raw, jsontext.Options{})
+	mut items = []str{}
+	for {
+		let t = d.ReadToken() catch err {
+			items = append(items, end(err))
+			break
+		}
+		items = append(items, str(t.Kind()) + ":" + seal.Hex([]u8(t.String())))
+	}
+	return twine.Join(items, "|")
+}
+
+// valueLine is the raw text of each value of raw, then the end.
+fn valueLine(raw str) str {
+	mut d = jsontext.NewDecoder(raw, jsontext.Options{})
+	mut items = []str{}
+	for {
+		let v = d.ReadValue() catch err {
+			items = append(items, end(err))
+			break
+		}
+		items = append(items, seal.Hex([]u8(v)))
+	}
+	return twine.Join(items, "|")
+}
+
+// end is how a case's last item reads: EOF, or E: and the hex of the message.
+fn end(err fault) str {
+	if fault.Is(err, jsontext.EOF) {
+		return "EOF"
+	}
+	return "E:" + seal.Hex([]u8(say.Str(err)))
+}
+
+// options is the encoder options of case n (see bench/ref/jsontext).
+fn options(n i64) jsontext.Options {
+	if n == 1 {
+		return jsontext.Options{Indent: "  "}
+	}
+	if n == 2 {
+		return jsontext.Options{Multiline: true}
+	}
+	if n == 3 {
+		return jsontext.Options{SpaceAfterColon: true, SpaceAfterComma: true}
+	}
+	if n == 4 {
+		return jsontext.Options{EscapeForHTML: true, EscapeForJS: true}
+	}
+	if n == 5 {
+		return jsontext.Options{Indent: "\t", IndentPrefix: "  "}
+	}
+	return jsontext.Options{}
+}
+
+// writeLine writes the tokens of raw with the encoder options of case n, or gives the decoder's or encoder's error.
+fn writeLine(raw str, n i64) str {
+	mut d = jsontext.NewDecoder(raw, jsontext.Options{})
+	mut e = jsontext.NewEncoder(options(n))
+	for {
+		let t = d.ReadToken() catch err {
+			if fault.Is(err, jsontext.EOF) {
+				break
+			}
+			return "D:" + seal.Hex([]u8(say.Str(err)))
+		}
+		e.WriteToken(t) catch err {
+			return "X:" + seal.Hex([]u8(say.Str(err)))
+		}
+	}
+	return seal.Hex([]u8(e.Bytes()))
+}
+
+// bitsOf reads the hex digits of s as an unsigned 64-bit number.
+fn bitsOf(s str) u64 {
+	mut v = u64(0)
+	for i in 0..len(s) {
+		let c = s[i]
+		let d = mint.ParseUint(str([]u8{c}), 16) catch _ {
+			return 0
+		}
+		v = v*16 + d
+	}
+	return v
+}
+
+// caseLine answers one case.
+fn caseLine(line str) str {
+	let sp = twine.IndexByte(line, ' ')
+	if sp < 0 {
+		return ""
+	}
+	let mode = line[0:sp]
+	let arg = line[sp+1:]
+	if mode == "F" {
+		mut out = jsontext.NewEncoder(jsontext.Options{})
+		out.WriteToken(jsontext.Float(mint.F64frombits(bitsOf(arg)))) catch err {
+			return "X:" + seal.Hex([]u8(say.Str(err)))
+		}
+		return seal.Hex([]u8(out.Bytes()))
+	}
+	if mode == "I" {
+		let n = mint.ParseInt(arg, 10) catch _ {
+			return ""
+		}
+		mut out = jsontext.NewEncoder(jsontext.Options{})
+		out.WriteToken(jsontext.Int(n)) catch err {
+			return "X:" + seal.Hex([]u8(say.Str(err)))
+		}
+		return seal.Hex([]u8(out.Bytes()))
+	}
+	let raw = seal.HexDecode(arg) catch _ {
+		return ""
+	}
+	if mode == "T" {
+		return tokenLine(str(raw))
+	}
+	if mode == "V" {
+		return valueLine(str(raw))
+	}
+	let n = mint.Atoi(mode[1:]) catch _ {
+		return ""
+	}
+	return writeLine(str(raw), n)
+}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	let lines = twine.Split(body, "\n")
+	for i in 0..len(lines)-1 {
+		say.Line(caseLine(lines[i]))
+	}
+}

@@ -1,0 +1,87 @@
+package main
+
+// The jsonv2 twin, Tin side: read the cases of bench/ref/jsonv2 (one per line, see that file's header) on stdin and print the line each
+// one gets from packages/jsonv2, so tools/ci/jsonv2_check.tin can compare them (#931).
+
+import "constraints"
+import "jsonv2"
+import "quarry"
+import "say"
+import "seal"
+import "twine"
+
+// Note is the struct of the N cases (as bench/ref/jsonv2's Note).
+type Note struct {
+	Title str
+	Tags  []str
+	At    ?Point
+	Ok    bool
+}
+
+// Point is the struct of the P cases (as bench/ref/jsonv2's Point).
+type Point struct {
+	X i64
+	Y i64
+}
+
+// optionSet is the Marshal options of case k (see bench/ref/jsonv2).
+fn optionSet(k i64) jsonv2.Options {
+	if k == 1 {
+		return jsonv2.Options{Indent: "  "}
+	}
+	if k == 2 {
+		return jsonv2.Options{Multiline: true, SpaceAfterColon: true}
+	}
+	if k == 3 {
+		return jsonv2.Options{EscapeForHTML: true, EscapeForJS: true}
+	}
+	return jsonv2.Options{}
+}
+
+// marshalAll is the four Marshal results of v joined with '|' (X when one fails).
+fn marshalAll[T constraints.Any](v T) str {
+	mut items = []str{}
+	for k in 0..4 {
+		let out = jsonv2.Marshal(v, optionSet(k)) catch _ {
+			return "X"
+		}
+		items = append(items, seal.Hex([]u8(out)))
+	}
+	return twine.Join(items, "|")
+}
+
+// caseLine answers one case.
+fn caseLine(line str) str {
+	let sp = twine.IndexByte(line, ' ')
+	if sp < 0 {
+		return ""
+	}
+	let mode = line[0:sp]
+	let raw = seal.HexDecode(line[sp+1:]) catch _ {
+		return "E"
+	}
+	let doc = str(raw)
+	if mode == "N" {
+		mut n = Note{Title: "", Tags: []str{}, Ok: false}
+		jsonv2.Unmarshal(doc, mut n, jsonv2.Options{}) catch _ {
+			return "E"
+		}
+		return marshalAll(n)
+	}
+	mut p = Point{X: 0, Y: 0}
+	jsonv2.Unmarshal(doc, mut p, jsonv2.Options{}) catch _ {
+		return "E"
+	}
+	return marshalAll(p)
+}
+
+fn main() {
+	let body = quarry.ReadStdin() catch err {
+		say.Line("fault", err)
+		return
+	}
+	let lines = twine.Split(body, "\n")
+	for i in 0..len(lines)-1 {
+		say.Line(caseLine(lines[i]))
+	}
+}
