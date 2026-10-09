@@ -5,6 +5,7 @@ import "../store"
 import "crucible"
 import "dice"
 import "fault"
+import "pack"
 import "quarry"
 import "seal"
 import "sift"
@@ -574,5 +575,104 @@ fn TestMerge(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 	quarry.RemoveAll(other) catch _ {
+	}
+}
+
+// The in-place Adler-32 and uvarint readers give what stamp.Adler32 and pack.Uvarint give on the slice (#807).
+fn TestInPlaceReaders(t mut crucible.T) {
+	mut r = dice.New(11)
+	mut wrong = 0
+	for round in 0..400 {
+		let n = r.Intn(12000)
+		mut b = r.Bytes(n + 16)
+		if round % 7 == 0 {
+			for k in 0..len(b) {
+				b[k] = 0xff
+			}
+		}
+		let s = str(b)
+		let from = r.Intn(9)
+		let to = from + n
+		if adler32In(s, from, to) != stamp.Adler32(s[from:to]) {
+			wrong += 1
+		}
+	}
+	mut big = make([]u8, (1 << 24) + 4099)
+	for k in 0..len(big) {
+		big[k] = 0xff
+	}
+	let bs = str(big)
+	if adler32In(bs, 3, len(bs)) != stamp.Adler32(bs[3:]) {
+		wrong += 1
+	}
+	crucible.Equal(mut t, "adler sums that differ", wrong, 0)
+	mut vwrong = 0
+	for round in 0..3000 {
+		let n = 1 + r.Intn(14)
+		mut b = r.Bytes(n)
+		// mostly continuation bytes, so long and overflowing numbers come up
+		for k in 0..n {
+			if r.Intn(4) != 0 {
+				b[k] = b[k] | 0x80
+			}
+		}
+		let s = str(b)
+		let at = r.Intn(n)
+		let end = at + r.Intn(n - at + 1)
+		let (v, k, ok) = uvarintAt(s, at, end)
+		let (wv, wk, werr) = pack.Uvarint([]u8(s[at:min(end, at + 10)]))
+		if ok != (werr == nil) || (ok && (v != wv || k != wk)) {
+			vwrong += 1
+		}
+	}
+	crucible.Equal(mut t, "varints read differently", vwrong, 0)
+}
+
+// A pack too large to be read whole at once gives every object through its read windows, in any order (#807).
+fn TestRanged(t mut crucible.T) {
+	mut r = dice.New(12)
+	mut s = store.NewMem()
+	mut ids = []object.Id{}
+	for i in 0..300 {
+		// mostly small objects, some larger than a window, incompressible so the pack outgrows wholeUnder
+		mut n = 200 + r.Intn(1500)
+		if i % 25 == 0 {
+			n = 20000 + r.Intn(30000)
+		}
+		let id = s.PutRaw(object.Kind.Blob, str(r.Bytes(n))) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	let d = fresh("ranged")
+	let written = Write(mut s, ids, d) catch err {
+		t.Error("write: {fault.Message(err)}")
+		return
+	}
+	t.True("larger than wholeUnder", written.size > wholeUnder)
+	mut p = Open(written.Path) catch err {
+		t.Error("open: {fault.Message(err)}")
+		return
+	}
+	mut wrong = 0
+	// fewer than 64 objects first, in a random order, so each is read by its range of the file
+	for k in 0..60 {
+		let id = ids[r.Intn(len(ids))]
+		let (k1, b1, e1) = p.GetRaw(id)
+		let (k2, b2, e2) = s.GetRaw(id)
+		if e1 != nil || e2 != nil || k1 != k2 || b1 != b2 {
+			wrong += 1
+		}
+	}
+	t.False("still read by ranges", p.loaded)
+	for id in ids {
+		let (k1, b1, e1) = p.GetRaw(id)
+		let (k2, b2, e2) = s.GetRaw(id)
+		if e1 != nil || e2 != nil || k1 != k2 || b1 != b2 {
+			wrong += 1
+		}
+	}
+	crucible.Equal(mut t, "objects read back wrong", wrong, 0)
+	quarry.RemoveAll(d) catch _ {
 	}
 }
