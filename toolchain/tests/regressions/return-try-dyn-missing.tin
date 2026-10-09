@@ -1,0 +1,25 @@
+package main
+
+shape Named {
+	name() str
+}
+
+type Cat struct {
+	n str
+}
+
+fn mk() !Cat {
+	return Cat{n: "tom"}
+}
+
+// Cat has no name method: return try must refuse the conversion, not return a Cat as a dyn Named (#896).
+fn pick() !dyn Named {
+	return try mk()
+}
+
+fn main() {
+	let d = pick() catch _ {
+		return
+	}
+	_ = d
+}

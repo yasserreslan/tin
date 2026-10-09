@@ -1,0 +1,32 @@
+package main
+
+import "say"
+
+shape Named {
+	name() str
+}
+
+type Dog struct {
+	n str
+}
+
+fn (d Dog) name() str {
+	return d.n
+}
+
+fn mk() !Dog {
+	return Dog{n: "rex"}
+}
+
+// The concrete result of try is returned as a dyn Named without its conversion.
+fn pick() !dyn Named {
+	return try mk()
+}
+
+fn main() {
+	let d = pick() catch err {
+		say.Line(err)
+		return
+	}
+	say.Line(d.name())
+}

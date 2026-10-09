@@ -1186,12 +1186,41 @@
     }
   },
   {
+    "source": "return-try-dyn.tin",
+    "issue": 896,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "rex\n",
+      "stderr": ""
+    }
+  },
+  {
     "source": "extern-not-in-scope.tin",
     "issue": 964,
     "expected": {
       "phase": "compile",
       "exit": 1,
       "stderr": "toolchain/tests/regressions/extern-not-in-scope.tin:8:11: error E103 UNDEFINED: undefined function: floor\n"
+    }
+  },
+  {
+    "source": "return-try-dyn-forms.tin",
+    "issue": 896,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "rex\nfallback after gone\nfallback\nnamed after gone\nnamed\nrex 7\ntom\nsome 5\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "return-try-dyn-missing.tin",
+    "issue": 896,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "does not satisfy shape Named"
     }
   }
 ]
