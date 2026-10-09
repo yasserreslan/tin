@@ -18,6 +18,7 @@ import "redis"
 import "s3"
 import "say"
 import "seal"
+import "signal"
 import "tide"
 import "tls"
 import "twine"
@@ -36,7 +37,7 @@ type Boot struct {
 }
 
 fn usage() str {
-	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub version [-v]\n"
+	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub check [--config FILE]\n       tinhub version [-v]\n"
 }
 
 // parseBoot reads the command, its --config and --roles flags, and loads the configuration.
@@ -383,6 +384,9 @@ fn run(c config.Config) ! {
 	}
 	let r = routes(c)
 	herald.Log(herald.LInfo, "tinhub starting", []str{"version", version, "roles", twine.Join(c.Roles, ","), "listen", c.Listen})
+	// SIGHUP (systemctl reload, a certificate renewal hook) must not end the server: certificates are read again
+	// when their files change, with or without it
+	try signal.Ignore(signal.SIGHUP)
 	if len(c.TLSCert) > 0 {
 		// the files are read again when they change, so a renewed certificate needs no restart
 		let cert = anvil.TLSCert{CertPEM: "", KeyPEM: "", CertFile: c.TLSCert, KeyFile: c.TLSKey}
@@ -418,6 +422,16 @@ fn main() {
 		"migrate" => {
 			migrate() catch err {
 				quarry.Eprintln("tinhub: migrate: {fault.Message(err)}")
+				quarry.Exit(1)
+			}
+		}
+		"check" => {
+			let ok = checkNow(b.Conf) catch err {
+				quarry.Eprintln("tinhub: check: {fault.Message(err)}")
+				quarry.Exit(1)
+				return
+			}
+			if !ok {
 				quarry.Exit(1)
 			}
 		}
@@ -464,4 +478,19 @@ fn copyNow(c config.Config) ! {
 	mut to = packs.S3Store{Client: client, Bucket: c.S3Bucket, Cache: c.PacksDir + "/cache"}
 	let got = try packs.Copy(mut from, mut to, "repos/", c.PacksDir + "/tmp")
 	say.Line("tinhub: copied {got.Copied} objects ({got.Bytes} bytes), {got.Skipped} already there")
+}
+
+// checkNow is tinhub check: every live pack is in the store at its size, with fingerprints of the refs and the live
+// packs to compare with the same command's output before a backup (deploy/RUNBOOK.md). It reports false when a pack
+// is missing.
+fn checkNow(c config.Config) !bool {
+	try db.Current(pg)
+	mut st = try openStore(c)
+	let v = try packs.Verify(pg, mut st)
+	say.Line("refs {v.Refs}")
+	say.Line("packs {v.Live} ({v.Packs} packs, {v.Bytes} bytes)")
+	for m in v.Missing {
+		say.Line("missing {m}")
+	}
+	return len(v.Missing) == 0
 }
