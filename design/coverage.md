@@ -202,7 +202,7 @@ Ordered by import path, as `go list std` prints them.
 | `os/user` |  | missing |  |  |
 | `path` | 8+1 | partial | trail | Clean, Base, Dir, Ext, Join, Split, Match, IsAbs |
 | `path/filepath` | 27+6 | partial | trail | the same, plus Rel; no Walk, WalkDir, Glob, Abs or EvalSymlinks |
-| `plugin` |  | design |  | no dynamic loading |
+| `plugin` |  | design |  | no dynamic loading; extensions are child processes behind a protocol (design/stdlib_plugin.md) |
 | `reflect` | 369+132 | design | compile-time derivation (argo, say) | runtime reflection is not planned; what code uses it for (serialization, validation, mapping rows to structs) becomes derived code |
 | `regexp` | 59+1 | missing |  | needs an RE2-style engine; linear time |
 | `regexp/syntax` |  | missing |  |  |

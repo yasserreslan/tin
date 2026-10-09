@@ -624,7 +624,7 @@ One box per Go standard-library package (the 176 that `go list std` reports for 
 - [ ] `path/filepath` (trail): partial; the same, plus Rel; no Walk, WalkDir, Glob, Abs or EvalSymlinks
   Go's `path/filepath` manipulates OS paths and walks directory trees; Tin's `trail` has the `path` functions plus Rel, and the next step is `Walk`/`WalkDir` with a callback (closures), `Glob`, `Abs` and `EvalSymlinks`, verified against Go on a temporary tree.
 - [ ] `plugin`: design; no dynamic loading
-  Go's `plugin` loads Go shared objects at run time; Tin builds static whole-program executables with no dynamic loading, and the next step is only to document the omission (hot reload for development is an open question in section 11).
+  Go's `plugin` loads Go shared objects at run time; Tin builds static whole-program executables with no dynamic loading, and the omission is documented in design/stdlib_plugin.md (#924) (hot reload for development is an open question in section 11).
 - [ ] `reflect` (compile-time derivation (argo, say)): design; runtime reflection is not planned; what code uses it for (serialization, validation, mapping rows to structs) becomes derived code
   Go's `reflect` inspects and manipulates types and values at run time; Tin will not provide runtime reflection, and the next step is derivation (#145: attributes and `fields[T]`) covering what reflection is used for (serialization, validation, row mapping, flag parsing).
 - [ ] `regexp`: missing; needs an RE2-style engine; linear time
