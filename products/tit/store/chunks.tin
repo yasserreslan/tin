@@ -336,3 +336,43 @@ fn WriteChunked(dir str, id object.Id, path str) !bool {
 	try quarry.Rename(tmp, path)
 	return true
 }
+
+// ManifestChunks is the chunks (each one's SHA-256, hex) of the loose blob id in the loose store in dir when it is kept
+// in chunks, and none when it is not (#1010: prune keeps the chunks of the blobs it keeps, purge removes the others).
+fn ManifestChunks(dir str, id object.Id) ![]str {
+	let l = NewLoose(dir)
+	let p = l.path(id)
+	mut out = []str{}
+	if !quarry.Exists(p) {
+		return out
+	}
+	let z = try quarry.ReadFile(p)
+	let enc = squash.Unzlib(z, 1032 * len(z) + 1024) catch err {
+		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()}: {fault.Message(err)}")
+	}
+	if !isManifest(enc) {
+		return out
+	}
+	let nul = indexNul(enc)
+	if nul < 0 {
+		fail fault.Wrap(object.ErrCorrupt, "a chunk manifest without its size")
+	}
+	let list = enc[nul + 1:]
+	mut i = 0
+	for i + 40 <= len(list) {
+		out = append(out, seal.Hex([]u8(list[i:i + 32])))
+		i += 40
+	}
+	return out
+}
+
+// ChunkPath is where the chunk with this SHA-256 (hex) is in the loose store in dir.
+fn ChunkPath(dir str, hexHash str) str {
+	return dir + "/chunks/" + hexHash[0:2] + "/" + hexHash[2:]
+}
+
+// LoosePath is where the loose object id is in the loose store in dir.
+fn LoosePath(dir str, id object.Id) str {
+	let l = NewLoose(dir)
+	return l.path(id)
+}

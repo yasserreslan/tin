@@ -1,5 +1,6 @@
 package cmd
 
+import "../prune"
 import "fault"
 import "flume"
 import "policy"
@@ -58,6 +59,8 @@ type Command enum {
 	Park(str)
 	Focus([]str, bool)
 	Repack(bool)
+	Prune(PruneArgs)
+	Purge(PurgeArgs)
 	Unpark(str)
 	Log(LogArgs)
 	Show(str)
@@ -358,6 +361,11 @@ commands:
   overlap                    other branches (and fetched remote ones) changing the declarations this one changes
   repack [--all]             every pack into three (commits, trees, blobs), its deltas found again on every
                              core (adopt leaves several); --all repacks three packs or fewer too
+  prune [--older-than D] [--dry-run]
+                             remove what nothing reaches: refs, changes, workspaces, and the oplog and
+                             snapshots of the last D (default 30d) are kept, so undo keeps working
+  purge ID... --reason TEXT  remove objects no ref, change or workspace reaches from every pack at once
+                             (a leaked secret: tit rewrite first); recorded in .tit/purged
   mirror [git dir or URL]    write every branch and tag into a git directory, as git objects (mirror.url); an
                              http(s) URL gets them pushed over git's smart HTTP (TIT_MIRROR_TOKEN)
   adopt [git dir]            bring a git repository in (again after new git commits: only what is new)
@@ -1045,6 +1053,41 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Watch(wa)
 	}
+	if name == "prune" {
+		mut pa = PruneArgs{Retention: prune.DefaultRetention, Dry: false}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--dry-run" {
+				pa.Dry = true
+			} else if rest[k] == "--older-than" && k + 1 < len(rest) {
+				k += 1
+				pa.Retention = try parseDuration(rest[k])
+			} else {
+				fail fault.Wrap(ErrUsage, "prune: unexpected {rest[k]}")
+			}
+			k += 1
+		}
+		return g, Command.Prune(pa)
+	}
+	if name == "purge" {
+		mut ua = PurgeArgs{Ids: []str{}, Reason: ""}
+		mut k = 0
+		for k < len(rest) {
+			if rest[k] == "--reason" && k + 1 < len(rest) {
+				k += 1
+				ua.Reason = rest[k]
+			} else if twine.HasPrefix(rest[k], "-") {
+				fail fault.Wrap(ErrUsage, "purge: unexpected {rest[k]}")
+			} else {
+				ua.Ids = append(ua.Ids, rest[k])
+			}
+			k += 1
+		}
+		if len(ua.Ids) == 0 || len(ua.Reason) == 0 {
+			fail fault.Wrap(ErrUsage, "purge ID... --reason TEXT")
+		}
+		return g, Command.Purge(ua)
+	}
 	if name == "repack" {
 		// --all: repack even three packs or fewer, their deltas searched again (bench/tit measures packing with it)
 		if len(rest) == 1 && rest[0] == "--all" {
@@ -1316,6 +1359,8 @@ fn commandName(c Command) str {
 		Park(_) => "park"
 		Focus(_, _) => "focus"
 		Repack(_) => "repack"
+		Prune(_) => "prune"
+		Purge(_) => "purge"
 		Unpark(_) => "unpark"
 		Log(_) => "log"
 		Show(_) => "show"
@@ -1465,6 +1510,12 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Repack(all) => {
 			try doRepack(g, all, mut o)
+		}
+		Prune(pa) => {
+			try doPrune(g, pa, mut o)
+		}
+		Purge(ua) => {
+			try doPurge(g, ua, mut o)
 		}
 		Unpark(name) => {
 			try doUnpark(g, name, mut o)
