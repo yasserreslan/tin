@@ -43,6 +43,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+D, Cmd+Shift+K, Alt+Up/Down | duplicate, delete, move lines |
 | Cmd+[ and Cmd+] , Tab, Shift+Tab | unindent, indent |
 | Alt+Left/Right, Cmd+Left/Right/Up/Down | by word, line start/end, document start/end |
+| Alt+Delete, Alt+Backspace | delete the word after or before the caret (the line break when there is no word, the selection when there is one) |
 | Cmd+Alt+R (View > Toggle Ruler), Cmd+Alt+Z (View > Toggle Word Wrap) | wrap long lines at the edge of the text area instead of scrolling sideways; Up and Down then move by rows, a click lands in the row it is on; the ruler (a vertical line at `ruler_column`, 80 by default, and at the wrap column when that one comes first) shows how far a line runs |
 | View > Toggle Whitespace (also in the palette) | show spaces as dots and tabs as arrows |
 | Cmd+Alt+[ , Cmd+Alt+] (Edit > Fold, Unfold, Unfold All) | fold the block at the caret (the lines indented deeper than its first line), open it; a click on the arrow in the gutter does the same. Up and Down skip a fold; a fold that would hide the caret opens; switching tabs drops the folds, and an edit that changes the number of lines moves them as if it was made at the caret |
