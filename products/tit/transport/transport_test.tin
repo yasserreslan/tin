@@ -19,7 +19,7 @@ fn TestFrames(t mut crucible.T) {
 	t.NoFault("decode", argo.Get(header, mut back))
 	crucible.Equal(mut t, "change", back.Changes[0].Change, "kkzz")
 	crucible.Equal(mut t, "ref", back.Refs[0].Name, "refs/heads/main")
-	for bad in []str{"", "TITQ\x01\x04\x00\x00\x00\x00", "TITP\x02\x04\x00\x00\x00\x00", "TITP\x01\x09\x00\x00\x00\x00", "TITP\x01\x04\xff\x00\x00\x00{{}}"} {
+	for bad in []str{"", "TITQ\x01\x04\x00\x00\x00\x00", "TITP\x02\x04\x00\x00\x00\x00", "TITP\x01\x7f\x00\x00\x00\x00", "TITP\x01\x04\xff\x00\x00\x00{{}}"} {
 		let (_, _, _, e) = ReadFrame(bad)
 		t.True("rejected: " + seal.Hex([]u8(bad)), e != nil && fault.Is(e, ErrBadFrame))
 	}

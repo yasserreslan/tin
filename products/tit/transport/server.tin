@@ -29,7 +29,8 @@ type Reply struct {
 
 // Server serves one repository.
 type Server struct {
-	repo   dyn Repo
+	repo    dyn Repo
+	replays dyn ReplayStore
 	key    secret str
 	keys   map[str][]str
 	public bool
@@ -40,12 +41,19 @@ type Server struct {
 // NewServer serves the repository whose .tit directory is dir; key signs its nonces. public lets heads and fetch go
 // unsigned.
 fn NewServer(dir str, key secret str, public bool) Server {
-	return NewRepoServer(NewDirRepo(dir), key, public)
+	mut s = NewRepoServer(NewDirRepo(dir), key, public)
+	s.SetReplays(DirReplays{Dir: dir + "/replay"})
+	return s
+}
+
+// SetReplays makes the server keep replay capsules in r (design/tit.md §17).
+fn (s mut Server) SetReplays(r dyn ReplayStore) {
+	s.replays = r
 }
 
 // NewRepoServer serves repo (design/tit.md §16): tinhub's, or a MemRepo in tests.
 fn NewRepoServer(repo dyn Repo, key secret str, public bool) Server {
-	return Server{repo: repo, key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
+	return Server{repo: repo, replays: NoReplays{none: true}, key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
 }
 
 // Allow lets the holder of an ed25519 public key sign requests as email.
@@ -104,6 +112,29 @@ fn (s mut Server) Handle(method str, path str, signature str, body str, now i64)
 	let push = twine.HasSuffix(path, "/tit/v1/push")
 	if len(who) == 0 && (push || !s.public) {
 		return s.challenge(Code.Unauthorized, "sign the request with your key (tit key makes one)", now)
+	}
+	// replay capsules (§17): every request signed, even on a public repository
+	let rp = twine.Index(path, "/tit/v1/replay")
+	if rp >= 0 {
+		if len(who) == 0 {
+			return s.challenge(Code.Unauthorized, "replay capsules hold real requests: sign the request with your key", now)
+		}
+		let rest = path[rp + len("/tit/v1/replay"):]
+		mut answer = ""
+		mut rerr fault = nil
+		if len(rest) == 0 {
+			let (a, e) = s.replayRoute(method, body, now)
+			answer = a
+			rerr = e
+		} else {
+			let (a, e) = s.replayOne(method, rest)
+			answer = a
+			rerr = e
+		}
+		if rerr != nil {
+			return s.answerFor(rerr, now)
+		}
+		return Reply{Status: 200, Body: answer}
 	}
 	if method == "GET" && twine.HasSuffix(path, "/tit/v1/heads") {
 		let (h, herr) = s.heads(now)
@@ -679,4 +710,22 @@ fn short(text str) str {
 
 fn argoGet[T constraints.Any](text str, v mut T) ! {
 	try argo.Get(text, mut v)
+}
+
+fn (s mut Server) replayRoute(method str, body str, now i64) !str {
+	if method == "POST" {
+		return try s.replayPush(body, now)
+	}
+	if method == "GET" {
+		return try s.replayList()
+	}
+	try refusal(Code.NotFound, "no such request: {method} /tit/v1/replay")
+	return ""
+}
+
+fn (s mut Server) replayOne(method str, rest str) !str {
+	if method != "GET" || len(rest) < 2 || rest[0] != '/' {
+		try refusal(Code.NotFound, "no such request: {method} /tit/v1/replay{rest}")
+	}
+	return try s.replayGet(rest[1:])
 }
