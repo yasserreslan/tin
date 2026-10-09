@@ -29,8 +29,9 @@ type Value struct {
 	n    i64
 	f    f64
 	b    bool
-	xs   []Value
-	m    map[str]Value
+	xs    []Value
+	m     map[str]Value
+	trust i64
 }
 
 // The kinds of a Value.
@@ -50,37 +51,67 @@ const KindMap = 6
 
 // None returns the absent value (a missing map key), printed as Go prints it.
 fn None() Value {
-	return Value{kind: KindNone, s: "", n: 0, f: 0, b: false, xs: []Value{}, m: make(map[str]Value)}
+	return Value{kind: KindNone, s: "", n: 0, f: 0, b: false, xs: []Value{}, m: make(map[str]Value), trust: 0}
 }
 
 // Str returns a string value.
 fn Str(s str) Value {
-	return Value{kind: KindStr, s: s, n: 0, f: 0, b: false, xs: []Value{}, m: make(map[str]Value)}
+	return Value{kind: KindStr, s: s, n: 0, f: 0, b: false, xs: []Value{}, m: make(map[str]Value), trust: 0}
 }
 
 // Int returns an integer value.
 fn Int(n i64) Value {
-	return Value{kind: KindInt, s: "", n: n, f: 0, b: false, xs: []Value{}, m: make(map[str]Value)}
+	return Value{kind: KindInt, s: "", n: n, f: 0, b: false, xs: []Value{}, m: make(map[str]Value), trust: 0}
 }
 
 // Float returns a floating-point value.
 fn Float(f f64) Value {
-	return Value{kind: KindFloat, s: "", n: 0, f: f, b: false, xs: []Value{}, m: make(map[str]Value)}
+	return Value{kind: KindFloat, s: "", n: 0, f: f, b: false, xs: []Value{}, m: make(map[str]Value), trust: 0}
 }
 
 // Bool returns a boolean value.
 fn Bool(b bool) Value {
-	return Value{kind: KindBool, s: "", n: 0, f: 0, b: b, xs: []Value{}, m: make(map[str]Value)}
+	return Value{kind: KindBool, s: "", n: 0, f: 0, b: b, xs: []Value{}, m: make(map[str]Value), trust: 0}
 }
 
 // List returns a list value.
 fn List(xs []Value) Value {
-	return Value{kind: KindList, s: "", n: 0, f: 0, b: false, xs: xs, m: make(map[str]Value)}
+	return Value{kind: KindList, s: "", n: 0, f: 0, b: false, xs: xs, m: make(map[str]Value), trust: 0}
 }
 
 // Map returns a map value; the keys are strings, as {{.name}} looks them up.
 fn Map(m map[str]Value) Value {
-	return Value{kind: KindMap, s: "", n: 0, f: 0, b: false, xs: []Value{}, m: m}
+	return Value{kind: KindMap, s: "", n: 0, f: 0, b: false, xs: []Value{}, m: m, trust: 0}
+}
+
+// The trusted kinds of a string value: the contextual escapers pass a value of its own kind through, as Go's html/template
+// does for template.HTML, template.JS, template.JSStr, template.CSS and template.URL.
+const TrustNone = 0
+
+// TrustHTML marks HTML that is already escaped or markup (template.HTML).
+const TrustHTML = 1
+
+// TrustJS marks a JavaScript expression (template.JS).
+const TrustJS = 2
+
+// TrustJSStr marks text that is already escaped for a JavaScript string (template.JSStr).
+const TrustJSStr = 3
+
+// TrustCSS marks a CSS declaration value (template.CSS).
+const TrustCSS = 4
+
+// TrustURL marks a URL (template.URL).
+const TrustURL = 5
+
+// Trusted returns the string s, of the trusted kind t (a Trust constant), which the contextual escapers pass through in
+// that context. Only Go code makes one: template data from outside the program is never trusted.
+fn Trusted(t i64, s str) Value {
+	return Value{kind: KindStr, s: s, n: 0, f: 0, b: false, xs: []Value{}, m: make(map[str]Value), trust: t}
+}
+
+// Trust returns the trusted kind of a value (a Trust constant), or TrustNone for an ordinary value.
+fn (v Value) Trust() i64 {
+	return v.trust
 }
 
 // Kind returns the value's kind (one of the Kind constants), for code that inspects data.
