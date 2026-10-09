@@ -17,26 +17,42 @@ const l6 = 1.531383769920937332e-01
 const l7 = 1.479819860511658591e-01
 
 // Log returns the natural logarithm of x. Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN.
+// It is Go's math.Log on each architecture, bit for bit (#942). On arm64 it is Go's pure-Go log, whose fused
+// multiply-adds are written here as the products Tin's arm64 backend fuses the same way (`x*y + z` and `z + x*y`
+// fuse, `z - x*y` does not, so `-z + x*y` stands for Go's fused `x*y - z`). On amd64 it is Go's assembly, the same
+// operations unfused, with its own special cases, Frexp and comparison (logAmd64).
 fn Log(x f64) f64 {
-	if IsNaN(x) || IsInf(x, 1) {
-		return x
-	}
-	if x < 0 {
-		return NaN()
-	}
-	if x == 0 {
-		return Inf(-1)
+	if logAmd64 {
+		if x == 0 {
+			return Inf(-1)
+		}
+		if F64bits(x)>>63 != 0 {
+			return NaN()
+		}
+		if IsNaN(x) || IsInf(x, 1) {
+			return x
+		}
+	} else {
+		if IsNaN(x) || IsInf(x, 1) {
+			return x
+		}
+		if x < 0 {
+			return NaN()
+		}
+		if x == 0 {
+			return Inf(-1)
+		}
 	}
 	mut f1 f64
 	mut ki i64
-	if x >= smallestNormal { // x > 0 and finite here: Frexp without the call
+	if x >= smallestNormal || logAmd64 { // x > 0 and finite here: Frexp without the call; amd64 keeps a subnormal's bits
 		let bits = F64bits(x)
 		ki = i64(bits>>f64Shift) - f64Bias + 1
 		f1 = F64frombits(bits&0x000fffffffffffff | u64(f64Bias-1)<<f64Shift)
 	} else {
 		f1, ki = Frexp(x)
 	}
-	if f1 < sqrt2Half {
+	if f1 < sqrt2Half || logAmd64 && f1 == sqrt2Half { // amd64 tests f1 <= Sqrt2/2 (CMPSD "not less than")
 		f1 *= 2
 		ki -= 1
 	}
@@ -45,11 +61,12 @@ fn Log(x f64) f64 {
 	let s = f / (2 + f)
 	let s2 = s * s
 	let s4 = s2 * s2
-	let t1 = s2 * (l1 + s4*(l3+s4*(l5+s4*l7)))
 	let t2 = s4 * (l2 + s4*(l4+s4*l6))
-	let r = t1 + t2
-	let hfsq = 0.5 * f * f
-	return k*expLn2Hi - ((hfsq - (s*(hfsq+r) + k*expLn2Lo)) - f)
+	let r = s2*(l1+s4*(l3+s4*(l5+s4*l7))) + t2
+	let hfsq = 0.5 * f
+	let w = k*expLn2Lo + s*(r+hfsq*f)
+	let y = -w + hfsq*f - f
+	return -y + k*expLn2Hi
 }
 
 // Log2 returns the binary logarithm of x, exact for powers of two.

@@ -1,0 +1,4 @@
+package gauge
+
+// logAmd64 is false where Go uses its pure-Go math.Log with fused multiply-adds, which log.tin follows bit for bit (#942).
+const logAmd64 = false

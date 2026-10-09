@@ -1,0 +1,4 @@
+package gauge
+
+// logAmd64 is true where Go uses its amd64 assembly for math.Log, which log.tin follows bit for bit (#942).
+const logAmd64 = true
