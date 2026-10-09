@@ -33,6 +33,9 @@ type Kind enum {
 	PushRequest
 	PushAnswer
 	Error
+	ReplayPush
+	ReplayAnswer
+	ReplayCapsule
 }
 
 // Code is why a server refused a request.
@@ -126,6 +129,43 @@ type ErrorAnswer struct {
 	Nonce   str
 }
 
+// ReplayPushHeader is the header of POST /tit/v1/replay (§17): the commit that served the capsule and its file name.
+type ReplayPushHeader struct {
+	Commit str
+	Name   str
+}
+
+// ReplayEntry is one stored capsule: its id (SHA-256 of its bytes), its group (SHA-256 of its signer and summary), its
+// file name, the commit, its signer (hex), its plain summary and when it was stored (unix s).
+type ReplayEntry struct {
+	Id      str
+	Group   str
+	Name    str
+	Commit  str
+	Signer  str
+	Summary str
+	Time    i64
+}
+
+// ReplayAnswer answers a replay push: the capsule's id and group, and whether it was new.
+type ReplayAnswer struct {
+	Id    str
+	Group str
+	New   bool
+}
+
+// ReplayList answers GET /tit/v1/replay: the capsules, newest first.
+type ReplayList struct {
+	Capsules []ReplayEntry
+}
+
+// ReplayGot is the header of a fetched capsule; the capsule follows it.
+type ReplayGot struct {
+	Id     str
+	Name   str
+	Commit str
+}
+
 // Transport is a way to reach a tit repository: the HTTP client (#795) or an in-process server in tests.
 shape Transport {
 	mut Heads() !Heads
@@ -141,6 +181,9 @@ fn kindByte(k Kind) i64 {
 		PushRequest => 4
 		PushAnswer => 5
 		Error => 6
+		ReplayPush => 7
+		ReplayAnswer => 8
+		ReplayCapsule => 9
 	}
 }
 
@@ -162,6 +205,15 @@ fn kindOf(b i64) !Kind {
 	}
 	if b == 6 {
 		return Kind.Error
+	}
+	if b == 7 {
+		return Kind.ReplayPush
+	}
+	if b == 8 {
+		return Kind.ReplayAnswer
+	}
+	if b == 9 {
+		return Kind.ReplayCapsule
 	}
 	fail fault.Wrap(ErrBadFrame, "kind {b}")
 }
