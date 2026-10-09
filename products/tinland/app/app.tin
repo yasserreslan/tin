@@ -41,6 +41,7 @@ fn Run(paths []str) bool {
 	}
 	render.Init(gpu, appkit.Scale(win.Win), ws.CodeSize)
 	ws.UseFont()
+	ws.UseGuides(cfg.Guides)
 	BuildMenus(win, cfg)
 	mut idle = 0
 	for !ws.Quit {

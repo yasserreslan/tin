@@ -185,6 +185,12 @@ added
 	typeText(mut ws, "notes")
 	say.Line("recent picker", ws.Picker.Kind, len(ws.Picker.Items), twine.HasSuffix(ws.Picker.Items[0], "/notes.md"))
 	ws.ClosePicker()
+	// the indent guides: on by default, off and on again
+	say.Line("guides default", editor.GuidesShown())
+	ws.UseGuides(false)
+	say.Line("guides off", editor.GuidesShown())
+	ws.UseGuides(true)
+	say.Line("guides on", editor.GuidesShown())
 	// reveal in Finder and copy the path: the commands ask appkit, and without a file they say so
 	ws.Perform(workspace.CmdRevealFinder)
 	say.Line("revealed", ws.Ed.Message)

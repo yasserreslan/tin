@@ -191,6 +191,20 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 		if row == b.Row && !b.HasSel {
 			render.Fill(mut scene, x, top, w, lh, th.LineHighlight)
 		}
+		// the indent guides: one vertical segment per indentation level this line reaches
+		if guidesOn && first {
+			let ind = indentOf(line)
+			if ind >= 4 {
+				mut k = 1
+				for guideAt(k) < ind {
+					let gx = textX + f64(guideAt(k) - hs) * ed.CharW
+					if gx >= textX && gx < x + w {
+						render.Fill(mut scene, gx, top, 1.0, lh, th.Guide)
+					}
+					k += 1
+				}
+			}
+		}
 		// the selected part of this line
 		if b.HasSel && row >= sel0.Row && row <= sel1.Row {
 			mut from = 0

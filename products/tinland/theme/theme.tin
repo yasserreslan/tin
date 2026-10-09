@@ -33,6 +33,8 @@ type Theme struct {
 	Match i64
 	// Ruler is the vertical line at the ruler's column.
 	Ruler i64
+	// Guide is an indent guide's vertical line.
+	Guide i64
 	// syntax
 	Keyword i64
 	String i64
@@ -69,6 +71,7 @@ fn Dark() Theme {
 		LineHighlight: ui.Hex(0x1b2028),
 		Match: ui.HexA(0xe0955a, 0.35),
 		Ruler: ui.Hex(0x2b3442),
+		Guide: ui.Hex(0x232931),
 		Keyword: ui.Hex(0xf0876a),
 		String: ui.Hex(0x8fd1b0),
 		Number: ui.Hex(0xf2c46d),
@@ -105,6 +108,7 @@ fn Light() Theme {
 		LineHighlight: ui.Hex(0xf1eee8),
 		Match: ui.HexA(0xc2692a, 0.30),
 		Ruler: ui.Hex(0xd8d2c8),
+		Guide: ui.Hex(0xdcd6cc),
 		Keyword: ui.Hex(0xc2492a),
 		String: ui.Hex(0x2a8a63),
 		Number: ui.Hex(0xa86a00),
