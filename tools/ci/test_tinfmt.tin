@@ -1,6 +1,7 @@
 package main
 
 import "./ci"
+import "quarry"
 import "say"
 import "twine"
 
@@ -94,12 +95,14 @@ fn main() {
 			failures += 1
 			continue
 		}
-		let copy = ci.Join(dir, path[twine.LastIndex(path, "/") + 1:])
+		// the copy stays beside the original: an embed directive resolves its pattern next to the source file (#928)
+		let copy = path + ".fmtcopy.tin"
 		ci.Write(copy, once.Stdout)
 		if tokens(copy) != tokens(path) {
 			say.Line(path + ": formatting changed the tokens")
 			failures += 1
 		}
+		quarry.Remove(copy) catch _ { }
 	}
 	ci.Test("every test and example is idempotent and keeps its tokens", failures == 0)
 	ci.Remove(dir)
