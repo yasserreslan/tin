@@ -184,9 +184,9 @@ Ordered by import path, as `go list std` prints them.
 | `mime/quotedprintable` |  | missing |  |  |
 | `net` | 20+2 | partial | wire | TCP Dial, DialTimeout, Listen, Accept, deadlines; no UDP, Unix sockets, IP or CIDR types, resolver control |
 | `net/http` | 553+126 | partial | anvil, wire, websocket | server with Router, middleware, groups, HEAD and 405 handling; client Get, Post, Do; WebSocket; no TLS, HTTP/2, cookies, multipart, Client or Transport configuration, streaming bodies |
-| `net/http/cgi` |  | missing |  | low priority |
+| `net/http/cgi` |  | partial | cgi | Serve, ServeFunc, Call and Format: the CGI child (environment, stdin, stdout) with Go's CONTENT_LENGTH, PATH_INFO and header rules; no host side (cgi.Handler), TLS or RemoteAddr (#915) |
 | `net/http/cookiejar` |  | missing |  |  |
-| `net/http/fcgi` |  | missing |  | low priority |
+| `net/http/fcgi` |  | partial | cgi/fcgi | Serve and ServeFunc: the responder role over TCP, one connection at a time, requests in order; no multiplexing, filter or authorizer roles (#915) |
 | `net/http/httptest` | 1+57 | partial | anvil.Router.Run | runs a request through a router without a socket; no ResponseRecorder or test Server |
 | `net/http/httptrace` |  | partial | httptrace | client hooks that wire can observe on HTTP/1.1 and TLS; DNS and connect hooks are not observable (#915) |
 | `net/http/httputil` | 5+0 | partial | dump | DumpRequest and DumpResponse; no ReverseProxy |

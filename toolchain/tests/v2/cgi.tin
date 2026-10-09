@@ -1,0 +1,58 @@
+package main
+
+import "anvil"
+import "cgi"
+import "say"
+
+// hello echoes the method and path, and sets fields whose spelling and values Format must write as Go does.
+fn hello(q anvil.Req, w mut anvil.Out) {
+	w.Head("x-lower", "lower")
+	w.Head("X-Space", "  padded  ")
+	w.Head("set-cookie", "a=1")
+	w.Head("Set-Cookie", "b=2")
+	w.Type("text/html; charset=utf-8")
+	w.Text("<p>{q.Method} {q.Path}</p>\n")
+}
+
+// show prints the response a CGI request gets, or the fault Call fails with.
+fn show(r anvil.Router, env map[str]str, body str) {
+	let (out, err) = cgi.Call(r, env, body)
+	if err != nil {
+		say.Line("fault: " + say.Str(err))
+		return
+	}
+	say.Text(cgi.Format(out.Code(), out.HeadersAll(), str(out.Body), false))
+	say.Line("--")
+}
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Any(`/{path...}`, hello)
+	mut env = map[str]str{}
+	env["REQUEST_METHOD"] = "GET"
+	env["SERVER_PROTOCOL"] = "HTTP/1.1"
+	env["REQUEST_URI"] = "/a/b?x=1"
+	env["HTTP_X_FOO_BAR"] = "v1"
+	env["HTTP_HOST"] = "example.test"
+	show(r, env, "")
+	mut none = map[str]str{}
+	none["SERVER_PROTOCOL"] = "HTTP/1.1"
+	show(r, none, "")
+	mut badLength = map[str]str{}
+	badLength["REQUEST_METHOD"] = "POST"
+	badLength["SERVER_PROTOCOL"] = "HTTP/1.1"
+	badLength["REQUEST_URI"] = "/post"
+	badLength["CONTENT_LENGTH"] = "abc"
+	show(r, badLength, "hello")
+	mut badProto = map[str]str{}
+	badProto["REQUEST_METHOD"] = "GET"
+	badProto["SERVER_PROTOCOL"] = "FTP/1.1"
+	badProto["REQUEST_URI"] = "/x"
+	show(r, badProto, "")
+	say.Text(cgi.Format(999, []str{}, "x\n", false))
+	say.Line("--")
+	say.Text(cgi.Format(304, []str{"content-type", "text/plain", "x-foo-BAR", "1", "x foo", "2"}, "", false))
+	say.Line("--")
+	say.Text(cgi.Format(200, []str{"Date", "now", "Content-Length", "5"}, "ok\n", true))
+	say.Line("--")
+}

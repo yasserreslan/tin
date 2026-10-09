@@ -1,0 +1,30 @@
+Status: 200 OK
+Content-Type: text/html; charset=utf-8
+Set-Cookie: a=1
+Set-Cookie: b=2
+X-Lower: lower
+X-Space: padded
+
+<p>GET /a/b</p>
+--
+fault: cgi: no REQUEST_METHOD in environment
+fault: cgi: bad CONTENT_LENGTH in environment: abc
+fault: cgi: invalid SERVER_PROTOCOL version
+Status: 999 
+Content-Type: text/plain; charset=utf-8
+
+x
+--
+Status: 304 Not Modified
+Content-Type: text/plain
+X-Foo-Bar: 1
+x foo: 2
+
+--
+Status: 200 OK
+Content-Length: 5
+Content-Type: text/plain; charset=utf-8
+Date: now
+
+ok
+--
