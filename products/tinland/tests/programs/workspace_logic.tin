@@ -185,6 +185,13 @@ added
 	typeText(mut ws, "notes")
 	say.Line("recent picker", ws.Picker.Kind, len(ws.Picker.Items), twine.HasSuffix(ws.Picker.Items[0], "/notes.md"))
 	ws.ClosePicker()
+	// reveal in Finder and copy the path: the commands ask appkit, and without a file they say so
+	ws.Perform(workspace.CmdRevealFinder)
+	say.Line("revealed", ws.Ed.Message)
+	ws.Perform(workspace.CmdCopyPath)
+	say.Line("copied", ws.Ed.Message)
+	mut empty = editor.New(textedit.New())
+	say.Line("no path", len(empty.Buf.Path))
 	// the status bar's selection count
 	ws.OpenFile(root + "/notes.md")
 	ws.Ed.Buf.SelectAll()

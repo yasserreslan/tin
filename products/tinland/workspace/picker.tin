@@ -59,6 +59,8 @@ fn commands() []command {
 		command{name: "View: Toggle Problems Panel", cmd: CmdToggleProblems},
 		command{name: "View: Toggle Git Panel", cmd: CmdToggleGit},
 		command{name: "View: Reveal in Project Panel", cmd: CmdRevealInProject},
+		command{name: "View: Reveal in Finder", cmd: CmdRevealFinder},
+		command{name: "View: Copy File Path", cmd: CmdCopyPath},
 		command{name: "View: Toggle Output Panel", cmd: CmdToggleOutput},
 		command{name: "View: Toggle Terminal", cmd: CmdToggleTerminal},
 		command{name: "Tinland: Open Settings", cmd: CmdOpenSettings},
