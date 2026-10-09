@@ -93,6 +93,7 @@ fn packages() []str {
 		"lane", "a bounded queue between the tasks of one core (buffered channels)",
 		"replay", "recording and reading request capsules for tin replay",
 		"stencil", "text templates loaded at run time (text/template)",
+		"htmltpl", "HTML templates with contextual escaping (html/template)",
 		"column", "aligned text columns (text/tabwriter)",
 		"scroll", "XML tokenizer and writer (encoding/xml)",
 		"html", "HTML tokenizer and escaping (html, golang.org/x/net/html)",

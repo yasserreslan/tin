@@ -1,0 +1,70 @@
+text <p>&lt;script&gt;alert(1)&lt;/script&gt;</p>
+text static lt <p>a &lt; b</p>
+text doctype <!DOCTYPE html><p>x</p>
+text nul <p>a�b</p>
+text plus <p>a&#43;b</p>
+text html trusted <p><b>x</b> &amp;</p>
+text comment ab
+text comment static ab<p>x</p>
+url start <a href="#ZgotmplZ">x</a>
+url trusted <a href="javascript:alert%281%29">x</a>
+url query <a href="/s?q=a%20b%26c">x</a>
+url fragment <a href="/p#x%22y">x</a>
+url unquoted <img src=/a%20b>
+attr <p title="&#34; onmouseover=&#34;alert(1)">x</p>
+attr single <p title='&#39; onmouseover=&#39;alert(1)'>x</p>
+attr unquoted <p title=a&#32;b>x</p>
+attr unquoted empty <p title=ZgotmplZ>x</p>
+attr html stripped <p title="x &amp;">x</p>
+attr unquoted html <p title=x>x</p>
+attr style <p style="color: red">x</p>
+attr style bad <p style="color: ZgotmplZ">x</p>
+rcdata title <title>&lt;script&gt;</title>
+rcdata textarea <textarea>a&amp;&lt;b&gt;</textarea>
+rcdata html <textarea>&lt;b&gt;x&lt;/b&gt;&amp;</textarea>
+js string <script>var x = "a\u003c/script\u003e";</script>
+js int <script>var x =  3 ;</script>
+js bool <script>var x =  true ;</script>
+js none <script>var x =  null ;</script>
+js float <script>var x =  1.5e-7 ;</script>
+js list <script>var x = [1,"a",null];</script>
+js map <script>var x = {"a":"\u003cx\u003e","b":1};</script>
+js trusted <script>var x = 1+2;</script>
+js trusted string <script>var x = "a\b";</script>
+js division <script>var y =  4  / 2; var z = 1 / 3</script>
+js dq <script>var s = "a\u0022b\\c\u003c\/script\u003e";</script>
+js sq <script>var s = 'it\u0027s';</script>
+js jsstr <script>var s = "a\b";</script>
+js comment <script>
+var x = 1;</script>
+js comment static <script>x = 1   +  2 </script>
+js line static <script>x = 1 
+var y = "Q"</script>
+css value <style>p { color: red }</style>
+css value bad <style>p { color: ZgotmplZ }</style>
+css trusted <style>p { color: red; }</style>
+css string <style>p::before { content: "a\\b\22 c\3c d\3e " }</style>
+css string url <style>p::before { content: "#ZgotmplZ" }</style>
+css url <style>p { background: url(a%20b) }</style>
+css url quoted <style>p { background: url("x%20y?q=%3c") }</style>
+css comment <style>  p{}</style>
+on attr <a onclick="f(&#34;a&#34;)">x</a>
+branch <p>x</p>
+range <p>a</p><p>&lt;</p>
+with <p>&lt;</p>
+define <p>[&lt;x&gt;]</p>
+funcs <p>&lt;hi&gt;!</p>
+unparsed htmltpl: t: the template has no body; call Parse first
+reparse r <p>x</p>
+refuse tag stencil: an action inside a tag, outside an attribute value, is not supported
+refuse template call stencil: a template call outside element text is not supported
+refuse predefined stencil: a predefined escaper (html or urlquery) in an action is not supported
+refuse regexp stencil: an action in a JavaScript regular expression is not supported
+refuse template literal stencil: a template literal in a <script> is not supported
+refuse unquoted quote stencil: a quote, <, = or backtick in an unquoted attribute value is not supported
+refuse srcset stencil: an action in a srcset attribute is not supported
+refuse meta stencil: an action in a meta tag is not supported
+refuse end in context stencil: t: the template ends inside an HTML context
+refuse script end in string stencil: <script, </script or <!-- inside a JavaScript string is not supported
+refuse if crosses stencil: an if block crosses an HTML context boundary
+if same context <p>x</p>

@@ -76,6 +76,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lane](#lane) | a bounded queue between the tasks of one core (buffered channels) |
 | [replay](#replay) | recording and reading request capsules for tin replay |
 | [stencil](#stencil) | text templates loaded at run time (text/template) |
+| [htmltpl](#htmltpl) | HTML templates with contextual escaping (html/template) |
 | [column](#column) | aligned text columns (text/tabwriter) |
 | [scroll](#scroll) | XML tokenizer and writer (encoding/xml) |
 | [html](#html) | HTML tokenizer and escaping (html, golang.org/x/net/html) |
@@ -2877,6 +2878,7 @@ URL attributes (href, src, action, formaction, poster, background) are escaped b
 
 Execute keeps the data and the variables in a cell bound to a runtime slot (the pattern policy.Bind uses), so the stores happen inside the runtime.
 
+- `ParseContextual(name str, text str) !Template`: ParseContextual parses text into a Template whose actions are escaped by their context, as Go's html/template does. A context the mode does not support is a parse error (see the file's comment).
 - `type State struct`: State is one execution of a template.
 - `type Node enum`: Node is one piece of a parsed template.
 - `type Branch struct`: Branch is if/with: the condition, the body and the else branch.
@@ -2903,6 +2905,14 @@ Execute keeps the data and the variables in a cell bound to a runtime slot (the 
 - `Bool(b bool) Value`: Bool returns a boolean value.
 - `List(xs []Value) Value`: List returns a list value.
 - `Map(m map[str]Value) Value`: Map returns a map value; the keys are strings, as {{.name}} looks them up.
+- `const TrustNone = 0`: The trusted kinds of a string value: the contextual escapers pass a value of its own kind through, as Go's html/template does for template.HTML, template.JS, template.JSStr, template.CSS and template.URL.
+- `const TrustHTML = 1`: TrustHTML marks HTML that is already escaped or markup (template.HTML).
+- `const TrustJS = 2`: TrustJS marks a JavaScript expression (template.JS).
+- `const TrustJSStr = 3`: TrustJSStr marks text that is already escaped for a JavaScript string (template.JSStr).
+- `const TrustCSS = 4`: TrustCSS marks a CSS declaration value (template.CSS).
+- `const TrustURL = 5`: TrustURL marks a URL (template.URL).
+- `Trusted(t i64, s str) Value`: Trusted returns the string s, of the trusted kind t (a Trust constant), which the contextual escapers pass through in that context. Only Go code makes one: template data from outside the program is never trusted.
+- `(v Value) Trust() i64`: Trust returns the trusted kind of a value (a Trust constant), or TrustNone for an ordinary value.
 - `(v Value) Kind() i64`: Kind returns the value's kind (one of the Kind constants), for code that inspects data.
 - `(v Value) String() str`: String returns the string of a string value.
 - `(v Value) Integer() i64`: Integer returns the integer of an integer value.
@@ -2914,6 +2924,21 @@ Execute keeps the data and the variables in a cell bound to a runtime slot (the 
 - `(t mut Template) Func(name str, f fn([]Value) !Value)`: Func registers f for {{name ...}} calls in this template.
 - `(t Template) Execute(data Value) !str`: Execute renders the template with data and returns the output.
 - `(t Template) ExecuteTo(w mut twine.Builder, data Value) !`: ExecuteTo renders the template with data into w. The data and the variables live in a cell bound to a runtime slot for the call (the pattern policy.Bind uses).
+
+## htmltpl
+
+- `type Template struct`: Template is a template in the html/template style: a name, the functions registered for it, and its parsed body.
+- `New(name str) Template`: New returns an empty template named name, as Go's template.New does; Parse gives it a body.
+- `(t Template) Name() str`: Name returns the template's name.
+- `(t mut Template) Funcs(funcs map[str]fn([]stencil.Value) !stencil.Value)`: Funcs registers functions for {{name ...}} calls in the template's text; it must be called before Parse, as in Go.
+- `(t mut Template) Parse(text str) !`: Parse parses text as the template's body, escaped by context. A later Parse replaces the body. A context the mode does not support is an error (see README.md).
+- `(t Template) Execute(w mut twine.Builder, data stencil.Value) !`: Execute writes the template's output for data into w, escaped by context.
+- `(t Template) ExecuteString(data stencil.Value) !str`: ExecuteString returns the template's output for data as a string.
+- `HTML(s str) stencil.Value`: HTML marks s as HTML that the escapers pass through in element text and RCDATA (template.HTML).
+- `JS(s str) stencil.Value`: JS marks s as a JavaScript expression that a <script> or an event attribute passes through (template.JS).
+- `JSStr(s str) stencil.Value`: JSStr marks s as text already escaped for a JavaScript string literal (template.JSStr).
+- `CSS(s str) stencil.Value`: CSS marks s as a CSS value that a <style> element or a style attribute passes through (template.CSS).
+- `URL(s str) stencil.Value`: URL marks s as a URL that the URL escaper passes through without filtering its scheme (template.URL).
 
 ## column
 
