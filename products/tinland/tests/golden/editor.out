@@ -274,12 +274,8 @@ fn main() {
 	say.Line(x)
 }
 
---- untitled row 3 col 6 dirty true
-selection: three
-one
-two
-three
---- untitled row 3 col 6 dirty true
-one
-two
-three
+tabs 12 12 untitled
+tabs 12 1 sample.txt
+tabs 1 1 sample.txt
+tabs 1 1 untitled
+message: closed every tab

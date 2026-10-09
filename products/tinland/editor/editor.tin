@@ -281,6 +281,66 @@ fn (ed mut Editor) Load(path str) bool {
 	return true
 }
 
+// closeOthers closes every tab but the active one, asking about unsaved changes in each.
+fn (ed mut Editor) closeOthers() {
+	if len(ed.Tabs) <= 1 {
+		return
+	}
+	let at = ed.Active
+	mut kept = []Tab{}
+	mut j = 0
+	for j < len(ed.Tabs) {
+		if j == at {
+			kept = append(kept, ed.Tabs[j])
+			j += 1
+			continue
+		}
+		// a tab with changes asks first, and a Cancel stops the whole thing
+		ed.Active = -1
+		ed.activate(j)
+		ed.Active = j
+		if !ed.confirm() {
+			ed.Active = at
+			ed.stash()
+			return
+		}
+		j += 1
+	}
+	ed.Tabs = kept
+	ed.Active = -1
+	ed.activate(0)
+	ed.Active = 0
+	ed.rawFor = -1
+	ed.Diags = []tinsym.Diag{}
+	ed.DiagFor = -1
+	ed.Say("closed the other tabs")
+	ed.Redraw = true
+}
+
+// closeAll closes every tab, asking about unsaved changes in each, and leaves one empty tab behind.
+fn (ed mut Editor) closeAll() {
+	mut j = 0
+	for j < len(ed.Tabs) {
+		ed.Active = -1
+		ed.activate(j)
+		ed.Active = j
+		if !ed.confirm() {
+			ed.Say("close all stopped")
+			return
+		}
+		j += 1
+	}
+	ed.Tabs = []Tab{Tab{Buf: textedit.New()}}
+	ed.Active = -1
+	ed.activate(0)
+	ed.Active = 0
+	ed.rawFor = -1
+	ed.Diags = []tinsym.Diag{}
+	ed.DiagFor = -1
+	ed.Say("closed every tab")
+	ed.Redraw = true
+}
+
 // closeTab closes the active tab (asking about unsaved changes); closing the last one leaves an empty tab.
 fn (ed mut Editor) closeTab() {
 	if !ed.confirm() {
