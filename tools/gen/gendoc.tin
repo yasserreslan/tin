@@ -48,6 +48,8 @@ fn packages() []str {
 		"link", "URLs and their escaping (net/url)",
 		"netip", "IP addresses, address/port pairs and prefixes as value types (net/netip)",
 		"ore", "byte slices (bytes)",
+		"jsontext", "JSON tokens and values, token by token (encoding/json/jsontext)",
+		"jsonv2", "JSON Marshal and Unmarshal with options (encoding/json/v2)",
 		"flume", "buffered I/O (bufio)",
 		"quarry", "files, environment, process (os)",
 		"user", "users and groups (os/user)",

@@ -1,0 +1,74 @@
+package main
+
+// The jsonv2 package: Marshal and Unmarshal with their options, against the rules of encoding/json/v2 (#931). Every line of the expected
+// output is checked by hand; the Go twin (tools/ci/jsonv2_check.tin) compares the same behaviour over generated values.
+
+import "constraints"
+import "jsonv2"
+import "mint"
+import "say"
+
+type Point struct {
+	X i64
+	Y i64
+}
+
+type Note struct {
+	Title str
+	Tags  []str
+	At    ?Point
+	Ok    bool
+}
+
+// show prints the Marshal result of v with opts, or its fault.
+fn show[T constraints.Any](v T, opts jsonv2.Options) {
+	let out = jsonv2.Marshal(v, opts) catch err {
+		say.Line("marshal error:", err)
+		return
+	}
+	say.Line(mint.Quote(out))
+}
+
+fn main() {
+	show(Point{X: 1, Y: -2}, jsonv2.Options{})
+	show(Note{Title: "a<&>", Tags: []str{"x", "\xe2\x80\xa8"}, Ok: true}, jsonv2.Options{})
+	show(Note{Title: "a<&>", Tags: []str{}, Ok: false}, jsonv2.Options{EscapeForHTML: true, EscapeForJS: true})
+	show(Note{Title: "t", Tags: []str{"y"}}, jsonv2.Options{Indent: "  "})
+	show(Note{Title: "t", Tags: []str{"y"}}, jsonv2.Options{Multiline: true, SpaceAfterColon: true})
+	show(Point{X: 1, Y: 2}, jsonv2.Options{SpaceAfterColon: true, SpaceAfterComma: true})
+
+	mut p = Point{X: 0, Y: 0}
+	jsonv2.Unmarshal("{{\"X\":5,\"Y\":6}}", mut p, jsonv2.Options{}) catch err {
+		say.Line("unmarshal error:", err)
+	}
+	say.Line("point:", p.X, p.Y)
+
+	// Duplicate names are a fault unless AllowDuplicateNames; then the later value is kept.
+	mut q = Point{X: 0, Y: 0}
+	jsonv2.Unmarshal("{{\"X\":1,\"X\":2}}", mut q, jsonv2.Options{}) catch err {
+		say.Line("unmarshal error:", err)
+	}
+	say.Line("after duplicate:", q.X, q.Y)
+	jsonv2.Unmarshal("{{\"X\":1,\"X\":2}}", mut q, jsonv2.Options{AllowDuplicateNames: true}) catch err {
+		say.Line("unmarshal error:", err)
+	}
+	say.Line("allowed duplicate:", q.X, q.Y)
+
+	// A member with no field is ignored unless RejectUnknownMembers.
+	mut r = Point{X: 0, Y: 0}
+	jsonv2.Unmarshal("{{\"X\":3,\"Z\":4}}", mut r, jsonv2.Options{}) catch err {
+		say.Line("unmarshal error:", err)
+	}
+	say.Line("ignored unknown:", r.X, r.Y)
+	jsonv2.Unmarshal("{{\"X\":3,\"Z\":4}}", mut r, jsonv2.Options{RejectUnknownMembers: true}) catch err {
+		say.Line("rejected unknown:", err)
+	}
+	say.Line("unchanged after fault:", r.X, r.Y)
+
+	// Malformed text is a fault that names its position, as jsontext reports it, and leaves the target as it was.
+	mut xs = []i64{7}
+	jsonv2.Unmarshal("[1,]", mut xs, jsonv2.Options{}) catch err {
+		say.Line("unmarshal error:", err)
+	}
+	say.Line("slice after fault:", len(xs), xs[0])
+}

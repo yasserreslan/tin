@@ -1,0 +1,190 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "say"
+import "seal"
+import "twine"
+
+// Compare packages/jsonv2 with Go's encoding/json/v2 (#931).
+//
+// A corpus (a fixed seed, so both sides see the same cases) of documents is fed as one case per line to bench/ref/jsonv2 (Go) and
+// tools/ci/fixtures/jsonv2.tin (Tin): each document is unmarshalled into a Note or a Point, and the value is marshalled under four
+// option sets. The corpus holds hand-written documents (unknown and duplicate members, case-sensitive names, nulls, type mismatches,
+// the integer boundaries, surrogates, trailing text), generated documents and their mutations. Both sides must agree on which documents
+// decode, and on every marshalled byte of those that do.
+
+const SEED = 931
+
+const ESCAPES = "a|Z| |\\\"|\\\\|\\/|\\b|\\f|\\n|\\t|\\u00e9|\\u4e2d|\\ud83d\\ude00|\\u0000|\\u001f|\\u2028|é|<>&|😀|\\u007f"
+
+const INTS = "0|-0|1|-1|9223372036854775807|-9223372036854775808|9223372036854775808|1e2|1.0|01|123|-7|true|null|\"1\""
+
+// pick returns one of the |-separated items of list.
+fn pick(rng mut dice.Rand, list str) str {
+	let items = twine.Split(list, "|")
+	return items[rng.Intn(len(items))]
+}
+
+// jsonString is a JSON string of a few generated escapes and characters.
+fn jsonString(rng mut dice.Rand) str {
+	mut s = "\""
+	for k in 0..rng.Intn(5) {
+		s += pick(mut rng, ESCAPES)
+	}
+	return s + "\""
+}
+
+// pointDoc is a generated Point document: members X and Y, sometimes missing, repeated or with another case.
+fn pointDoc(rng mut dice.Rand) str {
+	mut parts = []str{}
+	if rng.Intn(5) > 0 {
+		parts = append(parts, "\"X\":" + pick(mut rng, INTS))
+	}
+	if rng.Intn(5) > 0 {
+		parts = append(parts, "\"Y\":" + pick(mut rng, INTS))
+	}
+	if rng.Intn(6) == 0 {
+		parts = append(parts, "\"x\":" + pick(mut rng, INTS))
+	}
+	return "{{" + twine.Join(parts, ",") + "}}"
+}
+
+// noteDoc is a generated Note document: members Title, Tags, At and Ok, with the odd extra or misspelt member.
+fn noteDoc(rng mut dice.Rand) str {
+	mut parts = []str{}
+	if rng.Intn(5) > 0 {
+		parts = append(parts, "\"Title\":" + jsonString(mut rng))
+	}
+	if rng.Intn(5) > 0 {
+		mut tags = []str{}
+		for k in 0..rng.Intn(4) {
+			tags = append(tags, jsonString(mut rng))
+		}
+		parts = append(parts, "\"Tags\":[" + twine.Join(tags, ",") + "]")
+	}
+	if rng.Intn(4) == 0 {
+		parts = append(parts, "\"At\":null")
+	} else {
+		parts = append(parts, "\"At\":" + pointDoc(mut rng))
+	}
+	if rng.Intn(5) > 0 {
+		parts = append(parts, "\"Ok\":" + pick(mut rng, "true|false|null|1"))
+	}
+	if rng.Intn(6) == 0 {
+		parts = append(parts, "\"Extra\":[1," + pick(mut rng, INTS) + "]")
+	}
+	return "{{" + twine.Join(parts, ",") + "}}"
+}
+
+// mutate changes one byte of doc (removed, replaced or inserted) so the result is usually malformed.
+fn mutate(rng mut dice.Rand, doc str) str {
+	let marks = " ,:]}}\"\\x1"
+	if len(doc) == 0 {
+		return marks
+	}
+	let at = rng.Intn(len(doc))
+	let c = marks[rng.Intn(len(marks))]
+	let k = rng.Intn(3)
+	if k == 0 {
+		return doc[0:at] + doc[at+1:]
+	}
+	if k == 1 {
+		return doc[0:at] + str([]u8{c}) + doc[at+1:]
+	}
+	return doc[0:at] + str([]u8{c}) + doc[at:]
+}
+
+// notes are the hand-written Note documents: each line of the corpus has its own case.
+fn notes() []str {
+	return []str{
+		"{{\"Title\":\"a\",\"Tags\":[\"x\"],\"At\":null,\"Ok\":true}}", "{{\"Title\":\"\",\"Tags\":[],\"At\":{{\"X\":1,\"Y\":2}},\"Ok\":false}}",
+		"{{\"Title\":\"<&>\",\"Tags\":[\"\\u00e9\"]}}", "{{\"Title\":\"x\",\"Extra\":[1,{{\"a\":null}}],\"Ok\":true}}", "{{\"title\":\"lower\"}}",
+		"{{\"Title\":\"d\",\"Title\":\"e\"}}", "{{\"Title\":null,\"Tags\":null,\"At\":null,\"Ok\":null}}", "{{\"Title\":1}}", "{{\"Tags\":[\"a\",1]}}",
+		"{{\"At\":{{\"X\":\"1\"}}}}", "{{\"At\":{{\"X\":1.5}}}}", "{{\"At\":{{\"X\":9223372036854775807,\"Y\":-9223372036854775808}}}}",
+		"{{\"At\":{{\"X\":9223372036854775808}}}}", "{{\"Ok\":\"true\"}}", "[]", "null", "1", "\"\"", "{{}}", "{{\"Title\":\"a\\u0000b\"}}",
+		"{{\"Title\":\"\\ud83d\\ude00\"}}", "{{\"Title\":\"\\ud800\"}}", "{{\"Tags\":[\"a\"]}} x", "{{\"Title\":\"x\",}}", "{{\"Title\" \"x\"}}",
+		"{{\"Title\":\"\\u2028\\u2029\"}}", "{{\"At\":{{\"X\":1,\"X\":2}}}}", "{{\"Tags\":[[\"a\"]]}}", "{{\"Tags\":\"a\"}}", "{{\"At\":[]}}",
+	}
+}
+
+// points are the hand-written Point documents.
+fn points() []str {
+	return []str{
+		"{{\"X\":1,\"Y\":-2}}", "{{\"X\":1}}", "{{\"X\":1,\"Y\":2,\"Z\":3}}", "{{\"X\":01}}", "{{\"X\":-0}}", "{{\"X\":1e2}}", "{{\"X\":1.0}}",
+		"{{\"x\":1}}", "{{}}", "[1,2]", "null", "{{\"X\":9223372036854775807,\"Y\":-9223372036854775808}}", "{{\"X\":9223372036854775808}}",
+		"{{\"X\":-9223372036854775809}}", "{{\"X\":\"1\",\"Y\":2}}", "{{\"X\":1,\"Y\":2}} {{\"X\":3}}", "{{\"X\":true}}", "{{\"X\":null,\"Y\":null}}",
+		"{{\"X\":1,\"X\":1}}", "{{\"X\":1,\"Y\":2", "", "{{\"Y\":-0,\"X\":123456789012}}",
+	}
+}
+
+// corpus is the case lines: the hand-written documents, then generated ones and their mutations.
+fn corpus() []str {
+	let rng = dice.New(SEED)
+	mut lines = []str{}
+	for doc in notes() {
+		lines = append(lines, "N " + seal.Hex([]u8(doc)))
+	}
+	for doc in points() {
+		lines = append(lines, "P " + seal.Hex([]u8(doc)))
+	}
+	// Each generated document keeps the type it was made for; a mutation is decoded as either.
+	mut docs = []str{}
+	mut modes = []str{}
+	for i in 0..150 {
+		docs = append(docs, noteDoc(mut rng))
+		modes = append(modes, "N")
+	}
+	for i in 0..150 {
+		docs = append(docs, pointDoc(mut rng))
+		modes = append(modes, "P")
+	}
+	for i in 0..60 {
+		let at = rng.Intn(len(docs))
+		docs = append(docs, mutate(mut rng, docs[at]))
+		modes = append(modes, modes[at])
+	}
+	for i in 0..len(docs) {
+		lines = append(lines, modes[i] + " " + seal.Hex([]u8(docs[i])))
+	}
+	return lines
+}
+
+// run answers the case lines with the program exe.
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 600, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/jsonv2")
+	ci.Mkdirs(directory)
+	ci.Write(ci.Join(directory, "corpus.txt"), data)
+	let work = ci.TempDir(directory, "jsonv2-")
+	let tin = ci.Join(work, "jsonv2-tin")
+	ci.BuildTin("tools/ci/fixtures/jsonv2.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "jsonv2-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "."}, ci.Join(ci.Root(), "bench/ref/jsonv2"), 300), "go build jsonv2")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "jsonv2: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line("case " + mint.Itoa(i + 1) + ": " + lines[i])
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, "jsonv2: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ")
+	ci.Remove(work)
+	ci.Pass("jsonv2: " + mint.Itoa(len(want)) + " cases match Go's encoding/json/v2")
+}

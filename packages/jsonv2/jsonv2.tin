@@ -1,0 +1,87 @@
+// Package jsonv2 is encoding/json/v2's surface over argo and jsontext: Marshal and Unmarshal with options (#931). argo does the typed
+// work (its encoders and decoders are generated per type); jsontext rewrites the encoded text with the options and checks text for the
+// v2 rules argo does not apply (malformed text and duplicate member names are refused). The differences from v2 are in README.md.
+package jsonv2
+
+import "argo"
+import "constraints"
+import "fault"
+import "jsontext"
+import "twine"
+
+// Options are the v2 options this package implements: the formatting of Marshal's output (jsontext's options), whether Unmarshal
+// accepts duplicate member names, and whether it refuses members that match no field.
+type Options struct {
+	// Multiline starts a new line for each member and element.
+	Multiline bool
+	// Indent is the text written per nesting level; it implies Multiline.
+	Indent str
+	// IndentPrefix is written at the start of each line after the first, before Indent.
+	IndentPrefix str
+	// SpaceAfterColon writes a space after each member name's colon.
+	SpaceAfterColon bool
+	// SpaceAfterComma writes a space after each comma.
+	SpaceAfterComma bool
+	// EscapeForHTML escapes <, > and & in the strings Marshal writes, as <, > and &.
+	EscapeForHTML bool
+	// EscapeForJS escapes U+2028 and U+2029 in the strings Marshal writes.
+	EscapeForJS bool
+	// AllowDuplicateNames lets Unmarshal accept an object with the same member name twice.
+	AllowDuplicateNames bool
+	// RejectUnknownMembers makes Unmarshal fail on a member that matches no field (argo.GetStrict).
+	RejectUnknownMembers bool
+}
+
+// Marshal returns the JSON encoding of v, formatted with opts. It has no newline at the end, as Go's Marshal has none. Strings are not
+// HTML-escaped unless opts asks for it.
+fn Marshal[T constraints.Any](v T, opts Options) !str {
+	mut b = []u8{}
+	argo.Put(mut b, v)
+	return try reformat(str(b), opts)
+}
+
+// Unmarshal parses the JSON text s into v, a struct, slice or map. Malformed text and duplicate member names are faults (unless
+// AllowDuplicateNames); a member that matches no field is a fault with RejectUnknownMembers. A fault leaves v unchanged.
+fn Unmarshal[T constraints.Any](s str, v mut T, opts Options) ! {
+	try check(s, opts)
+	if opts.RejectUnknownMembers {
+		try argo.GetStrict(s, mut v)
+	} else {
+		try argo.Get(s, mut v)
+	}
+}
+
+// jsontextOptions is the jsontext encoder's options for opts.
+fn jsontextOptions(opts Options) jsontext.Options {
+	return jsontext.Options{Multiline: opts.Multiline, Indent: opts.Indent, IndentPrefix: opts.IndentPrefix, SpaceAfterColon: opts.SpaceAfterColon, SpaceAfterComma: opts.SpaceAfterComma, EscapeForHTML: opts.EscapeForHTML, EscapeForJS: opts.EscapeForJS}
+}
+
+// reformat rewrites the JSON text s token by token with the options, and drops the newline that ends a top-level value.
+fn reformat(s str, opts Options) !str {
+	mut d = jsontext.NewDecoder(s, jsontext.Options{})
+	mut e = jsontext.NewEncoder(jsontextOptions(opts))
+	for {
+		let t = d.ReadToken() catch err {
+			if fault.Is(err, jsontext.EOF) {
+				break
+			}
+			fail err
+		}
+		try e.WriteToken(t)
+	}
+	return twine.TrimSuffix(e.Bytes(), "\n")
+}
+
+// check reads every value of s, so that malformed text and duplicate names fail as jsontext reports them for a value (as Go's Unmarshal
+// reads one).
+fn check(s str, opts Options) ! {
+	mut d = jsontext.NewDecoder(s, jsontext.Options{AllowDuplicateNames: opts.AllowDuplicateNames})
+	for {
+		let v = d.ReadValue() catch err {
+			if fault.Is(err, jsontext.EOF) {
+				break
+			}
+			fail err
+		}
+	}
+}
