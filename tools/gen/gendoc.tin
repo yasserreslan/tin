@@ -99,6 +99,7 @@ fn packages() []str {
 		"database", "generic SQL drivers, pooling and queries (database/sql)",
 		"kafka", "Kafka client (franz-go, sarama)",
 		"websocket", "WebSocket server and client (gorilla/websocket)",
+		"s3", "S3-compatible object storage client with Signature Version 4 (aws-sdk-go-v2 s3)",
 		"atomic", "counters and flags every core may change (sync/atomic)",
 		"lane", "a bounded queue between the tasks of one core (buffered channels)",
 		"replay", "recording and reading request capsules for tin replay",

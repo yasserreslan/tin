@@ -1,0 +1,93 @@
+package main
+
+import "flume"
+import "mint"
+import "quarry"
+import "s3"
+import "say"
+import "seal"
+import "twine"
+
+// The Tin side of tools/ci/s3_check.tin's differential test: it signs each request of the corpus on standard input with
+// packages/s3 and prints "name Authorization" or "name URL", as bench/ref/s3sig does with the AWS SDK for Go v2.
+
+// field decodes one hex field ("-" is empty).
+fn field(s str) str {
+	if s == "-" {
+		return ""
+	}
+	let b = seal.HexDecode(s) catch _ {
+		quarry.Eprintln("s3_sig: bad hex field " + s)
+		quarry.Exit(2)
+		[]u8{}
+	}
+	return str(b)
+}
+
+// sign signs one corpus line.
+fn sign(line str) !str {
+	let f = twine.Fields(line)
+	mut at = 0
+	mut vals = []str{}
+	for x in f {
+		vals = append(vals, field(x))
+	}
+	let name = vals[0]
+	let method = vals[1]
+	let scheme = vals[2]
+	let host = vals[3]
+	let path = vals[4]
+	at = 5
+	let nq = try mint.Atoi(vals[at])
+	at += 1
+	mut query = []str{}
+	for i in 0..2 * nq {
+		query = append(query, vals[at + i])
+	}
+	at += 2 * nq
+	let nh = try mint.Atoi(vals[at])
+	at += 1
+	mut headers = []str{}
+	for i in 0..2 * nh {
+		headers = append(headers, vals[at + i])
+	}
+	at += 2 * nh
+	let payload = vals[at]
+	let length = try mint.Atoi(vals[at + 1])
+	let cfg = s3.Config{Endpoint: scheme + "://" + host, Region: vals[at + 5], AccessKey: vals[at + 2], SecretKey: vals[at + 3], Token: vals[at + 4]}
+	let service = vals[at + 6]
+	let unix = try mint.Atoi(vals[at + 7])
+	let expires = try mint.Atoi(vals[at + 8])
+	let r = s3.Request{Method: method, Scheme: scheme, Host: host, Path: s3.EscapePath(path), Query: query, Headers: headers, PayloadHash: payload, ContentLength: length}
+	if expires > 0 {
+		let q = s3.PresignRequest(cfg, service, r, expires, unix)
+		return name + " " + scheme + "://" + host + s3.EscapePath(path) + "?" + q
+	}
+	let s = s3.SignRequest(cfg, service, r, unix)
+	return name + " " + s.Authorization
+}
+
+// run signs every line of standard input.
+fn run() ! {
+	mut in = flume.New(0)
+	mut out = flume.Stdout()
+	for {
+		let (line, more) = try in.Line()
+		if !more {
+			break
+		}
+		if len(line) == 0 {
+			continue
+		}
+		let s = try sign(line)
+		out.Line(s)
+	}
+	try out.Flush()
+}
+
+fn main() {
+	run() catch err {
+		quarry.Eprintln("s3_sig: " + say.Str(err))
+		quarry.Exit(2)
+	}
+}

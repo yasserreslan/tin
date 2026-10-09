@@ -142,6 +142,53 @@ fn DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body
 	return Copied{Status: s.Status, Bytes: n}
 }
 
+// Head is a response's status and header fields, as DoStreamToHead gives them before the body.
+type Head struct {
+	Status i64
+	head   str
+}
+
+// Header returns the response header name (any case), or "".
+fn (h Head) Header(name str) str {
+	return field_of(h.head, name)
+}
+
+// HeadWriter is an io.Writer that is told the response's head before its body: a client that
+// must know the status before it keeps a body (an object store's error answer is no object).
+shape HeadWriter {
+	mut Write(data []u8) !i64
+	mut Begin(h Head) !
+}
+
+// DoStreamToHead is DoStreamTo with w.Begin called once with the response's status and fields
+// before any body byte is written to w; a fault from Begin ends the call, closing the connection.
+fn DoStreamToHead[R io.Reader, W HeadWriter](method str, url str, headers []str, body R, opt Options, w mut W) !Copied {
+	mut s = try DoStream(method, url, headers, body, opt)
+	let berr = w.Begin(Head{Status: s.Status, head: s.head})
+	if berr != nil {
+		s.Close()
+		fail berr
+	}
+	mut buf = make([]u8, streamBuf)
+	mut n = 0
+	for {
+		let k = s.Read(mut buf) catch err {
+			s.Close()
+			fail err
+		}
+		if k == 0 {
+			break
+		}
+		let (_, werr) = w.Write(buf[0:k])
+		if werr != nil {
+			s.Close()
+			fail werr
+		}
+		n += k
+	}
+	return Copied{Status: s.Status, Bytes: n}
+}
+
 fn decimal(v str) !i64 {
 	mut x = 0
 	mut digits = 0
