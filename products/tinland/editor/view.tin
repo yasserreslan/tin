@@ -40,9 +40,24 @@ fn kindColor(th theme.Theme, kind i64) i64 {
 }
 
 // UseFont sets the character cell from the code font: its advance, and a line a little taller than the font.
+// lineHeightScale is what a line is tall as a multiple of the font's own height: 1.2 unless the settings name another.
+mut lineHeightScale = 1.2
+
+// SetLineHeight chooses the multiple of the font's height a line is tall as (0.8 to 2.0, clamped).
+fn SetLineHeight(scale f64) {
+	mut v = scale
+	if v < 0.8 {
+		v = 0.8
+	}
+	if v > 2.0 {
+		v = 2.0
+	}
+	lineHeightScale = v
+}
+
 fn (ed mut Editor) UseFont() {
 	ed.CharW = render.CodeCell()
-	ed.LineH = f64(i64(render.LineHeight(render.FontCode) * 1.2 + 0.5))
+	ed.LineH = f64(i64(render.LineHeight(render.FontCode) * lineHeightScale + 0.5))
 }
 
 // Prepare does what a frame needs that stores new memory: the multi-line string state of each line. Call it outside the
