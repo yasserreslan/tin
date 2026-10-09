@@ -274,9 +274,28 @@ fn main() {
 	say.Line(x)
 }
 
+<<<<<<< HEAD
 --- untitled row 1 col 9 dirty true
 one two 
 --- untitled row 1 col 8 dirty true
 one twothree four
 --- untitled row 1 col 9 dirty true
 one two hree
+=======
+diag: 4 2 4 8 E262 missing return value
+diag: 8 2 8 8 E262 missing return value
+diags: 2
+next: true 4 2
+at broken.tin 4 2
+next: true 8 2
+at broken.tin 8 2
+next: true 4 2
+at broken.tin 4 2
+prev: true 4 2
+at broken.tin 4 2
+prev: true 4 2
+at broken.tin 4 2
+prev: true 4 2
+at broken.tin 4 2
+message: missing return value
+>>>>>>> ab54fe74 (Tinland: F8 goes to the next problem the compiler found, Shift+F8 to the previous one)

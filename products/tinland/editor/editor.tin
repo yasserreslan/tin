@@ -35,6 +35,7 @@ const keyHome = 115
 const keyEnd = 119
 const keyPageUp = 116
 const keyPageDown = 121
+const keyF8 = 100
 
 // Key is one key press: the hardware code, the modifier flags and the text it types.
 type Key struct {
@@ -599,6 +600,12 @@ fn (ed mut Editor) handleKey(k Key) {
 		return
 	}
 	if len(ed.Extra) > 0 && ed.multiKey(k) {
+		return
+	}
+	if k.Code == keyF8 {
+		// F8 goes to the next problem, Shift+F8 to the previous one
+		ed.NextProblem((k.Flags & flagShift) == 0)
+		ed.ensureVisible()
 		return
 	}
 	let shift = (k.Flags & flagShift) != 0

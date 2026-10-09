@@ -45,6 +45,8 @@ const CmdToggleRuler = 41
 const CmdCloseOthers = 45
 const CmdSelectNext = 47
 const CmdCloseAll = 46
+const CmdNextProblem = 50
+const CmdPrevProblem = 51
 
 // Perform does a menu command by pressing the key that does the same.
 fn (ed mut Editor) Perform(cmd i64) {
@@ -74,6 +76,14 @@ fn (ed mut Editor) Perform(cmd i64) {
 		} else {
 			ed.Say("ruler off")
 		}
+		return
+	}
+	if cmd == CmdNextProblem {
+		ed.NextProblem(true)
+		return
+	}
+	if cmd == CmdPrevProblem {
+		ed.NextProblem(false)
 		return
 	}
 	if cmd == CmdSelectLine {

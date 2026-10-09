@@ -89,6 +89,7 @@ fn (ed Editor) dump() {
 //   whitespace       toggles the whitespace marks (prints the new state)
 //   tabs             prints how many tabs are open, which is active and its name; closeothers keeps the active
 //   counts           prints the text's lines, words and characters
+//   nextproblem, prevproblem  put the caret at the next or previous problem the compiler found
 //   one, closeall leaves one empty tab
 //   guides           toggles the indent guides (prints the new state)
 //   snap:PATH        draws the editor and writes it as a PNG
@@ -235,6 +236,10 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
 		} else if step == "selnext" {
 			say.Line("selected:", ed.SelectNext())
+		} else if step == "nextproblem" {
+			say.Line("next:", ed.NextProblem(true), ed.Buf.Row + 1, ed.Buf.Col + 1)
+		} else if step == "prevproblem" {
+			say.Line("prev:", ed.NextProblem(false), ed.Buf.Row + 1, ed.Buf.Col + 1)
 		} else if step == "counts" {
 			say.Line("counts", ed.Counts())
 		} else if step == "tabs" {

@@ -37,6 +37,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+F, Cmd+G (Shift: backwards) | find as you type; Tab switches to the replacement, Return replaces, Cmd+Return replaces all |
 | Cmd+L | go to line |
 | Cmd+Shift+O | go to a symbol in the file (the declarations the compiler reports: functions, types and constants, narrowed by typing) |
+| F8, Shift+F8 | go to the next problem the compiler found, and to the previous one, wrapping around the end of the file (the message is in the status bar) |
 | Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
 | Cmd+/ | comment or uncomment lines; Edit > Sort Lines and Trim Trailing Whitespace sort the touched lines and remove their trailing spaces and tabs (the command palette has both) |
 | Cmd+Alt+Down, Cmd+Alt+Up, Cmd+Shift+L | add a caret on the line below or above (typing, Backspace, Delete and the arrows then act on every caret; Escape puts them away), and select every occurrence of the selected text so typing changes them all at once |
