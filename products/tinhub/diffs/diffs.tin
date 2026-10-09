@@ -108,7 +108,8 @@ fn isHex(s str) bool {
 }
 
 // EnqueueFor queues the jobs of a push in tx (the push fan-out calls it with the push event's repository and
-// payload): a review.diff job for each change version the push added. It returns the jobs queued.
+// payload): a review.diff job for each change version the push added and no job has been queued for yet, so a fan-out
+// run again queues nothing twice. It returns the jobs queued.
 fn EnqueueFor(tx mut postgres.Tx, repoId i64, payload str) !i64 {
 	mut p = push{changes: []changeMove{}}
 	argo.Get(payload, mut p) catch err {
@@ -117,6 +118,10 @@ fn EnqueueFor(tx mut postgres.Tx, repoId i64, payload str) !i64 {
 	mut n = 0
 	for c in p.changes {
 		if !isHex(c.commit) || len(c.change) == 0 {
+			continue
+		}
+		let queued = try tx.Query("SELECT 1 FROM events WHERE kind = {DiffKind} AND repo_id = {repoId} AND payload->>'change' = {c.change} AND payload->>'commit' = {c.commit} LIMIT 1")
+		if len(queued.Rows) > 0 {
 			continue
 		}
 		mut buf = []u8{}
