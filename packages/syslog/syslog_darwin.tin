@@ -1,0 +1,54 @@
+package syslog
+
+extern fn socket(domain i64, typ i64, proto i64) i64
+extern fn bind(fd i64, addr i64, n i64) i64
+extern fn listen(fd i64, backlog i64) i64
+extern fn accept(fd i64, addr i64, n i64) i64
+extern fn connect(fd i64, addr i64, n i64) i64
+extern fn recv(fd i64, buf i64, n i64, flags i64) i64
+
+// sysSocket creates a socket; a negative result is an error.
+fn sysSocket(domain i64, typ i64, proto i64) i64 {
+	return i64(i32(socket(domain, typ, proto)))
+}
+
+// sysBind binds socket fd to the address sa of length n.
+fn sysBind(fd i64, sa i64, n i64) i64 {
+	return i64(i32(bind(fd, sa, n)))
+}
+
+// sysListen makes stream socket fd accept connections, with a backlog of n.
+fn sysListen(fd i64, n i64) i64 {
+	return i64(i32(listen(fd, n)))
+}
+
+// sysAccept takes the next connection of listening socket fd.
+fn sysAccept(fd i64) i64 {
+	return i64(i32(accept(fd, 0, 0)))
+}
+
+// sysConnect connects socket fd to the address sa of length n.
+fn sysConnect(fd i64, sa i64, n i64) i64 {
+	return i64(i32(connect(fd, sa, n)))
+}
+
+// sysRecv receives one datagram (or the bytes available) of socket fd into buf.
+fn sysRecv(fd i64, buf i64, n i64) i64 {
+	return i64(recv(fd, buf, n, 0))
+}
+
+// sockaddrUnix builds the sockaddr_un of path (BSD layout: a length byte, a family byte, then the 104-byte sun_path). It returns the
+// address and its length.
+fn sockaddrUnix(path str) !(i64, i64) {
+	if len(path) >= 104 {
+		fail "syslog: socket path {path} is too long"
+	}
+	let n = 2 + len(path) + 1
+	let sa = calloc(1, 106)
+	store8(sa, n)
+	store8(sa+1, 1)
+	for i in 0..len(path) {
+		store8(sa+2+i, i64(path[i]))
+	}
+	return sa, n
+}

@@ -1,0 +1,113 @@
+package main
+
+import "herald"
+import "quarry"
+import "say"
+import "syslog"
+import "twine"
+
+// shape replaces the time and process id of a local frame (the tag is tag) with TS and PID, so the output is the same on every run.
+fn shape(d str, tag str) str {
+	let gt = twine.IndexByte(d, '>')
+	let sp = twine.Index(d, " " + tag + "[")
+	let close = twine.Index(d, "]: ")
+	return d[0:gt+1] + "TS" + d[sp:sp+len(tag)+2] + "PID" + d[close:]
+}
+
+// shapeNet is shape for a network frame, which also carries the host name (masked: it differs between machines).
+fn shapeNet(d str, tag str) str {
+	let gt = twine.IndexByte(d, '>')
+	let rest = d[gt+1:]
+	let tagAt = twine.Index(rest, " " + tag + "[")
+	let close = twine.Index(rest, "]: ")
+	return d[0:gt+1] + "TS HOST" + rest[tagAt:tagAt+len(tag)+2] + "PID" + rest[close:]
+}
+
+// dialErr is the error text of a Dial that fails, or "connected" when it does not.
+fn dialErr(network str, addr str, priority i64) str {
+	mut w = syslog.Dial(network, addr, priority, "t") catch err {
+		return say.Str(err)
+	}
+	w.Close()
+	return "connected"
+}
+
+fn run() ! {
+	say.Line("consts", syslog.LogEmerg, syslog.LogDebug, syslog.LogKern, syslog.LogMail, syslog.LogLocal0, syslog.LogLocal7)
+
+	// Frame: the local layout (no host) and the network layout, with a newline added or not.
+	say.Line(say.Fmt("%q", syslog.Frame(true, 190, "Oct  9 12:00:00", "ignored", "app", 42, "hello")))
+	say.Line(say.Fmt("%q", syslog.Frame(false, 11, "2026-10-09T12:00:00Z", "host1", "app", 7, "line\n")))
+	say.Line(say.Fmt("%q", syslog.Frame(false, 11, "2026-10-09T12:00:00+02:00", "h", "t", 1, "")))
+	say.Line(say.Fmt("%q", syslog.Frame(true, 6, "Jan  1 00:00:00", "h", "t", 0, "a\n\n")))
+
+	// HeraldMessage: pairs are "k=v", and a value with a space, quote, '=' or no characters at all is quoted.
+	say.Line(syslog.HeraldMessage("ready", []str{"addr", ":8080", "note", "two words", "empty", "", "q", "a\"b", "eq", "a=b", "ok", "x"}))
+
+	// Dial failures: the priority check, an unknown network, a name where an IPv4 address is needed, and a socket nobody listens on.
+	say.Line(dialErr("", "", 192))
+	say.Line(dialErr("", "", -1))
+	say.Line(dialErr("bogus", "x", 0))
+	say.Line(dialErr("udp", "localhost:514", 0))
+	say.Line(dialErr("unixgram", "/tmp/tin-test-syslog-none.sock", 0))
+
+	// A datagram round trip: Info, Write, Herald, then Close and Err reconnects.
+	let path = "/tmp/tin-test-syslog.sock"
+	quarry.Remove(path) catch _ {}
+	mut c = try syslog.Listen("unixgram", path)
+	mut w = try syslog.Dial("unixgram", path, syslog.LogLocal0|syslog.LogNotice, "probe")
+	try w.Info("hello")
+	let d1 = try c.Read(65536)
+	say.Line(say.Fmt("%q", shape(d1, "probe")))
+	let n = try w.Write([]u8{'a', 'b'})
+	say.Line("wrote", n)
+	let d2 = try c.Read(65536)
+	say.Line(say.Fmt("%q", shape(d2, "probe")))
+	try w.Herald(herald.LWarn, "disk", []str{"pct", "91"})
+	let d3 = try c.Read(65536)
+	say.Line(say.Fmt("%q", shape(d3, "probe")))
+	w.Close()
+	try w.Err("again")
+	let d4 = try c.Read(65536)
+	say.Line(say.Fmt("%q", shape(d4, "probe")))
+	w.Close()
+	c.Close()
+	quarry.Remove(path) catch _ {}
+
+	// A stream: two lines in order on one connection.
+	let spath = "/tmp/tin-test-syslog-stream.sock"
+	quarry.Remove(spath) catch _ {}
+	mut s = try syslog.Listen("unix", spath)
+	mut sw = try syslog.Dial("unix", spath, syslog.LogDaemon|syslog.LogInfo, "sd")
+	try sw.Info("one")
+	try sw.Err("two")
+	mut text = ""
+	mut lines = 0
+	for lines < 2 {
+		let chunk = try s.Read(65536)
+		text = text + chunk
+		lines += twine.Count(chunk, "\n")
+	}
+	let parts = twine.Split(text, "\n")
+	say.Line(say.Fmt("%q", shape(parts[0] + "\n", "sd")))
+	say.Line(say.Fmt("%q", shape(parts[1] + "\n", "sd")))
+	sw.Close()
+	s.Close()
+	quarry.Remove(spath) catch _ {}
+
+	// UDP on the loopback: the network layout, with the host name.
+	mut u = try syslog.Listen("udp", "127.0.0.1:41977")
+	mut uw = try syslog.Dial("udp", "127.0.0.1:41977", syslog.LogUser|syslog.LogAlert, "udp")
+	try uw.Alert("up")
+	let d5 = try u.Read(65536)
+	say.Line(say.Fmt("%q", shapeNet(d5, "udp")))
+	uw.Close()
+	u.Close()
+}
+
+fn main() {
+	run() catch err {
+		say.Line("syslog test: " + say.Str(err))
+		quarry.Exit(1)
+	}
+}

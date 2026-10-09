@@ -1,0 +1,354 @@
+package main
+
+import "./ci"
+import "dice"
+import "mint"
+import "quarry"
+import "say"
+import "spawn"
+import "syslog"
+import "tide"
+import "twine"
+import "wire"
+
+// Compare the wire bytes of syslog with Go's log/syslog (#929).
+//
+// Every run sends the same generated script (edge messages first, then random severities, Writes and, where the run allows it,
+// Closes that reconnect) through bench/ref/syslog (Go) and tools/ci/fixtures/syslog.tin (Tin). A collector written in this check
+// reads what each client sends while the client runs (a macOS datagram queue is small, so the reader must keep up): datagrams over
+// a Unix socket (unixgram), a Unix stream (unix), TCP (tcp, through wire) and IPv4 UDP. The frames must match line by line, except
+// the time and the process id: those are checked for their layout (and, for the network format, for being recent) and replaced.
+
+const SEED = 929
+
+// run is one comparison: the network, the priority and the tag of the Writer, and whether its script may Close (and reconnect).
+// embedded says the messages may hold newlines inside (a datagram is one message whatever it holds; a stream's frames end at each
+// newline, so its messages hold only a final one).
+type run struct {
+	network   str
+	priority  i64
+	tag       str
+	reconnect bool
+	embedded  bool
+}
+
+// runs are the comparisons: local datagrams and a local stream, and the network formats.
+fn runs() []run {
+	return []run{
+		run{network: "unixgram", priority: 190, tag: "tin-check", reconnect: false, embedded: true},
+		run{network: "unixgram", priority: 23, tag: "mail", reconnect: true, embedded: true},
+		run{network: "unix", priority: 29, tag: "daemon", reconnect: true, embedded: false},
+		run{network: "tcp", priority: 33, tag: "auth", reconnect: true, embedded: false},
+		run{network: "udp", priority: 11, tag: "udp-tag", reconnect: false, embedded: true},
+	}
+}
+
+// hexOf is the script's text for a message: its hex digits, or "-" for an empty one.
+fn hexOf(b []u8) str {
+	if len(b) == 0 {
+		return "-"
+	}
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for x in b {
+		out = append(out, digits[x >> 4])
+		out = append(out, digits[x & 15])
+	}
+	return str(out)
+}
+
+// message is one random message: bytes from a small alphabet with some random ones, and no newline except at its end unless the
+// run allows newlines inside.
+fn message(rng mut dice.Rand, embedded bool) []u8 {
+	let alphabet = []u8{'a', 'Z', '%', '"', '=', ' ', '[', ']', ':', '\t', 0xc3, 0xa9, 0xff}
+	mut out = []u8{}
+	let n = rng.Range(0, 121)
+	for k in 0..n {
+		mut c = alphabet[rng.Range(0, len(alphabet))]
+		if rng.Range(0, 8) == 0 {
+			c = u8(rng.Range(0, 256))
+		}
+		if c == '\n' && !embedded {
+			c = ' '
+		}
+		out = append(out, c)
+	}
+	if rng.Range(0, 4) == 0 {
+		out = append(out, '\n')
+	}
+	return out
+}
+
+// script builds the operations of one run, one per line as bench/ref/syslog reads them, and the number of messages they send. The
+// first lines are edge messages: an empty one, a bare newline, a message with a newline and a Write.
+fn script(r run, seed i64) (str, i64) {
+	mut rng = dice.New(u64(seed))
+	mut lines = []str{"S 6 -", "S 4 0a", "W 6161", "S 7 78"}
+	mut sent = 4
+	if r.embedded {
+		lines = append(lines, "W 780a0a")
+		sent += 1
+	}
+	mut closes = 0
+	for i in 0..100 {
+		let k = rng.Range(0, 12)
+		if k == 0 && r.reconnect && closes < 6 {
+			lines = append(lines, "C")
+			closes += 1
+		} else if k < 4 {
+			lines = append(lines, "W " + hexOf(message(mut rng, r.embedded)))
+			sent += 1
+		} else {
+			let sev = rng.Range(0, 8)
+			lines = append(lines, "S " + mint.Itoa(sev) + " " + hexOf(message(mut rng, r.embedded)))
+			sent += 1
+		}
+	}
+	return twine.Join(lines, "\n") + "\n", sent
+}
+
+// stampOK reports whether ts is a time in the Stamp layout (the time of a local frame).
+fn stampOK(ts str) bool {
+	// Stamp has no year, and a year 0 is outside Unix time: a fixed year is put in front of both.
+	tide.Parse("2006 " + tide.Stamp, "2026 " + ts, tide.Local()) catch _ {
+		return false
+	}
+	return true
+}
+
+// recentOK reports whether ts is an RFC 3339 time within two minutes of now (the time of a network frame).
+fn recentOK(ts str) bool {
+	let ns = tide.ParseRFC3339(ts) catch _ {
+		return false
+	}
+	let age = tide.Wall() - ns
+	return age < 120s && age > -120s
+}
+
+// digitsOnly reports whether s is a non-empty run of decimal digits.
+fn digitsOnly(s str) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i in 0..len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// mask replaces the time and the process id of one frame with TS and PID, after checking that the time is well formed (and recent,
+// on a network frame). A frame that fails the check comes back with a "!" in front, so it can never match.
+fn mask(frame str, local bool) str {
+	let gt = twine.IndexByte(frame, '>')
+	if len(frame) < 2 || frame[0] != '<' || gt < 0 {
+		return "!" + frame
+	}
+	let pri = frame[1:gt]
+	mut rest = frame[gt+1:]
+	if local {
+		if len(rest) < 15 || !stampOK(rest[0:15]) {
+			return "!" + frame
+		}
+		rest = rest[15:]
+	} else {
+		let sp = twine.IndexByte(rest, ' ')
+		if sp < 0 || !recentOK(rest[0:sp]) {
+			return "!" + frame
+		}
+		rest = rest[sp:]
+	}
+	let open = twine.IndexByte(rest, '[')
+	if open < 0 {
+		return "!" + frame
+	}
+	let shut = twine.IndexByte(rest[open:], ']')
+	if shut < 0 || !digitsOnly(rest[open+1:open+shut]) {
+		return "!" + frame
+	}
+	return "<" + pri + ">TS" + rest[0:open+1] + "PID" + rest[open+shut:]
+}
+
+// streamFrames masks the frames of a stream: each frame ends with a newline, so the pieces before the last one are the frames.
+fn streamFrames(text str, local bool) []str {
+	let pieces = twine.Split(text, "\n")
+	mut out = []str{}
+	for i in 0..len(pieces)-1 {
+		out = append(out, mask(pieces[i], local))
+	}
+	return out
+}
+
+// datagramFrames masks each datagram (its inner newlines belong to the message).
+fn datagramFrames(parts []str, local bool) []str {
+	mut out = []str{}
+	for p in parts {
+		out = append(out, mask(p, local))
+	}
+	return out
+}
+
+// startClient starts a client with argv and the script as its standard input (a file in dir).
+fn startClient(argv []str, input str, file str) !spawn.Process {
+	ci.Write(file, input)
+	let c = spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: ci.Root(), Stdin: spawn.Stdio.File(file), Stdout: spawn.Stdio.Null, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}
+	return try spawn.Start(c)
+}
+
+// finish waits for a client and fails the check unless it exited with 0.
+fn finish(p mut spawn.Process, what str) {
+	let code = p.Wait() catch _ {
+		-1
+	}
+	if code != 0 {
+		ci.Fail(what + ": exit " + mint.Itoa(code))
+	}
+}
+
+// readDatagrams takes the next n datagrams of the collector.
+fn readDatagrams(c mut syslog.Collector, n i64) ![]str {
+	mut out = []str{}
+	for i in 0..n {
+		let msg = try c.Read(65536)
+		out = append(out, msg)
+	}
+	return out
+}
+
+// readLines reads a stream until it holds n newlines, and returns its bytes.
+fn readLines(c mut syslog.Collector, n i64) !str {
+	mut text = ""
+	mut lines = 0
+	for lines < n {
+		let chunk = try c.Read(65536)
+		text = text + chunk
+		lines += twine.Count(chunk, "\n")
+	}
+	return text
+}
+
+// datagramRun has the client send the script to a datagram collector (a Unix socket, or UDP on a loopback port) and returns the
+// datagrams the collector read.
+fn datagramRun(r run, exe str, input str, sent i64, dir str, port i64) ![]str {
+	mut addr = "127.0.0.1:" + mint.Itoa(port)
+	mut path = ""
+	if r.network != "udp" {
+		path = ci.Join(dir, r.network + ".sock")
+		quarry.Remove(path) catch _ {}
+		addr = path
+	}
+	mut c = try syslog.Listen(r.network, addr)
+	mut p = try startClient([]str{exe, r.network, addr, mint.Itoa(r.priority), r.tag}, input, ci.Join(dir, "script-" + r.network))
+	let got = try readDatagrams(mut c, sent)
+	finish(mut p, exe)
+	c.Close()
+	if path != "" {
+		quarry.Remove(path) catch _ {}
+	}
+	return got
+}
+
+// unixRun has the client write the script to a Unix stream collector and returns the bytes it read, once they hold sent lines.
+fn unixRun(r run, exe str, input str, sent i64, dir str) !str {
+	let path = ci.Join(dir, "unix.sock")
+	quarry.Remove(path) catch _ {}
+	mut c = try syslog.Listen("unix", path)
+	mut p = try startClient([]str{exe, r.network, path, mint.Itoa(r.priority), r.tag}, input, ci.Join(dir, "script-unix"))
+	let text = try readLines(mut c, sent)
+	finish(mut p, exe)
+	c.Close()
+	quarry.Remove(path) catch _ {}
+	return text
+}
+
+// tcpRun has the client write the script to a TCP listener of this check and returns the bytes of the connections it served, once
+// they hold sent lines (a client that reconnects is served by one connection after another).
+fn tcpRun(r run, exe str, input str, sent i64, dir str) !str {
+	mut l = try wire.Listen("127.0.0.1:0")
+	let addr = "127.0.0.1:" + mint.Itoa(l.Port())
+	mut p = try startClient([]str{exe, r.network, addr, mint.Itoa(r.priority), r.tag}, input, ci.Join(dir, "script-tcp"))
+	mut text = ""
+	mut lines = 0
+	for lines < sent {
+		mut conn = try l.Accept()
+		mut buf = []u8{}
+		for {
+			conn.Read(mut buf, 65536) catch err {
+				if wire.IsEOF(err) {
+					break
+				}
+				fail "tcp read: {say.Str(err)}"
+			}
+		}
+		let chunk = str(buf)
+		text = text + chunk
+		lines += twine.Count(chunk, "\n")
+		conn.Close()
+	}
+	finish(mut p, exe)
+	l.Close()
+	return text
+}
+
+// deliver runs the client exe on run r's script and returns the frames the collector got, masked.
+fn deliver(r run, exe str, input str, sent i64, dir str, port i64) ![]str {
+	let local = r.network != "tcp" && r.network != "udp"
+	if r.network == "unix" {
+		let text = try unixRun(r, exe, input, sent, dir)
+		return streamFrames(text, local)
+	}
+	if r.network == "tcp" {
+		let text = try tcpRun(r, exe, input, sent, dir)
+		return streamFrames(text, local)
+	}
+	let parts = try datagramRun(r, exe, input, sent, dir, port)
+	return datagramFrames(parts, local)
+}
+
+// compare fails the check unless the Go frames and the Tin frames are the same and there is one per message, showing the first
+// differences.
+fn compare(name str, want []str, got []str, sent i64) {
+	ci.Check(i64(len(want)) == sent, name + ": Go delivered " + mint.Itoa(len(want)) + " frames for " + mint.Itoa(sent) + " messages")
+	ci.Check(len(got) == len(want), name + ": " + mint.Itoa(len(got)) + " frames against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	for i in 0..len(want) {
+		if want[i] != got[i] {
+			say.Line(name + " frame " + mint.Itoa(i + 1) + ":")
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+			bad += 1
+			if bad >= 10 {
+				break
+			}
+		}
+	}
+	ci.Check(bad == 0, name + ": " + mint.Itoa(bad) + " frames differ")
+}
+
+// check runs every comparison in order: the Go client and the Tin client on the same script, then their frames compared.
+fn check() ! {
+	let root = ci.Root()
+	let work = ci.TempDir("/tmp", "tin-syslog-")
+	let tin = ci.Join(work, "syslog-tin")
+	ci.BuildTin("tools/ci/fixtures/syslog.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "syslog-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/syslog"}, root, 300), "go build syslog")
+	mut total = 0
+	for idx, r in runs() {
+		let (text, sent) = script(r, SEED+i64(idx))
+		let port = 41000 + i64(idx)
+		let want = try deliver(r, goexe, text, sent, work, port)
+		let got = try deliver(r, tin, text, sent, work, port)
+		compare(r.network + " " + mint.Itoa(r.priority), want, got, sent)
+		total += len(want)
+	}
+	ci.Remove(work)
+	ci.Pass("syslog: " + mint.Itoa(total) + " frames over " + mint.Itoa(len(runs())) + " connections (unixgram, unix, tcp, udp) match Go's log/syslog")
+}
+
+fn main() {
+	check() catch err {
+		ci.Fail("syslog_check: " + say.Str(err))
+	}
+}
