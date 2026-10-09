@@ -1,0 +1,50 @@
+package main
+
+import "./ci"
+import "quarry"
+import "say"
+
+// The Tin reader and Go's debug/macho must print the same lines for the same Mach-O files: a Tin darwin-arm64 executable,
+// and Go's own darwin/arm64 and darwin/amd64 executables of bench/ref/debug_macho.
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci/macho"), "macho-")
+	let reader = ci.Join(work, "reader")
+	let goExe = ci.Join(work, "go-macho")
+	ci.BuildTin("tools/ci/fixtures/macho_reader.tin", reader, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goExe, "./bench/ref/debug_macho"}, root, 300), "build Go Mach-O reader")
+	let tinSample = ci.Join(work, "tin-darwin-arm64")
+	ci.BuildTin("tools/ci/fixtures/macho_sample.tin", tinSample, "", []str{"-target", "darwin-arm64"})
+	let goArm64 = ci.Join(work, "go-darwin-arm64")
+	ci.Must(ci.ExecEnv([]str{"go", "build", "-o", goArm64, "./bench/ref/debug_macho"}, root, 300, []str{"GOOS=darwin", "GOARCH=arm64"}, []str{}), "build Go darwin/arm64 sample")
+	let goAmd64 = ci.Join(work, "go-darwin-amd64")
+	ci.Must(ci.ExecEnv([]str{"go", "build", "-o", goAmd64, "./bench/ref/debug_macho"}, root, 300, []str{"GOOS=darwin", "GOARCH=amd64"}, []str{}), "build Go darwin/amd64 sample")
+	for sample in []str{tinSample, goArm64, goAmd64} {
+		let tinResult = ci.Exec([]str{reader, sample}, root, 60)
+		let goResult = ci.Exec([]str{goExe, sample}, root, 60)
+		ci.Must(tinResult, "Tin reads {sample}")
+		ci.Must(goResult, "Go reads {sample}")
+		let tinLines = ci.Lines(tinResult.Stdout)
+		let goLines = ci.Lines(goResult.Stdout)
+		ci.Check(len(tinLines) == len(goLines), "{sample}: Tin and Go Mach-O line counts ({len(tinLines)} and {len(goLines)})")
+		for i in 0..min(len(tinLines), len(goLines)) {
+			ci.Check(tinLines[i] == goLines[i], "{sample} Mach-O line {i + 1}: Tin {tinLines[i]}, Go {goLines[i]}")
+		}
+	}
+	// A foreign file (Go source) and a truncated executable are rejected by the Tin reader with the format fault.
+	let rejectedForeign = ci.Exec([]str{reader, ci.Join(root, "tools/ci/fixtures/macho_reader.tin")}, root, 60)
+	ci.Must(rejectedForeign, "Tin reads a foreign file")
+	ci.Check(rejectedForeign.Stdout == "rejected true\n", "foreign file: Tin printed {rejectedForeign.Stdout}")
+	let (head, headErr) = quarry.ReadAt(tinSample, 0, 100)
+	ci.Check(headErr == nil && len(head) == 100, "read the head of the Tin executable")
+	let cut = ci.Join(work, "truncated")
+	quarry.WriteFile(cut, head) catch err {
+		ci.Fail("write the truncated executable: {err}")
+	}
+	let rejectedCut = ci.Exec([]str{reader, cut}, root, 60)
+	ci.Must(rejectedCut, "Tin reads a truncated executable")
+	ci.Check(rejectedCut.Stdout == "rejected true\n", "truncated executable: Tin printed {rejectedCut.Stdout}")
+	ci.Remove(work)
+	ci.Pass("Mach-O headers, load commands, sections, symbols, dylibs, UUID and build version of a Tin darwin-arm64 executable and of Go's darwin/arm64 and darwin/amd64 executables agree with Go's debug/macho; buildinfo reads the same metadata; foreign and truncated files are rejected")
+	say.Line("Mach-O reader check passed")
+}

@@ -1,0 +1,247 @@
+package main
+
+import "debug/buildinfo"
+import "debug/macho"
+import "fault"
+import "quarry"
+import "say"
+
+// put appends the low n bytes of v, least significant first.
+fn put(buf mut []u8, v i64, n i64) {
+	for i in 0..n {
+		buf = append(buf, u8((v >> (8*i)) & 0xff))
+	}
+}
+
+// zeros appends n zero bytes.
+fn zeros(buf mut []u8, n i64) {
+	for i in 0..n {
+		buf = append(buf, 0)
+	}
+}
+
+// name appends s padded with NUL bytes to n bytes.
+fn name(buf mut []u8, s str, n i64) {
+	for i in 0..len(s) {
+		buf = append(buf, s[i])
+	}
+	zeros(mut buf, n-len(s))
+}
+
+// image is a 389-byte arm64 executable: a __TEXT segment holding __text (8 bytes 1..8 at offset 336), a symbol table of two
+// symbols, LC_UUID, LC_LOAD_DYLIB, LC_BUILD_VERSION and LC_MAIN. segSize is the segment command's size field (152 when valid).
+fn image(segSize i64) []u8 {
+	mut buf = make([]u8, 0, 400)
+	put(mut buf, 0xfeedfacf, 4)
+	put(mut buf, 0x0100000c, 4)
+	put(mut buf, 0, 4)
+	put(mut buf, 2, 4)
+	put(mut buf, 6, 4)
+	put(mut buf, 304, 4)
+	put(mut buf, 0x200085, 4)
+	put(mut buf, 0, 4)
+	put(mut buf, 0x19, 4)
+	put(mut buf, segSize, 4)
+	name(mut buf, "__TEXT", 16)
+	put(mut buf, 0x100000000, 8)
+	put(mut buf, 4096, 8)
+	put(mut buf, 0, 8)
+	put(mut buf, 389, 8)
+	put(mut buf, 7, 4)
+	put(mut buf, 5, 4)
+	put(mut buf, 1, 4)
+	put(mut buf, 0, 4)
+	name(mut buf, "__text", 16)
+	name(mut buf, "__TEXT", 16)
+	put(mut buf, 0x100000150, 8)
+	put(mut buf, 8, 8)
+	put(mut buf, 336, 4)
+	put(mut buf, 2, 4)
+	put(mut buf, 0, 4)
+	put(mut buf, 0, 4)
+	put(mut buf, 0x80000400, 4)
+	zeros(mut buf, 12)
+	put(mut buf, 2, 4)
+	put(mut buf, 24, 4)
+	put(mut buf, 344, 4)
+	put(mut buf, 2, 4)
+	put(mut buf, 376, 4)
+	put(mut buf, 13, 4)
+	put(mut buf, 0x1b, 4)
+	put(mut buf, 24, 4)
+	for b in []u8{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff} {
+		buf = append(buf, b)
+	}
+	put(mut buf, 0xc, 4)
+	put(mut buf, 56, 4)
+	put(mut buf, 24, 4)
+	put(mut buf, 2, 4)
+	put(mut buf, 0x10000, 4)
+	put(mut buf, 0x10000, 4)
+	name(mut buf, "/usr/lib/libSystem.B.dylib", 32)
+	put(mut buf, 0x32, 4)
+	put(mut buf, 24, 4)
+	put(mut buf, 1, 4)
+	put(mut buf, 0x000b0000, 4)
+	put(mut buf, 0x000e0000, 4)
+	put(mut buf, 0, 4)
+	put(mut buf, 0x80000028, 4)
+	put(mut buf, 24, 4)
+	put(mut buf, 256, 8)
+	put(mut buf, 0, 8)
+	for i in 1..9 {
+		put(mut buf, i, 1)
+	}
+	put(mut buf, 2, 4)
+	put(mut buf, 0x0f, 1)
+	put(mut buf, 1, 1)
+	put(mut buf, 0, 2)
+	put(mut buf, 0x100000150, 8)
+	put(mut buf, 8, 4)
+	put(mut buf, 0x0e, 1)
+	put(mut buf, 1, 1)
+	put(mut buf, 0x10, 2)
+	put(mut buf, 0x100000158, 8)
+	put(mut buf, 0x20, 1)
+	put(mut buf, 0, 1)
+	name(mut buf, "_main", 6)
+	name(mut buf, "_x.y", 5)
+	return buf
+}
+
+fn main() {
+	let path = "/tmp/tin-test-macho-ok"
+	quarry.WriteFile(path, str(image(152))) catch err {
+		say.Line("write failed {err}")
+		return
+	}
+	let f = macho.Open(path) catch err {
+		say.Line("open failed {err}")
+		return
+	}
+	say.Line("header {f.Header.CPU} {f.Header.SubCPU} {f.Header.Type} {f.Header.Commands} {f.Header.CommandBytes} {f.Header.Flags}")
+	for c in f.Commands {
+		say.Line("command {c.Cmd} {c.Size} {c.Offset}")
+	}
+	for s in f.Segments {
+		say.Line("segment {s.Name} {s.Address} {s.MemorySize} {s.Offset} {s.FileSize} {s.MaxProt} {s.InitProt} {s.Sections} {s.Flags}")
+	}
+	for s in f.Sections {
+		say.Line("section {s.Segment} {s.Name} {s.Address} {s.Size} {s.Offset} {s.Align} {s.RelocOffset} {s.Relocations} {s.Flags}")
+	}
+	for d in f.Dylibs {
+		say.Line("dylib {d}")
+	}
+	say.Line("uuid {hexUUIDLower(f.UUID)}")
+	say.Line("build {f.Build.Platform} {f.Build.MinOS} {f.Build.SDK} {f.Build.Tools}")
+	say.Line("entry {f.Entry}")
+	let syms = f.Symbols() catch err {
+		say.Line("symbols rejected {err}")
+		return
+	}
+	say.Line("symbols {len(syms)}")
+	for s in syms {
+		say.Line("symbol {s.Name} {s.Type} {s.Section} {s.Desc} {s.Value}")
+	}
+	let code = f.ReadSection(0) catch err {
+		say.Line("section rejected {err}")
+		return
+	}
+	say.Line("code {len(code)} {code[0]} {code[len(code)-1]}")
+	let info = buildinfo.Read(path) catch err {
+		say.Line("buildinfo rejected {err}")
+		return
+	}
+	say.Line("buildinfo {info.UUID} {info.Platform} {info.MinOS} {info.SDK} {len(info.Dylibs)}")
+	quarry.Remove(path) catch err {
+		say.Line("remove failed {err}")
+	}
+
+	// A file cut inside the symbol table: the commands are whole, so Open succeeds; the symbols fail on their own read.
+	let cut = "/tmp/tin-test-macho-cut"
+	quarry.WriteFile(cut, str(image(152)[0:350])) catch err {
+		say.Line("write failed {err}")
+		return
+	}
+	let g = macho.Open(cut) catch err {
+		say.Line("cut open rejected {err}")
+		return
+	}
+	say.Line("cut open ok {g.Header.Commands}")
+	let (_, symErr) = g.Symbols()
+	say.Line("cut symbols rejected {fault.Is(symErr, macho.ErrFormat)}")
+	let cutCode = g.ReadSection(0) catch err {
+		say.Line("cut section rejected {err}")
+		return
+	}
+	say.Line("cut code {len(cutCode)}")
+	quarry.Remove(cut) catch err {
+		say.Line("remove failed {err}")
+	}
+
+	// Rejected files: each one's fault is macho.ErrFormat.
+	let short = "/tmp/tin-test-macho-short"
+	quarry.WriteFile(short, str(image(152)[0:100])) catch err {
+		say.Line("write failed {err}")
+		return
+	}
+	let (_, shortErr) = macho.Open(short)
+	say.Line("header cut rejected {fault.Is(shortErr, macho.ErrFormat)}")
+	quarry.Remove(short) catch err {
+		say.Line("remove failed {err}")
+	}
+	mut fat = image(152)
+	fat[0] = 0xca
+	fat[1] = 0xfe
+	fat[2] = 0xba
+	fat[3] = 0xbe
+	let fatPath = "/tmp/tin-test-macho-fat"
+	quarry.WriteFile(fatPath, str(fat)) catch err {
+		say.Line("write failed {err}")
+		return
+	}
+	let (_, fatErr) = macho.Open(fatPath)
+	say.Line("fat rejected {fault.Is(fatErr, macho.ErrFormat)}")
+	quarry.Remove(fatPath) catch err {
+		say.Line("remove failed {err}")
+	}
+	let badPath = "/tmp/tin-test-macho-bad"
+	quarry.WriteFile(badPath, str(image(8))) catch err {
+		say.Line("write failed {err}")
+		return
+	}
+	let (_, badErr) = macho.Open(badPath)
+	say.Line("bad segment rejected {fault.Is(badErr, macho.ErrFormat)}")
+	quarry.Remove(badPath) catch err {
+		say.Line("remove failed {err}")
+	}
+	let (_, foreignErr) = macho.Open("toolchain/std/debug/elf/elf.tin")
+	say.Line("foreign rejected {fault.Is(foreignErr, macho.ErrFormat)}")
+
+	mut elfBytes = make([]u8, 64)
+	elfBytes[0] = 0x7f
+	elfBytes[1] = 'E'
+	elfBytes[2] = 'L'
+	elfBytes[3] = 'F'
+	let elfPath = "/tmp/tin-test-macho-elf"
+	quarry.WriteFile(elfPath, str(elfBytes)) catch err {
+		say.Line("write failed {err}")
+		return
+	}
+	let (_, elfErr) = buildinfo.Read(elfPath)
+	say.Line("elf buildinfo none {fault.Is(elfErr, buildinfo.ErrNoBuildInfo)}")
+	quarry.Remove(elfPath) catch err {
+		say.Line("remove failed {err}")
+	}
+}
+
+// hexUUIDLower is the 16 bytes as lower-case hex.
+fn hexUUIDLower(b str) str {
+	let digits = "0123456789abcdef"
+	mut out = ""
+	for i in 0..len(b) {
+		let c = i64(b[i])
+		out += digits[c/16:c/16+1] + digits[c%16:c%16+1]
+	}
+	return out
+}

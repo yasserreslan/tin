@@ -144,6 +144,8 @@ jobs:
         run: sh tools/ci/tin.sh zip_check
       - name: Lazy ELF64 sections, symbols and dynamic tables against Go on arm64 and amd64
         run: sh tools/ci/tin.sh elf_check
+      - name: Lazy Mach-O headers, load commands, sections and symbols against Go's debug/macho (Tin and Go darwin binaries)
+        run: sh tools/ci/tin.sh macho_check
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
       - name: Embedded file trees (the embed directive) against Go's file trees over the same patterns

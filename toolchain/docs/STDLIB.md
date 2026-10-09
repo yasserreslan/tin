@@ -38,7 +38,10 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [jsonv2](#jsonv2) | JSON Marshal and Unmarshal with options (encoding/json/v2) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
-| [debug](#debug) | ELF executable metadata (debug/elf) |
+| [debug](#debug) | binary formats of the executables Tin writes (debug/elf, debug/macho, debug/buildinfo) |
+| [debug/elf](#debug/elf) | ELF executable headers, sections, symbols and dynamic tables (debug/elf) |
+| [debug/macho](#debug/macho) | Mach-O executable headers, load commands, sections and symbols (debug/macho) |
+| [debug/buildinfo](#debug/buildinfo) | Tin's build metadata in Mach-O executables: the LC_UUID and LC_BUILD_VERSION commands (debug/buildinfo) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [signal](#signal) | operating-system signals (os/signal) |
@@ -1319,6 +1322,45 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `Exit(code i64)`: Exit flushes stdout and ends the program with status code.
 - `Eprint(s str)`: Eprint writes s to stderr.
 - `Eprintln(s str)`: Eprintln writes s and a newline to stderr in one write.
+
+## debug/elf
+
+Package elf reads bounded ELF64 little-endian binaries for Linux arm64 and amd64.
+
+- `type Header struct`: Header is the ELF identification and file header fields used by this reader.
+- `type Segment struct`: Segment describes one ELF program header.
+- `type Section struct`: Section describes one ELF section header; its data is read on demand.
+- `type Symbol struct`: Symbol is one ELF symbol table entry.
+- `type DynamicEntry struct`: DynamicEntry is one ELF dynamic table key and value.
+- `type File struct`: File is a validated ELF image backed by a path; section bytes are not retained.
+- `Open(path str) !File`: Open validates the ELF64 little-endian header and tables for arm64 or amd64.
+- `(f File) ReadSection(index i64) !str`: ReadSection reads one section's file-backed bytes, capped at 64 MiB.
+- `(f File) Symbols() ![]Symbol`: Symbols reads static and dynamic ELF symbol tables with their linked strings.
+- `(f File) Dynamic() ![]DynamicEntry`: Dynamic reads entries from SHT_DYNAMIC sections until DT_NULL.
+
+## debug/macho
+
+Package macho reads bounded 64-bit little-endian Mach-O executables for arm64 and x86-64, the files the compiler writes for macOS.
+
+- `type Header struct`: Header is the Mach-O file header fields this reader keeps.
+- `type Command struct`: Command is one load command's type and size, and where it sits in the file.
+- `type Segment struct`: Segment describes one LC_SEGMENT_64 command.
+- `type Section struct`: Section describes one section header; its data is read on demand.
+- `type Symbol struct`: Symbol is one entry of the static symbol table.
+- `type BuildVersion struct`: BuildVersion is the LC_BUILD_VERSION command: the platform and the OS versions a file was built for.
+- `type File struct`: File is a validated Mach-O image backed by a path; section bytes and symbols are read on demand.
+- `Open(path str) !File`: Open validates the Mach-O header and load commands of a 64-bit arm64 or x86-64 file; symbols and sections are read later.
+- `(f File) ReadSection(index i64) !str`: ReadSection reads one section's file-backed bytes, capped at 64 MiB; zero-fill sections have no file bytes and read as "".
+- `(f File) Symbols() ![]Symbol`: Symbols reads the static symbol table (LC_SYMTAB) and its strings, each capped at 64 MiB.
+
+## debug/buildinfo
+
+Package buildinfo reads the build metadata Tin's own Mach-O executables carry: the LC_UUID and LC_BUILD_VERSION load commands.
+
+Contract: the compiler does not write Go's buildinfo blob (the "\xff Go buildinf:" record that debug/buildinfo of Go reads), and ELF executables carry no build metadata today. A Tin Mach-O executable carries an LC_UUID, a hash of its code, so identical builds have the same UUID (toolchain/docs/COMPILER.md, section 9), and an LC_BUILD_VERSION naming macOS and the minimum and SDK versions the compiler targets. Nothing else is written, so this package reads only those two commands.
+
+- `type Info struct`: Info is the build metadata of one Mach-O executable.
+- `Read(path str) !Info`: Read returns the build metadata of a Mach-O executable: ErrNoBuildInfo for an ELF file or one without Tin's commands.
 
 ## user
 

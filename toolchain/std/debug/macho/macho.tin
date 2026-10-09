@@ -1,0 +1,239 @@
+// Package macho reads bounded 64-bit little-endian Mach-O executables for arm64 and x86-64, the files the compiler writes for macOS.
+package macho
+
+import "fault"
+import "quarry"
+
+const headerBytes = 32
+const commandBytes = 8
+const segmentBytes = 72
+const sectionBytes = 80
+const symbolBytes = 16
+const maxTableBytes = 4 * 1024 * 1024
+const maxSectionBytes = 64 * 1024 * 1024
+const magic64 = 0xfeedfacf
+const cpuAMD64 = 0x01000007
+const cpuARM64 = 0x0100000c
+const cmdSegment64 = 0x19
+const cmdSymtab = 0x2
+const cmdLoadDylib = 0xc
+const cmdUUID = 0x1b
+const cmdBuildVersion = 0x32
+const cmdMain = 0x80000028
+const sectionZerofill = 0x1
+const sectionGBZerofill = 0xc
+const sectionThreadZerofill = 0x12
+
+// ErrFormat marks a truncated, malformed, foreign, or unsupported Mach-O file.
+let ErrFormat = fault("debug/macho: malformed or unsupported Mach-O")
+
+// Header is the Mach-O file header fields this reader keeps.
+type Header struct {
+	CPU i64 // CPU type: 0x0100000c for arm64, 0x01000007 for x86-64.
+	SubCPU i64 // CPU subtype.
+	Type i64 // File type: 2 for an executable.
+	Commands i64 // Number of load commands.
+	CommandBytes i64 // Bytes of load commands after the header.
+	Flags i64 // File flags.
+}
+
+// Command is one load command's type and size, and where it sits in the file.
+type Command struct {
+	Cmd i64 // Load command type.
+	Size i64 // Command size in bytes, header included.
+	Offset i64 // File offset of the command.
+}
+
+// Segment describes one LC_SEGMENT_64 command.
+type Segment struct {
+	Name str // Segment name, such as __TEXT.
+	Address i64 // Virtual address.
+	MemorySize i64 // Bytes in memory.
+	Offset i64 // File offset of the segment data.
+	FileSize i64 // File-backed bytes.
+	MaxProt i64 // Maximum permissions.
+	InitProt i64 // Initial permissions.
+	Sections i64 // Number of sections the command holds.
+	Flags i64 // Segment flags.
+}
+
+// Section describes one section header; its data is read on demand.
+type Section struct {
+	Segment str // Name of the segment that holds the section.
+	Name str // Section name, such as __text.
+	Address i64 // Virtual address.
+	Size i64 // Section size in bytes.
+	Offset i64 // File offset of the section data.
+	Align i64 // Alignment as a power of two.
+	RelocOffset i64 // File offset of the relocation entries.
+	Relocations i64 // Number of relocation entries.
+	Flags i64 // Section type and attributes.
+}
+
+// Symbol is one entry of the static symbol table.
+type Symbol struct {
+	Name str // Symbol name.
+	Type i64 // Symbol type (n_type): external and section bits.
+	Section i64 // Section number, counted from 1 across all segments; 0 when none.
+	Desc i64 // Description bits (n_desc).
+	Value i64 // Symbol value.
+}
+
+// BuildVersion is the LC_BUILD_VERSION command: the platform and the OS versions a file was built for.
+type BuildVersion struct {
+	Platform i64 // Platform number: 1 for macOS; 0 when the file has no LC_BUILD_VERSION.
+	MinOS i64 // Minimum OS version, packed as xxxx.yy.zz.
+	SDK i64 // SDK version, packed the same way.
+	Tools i64 // Number of tool entries after the command.
+}
+
+// File is a validated Mach-O image backed by a path; section bytes and symbols are read on demand.
+type File struct {
+	Path str // File path used for bounded reads.
+	Size i64 // Size captured when the file was opened.
+	Header Header // Mach-O header fields.
+	Commands []Command // Every load command, in file order.
+	Segments []Segment // LC_SEGMENT_64 commands, in file order.
+	Sections []Section // Sections of all segments, in file order; section numbers count from 1.
+	Dylibs []str // Names of the LC_LOAD_DYLIB libraries, in file order.
+	UUID str // The 16-byte LC_UUID, or "" when the file has none.
+	Build BuildVersion // The LC_BUILD_VERSION command, the last one if there are several.
+	Entry i64 // The LC_MAIN entry offset from the start of the image, or 0 when there is none.
+	symOffset i64
+	symCount i64
+	strOffset i64
+	strSize i64
+}
+
+fn read16(b str, p i64) i64 {
+	return i64(b[p]) | i64(b[p+1])<<8
+}
+
+fn read32(b str, p i64) i64 {
+	return read16(b, p) + read16(b, p+2)*65536
+}
+
+fn read64(b str, p i64) i64 {
+	let hi = read32(b, p+4)
+	if hi > 0x7fffffff { return -1 }
+	return read32(b, p) + hi*4294967296
+}
+
+fn validRange(size i64, off i64, n i64) bool {
+	return off >= 0 && n >= 0 && off <= size && n <= size-off
+}
+
+// cstring is the bytes from `from` up to the first NUL before `to`, or up to `to` (Go's debug/macho rule).
+fn cstring(b str, from i64, to i64) str {
+	mut end = from
+	for end < to && b[end] != 0 { end += 1 }
+	return b[from:end]
+}
+
+// Open validates the Mach-O header and load commands of a 64-bit arm64 or x86-64 file; symbols and sections are read later.
+fn Open(path str) !File {
+	let size = try quarry.Size(path)
+	if size < headerBytes { fail ErrFormat }
+	let b = try quarry.ReadAt(path, 0, headerBytes)
+	if len(b) != headerBytes || read32(b, 0) != magic64 { fail ErrFormat }
+	let cpu = read32(b, 4)
+	if cpu != cpuARM64 && cpu != cpuAMD64 { fail ErrFormat }
+	let ncmds = read32(b, 16)
+	let cmdsBytes = read32(b, 20)
+	if cmdsBytes > maxTableBytes || !validRange(size, headerBytes, cmdsBytes) || ncmds*commandBytes > cmdsBytes { fail ErrFormat }
+	let h = Header{CPU: cpu, SubCPU: read32(b, 8), Type: read32(b, 12), Commands: ncmds, CommandBytes: cmdsBytes, Flags: read32(b, 24)}
+	let lc = try quarry.ReadAt(path, headerBytes, cmdsBytes)
+	if len(lc) != cmdsBytes { fail ErrFormat }
+	mut commands = []Command{}
+	mut segments = []Segment{}
+	mut sections = []Section{}
+	mut dylibs = []str{}
+	mut uuid = ""
+	mut build = BuildVersion{}
+	mut entry i64 = 0
+	mut symOffset i64 = 0
+	mut symCount i64 = 0
+	mut strOffset i64 = 0
+	mut strSize i64 = 0
+	mut p i64 = 0
+	for i in 0..ncmds {
+		if p+commandBytes > cmdsBytes { fail ErrFormat }
+		let cmd = read32(lc, p)
+		let sz = read32(lc, p+4)
+		if sz < commandBytes || sz > cmdsBytes-p { fail ErrFormat }
+		commands = append(commands, Command{Cmd: cmd, Size: sz, Offset: headerBytes + p})
+		if cmd == cmdSegment64 {
+			if sz < segmentBytes { fail ErrFormat }
+			let nsects = read32(lc, p+64)
+			if nsects > (sz-segmentBytes)/sectionBytes { fail ErrFormat }
+			segments = append(segments, Segment{Name: cstring(lc, p+8, p+24), Address: read64(lc, p+24), MemorySize: read64(lc, p+32), Offset: read64(lc, p+40), FileSize: read64(lc, p+48), MaxProt: read32(lc, p+56), InitProt: read32(lc, p+60), Sections: nsects, Flags: read32(lc, p+68)})
+			let segName = cstring(lc, p+8, p+24)
+			for j in 0..nsects {
+				let q = p + segmentBytes + j*sectionBytes
+				sections = append(sections, Section{Segment: segName, Name: cstring(lc, q, q+16), Address: read64(lc, q+32), Size: read64(lc, q+40), Offset: read32(lc, q+48), Align: read32(lc, q+52), RelocOffset: read32(lc, q+56), Relocations: read32(lc, q+60), Flags: read32(lc, q+64)})
+			}
+		} else if cmd == cmdSymtab {
+			if sz < 24 { fail ErrFormat }
+			symOffset = read32(lc, p+8)
+			symCount = read32(lc, p+12)
+			strOffset = read32(lc, p+16)
+			strSize = read32(lc, p+20)
+		} else if cmd == cmdLoadDylib {
+			if sz < 24 { fail ErrFormat }
+			let nameAt = read32(lc, p+8)
+			if nameAt >= sz { fail ErrFormat }
+			dylibs = append(dylibs, cstring(lc, p+nameAt, p+sz))
+		} else if cmd == cmdUUID {
+			if sz < 24 { fail ErrFormat }
+			uuid = lc[p+8:p+24]
+		} else if cmd == cmdBuildVersion {
+			if sz < 24 || 24+8*read32(lc, p+20) > sz { fail ErrFormat }
+			build = BuildVersion{Platform: read32(lc, p+8), MinOS: read32(lc, p+12), SDK: read32(lc, p+16), Tools: read32(lc, p+20)}
+		} else if cmd == cmdMain {
+			if sz < 24 { fail ErrFormat }
+			entry = read64(lc, p+8)
+		}
+		p += sz
+	}
+	return File{Path: path, Size: size, Header: h, Commands: commands, Segments: segments, Sections: sections, Dylibs: dylibs, UUID: uuid, Build: build, Entry: entry, symOffset: symOffset, symCount: symCount, strOffset: strOffset, strSize: strSize}
+}
+
+// ReadSection reads one section's file-backed bytes, capped at 64 MiB; zero-fill sections have no file bytes and read as "".
+fn (f File) ReadSection(index i64) !str {
+	if index < 0 || index >= len(f.Sections) { fail ErrFormat }
+	let s = f.Sections[index]
+	let typ = s.Flags & 0xff
+	if typ == sectionZerofill || typ == sectionGBZerofill || typ == sectionThreadZerofill { return "" }
+	if s.Size > maxSectionBytes || !validRange(f.Size, s.Offset, s.Size) { fail ErrFormat }
+	let data = try quarry.ReadAt(f.Path, s.Offset, s.Size)
+	if len(data) != s.Size { fail ErrFormat }
+	return data
+}
+
+// symbolName drops the underscore the linker adds to a name with a dot, as Go's debug/macho does for Go symbols.
+fn symbolName(name str) str {
+	mut dot = false
+	for c in name {
+		if c == '.' { dot = true }
+	}
+	if dot && len(name) > 0 && name[0] == '_' { return name[1:] }
+	return name
+}
+
+// Symbols reads the static symbol table (LC_SYMTAB) and its strings, each capped at 64 MiB.
+fn (f File) Symbols() ![]Symbol {
+	mut out = []Symbol{}
+	if f.symCount == 0 { return out }
+	let tableBytes = f.symCount * symbolBytes
+	if tableBytes > maxSectionBytes || f.strSize > maxSectionBytes || !validRange(f.Size, f.symOffset, tableBytes) || !validRange(f.Size, f.strOffset, f.strSize) { fail ErrFormat }
+	let raw = try quarry.ReadAt(f.Path, f.symOffset, tableBytes)
+	let strs = try quarry.ReadAt(f.Path, f.strOffset, f.strSize)
+	if len(raw) != tableBytes || len(strs) != f.strSize { fail ErrFormat }
+	for i in 0..f.symCount {
+		let p = i * symbolBytes
+		let strx = read32(raw, p)
+		if strx >= len(strs) { fail ErrFormat }
+		out = append(out, Symbol{Name: symbolName(cstring(strs, strx, len(strs))), Type: i64(raw[p+4]), Section: i64(raw[p+5]), Desc: read16(raw, p+6), Value: read64(raw, p+8)})
+	}
+	return out
+}
