@@ -1,0 +1,11 @@
+package sandbox
+
+import "say"
+
+// macOS has none of the kernel features the sandbox is made of (namespaces, cgroups, seccomp): the package compiles there so a
+// program that imports it builds on a development Mac, and Run fails.
+
+// sandboxRun fails: the sandbox is Linux only.
+fn sandboxRun(s Spec) !Result {
+	fail say.Fault("sandbox: %s: Linux only (namespaces, cgroup v2 and seccomp)", s.Argv[0])
+}

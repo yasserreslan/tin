@@ -46,6 +46,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [debug/dwarf](#debug/dwarf) | DWARF compilation units, DIEs and source line tables (debug/dwarf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
+| [sandbox](#sandbox) | running a program fenced by Linux: namespaces, cgroup v2 limits, seccomp, a timeout (Linux only) |
 | [signal](#signal) | operating-system signals (os/signal) |
 | [trail](#trail) | paths (path, path/filepath on Unix) |
 | [lever](#lever) | command-line flags (flag) |
@@ -1421,6 +1422,18 @@ Package spawn starts child processes, like Go's os/exec: Run a program and colle
 - `(p Process) Read(buf mut []u8) !i64`: Read reads the child's standard output (Stdio.Pipe on Cmd.Stdout) into buf, up to its length, and returns how many bytes came; 0 is end of file.
 - `(p Process) ReadStderr(buf mut []u8) !i64`: ReadStderr is Read for the child's standard error.
 - `LookPath(name str) !str`: LookPath finds name like Go's exec.LookPath: a name with a slash is used as it is, otherwise each PATH entry is tried in order and the first executable file wins.
+
+## sandbox
+
+Package sandbox runs a program fenced by Linux (#1002): its own cgroup v2 (memory.max with no swap, cpu.max, pids.max, cpu.weight), new user, mount, PID, network, IPC, UTS and cgroup namespaces, a root built from read-only bind mounts of the system directories and the given inputs plus one writable scratch directory (pivot_root, a fresh /proc, no other host file visible), no network (a down loopback only), a seccomp allow-list, a hard timeout that kills the whole process tree, and its stdout and stderr captured up to a cap. It is meant for code from your own repositories (builds, tests, generated programs); code from anyone else belongs in a microVM, not here. Linux only: on macOS Run fails. The caller needs unprivileged user namespaces (or root) and, for the cgroup limits, a delegated cgroup v2 directory (Spec.Cgroup) that holds no processes of its own; see the package README for the exact requirements and how CI runs the escape tests.
+
+- `type Bind struct`: Bind is a host file or directory mounted read-only inside the sandbox.
+- `type Spec struct`: Spec describes one sandboxed run. Zero values mean: no cgroup limit for Memory, CPU, Pids and Weight (they need Cgroup), DefaultTimeout, DefaultMaxOutput, DefaultSystem, ScratchPath "/scratch", and Dir the scratch path (or "/" without one).
+- `type Result struct`: Result is how a sandboxed run ended and what it printed.
+- `const DefaultTimeout = 60 * 1000 * 1000 * 1000`: DefaultTimeout is Run's timeout when Spec.Timeout is 0: one minute.
+- `const DefaultMaxOutput = 1024 * 1024`: DefaultMaxOutput is Run's cap on each of stdout and stderr when Spec.MaxOutput is 0: 1 MiB.
+- `DefaultSystem() []str`: DefaultSystem is the host directories mounted read-only when Spec.System is empty; a missing one is skipped and a symlink (a merged /usr's /bin) is recreated as the same symlink.
+- `Run(spec Spec) !Result`: Run runs spec.Argv in a new sandbox and waits for it: the output is read while it runs, the wait goes through the scheduler (other tasks keep running), and a task deadline (within) kills the tree like the timeout but fails with fault.DeadlineExceeded. A program that exits non-zero, dies of a signal, times out or is killed for memory is a Result, not a fault; a sandbox that cannot be built (no user namespaces, a missing input, a cgroup that is not delegated) or a program that cannot be executed is a fault that names the step.
 
 ## signal
 

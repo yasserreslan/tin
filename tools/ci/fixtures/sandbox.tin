@@ -1,0 +1,311 @@
+package main
+
+import "fault"
+import "mint"
+import "quarry"
+import "sandbox"
+import "say"
+import "spawn"
+import "twine"
+import "wire"
+
+// The escape tests of packages/sandbox (#1002), run by tools/ci/sandbox_check.tin (as root on CI, where only root may make user
+// namespaces and cgroups). One line per result, in order: exit codes and signals, output and its caps, inputs read-only and the
+// scratch directory writable, nothing else of the host readable, no network, the seccomp filter (sandbox_sys.go), a timeout and a
+// task deadline that leave no process behind, the Tin compiler building and running a program inside, and, with a cgroup v2
+// hierarchy, the cgroup's kill and removal, the limits written, a pids.max that stops a loop and a fork bomb, and a memory hog
+// killed by memory.max.
+//
+// Arguments: ROOT WORK CGROUP. ROOT is the repository (only to show that it cannot be read). WORK, which every user can reach,
+// holds the probes (probe, sys-probe), the toolchain tree tin/ (tin/bin/tinc, tin/toolchain, tin/packages), the input
+// directory in/ (data.txt) and the scratch directory scratch/. CGROUP is a cgroup v2 directory delegated to this process, "auto"
+// to make /sys/fs/cgroup/tin-sandbox-check (root, unified hierarchy) or "-" for none.
+
+mut root = ""
+mut work = ""
+
+// spec is a Spec with the probes, the input directory and the scratch directory mounted and everything else zero.
+fn spec(argv []str) sandbox.Spec {
+	let inputs = []sandbox.Bind{sandbox.Bind{From: work + "/probe", To: "/probe"}, sandbox.Bind{From: work + "/sys-probe", To: "/sys-probe"}, sandbox.Bind{From: work + "/in", To: "/in"}}
+	return sandbox.Spec{Argv: argv, Env: []str{"PATH=/usr/bin:/bin"}, Dir: "", Inputs: inputs, System: []str{}, NoSystem: false, Scratch: work + "/scratch", ScratchPath: "", Memory: 0, CPU: 0.0, Pids: 0, Weight: 0, Timeout: 0, MaxOutput: 0, Cgroup: "", Network: false}
+}
+
+// show prints a run's outcome (and its stdout when there is any), or its fault.
+fn show(name str, s sandbox.Spec) {
+	let r = sandbox.Run(s) catch err {
+		say.Line(name, "fault", err)
+		return
+	}
+	let out = twine.TrimSpace(r.Stdout)
+	if len(out) == 0 {
+		say.Line(name, r.Code, r.Signal, r.TimedOut, r.OOM)
+		return
+	}
+	say.Line(name, r.Code, r.Signal, r.TimedOut, r.OOM, out)
+}
+
+// probeLine runs the probe with args and prints "ok ..." or just "fail" (the reason varies by kernel) and the exit code.
+fn probeLine(name str, args []str) {
+	mut argv = []str{"/probe"}
+	for a in args {
+		argv = append(argv, a)
+	}
+	let r = sandbox.Run(spec(argv)) catch err {
+		say.Line(name, "fault", err)
+		return
+	}
+	let out = twine.TrimSpace(r.Stdout)
+	if twine.HasPrefix(out, "fail") {
+		say.Line(name, "fail", r.Code)
+		return
+	}
+	say.Line(name, out, r.Code)
+}
+
+// leftovers counts the host's processes whose command line holds mark.
+fn leftovers(mark str) i64 {
+	let names = quarry.ReadDir("/proc") catch _ {
+		return -1
+	}
+	mut n = 0
+	for p in names {
+		if len(p) == 0 || p[0] < '0' || p[0] > '9' {
+			continue
+		}
+		let cmdline = quarry.ReadFile("/proc/" + p + "/cmdline") catch _ {
+			continue
+		}
+		if twine.Contains(cmdline, mark) {
+			n += 1
+		}
+	}
+	return n
+}
+
+// basics: exit codes, signals, a PATH lookup, output and its caps, a program that is not there, and who the program is.
+fn basics() {
+	show("exit", spec([]str{"/bin/sh", "-c", "exit 7"}))
+	show("signal", spec([]str{"/bin/sh", "-c", "kill -TERM $$"}))
+	show("path", spec([]str{"sh", "-c", "echo found"}))
+	let r = sandbox.Run(spec([]str{"/bin/sh", "-c", "echo out; echo err >&2"})) catch err {
+		say.Line("output fault", err)
+		return
+	}
+	say.Line("output", r.Stdout == "out\n", r.Stderr == "err\n", r.StdoutTruncated, r.StderrTruncated)
+	mut big = spec([]str{"/probe", "spew", "10485760"})
+	big.MaxOutput = 1048576
+	let b = sandbox.Run(big) catch err {
+		say.Line("cap fault", err)
+		return
+	}
+	say.Line("cap", len(b.Stdout), b.StdoutTruncated, len(b.Stderr), b.StderrTruncated, b.Code)
+	show("missing", spec([]str{"/no/such/program"}))
+	show("identity", spec([]str{"/bin/sh", "-c", "echo $(id -u) $(id -g) $(hostname) $$ /proc/[0-9]*"}))
+}
+
+// files: the inputs are readable and read-only, scratch is writable, and nothing else of the host is there.
+fn files() {
+	probeLine("read input", []str{"read", "/in/data.txt"})
+	probeLine("write input", []str{"write", "/in/new.txt"})
+	probeLine("write scratch", []str{"write", "/scratch/new.txt"})
+	let written = quarry.ReadFile(work + "/scratch/new.txt") catch _ { "missing" }
+	say.Line("scratch on host", written)
+	probeLine("write root", []str{"write", "/new.txt"})
+	probeLine("write usr", []str{"write", "/usr/new.txt"})
+	probeLine("read source", []str{"read", root + "/tools/ci/sandbox_check.tin"})
+	probeLine("list source dir", []str{"list", root + "/tools/ci"})
+	probeLine("read shadow", []str{"read", "/etc/shadow"})
+	probeLine("list etc", []str{"list", "/etc"})
+	probeLine("list home", []str{"list", "/home"})
+	probeLine("list root", []str{"list", "/root"})
+	probeLine("list tmp", []str{"list", "/tmp"})
+	probeLine("read init environ", []str{"read", "/proc/1/environ"})
+	probeLine("read own status", []str{"read", "/proc/self/status"})
+	probeLine("write proc sys", []str{"write", "/proc/sys/kernel/hostname"})
+}
+
+// network: only a loopback that is down, and the filter refuses IP sockets; with Network the host's network is there.
+fn network() {
+	let l = wire.Listen("127.0.0.1:0") catch err {
+		say.Line("listen fault", err)
+		return
+	}
+	let addr = "127.0.0.1:" + mint.Itoa(l.Port())
+	probeLine("netdev", []str{"netdev"})
+	probeLine("dial internet", []str{"dial", "1.1.1.1:53"})
+	probeLine("dial host", []str{"dial", addr})
+	mut s = spec([]str{"/probe", "dial", addr})
+	s.Network = true
+	show("dial host with Network", s)
+}
+
+// seccomp: the denied calls get EPERM where the kernel alone would allow them, and a Go program runs.
+fn seccomp() {
+	mut s = spec([]str{"/sys-probe"})
+	s.Env = []str{"TIN_SANDBOX_PROBE=1"}
+	let r = sandbox.Run(s) catch err {
+		say.Line("seccomp fault", err)
+		return
+	}
+	for line in twine.Split(twine.TrimSpace(r.Stdout), "\n") {
+		say.Line("seccomp", line)
+	}
+	say.Line("seccomp exit", r.Code, len(r.Stderr))
+}
+
+// trees: the timeout and a task deadline kill a program and the processes it left, and none of them remains.
+fn trees() {
+	let mark = say.Fmt("tin-sandbox-mark-%d", quarry.Pid())
+	mut s = spec([]str{"/bin/sh", "-c", "/probe sleep " + mark + " & /probe sleep " + mark})
+	s.Timeout = 1000000000
+	show("timeout", s)
+	say.Line("timeout leftovers", leftovers(mark))
+	let mark2 = mark + "-deadline"
+	let s2 = spec([]str{"/bin/sh", "-c", "/probe sleep " + mark2 + " & /probe sleep " + mark2})
+	let r = within 500000000 {
+		try sandbox.Run(s2)
+	} catch err {
+		say.Line("deadline", fault.Is(err, fault.DeadlineExceeded))
+		say.Line("deadline leftovers", leftovers(mark2))
+		return
+	}
+	say.Line("deadline not reached", r.Code)
+}
+
+// compiler: tinc builds a program inside (the toolchain and itself read-only), and the program runs there with no system
+// directory at all.
+fn compiler() {
+	quarry.WriteFile(work + "/scratch/hello.tin", "package main\n\nimport \"say\"\n\nfn main() {{\n\tsay.Line(\"hello from the sandbox\")\n}}\n") catch err {
+		say.Line("tinc fault", err)
+		return
+	}
+	mut s = spec([]str{"/tin/bin/tinc", "-o", "/scratch/hello", "/scratch/hello.tin"})
+	s.Env = []str{"TIN_ROOT=/tin", "HOME=/scratch"}
+	s.Inputs = []sandbox.Bind{sandbox.Bind{From: work + "/tin", To: "/tin"}}
+	let r = sandbox.Run(s) catch err {
+		say.Line("tinc fault", err)
+		return
+	}
+	say.Line("tinc", r.Code, r.Signal, len(r.Stdout) + len(r.Stderr))
+	mut h = spec([]str{"/scratch/hello"})
+	h.NoSystem = true
+	show("hello", h)
+}
+
+// cgroupDir makes /sys/fs/cgroup/tin-sandbox-check with the memory, cpu and pids controllers available to its children, or
+// returns "" without a cgroup v2 hierarchy there.
+fn cgroupDir() str {
+	let top = "/sys/fs/cgroup"
+	if !quarry.Exists(top + "/cgroup.controllers") {
+		return ""
+	}
+	let enabled = quarry.ReadFile(top + "/cgroup.subtree_control") catch _ { "" }
+	for c in []str{"memory", "cpu", "pids"} {
+		if !twine.Contains(enabled, c) {
+			quarry.WriteFile(top + "/cgroup.subtree_control", "+" + c) catch err {
+				say.Line("cgroup fault", err)
+				return ""
+			}
+		}
+	}
+	let dir = top + "/tin-sandbox-check"
+	if !quarry.Exists(dir) {
+		quarry.Mkdir(dir) catch err {
+			say.Line("cgroup fault", err)
+			return ""
+		}
+	}
+	return dir
+}
+
+// cgroups: a run in a cgroup, cgroup.kill on the timeout, the limits, and every sandbox cgroup removed afterwards.
+fn cgroups(cg str) {
+	let controllers = quarry.ReadFile(cg + "/cgroup.controllers") catch _ { "" }
+	mut base = spec([]str{"/bin/sh", "-c", "exit 3"})
+	base.Cgroup = cg
+	show("cgroup", base)
+	let mark = say.Fmt("tin-sandbox-cgroup-%d", quarry.Pid())
+	mut t = spec([]str{"/bin/sh", "-c", "/probe sleep " + mark + " & /probe sleep " + mark})
+	t.Cgroup = cg
+	t.Timeout = 500000000
+	show("cgroup timeout", t)
+	say.Line("cgroup timeout leftovers", leftovers(mark))
+	let full = twine.Contains(controllers, "memory") && twine.Contains(controllers, "pids") && twine.Contains(controllers, "cpu")
+	say.Line("cgroup controllers", full)
+	if full {
+		mut l = spec([]str{"/bin/sh", "-c", "exit 0"})
+		l.Cgroup = cg
+		l.Memory = 64 * 1024 * 1024
+		l.CPU = 0.5
+		l.Pids = 16
+		l.Weight = 50
+		show("limits", l)
+		let pmark = mark + "-pids"
+		mut p = spec([]str{"/bin/sh", "-c", "i=0; while [ $i -lt 64 ]; do /probe sleep " + pmark + " & i=$((i+1)); done; wait"})
+		p.Cgroup = cg
+		p.Pids = 16
+		p.Timeout = 2000000000
+		let pr = sandbox.Run(p) catch err {
+			say.Line("pids fault", err)
+			return
+		}
+		say.Line("pids", pr.TimedOut, twine.Contains(pr.Stderr, "fork"), leftovers(pmark))
+		mut bomb = spec([]str{"/bin/sh", "-c", `f() { f | f & }; f; sleep 1`})
+		bomb.Cgroup = cg
+		bomb.Pids = 64
+		bomb.Timeout = 3000000000
+		let br = sandbox.Run(bomb) catch err {
+			say.Line("fork bomb fault", err)
+			return
+		}
+		let alive = spawn.Run(spawn.Cmd{Argv: []str{"/bin/true"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0, Input: ""}) catch _ {
+			spawn.Result{Code: -1, Stdout: "", Stderr: ""}
+		}
+		say.Line("fork bomb", twine.Contains(br.Stderr, "fork"), alive.Code == 0)
+		mut m = spec([]str{"/probe", "alloc", "512"})
+		m.Cgroup = cg
+		m.Memory = 64 * 1024 * 1024
+		show("oom", m)
+		mut ok = spec([]str{"/probe", "alloc", "16"})
+		ok.Cgroup = cg
+		ok.Memory = 64 * 1024 * 1024
+		show("under limit", ok)
+	}
+	let names = quarry.ReadDir(cg) catch _ {
+		[]str{}
+	}
+	mut left = 0
+	for n in names {
+		if twine.HasPrefix(n, "tin-sandbox-") {
+			left += 1
+		}
+	}
+	say.Line("cgroups left", left)
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) != 4 {
+		say.Line("usage: sandbox ROOT WORK CGROUP")
+		quarry.Exit(2)
+	}
+	root = args[1]
+	work = args[2]
+	basics()
+	files()
+	network()
+	seccomp()
+	trees()
+	compiler()
+	mut cg = args[3]
+	if cg == "auto" {
+		cg = cgroupDir()
+	} else if cg == "-" {
+		cg = ""
+	}
+	if len(cg) > 0 {
+		cgroups(cg)
+	} else {
+		say.Line("cgroup none")
+	}
+}

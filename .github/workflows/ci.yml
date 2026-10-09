@@ -149,6 +149,9 @@ jobs:
         run: sh tools/ci/tin.sh tar_check
       - name: Child processes start, wait, signal and are cut by a deadline (native or Docker)
         run: sh tools/ci/tin.sh spawn_check
+      - name: Sandboxed processes (namespaces, cgroup v2 limits, seccomp, timeout; as root through sudo)
+        if: runner.os == 'Linux'
+        run: sh tools/ci/tin.sh sandbox_check
       - name: Operating system signals (dispositions, task delivery and per-core listeners)
         run: sh tools/ci/tin.sh signal_check
       - name: DEFLATE against Go (every length and distance code, both directions)

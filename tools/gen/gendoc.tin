@@ -63,6 +63,7 @@ fn packages() []str {
 		"debug/dwarf", "DWARF compilation units, DIEs and source line tables (debug/dwarf)",
 		"user", "users and groups (os/user)",
 		"spawn", "starting child processes (os/exec)",
+		"sandbox", "running a program fenced by Linux: namespaces, cgroup v2 limits, seccomp, a timeout (Linux only)",
 		"signal", "operating-system signals (os/signal)",
 		"trail", "paths (path, path/filepath on Unix)",
 		"lever", "command-line flags (flag)",

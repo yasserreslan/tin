@@ -1,0 +1,152 @@
+// Package sandbox runs a program fenced by Linux (#1002): its own cgroup v2 (memory.max with no swap, cpu.max, pids.max,
+// cpu.weight), new user, mount, PID, network, IPC, UTS and cgroup namespaces, a root built from read-only bind mounts of the
+// system directories and the given inputs plus one writable scratch directory (pivot_root, a fresh /proc, no other host file
+// visible), no network (a down loopback only), a seccomp allow-list, a hard timeout that kills the whole process tree, and its
+// stdout and stderr captured up to a cap. It is meant for code from your own repositories (builds, tests, generated programs);
+// code from anyone else belongs in a microVM, not here. Linux only: on macOS Run fails. The caller needs unprivileged user
+// namespaces (or root) and, for the cgroup limits, a delegated cgroup v2 directory (Spec.Cgroup) that holds no processes of
+// its own; see the package README for the exact requirements and how CI runs the escape tests.
+package sandbox
+
+import "say"
+
+// Bind is a host file or directory mounted read-only inside the sandbox.
+type Bind struct {
+	From str // the host path; symlinks are followed.
+	To   str // the absolute path inside the sandbox.
+}
+
+// Spec describes one sandboxed run. Zero values mean: no cgroup limit for Memory, CPU, Pids and Weight (they need Cgroup),
+// DefaultTimeout, DefaultMaxOutput, DefaultSystem, ScratchPath "/scratch", and Dir the scratch path (or "/" without one).
+type Spec struct {
+	Argv        []str  // the program and its arguments; a name without a slash is looked up in Env's PATH inside.
+	Env         []str  // exactly these "NAME=value" entries; empty is an empty environment.
+	Dir         str    // the working directory inside.
+	Inputs      []Bind // read-only inputs.
+	System      []str  // host directories mounted read-only at the same path; empty means DefaultSystem.
+	NoSystem    bool   // mount no system directory at all (a static program).
+	Scratch     str    // a host directory mounted read-write, or "" for none.
+	ScratchPath str    // where Scratch appears inside.
+	Memory      i64    // memory.max in bytes (swap is off: memory.swap.max 0).
+	CPU         f64    // cpu.max in cores (0.5 is half of one CPU over each 100 ms period).
+	Pids        i64    // pids.max: processes and threads together.
+	Weight      i64    // cpu.weight, 1 to 10000 (100 is the kernel's default).
+	Timeout     i64    // nanoseconds before the whole tree is killed.
+	MaxOutput   i64    // bytes kept of stdout and of stderr each; the rest is read and dropped.
+	Cgroup      str    // the delegated parent cgroup v2 directory a child cgroup is made in, or "" for none.
+	Network     bool   // share the caller's network (and allow IPv4 and IPv6 sockets) instead of none.
+}
+
+// Result is how a sandboxed run ended and what it printed.
+type Result struct {
+	Code            i64  // the exit code, or -1 when a signal ended the program.
+	Signal          i64  // the signal that ended it, or 0.
+	TimedOut        bool // the timeout killed the tree.
+	OOM             bool // the memory limit killed a process (memory.events oom_kill).
+	Stdout          str
+	Stderr          str
+	StdoutTruncated bool // stdout went over MaxOutput.
+	StderrTruncated bool // stderr went over MaxOutput.
+}
+
+// DefaultTimeout is Run's timeout when Spec.Timeout is 0: one minute.
+const DefaultTimeout = 60 * 1000 * 1000 * 1000
+
+// DefaultMaxOutput is Run's cap on each of stdout and stderr when Spec.MaxOutput is 0: 1 MiB.
+const DefaultMaxOutput = 1024 * 1024
+
+// DefaultSystem is the host directories mounted read-only when Spec.System is empty; a missing one is skipped and a symlink
+// (a merged /usr's /bin) is recreated as the same symlink.
+fn DefaultSystem() []str {
+	return []str{"/usr", "/lib", "/lib64", "/bin", "/sbin"}
+}
+
+// Run runs spec.Argv in a new sandbox and waits for it: the output is read while it runs, the wait goes through the
+// scheduler (other tasks keep running), and a task deadline (within) kills the tree like the timeout but fails with
+// fault.DeadlineExceeded. A program that exits non-zero, dies of a signal, times out or is killed for memory is a Result,
+// not a fault; a sandbox that cannot be built (no user namespaces, a missing input, a cgroup that is not delegated) or a
+// program that cannot be executed is a fault that names the step.
+fn Run(spec Spec) !Result {
+	let s = try normalize(spec)
+	return try sandboxRun(s)
+}
+
+// normalize checks spec and returns a copy with the defaults filled in (a struct is a reference: the caller's stays as it was).
+fn normalize(spec Spec) !Spec {
+	mut s = Spec{Argv: spec.Argv, Env: spec.Env, Dir: spec.Dir, Inputs: spec.Inputs, System: spec.System, NoSystem: spec.NoSystem, Scratch: spec.Scratch, ScratchPath: spec.ScratchPath, Memory: spec.Memory, CPU: spec.CPU, Pids: spec.Pids, Weight: spec.Weight, Timeout: spec.Timeout, MaxOutput: spec.MaxOutput, Cgroup: spec.Cgroup, Network: spec.Network}
+	if len(s.Argv) == 0 || len(s.Argv[0]) == 0 {
+		fail say.Fault("sandbox: empty argv")
+	}
+	if len(s.Cgroup) == 0 && (s.Memory != 0 || s.CPU != 0.0 || s.Pids != 0 || s.Weight != 0) {
+		fail say.Fault("sandbox: Memory, CPU, Pids and Weight need a Cgroup directory")
+	}
+	if s.Memory < 0 || s.CPU < 0.0 || s.Pids < 0 || s.Weight < 0 || s.Weight > 10000 || s.Timeout < 0 || s.MaxOutput < 0 {
+		fail say.Fault("sandbox: a limit is out of range")
+	}
+	if len(s.Cgroup) > 0 {
+		try checkHost("Cgroup", s.Cgroup)
+	}
+	if s.Timeout == 0 {
+		s.Timeout = DefaultTimeout
+	}
+	if s.MaxOutput == 0 {
+		s.MaxOutput = DefaultMaxOutput
+	}
+	if s.NoSystem {
+		s.System = []str{}
+	} else if len(s.System) == 0 {
+		s.System = DefaultSystem()
+	}
+	for d in s.System {
+		try checkInside("System", d)
+	}
+	for b in s.Inputs {
+		try checkHost("input", b.From)
+		try checkInside("input", b.To)
+	}
+	if len(s.ScratchPath) == 0 {
+		s.ScratchPath = "/scratch"
+	}
+	if len(s.Scratch) > 0 {
+		try checkHost("Scratch", s.Scratch)
+		try checkInside("ScratchPath", s.ScratchPath)
+	}
+	if len(s.Dir) == 0 {
+		s.Dir = "/"
+		if len(s.Scratch) > 0 {
+			s.Dir = s.ScratchPath
+		}
+	}
+	if s.Dir[0] != '/' {
+		fail say.Fault("sandbox: Dir %q is not absolute", s.Dir)
+	}
+	return s
+}
+
+// checkHost fails unless p is an absolute host path.
+fn checkHost(what str, p str) ! {
+	if len(p) == 0 || p[0] != '/' {
+		fail say.Fault("sandbox: %s %q is not an absolute path", what, p)
+	}
+}
+
+// checkInside fails unless p is an absolute path inside the sandbox below "/" with no "." or ".." element, and not in /proc
+// or /dev, which the sandbox makes itself.
+fn checkInside(what str, p str) ! {
+	if len(p) < 2 || p[0] != '/' {
+		fail say.Fault("sandbox: %s %q must be an absolute path below /", what, p)
+	}
+	mut start = 1
+	for i in 1..len(p)+1 {
+		if i == len(p) || p[i] == '/' {
+			let part = p[start:i]
+			if len(part) == 0 || part == "." || part == ".." {
+				fail say.Fault("sandbox: %s %q is not a clean path", what, p)
+			}
+			if start == 1 && (part == "proc" || part == "dev") {
+				fail say.Fault("sandbox: %s %q is in /proc or /dev, which the sandbox makes", what, p)
+			}
+			start = i + 1
+		}
+	}
+}
