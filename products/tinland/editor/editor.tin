@@ -117,7 +117,12 @@ type Editor struct {
 	// mapDrag is true while the mouse drags in the minimap.
 	mapDrag bool
 	gutterDrag bool
+	// colDragging is true while the mouse drags a column selection (Alt held down).
+	colDragging bool
 	gutterAnchor i64
+	// colAnchorRow and colAnchorCol are where an Alt drag started a column selection.
+	colAnchorRow  i64
+	colAnchorCol  i64
 	clicks   i64
 	lastClick f64
 	// SaveTrim and SaveFinalNl are the write hygiene of the settings: the trailing spaces and tabs are
@@ -537,6 +542,14 @@ fn (ed mut Editor) handleKey(k Key) {
 		ed.promptKey(k)
 		ed.ensureVisible()
 		return
+	}
+	if ed.Buf.ColSel {
+		// a rectangle is on screen: a key that changes text acts on every line it covers, and one
+		// that moves drops it
+		if ed.columnKey(k) {
+			ed.ensureVisible()
+			return
+		}
 	}
 	if len(ed.Extra) > 0 && ed.multiKey(k) {
 		return

@@ -89,6 +89,19 @@ fn (ed mut Editor) MouseDown(x f64, y f64, clicks i64, flags i64) {
 		ed.mapScrollTo(y)
 		return
 	}
+	if (flags & flagAlt) != 0 && !(ed.mapW() > 0.0 && x >= ed.AreaW - ed.mapW()) {
+		// a drag with Alt selects the rectangle between here and where the mouse goes
+		ed.Follow = true
+		ed.mouseTo(x, y, false)
+		ed.colAnchorRow = ed.Buf.Row
+		ed.colAnchorCol = ed.Buf.Col
+		ed.dragging = true
+		ed.colDragging = true
+		ed.Buf.HasSel = true
+		ed.Buf.ColumnSelect()
+		ed.Say("column selection")
+		return
+	}
 	ed.Follow = true
 	ed.mouseTo(x, y, (flags & flagShift) != 0)
 	if (flags & flagCmd) != 0 {
@@ -138,6 +151,10 @@ fn (ed mut Editor) MouseDrag(x f64, y f64) {
 		return
 	}
 	if ed.dragging {
+		if ed.colDragging {
+			ed.mouseToCol(x, y)
+			return
+		}
 		ed.mouseTo(x, y, true)
 	}
 }
@@ -145,6 +162,7 @@ fn (ed mut Editor) MouseDrag(x f64, y f64) {
 // MouseUp ends a drag.
 fn (ed mut Editor) MouseUp() {
 	ed.dragging = false
+	ed.colDragging = false
 	ed.mapDrag = false
 	ed.gutterDrag = false
 }

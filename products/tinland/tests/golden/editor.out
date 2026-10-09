@@ -298,4 +298,41 @@ fn main() {
 	say.Line(x)
 }
 
-message: reverted sample.txt
+column selection true
+column text: 
+
+
+
+after a key: true one tzwo
+threez four
+five zsix
+sevenz
+--- untitled row 4 col 7 dirty true
+selection: zwo
+threez four
+five zsix
+sevenz
+one tzwo
+threez four
+five zsix
+sevenz
+--- untitled row 1 col 6 dirty true
+one two
+three four
+five six
+seven
+column selection true
+--- untitled row 4 col 4 dirty true
+selection: 	one two
+	three four
+	five six
+	se
+	one two
+	three four
+	five six
+	seven
+--- untitled row 4 col 4 dirty true
+	one two
+	three four
+	five six
+	seven

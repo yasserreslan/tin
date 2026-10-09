@@ -3470,6 +3470,13 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) TrimTrailingSpace()`: TrimTrailingSpace removes the spaces and tabs at the end of every touched line (the cursor's line when nothing is selected), one undo step for the whole thing.
 - `(b mut Buffer) TransformCase(upper bool)`: TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
 - `(b mut Buffer) SelectLine(row i64)`: SelectLine selects line row, including its newline when it is not the last line.
+- `(b mut Buffer) ColumnSelect()`: ColumnSelect makes the selection the rectangle from (SelRow, SelCol) to (Row, Col) (a column of 0 becomes the whole line). Either end may be the anchor: the rectangle is kept in text order.
+- `(b Buffer) ColumnSelection() (i64, i64, i64, i64, bool)`: ColumnSelection is the rectangle of a column selection: the first and last line and the byte columns. It is false when the selection is not a column one.
+- `(b Buffer) ColumnText() str`: ColumnText is the text of a column selection: one line per touched line, the covered bytes only.
+- `(b mut Buffer) InsertColumn(text str)`: InsertColumn types text at every line of the column selection (a newline in it is written as a line break too), one undo step.
+- `(b mut Buffer) DeleteColumn()`: DeleteColumn removes the rectangle of a column selection, one undo step.
+- `(b mut Buffer) IndentColumn()`: IndentColumn adds a tab at the start of every line the column selection touches (or one, when there is no selection); UnindentColumn removes one.
+- `(b mut Buffer) UnindentColumn()`: UnindentColumn removes one tab (or up to four spaces) from the start of every line the column selection touches.
 
 ## tinjson
 

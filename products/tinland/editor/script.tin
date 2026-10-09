@@ -87,6 +87,9 @@ fn (ed Editor) dump() {
 //   wrap             toggles word wrap (prints the new state); rowof prints the caret's row on the screen
 //   sort, trim       sorts the touched lines, removes their trailing spaces and tabs
 //   whitespace       toggles the whitespace marks (prints the new state)
+//   guides           toggles the indent guides (prints the new state)
+//   colsel:R0,C0,R1,C1  makes the column selection (rectangle) the script names; coltext prints its text,
+//   colinsert types into every line it covers, coldelete removes them, colindent indents them
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
 fn RunScript(ed mut Editor, script str) {
@@ -227,8 +230,33 @@ fn RunScript(ed mut Editor, script str) {
 			// where the caret is on the screen: its row from the top and its column in that row
 			let dc = textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4)
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
+		} else if step == "guides" {
+			say.Line("guides:", ToggleGuides())
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
+		} else if twine.HasPrefix(step, "colsel:") {
+			// colsel:R0,C0,R1,C1 makes the rectangle the script names
+			let n = appkit.ParseNumbers(step[7:])
+			if len(n) >= 4 {
+				ed.Buf.SelRow = i64(n[0]) - 1
+				ed.Buf.SelCol = i64(n[1]) - 1
+				ed.Buf.MoveTo(i64(n[2]) - 1, i64(n[3]) - 1, false)
+				ed.Buf.HasSel = true
+				ed.Buf.ColumnSelect()
+			}
+			say.Line("column selection", ed.Buf.ColSel)
+		} else if step == "coltext" {
+			say.Line("column text:", ed.Buf.ColumnText())
+		} else if step == "colinsert" {
+			ed.Buf.InsertColumn("X")
+		} else if step == "coldelete" {
+			ed.Buf.DeleteColumn()
+		} else if step == "colindent" {
+			ed.Buf.IndentColumn()
+		} else if step == "colkey" {
+			// the key a rectangle answers: typing, backspace, escape
+			ed.handleKey(Key{Code: -1, Chars: "z"})
+			say.Line("after a key:", ed.Buf.ColSel, ed.Buf.Text())
 		} else if twine.HasPrefix(step, "ruler:") {
 			// ruler:N puts the line at display column N
 			let n = parseInt(step[6:])

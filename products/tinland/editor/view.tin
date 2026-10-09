@@ -208,6 +208,17 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 				render.Fill(mut scene, x0, top, x1 - x0, lh, th.Selection)
 			}
 		}
+		// the column selection: the rectangle's part of this line
+		if b.ColSel && row >= b.ColFirst && row <= b.ColLast {
+			let (cf0, ct0, inRow) = ed.clampSpan(b.ColFrom, min(b.ColTo, len(line)), hs)
+			if inRow {
+				let x0 = textX + f64(cf0 - hs) * ed.CharW
+				let x1 = textX + f64(ct0 - hs) * ed.CharW
+				if x1 > x0 {
+					render.Fill(mut scene, x0, top, x1 - x0, lh, th.Selection)
+				}
+			}
+		}
 		// every place the find box's text occurs on this line
 		let needle = ed.activeNeedle()
 		if len(needle) > 0 {

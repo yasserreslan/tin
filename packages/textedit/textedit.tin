@@ -32,6 +32,13 @@ type Buffer struct {
 	HasSel bool
 	SelRow i64
 	SelCol i64
+	// ColSel is a column selection: HasSel with it set is the rectangle from (SelRow, SelCol) to
+	// (Row, Col), where a column of 0 means the whole line.
+	ColSel   bool
+	ColFrom  i64
+	ColTo    i64
+	ColFirst i64
+	ColLast  i64
 	Dirty  bool
 	// CRLF is true when the text the buffer was made from ended its lines with \r\n: FileText writes them back so saving does not change a
 	// file's line endings.
@@ -1186,4 +1193,190 @@ fn (b mut Buffer) SelectLine(row i64) {
 		b.Col = len(b.Lines[r])
 	}
 	b.want = -1
+}
+
+// ColumnSelect makes the selection the rectangle from (SelRow, SelCol) to (Row, Col) (a column of 0
+// becomes the whole line). Either end may be the anchor: the rectangle is kept in text order.
+fn (b mut Buffer) ColumnSelect() {
+	if !b.HasSel {
+		return
+	}
+	mut c0 = b.SelCol
+	mut c1 = b.Col
+	if c0 > c1 {
+		let t = c0
+		c0 = c1
+		c1 = t
+	}
+	mut r0 = b.SelRow
+	mut r1 = b.Row
+	if r0 > r1 {
+		let t = r0
+		r0 = r1
+		r1 = t
+	}
+	b.ColSel = true
+	b.ColFirst = r0
+	b.ColLast = r1
+	b.ColFrom = c0
+	b.ColTo = c1
+}
+
+// ColumnSelection is the rectangle of a column selection: the first and last line and the byte
+// columns. It is false when the selection is not a column one.
+fn (b Buffer) ColumnSelection() (i64, i64, i64, i64, bool) {
+	if !b.ColSel {
+		return 0, 0, 0, 0, false
+	}
+	return b.ColFirst, b.ColLast, b.ColFrom, b.ColTo, true
+}
+
+// columnLines are the lines a column selection touches, each clamped to the line's own length, with
+// the byte columns it covers on that line.
+fn (b Buffer) columnSpans() []span {
+	mut out = []span{}
+	if !b.ColSel {
+		return out
+	}
+	for r in b.ColFirst..b.ColLast + 1 {
+		if r < 0 || r >= len(b.Lines) {
+			continue
+		}
+		let line = b.Lines[r]
+		let whole = b.ColFrom <= 0
+		mut from = b.ColFrom
+		mut to = min(b.ColTo, len(line))
+		if whole {
+			from = 0
+			to = len(line)
+		}
+		out = append(out, span{row: r, from: from, to: to})
+	}
+	return out
+}
+
+// span is the part of a line a column selection covers.
+type span struct {
+	row  i64
+	from i64
+	to   i64
+}
+
+// ColumnText is the text of a column selection: one line per touched line, the covered bytes only.
+fn (b Buffer) ColumnText() str {
+	let spans = b.columnSpans()
+	mut parts = []str{}
+	for s in spans {
+		parts = append(parts, b.Lines[s.row][s.from:s.to])
+	}
+	return twine.Join(parts, "\n")
+}
+
+// InsertColumn types text at every line of the column selection (a newline in it is written as a
+// line break too), one undo step.
+fn (b mut Buffer) InsertColumn(text str) {
+	if !b.ColSel {
+		return
+	}
+	let spans = b.columnSpans()
+	if len(spans) == 0 {
+		return
+	}
+	b.record(kindOther)
+	let parts = twine.Split(text, "\n")
+	mut k = 0
+	for s in spans {
+		let piece = parts[k % len(parts)]
+		let line = b.Lines[s.row]
+		b.Lines[s.row] = line[:s.from] + piece + line[s.to:]
+		k += 1
+	}
+	b.ColFrom = spans[0].from
+	b.ColTo = spans[0].from + len(parts[0])
+	b.Col = b.ColTo
+	b.Dirty = true
+	b.Version += 1
+}
+
+// DeleteColumn removes the rectangle of a column selection, one undo step.
+fn (b mut Buffer) DeleteColumn() {
+	if !b.ColSel {
+		return
+	}
+	let spans = b.columnSpans()
+	if len(spans) == 0 {
+		return
+	}
+	b.record(kindOther)
+	for s in spans {
+		let line = b.Lines[s.row]
+		b.Lines[s.row] = line[:s.from] + line[s.to:]
+	}
+	b.Row = b.ColFirst
+	b.Col = b.ColFrom
+	b.HasSel = false
+	b.ColSel = false
+	b.want = -1
+	b.Dirty = true
+	b.Version += 1
+}
+
+// IndentColumn adds a tab at the start of every line the column selection touches (or one, when
+// there is no selection); UnindentColumn removes one.
+fn (b mut Buffer) IndentColumn() {
+	let spans = b.columnSpans()
+	if len(spans) == 0 {
+		b.Indent()
+		return
+	}
+	b.record(kindOther)
+	for s in spans {
+		b.Lines[s.row] = "\t" + b.Lines[s.row]
+	}
+	if b.ColFrom >= 0 {
+		b.ColFrom += 1
+		b.ColTo += 1
+		b.Col += 1
+	}
+	b.Dirty = true
+	b.Version += 1
+}
+
+// UnindentColumn removes one tab (or up to four spaces) from the start of every line the column
+// selection touches.
+fn (b mut Buffer) UnindentColumn() {
+	let spans = b.columnSpans()
+	if len(spans) == 0 {
+		b.Unindent()
+		return
+	}
+	b.record(kindOther)
+	mut cut = 0
+	for s in spans {
+		let line = b.Lines[s.row]
+		mut n = 0
+		if len(line) > 0 && line[0] == '\t' {
+			n = 1
+		} else if len(line) > 0 && line[0] == ' ' {
+			n = 1
+			for n < 4 && n < len(line) && line[n] == ' ' {
+				n += 1
+			}
+		}
+		if n > 0 {
+			b.Lines[s.row] = line[n:]
+			if s.row == b.ColFirst {
+				cut = n
+			}
+		}
+	}
+	if b.ColFrom >= cut {
+		b.ColFrom -= cut
+		b.ColTo -= cut
+		if b.Col >= cut {
+			b.Col -= cut
+		}
+	}
+	b.Dirty = true
+	b.Version += 1
 }

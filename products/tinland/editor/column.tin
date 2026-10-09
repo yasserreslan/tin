@@ -1,0 +1,174 @@
+package editor
+
+import "appkit"
+
+// Column selection (Alt while the mouse drags): the rectangle between where the drag started and where it is. Typing, a cut, a
+// paste, the indent keys and undo act on every line the rectangle covers; the clipboard text is one line per covered line.
+
+// ColumnSelOn reports whether the buffer's selection is a column one.
+fn (ed Editor) ColumnSelOn() bool {
+	return ed.Buf.ColSel
+}
+
+// ColumnSelect turns the current selection into a column one and reports whether it became one.
+fn (ed mut Editor) ColumnSelect() bool {
+	ed.Buf.ColumnSelect()
+	if ed.Buf.ColSel {
+		ed.Say("column selection")
+		ed.Redraw = true
+		return true
+	}
+	return false
+}
+
+// mouseToCol puts the rectangle in the buffer from where the press was to (x, y) as it moves.
+fn (ed mut Editor) mouseToCol(x f64, y f64) {
+	mut r = i64(y / ed.LineH)
+	if wrapOn {
+		let (wr, _) = ed.rowAt(r)
+		r = wr
+	} else {
+		r = ed.shownAfter(ed.Scroll, r)
+	}
+	mut col = i64((x - ed.gutterW()) / ed.CharW)
+	if r >= len(ed.Buf.Lines) {
+		r = len(ed.Buf.Lines) - 1
+	}
+	if r < 0 {
+		r = 0
+	}
+	if col > len(ed.Buf.Lines[r]) {
+		col = len(ed.Buf.Lines[r])
+	}
+	if col < 0 {
+		col = 0
+	}
+	ed.Buf.MoveTo(r, col, false)
+	ed.Buf.SelRow = ed.colAnchorRow
+	ed.Buf.SelCol = ed.colAnchorCol
+	ed.Buf.HasSel = true
+	ed.Buf.ColumnSelect()
+	ed.Follow = true
+	ed.Redraw = true
+}
+
+// CopyColumn puts the rectangle's text on the clipboard.
+fn (ed mut Editor) CopyColumn() bool {
+	if !ed.Buf.ColSel {
+		return false
+	}
+	appkit.SetClipboard(ed.Buf.ColumnText())
+	ed.Say("copied the column selection")
+	return true
+}
+
+// CutColumn removes the rectangle and puts it on the clipboard.
+fn (ed mut Editor) CutColumn() bool {
+	if !ed.Buf.ColSel {
+		return false
+	}
+	appkit.SetClipboard(ed.Buf.ColumnText())
+	ed.Buf.DeleteColumn()
+	ed.Follow = true
+	ed.Redraw = true
+	ed.Say("cut the column selection")
+	return true
+}
+
+// PasteColumn writes the clipboard text into every line the rectangle covers.
+fn (ed mut Editor) PasteColumn() bool {
+	if !ed.Buf.ColSel {
+		return false
+	}
+	ed.Buf.InsertColumn(appkit.ClipboardText())
+	ed.Follow = true
+	ed.Redraw = true
+	ed.Say("pasted into the column selection")
+	return true
+}
+
+// IndentColumn and UnindentColumn move the rectangle's columns with the lines.
+fn (ed mut Editor) IndentColumn() {
+	ed.Buf.IndentColumn()
+	ed.Follow = true
+	ed.Redraw = true
+}
+
+fn (ed mut Editor) UnindentColumn() {
+	ed.Buf.UnindentColumn()
+	ed.Follow = true
+	ed.Redraw = true
+}
+
+// columnKey handles a key while a column selection is on screen. It reports whether it handled it: the keys that change the
+// rectangle's text act on every line it covers, and the ones that move the caret drop it so the ordinary path takes over.
+fn (ed mut Editor) columnKey(k Key) bool {
+	let cmd = (k.Flags & flagCmd) != 0
+	let shift = (k.Flags & flagShift) != 0
+	let alt = (k.Flags & flagAlt) != 0
+	if k.Code == keyEscape {
+		ed.Buf.HasSel = false
+		ed.Buf.ColSel = false
+		return true
+	}
+	if cmd {
+		mut cc = u8(0)
+		if len(k.Chars) > 0 {
+			cc = u8(k.Chars[0])
+		}
+		if cc == 'c' {
+			ed.CopyColumn()
+			return true
+		}
+		if cc == 'x' {
+			ed.CutColumn()
+			return true
+		}
+		if cc == 'v' {
+			ed.PasteColumn()
+			return true
+		}
+		if cc == 'z' {
+			ed.Buf.Undo()
+			ed.Buf.ColSel = false
+			ed.Redraw = true
+			return true
+		}
+		if cc == 'a' {
+			// the whole text becomes the rectangle: the first line's start to the last line's end
+			ed.Buf.MoveTo(0, 0, false)
+			ed.Buf.MoveTo(len(ed.Buf.Lines) - 1, len(ed.Buf.Lines[len(ed.Buf.Lines) - 1]), true)
+			ed.Buf.ColumnSelect()
+			return true
+		}
+		return false
+	}
+	if k.Code == keyBackspace || k.Code == keyForwardDelete {
+		ed.Buf.DeleteColumn()
+		return true
+	}
+	if k.Code == keyTab {
+		if shift {
+			ed.UnindentColumn()
+		} else {
+			ed.IndentColumn()
+		}
+		return true
+	}
+	if k.Code == keyReturn || k.Code == keyEnter {
+		// a line break in a rectangle is typed into every line it covers
+		ed.Buf.InsertColumn("\n")
+		return true
+	}
+	if k.Code == keyLeft || k.Code == keyRight || k.Code == keyUp || k.Code == keyDown || k.Code == keyHome || k.Code == keyEnd || k.Code == keyPageUp || k.Code == keyPageDown {
+		ed.Buf.HasSel = false
+		ed.Buf.ColSel = false
+		return false
+	}
+	if typeable(k.Chars) {
+		ed.Buf.InsertColumn(k.Chars)
+		return true
+	}
+	_ = alt
+	return false
+}
