@@ -52,7 +52,7 @@ fn commands() []command {
 		command{name: "Edit: Trim Trailing Whitespace", cmd: 40},
 		command{name: "Edit: Transform to Uppercase", cmd: 37},
 		command{name: "Edit: Transform to Lowercase", cmd: 38},
-		command{name: "Selection: Select Line", cmd: 44},
+		command{name: "Selection: Select All Occurrences", cmd: 47},
 		command{name: "Selection: Select All", cmd: 12},
 		command{name: "Selection: Move Line Up", cmd: 34},
 		command{name: "Selection: Move Line Down", cmd: 35},

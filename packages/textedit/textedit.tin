@@ -822,6 +822,45 @@ fn (b mut Buffer) Find(needle str, forward bool) bool {
 	return false
 }
 
+// SelectNext selects the next occurrence of the selected text after the selection and reports whether
+// there was one (it selects nothing without a selection): the way a repeated "select next occurrence"
+// grows from one match to every match in the file.
+fn (b mut Buffer) SelectNext() bool {
+	if !b.HasSel {
+		return false
+	}
+	let needle = b.SelectedText()
+	if len(needle) == 0 {
+		return false
+	}
+	let from = b.SelEnd()
+	mut row = from.Row
+	mut col = from.Col + len(needle)
+	let n = len(b.Lines)
+	mut k = 0
+	for k <= n {
+		if row < 0 || row >= n {
+			break
+		}
+		let line = b.Lines[row]
+		if col > len(line) {
+			col = 0
+			row += 1
+			k += 1
+			continue
+		}
+		let at = twine.Index(line[col:], needle)
+		if at >= 0 {
+			b.selectSpan(row, col + at, len(needle))
+			return true
+		}
+		row += 1
+		col = 0
+		k += 1
+	}
+	return false
+}
+
 // selectSpan selects length bytes of line row from col, the cursor at the end of the match.
 fn (b mut Buffer) selectSpan(row i64, col i64, length i64) {
 	b.last = kindNone

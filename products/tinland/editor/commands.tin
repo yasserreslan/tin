@@ -42,6 +42,7 @@ const CmdSortLines = 39
 const CmdTrimTrailing = 40
 const CmdToggleRuler = 41
 const CmdCloseOthers = 45
+const CmdSelectNext = 47
 const CmdCloseAll = 46
 
 // Perform does a menu command by pressing the key that does the same.
@@ -114,6 +115,10 @@ fn (ed mut Editor) Perform(cmd i64) {
 		ed.Buf.TrimTrailingSpace()
 		ed.Follow = true
 		ed.Redraw = true
+		return
+	}
+	if cmd == CmdSelectNext {
+		ed.handleKey(Key{Code: -1, Flags: flagCmd | flagShift, Chars: "l"})
 		return
 	}
 	if cmd == CmdCloseOthers {

@@ -4161,6 +4161,7 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) Indent()`: Indent adds a tab at the start of every selected line (or the cursor's line); Unindent removes one tab or up to four spaces from each.
 - `(b mut Buffer) Unindent()`
 - `(b mut Buffer) Find(needle str, forward bool) bool`: Find looks for needle after the cursor (before it when backward), wrapping around the end of the text, and selects the match; it reports whether there was one.
+- `(b mut Buffer) SelectNext() bool`: SelectNext selects the next occurrence of the selected text after the selection and reports whether there was one (it selects nothing without a selection): the way a repeated "select next occurrence" grows from one match to every match in the file.
 - `(b mut Buffer) ReplaceSelection(text str)`: ReplaceSelection replaces the selection with text (a no-op without a selection).
 - `(b mut Buffer) ToggleComment()`: ToggleComment comments every touched line with "// ", or uncomments them when all of them are commented.
 - `(b mut Buffer) DeleteLine()`: DeleteLine removes the cursor's line (or every touched line).
