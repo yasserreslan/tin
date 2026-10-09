@@ -12,6 +12,7 @@ import "fault"
 import "flume"
 import "mint"
 import "quarry"
+import "tide"
 import "tty"
 import "twine"
 
@@ -202,7 +203,7 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 }
 
 // mergeAdopted merges the packs of one kind that the batches wrote into one pack (their entries copied as they are),
-// then removes them. The new pack is in place before they go, so an interruption leaves objects twice, never missing;
+// then retires them. The new pack is in place before they go, so an interruption leaves objects twice, never missing;
 // a merge that fails leaves the batches' packs as they are (tit repack joins them), and says so.
 fn mergeAdopted(dir str, paths []str) {
 	if len(paths) < 2 {
@@ -215,18 +216,18 @@ fn mergeAdopted(dir str, paths []str) {
 		quarry.Eprintln("tit: adopt: the batches' packs stay apart ({fault.Message(err)}); tit repack joins them")
 		return
 	}
+	// retired, not deleted: a reader that listed them keeps reading them in packs/retired (#1007)
+	mut names = []str{}
 	for p in paths {
 		if p == merged {
 			continue
 		}
-		let base = p[0:len(p) - 5]
-		quarry.Remove(base + ".idx") catch e {
-			quarry.Eprintln("tit: adopt: {fault.Message(e)}")
-			continue
-		}
-		quarry.Remove(p) catch e {
-			quarry.Eprintln("tit: adopt: {fault.Message(e)}")
-		}
+		let slash = twine.LastIndex(p, "/")
+		names = append(names, p[slash + 1:len(p) - 5])
+	}
+	packfile.Retire(dir, names, tide.Wall() / 1000000000) catch e {
+		quarry.Eprintln("tit: adopt: {fault.Message(e)}")
+		0
 	}
 }
 
