@@ -231,11 +231,14 @@ fn doStatus(g Global, short bool, o mut Out) ! {
 		tree = try r.headTreeOf(head)
 	}
 	mut rules = try ignore.Load(r.Ws.Root)
+	let known = idx.Tree != object.NoId
 	let full = try index.Status(mut r.Store, r.Ws.Root, tree, mut idx, mut rules)
 	let rep = focused(r, full)
 	// unchanged files' new stat goes back into the index, so the next status skips them
 	if rep.Restat {
 		try idx.Write(r.Ws.IndexPath())
+	} else if !known {
+		r.rememberIndexTree(idx)
 	}
 	let untracked = collapse(rep.Untracked, idx)
 	let renames = try stagedRenames(mut r, idx, tree, rep)

@@ -81,11 +81,13 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 	}
 	mut same = false
 	if !conflictedAny && head != object.NoId {
-		mut mem = store.NewMem()
-		let itree = WriteTree(mut mem, idx) catch _ {
-			object.NoId
+		if idx.Tree == object.NoId {
+			mut mem = store.NewMem()
+			idx.Tree = WriteTree(mut mem, idx) catch _ {
+				object.NoId
+			}
 		}
-		same = itree == head
+		same = idx.Tree == head
 	}
 	mut h = map[str]Entry{}
 	if !same {

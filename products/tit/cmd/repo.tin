@@ -11,6 +11,7 @@ import "../store"
 import "../worktree"
 import "fault"
 import "quarry"
+import "seal"
 import "trail"
 import "twine"
 
@@ -208,5 +209,27 @@ fn (r Repo) config() !identity.Config {
 }
 
 fn (r Repo) readIndex() !index.Index {
-	return try index.Read(r.Ws.IndexPath())
+	mut idx = try index.Read(r.Ws.IndexPath())
+	// the tree of this very index file, remembered by its hash (index-tree: "<sum> <tree>"): status need not hash
+	// every entry again to see that nothing is staged
+	if len(idx.Sum) == 32 {
+		let text = quarry.ReadFile(r.Ws.State() + "/index-tree") catch _ {
+			""
+		}
+		let parts = twine.Split(twine.TrimSpace(text), " ")
+		if len(parts) == 2 && parts[0] == seal.Hex([]u8(idx.Sum)) {
+			idx.Tree = object.ParseId(parts[1]) catch _ {
+				object.NoId
+			}
+		}
+	}
+	return idx
+}
+
+// rememberIndexTree keeps the tree status computed for the index file it read.
+fn (r Repo) rememberIndexTree(idx index.Index) {
+	if len(idx.Sum) == 32 && idx.Tree != object.NoId {
+		quarry.WriteFile(r.Ws.State() + "/index-tree", seal.Hex([]u8(idx.Sum)) + " " + idx.Tree.Hex() + "\n") catch _ {
+		}
+	}
 }

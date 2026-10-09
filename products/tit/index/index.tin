@@ -49,6 +49,11 @@ type Index struct {
 	// entry whose file changed at that time or after cannot be trusted by its stat (status hashes it, as git does
 	// with "racily clean" entries)
 	Written i64
+	// Sum is the index file's trailing SHA-256 when it was read ("" otherwise), and Tree the tree its entries make
+	// when known (object.NoId otherwise): status hashes the entries into a tree only when Tree is not known, and
+	// a caller may remember Tree by Sum (an exact key: any change to the file changes it)
+	Sum  str
+	Tree object.Id
 }
 
 // FileStatus is how a path differs.
@@ -64,7 +69,7 @@ type FileStatus enum {
 
 // New is an empty index.
 fn New() Index {
-	return Index{Entries: []Entry{}, Written: 0}
+	return Index{Entries: []Entry{}, Written: 0, Sum: "", Tree: object.NoId}
 }
 
 fn modeByte(m object.Mode) i64 {
@@ -234,7 +239,12 @@ fn (idx mut Index) Remove(path str) {
 }
 
 fn le64(s str, at i64) i64 {
-	return i64(pack.LE.U64([]u8(s[at:at + 8])))
+	// by bytes, in place (a slice of a str is a copy, five per entry)
+	mut v = 0
+	for k in 0..8 {
+		v = v | (i64(s[at + k]) << (8 * k))
+	}
+	return v
 }
 
 // Read reads an index file; a missing file is an empty index.
@@ -279,7 +289,7 @@ fn Read(path str) !Index {
 	if at != end {
 		fail fault.Wrap(ErrBadIndex, "{path}: bytes after the last entry")
 	}
-	return Index{Entries: out, Written: written}
+	return Index{Entries: out, Written: written, Sum: data[len(data) - 32:], Tree: object.NoId}
 }
 
 fn appendU64(out mut []u8, v i64) {
@@ -339,7 +349,7 @@ fn FromTree[S store.ObjectStore](s mut S, tree object.Id) !Index {
 	if tree != object.NoId {
 		try addTree(mut s, tree, "", mut es)
 	}
-	mut idx = Index{Entries: es, Written: 0}
+	mut idx = Index{Entries: es, Written: 0, Sum: "", Tree: object.NoId}
 	idx.sortEntries()
 	return idx
 }
