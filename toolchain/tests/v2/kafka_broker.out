@@ -31,6 +31,24 @@ ok a Txn used by two tasks at once fails one of them with ErrTransaction
 ok a transactional send to a topic being created waits for its partitions
 ok a topic that never gets partitions is ErrUnknownTopic
 ok PartitionFor of 0 partitions is -1
+ok a cancelled owner fails its own send
+ok but not its batchmate's, which was written
+ok and each record is written once
+ok a cancelled owner's records go out in the next batch
+ok whole, before any record that came later
+ok a waiter past the client timeout is ErrTimedOut
+ok and the batch in flight still lands
+ok a send whose answers are all lost fails
+ok and the next send is written, not taken for its duplicate
+ok and later sends to the partition complete
+ok both records of a refused batch fail with the broker's own error
+ok a failing InitProducerId is ErrCoordinator
+ok a batch too large for the broker is ErrMessageTooLarge
+ok and its refusal asked for no producer id
+ok so the next send is written with the same producer id
+ok a transactional batch past BatchMax splits
+ok and every record of it is written
+ok a cancelled sender's fault is Canceled
 ok 70 producers made and closed, and one id made 71 times, fit in 64 slots
 ok the member joined with the id the coordinator gave
 ok the rebalance made it join again

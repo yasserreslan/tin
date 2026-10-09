@@ -83,6 +83,31 @@ A member is a value owned by one core: `Group` holds per-core state the same way
   batch is never written twice. OUT_OF_ORDER_SEQUENCE and UNKNOWN_PRODUCER_ID reset the epoch.
 - Compression is per client (`Options.Compression`): none, gzip, snappy (xerial framing as Kafka's Java
   client writes it, plain blocks read too), lz4 (frame format), zstd.
+- A batch outlives the task that drives it. The caller owning a partition when a batch goes out may be
+  cancelled while it is in flight (its deadline, a scope sibling, the drain); the frame was written
+  either way, so its own boundary never decides the batch's fate:
+  - The owner's deadline or cancellation ends its wait, not the batch: `sendNext` puts the batch's
+    records back at the head of the accumulator, `produceBatch` rolls the sequence back with them, and
+    the partition is passed to the next pending caller, which sends the batch again. An idempotent
+    retry of a written batch gets DUPLICATE_SEQUENCE_NUMBER and reports no offset, exactly as the lost
+    acknowledgement of the broker test does; without idempotence the retry may write the records twice,
+    as Kafka's contract for a producer without idempotence allows.
+  - A caller that gives up leaves its records pending: the next batch sends them and frees its waiter
+    when they are done. Ownership passes to the first caller still waiting (one that gave up is
+    skipped), so a partition is never left with a batch nobody sends, and no waiter is handed to a task
+    that already left.
+  - A batch the broker answered with a rejection it did not append (MESSAGE_TOO_LARGE, an invalid
+    record, authorization) rolls the sequence back, and so does one whose every attempt was answered:
+    only one batch per partition is in flight, so nothing else consumed the sequence, and the next
+    batch reuses it instead of getting OUT_OF_ORDER and costing the client a new producer id. An
+    ambiguous answer (NOT_ENOUGH_REPLICAS_AFTER_APPEND, REQUEST_TIMED_OUT, NETWORK_EXCEPTION) or a
+    transport failure leaves the sequence consumed: the batch may have been written, and reusing its
+    sequence would have the broker drop the next batch as a duplicate and lose its records.
+  - A waiter's outcome is the fault itself, kept while the waiter outlives the failed call and copied
+    back into the reporting caller's pool, so `fault.Is` holds for the deadline, cancel,
+    ErrCoordinator, ErrTimedOut and broker-error faults a caller sees for a batch another task failed.
+  - A recorded or replayed request (`TIN_REPLAY_DIR`) splits by `BatchMax` like live mode (section 8),
+    so a batch that live mode would split is not refused once the request is recorded.
 
 ## 5. Transactions
 

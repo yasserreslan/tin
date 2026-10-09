@@ -9,6 +9,7 @@ import "relay"
 import "say"
 import "seal"
 import "stamp"
+import "tide"
 import "wire"
 
 // The Kafka client against a fake cluster in the same process, so CI needs no Kafka: brokers 1
@@ -132,12 +133,12 @@ fn be64(s str, at i64) i64 {
 
 // Topics and their leaders (the same on every broker): t has partitions led by brokers 1, 2
 // and 3, old is led by broker 4, tx and the group's topic g by brokers 1 and 2, txl (the
-// transactional producer's failures, #442) by broker 1. t/1's leader moves from broker 2 to
-// broker 1 at the first produce to it (see leaderOf). late is being created: each broker's
-// first answer about it has no partitions (LEADER_NOT_AVAILABLE), later ones one, led by broker
-// 1; never stays without partitions.
+// transactional producer's failures, #442) and p (the producer's batch lifetimes, #443) by
+// broker 1. t/1's leader moves from broker 2 to broker 1 at the first produce to it (see
+// leaderOf). late is being created: each broker's first answer about it has no partitions
+// (LEADER_NOT_AVAILABLE), later ones one, led by broker 1; never stays without partitions.
 fn layout() []str {
-	return []str{"t", "old", "tx", "g", "txl"}
+	return []str{"t", "old", "tx", "g", "txl", "p"}
 }
 
 // leaderOf is the leader of topic's partition part as broker b sees it: once broker 2 has told
@@ -164,7 +165,7 @@ fn leaders(topic str) []i64 {
 	if topic == "g" {
 		return []i64{1, 2}
 	}
-	if topic == "txl" || topic == "late" {
+	if topic == "txl" || topic == "late" || topic == "p" {
 		return []i64{1}
 	}
 	return []i64{}
@@ -197,6 +198,7 @@ type broker struct {
 	authed     bool
 	scram      str // a SCRAM exchange in progress: client-first-bare,server-first
 	moved      bool // t/1's leader has moved from broker 2 to broker 1
+	client     str // the client id of the request being served
 }
 
 fn (b mut broker) logIndex(topic str, part i64) i64 {
@@ -281,7 +283,7 @@ fn serve(id i64) ! {
 		}
 	}
 	ports = append(ports, cur)
-	mut b = broker{id: id, ports: ports, logs: []partLog{}, seqs: []i64{}, produces: 0, groupGen: 0, beats: 0, member: "", assignment: "", commits: []str{}, commitOffs: []i64{}, nextPid: 1000 + 100*id, txFirst: -1, txPid: -1, authed: false, scram: "", moved: false}
+	mut b = broker{id: id, ports: ports, logs: []partLog{}, seqs: []i64{}, produces: 0, groupGen: 0, beats: 0, member: "", assignment: "", commits: []str{}, commitOffs: []i64{}, nextPid: 1000 + 100*id, txFirst: -1, txPid: -1, authed: false, scram: "", moved: false, client: ""}
 	// The client keeps two connections to a broker (one for requests a broker may hold), so a
 	// broker serves several: it polls each with a short timeout and takes new ones in between.
 	mut conns = []wire.Conn{}
@@ -369,7 +371,7 @@ fn handle(b mut broker, frame str) (str, bool) {
 	let api = r.i16()
 	let ver = r.i16()
 	let corr = r.i32()
-	r.str() // client id
+	b.client = r.str() // client id
 	mut out = make([]u8, 0, 256)
 	p32(mut out, corr)
 	if api == 18 {
@@ -629,6 +631,7 @@ fn produce(b mut broker, r mut rd, head []u8) (str, bool) {
 	r.i32()
 	let nt = r.i32()
 	mut lostAck = false
+	mut slow = false
 	p32(mut out, nt)
 	for i in 0..nt {
 		let topic = r.str()
@@ -650,6 +653,29 @@ fn produce(b mut broker, r mut rd, head []u8) (str, bool) {
 					}
 				}
 				p16(mut out, 6)
+				p64(mut out, -1)
+				p64(mut out, -1)
+				p64(mut out, 0)
+				continue
+			}
+			if contains(batch, "slow") {
+				// The answer waits, so a client can be cancelled while its batch is in flight
+				// (#443: the owner's deadline must not fail its batchmates' written records).
+				slow = true
+			}
+			if contains(batch, "too-large") {
+				// A record past the broker's message.max.bytes is refused whole, with its
+				// batchmates (#443: the fault must keep its identity across tasks).
+				p16(mut out, 10)
+				p64(mut out, -1)
+				p64(mut out, -1)
+				p64(mut out, 0)
+				continue
+			}
+			if topic == "p" && len(batch)-61 > 80 {
+				// A batch past the broker's message.max.bytes is refused whole (#443: a
+				// SendBatch that live mode splits must be split on the recorded path too).
+				p16(mut out, 10)
 				p64(mut out, -1)
 				p64(mut out, -1)
 				p64(mut out, 0)
@@ -711,6 +737,13 @@ fn produce(b mut broker, r mut rd, head []u8) (str, bool) {
 		}
 	}
 	p32(mut out, 0)
+	if slow {
+		// The records are stored; only the answer waits, as a broker under load does.
+		let derr = tide.Wait(150ms)
+		if derr != nil {
+			// The broker's own task was cancelled: answer now.
+		}
+	}
 	if lostAck {
 		return "", false
 	}
@@ -1002,6 +1035,16 @@ fn txn(b mut broker, api i64, r mut rd, head []u8) str {
 	if api == 22 {
 		r.str()
 		r.i32()
+		// The client on core 0 counts the producer ids it asked for (#443: a refused batch must
+		// not cost a new one). A client marked coordfail is answered as a coordinator that is
+		// not available yet, which the send must report as ErrCoordinator.
+		relay.Send(0, "pid")
+		if b.client == "coordfail" {
+			p16(mut out, 15)
+			p64(mut out, -1)
+			p16(mut out, -1)
+			return str(out)
+		}
 		b.nextPid += 1
 		p16(mut out, 0)
 		p64(mut out, b.nextPid)
@@ -1066,6 +1109,77 @@ fn sendTo(tx kafka.Txn, v str) i64 {
 
 fn msg(v str) kafka.Message {
 	return kafka.Message{Key: "", Value: v, Headers: []kafka.Header{}, Timestamp: 0}
+}
+
+// sendErr sends one record and reports its outcome: 0 sent, 1 its own deadline or a
+// cancellation, 2 the client timeout (ErrTimedOut), 3 MESSAGE_TOO_LARGE, 4 a failing
+// InitProducerId (ErrCoordinator), 5 another fault.
+fn sendErr(c kafka.Client, topic str, p i64, v str) i64 {
+	let (_, err) = c.SendTo(topic, p, msg(v))
+	if err == nil {
+		return 0
+	}
+	if fault.Is(err, fault.DeadlineExceeded) || fault.Is(err, fault.Canceled) {
+		return 1
+	}
+	if fault.Is(err, kafka.ErrTimedOut) {
+		return 2
+	}
+	if fault.Is(err, kafka.ErrMessageTooLarge) {
+		return 3
+	}
+	if fault.Is(err, kafka.ErrCoordinator) {
+		return 4
+	}
+	return 5
+}
+
+// withinBound sends one record inside a deadline, as a request handler would, and reports its
+// outcome as sendErr does.
+fn withinBound(c kafka.Client, topic str, p i64, v str, d i64) i64 {
+	within d {
+		try c.SendTo(topic, p, msg(v))
+	} catch err {
+		if fault.Is(err, fault.DeadlineExceeded) || fault.Is(err, fault.Canceled) {
+			return 1
+		}
+		return 4
+	}
+	return 0
+}
+
+// laterSend waits d, then sends one record plainly (no deadline), and reports its outcome as
+// sendErr does.
+fn laterSend(c kafka.Client, topic str, p i64, v str, d i64) i64 {
+	let derr = tide.Wait(d)
+	if derr != nil {
+		return 1
+	}
+	return sendErr(c, topic, p, v)
+}
+
+// canceledSend sends one record and reports 1 when it fails with fault.Canceled (a cancellation
+// reaching it while it waited), 0 otherwise.
+fn canceledSend(c kafka.Client, topic str, p i64, v str) i64 {
+	let (_, err) = c.SendTo(topic, p, msg(v))
+	if err != nil && fault.Is(err, fault.Canceled) {
+		return 1
+	}
+	return 0
+}
+
+// pidsAsked is how many InitProducerId requests the brokers have answered, drained from relay.
+fn pidsAsked() i64 {
+	mut n = 0
+	for {
+		let (_, note, noted) = relay.TryRecv()
+		if !noted {
+			return n
+		}
+		if note == "pid" {
+			n += 1
+		}
+	}
 }
 
 fn run(ports str) ! {
@@ -1228,6 +1342,114 @@ fn run(ports str) ! {
 	check("a topic that never gets partitions is ErrUnknownTopic", never != nil && fault.Is(never, kafka.ErrUnknownTopic))
 	try tl.Abort()
 	check("PartitionFor of 0 partitions is -1", kafka.PartitionFor("k", 0) == -1)
+
+	// A batch outlives the caller that drove it (#443): a caller cancelled while its batch is
+	// in flight fails its own send, not the records that went out with it.
+	let (own, mate) = try parallel {
+		withinBound(c, "p", 0, "slow-a", 60ms)
+		sendErr(c, "p", 0, "slow-b")
+	}
+	check("a cancelled owner fails its own send", own == 1)
+	check("but not its batchmate's, which was written", mate == 0)
+	let pair = try c.Fetch("p", 0, 0, 0)
+	check("and each record is written once", len(pair) == 2 && pair[0].Value == "slow-a" && pair[1].Value == "slow-b")
+
+	// A caller that gives up leaves its records to the next batch, which sends them before any
+	// record that came later, so a written batch is never merged with an unwritten one.
+	let (gone, kept) = try parallel {
+		withinBound(c, "p", 0, "slow-c", 60ms)
+		laterSend(c, "p", 0, "slow-d", 20ms)
+	}
+	check("a cancelled owner's records go out in the next batch", gone == 1 && kept == 0)
+	let four = try c.Fetch("p", 0, 0, 0)
+	check("whole, before any record that came later", len(four) == 4 && four[2].Value == "slow-c" && four[3].Value == "slow-d")
+
+	// A waiter past the client's own timeout fails with ErrTimedOut, while the batch in flight
+	// still lands for the others.
+	let short = kafka.Open(kafka.Options{Brokers: []str{boot}, Username: "tin", Password: "secret", Timeout: 50ms})
+	let (own2, mate2) = try parallel {
+		sendErr(short, "p", 0, "slow-e")
+		laterSend(short, "p", 0, "slow-f", 20ms)
+	}
+	check("a waiter past the client timeout is ErrTimedOut", mate2 == 2)
+	check("and the batch in flight still lands", own2 == 0)
+	short.Close()
+
+	// A send whose acknowledgements are all lost fails after the broker wrote it, and the next
+	// send to the partition goes on with the next sequence: rolling this one back would have
+	// the broker drop the next batch as its duplicate, and its records would be lost (#443).
+	let (_, lost) = c.SendTo("p", 0, msg("ack-lost"))
+	check("a send whose answers are all lost fails", lost != nil)
+	let nextOne = try c.SendTo("p", 0, msg("after the lost ack"))
+	let eight = try c.Fetch("p", 0, 0, 0)
+	check("and the next send is written, not taken for its duplicate", nextOne.Offset == 7 && len(eight) == 8 && eight[7].Value == "after the lost ack")
+
+	let after = try c.SendTo("p", 0, msg("after the cancel"))
+	let nine = try c.Fetch("p", 0, 0, 0)
+	check("and later sends to the partition complete", after.Offset == 8 && len(nine) == 9 && nine[8].Value == "after the cancel")
+
+	// A failed batch's fault keeps its identity across tasks: the batchmate of a refused record
+	// sees the broker's own error, not a message rebuilt from text.
+	let (wide, fine) = try parallel {
+		sendErr(c, "p", 0, "too-large")
+		sendErr(c, "p", 0, "fine")
+	}
+	check("both records of a refused batch fail with the broker's own error", wide == 3 && fine == 3)
+	let cf = kafka.Open(kafka.Options{Brokers: []str{boot}, Username: "tin", Password: "secret", ClientID: "coordfail", Timeout: 5s})
+	let (_, coord) = cf.SendTo("p", 0, msg("no coordinator"))
+	mut coordErr = false
+	if coord != nil {
+		coordErr = fault.Is(coord, kafka.ErrCoordinator)
+	}
+	check("a failing InitProducerId is ErrCoordinator", coordErr)
+	cf.Close()
+
+	// A batch the broker refuses for good costs no sequence: the next send to the partition is
+	// written with the same producer id, not after a new one.
+	_ = pidsAsked() // drain what the sends so far asked for
+	let (_, large) = c.SendTo("p", 0, msg("too-large"))
+	check("a batch too large for the broker is ErrMessageTooLarge", large != nil && fault.Is(large, kafka.ErrMessageTooLarge))
+	check("and its refusal asked for no producer id", pidsAsked() == 0)
+	let after2 = try c.SendTo("p", 0, msg("after the refusal"))
+	check("so the next send is written with the same producer id", after2.Offset == 9 && pidsAsked() == 0)
+
+	// A transactional SendBatch splits by BatchMax, as live mode does.
+	let tc = kafka.Open(kafka.Options{Brokers: []str{boot}, Username: "tin", Password: "secret", Timeout: 5s, BatchMax: 60})
+	let tx2 = try tc.Transactional("split-1", 0)
+	try tx2.Begin()
+	mut many = []kafka.Message{}
+	for k in 0..10 {
+		many = append(many, msg("split {k}"))
+	}
+	let sAcks = try tx2.SendBatch("p", many)
+	check("a transactional batch past BatchMax splits", len(sAcks) == 10)
+	try tx2.Commit()
+	let splitBack = try tc.Fetch("p", 0, sAcks[0].Offset, 0)
+	mut splitOK = len(splitBack) == 10
+	for k in 0..10 {
+		if splitBack[k].Value != "split {k}" {
+			splitOK = false
+		}
+	}
+	check("and every record of it is written", splitOK)
+	tx2.Close()
+	tc.Close()
+
+	// A cancelled sender's own fault is Canceled (#443): its records go back to the head of the
+	// partition for whatever sends there next, and the fault keeps its identity.
+	mut canceled = 0
+	scope s {
+		let t = s.spawn(fn() !i64 {
+			return canceledSend(c, "p", 0, "slow-g")
+		})
+		let derr = tide.Wait(20ms)
+		if derr != nil {
+			// The wait was cancelled with the sender: nothing to do.
+		}
+		t.cancel()
+		canceled = try t.wait()
+	}
+	check("a cancelled sender's fault is Canceled", canceled == 1)
 
 	// Slots: Close frees one, and making the producer of an id again reuses its slot.
 	for k in 0..70 {
