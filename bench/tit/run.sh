@@ -60,7 +60,7 @@ repack() {
 	rm -rf .tit
 	cp -R "$d/tit-packs" .tit
 	t0=$(date +%s%N)
-	TIN_CORES=$1 "$tit" repack > /dev/null
+	TIN_CORES=$1 "$tit" repack --all > /dev/null
 	echo $((($(date +%s%N) - t0) / 1000))
 }
 : > "$d/r1"

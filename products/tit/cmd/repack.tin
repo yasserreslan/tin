@@ -11,7 +11,7 @@ import "twine"
 // each pack is one more index to search for every object read. Loose objects stay as they are (large files among them
 // are kept in chunks). The new pack is in place before the old ones go, so a crash leaves objects twice, never missing.
 
-fn doRepack(g Global, o mut Out) ! {
+fn doRepack(g Global, all bool, o mut Out) ! {
 	mut r = try open(g)
 	use lock = change.Lock(r.Ws.Store)
 	let dir = r.Ws.Store + "/packs"
@@ -24,7 +24,7 @@ fn doRepack(g Global, o mut Out) ! {
 			}
 		}
 	}
-	if len(old) < 4 {
+	if len(old) < 4 && !(all && len(old) > 0) {
 		o.Line("Nothing to repack: {len(old)} packs.")
 		return
 	}
