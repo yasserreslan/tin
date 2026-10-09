@@ -3513,6 +3513,39 @@ fn (w Out) Fields() []str {
 	return out
 }
 
+// HeadersAll returns the response's headers as flat name, value pairs: Content-Type when set, then the Head and SetCookie fields in order.
+fn (w Out) HeadersAll() []str {
+	mut out = []str{}
+	if len(w.ctype) > 0 {
+		out = append(out, "Content-Type", w.ctype)
+	}
+	let e = w.extra
+	mut i = 0
+	for i < len(e) {
+		mut j = i
+		for j < len(e) && e[j] != '\n' {
+			j += 1
+		}
+		mut le = j
+		if le > i && e[le-1] == '\r' {
+			le -= 1
+		}
+		mut c = i
+		for c < le && e[c] != ':' {
+			c += 1
+		}
+		if c < le {
+			mut v = c + 1
+			for v < le && e[v] == ' ' {
+				v += 1
+			}
+			out = append(out, str(e[i:c]), str(e[v:le]))
+		}
+		i = j + 1
+	}
+	return out
+}
+
 // SetValue stores value under key for the rest of the request: middleware hand data (a user
 // id, a request id) to the handlers after them this way. Value reads it back.
 fn (w mut Out) SetValue(key str, value str) {

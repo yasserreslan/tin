@@ -20,6 +20,8 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
 | [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
+| [cgi](#cgi) | CGI handler adapter over an anvil handler (net/http/cgi) |
+| [cgi/fcgi](#cgi/fcgi) | FastCGI responder over an anvil handler (net/http/fcgi) |
 | [assay](#assay) | HTTP test requests, recorders and local test servers (net/http/httptest) |
 | [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
 | [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
@@ -370,6 +372,7 @@ ServeTLS (and Router.ServeTLS) serve HTTPS: TLS 1.3 with a PEM certificate chain
 - `(w Out) Code() i64`: Code returns the response status set so far (200 unless Status changed it).
 - `(w Out) Header(k str) str`: Header returns response header k as set so far (Type sets Content-Type, Head the rest), or "".
 - `(w Out) Fields() []str`: Fields returns every header field Head (and SetCookie) added so far as "Name: value", in order: Content-Type, which Type sets, is read with Header (#739).
+- `(w Out) HeadersAll() []str`: HeadersAll returns the response's headers as flat name, value pairs: Content-Type when set, then the Head and SetCookie fields in order.
 - `(w mut Out) SetValue(key str, value str)`: SetValue stores value under key for the rest of the request: middleware hand data (a user id, a request id) to the handlers after them this way. Value reads it back.
 - `(w Out) Value(key str) str`: Value returns what SetValue stored under key in this request, or "".
 - `OnRelay(h fn(i64, str))`: OnRelay makes every core run h(from, msg) for each relay message it receives (call before Serve). Handlers run between requests, with their own request pool.
@@ -621,6 +624,22 @@ Once the response head is sent its status cannot change, so a failure in the ups
 - `New(target str) Proxy`: New returns a proxy with default hook functions. Set hooks before registering ServeHTTP.
 - `DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault)`: DefaultErrorHandler writes Go ReverseProxy's default 502: the status with no body (anvil adds its text/plain content type).
 - `(p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out)`: ServeHTTP handles a request and can be registered with anvil.Router.Stream. Requests and responses reuse one 32 KiB buffer in each direction; neither body is accumulated.
+
+## cgi
+
+Package cgi runs an anvil handler, or a Router, as a CGI program (RFC 3875) the way Go's net/http/cgi does. Serve reads the request from the environment and standard input and writes the response to standard output. Call and Format are the same steps on values, for cgi/fcgi and tests. The request goes through anvil's in-process path (Router.RunWith), so RemoteAddr and TLS are empty.
+
+- `Serve(r anvil.Router) !`: Serve runs r as a CGI program: the request comes from the environment and standard input, the response goes to standard output.
+- `ServeFunc(h fn(anvil.Req, mut anvil.Out)) !`: ServeFunc is Serve for one handler h on every path and method.
+- `Call(r anvil.Router, env map[str]str, body str) !anvil.Out`: Call answers the request the CGI variables env describe, with body as its body, through r: Go's cgi.RequestFromMap, then the handler.
+- `Format(code i64, headers []str, body str, fastcgi bool) str`: Format is the response bytes for a status code, its header fields (name and value pairs) and its body: the Status line, the fields sorted by canonical name, a blank line, then the body. fastcgi gives Go's fcgi child instead: a Date, and no Content-Type on 304.
+
+## cgi/fcgi
+
+Package fcgi runs an anvil handler, or a Router, as a FastCGI responder: the record protocol of Go's net/http/fcgi (responder role). Serve answers the connections one after another, and each connection's requests in order, each when its stdin ends (Go answers them concurrently, which a sequential client cannot tell apart). The response is the bytes cgi.Format gives, cut into STDOUT records, with Go's Date header and its error for a request whose variables are malformed (a 500 and the message on STDERR).
+
+- `Serve(l wire.Listener, r anvil.Router) !`: Serve answers FastCGI requests that arrive on l with r, one connection after another, until l fails. A task spawned per connection would not run while this loop waits in Accept (see packages/rpc).
+- `ServeFunc(l wire.Listener, h fn(anvil.Req, mut anvil.Out)) !`: ServeFunc is Serve for one handler h on every path and method.
 
 ## assay
 

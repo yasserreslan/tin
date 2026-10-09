@@ -294,6 +294,8 @@ jobs:
         run: sh tools/ci/tin.sh dump_check
       - name: HTTP client trace hooks against Go net/http
         run: sh tools/ci/tin.sh httptrace_check
+      - name: CGI and FastCGI adapters against Go's net/http/cgi and net/http/fcgi
+        run: sh tools/ci/tin.sh cgi_check
       - name: pprof route availability
         run: |
           bin/tinc toolchain/tests/v2/pprof.tin -o bin/ci/pprof-test

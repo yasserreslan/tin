@@ -1,0 +1,107 @@
+// cgi_twin serves the routes of the CGI and FastCGI twin check (tools/ci/cgi_check.tin) as a CGI
+// program (no argument), or as a FastCGI responder on a loopback port (argument fcgi, which prints
+// the port first). bench/ref/cgi is the Go program with the same routes.
+package main
+
+import "anvil"
+import "cgi"
+import "cgi/fcgi"
+import "flume"
+import "mint"
+import "quarry"
+import "say"
+import "wire"
+
+// echo answers every other path with the request's line, its headers of interest and its body.
+fn echo(q anvil.Req, w mut anvil.Out) {
+	let host = q.Header("Host")
+	let ctype = q.Header("Content-Type")
+	let xfoo = q.Header("X-Foo-Bar")
+	let body = q.Body()
+	let n = len(body)
+	w.Type("text/plain; charset=utf-8")
+	w.Text("method={q.Method}\npath={q.Path}\nquery={q.Query}\nhost={host}\nctype={ctype}\nxfoo={xfoo}\nbody-len={n}\nbody={body}\n")
+}
+
+// status answers with the status code in its path, or 400 when the code is not a number.
+fn status(q anvil.Req, w mut anvil.Out) {
+	let (code, err) = mint.Atoi(q.PathParam("code"))
+	w.Type("text/plain; charset=utf-8")
+	if err != nil {
+		w.Status(400)
+		w.Text("bad code\n")
+		return
+	}
+	w.Status(code)
+	w.Text("status {code}\n")
+}
+
+// headers sets fields whose names and values the response must spell as Go does.
+fn headers(q anvil.Req, w mut anvil.Out) {
+	w.Head("x-lower", "lower")
+	w.Head("X-Space", "  padded  ")
+	w.Head("Set-Cookie", "a=1; Path=/")
+	w.Head("set-cookie", "b=2")
+	w.Type("text/html; charset=utf-8")
+	w.Text("<p>headers</p>\n")
+}
+
+// big writes 222000 bytes in 6000 writes.
+fn big(q anvil.Req, w mut anvil.Out) {
+	w.Type("text/plain; charset=utf-8")
+	for i in 0..6000 {
+		w.Text("0123456789abcdefghijklmnopqrstuvwxyz\n")
+	}
+}
+
+// routes is the router of both modes.
+fn routes() anvil.Router {
+	let r = anvil.NewRouter()
+	r.Get(`/status/{code}`, status)
+	r.Get("/headers", headers)
+	r.Get("/big", big)
+	r.Any(`/{path...}`, echo)
+	return r
+}
+
+// exitWith reports err on standard error and exits 1, as the Go twin does.
+fn exitWith(err fault) {
+	mut e = flume.NewWriter(2)
+	e.Line(say.Str(err))
+	let ferr = e.Flush()
+	if ferr != nil {
+		quarry.Exit(1)
+	}
+	quarry.Exit(1)
+}
+
+// serveFastCGI listens on a loopback port, prints it, and answers FastCGI requests on it.
+fn serveFastCGI() {
+	let (l, lerr) = wire.Listen("127.0.0.1:0")
+	if lerr != nil {
+		exitWith(lerr)
+	}
+	let port = l.Port()
+	mut out = flume.Stdout()
+	out.Line("{port}")
+	let ferr = out.Flush()
+	if ferr != nil {
+		quarry.Exit(1)
+	}
+	let err = fcgi.Serve(l, routes())
+	if err != nil {
+		exitWith(err)
+	}
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) > 1 && args[1] == "fcgi" {
+		serveFastCGI()
+		return
+	}
+	let err = cgi.Serve(routes())
+	if err != nil {
+		exitWith(err)
+	}
+}
