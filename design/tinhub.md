@@ -283,26 +283,41 @@ jobs, and the age of the oldest ready job of each kind.
 ```tin
 // package packs: where a repository's packs and capsules are kept
 shape PackStore {
-	mut Put(key str, path str) !            // copy the file at path to key; written once (temp, fsync, rename)
-	mut Get(key str, path str) !            // the whole object at key into the file at path
+	mut Put(key str, path str) !i64         // store the file at path at key, taking the file; the bytes stored
+	mut Get(key str, path str) !i64         // the whole object at key into the file at path; the bytes written
 	mut ReadAt(key str, off i64, buf mut []u8) !i64   // a ranged read; the bytes read
 	mut Size(key str) !?i64                 // nil when there is no object at key
 	mut Delete(key str) !bool               // false when it was not there
-	mut List(prefix str) ![]str             // every key under prefix
+	mut List(prefix str) ![]str             // every key under prefix, in order
 	Local(key str) ?str                     // a file path that holds key's bytes, when the store has one
 }
 ```
 
-Keys: `repos/<repo id>/packs/<hash>.pack`, `repos/<repo id>/packs/<hash>.idx`, `repos/<repo id>/capsules/<id>.tcap`,
-`repos/<repo id>/diffs/<change>/<version>.<against>`. The directory store keeps a key at `<packs.dir>/<key>`; the S3
-store at the same key in the bucket, with a local cache under `<packs.dir>/cache` (LRU by bytes; `.idx` always
-cached). The state of each pack is the `packs` row, never the file: a reader lists live packs from Postgres.
+(`Put` and `Get` return the bytes rather than a bare `!`: a shape method returning only `!` must be the shape's last,
+#1072.) `packs.Check` is the contract every store passes; the tests run it on the directory store and, against
+`bench/ref/s3sig`'s signature-checking fake, on the S3 store.
 
-A push over `PgRepo` (design/tit.md §16): the pack is streamed to `TempDir()` (`<packs.dir>/tmp`) and verified; `Stage`
-inserts the `pending` row, then `Put`s the `.idx` and the `.pack`; `Commit` takes the lock, re-checks, sets `live`,
-moves refs, inserts versions and the event, and commits. `Retire` sets `retired_at`. The sweep deletes the objects of
-`pending` rows older than `push.deadline` plus 10 minutes and of `retired` rows older than `packs.grace`, then their
-rows.
+Keys: `repos/<repo id>/packs/<hash>.pack`, `repos/<repo id>/packs/<hash>.idx`, `repos/<repo id>/capsules/<id>.tcap`,
+`repos/<repo id>/diffs/<change>/<version>.<against>`. The directory store keeps a key at `<packs.dir>/<key>`, written
+through a temporary file in the same directory, synced and renamed. The S3 store keeps it at the same key in the
+bucket (multipart above 64 MiB), with the node's copies under `<packs.dir>/cache`: what a node wrote or read stays
+there, and the sweep keeps the copies under `packs.cache` by retiring the oldest as tit retires a pack
+(`packfile.Retire`: a fetch that opened one follows it into `retired/`) and deleting retired copies after
+`packs.grace`. The state of each pack is the `packs` row, never the file: a reader lists live packs from Postgres.
+
+A push over `PgRepo` (`products/tinhub/repo`; design/tit.md §16): the pack is streamed to `TempDir()`
+(`<packs.dir>/tmp`), verified and indexed there; `Stage` inserts the `pending` row under the repository's lock (a pack
+already live is not stored again; a retired one becomes pending), then `Put`s the `.idx` and the `.pack`; `Commit`
+takes the lock (`pg_advisory_xact_lock(-<repo id>)`), re-checks every replaced version and old ref target, sets the
+pack `live` (adding its size to the repository's), moves each ref by compare-and-swap (`UPDATE … WHERE target = $old`,
+an insert when old is empty, a delete when new is empty, `RefChanged` when no row matched), adds the version rows and
+the `push` event, and commits. `Retire` sets `retired_at`. The sweep (every `packs.sweep`, and `tinhub packs sweep`)
+deletes, each under its repository's lock, the files and then the rows of `pending` packs older than `push.deadline`
+plus 10 minutes and of `retired` packs older than `packs.grace`, and the files a dead push left in `<packs.dir>/tmp`.
+
+Refs are cached in Redis (`redis.addr`) under a generation each commit bumps after it lands (`tinhub:refgen:<repo>`,
+`tinhub:refs:<repo>:<gen>`): a reader never finds an entry older than a push that has answered, and a Redis fault or
+miss reads Postgres. Pushes never read the cache.
 
 ---
 

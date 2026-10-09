@@ -3,6 +3,7 @@ package main
 import "./config"
 import "./db"
 import "./events"
+import "./packs"
 import "anvil"
 import "fault"
 import "hearth"
@@ -10,6 +11,7 @@ import "mint"
 import "herald"
 import "postgres"
 import "quarry"
+import "s3"
 import "say"
 import "seal"
 import "tide"
@@ -30,7 +32,7 @@ type Boot struct {
 }
 
 fn usage() str {
-	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub version [-v]\n"
+	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep [--config FILE]\n       tinhub version [-v]\n"
 }
 
 // parseBoot reads the command, its --config and --roles flags, and loads the configuration.
@@ -122,6 +124,70 @@ fn working() bool {
 	return boot.Command == "run" && len(boot.Err) == 0 && boot.Conf.Has("worker") && hearth.ID() == 0
 }
 
+// openStore is the pack store packs.store names: the directory store at packs.dir, or the bucket with the node's
+// copies under packs.dir/cache.
+fn openStore(c config.Config) !dyn packs.PackStore {
+	if c.PacksStore == "s3" {
+		let client = try s3.New(s3.Config{Endpoint: c.S3Endpoint, Region: c.S3Region, AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, Token: "", PathStyle: c.S3PathStyle, SignPayload: false, UnsignedPayload: false, Attempts: 0, Backoff: 0, Timeout: 0, TLS: nil})
+		let st dyn packs.PackStore = packs.S3Store{Client: client, Bucket: c.S3Bucket, Cache: c.PacksDir + "/cache"}
+		return st
+	}
+	let d = try packs.NewDirStore(c.PacksDir)
+	let st dyn packs.PackStore = d
+	return st
+}
+
+// pendingAge is how old a pending pack is before the sweep deletes it: no push runs past its deadline, so none can
+// still be writing it.
+fn pendingAge(c config.Config) i64 {
+	return c.PushDeadline + 10 * tide.Minute
+}
+
+// sweep runs the sweeps once (design/tinhub.md §2): on a worker, the pending and retired packs of every repository;
+// on every process, the packs left in packs.dir/tmp by pushes that died and, with the S3 store, the node's copies
+// over packs.cache.
+fn sweep(c config.Config, rows bool) ! {
+	mut st = try openStore(c)
+	let now = tide.Wall() / tide.Second
+	if rows {
+		let n = try packs.Sweep(pg, mut st, pendingAge(c), c.PacksGrace)
+		if n > 0 {
+			herald.Log(herald.LInfo, "swept packs", []str{"packs", say.Str(n)})
+		}
+	}
+	_ = try packs.SweepTemp(c.PacksDir + "/tmp", pendingAge(c) / tide.Second, now)
+	if c.PacksStore == "s3" {
+		_ = try packs.TrimCache(c.PacksDir + "/cache", c.PacksCache, c.PacksGrace / tide.Second, now)
+	}
+}
+
+// sweeping reports whether this process runs the sweeps: tinhub run, on core 0.
+fn sweeping() bool {
+	return boot.Command == "run" && len(boot.Err) == 0 && hearth.ID() == 0
+}
+
+// sweepLoop runs the sweeps every packs.sweep until the drain cancels it.
+fn sweepLoop() {
+	let every = boot.Conf.PacksSweep
+	let rows = boot.Conf.Has("worker")
+	for {
+		arena {
+			sweep(boot.Conf, rows) catch err {
+				herald.Log(herald.LError, "sweep", []str{"error", fault.Message(err)})
+			}
+		}
+		mut stop = false
+		hearth.Quiet(fn() {
+			tide.Wait(every) catch _ {
+				stop = true
+			}
+		})
+		if stop {
+			return
+		}
+	}
+}
+
 on core.start {
 	herald.SetLevel(level(boot.Conf.LogLevel))
 	if working() {
@@ -130,6 +196,11 @@ on core.start {
 			detach {
 				runner().Loop(s)
 			}
+		}
+	}
+	if sweeping() && boot.Conf.PacksSweep > 0 {
+		detach {
+			sweepLoop()
 		}
 	}
 }
@@ -300,9 +371,26 @@ fn main() {
 				quarry.Exit(1)
 			}
 		}
+		"packs" => {
+			if len(b.Args) != 1 || b.Args[0] != "sweep" {
+				quarry.Eprint(usage())
+				quarry.Exit(2)
+			}
+			sweepNow(b.Conf) catch err {
+				quarry.Eprintln("tinhub: packs sweep: {fault.Message(err)}")
+				quarry.Exit(1)
+			}
+		}
 		_ => {
 			quarry.Eprint(usage())
 			quarry.Exit(2)
 		}
 	}
+}
+
+// sweepNow is tinhub packs sweep: the sweeps once, with the schema checked first.
+fn sweepNow(c config.Config) ! {
+	try db.Current(pg)
+	try sweep(c, true)
+	say.Line("tinhub: swept")
 }

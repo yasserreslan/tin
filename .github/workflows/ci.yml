@@ -323,7 +323,7 @@ jobs:
       - name: tinhub (unit tests and the build; design/tinhub.md)
         if: ${{ !(runner.os == 'Linux' && runner.arch == 'X64') }}
         run: sh products/tinhub/tests/run.sh
-      - name: tinhub against the runner's PostgreSQL (schema, event queue, readiness, drain; Linux x86-64)
+      - name: tinhub against the runner's PostgreSQL (schema, event queue, packs and refs, crash points, readiness, drain; Linux x86-64)
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
           sudo -u postgres createdb -O tin tinhub_test

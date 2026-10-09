@@ -206,9 +206,14 @@ creates a dedicated `tin` database/user with a SCRAM verifier; it does not insta
 normalization/bidirectional/prohibited-input cases; the fixed Unicode 3.2 tables of
 `packages/postgres/sasl/sasl.tin` are kept as generated once (RFC 3454 and RFC 4013 pin them to Unicode 3.2, so they never change).
 
-tinhub (`products/tinhub/tests/run.sh`, design/tinhub.md): every native job runs its unit tests and builds the binary.
+tinhub (`products/tinhub/tests/run.sh`, design/tinhub.md): every native job runs its unit tests and builds the binary;
+where Go is installed the S3 pack store passes the store contract against `bench/ref/s3sig`'s signature-checking fake.
 On `ubuntu-24.04` the same script also runs against the runner's PostgreSQL, in a `tinhub_test` database it empties
 first: the migrations (from an empty database, twice, and two migrators at once applying each migration once), the
 schema's constraints, the event queue (four worker processes run 10,000 jobs and none is lost; a worker killed in the
-middle of a job loses it to another once its lease passes; a job over its memory budget fails alone), and a server
-that refuses to start before `tinhub migrate`, turns ready after it, and finishes a request in flight at SIGTERM.
+middle of a job loses it to another once its lease passes; a job over its memory budget fails alone), the pack states
+(a property test of random stages, commits, retires, drops and sweeps), tit's repository contract on Postgres, two
+processes racing to move one ref (each move lands once or is refused), pushes read back through two nodes' Redis caches
+while Redis (redis-server, else the `redis` image) is killed and restarted, a push, repack and retire killed at each
+crash point (main never reaches a missing pack, and the sweep removes the rest), and a server that refuses to start
+before `tinhub migrate`, turns ready after it, and finishes a request in flight at SIGTERM.

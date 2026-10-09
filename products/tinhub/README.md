@@ -9,6 +9,7 @@ written in Tin and run on Linux (arm64 and x86-64). The design, with every table
 ```sh
 tinhub run [--config FILE] [--roles node,worker,runner]   # serve; every role by default
 tinhub migrate [--config FILE]                             # apply the pending migrations, then exit
+tinhub packs sweep [--config FILE]                         # delete what crashed pushes and repacks left, once
 tinhub version
 ```
 
@@ -31,6 +32,14 @@ secrets.nonce = file:/run/secrets/tinhub-nonce
 secrets.cookie = file:/run/secrets/tinhub-cookie
 packs.dir = /var/lib/tinhub
 ```
+
+## Packs
+
+Packs live in the pack store (`packs.store = dir`, at `packs.dir`; or `s3`, a bucket with each node's copies under
+`packs.dir/cache`); whether a pack is pending, live or retired is its row in Postgres. Refs and change versions are
+rows too, moved by compare-and-swap in one transaction per push under the repository's lock, and cached in Redis when
+`redis.addr` is set. Every `packs.sweep` the sweeps delete the packs crashed pushes left and those retired longer than
+`packs.grace`. See [design/tinhub.md §7](../../design/tinhub.md#7-the-pack-store-1011-1015).
 
 ## Health and shutdown
 
