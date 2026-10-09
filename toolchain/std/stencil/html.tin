@@ -114,7 +114,11 @@ fn annotateHTML(nodes []Node, st htmlState) !htmlState {
 				}
 			}
 			Call(_) => {
-				// A called template starts and ends in text; see the note in ParseHTML.
+				// A called template renders in element text, so a call in a tag, an attribute or a script would be
+				// escaped as text (a URL would pass unfiltered): refused.
+				if s.state != stText {
+					fail say.Fault("stencil: a template call outside element text is not supported")
+				}
 			}
 		}
 	}
