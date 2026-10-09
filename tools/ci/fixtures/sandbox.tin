@@ -241,7 +241,10 @@ fn cgroups(cg str) {
 		l.Weight = 50
 		show("limits", l)
 		let pmark = mark + "-pids"
-		mut p = spec([]str{"/bin/sh", "-c", "i=0; while [ $i -lt 64 ]; do /probe sleep " + pmark + " & i=$((i+1)); done; wait"})
+		// the loop runs in a subshell: a shell whose fork fails exits (dash: "Cannot fork"), and the program's exit would
+		// end the run before its timeout; the program then becomes a sleeper itself, with no fork, so the timeout kills
+		// the sleepers the limit let start
+		mut p = spec([]str{"/bin/sh", "-c", "(i=0; while [ $i -lt 64 ]; do /probe sleep " + pmark + " & i=$((i+1)); done; wait); exec /probe sleep " + pmark})
 		p.Cgroup = cg
 		p.Pids = 16
 		p.Timeout = 2000000000
