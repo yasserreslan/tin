@@ -103,7 +103,13 @@ files . > "$d/tit.files"
 gitfiles . main > "$d/git.files"
 cmp -s "$d/tit.files" "$d/git.files" || fail "back on main the files differ"
 echo "ok #784 #789 switching through $k commits across history leaves exactly each commit's files"
-f=$(git log --name-only --format= main -- '*.tin' | grep . | sort | uniq -c | sort -rn | awk 'NR == 1 { print $2 }')
+f=""
+for c in $(git log --name-only --format= main -- '*.tin' | grep . | sort | uniq -c | sort -rn | awk '{ print $2 }'); do
+	if git cat-file -e "main:$c" 2> /dev/null; then
+		f=$c
+		break
+	fi
+done
 old=$(git rev-list main -n 1 --skip=1 -- "$f" || true)
 if [ -n "$old" ] && [ "$(git rev-parse "$old:$f")" != "$(git rev-parse "main:$f")" ]; then
 	printf '\n// unsaved\n' >> "$f"
@@ -156,7 +162,9 @@ echo "ok #783 staged, the rename shows as git shows it"
 cd "$d/repo"
 m=0
 for br in $(git branch --format='%(refname:short)' | grep -v '^main$' | head -40); do
-	gtree=$(git merge-tree --write-tree main "$br" 2> /dev/null | head -1) || continue
+	# only the merges git makes cleanly (merge-tree exits 1 on a conflict)
+	out=$(git merge-tree --write-tree main "$br" 2> /dev/null) || continue
+	gtree=$(echo "$out" | head -1)
 	[ "$(git merge-base main "$br")" = "$(git rev-parse "$br")" ] && continue
 	[ "$(git merge-base main "$br")" = "$(git rev-parse main)" ] && continue
 	t switch main > /dev/null

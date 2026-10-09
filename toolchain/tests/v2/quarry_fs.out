@@ -18,3 +18,11 @@ entries of a file: true
 sync missing: open /tmp/tin-test-quarry-fs/missing: no such file or directory
 second exclusive create fails: true
 lock holds: 5
+read at 0 4 [0123]
+read at 10 6 [abcdef]
+read at 14 10 [ef]
+read at 16 3 []
+read at 40 2 []
+read at 3 0 []
+read at a missing file fails: true
+read at a negative offset fails: true

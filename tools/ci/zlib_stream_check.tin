@@ -1,0 +1,51 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// Streaming zlib against Go's compress/zlib (#772). Tin writes streams of 32 sizes from 0 to 1 MiB and of three of
+// the repository's own files with NewZlibWriter, in random pieces, and Go inflates them; Go writes the same inputs
+// and Tin reads them with NewZlibReader, in random read sizes. Then 4 GiB each way through a pipe (Tin's writer into Go's reader, Go's
+// writer into Tin's reader), a 4 GiB stream read under limit memory 1mb, and every byte of a stream damaged and
+// every cut of it: a fault each time, never a panic, never a wrong result.
+
+let size4g = "4294967296"
+
+fn main() {
+	let dir = ci.Join(ci.Root(), "bin/ci/zlib_stream")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "zlib-")
+	let exe = ci.Join(work, "zlib_stream")
+	ci.BuildTin("tools/ci/fixtures/zlib_stream.tin", exe, "", []str{})
+	let gobin = ci.Join(work, "zlib_go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", gobin, "./bench/ref/zlib_stream"}, ci.Root(), 300), "go build")
+	let commands = [][]str{
+		[]str{exe, "files", work},
+		[]str{gobin, "files", work},
+		[]str{exe, "check", work},
+		[]str{"/bin/sh", "-c", "'" + exe + "' write " + size4g + " | '" + gobin + "' read " + size4g},
+		[]str{"/bin/sh", "-c", "'" + gobin + "' write " + size4g + " | '" + exe + "' read " + size4g},
+		[]str{exe, "bound", size4g},
+		[]str{exe, "damaged"},
+	}
+	mut lines = []str{}
+	for command in commands {
+		let o = ci.Exec(command, ci.Root(), 900)
+		ci.Must(o, command[0])
+		for line in twine.Split(twine.TrimSuffix(o.Stdout, "\n"), "\n") {
+			lines = append(lines, line)
+		}
+	}
+	ci.Remove(work)
+	say.Line(twine.Join(lines, "\n"))
+	let all = twine.Join(lines, "\n")
+	ci.Check(!twine.Contains(all, "FAIL"), "zlib streams disagree with Go:\n" + all)
+	ci.Check(twine.Contains(all, "go inflates tin: 35 ok, 0 failed"), "Go did not inflate every Tin stream")
+	ci.Check(twine.Contains(all, "tin reads go: 35 ok, 0 failed"), "Tin did not read every Go stream")
+	ci.Check(twine.Contains(all, "go reads tin's stream of " + size4g + " bytes ok"), "Go did not read Tin's 4 GiB stream")
+	ci.Check(twine.Contains(all, "tin reads go's stream of " + size4g + " bytes ok"), "Tin did not read Go's 4 GiB stream")
+	ci.Check(twine.Contains(all, "tin reads " + size4g + " bytes of " + size4g + " under limit memory 1mb"), "the 4 GiB stream did not stay under 1 MiB")
+	ci.Check(twine.Contains(all, " 0 panics, 0 decoded to something else"), "a damaged stream panicked or decoded wrong")
+	ci.Pass("squash: streaming zlib against Go's compress/zlib, 32 sizes, 3 real files and 4 GiB each way; 4 GiB read in 1 MiB; damaged streams fault")
+}

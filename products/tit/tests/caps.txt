@@ -7,10 +7,11 @@ change files
 cmd net files spawn
 cores files
 crash
+delta
 diff
 fault
 flume files
-git files
+git net files
 glyph
 hearth
 herald

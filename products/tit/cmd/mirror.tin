@@ -29,6 +29,13 @@ fn doMirror(g Global, path str, o mut Out) ! {
 	} else if cfg.Get("mirror.url") == nil {
 		try identity.Set(r.Ws.Store + "/config", "mirror.url", gitDir)
 	}
+	// a git server over HTTP(S): the objects go into a git directory of tit's own first, then are pushed from there
+	mut pushTo = ""
+	if twine.HasPrefix(gitDir, "http://") || twine.HasPrefix(gitDir, "https://") {
+		pushTo = gitDir
+		gitDir = r.Ws.Store + "/mirror.git"
+		try bareGit(gitDir)
+	}
 	let target = try git.Open(gitDir)
 	let idsPath = r.Ws.Store + "/git-ids"
 	mut ids = try git.ReadIds(idsPath)
@@ -89,5 +96,32 @@ fn doMirror(g Global, path str, o mut Out) ! {
 	if len(current) > 0 {
 		try git.PointHead(gitDir, current)
 	}
-	o.Line("Mirrored " + count(written, "object", "objects") + " into " + target.CommonDir + "; " + count(len(names), "ref", "refs") + " written.")
+	if len(pushTo) == 0 {
+		o.Line("Mirrored " + count(written, "object", "objects") + " into " + target.CommonDir + "; " + count(len(names), "ref", "refs") + " written.")
+		return
+	}
+	mut updates = []git.RefPush{}
+	for k in 0..len(names) {
+		updates = append(updates, git.RefPush{Name: names[k], New: back.Git(tips[k].Bytes())})
+	}
+	let pushed = try git.Open(gitDir)
+	let token secret str = quarry.Getenv("TIT_MIRROR_TOKEN")
+	let (moved, sent) = try git.PushHttp(pushed, pushTo, token, updates)
+	if moved == 0 {
+		o.Line("Everything is mirrored: " + pushTo + " holds every branch and tag already.")
+		return
+	}
+	o.Line("Mirrored to " + pushTo + ": " + count(moved, "ref", "refs") + " moved, " + count(sent, "object", "objects") + " sent.")
+}
+
+// bareGit makes an empty bare git directory at dir, unless there is one.
+fn bareGit(dir str) ! {
+	if quarry.Exists(dir + "/HEAD") {
+		return
+	}
+	try quarry.MkdirAll(dir + "/objects")
+	try quarry.MkdirAll(dir + "/refs/heads")
+	try quarry.MkdirAll(dir + "/refs/tags")
+	try quarry.WriteFile(dir + "/config", "[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+	try quarry.WriteFile(dir + "/HEAD", "ref: refs/heads/main\n")
 }

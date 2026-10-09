@@ -69,19 +69,10 @@ fn storePack(r mut Repo, data str) !i64 {
 	if len(data) == 0 {
 		return 0
 	}
-	mut mem = store.NewMem()
-	let ids = try packfile.Unpack(data, mut mem, transport.MaxObject)
-	mut fresh = []object.Id{}
-	for id in ids {
-		if !r.Store.Has(id) {
-			fresh = append(fresh, id)
-		}
-	}
-	if len(fresh) > 0 {
-		mut p = try packfile.Write(mut mem, fresh, r.Ws.Store + "/packs")
-		try p.Verify()
-	}
-	return len(fresh)
+	// the pack is kept as it came, with an index built for it (packfile.Keep): nothing is unpacked into memory or
+	// packed again, so a clone of a long history takes the memory of the pack
+	let p = try packfile.Keep(data, r.Ws.Store + "/packs", transport.MaxObject)
+	return p.Count
 }
 
 fn localTips(r Repo) ![]str {

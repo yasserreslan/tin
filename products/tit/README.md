@@ -41,7 +41,9 @@ takes only those. A shallow clone is refused (`git fetch --unshallow` first); a 
 
 Going the other way, `tit mirror <git dir>` writes every branch and tag into a git directory: adopted commits keep
 their original git ids, and a commit made in tit gets one fixed encoding (its message, then a `Change-Id:` line, no
-signature), so every machine mirroring it writes the same git id. `git push` from there carries it on.
+signature), so every machine mirroring it writes the same git id. `git push` from there carries it on, or tit pushes
+itself: `TIT_MIRROR_TOKEN=... tit mirror https://github.com/owner/repo.git` speaks git's smart HTTP protocol and sends
+only what the server lacks.
 
 ## Never losing work
 
@@ -80,6 +82,62 @@ Requests are signed with your key over a nonce the server gives, and a push is t
 the server's old value of each ref (and the version each change replaces), so a race or a replay is refused instead
 of overwriting someone's work. The protocol is section 15 of the design.
 
+## Stacks and sync
+
+```sh
+tit switch -c feature
+tit commit -am "one"; tit commit -am "two"; tit commit -am "three"
+tit stack                     # the changes above main, oldest first
+tit absorb                    # each uncommitted fix goes into the change that wrote those lines
+tit edit <change>             # amend a change in the middle: tit commit --amend rebases what is above it
+tit move <change> --before <change>
+tit split <change> <paths>
+tit sync                      # fetch, rebase the stack onto origin's main, push it
+```
+
+A stack never stops halfway: a rebase that meets a conflict records it in the change (`tit stack` shows it), and
+`tit sync` will not push it until `tit edit` resolves it. Each of these is one operation, so one `tit undo` reverses
+it. `tit rewrite --all '<command>'` runs a command (a formatter, say) on every change of every branch, again as one
+operation.
+
+## Workspaces, snapshots and park
+
+```sh
+tit workspace new issue-42    # ../<repo>-issue-42, on its own branch, sharing this store, with its own undo
+tit who products/tit          # who changed this area lately
+tit timeline notes.txt        # versions of a file kept before each command that changed files
+tit timeline notes.txt 3      # put version 3 back
+tit watch                     # keep every save, until Ctrl-C
+tit park wip                  # put the uncommitted changes aside (untracked files too), branch remembered
+tit unpark wip
+```
+
+## Tin-aware history
+
+```sh
+tit diff --semantic           # added, removed, changed, moved and renamed declarations
+tit history quarry.ReadFile   # the commits that changed one declaration, through renames and moves
+tit overlap                   # other branches changing the declarations this one changes
+```
+
+A merge of `.tin` files whose lines conflict is tried again declaration by declaration: two branches adding
+different functions at the same place merge cleanly, and a conflict names the function both changed.
+
+## Large repositories
+
+Files over 8 MiB are stored in content-defined chunks, so an edit stores what it touched, and they check out a chunk
+at a time. `tit clone --lazy` takes the history now and file contents when something reads them; `tit focus
+<dir>...` checks out only those directories (with a lazy clone, the rest is never fetched). `tit repack` gathers the
+packs an adopt leaves into three (commits, trees, blobs), finding deltas and compressing on every core.
+
+## Releases and benchmarks
+
+```sh
+tit ship v1.2.0                         # tag with the changelog since the last tag, signed, pushed
+tit bench record parse 812 --unit ms    # kept with the change and the machine
+tit bench compare parse HEAD~3 HEAD     # never macOS against Linux, never two machines
+```
+
 ## Safety
 
 `tit commit` refuses a private key (RSA, EC, Ed25519 in PEM or DER, OpenSSH, tit) or an access token (GitHub, AWS,
@@ -90,5 +148,7 @@ files for them, and `.tit-guard-allow` lists paths it leaves alone. `tit verify`
 ## Tests
 
 `sh products/tit/tests/run.sh bin/tinc` runs everything: each package's tests, the programs and sessions compared with
-git's output, and the scripts (`adopt`, `undo`, `share`, `mirror`, `guard`, `bisect`), which need git, openssl and
-ssh-keygen.
+git's output, and the scripts in `tests/scripts` (which need git, openssl, perl and ssh-keygen): crash points at every
+write, damaged inputs of every format, sharing over `tit serve`, and the rest. `tests/tinrepo.sh` checks tit against
+git on a full clone of the Tin repository (adopt, revisions, status, switches, merges, mirror, clone, lazy clone); it
+takes minutes and is run by hand on Linux.

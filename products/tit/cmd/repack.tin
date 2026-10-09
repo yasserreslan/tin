@@ -1,0 +1,81 @@
+package cmd
+
+import "../change"
+import "../object"
+import "../packfile"
+import "quarry"
+import "twine"
+
+// tit repack (#778): every pack into three (commits and tags, trees, blobs), its deltas searched again and its entries compressed on every core. adopt
+// leaves a pack for each batch it converts, and each pack is one more index to search for every object read. Loose
+// objects stay as they are (large files among them are kept in chunks). The new pack is in place before the old ones
+// go, so a crash leaves objects twice, never missing.
+
+fn doRepack(g Global, o mut Out) ! {
+	mut r = try open(g)
+	use lock = change.Lock(r.Ws.Store)
+	let dir = r.Ws.Store + "/packs"
+	mut old = []str{}
+	if quarry.IsDir(dir) {
+		let names = try quarry.ReadDir(dir)
+		for n in names {
+			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
+				old = append(old, n[0:len(n) - 5])
+			}
+		}
+	}
+	if len(old) < 4 {
+		o.Line("Nothing to repack: {len(old)} packs.")
+		return
+	}
+	// commits and tags in one pack, trees in another, blobs in a third: a log then reads only the first
+	mut commits = []object.Id{}
+	mut trees = []object.Id{}
+	mut blobs = []object.Id{}
+	for p in r.ids.packs {
+		for i in 0..p.Count {
+			let id = p.IdAt(i)
+			let (kind, _) = try r.Store.GetRaw(id)
+			match kind {
+				Commit, Tag => {
+					commits = append(commits, id)
+				}
+				Tree => {
+					trees = append(trees, id)
+				}
+				Blob => {
+					blobs = append(blobs, id)
+				}
+			}
+		}
+	}
+	mut made = []str{}
+	mut count = 0
+	mut size = 0
+	mut deltas = 0
+	for part in [][]object.Id{commits, trees, blobs} {
+		if len(part) == 0 {
+			continue
+		}
+		mut p = try packfile.Write(mut r.Store, part, dir)
+		made = append(made, p.Path[len(dir) + 1:len(p.Path) - 5])
+		count += p.Count
+		deltas += p.Deltas()
+		let info = try quarry.Lstat(p.Path)
+		size += info.Size
+	}
+	for n in old {
+		mut kept = false
+		for m in made {
+			if m == n {
+				kept = true
+			}
+		}
+		if kept {
+			continue
+		}
+		try quarry.Remove(dir + "/" + n + ".idx")
+		try quarry.Remove(dir + "/" + n + ".pack")
+	}
+	o.Line("Packed {count} objects from {len(old)} packs into {len(made)}: commits, trees and blobs apart ({size / 1048576} MiB, {deltas} deltas).")
+}

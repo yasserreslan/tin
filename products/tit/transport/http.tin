@@ -146,6 +146,13 @@ fn Serve(addr str, dir str, allowFile str, public bool) ! {
 		p = "1"
 	}
 	try quarry.Setenv("TIT_SERVE_PUBLIC", p)
+	// a fetch builds its pack in memory, as large as what it sends (a clone: the whole repository), more than anvil's
+	// default request budget (a share of memory per core); the server's own limits bound pushes. TIN_REQUEST_MEMORY,
+	// when set, is kept.
+	let (_, set) = quarry.LookupEnv("TIN_REQUEST_MEMORY")
+	if !set {
+		try quarry.Setenv("TIN_REQUEST_MEMORY", "0")
+	}
 	try anvil.Serve(addr, handle)
 }
 

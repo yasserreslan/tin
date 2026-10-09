@@ -21,6 +21,30 @@ Output longer than the terminal goes through `$PAGER` (`less -FRX`); `TIT_NO_PAG
 status is 0, 1 for a failure, 2 for a usage error, 130 after Ctrl-C. `tit help <command>` (or `tit <command> --help`)
 prints one command's usage.
 
+## A session
+
+<!-- tests/scripts/docs.sh runs this block, line by line, in an empty directory: keep it working. -->
+
+```sh
+tit init
+tit config set user.name "Ada Lovelace"
+tit config set user.email ada@example.com
+printf 'one\n' > notes.txt
+tit add notes.txt
+tit commit -m "first"
+tit switch -c idea
+printf 'two\n' >> notes.txt
+tit commit -am "second"
+tit stack
+tit switch main
+tit merge idea
+tit log --oneline
+tit undo
+tit timeline notes.txt
+tit park --help
+tit status -s
+```
+
 ## Revisions
 
 `HEAD`; a branch, tag or remote-tracking branch (`main`, `v1`, `origin/main`); a full or short commit id; a change id
@@ -99,6 +123,26 @@ the new version records it, `tit stack` shows it, and `tit edit` puts git's mark
 | `tit split <change> <paths> [-m msg]` | a new change, just below, holding what the change did to these paths |
 | `tit absorb` | each uncommitted hunk goes into the change that wrote those lines; a hunk no single change owns stays (listed) |
 | `tit sync [remote]` | fetch, rebase the stack onto `<remote>/<trunk>` (the local trunk follows), push the branch; nothing that records a conflict is pushed |
+| `tit rewrite [--stack\|--all] <cmd>` | run `cmd` (through `/bin/sh`) on each change's own files, in a temporary directory: what it leaves is the change's new version, and the changes above follow. `--stack` (the default) is this branch's stack, `--all` every branch above the trunk; a change where it fails is listed and kept; one undo reverses it all |
+
+## Tin declarations
+
+| command | |
+|---|---|
+| `tit diff --semantic [A B]` | the changes as declarations: added, removed, changed, moved (to another file) and renamed (same body, new name); a reformat is no change |
+| `tit history <[package.]Name\|Type.Method> [-n N]` | the commits that changed one declaration, newest first, following its renames and moves (in the last N commits) |
+| `tit overlap` | the other branches (and fetched remote ones) above the trunk that change declarations this branch changes, and which |
+
+A merge of `.tin` files whose lines conflict is tried again declaration by declaration (design/tit.md): different
+declarations added or changed on each side merge cleanly, and a conflict names the declaration both sides changed.
+
+## Benchmarks
+
+| command | |
+|---|---|
+| `tit bench record <name> <value> [--unit u]` | keep a result for HEAD's change, with this machine (OS, architecture, CPU, cores, kernel) |
+| `tit bench log <name>` | every result of a benchmark |
+| `tit bench compare <name> <A> <B>` | the newest result of each revision's change and their ratio; refuses macOS against Linux, and two machines |
 
 ## Undo
 
@@ -122,6 +166,15 @@ their blobs), a file `tit guard` flags is never kept, and neither is a file over
 A file over 8 MiB is stored in content-defined chunks (design/tit.md section 5): an edit stores the chunks it
 touches, not the whole file again. Nothing changes in how the file is used; commits and git mirrors see one blob.
 
+| command | |
+|---|---|
+| `tit focus <dir>...` | check out only these directories (and the files at the root); the others stay in every commit as they are, and status, diff, `add` and `commit -a` leave them alone; refuses, changing nothing, when a file leaving the focus has changes |
+| `tit focus` | the directories in focus |
+| `tit focus --all` | check out everything again |
+| `tit repack` | every pack into three, commits and tags, trees, and blobs (a log reads only the first), its deltas searched again and its entries compressed on every core (`TIN_CORES` sets how many); adopt leaves three packs for each batch it converts |
+
+With `tit clone --lazy`, a focus also limits what is fetched: files outside it are never read.
+
 ## Sharing
 
 | command | |
@@ -138,7 +191,7 @@ touches, not the whole file again. Nothing changes in how the file is used; comm
 | command | |
 |---|---|
 | `tit adopt [git dir]` | bring a git repository in (the first time: start a tit repository in its working directory); again later: only what is new |
-| `tit mirror [git dir]` | write every branch and tag into a git directory as git objects (remembered as `mirror.url`) |
+| `tit mirror [git dir or URL]` | write every branch and tag into a git directory as git objects (remembered as `mirror.url`); given an `http(s)://` URL (`https://github.com/owner/repo.git`), write them into `.tit/mirror.git` and push them there over git's smart HTTP protocol, sending only what the server lacks; `TIT_MIRROR_TOKEN` is sent as the password (a GitHub token). One way: nothing is read from the server but its refs |
 
 ## Safety
 

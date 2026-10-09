@@ -1,3 +1,4 @@
+products/tit/git/push.tin: reveal("x-access-token:" + token) in git.PushHttp
 products/tit/identity/keys.tin: secret value seed passed to seal.Ed25519PublicKey (parameter seed is declared secret) in identity.NewKey
 products/tit/identity/keys.tin: reveal(seed) in identity.NewKey
 products/tit/identity/keys.tin: secret value seed passed to seal.Ed25519PublicKey (parameter seed is declared secret) in identity.LoadKey
@@ -6,4 +7,4 @@ products/tit/identity/keys.tin: secret value s.seed passed to seal.SignEd25519 (
 products/tit/identity/keys.tin: secret value s.seed passed to seal.SignEd25519 (parameter seed is declared secret) in identity.Signer.SignTag
 products/tit/transport/transport.tin: secret value key passed to seal.Hmac (parameter key is declared secret) in transport.NewNonce
 products/tit/transport/transport.tin: secret value key passed to seal.Hmac (parameter key is declared secret) in transport.CheckNonce
-1 reveal, 7 secrets passed to library parameters declared secret
+2 reveals, 7 secrets passed to library parameters declared secret

@@ -111,6 +111,21 @@ fn main() {
 		""
 	}
 	say.Line("lock holds:", len(lock))
+	// ReadAt: a range of a file, fewer bytes at its end, none past it
+	quarry.WriteFile(d + "/range", "0123456789abcdef") catch err {
+		say.Line(err)
+	}
+	for c in [][]i64{[]i64{0, 4}, []i64{10, 6}, []i64{14, 10}, []i64{16, 3}, []i64{40, 2}, []i64{3, 0}} {
+		let s = quarry.ReadAt(d + "/range", c[0], c[1]) catch err {
+			say.Line(err)
+			continue
+		}
+		say.Line("read at", c[0], c[1], "[" + s + "]")
+	}
+	let (_, e6) = quarry.ReadAt(d + "/missing", 0, 1)
+	say.Line("read at a missing file fails:", e6 != nil)
+	let (_, e7) = quarry.ReadAt(d + "/range", -1, 1)
+	say.Line("read at a negative offset fails:", e7 != nil)
 	quarry.Chmod(d + "/sub/b", 420) catch _ {
 	}
 	quarry.RemoveAll(d) catch err {

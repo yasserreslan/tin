@@ -177,7 +177,7 @@ fn TestKey(t mut crucible.T) {
 
 // Every command has help (#788): tit help <command> and tit <command> --help print its part of the usage text.
 fn TestHelpForEveryCommand(t mut crucible.T) {
-	let names = []str{"init", "status", "add", "rm", "mv", "commit", "diff", "log", "show", "cat", "config", "key", "branch", "switch", "merge", "tag", "undo", "redo", "oplog", "remote", "clone", "fetch", "push", "pull", "sync", "serve", "guard", "verify", "bisect", "workspace", "workspaces", "who", "stack", "edit", "move", "split", "absorb", "rewrite", "bench", "history", "overlap", "timeline", "ship", "watch", "park", "unpark", "mirror", "adopt", "version", "help"}
+	let names = []str{"init", "status", "add", "rm", "mv", "commit", "diff", "log", "show", "cat", "config", "key", "branch", "switch", "merge", "tag", "undo", "redo", "oplog", "remote", "clone", "fetch", "push", "pull", "sync", "serve", "guard", "verify", "bisect", "workspace", "workspaces", "who", "stack", "edit", "move", "split", "absorb", "rewrite", "bench", "history", "overlap", "timeline", "ship", "watch", "focus", "repack", "park", "unpark", "mirror", "adopt", "version", "help"}
 	for n in names {
 		let h = helpOf(n)
 		t.True("help for " + n, twine.HasPrefix(h, "usage: tit "))

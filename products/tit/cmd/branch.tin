@@ -183,7 +183,7 @@ fn headTree(r mut Repo) !object.Id {
 	if head == nil {
 		return object.NoId
 	}
-	return try r.treeOf(head)
+	return try r.headTreeOf(head)
 }
 
 // checkMove fails, changing nothing, when moving the working directory and the index from the tree from to the tree
@@ -359,6 +359,13 @@ fn doMerge(g Global, a MergeArgs, o mut Out) ! {
 		let full = r.Ws.Root + "/" + c.Path
 		let slash = twine.LastIndex(full, "/")
 		try quarry.MkdirAll(full[0:slash])
+		if quarry.IsDir(full) {
+			// a file against a directory: the directory stays, the file goes beside it, as git does
+			try quarry.WriteFile(full + "~" + twine.ReplaceAll(a.Rev, "/", "_"), text)
+			idx.SetConflict(c.Path, object.Mode.File, hashOf(c.Base()), hashOf(c.Ours()), hashOf(c.Theirs()))
+			paths = append(paths, c.Path)
+			continue
+		}
 		mut mode = object.Mode.File
 		let cur = idx.Find(c.Path)
 		if cur != nil {

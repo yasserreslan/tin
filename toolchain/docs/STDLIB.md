@@ -1196,6 +1196,7 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `LookupEnv(key str) (str, bool)`: LookupEnv returns the value of key and whether it is set (an empty value is still set).
 - `Setenv(key str, value str) !`: Setenv sets environment variable key to value; an empty key or one holding '=' or NUL is a fault.
 - `Unsetenv(key str) !`: Unsetenv removes environment variable key.
+- `ReadAt(path str, off i64, n i64) !str`: ReadAt returns up to n bytes of the file at path from offset off: fewer at the file's end, "" past it. Only those bytes are read (pread), so one record of a large file costs its own size. Inside a request task, or recording or replaying a tape, it reads the file through ReadFileBound and gives the same bytes.
 - `ReadFile(path str) !str`: ReadFile returns the whole content of the file at path. A file larger than 64 MiB (anvil's request limit) fails with fault.LimitExceeded before it is read, and so does a device or pipe past it, read by read (#745); ReadFileBound sets another bound.
 - `ReadFileBound(path str, n i64) !str`: ReadFileBound returns the whole content of the file at path when it is at most n bytes, and otherwise fails with fault.LimitExceeded: a regular file by its size, before anything is read, a device or pipe as soon as more than n bytes have come (#745).
 - `OpenRegular(path str) !(i64, i64)`: OpenRegular opens the regular file at path for reading and returns its descriptor and size; the caller closes the descriptor. Inside a request task it opens the file as ReadFile does: through the core's io_uring (Linux), or on a helper thread, always there under a slow mount, so an open that waits (a FIFO with no writer, a hung network mount) waits within the task's deadline and the core serves others meanwhile (#744). A directory ("is a directory"), a FIFO, a device or a socket ("not a regular file") is refused after the open: it has no size to send. It is for code that hands the file to the system, as anvil's SendFile does.
@@ -1760,6 +1761,11 @@ let back = try squash.Gunzip(z, 64mb)
 - `(z mut DeflateWriter[W]) Close() !`: Close compresses what is buffered, ends the stream and writes the zlib trailer; it does not close the writer below.
 - `InflatePrefix(data str, max i64) !(str, i64)`: InflatePrefix decompresses the raw DEFLATE stream at the start of data (at most max bytes out) and says how many bytes of data the stream took; what follows is left alone.
 - `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
+- `shape Reader`: Reader is what a streaming decompressor reads from: io.Reader's method.
+- `type InflateStream[R Reader] struct`: InflateStream decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src. It reads from another reader as it goes; InflateReader (inflate_reader.tin) reads DEFLATE data already in memory.
+- `NewInflateStream[R Reader](src R, max i64) InflateStream[R]`: NewInflateStream reads raw DEFLATE from src, making at most max bytes.
+- `NewZlibReader[R Reader](src R, max i64) !InflateStream[R]`: NewZlibReader reads a zlib stream from src (its header now, its Adler-32 at the end), making at most max bytes.
+- `(r mut InflateStream[R]) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
 - `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
 
@@ -1806,6 +1812,11 @@ let back = try squash.Gunzip(z, 64mb)
 - `(z mut DeflateWriter[W]) Close() !`: Close compresses what is buffered, ends the stream and writes the zlib trailer; it does not close the writer below.
 - `InflatePrefix(data str, max i64) !(str, i64)`: InflatePrefix decompresses the raw DEFLATE stream at the start of data (at most max bytes out) and says how many bytes of data the stream took; what follows is left alone.
 - `UnzlibPrefix(data str, max i64) !(str, i64)`: UnzlibPrefix decompresses the zlib stream at the start of data (at most max bytes out), checks its Adler-32 and says how many bytes of data the stream took, trailer included.
+- `shape Reader`: Reader is what a streaming decompressor reads from: io.Reader's method.
+- `type InflateStream[R Reader] struct`: InflateStream decompresses the DEFLATE stream (raw, or zlib when made by NewZlibReader) read from src. It reads from another reader as it goes; InflateReader (inflate_reader.tin) reads DEFLATE data already in memory.
+- `NewInflateStream[R Reader](src R, max i64) InflateStream[R]`: NewInflateStream reads raw DEFLATE from src, making at most max bytes.
+- `NewZlibReader[R Reader](src R, max i64) !InflateStream[R]`: NewZlibReader reads a zlib stream from src (its header now, its Adler-32 at the end), making at most max bytes.
+- `(r mut InflateStream[R]) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the decompressed stream; 0 at its end (a zlib stream's checksum checked).
 - `Unzstd(data str, max i64) !str`: Unzstd decompresses Zstandard data (any number of frames, and skippable frames), producing at most max bytes.
 - `Zstd(data str, level i64) str`: Zstd compresses data as one Zstandard frame at level (Store to Best; Store writes raw blocks).
 

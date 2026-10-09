@@ -199,6 +199,22 @@ fn objects(dir str) !store.Layered {
 	return store.NewLayered(layers)
 }
 
+// packsOf is the repository's packs, for a fetch to send their entries as they are (packfile.Reuse).
+fn packsOf(dir str) ![]packfile.Pack {
+	mut out = []packfile.Pack{}
+	let pdir = dir + "/packs"
+	if quarry.IsDir(pdir) {
+		let names = try quarry.ReadDir(pdir)
+		for n in names {
+			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
+				let p = try packfile.Open(pdir + "/" + n)
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
 fn (s Server) heads(now i64) !Heads {
 	let refs = change.NewRefs(s.Dir)
 	let all = try refs.List("refs/")
@@ -350,13 +366,13 @@ fn (s Server) fetch(body str) !str {
 			}
 			ids = append(ids, id)
 		}
-		let otmp = s.Dir + "/tmp-fetch-" + seal.Hex(seal.RandomBytes(8))
-		let op = try packfile.Write(mut st, ids, otmp)
-		let odata = try flume.ReadFile(op.Path)
-		try quarry.RemoveAll(otmp)
+		mut opacks = try packsOf(s.Dir)
+		let odata = try packfile.Reuse(mut st, mut opacks, ids)
 		return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(ids)}), odata)
 	}
 	mut wants = []object.Id{}
+	// an annotated tag is sent itself, and the commit it tags is walked
+	mut tags = []object.Id{}
 	for w in req.Wants {
 		let id = object.ParseId(w) catch _ {
 			try refusal(Code.BadRequest, "{w} is not an id")
@@ -365,7 +381,31 @@ fn (s Server) fetch(body str) !str {
 		if !st.Has(id) {
 			try refusal(Code.NotFound, "no commit {w} here")
 		}
-		wants = append(wants, id)
+		mut cur = id
+		for k in 0..16 {
+			let (kind, body) = try st.GetRaw(cur)
+			if kind != object.Kind.Tag {
+				break
+			}
+			tags = append(tags, cur)
+			let o = try object.Decode(kind, body)
+			match o {
+				Tag(t) => {
+					cur = t.Object
+				}
+				Commit(_) => {
+				}
+				Tree(_) => {
+				}
+				Blob(_) => {
+				}
+			}
+		}
+		let (ck, _) = try st.GetRaw(cur)
+		if ck != object.Kind.Commit {
+			try refusal(Code.BadRequest, "{w} does not name a commit")
+		}
+		wants = append(wants, cur)
 	}
 	mut haves = []object.Id{}
 	for h in req.Haves {
@@ -385,6 +425,13 @@ fn (s Server) fetch(body str) !str {
 	}
 	mut send = []object.Id{}
 	mut seen = map[str]bool{}
+	for t in tags {
+		let (_, dup) = seen[t.Bytes()]
+		if !dup {
+			seen[t.Bytes()] = true
+			send = append(send, t)
+		}
+	}
 	for id in commits {
 		send = append(send, id)
 		let c = try commitOf(mut st, id)
@@ -394,10 +441,9 @@ fn (s Server) fetch(body str) !str {
 			try reach(mut st, c.Tree, skip, mut send, mut seen)
 		}
 	}
-	let tmp = s.Dir + "/tmp-fetch-" + seal.Hex(seal.RandomBytes(8))
-	let p = try packfile.Write(mut st, send, tmp)
-	let data = try flume.ReadFile(p.Path)
-	try quarry.RemoveAll(tmp)
+	// the entries the packs hold already go as they are (packfile.Reuse): no delta search, no recompression
+	mut packs = try packsOf(s.Dir)
+	let data = try packfile.Reuse(mut st, mut packs, send)
 	return Frame(Kind.FetchAnswer, Encode(FetchAnswer{Objects: len(send)}), data)
 }
 

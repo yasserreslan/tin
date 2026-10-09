@@ -45,6 +45,10 @@ fn (e Entry) Id() object.Id {
 // Index is a workspace's staging area: its entries sorted by path (and stage).
 type Index struct {
 	Entries []Entry
+	// Written is when the index file was last written (its mtime, in ns; 0 for an index not read from a file): an
+	// entry whose file changed at that time or after cannot be trusted by its stat (status hashes it, as git does
+	// with "racily clean" entries)
+	Written i64
 }
 
 // FileStatus is how a path differs.
@@ -60,7 +64,7 @@ type FileStatus enum {
 
 // New is an empty index.
 fn New() Index {
-	return Index{Entries: []Entry{}}
+	return Index{Entries: []Entry{}, Written: 0}
 }
 
 fn modeByte(m object.Mode) i64 {
@@ -125,17 +129,59 @@ fn (idx Index) Find(path str) ?Entry {
 	return nil
 }
 
-// Set adds or replaces the stage-0 entry for e.Path, dropping any conflict stages of that path.
-fn (idx mut Index) Set(e Entry) {
-	mut out = make([]Entry, 0, len(idx.Entries) + 1)
-	for x in idx.Entries {
-		if x.Path != e.Path {
-			out = append(out, x)
+// lowerBound is the first position whose path is not before path.
+fn (idx Index) lowerBound(path str) i64 {
+	mut lo = 0
+	mut hi = len(idx.Entries)
+	for lo < hi {
+		let mid = (lo + hi) / 2
+		if idx.Entries[mid].Path < path {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
+	return lo
+}
+
+// Set adds or replaces the stage-0 entry for e.Path, dropping any conflict stages of that path. A path cannot be a
+// file and a directory at once (git's rule): a file entry at a directory above it, and every entry below it, give way.
+fn (idx mut Index) Set(e Entry) {
+	for i in 0..len(e.Path) {
+		if e.Path[i] == '/' {
+			let above = e.Path[0:i]
+			let at = idx.lowerBound(above)
+			if at < len(idx.Entries) && idx.Entries[at].Path == above {
+				idx.Remove(above)
+			}
+		}
+	}
+	let below = e.Path + "/"
+	let first = idx.lowerBound(below)
+	if first < len(idx.Entries) && twine.HasPrefix(idx.Entries[first].Path, below) {
+		mut left = make([]Entry, 0, len(idx.Entries))
+		for x in idx.Entries {
+			if !twine.HasPrefix(x.Path, below) {
+				left = append(left, x)
+			}
+		}
+		idx.Entries = left
+	}
+	// in place, in order: the entries of this path are one run
+	let lo = idx.lowerBound(e.Path)
+	mut hi = lo
+	for hi < len(idx.Entries) && idx.Entries[hi].Path == e.Path {
+		hi += 1
+	}
+	if hi == lo + 1 {
+		idx.Entries[lo] = e
+		return
+	}
+	mut out = make([]Entry, 0, len(idx.Entries) + 1)
+	out = append(out, idx.Entries[0:lo]...)
 	out = append(out, e)
+	out = append(out, idx.Entries[hi:]...)
 	idx.Entries = out
-	idx.sortEntries()
 }
 
 // SetConflict records a conflicted path in place of any entry it had: the base's, our and their versions (blob ids
@@ -156,7 +202,13 @@ fn (idx Index) Stages(path str) (bool, bool, bool) {
 	mut b = false
 	mut o = false
 	mut t = false
-	for e in idx.Entries {
+	// the entries of a path are one run, found by binary search
+	let lo = idx.lowerBound(path)
+	for i in lo..len(idx.Entries) {
+		let e = idx.Entries[i]
+		if e.Path != path {
+			break
+		}
 		if e.Path == path {
 			if e.Stage == 1 {
 				b = true
@@ -190,6 +242,8 @@ fn Read(path str) !Index {
 	if !quarry.Exists(path) {
 		return New()
 	}
+	let st = try quarry.Lstat(path)
+	let written = st.Mtime
 	let data = try flume.ReadFile(path)
 	if len(data) < 20 + 32 || data[0:8] != "TITINDEX" || i64(pack.LE.U32([]u8(data[8:12]))) != 1 {
 		fail fault.Wrap(ErrBadIndex, "{path}: not a version 1 index")
@@ -225,7 +279,7 @@ fn Read(path str) !Index {
 	if at != end {
 		fail fault.Wrap(ErrBadIndex, "{path}: bytes after the last entry")
 	}
-	return Index{Entries: out}
+	return Index{Entries: out, Written: written}
 }
 
 fn appendU64(out mut []u8, v i64) {
@@ -285,7 +339,7 @@ fn FromTree[S store.ObjectStore](s mut S, tree object.Id) !Index {
 	if tree != object.NoId {
 		try addTree(mut s, tree, "", mut es)
 	}
-	mut idx = Index{Entries: es}
+	mut idx = Index{Entries: es, Written: 0}
 	idx.sortEntries()
 	return idx
 }

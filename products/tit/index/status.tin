@@ -22,6 +22,8 @@ type Report struct {
 	Staged    []FileStatus
 	Unstaged  []FileStatus
 	Untracked []str
+	// Restat says that idx got new stats (files found unchanged after all), worth writing back
+	Restat bool
 }
 
 // flatten is the commit tree's files as their index entries, by path (a map of Entry rather than of a small struct
@@ -68,8 +70,27 @@ fn isLink(m object.Mode) bool {
 // Status compares the commit tree head (object.NoId before the first commit), the index and the working directory
 // at root. idx gets the new stat of files found unchanged.
 fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index, rules mut ignore.Rules) !Report {
-	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}}
-	let h = try flatten(mut s, head)
+	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}, Restat: false}
+	// the index as a tree, hashed in memory: when it is the last commit's tree, nothing is staged and the commit's
+	// trees need not be read at all
+	mut conflictedAny = false
+	for e in idx.Entries {
+		if e.Stage != 0 {
+			conflictedAny = true
+		}
+	}
+	mut same = false
+	if !conflictedAny && head != object.NoId {
+		mut mem = store.NewMem()
+		let itree = WriteTree(mut mem, idx) catch _ {
+			object.NoId
+		}
+		same = itree == head
+	}
+	mut h = map[str]Entry{}
+	if !same {
+		h = try flatten(mut s, head)
+	}
 	// staged: the last commit against the index
 	mut conflicted = map[str]bool{}
 	mut inIndex = map[str]bool{}
@@ -80,6 +101,9 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 				conflicted[e.Path] = true
 				rep.Staged = append(rep.Staged, FileStatus.Conflicted(e.Path))
 			}
+			continue
+		}
+		if same {
 			continue
 		}
 		let (he, ok) = h[e.Path]
@@ -117,7 +141,9 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 			rep.Unstaged = append(rep.Unstaged, FileStatus.TypeChanged(e.Path))
 			continue
 		}
-		if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && mode == e.Mode {
+		// the stat says unchanged, unless the file changed no earlier than the index was written: then a change of
+		// the same size within the clock's granularity would look the same (git's racily clean entries)
+		if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && mode == e.Mode && e.Mtime < idx.Written {
 			continue
 		}
 		toHash = append(toHash, root + "/" + e.Path)
@@ -135,6 +161,7 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 			rep.Unstaged = append(rep.Unstaged, FileStatus.Modified(e.Path))
 		} else {
 			idx.Entries[i] = Entry{Path: e.Path, Hash: e.Hash, Mode: e.Mode, Stage: 0, Size: info.Size, Mtime: info.Mtime, Ctime: info.Ctime, Inode: info.Inode, Device: info.Device}
+			rep.Restat = true
 		}
 	}
 	sortStatus(mut rep.Staged)
@@ -146,12 +173,8 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 // hasTracked reports whether the index tracks anything under dir/.
 fn hasTracked(idx Index, dir str) bool {
 	let prefix = dir + "/"
-	for e in idx.Entries {
-		if twine.HasPrefix(e.Path, prefix) {
-			return true
-		}
-	}
-	return false
+	let at = idx.lowerBound(prefix)
+	return at < len(idx.Entries) && twine.HasPrefix(idx.Entries[at].Path, prefix)
 }
 
 fn walk(root str, dir str, files mut map[str]quarry.FileInfo, rules mut ignore.Rules, idx Index, untracked mut []str) ! {

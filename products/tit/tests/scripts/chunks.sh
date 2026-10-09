@@ -1,8 +1,8 @@
 #!/bin/sh
 # Large files in chunks (#803): a 64 MiB file is stored in content-defined chunks; overwriting 1 MiB in its middle
 # adds about 1 MiB to the store (the criterion: under 5 MiB, for a 2 GiB file on Linux; TIT_CHUNKS_MB sets the size
-# here), inserting bytes near its start shifts nothing else; the old version checks out byte for byte and status is
-# clean. Usage: chunks.sh <tit> <dir>
+# here), inserting bytes near its start shifts nothing else; the old version checks out byte for byte, written a
+# chunk at a time, and status is clean. Usage: chunks.sh <tit> <dir>
 set -eu
 tit=$1
 d=$2
@@ -43,7 +43,9 @@ k3=$(kib .)
 [ $((k3 - k2)) -lt 5120 ] || fail "an insertion near the start added $((k3 - k2)) KiB"
 echo "ok inserting bytes near the start added $((k3 - k2)) KiB: the cuts after it do not move"
 [ "$(t status -s)" = "" ] || fail "status: $(t status -s)"
+echo "ok status is clean"
+# a checkout writes the file a chunk at a time
 t switch --detach HEAD~2 > /dev/null
 cmp -s big.bin "$d/v1.bin" || fail "the first version does not check out byte for byte"
 t switch main > /dev/null
-echo "ok the first version checks out byte for byte, and status is clean"
+echo "ok the first version checks out byte for byte, a chunk at a time"

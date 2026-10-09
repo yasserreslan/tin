@@ -13,6 +13,21 @@ type Layered struct {
 	fallback []dyn ObjectStore
 }
 
+// recentObject is a commit or tree a Layered read.
+type recentObject struct {
+	what    object.Kind
+	content str
+}
+
+// recent keeps the commits and trees Layered stores read, up to recentMost bytes, so a walk that reads a commit to
+// queue it and again to follow it, and a command that then prints it, inflate it once. Ids name their content, so
+// one cache serves every Layered of the process (of the core: globals are per core). Blobs pass through.
+mut recent = map[str]recentObject{}
+
+mut recentHeld = 0
+
+const recentMost = 32 << 20
+
 // NewLayered is a layered store over stores (at least one), the first taking the writes.
 fn NewLayered(stores []dyn ObjectStore) Layered {
 	return Layered{stores: stores, fallback: []dyn ObjectStore{}}
@@ -49,10 +64,20 @@ fn (l Layered) Has(id object.Id) bool {
 
 // GetRaw is the object's kind and body from the first layer that holds it.
 fn (l mut Layered) GetRaw(id object.Id) !(object.Kind, str) {
+	let key = id.Bytes()
+	let (hit, ok) = recent[key]
+	if ok {
+		return hit.what, hit.content
+	}
 	for i in 0..len(l.stores) {
 		mut s = l.stores[i]
 		if s.Has(id) {
-			return try s.GetRaw(id)
+			let (kind, body) = try s.GetRaw(id)
+			if kind != object.Kind.Blob && recentHeld + len(body) <= recentMost {
+				recent[keep(key)] = keep(recentObject{what: kind, content: body})
+				recentHeld = recentHeld + len(body)
+			}
+			return kind, body
 		}
 	}
 	for i in 0..len(l.fallback) {

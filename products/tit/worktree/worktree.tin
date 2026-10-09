@@ -85,7 +85,7 @@ fn dirOf(path str) str {
 
 // dirty reports whether the working file at path has changes the index does not hold (or is absent when it should be
 // there, which is not a change worth keeping).
-fn dirty(root str, e index.Entry) !bool {
+fn dirty(root str, e index.Entry, written i64) !bool {
 	let full = root + "/" + e.Path
 	let (info, err) = quarry.Lstat(full)
 	if err != nil {
@@ -95,7 +95,9 @@ fn dirty(root str, e index.Entry) !bool {
 	if mode != e.Mode {
 		return true
 	}
-	if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device {
+	// the stat is trusted only for a file older than the index (a same-size change within the clock's granularity
+	// looks the same otherwise)
+	if info.Size == e.Size && info.Mtime == e.Mtime && info.Ctime == e.Ctime && info.Inode == e.Inode && info.Device == e.Device && e.Mtime < written {
 		return false
 	}
 	let id = try cores.HashPath(full)
@@ -105,7 +107,19 @@ fn dirty(root str, e index.Entry) !bool {
 // Checkout moves the working directory of w from the tree from to the tree to, updating idx, and fails with ErrDirty
 // (writing nothing) when it would lose changes; force writes anyway.
 fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from object.Id, to object.Id, force bool) ! {
-	let changes = try diff.TreeDiff(mut s, from, to, false)
+	let all = try diff.TreeDiff(mut s, from, to, false)
+	// a file outside the focus (focus.tin) is not written: its index entry follows the tree, with no stat
+	let focus = FocusOf(w)
+	mut changes = []diff.FileChange{}
+	for c in all {
+		if InFocus(focus, c.Path) {
+			changes = append(changes, c)
+		} else if c.Kind == diff.Kind.Deleted {
+			idx.Remove(c.Path)
+		} else {
+			idx.Set(index.Entry{Path: c.Path, Hash: c.NewHash, Mode: c.NewMode, Stage: 0, Size: 0, Mtime: 0, Ctime: 0, Inode: 0, Device: 0})
+		}
+	}
 	// first every check, so a refused checkout changes nothing
 	if !force {
 		try check(w, idx, changes)
@@ -129,17 +143,34 @@ fn Checkout[S store.ObjectStore](s mut S, w Workspace, idx mut index.Index, from
 			writes = append(writes, c)
 		}
 	}
-	mut bodies = make([]str, len(writes))
-	for i in 0..len(writes) {
-		let id = try object.IdOf(writes[i].NewHash)
+	// a large file kept in chunks is written a chunk at a time (store.WriteChunked); the rest are read whole and
+	// written in parallel
+	mut whole = []diff.FileChange{}
+	for c in writes {
+		if c.NewMode == object.Mode.Link {
+			whole = append(whole, c)
+			continue
+		}
+		let id = try object.IdOf(c.NewHash)
+		try prepare(w.Root, c.Path)
+		let streamed = try store.WriteChunked(w.Store + "/objects", id, w.Root + "/" + c.Path)
+		if !streamed {
+			whole = append(whole, c)
+		} else if c.NewMode == object.Mode.Exec {
+			try quarry.Chmod(w.Root + "/" + c.Path, 493)
+		}
+	}
+	mut bodies = make([]str, len(whole))
+	for i in 0..len(whole) {
+		let id = try object.IdOf(whole[i].NewHash)
 		let (_, body) = try s.GetRaw(id)
 		bodies[i] = body
 	}
-	mut paths = make([]str, 0, len(writes))
-	mut modes = make([]object.Mode, 0, len(writes))
-	for i in 0..len(writes) {
-		paths = append(paths, writes[i].Path)
-		modes = append(modes, writes[i].NewMode)
+	mut paths = make([]str, 0, len(whole))
+	mut modes = make([]object.Mode, 0, len(whole))
+	for i in 0..len(whole) {
+		paths = append(paths, whole[i].Path)
+		modes = append(modes, whole[i].NewMode)
 	}
 	try writeAll(w.Root, paths, modes, bodies)
 	for i in 0..len(writes) {
@@ -182,7 +213,7 @@ fn check(w Workspace, idx index.Index, changes []diff.FileChange) ! {
 	for c in changes {
 		let e = idx.Find(c.Path)
 		if e != nil {
-			let d = try dirty(w.Root, e)
+			let d = try dirty(w.Root, e, idx.Written)
 			if d {
 				blocked = append(blocked, c.Path)
 			}
@@ -213,6 +244,28 @@ fn writeAll(root str, paths []str, modes []object.Mode, bodies []str) ! {
 			sc.spawn(fn() ! {
 				try writeFile(root, paths[k], modes[k], bodies[k])
 			})
+		}
+	}
+}
+
+// prepare makes the directory of path and clears what stands at path (a file, a link or a directory).
+fn prepare(root str, path str) ! {
+	let full = root + "/" + path
+	let d = dirOf(path)
+	if len(d) > 0 {
+		let dir = root + "/" + d
+		let (info, err) = quarry.Lstat(dir)
+		if err == nil && info.Type != quarry.FileType.Dir {
+			try quarry.Remove(dir)
+		}
+		try quarry.MkdirAll(dir)
+	}
+	let (old, oerr) = quarry.Lstat(full)
+	if oerr == nil {
+		if old.Type == quarry.FileType.Dir {
+			try quarry.RemoveAll(full)
+		} else {
+			try quarry.Remove(full)
 		}
 	}
 }

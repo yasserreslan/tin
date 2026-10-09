@@ -1,0 +1,404 @@
+package main
+
+import "fault"
+import "flume"
+import "quarry"
+import "say"
+import "squash"
+
+// The Tin side of zlib_stream_check.tin (#772): squash's streaming zlib against Go's compress/zlib.
+//
+//	zlib_stream files DIR   write DIR/in-N.bin and DIR/tin-N.zlib (NewZlibWriter, in random pieces)
+//	zlib_stream check DIR   read Go's DIR/go-N.zlib with NewZlibReader (random read sizes) and compare
+//	zlib_stream write N     write a zlib stream of gen(N) to stdout
+//	zlib_stream read N      read a zlib stream of gen(N) from stdin and check it
+//	zlib_stream bound N     read a zlib stream of N zero bytes made as it is read, under limit memory 1mb
+//	zlib_stream damaged     every byte of a stream damaged, and every cut: a fault, never a panic
+
+// gen is the byte at position i of the streamed input, the same function as the Go side's.
+fn gen(i i64) u8 {
+	if i % 4096 == 0 {
+		return u8((i / 4096) % 251)
+	}
+	return u8(97 + (i * 7 + i / 13) % 26)
+}
+
+// rng is a 64-bit LCG for sizes, pieces and noise.
+type rng struct {
+	x u64
+}
+
+fn (r mut rng) next() i64 {
+	r.x = r.x *% 6364136223846793005 +% 1442695040888963407
+	return i64(r.x >> 33)
+}
+
+// sample is n bytes of text and noise in runs, so the codes and the stored blocks all show up.
+fn sample(r mut rng, n i64) []u8 {
+	mut b = make([]u8, 0, n)
+	for len(b) < n {
+		let run = 1 + r.next() % 3000
+		let noise = r.next() % 3 == 0
+		for k in 0..run {
+			if len(b) >= n {
+				break
+			}
+			if noise {
+				b = append(b, u8(r.next() & 255))
+			} else {
+				b = append(b, gen(len(b)))
+			}
+		}
+	}
+	return b
+}
+
+type Buf struct {
+	data []u8
+}
+
+fn (b mut Buf) Write(p []u8) !i64 {
+	b.data = append(b.data, p...)
+	return len(p)
+}
+
+type Mem struct {
+	data []u8
+	at   []i64
+	most i64
+}
+
+fn (m mut Mem) Read(buf mut []u8) !i64 {
+	let n = min(min(len(buf), m.most), len(m.data) - m.at[0])
+	for k in 0..n {
+		buf[k] = m.data[m.at[0] + k]
+	}
+	m.at[0] += n
+	return n
+}
+
+// Zeros is a zlib stream of n zero bytes in stored blocks, made as it is read, without a slice.
+type Zeros struct {
+	n     i64
+	state []i64
+}
+
+fn (z mut Zeros) Read(buf mut []u8) !i64 {
+	mut k = 0
+	for k < len(buf) {
+		if z.state[1] == 0 {
+			if len(buf) - k < 2 {
+				break
+			}
+			buf[k] = 0x78
+			buf[k + 1] = 0x01
+			k += 2
+			z.state[1] = 1
+			continue
+		}
+		if z.state[1] == 1 {
+			if z.state[2] == 0 {
+				if len(buf) - k < 5 {
+					break
+				}
+				let blk = min(65535, z.state[0])
+				mut fin = 0
+				if blk == z.state[0] {
+					fin = 1
+				}
+				buf[k] = u8(fin)
+				buf[k + 1] = u8(blk & 255)
+				buf[k + 2] = u8(blk >> 8)
+				buf[k + 3] = u8(^blk & 255)
+				buf[k + 4] = u8((^blk >> 8) & 255)
+				k += 5
+				z.state[2] = blk
+				z.state[0] -= blk
+				if blk == 0 {
+					z.state[1] = 2
+				}
+				continue
+			}
+			let m = min(z.state[2], len(buf) - k)
+			for i in 0..m {
+				buf[k + i] = 0
+			}
+			k += m
+			z.state[2] -= m
+			if z.state[2] == 0 && z.state[0] == 0 {
+				z.state[1] = 2
+			}
+			continue
+		}
+		if z.state[1] == 2 {
+			if len(buf) - k < 4 {
+				break
+			}
+			let b = z.n % 65521
+			buf[k] = u8(b >> 8)
+			buf[k + 1] = u8(b & 255)
+			buf[k + 2] = 0
+			buf[k + 3] = 1
+			k += 4
+			z.state[1] = 3
+			continue
+		}
+		break
+	}
+	return k
+}
+
+let sizes = []i64{0, 1, 2, 3, 7, 31, 100, 255, 256, 1000, 4095, 4096, 4097, 16383, 16384, 16385, 32767, 32768, 32769, 65534, 65535, 65536, 65537, 100000, 131072, 262143, 262144, 262145, 500000, 777777, 1048575, 1048576}
+
+// realFiles are inputs from the repository itself (the check runs at its root).
+let realFiles = []str{"toolchain/docs/LANGUAGE.md", "toolchain/compiler/check.tin", "README.md"}
+
+fn atoi(s str) i64 {
+	mut v = 0
+	for i in 0..len(s) {
+		v = v * 10 + i64(s[i] - '0')
+	}
+	return v
+}
+
+// readAll reads a zlib stream through a reader in pieces of random sizes.
+fn readAll[R squash.Reader](src R, r mut rng) ![]u8 {
+	mut zr = try squash.NewZlibReader(src, 1 << 40)
+	mut out = []u8{}
+	mut buf = make([]u8, 70000)
+	for {
+		let want = 1 + r.next() % 70000
+		mut piece = make([]u8, want)
+		let n = try zr.Read(mut piece)
+		if n == 0 {
+			break
+		}
+		out = append(out, piece[0:n]...)
+	}
+	_ = buf
+	return out
+}
+
+fn main() {
+	let args = quarry.Args()
+	let mode = args[1]
+	mut r = rng{x: 7}
+	if mode == "files" {
+		let dir = args[2]
+		// real inputs as well: the repository's own text, up to 1 MiB
+		mut inputs = [][]u8{}
+		mut names = []str{}
+		for n in sizes {
+			inputs = append(inputs, sample(mut r, n))
+			names = append(names, "{n}")
+		}
+		for k in 0..len(realFiles) {
+			let text = quarry.ReadFile(realFiles[k]) catch e {
+				panic(e)
+			}
+			inputs = append(inputs, []u8(text[0:min(len(text), 1 << 20)]))
+			names = append(names, "real{k}")
+		}
+		for x in 0..len(inputs) {
+			let data = inputs[x]
+			let n = len(data)
+			let name = names[x]
+			quarry.WriteFile("{dir}/in-{name}.bin", str(data)) catch e {
+				panic(e)
+			}
+			let sink = Buf{data: []u8{}}
+			mut w = squash.NewZlibWriter(sink, []i64{1, 6, 9}[n % 3]) catch e {
+				panic(e)
+			}
+			mut at = 0
+			for at < len(data) {
+				let k = min(len(data) - at, 1 + r.next() % 100000)
+				_ = w.Write(data[at:at + k]) catch e {
+					panic(e)
+				}
+				at += k
+			}
+			w.Close() catch e {
+				panic(e)
+			}
+			quarry.WriteFile("{dir}/tin-{name}.zlib", str(sink.data)) catch e {
+				panic(e)
+			}
+		}
+		say.Line("tin wrote", len(inputs), "streams")
+		return
+	}
+	if mode == "check" {
+		let dir = args[2]
+		mut ok = 0
+		mut bad = 0
+		mut names = []str{}
+		for n in sizes {
+			names = append(names, "{n}")
+		}
+		for k in 0..len(realFiles) {
+			names = append(names, "real{k}")
+		}
+		for n in names {
+			let want = quarry.ReadFile("{dir}/in-{n}.bin") catch e {
+				panic(e)
+			}
+			let z = quarry.ReadFile("{dir}/go-{n}.zlib") catch e {
+				panic(e)
+			}
+			let src = Mem{data: []u8(z), at: []i64{0}, most: 1 + r.next() % 20000}
+			let (got, err) = readAll(src, mut r)
+			if err != nil || str(got) != want {
+				say.Line("tin reads go size", n, "FAIL", err)
+				bad += 1
+			} else {
+				ok += 1
+			}
+		}
+		say.Line("tin reads go:", ok, "ok,", bad, "failed")
+		return
+	}
+	if mode == "write" {
+		let n = atoi(args[2])
+		mut out = flume.Stdout()
+		mut w = squash.NewZlibWriter(out, 1) catch e {
+			panic(e)
+		}
+		mut block = make([]u8, 65536)
+		mut at = 0
+		for at < n {
+			let k = min(n - at, 65536)
+			for i in 0..k {
+				block[i] = gen(at + i)
+			}
+			_ = w.Write(block[0:k]) catch e {
+				panic(e)
+			}
+			at += k
+		}
+		w.Close() catch e {
+			panic(e)
+		}
+		out.Flush() catch e {
+			panic(e)
+		}
+		return
+	}
+	if mode == "read" {
+		let n = atoi(args[2])
+		let src = flume.New(0)
+		mut zr = squash.NewZlibReader(src, 1 << 40) catch e {
+			say.Line("tin reads go's stream FAIL", e)
+			return
+		}
+		mut buf = make([]u8, 65536)
+		mut at = 0
+		for {
+			let k = zr.Read(mut buf) catch e {
+				say.Line("tin reads go's stream FAIL at", at, e)
+				return
+			}
+			if k == 0 {
+				break
+			}
+			for i in 0..k {
+				if buf[i] != gen(at + i) {
+					say.Line("tin reads go's stream FAIL: byte", at + i, "differs")
+					return
+				}
+			}
+			at += k
+		}
+		if at != n {
+			say.Line("tin reads go's stream FAIL:", at, "bytes, not", n)
+			return
+		}
+		say.Line("tin reads go's stream of", n, "bytes ok")
+		return
+	}
+	if mode == "bound" {
+		let n = atoi(args[2])
+		let zs = Zeros{n: n, state: []i64{n, 0, 0}}
+		let got = limit memory 1048576 {
+			mut zr = squash.NewZlibReader(zs, 1 << 40) catch e {
+				say.Line("bound FAIL", e)
+				return
+			}
+			mut b = make([]u8, 65536)
+			mut t = 0
+			for {
+				let k = zr.Read(mut b) catch e {
+					say.Line("bound FAIL", e)
+					return
+				}
+				if k == 0 {
+					break
+				}
+				t += k
+			}
+			t
+		} catch e {
+			say.Line("bound FAIL", e)
+			-1
+		}
+		say.Line("tin reads", got, "bytes of", n, "under limit memory 1mb")
+		return
+	}
+	if mode == "damaged" {
+		let data = sample(mut r, 20000)
+		let sink = Buf{data: []u8{}}
+		mut w = squash.NewZlibWriter(sink, 6) catch e {
+			panic(e)
+		}
+		_ = w.Write(data) catch e {
+			panic(e)
+		}
+		w.Close() catch e {
+			panic(e)
+		}
+		let z = sink.data
+		mut inputs = 0
+		mut faults = 0
+		mut panics = 0
+		mut wrong = 0
+		for i in 0..len(z) + len(z) {
+			mut v = []u8{}
+			if i < len(z) {
+				v = make([]u8, len(z))
+				copy(v, z)
+				v[i] = v[i] ^ 0x41
+			} else {
+				v = z[0:i - len(z)]
+			}
+			inputs += 1
+			let src = Mem{data: v, at: []i64{0}, most: 1 + i % 977}
+			mut rr = rng{x: u64(i)}
+			// 0 decoded right, 1 refused with a fault, 2 decoded to something else, 3 panicked
+			let code = guard {
+				let (got, err) = readAll(src, mut rr)
+				mut c = 0
+				if err != nil {
+					c = 1
+				} else if str(got) != str(data) {
+					c = 2
+				}
+				c
+			} catch err {
+				mut c = 1
+				if fault.Is(err, fault.Panic) {
+					c = 3
+				}
+				c
+			}
+			if code == 1 {
+				faults += 1
+			} else if code == 2 {
+				wrong += 1
+			} else if code == 3 {
+				panics += 1
+			}
+		}
+		say.Line("damaged:", inputs, "inputs,", panics, "panics,", wrong, "decoded to something else")
+		return
+	}
+}

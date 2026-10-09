@@ -444,9 +444,15 @@ fn topo[S store.ObjectStore](s mut S, ids []object.Id) ![]object.Id {
 	}
 	mut done = map[str]bool{}
 	mut out = []object.Id{}
+	// the first position not taken yet: the scan starts there, so a list already in order takes one pass
+	mut from = 0
 	for len(out) < len(ids) {
 		mut progressed = false
-		for id in ids {
+		for from < len(ids) && done[ids[from].Bytes()] {
+			from += 1
+		}
+		for x in from..len(ids) {
+			let id = ids[x]
 			let k = id.Bytes()
 			if done[k] || children[k] > 0 {
 				continue

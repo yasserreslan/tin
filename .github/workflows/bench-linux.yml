@@ -141,6 +141,14 @@ jobs:
         run: |
           sh tools/ci/tin.sh bench/files/run.tin --json bin/bench-files.json | tee bin/bench-files.txt
           { echo '### File reads (head: io_uring versus TIN_IO_URING=0)'; echo '```'; cat bin/bench-files.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: tit against git (status, log, diff on the Tin repository)
+        run: |
+          ./tin build products/tit/main.tin -o bin/tit
+          mkdir -p bin/tit-bench
+          # the checkout is a detached HEAD: a branch at it, for the script's clone to check out
+          git branch -f tit-bench HEAD
+          sh bench/tit/run.sh bin/tit "$GITHUB_WORKSPACE" bin/tit-bench tit-bench | tee bin/bench-tit.txt
+          { echo '### tit against git'; cat bin/bench-tit.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep raw samples and server logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
