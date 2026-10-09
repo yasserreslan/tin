@@ -141,6 +141,7 @@ fn Serve(addr str, dir str, allowFile str, public bool) ! {
 	try quarry.Setenv("TIT_SERVE_DIR", dir)
 	try quarry.Setenv("TIT_SERVE_SECRET", secretKey)
 	try quarry.Setenv("TIT_SERVE_KEYS", allowed)
+	try quarry.Setenv("TIT_SERVE_ALLOW_FILE", allowFile)
 	mut p = "0"
 	if public {
 		p = "1"
@@ -193,6 +194,7 @@ fn serverFromEnv() !Server {
 	for k in keys {
 		s.Allow(k.Email, k.Public)
 	}
+	s.SetKeysFile(quarry.Getenv("TIT_SERVE_ALLOW_FILE"))
 	return s
 }
 
@@ -211,7 +213,12 @@ fn coreServer(w mut anvil.Out) ?Server {
 
 fn reply(w mut anvil.Out, r Reply) {
 	w.Status(r.Status)
-	w.Type("application/x-tit")
+	// the sign-in answers (§18) are plain JSON, for a browser
+	if len(r.Body) > 0 && r.Body[0] == '{' {
+		w.Type("application/json")
+	} else {
+		w.Type("application/x-tit")
+	}
 	w.Body = []u8(r.Body)
 }
 

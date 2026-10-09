@@ -31,6 +31,10 @@ type Reply struct {
 type Server struct {
 	repo    dyn Repo
 	replays dyn ReplayStore
+	// state is where login requests and invites are kept (§18), keysFile the allowed keys a key add appends to; ""
+	// when the server keeps none
+	state    str
+	keysFile str
 	key    secret str
 	keys   map[str][]str
 	public bool
@@ -43,7 +47,14 @@ type Server struct {
 fn NewServer(dir str, key secret str, public bool) Server {
 	mut s = NewRepoServer(NewDirRepo(dir), key, public)
 	s.SetReplays(DirReplays{Dir: dir + "/replay"})
+	s.state = dir
 	return s
+}
+
+// SetKeysFile makes the server add keys (§18 invites) to the allowed keys file at path, and read it again for a key
+// another process or core added.
+fn (s mut Server) SetKeysFile(path str) {
+	s.keysFile = path
 }
 
 // SetReplays makes the server keep replay capsules in r (design/tit.md §17).
@@ -53,7 +64,7 @@ fn (s mut Server) SetReplays(r dyn ReplayStore) {
 
 // NewRepoServer serves repo (design/tit.md §16): tinhub's, or a MemRepo in tests.
 fn NewRepoServer(repo dyn Repo, key secret str, public bool) Server {
-	return Server{repo: repo, replays: NoReplays{none: true}, key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
+	return Server{repo: repo, replays: NoReplays{none: true}, state: "", keysFile: "", key: key, keys: map[str][]str{}, public: public, limits: Limits{Pack: 2 * 1024 * 1024 * 1024, Refs: 10000}, seen: map[str]i64{}}
 }
 
 // Allow lets the holder of an ed25519 public key sign requests as email.
@@ -105,9 +116,25 @@ fn refusal(c Code, message str) ! {
 
 // Handle answers one request at time now (unix seconds).
 fn (s mut Server) Handle(method str, path str, signature str, body str, now i64) Reply {
+	// a key add (§18) is signed by the key it adds, which the server does not know yet
+	if method == "POST" && twine.HasSuffix(path, "/tit/v1/keys") {
+		let (r, kerr) = s.loginRoute(method, path, signature, body, "", now)
+		if kerr != nil {
+			return s.answerFor(kerr, now)
+		}
+		return r
+	}
 	let (who, err) = s.authenticate(method, path, signature, body, now)
 	if err != nil {
 		return s.answerFor(err, now)
+	}
+	// sign-in (§18): a login request is made unsigned, even on a private repository; its approval is signed
+	if twine.Index(path, "/tit/v1/login") >= 0 {
+		let (r, lerr) = s.loginRoute(method, path, signature, body, who, now)
+		if lerr != nil {
+			return s.answerFor(lerr, now)
+		}
+		return r
 	}
 	let push = twine.HasSuffix(path, "/tit/v1/push")
 	if len(who) == 0 && (push || !s.public) {
@@ -193,7 +220,19 @@ fn (s Server) signerOf(signature str, now i64) !?signer {
 	}
 	let (email, nonce, sig) = try ParseSignatureHeader(signature)
 	try CheckNonce(s.key, nonce, now)
-	let (pubs, known) = s.keys[email]
+	mut pubs = []str{}
+	let (mine, had) = s.keys[email]
+	for p in mine {
+		pubs = append(pubs, p)
+	}
+	if !had {
+		// a key added since this server read its keys (§18): by this core, or by another (the keys file)
+		s.reloadKeys()
+		for p in addedOf(email) {
+			pubs = append(pubs, p)
+		}
+	}
+	let known = len(pubs) > 0
 	if !known {
 		try refusal(Code.Unauthorized, "no key of {email} is allowed here")
 	}
