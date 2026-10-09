@@ -65,8 +65,6 @@ type Pack struct {
 	// idx is the index file: its ids, offsets and CRCs are read from it where they are (#807: copying them out on
 	// every open cost more than a status)
 	idx str
-	// ends is the entries' offsets in order, then the trailer's: an entry runs to the next one
-	ends []i64
 	// ranged counts the entries read one by one (entryBytes)
 	ranged i64
 	fanout []i64
@@ -132,7 +130,7 @@ fn Open(path str) !Pack {
 	}
 	// The index's hash and the order of its ids are checked by Verify (tit verify), as git checks its own indexes
 	// in fsck: an open reads only what it needs, and an offset is checked where it is used.
-	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ends: []i64{}, ranged: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ranged: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
 }
 
 // idsAt is where the ids start in an index: after its header (20 bytes) and fan-out table (1024).
@@ -243,47 +241,62 @@ fn (p Pack) uvarint(at i64) !(i64, i64) {
 }
 
 // wholeUnder is the size under which a pack is read whole the first time an object of it is.
-const wholeUnder = 2 << 20
+const wholeUnder = 256 << 10
 
 // entryBytes is the entry at off, up to the next one: from the pack's bytes once they are read, otherwise only that
 // range of the file (quarry.ReadAt), so reading a few objects of a large pack reads a few entries of it.
 fn (p mut Pack) entryBytes(off i64) !str {
-	if len(p.ends) == 0 {
-		// the entries' offsets in order, made the first time an entry's end is wanted
-		mut ends = make([]i64, p.Count)
-		for i in 0..p.Count {
-			ends[i] = p.off(i)
-		}
-		sift.Sort(mut ends)
-		p.ends = append(ends, p.size - 32)
-	}
-	mut lo = 0
-	mut hi = len(p.ends)
-	for lo < hi {
-		let mid = (lo + hi) / 2
-		if p.ends[mid] <= off {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo >= len(p.ends) || off < 20 {
+	if off < 20 || off >= p.size - 32 {
 		fail fault.Wrap(ErrBadPack, "no entry at {off}")
 	}
-	let end = p.ends[lo]
 	// a small pack, or one read entry by entry many times already, is read whole: one read beats many
 	if !p.loaded && (p.size <= wholeUnder || (p.ranged >= 64 && p.size <= 256 << 20)) {
 		try p.load()
 	}
 	if p.loaded {
-		return p.data[off:end]
+		let n = try entryLen(p.data[off:min(p.size - 32, off + maxHead)])
+		if off + n > p.size - 32 {
+			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+		}
+		return p.data[off:off + n]
 	}
+	// the entry's header says how long it is (#807: sorting every offset to find where one entry ends cost more than
+	// a log -n 1): read the header, then the rest when the first read did not hold it
 	p.ranged += 1
-	let e = try quarry.ReadAt(p.Path, off, end - off)
-	if len(e) != end - off {
+	let head = try quarry.ReadAt(p.Path, off, min(maxHead, p.size - 32 - off))
+	let n = try entryLen(head)
+	if off + n > p.size - 32 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	if n <= len(head) {
+		return head[0:n]
+	}
+	let e = try quarry.ReadAt(p.Path, off, n)
+	if len(e) != n {
 		fail fault.Wrap(ErrBadPack, "{p.Path} is shorter than its index says")
 	}
 	return e
+}
+
+// maxHead is the most bytes an entry's header takes: its type, size, base (an offset or an id) and compressed length.
+const maxHead = 1 + 10 + 32 + 10
+
+// entryLen is the length of the entry whose first bytes are h: its header and its compressed bytes.
+fn entryLen(h str) !i64 {
+	if len(h) == 0 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	let t = i64(h[0])
+	let (_, a) = try varintIn(h, 1)
+	mut at = a
+	if t == typeOfsDelta {
+		let (_, b) = try varintIn(h, at)
+		at = b
+	} else if t == typeRefDelta {
+		at += 32
+	}
+	let (clen, c) = try varintIn(h, at)
+	return c + clen
 }
 
 // storedZlib is the data of a zlib stream made only of stored blocks, when it is exactly size bytes and its Adler-32
