@@ -61,6 +61,9 @@ type Command enum {
 	Repack(bool)
 	Prune(PruneArgs)
 	Replay(ReplayArgs)
+	Login(LoginArgs)
+	Invite(str)
+	KeyAdd(str, str)
 	Purge(PurgeArgs)
 	Unpark(str)
 	Log(LogArgs)
@@ -315,7 +318,8 @@ commands:
   show [rev]                 one commit and its changes
   cat <rev or id>            an object's content
   config get <key>           a setting; config set [--user] <key> <value>; config list
-  key [path]                 make your signing key if there is none, and print its public half
+  key [path] | add URL CODE  make your signing key if there is none, and print its public half; add: register
+                             it at URL with an invite (tit invite)
   branch [-d|-D] [-m] [name [start]]
                              list branches, make one, delete one (-D: not merged), rename one (-m old new)
   switch [-c] [--detach] <branch or rev> [start]
@@ -371,6 +375,9 @@ commands:
                              the capsules at R, newest first (or their groups, with counts)
   replay ID [--remote R] [--against BUILD ...]
                              fetch a capsule to .tit/replay/; --against runs tin replay on it (TIT_TIN)
+  login [URL or remote] [--code CODE]
+                             sign in with your key: approve a login request (a browser's CODE, or a new one)
+  invite [--email ADDRESS]   (in a served repository) a one-use invite for tit key add, good for 7 days
   purge ID... --reason TEXT  remove objects no ref, change or workspace reaches from every pack at once
                              (a leaked secret: tit rewrite first); recorded in .tit/purged
   mirror [git dir or URL]    write every branch and tag into a git directory, as git objects (mirror.url); an
@@ -1060,6 +1067,19 @@ fn Parse(args []str) !(Global, Command) {
 		}
 		return g, Command.Watch(wa)
 	}
+	if name == "login" {
+		let la = try parseLogin(rest)
+		return g, Command.Login(la)
+	}
+	if name == "invite" {
+		mut email = ""
+		if len(rest) == 2 && rest[0] == "--email" {
+			email = rest[1]
+		} else {
+			try noMore(rest, 0, "invite")
+		}
+		return g, Command.Invite(email)
+	}
 	if name == "replay" {
 		let ra = try parseReplay(rest)
 		return g, Command.Replay(ra)
@@ -1180,6 +1200,12 @@ fn Parse(args []str) !(Global, Command) {
 		return g, Command.Adopt(path)
 	}
 	if name == "key" {
+		if len(rest) > 0 && rest[0] == "add" {
+			if len(rest) != 3 {
+				fail fault.Wrap(ErrUsage, "key add URL CODE")
+			}
+			return g, Command.KeyAdd(rest[1], rest[2])
+		}
 		mut path = ""
 		if len(rest) > 0 {
 			path = rest[0]
@@ -1372,6 +1398,9 @@ fn commandName(c Command) str {
 		Repack(_) => "repack"
 		Prune(_) => "prune"
 		Replay(_) => "replay"
+		Login(_) => "login"
+		Invite(_) => "invite"
+		KeyAdd(_, _) => "key"
 		Purge(_) => "purge"
 		Unpark(_) => "unpark"
 		Log(_) => "log"
@@ -1528,6 +1557,15 @@ fn dispatch(g Global, c Command, o mut Out) ! {
 		}
 		Replay(ra) => {
 			try doReplay(g, ra, mut o)
+		}
+		Login(la) => {
+			try doLogin(g, la, mut o)
+		}
+		Invite(email) => {
+			try doInvite(g, email, mut o)
+		}
+		KeyAdd(url, code) => {
+			try doKeyAdd(g, url, code, mut o)
 		}
 		Purge(ua) => {
 			try doPurge(g, ua, mut o)
