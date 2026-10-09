@@ -125,6 +125,35 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 	// the working directory
 	mut files = map[str]quarry.FileInfo{}
 	try walk(root, "", mut files, mut rules, idx, mut rep.Untracked)
+	try compareFiles(root, mut idx, files, mut rep)
+	sortStatus(mut rep.Staged)
+	sortStatus(mut rep.Unstaged)
+	sift.Sort(mut rep.Untracked)
+	return rep
+}
+
+// Unstaged is the index against the files alone, what diff needs: each entry's file is looked at (git diff's lstat of
+// each), with no walk for untracked files and no tree read (#807).
+fn Unstaged(root str, idx mut Index) !Report {
+	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}, Restat: false}
+	mut files = map[str]quarry.FileInfo{}
+	for e in idx.Entries {
+		if e.Stage != 0 {
+			continue
+		}
+		let (info, err) = quarry.Lstat(root + "/" + e.Path)
+		if err == nil && (info.Type == quarry.FileType.Regular || info.Type == quarry.FileType.Symlink) {
+			files[e.Path] = info
+		}
+	}
+	try compareFiles(root, mut idx, files, mut rep)
+	sortStatus(mut rep.Unstaged)
+	return rep
+}
+
+// compareFiles adds to rep what differs between the index and the files found: deleted, of another type, or
+// changed (read and hashed when the stat cache cannot tell); the entries found unchanged get their new stat.
+fn compareFiles(root str, idx mut Index, files map[str]quarry.FileInfo, rep mut Report) ! {
 	// unstaged: the index against the files
 	mut toHash = []str{}
 	mut hashIdx = []i64{}
@@ -166,10 +195,6 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 			rep.Restat = true
 		}
 	}
-	sortStatus(mut rep.Staged)
-	sortStatus(mut rep.Unstaged)
-	sift.Sort(mut rep.Untracked)
-	return rep
 }
 
 // hasTracked reports whether the index tracks anything under dir/.
