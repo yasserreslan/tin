@@ -15,6 +15,7 @@ const CmdCut = 9
 const CmdCopy = 10
 const CmdPaste = 11
 const CmdSelectAll = 12
+const CmdSelectLine = 44
 const CmdFind = 13
 const CmdFindNext = 14
 const CmdFindPrev = 15
@@ -61,6 +62,10 @@ fn (ed mut Editor) Perform(cmd i64) {
 		} else {
 			ed.Say("ruler off")
 		}
+		return
+	}
+	if cmd == CmdSelectLine {
+		ed.handleKey(Key{Code: -1, Flags: flagCtrl, Chars: "l"})
 		return
 	}
 	if cmd == CmdJumpBracket {
