@@ -102,59 +102,152 @@ fn checkName(name str) ! {
 	}
 }
 
+// checkEntries checks a tree's entries: valid names, ids, and names in strictly increasing sortKey order with no name
+// twice. It allocates nothing (#807: a map of the names seen and two sortKey strings per directory cost more than the
+// entries). Two entries with one name have keys name and name + "/" (equal keys are already out of order), so a name
+// is twice only when a directory comes after a file, link or executable of its name; every key between those two
+// starts with the name, and the entries before the directory are sorted, so a binary search for that key finds it.
 fn checkEntries(es []Entry) ! {
-	mut seen = map[str]bool{}
 	for i in 0..len(es) {
 		let e = es[i]
 		try checkName(e.Name)
 		if len(e.Id.raw) != 32 {
 			fail fault.Wrap(ErrCorrupt, "tree: entry {e.Name} has no id")
 		}
-		if seen[e.Name] {
+		if i > 0 {
+			let prev = es[i - 1]
+			let c = keyCompare(prev.Name, prev.Mode == Mode.Dir, e.Name, e.Mode == Mode.Dir)
+			if c == 0 {
+				fail fault.Wrap(ErrCorrupt, "tree: duplicate name {e.Name}")
+			}
+			if c > 0 {
+				fail fault.Wrap(ErrCorrupt, "tree: {e.Name} is out of order")
+			}
+		}
+		if e.Mode == Mode.Dir && sortedHasFile(es, i, e.Name) {
 			fail fault.Wrap(ErrCorrupt, "tree: duplicate name {e.Name}")
 		}
-		seen[e.Name] = true
-		if i > 0 && !(sortKey(es[i - 1]) < sortKey(e)) {
-			fail fault.Wrap(ErrCorrupt, "tree: {e.Name} is out of order")
+	}
+}
+
+// sortedHasFile reports whether es[0:n], sorted by sortKey, holds an entry that is not a directory named name.
+fn sortedHasFile(es []Entry, n i64, name str) bool {
+	mut lo = 0
+	mut hi = n
+	for lo < hi {
+		let mid = lo + (hi - lo) / 2
+		let m = es[mid]
+		let c = keyCompare(m.Name, m.Mode == Mode.Dir, name, false)
+		if c == 0 {
+			return true
+		}
+		if c < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
+	return false
+}
+
+// keyCompare orders two entries' sortKeys (each name, with "/" after it for a directory) without building them: -1,
+// 0 or 1.
+fn keyCompare(a str, aDir bool, b str, bDir bool) i64 {
+	let n = min(len(a), len(b))
+	for k in 0..n {
+		if a[k] != b[k] {
+			if a[k] < b[k] {
+				return -1
+			}
+			return 1
+		}
+	}
+	mut i = n
+	for {
+		let x = keyTail(a, aDir, i)
+		let y = keyTail(b, bDir, i)
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+		if x < 0 {
+			return 0
+		}
+		i += 1
+	}
+}
+
+// keyTail is byte k of the sortKey of an entry with this name: a byte of the name, '/' just after a directory's name,
+// or -1 past the key's end.
+fn keyTail(name str, dir bool, k i64) i64 {
+	if k < len(name) {
+		return i64(name[k])
+	}
+	if dir && k == len(name) {
+		return i64('/')
+	}
+	return -1
 }
 
 fn treeBody(es []Entry) !str {
 	try checkEntries(es)
 	mut out = make([]u8, 0, 48 * len(es))
 	for e in es {
-		appendStr(mut out, "{ModeText(e.Mode)} {e.Name}\x00")
+		appendStr(mut out, ModeText(e.Mode))
+		out = append(out, ' ')
+		appendStr(mut out, e.Name)
+		out = append(out, 0)
 		appendStr(mut out, e.Id.raw)
 	}
 	return str(out)
 }
 
 fn parseMode(s str) !Mode {
-	if s == "100644" {
-		return Mode.File
-	}
-	if s == "100755" {
-		return Mode.Exec
-	}
-	if s == "120000" {
-		return Mode.Link
-	}
-	if s == "40000" {
-		return Mode.Dir
-	}
-	fail fault.Wrap(ErrCorrupt, "tree: unknown mode {s}")
+	return try modeAt(s, 0, len(s))
 }
 
+// modeAt reads the mode written in s[from:to].
+fn modeAt(s str, from i64, to i64) !Mode {
+	let n = to - from
+	if n == 6 && textAt(s, from, "100644") {
+		return Mode.File
+	}
+	if n == 6 && textAt(s, from, "100755") {
+		return Mode.Exec
+	}
+	if n == 6 && textAt(s, from, "120000") {
+		return Mode.Link
+	}
+	if n == 5 && textAt(s, from, "40000") {
+		return Mode.Dir
+	}
+	fail fault.Wrap(ErrCorrupt, "tree: unknown mode {s[from:to]}")
+}
+
+// decodeTree reads a tree's entries: each "mode name\0" and 32 bytes of id, taking only the name and the id out of
+// the body. treeBody writes the same bytes back for the entries it accepts.
 fn decodeTree(body str) ![]Entry {
-	mut es = []Entry{}
+	// the entries counted first, so the list is made once
+	mut count = 0
+	mut j = 0
+	for j < len(body) {
+		let nul = indexFrom(body, j, 0)
+		if nul < 0 {
+			break
+		}
+		count += 1
+		j = nul + 33
+	}
+	mut es = make([]Entry, 0, count)
 	mut i = 0
 	for i < len(body) {
 		let sp = indexFrom(body, i, ' ')
 		if sp < 0 {
 			fail fault.Wrap(ErrCorrupt, "tree: entry without a mode")
 		}
-		let mode = try parseMode(body[i:sp])
+		let mode = try modeAt(body, i, sp)
 		let nul = indexFrom(body, sp + 1, 0)
 		if nul < 0 || nul + 33 > len(body) {
 			fail fault.Wrap(ErrCorrupt, "tree: truncated entry")
