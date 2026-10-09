@@ -109,6 +109,18 @@ fn dbOptions(c config.Config) db.Options {
 // pg is this core's client of the primary.
 let pg = db.Open(dbOptions(boot.Conf))
 
+// stale is this core's client of db.replica (phase 2), else the primary: for API reads that may lag.
+let stale = replica(boot.Conf)
+
+fn replica(c config.Config) postgres.Client {
+	if len(c.DbReplica) == 0 {
+		return pg
+	}
+	mut o = dbOptions(c)
+	o.Addr = c.DbReplica
+	return db.Open(o)
+}
+
 fn level(name str) i64 {
 	return match name {
 		"debug" => herald.LDebug
@@ -196,7 +208,7 @@ fn configureProto(c config.Config) {
 	}
 	let cache = repo.NewRefCache(c.RedisAddr, "tinhub:", tide.Minute)
 	let limits = redis.Open(redis.Options{Addr: c.RedisAddr, Username: "", Password: "", DB: 0, Proto: 0, Timeout: 0, TLS: nil})
-	api.Configure(api.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: signin.Caller})
+	api.Configure(api.Deps{Db: pg, Stale: stale, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: signin.Caller})
 	let sessions = accounts.NewSessions(c.RedisAddr, "tinhub:", accounts.SessionTTL, c.CookieKey)
 	signin.Configure(signin.Deps{Db: pg, Sessions: sessions, NonceKey: c.NonceSecret, CookieKey: c.CookieKey, PublicUrl: c.PublicURL, Secure: twine.HasPrefix(c.PublicURL, "https:")})
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
@@ -495,6 +507,9 @@ fn copyNow(c config.Config) ! {
 	}
 	mut from = try packs.NewDirStore(c.PacksDir)
 	let client = try s3.New(s3.Config{Endpoint: c.S3Endpoint, Region: c.S3Region, AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, Token: "", PathStyle: c.S3PathStyle, SignPayload: false, UnsignedPayload: false, Attempts: 0, Backoff: 0, Timeout: 0, TLS: nil})
+	// the bucket is made when it can be; one that exists already, or credentials that may not make one, are no fault
+	client.CreateBucket(c.S3Bucket) catch _ {
+	}
 	mut to = packs.S3Store{Client: client, Bucket: c.S3Bucket, Cache: c.PacksDir + "/cache"}
 	let got = try packs.Copy(mut from, mut to, "repos/", c.PacksDir + "/tmp")
 	say.Line("tinhub: copied {got.Copied} objects ({got.Bytes} bytes), {got.Skipped} already there")

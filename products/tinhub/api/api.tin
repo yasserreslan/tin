@@ -24,7 +24,10 @@ import "twine"
 
 // Deps is what the API needs, set on every core (Configure) before the first request.
 type Deps struct {
-	Db    postgres.Client
+	Db postgres.Client
+	// Stale is db.replica when set (phase 2), else Db: the lists of repositories, changes and versions may lag the
+	// primary by the replica's delay. Access checks, refs and the packs objects are read from always use Db.
+	Stale postgres.Client
 	Store dyn packs.PackStore
 	Cache repo.RefCache
 	Dir   str
@@ -233,7 +236,7 @@ fn readRepos(c call, owner str, after str, n i64) !repoPage {
 		try limit memory readMemory + 0 {
 			mut page = repoPage{repos: []repoOut{}, next: ""}
 			// a page and one more, of which those the caller cannot read are left out
-			let rows = try c.d.Db.Query("SELECT r.name FROM repos r JOIN owners o ON o.id = r.owner_id WHERE o.name = {owner} AND r.deleted_at IS NULL AND r.name > {after} ORDER BY r.name LIMIT 1000")
+			let rows = try c.d.Stale.Query("SELECT r.name FROM repos r JOIN owners o ON o.id = r.owner_id WHERE o.name = {owner} AND r.deleted_at IS NULL AND r.name > {after} ORDER BY r.name LIMIT 1000")
 			mut last = ""
 			for row in rows.Rows {
 				let name = row[0].Text()
@@ -421,7 +424,7 @@ fn readChanges(c call, user str, cursor str, n i64) !changePage {
 			mut page = changePage{changes: []changeOut{}, next: ""}
 			let repoId = c.r.Id
 			let limitN = n + 1
-			let rows = try c.d.Db.Query("SELECT v.change_id, v.version, v.commit_id, v.op, coalesce(o.name, ''), (extract(epoch FROM v.created_at) * 1000000)::bigint AS t FROM (SELECT DISTINCT ON (change_id) * FROM changes WHERE repo_id = {repoId} ORDER BY change_id, version DESC) v LEFT JOIN users u ON u.id = v.pushed_by LEFT JOIN owners o ON o.id = u.owner_id WHERE ({user} = '' OR o.name = {user}) AND ((extract(epoch FROM v.created_at) * 1000000)::bigint, v.change_id) < ({beforeTime}::bigint, {beforeChange}) ORDER BY t DESC, v.change_id DESC LIMIT {limitN}")
+			let rows = try c.d.Stale.Query("SELECT v.change_id, v.version, v.commit_id, v.op, coalesce(o.name, ''), (extract(epoch FROM v.created_at) * 1000000)::bigint AS t FROM (SELECT DISTINCT ON (change_id) * FROM changes WHERE repo_id = {repoId} ORDER BY change_id, version DESC) v LEFT JOIN users u ON u.id = v.pushed_by LEFT JOIN owners o ON o.id = u.owner_id WHERE ({user} = '' OR o.name = {user}) AND ((extract(epoch FROM v.created_at) * 1000000)::bigint, v.change_id) < ({beforeTime}::bigint, {beforeChange}) ORDER BY t DESC, v.change_id DESC LIMIT {limitN}")
 			mut r = pgRepo(c)
 			mut st = try r.Objects()
 			for i, row in rows.Rows {
@@ -484,7 +487,7 @@ fn readVersions(c call, ch str) !versionsOut {
 		try limit memory readMemory + 0 {
 			mut page = versionsOut{change: ch, versions: []versionOut{}}
 			let repoId = c.r.Id
-			let rows = try c.d.Db.Query("SELECT v.version, v.commit_id, v.op, coalesce(o.name, ''), (extract(epoch FROM v.created_at) * 1000000)::bigint FROM changes v LEFT JOIN users u ON u.id = v.pushed_by LEFT JOIN owners o ON o.id = u.owner_id WHERE v.repo_id = {repoId} AND v.change_id = {ch} ORDER BY v.version LIMIT 1000")
+			let rows = try c.d.Stale.Query("SELECT v.version, v.commit_id, v.op, coalesce(o.name, ''), (extract(epoch FROM v.created_at) * 1000000)::bigint FROM changes v LEFT JOIN users u ON u.id = v.pushed_by LEFT JOIN owners o ON o.id = u.owner_id WHERE v.repo_id = {repoId} AND v.change_id = {ch} ORDER BY v.version LIMIT 1000")
 			for row in rows.Rows {
 				page.versions = append(page.versions, versionOut{version: row[0].Int(), commit: row[1].Text(), op: row[2].Int(), pushed_by: row[3].Text(), time: row[4].Int()})
 			}
