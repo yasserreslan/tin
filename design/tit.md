@@ -537,3 +537,88 @@ shape Transport {
 
 `Frame` and `ReadFrame` write and read the message encoding, `NewNonce` and `CheckNonce` make and check nonces,
 `SigningPayload` is the bytes a request signature covers.
+
+## 16. The server's repository (#1003)
+
+Status: **proposed** by #1003, for #1006 (tit serve on it), #1007 (repack), #1009 (streaming), #1010 (prune and
+purge) and tinhub (#1011 pack store, #1016 refs in Postgres, #1018 the protocol on tinhub). The stubs are in
+`products/tit/transport/repo.tin`.
+
+The server of §15 reads and writes one `.tit` directory. tinhub keeps refs and change versions in Postgres and packs
+in a pack store, and runs on several nodes. Both serve the protocol through the same code (`transport.Server`) over a
+`Repo`: tit's is a `.tit` directory (`DirRepo`, #1006), tinhub's is its own (#1016).
+
+### Packs: pending, live, retired
+
+A pack is written once, named by its trailing hash (hex), and never modified. It is in one of three states:
+
+| state | who reads it | how it gets there | how it leaves |
+|---|---|---|---|
+| pending | nobody: no ref reaches it | `Stage` | `Commit` makes it live; `Drop`, or the sweep of pending packs older than the push deadline, deletes it |
+| live | every reader (`Objects`, `Packs`) | `Commit` | `Retire` |
+| retired | readers that listed it before it retired | `Retire` | deleted after the grace period (default 1 hour, never less than the longest fetch) |
+
+A `.tit` directory keeps pending packs in `packs/staged/` and retired ones in `packs/retired/`; a live pack is
+`packs/<hex>.pack` with its `.idx` (the index is renamed in first, so a listed pack always has its index). tinhub
+keeps a pack at `repos/<repo id>/packs/<hex>.pack` and `.idx` with its state in Postgres; no pack is shared between
+repos.
+
+### A push over a Repo
+
+1. The request is read and its pack verified (§6) into a file under `TempDir()` (in memory before #1009).
+2. Checks without the lock, against what the repository holds now: each change's newest version is the one the push
+   replaces (`Moved`), each ref holds the push's `old` (`RefChanged`), every pushed commit is complete, has no
+   conflict and verifies against the signers file (`BadPack`, `Conflicted`, `BadSignature`).
+3. `Stage`: the pack becomes pending. Data first.
+4. `Commit`: under the repository lock and as one change, the checks of step 2 on versions and refs are made again
+   (another push may have landed since), then the pack becomes live, the refs move and the versions are added. A
+   mismatch refuses the push and changes nothing; the server then `Drop`s the pack.
+
+The lock is held only for step 4. A crash before step 4 leaves a pending pack that nothing reaches; a crash inside it
+leaves the repository as before or after the push (tit: the oplog's pending operation, §9; tinhub: the transaction).
+
+Repack (#1007) and prune (#1010) use the same calls: write a pack, `Stage`, `Commit` an update with no refs and no
+changes (the pack becomes live), then `Retire` the packs it replaces. Prune never removes an object younger than its
+retention, so a push whose checks saw an object still finds it at `Commit`.
+
+### In Tin
+
+```tin
+// package transport
+
+// Staged is a pending pack: its trailing hash, hex.
+type Staged struct {
+	Name str
+}
+
+// Update is what Commit makes current in one step.
+type Update struct {
+	Who     str              // the email the request was signed as ("" for tit's own commands)
+	Command str              // for the record: "push by ada@example.com", "repack", "prune"
+	Changes []ChangeUpdate   // §15: each change's new commit and the version it replaces
+	Refs    []RefUpdate      // §15: each ref's old and new target, as a ref file writes them
+	Pack    str              // a staged pack's name, "" for none
+	Time    i64              // unix ns: the new versions' time
+}
+
+// Repo is what a server needs of one repository.
+shape Repo {
+	mut Ref(name str) !?change.Ref
+	mut Refs(prefix str) ![]change.Ref
+	mut Newest(c object.ChangeId) !?change.Version
+	mut Objects() !store.Layered           // every live object
+	mut Packs() ![]packfile.Pack           // the live packs, opened (for packfile.Reuse)
+	TempDir() str                          // where a pack is written before Stage, on the store's own file system
+	mut Stage(pack str) !Staged            // pack: a written, verified .pack path with its .idx beside it; moved in, pending
+	mut Commit(u Update) !i64              // the operation number the new versions record (§8)
+	mut Drop(s Staged) !bool               // deletes a pending pack; false when it was gone
+	mut Retire(names []str) !i64           // live packs out of new readers' sight; how many were live
+}
+```
+
+`Commit` refuses with `ErrRefused` and the §15 code in its text (`Moved: <change> …`, `RefChanged: <ref> …`), as
+the checks of step 2 do, so `Server.Handle` answers both the same way. A version's operation number is the oplog's
+(tit) or the repository's push sequence (tinhub); it only orders the versions of one change.
+
+The packages tinhub imports from tit (`object`, `store`, `packfile`, `change`, `transport`, `semantic`, `diff`,
+`merge`, `revwalk`) keep no process-wide state that two repositories in one process would share.
