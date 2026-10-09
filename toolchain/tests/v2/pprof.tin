@@ -1,0 +1,19 @@
+package main
+
+import "anvil"
+import "pprof"
+import "say"
+
+fn main() {
+	let r = anvil.NewRouter()
+	pprof.Register(mut r)
+	let page = r.Run("GET", "/debug/pprof/", "")
+	say.Line(page.Code())
+	say.Line(str(page.Body))
+	let heap = r.Run("GET", "/debug/pprof/heap", "")
+	say.Line(heap.Code())
+	say.Line(str(heap.Body))
+	let cpu = r.Run("GET", "/debug/pprof/profile?seconds=1", "")
+	say.Line(cpu.Code())
+	say.Line(str(cpu.Body))
+}

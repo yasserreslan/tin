@@ -1,0 +1,32 @@
+// Package pprof exposes Go-compatible profiling route names for anvil and reports which profiles the Tin runtime cannot provide.
+package pprof
+
+import "anvil"
+
+// Register adds the standard pprof route paths to r. Tin currently has no runtime profile source, so profile requests return 501.
+fn Register(r mut anvil.Router) {
+	r.Get("/debug/pprof/", index)
+	r.Get("/debug/pprof/cmdline", unavailable)
+	r.Get("/debug/pprof/profile", unavailable)
+	r.Get("/debug/pprof/heap", unavailable)
+	r.Get("/debug/pprof/goroutine", unavailable)
+	r.Get("/debug/pprof/allocs", unavailable)
+	r.Get("/debug/pprof/threadcreate", unavailable)
+	r.Get("/debug/pprof/block", unavailable)
+	r.Get("/debug/pprof/mutex", unavailable)
+}
+
+// index lists the standard profile names and makes their current availability clear.
+fn index(q anvil.Req, w mut anvil.Out) {
+	_ = q
+	w.Type("text/plain; charset=utf-8")
+	w.Text("Tin runtime profiles are unavailable: heap, goroutine, allocs, threadcreate, block, mutex, profile (CPU).\n")
+}
+
+// unavailable reports that Tin cannot produce this runtime profile.
+fn unavailable(q anvil.Req, w mut anvil.Out) {
+	_ = q
+	w.Status(501)
+	w.Type("text/plain; charset=utf-8")
+	w.Text("runtime profiling is unavailable")
+}

@@ -16,6 +16,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
 | [httptrace](#httptrace) | observable HTTP client phase hooks (net/http/httptrace) |
+| [pprof](#pprof) | HTTP profiling route names and runtime profile availability (net/http/pprof) |
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
 | [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
@@ -526,6 +527,12 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 Package httptrace provides the HTTP client hooks wire can observe on HTTP/1.1 and TLS. DNS and connect hooks are unavailable because wire's platform resolver combines those phases. HTTP/2 requests currently use a separate path and report only GetConn and TLS handshake hooks.
 
 - `type ClientTrace struct`: ClientTrace contains callbacks for observable HTTP client phases.
+
+## pprof
+
+Package pprof exposes Go-compatible profiling route names for anvil and reports which profiles the Tin runtime cannot provide.
+
+- `Register(r mut anvil.Router)`: Register adds the standard pprof route paths to r. Tin currently has no runtime profile source, so profile requests return 501.
 
 ## jar
 
