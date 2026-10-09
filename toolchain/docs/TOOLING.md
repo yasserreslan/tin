@@ -484,7 +484,7 @@ are followed), no lexical blocks and no inlined calls. `lldb` shows a `str` or a
 (`p label->len`); `command script import tools/dev/tin_lldb.py` (or that line in `~/.lldbinit`) makes it show the text and the
 first elements: `label = "pt"`, `xs = len=3 cap=3 [4, 5, 6]`. The language of the unit is C, which is what debuggers need to print values.
 
-`tools/ci/test_dwarf.tin` reads the sections back for all three targets without a debugger.
+`tools/ci/dwarf_check.tin` compares every Linux arm64 and amd64 line row and file entry against Go's `debug/dwarf`, then checks Tin's DIEs. `debug/dwarf` opens ELF files lazily through `debug/elf`; it reads the DWARF 4 forms Tin emits. The compiler currently emits no lexical-block DIEs. Mach-O, `.debug_str` forms, range lists, and `debug/gosym` remain open for follow-up work in #918.
 
 ### 8.1 Replaying a recorded request: `tin replay`
 

@@ -1,8 +1,16 @@
-// A reader of the DWARF the compiler writes with -g, in an ELF or Mach-O file: the sections are found, the line program is run and the
-// debugging entries of the one compilation unit are decoded (#409 macOS, #370 Linux).
+// Package dwarf reads the DWARF 4 sections written by Tin's compiler with -g.
+// It reads ELF files lazily through debug/elf; Go's debug/dwarf is the model.
 package dwarf
 
-import "say"
+import "debug/elf"
+import "fault"
+
+let ErrFormat = fault("debug/dwarf: malformed or unsupported DWARF")
+let ErrNoDebugInfo = fault("debug/dwarf: no debug info")
+const maxSectionBytes = 67108864
+const maxTotalDebugBytes = 67108864
+const maxRows = 1000000
+const maxDies = 1000000
 
 fn le(d str, at i64, n i64) i64 {
 	mut v = i64(0)
@@ -12,10 +20,36 @@ fn le(d str, at i64, n i64) i64 {
 	return v
 }
 
-// Section is a named section of the file's DWARF.
+// Sections contains the DWARF sections in an ELF file. Open caps the combined
+// section data at 64 MiB before retaining it.
 type Sections struct {
 	Names []str
 	Data []str
+}
+
+// Open reads the DWARF sections of an ELF executable. A binary without -g
+// returns ErrNoDebugInfo, matching Go's debug/dwarf.New on missing sections.
+fn Open(path str) !Sections {
+	let f = elf.Open(path) catch err {
+		if fault.Is(err, elf.ErrFormat) { fail ErrFormat }
+		fail err
+	}
+	mut names = []str{}
+	mut bodies = []str{}
+	mut total = i64(0)
+	for i, section in f.Sections {
+		if section.Name != ".debug_line" && section.Name != ".debug_info" && section.Name != ".debug_abbrev" && section.Name != ".debug_str" && section.Name != ".debug_ranges" && section.Name != ".debug_rnglists" { continue }
+		if section.Size > maxTotalDebugBytes - total { fail ErrFormat }
+		let body = f.ReadSection(i) catch err {
+			if fault.Is(err, elf.ErrFormat) { fail ErrFormat }
+			fail err
+		}
+		total += section.Size
+		names = append(names, section.Name)
+		bodies = append(bodies, body)
+	}
+	if len(names) == 0 { fail ErrNoDebugInfo }
+	return Sections{Names: names, Data: bodies}
 }
 
 // Get is the bytes of a section and whether there is one.
@@ -28,82 +62,25 @@ fn (s Sections) Get(name str) (str, bool) {
 	return "", false
 }
 
-fn cstring(d str, at i64) str {
+fn cstring(d str, at i64) !str {
+	if at < 0 || at >= len(d) { fail ErrFormat }
 	mut end = at
-	for d[end] != 0 {
+	for end < len(d) && d[end] != 0 {
 		end += 1
 	}
+	if end == len(d) { fail ErrFormat }
 	return d[at:end]
 }
 
-// SectionsOf finds the DWARF sections of an ELF or Mach-O file.
-fn SectionsOf(data str) !Sections {
-	mut names = []str{}
-	mut bodies = []str{}
-	if data[0:4] == "\x7fELF" {
-		let shoff = le(data, 0x28, 8)
-		let shentsize = le(data, 0x3a, 2)
-		let shnum = le(data, 0x3c, 2)
-		let shstrndx = le(data, 0x3e, 2)
-		let strtab = le(data, shoff + shstrndx * shentsize + 24, 8)
-		for i in 0..shnum {
-			let h = shoff + i * shentsize
-			let name = cstring(data, strtab + le(data, h, 4))
-			if twine_hasPrefix(name, ".debug_") {
-				let off = le(data, h + 24, 8)
-				let size = le(data, h + 32, 8)
-				names = append(names, name)
-				bodies = append(bodies, data[off:off + size])
-			}
-		}
-		return Sections{Names: names, Data: bodies}
-	}
-	if le(data, 0, 4) != 0xfeedfacf {
-		fail say.Fault("%s", "neither ELF nor Mach-O")
-	}
-	let ncmds = le(data, 16, 4)
-	mut at = 32
-	for c in 0..ncmds {
-		let cmd = le(data, at, 4)
-		let size = le(data, at + 4, 4)
-		if cmd == 0x19 {
-			let nsects = le(data, at + 64, 4)
-			for k in 0..nsects {
-				let sect = at + 72 + 80 * k
-				let name = trimNul(data[sect:sect + 16])
-				let seg = trimNul(data[sect + 16:sect + 32])
-				let sz = le(data, sect + 40, 8)
-				let off = le(data, sect + 48, 4)
-				if seg == "__DWARF" {
-					names = append(names, "." + name[2:])
-					bodies = append(bodies, data[off:off + sz])
-				}
-			}
-		}
-		at += size
-	}
-	return Sections{Names: names, Data: bodies}
-}
-
-fn twine_hasPrefix(s str, p str) bool {
-	return len(s) >= len(p) && s[0:len(p)] == p
-}
-
-fn trimNul(s str) str {
-	mut end = len(s)
-	for end > 0 && s[end - 1] == 0 {
-		end -= 1
-	}
-	return s[0:end]
-}
-
 // uleb reads an unsigned LEB128 number at i: the value and the next index.
-fn uleb(b str, start i64) (i64, i64) {
+fn uleb(b str, start i64) !(i64, i64) {
+	if start < 0 || start >= len(b) { fail ErrFormat }
 	mut v = i64(0)
 	mut shift = i64(0)
 	mut i = start
-	for {
+	for i < len(b) && shift < 64 {
 		let c = i64(b[i])
+		if shift == 63 && (c & 126) != 0 { fail ErrFormat }
 		i += 1
 		v = v | ((c & 127) << shift)
 		shift += 7
@@ -111,16 +88,18 @@ fn uleb(b str, start i64) (i64, i64) {
 			return v, i
 		}
 	}
-	return v, i
+	fail ErrFormat
 }
 
 // sleb reads a signed LEB128 number.
-fn sleb(b str, start i64) (i64, i64) {
+fn sleb(b str, start i64) !(i64, i64) {
+	if start < 0 || start >= len(b) { fail ErrFormat }
 	mut v = i64(0)
 	mut shift = i64(0)
 	mut i = start
-	for {
+	for i < len(b) && shift < 64 {
 		let c = i64(b[i])
+		if shift == 63 && c != 0 && c != 127 { fail ErrFormat }
 		i += 1
 		v = v | ((c & 127) << shift)
 		shift += 7
@@ -131,7 +110,7 @@ fn sleb(b str, start i64) (i64, i64) {
 			return v, i
 		}
 	}
-	return v, i
+	fail ErrFormat
 }
 
 // Row is a row of the line table.
@@ -145,44 +124,65 @@ type Row struct {
 
 // Lines is the files and rows of a DWARF 4 line program.
 type Lines struct {
+	Directories []str
 	Files []str
 	Rows []Row
 }
 
+// LineForPC returns the row whose address range contains pc. End-sequence
+// markers close a range and are never returned as source locations.
+fn (l Lines) LineForPC(pc i64) (Row, bool) {
+	for i, row in l.Rows {
+		if row.End { continue }
+		if row.Addr > pc { return Row{}, false }
+		if i + 1 < len(l.Rows) && pc < l.Rows[i + 1].Addr { return row, true }
+	}
+	return Row{}, false
+}
+
 fn LineRows(sec str) !Lines {
+	if len(sec) < 16 || len(sec) > maxSectionBytes { fail ErrFormat }
 	let length = le(sec, 0, 4)
 	let version = le(sec, 4, 2)
 	let headerLength = le(sec, 6, 4)
-	if version != 4 || 4 + length != len(sec) {
-		fail say.Fault("%s", "unexpected line table header")
+	if version != 4 || length < 12 || 4 + length != len(sec) {
+		fail ErrFormat
 	}
 	let mil = le(sec, 10, 1)
 	let lineBase = i64(i8(sec[13]))
 	let lineRange = le(sec, 14, 1)
 	let opcodeBase = le(sec, 15, 1)
+	if opcodeBase == 0 || lineRange == 0 || mil == 0 || 16 + opcodeBase - 1 > len(sec) { fail ErrFormat }
 	mut i = 16 + opcodeBase - 1
 	mut lens = []i64{}
 	for k in 0..opcodeBase - 1 {
 		lens = append(lens, i64(sec[16 + k]))
 	}
 	// include directories
-	for sec[i] != 0 {
-		i += len(cstring(sec, i)) + 1
+	mut directories = []str{}
+	for i < len(sec) && sec[i] != 0 {
+		let dir = try cstring(sec, i)
+		if len(directories) >= maxRows { fail ErrFormat }
+		directories = append(directories, dir)
+		i += len(dir) + 1
 	}
+	if i >= len(sec) { fail ErrFormat }
 	i += 1
 	mut files = []str{}
-	for sec[i] != 0 {
-		let name = cstring(sec, i)
+	for i < len(sec) && sec[i] != 0 {
+		let name = try cstring(sec, i)
+		if len(files) >= maxRows { fail ErrFormat }
 		files = append(files, name)
 		i += len(name) + 1
 		for k in 0..3 {
-			let (_, next) = uleb(sec, i)
+			let (_, next) = try uleb(sec, i)
 			i = next
 		}
 	}
+	if i >= len(sec) { fail ErrFormat }
 	i += 1
-	if i != 10 + headerLength {
-		fail say.Fault("%s", "the line table header ends elsewhere than it says")
+	if i != 10 + headerLength || i > len(sec) {
+		fail ErrFormat
 	}
 	mut rows = []Row{}
 	mut addr = i64(0)
@@ -196,14 +196,19 @@ fn LineRows(sec str) !Lines {
 			let adj = op - opcodeBase
 			addr += (adj / lineRange) * mil
 			line += lineBase + adj % lineRange
+			if len(rows) >= maxRows { fail ErrFormat }
 			rows = append(rows, Row{Addr: addr, File: file, Line: line, Col: col, End: false})
 		} else if op == 0 {
-			let (n, next) = uleb(sec, i)
+			let (n, next) = try uleb(sec, i)
+			if n < 1 || next > len(sec) || n > len(sec) - next { fail ErrFormat }
 			i = next
 			let sub = i64(sec[i])
 			if sub == 2 {
+				if n != 9 { fail ErrFormat }
 				addr = le(sec, i + 1, 8)
 			} else if sub == 1 {
+				if n != 1 { fail ErrFormat }
+				if len(rows) >= maxRows { fail ErrFormat }
 				rows = append(rows, Row{Addr: addr, File: file, Line: line, Col: col, End: true})
 				addr = 0
 				file = 1
@@ -212,31 +217,32 @@ fn LineRows(sec str) !Lines {
 			}
 			i += n
 		} else if op == 1 {
+			if len(rows) >= maxRows { fail ErrFormat }
 			rows = append(rows, Row{Addr: addr, File: file, Line: line, Col: col, End: false})
 		} else if op == 2 {
-			let (d, next) = uleb(sec, i)
+			let (d, next) = try uleb(sec, i)
 			i = next
 			addr += d * mil
 		} else if op == 3 {
-			let (d, next) = sleb(sec, i)
+			let (d, next) = try sleb(sec, i)
 			i = next
 			line += d
 		} else if op == 4 {
-			let (f, next) = uleb(sec, i)
+			let (f, next) = try uleb(sec, i)
 			i = next
 			file = f
 		} else if op == 5 {
-			let (c, next) = uleb(sec, i)
+			let (c, next) = try uleb(sec, i)
 			i = next
 			col = c
 		} else {
 			for k in 0..lens[op - 1] {
-				let (_, next) = uleb(sec, i)
+				let (_, next) = try uleb(sec, i)
 				i = next
 			}
 		}
 	}
-	return Lines{Files: files, Rows: rows}
+	return Lines{Directories: directories, Files: files, Rows: rows}
 }
 
 // Die is a debugging information entry: its tag, parent (an offset, -1 at the top), and the attribute values it holds as numbers
@@ -289,18 +295,20 @@ fn findAbbrev(table []Abbrev, code i64) Abbrev {
 
 // Dies decodes the entries of the one compilation unit in order.
 fn Dies(info str, abbrev str) ![]Die {
+	if len(info) < 11 || len(info) > maxSectionBytes || len(abbrev) == 0 || len(abbrev) > maxSectionBytes { fail ErrFormat }
 	mut table = []Abbrev{}
 	mut i = 0
 	for abbrev[i] != 0 {
-		let (code, a) = uleb(abbrev, i)
-		let (tag, b) = uleb(abbrev, a)
+		let (code, a) = try uleb(abbrev, i)
+		let (tag, b) = try uleb(abbrev, a)
+		if code == 0 || tag == 0 || b >= len(abbrev) || abbrev[b] > 1 || len(table) >= maxDies { fail ErrFormat }
 		let children = abbrev[b] != 0
 		i = b + 1
 		mut attrs = []i64{}
 		mut forms = []i64{}
 		for {
-			let (attr, c) = uleb(abbrev, i)
-			let (form, d) = uleb(abbrev, c)
+			let (attr, c) = try uleb(abbrev, i)
+			let (form, d) = try uleb(abbrev, c)
 			i = d
 			if attr == 0 && form == 0 {
 				break
@@ -314,20 +322,22 @@ fn Dies(info str, abbrev str) ![]Die {
 	let version = le(info, 4, 2)
 	let addrSize = le(info, 10, 1)
 	if version != 4 || addrSize != 8 || 4 + length != len(info) {
-		fail say.Fault("%s", "unexpected compilation unit header")
+		fail ErrFormat
 	}
 	mut pos = 11
 	mut out = []Die{}
 	mut stack = []i64{}
 	for pos < len(info) {
 		let at = pos
-		let (code, next) = uleb(info, pos)
+		let (code, next) = try uleb(info, pos)
 		pos = next
 		if code == 0 {
+			if len(stack) == 0 { fail ErrFormat }
 			stack = stack[0:len(stack) - 1]
 			continue
 		}
 		let ab = findAbbrev(table, code)
+		if ab.Tag == 0 { fail ErrFormat }
 		mut numKeys = []i64{}
 		mut numValues = []i64{}
 		mut strKeys = []i64{}
@@ -336,28 +346,33 @@ fn Dies(info str, abbrev str) ![]Die {
 			let a = ab.Attrs[k]
 			let f = ab.Forms[k]
 			if f == 0x08 {
-				let s = cstring(info, pos)
+				let s = try cstring(info, pos)
 				strKeys = append(strKeys, a)
 				strValues = append(strValues, s)
 				pos += len(s) + 1
 			} else if f == 0x05 {
+				if pos < 0 || pos > len(info) - 2 { fail ErrFormat }
 				numKeys = append(numKeys, a)
 				numValues = append(numValues, le(info, pos, 2))
 				pos += 2
 			} else if f == 0x06 || f == 0x17 || f == 0x13 {
+				if pos < 0 || pos > len(info) - 4 { fail ErrFormat }
 				numKeys = append(numKeys, a)
 				numValues = append(numValues, le(info, pos, 4))
 				pos += 4
 			} else if f == 0x01 || f == 0x07 {
+				if pos < 0 || pos > len(info) - 8 { fail ErrFormat }
 				numKeys = append(numKeys, a)
 				numValues = append(numValues, le(info, pos, 8))
 				pos += 8
 			} else if f == 0x0b {
+				if pos < 0 || pos >= len(info) { fail ErrFormat }
 				numKeys = append(numKeys, a)
 				numValues = append(numValues, i64(info[pos]))
 				pos += 1
 			} else if f == 0x18 {
-				let (n, after) = uleb(info, pos)
+				let (n, after) = try uleb(info, pos)
+				if n < 0 || after > len(info) || n > len(info) - after { fail ErrFormat }
 				strKeys = append(strKeys, a)
 				strValues = append(strValues, info[after:after + n])
 				pos = after + n
@@ -365,7 +380,7 @@ fn Dies(info str, abbrev str) ![]Die {
 				numKeys = append(numKeys, a)
 				numValues = append(numValues, 1)
 			} else {
-				fail say.Fault("form %d", f)
+				fail ErrFormat
 			}
 		}
 		mut parent = i64(-1)
@@ -373,26 +388,28 @@ fn Dies(info str, abbrev str) ![]Die {
 			parent = stack[len(stack) - 1]
 		}
 		out = append(out, Die{At: at, Tag: ab.Tag, Parent: parent, NumKeys: numKeys, NumValues: numValues, StrKeys: strKeys, StrValues: strValues})
+		if len(out) >= maxDies { fail ErrFormat }
 		if ab.Children {
 			stack = append(stack, at)
 		}
 	}
+	if len(stack) != 0 { fail ErrFormat }
 	return out
 }
 
 // Find is the entry at an offset.
-fn Find(dies []Die, at i64) Die {
+fn Find(dies []Die, at i64) !Die {
 	for d in dies {
 		if d.At == at {
 			return d
 		}
 	}
-	return dies[0]
+	fail ErrFormat
 }
 
 // TypeText is a short text for the type entry at an offset: a base type's name, a pointer as *target, a struct's name.
 fn TypeText(dies []Die, at i64) !str {
-	let d = Find(dies, at)
+	let d = try Find(dies, at)
 	if d.Tag == 0x24 || d.Tag == 0x13 {
 		let (name, _) = d.Str(0x03)
 		return name
@@ -402,5 +419,5 @@ fn TypeText(dies []Die, at i64) !str {
 		let inner = try TypeText(dies, target)
 		return "*" + inner
 	}
-	fail say.Fault("type tag %d", d.Tag)
+	fail ErrFormat
 }

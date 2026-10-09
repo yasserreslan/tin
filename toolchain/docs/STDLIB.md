@@ -42,6 +42,8 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [debug/elf](#debug/elf) | ELF executable headers, sections, symbols and dynamic tables (debug/elf) |
 | [debug/macho](#debug/macho) | Mach-O executable headers, load commands, sections and symbols (debug/macho) |
 | [debug/buildinfo](#debug/buildinfo) | Tin's build metadata in Mach-O executables: the LC_UUID and LC_BUILD_VERSION commands (debug/buildinfo) |
+| [debug](#debug) | binary formats of the executables Tin writes (debug/elf, debug/macho, debug/buildinfo) |
+| [debug/dwarf](#debug/dwarf) | DWARF compilation units, DIEs and source line tables (debug/dwarf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [signal](#signal) | operating-system signals (os/signal) |
@@ -1363,6 +1365,25 @@ Contract: the compiler does not write Go's buildinfo blob (the "\xff Go buildinf
 
 - `type Info struct`: Info is the build metadata of one Mach-O executable.
 - `Read(path str) !Info`: Read returns the build metadata of a Mach-O executable: ErrNoBuildInfo for an ELF file or one without Tin's commands.
+
+## debug/dwarf
+
+Package dwarf reads the DWARF 4 sections written by Tin's compiler with -g. It reads ELF files lazily through debug/elf; Go's debug/dwarf is the model.
+
+- `type Sections struct`: Sections contains the DWARF sections in an ELF file. Open caps the combined section data at 64 MiB before retaining it.
+- `Open(path str) !Sections`: Open reads the DWARF sections of an ELF executable. A binary without -g returns ErrNoDebugInfo, matching Go's debug/dwarf.New on missing sections.
+- `(s Sections) Get(name str) (str, bool)`: Get is the bytes of a section and whether there is one.
+- `type Row struct`: Row is a row of the line table.
+- `type Lines struct`: Lines is the files and rows of a DWARF 4 line program.
+- `(l Lines) LineForPC(pc i64) (Row, bool)`: LineForPC returns the row whose address range contains pc. End-sequence markers close a range and are never returned as source locations.
+- `LineRows(sec str) !Lines`
+- `type Die struct`: Die is a debugging information entry: its tag, parent (an offset, -1 at the top), and the attribute values it holds as numbers (Nums) and as text or bytes (Strs).
+- `(d Die) Num(attr i64) (i64, bool)`
+- `(d Die) Str(attr i64) (str, bool)`
+- `type Abbrev struct`: Abbrev is an abbreviation: tag, whether it has children and its (attribute, form) pairs.
+- `Dies(info str, abbrev str) ![]Die`: Dies decodes the entries of the one compilation unit in order.
+- `Find(dies []Die, at i64) !Die`: Find is the entry at an offset.
+- `TypeText(dies []Die, at i64) !str`: TypeText is a short text for the type entry at an offset: a base type's name, a pointer as *target, a struct's name.
 
 ## user
 
