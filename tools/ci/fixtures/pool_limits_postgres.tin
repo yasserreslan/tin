@@ -1,0 +1,81 @@
+package main
+
+import "anvil"
+import "mint"
+import "postgres"
+import "quarry"
+import "say"
+import "tide"
+
+// SetMaxOpen and SetMaxIdle after first use, for postgres_check.tin: a service whose one client
+// holds statements open, changes its limits while requests run, and lets the fake count the
+// connections. POSTGRES_POOL is Options.Pool (unset: the default).
+let db = postgres.Open(postgres.Options{
+	Addr:     quarry.Getenv("POSTGRES_ADDR"),
+	User:     quarry.Getenv("POSTGRES_USER"),
+	Password: quarry.Getenv("POSTGRES_PASSWORD"),
+	Database: quarry.Getenv("POSTGRES_DATABASE"),
+	Pool:     env_int("POSTGRES_POOL"),
+})
+
+fn env_int(name str) i64 {
+	let n = mint.Atoi(quarry.Getenv(name)) catch _ { 0 }
+	return n
+}
+
+fn param(q anvil.Req, name str, fallback i64) i64 {
+	let n = mint.Atoi(q.Param(name)) catch _ { fallback }
+	return n
+}
+
+fn sleep(q anvil.Req, w mut anvil.Out) {
+	let ms = param(q, "ms", 100)
+	let secs = f64(ms) / 1000.0
+	_ = db.Query("SELECT pg_sleep({secs})") catch err {
+		w.Status(502)
+		w.Text("{err}")
+		return
+	}
+	w.Text("slept")
+}
+
+// maxOpen sets the process-wide cap of the client (SetMaxOpen).
+fn maxOpen(q anvil.Req, w mut anvil.Out) {
+	db.SetMaxOpen(param(q, "n", 0)) catch err {
+		w.Status(502)
+		w.Text("{err}")
+		return
+	}
+	w.Text("max open set")
+}
+
+// maxIdle sets the idle connections this core keeps (SetMaxIdle).
+fn maxIdle(q anvil.Req, w mut anvil.Out) {
+	db.SetMaxIdle(param(q, "n", 0)) catch err {
+		w.Status(502)
+		w.Text("{err}")
+		return
+	}
+	w.Text("max idle set")
+}
+
+// raise waits, then raises the cap: the requests queued behind the cap on this core must go on.
+fn raise(q anvil.Req, w mut anvil.Out) {
+	tide.Sleep(param(q, "after", 0) * 1000000)
+	db.SetMaxOpen(param(q, "n", 0)) catch err {
+		w.Status(502)
+		w.Text("{err}")
+		return
+	}
+	w.Text("raised")
+}
+
+fn main() {
+	let r = anvil.NewRouter()
+	r.Get("/sleep", sleep)
+	r.Get("/max", maxOpen)
+	r.Get("/idle", maxIdle)
+	r.Get("/raise", raise)
+	let err = r.Serve(":" + quarry.Getenv("PORT"))
+	say.Line("server:", err)
+}

@@ -361,6 +361,86 @@ fn poolRun(exe str, out str, env []str, fake Fake, cores i64, extra []str, reque
 	return fake.Stats().Peak, slowest
 }
 
+// waitOpen waits, for up to 5 s, until the fake has at most n connections open (the client's closes reach it a moment later), and returns the count.
+fn waitOpen(fake Fake, n i64) i64 {
+	mut open = fake.Stats().Open
+	for i in 0..100 {
+		if open <= n {
+			break
+		}
+		tide.Sleep(50000000)
+		open = fake.Stats().Open
+	}
+	return open
+}
+
+// poolLimits: SetMaxOpen and SetMaxIdle change a live client's limits (fixtures/pool_limits_postgres.tin): the cap lowered after use
+// holds from the next use, a cap raised wakes the requests queued behind it, and SetMaxIdle(0) keeps no idle connection.
+fn poolLimits(out str, env []str, fake Fake) {
+	let exe = ci.Join(out, "pool_limits")
+	ci.BuildTin("tools/ci/fixtures/pool_limits_postgres.tin", exe, "", []str{})
+	let srv = startService(exe, out, withEnv(env, []str{"POSTGRES_POOL=", "TIN_DEADLINE_MS=20000"}), 1)
+	// Four statements at once on one core: four connections (the default Pool).
+	fake.ResetPeak()
+	let first = burst(srv.Port, repeat("/sleep?ms=300", 4))
+	if countCode(first, 200) != 4 {
+		flag("limits: " + mint.Itoa(4 - countCode(first, 200)) + " of 4 statements failed")
+	}
+	if fake.Stats().Peak != 4 {
+		flag("limits: the default Pool holds " + mint.Itoa(fake.Stats().Peak) + " connections for 4 statements, not 4")
+	}
+	// SetMaxOpen(1) after use: the next request trims the idle connections over the cap, then four statements run one at a time.
+	if fetch(srv.Port, "/max?n=1").Code != 200 {
+		flag("limits: SetMaxOpen after use failed")
+	}
+	let trimmed = fetch(srv.Port, "/sleep?ms=1")
+	if trimmed.Code != 200 {
+		flag("limits: the request after SetMaxOpen(1) failed")
+	}
+	let settled = waitOpen(fake, 1)
+	if settled > 1 {
+		flag("limits: " + mint.Itoa(settled) + " connections stay open after SetMaxOpen(1)")
+	}
+	fake.ResetPeak()
+	let one = burst(srv.Port, repeat("/sleep?ms=300", 4))
+	if countCode(one, 200) != 4 {
+		flag("limits: " + mint.Itoa(4 - countCode(one, 200)) + " of 4 statements failed under SetMaxOpen(1)")
+	}
+	if fake.Stats().Peak != 1 {
+		flag("limits: SetMaxOpen(1) allowed " + mint.Itoa(fake.Stats().Peak) + " connections at once")
+	}
+	say.Line("1 core, SetMaxOpen(1) after use: 4 statements, at most " + mint.Itoa(fake.Stats().Peak) + " connection: passed")
+	// Raised while three statements wait behind the one connection: /raise lifts the cap after 200 ms, and the waiters dial at once.
+	fake.ResetPeak()
+	let raised = burst(srv.Port, []str{"/sleep?ms=1000", "/sleep?ms=1000", "/sleep?ms=1000", "/sleep?ms=1000", "/raise?n=4&after=200"})
+	if countCode(raised, 200) != 5 {
+		flag("limits: " + mint.Itoa(5 - countCode(raised, 200)) + " of 5 requests failed around SetMaxOpen(4)")
+	}
+	mut slowest = 0.0
+	for i in 0..4 {
+		if raised[i].Took > slowest {
+			slowest = raised[i].Took
+		}
+	}
+	if fake.Stats().Peak != 4 || slowest >= 2.5 {
+		flag("limits: raised cap: " + mint.Itoa(fake.Stats().Peak) + " connections, slowest " + text(slowest, 2) + " s")
+	}
+	say.Line("1 core, SetMaxOpen(4) while 3 wait: " + mint.Itoa(fake.Stats().Peak) + " connections, slowest " + text(slowest, 2) + " s: passed")
+	// SetMaxIdle(0): the idle connections go at the next use, and none is kept after it.
+	if fetch(srv.Port, "/idle?n=0").Code != 200 {
+		flag("limits: SetMaxIdle after use failed")
+	}
+	if fetch(srv.Port, "/sleep?ms=1").Code != 200 {
+		flag("limits: the request after SetMaxIdle(0) failed")
+	}
+	let none = waitOpen(fake, 0)
+	if none != 0 {
+		flag("limits: SetMaxIdle(0) keeps " + mint.Itoa(none) + " connections open")
+	}
+	say.Line("1 core, SetMaxIdle(0) after use: " + mint.Itoa(none) + " connections kept open: passed")
+	srv.Stop()
+}
+
 // poolCap (#359): Options.MaxTotal caps the connections of the whole process, whatever the core count, and Pool defaults to max(2,
 // 64/cores) per core. fixtures/pool_cap_postgres.tin holds statements open; the fake counts the connections it has at once.
 fn poolCap(out str, env []str, fake Fake) {
@@ -488,6 +568,7 @@ fn main() {
 	sharedChecks(exe, out, env, fake, useFake)
 	if useFake {
 		poolCap(out, env, fake)
+		poolLimits(out, env, fake)
 		authCases(exe, out, env, fake)
 	}
 	// Once more over TLS 1.3 (sslmode=require): the fake behind TLS, or the real server (Ubuntu's PostgreSQL has ssl = on with its own

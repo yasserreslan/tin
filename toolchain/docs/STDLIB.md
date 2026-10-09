@@ -2582,8 +2582,8 @@ Package postgres implements a database/sql driver for the PostgreSQL client.
 - `(v Value) Float() f64`: Float is v as a float.
 - `(v Value) Text() str`: Text is v as text ("" for NULL).
 - `(r Rows) Col(name str) i64`: Col is the index of the named column, or -1.
-- `(c Client) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide connection cap for this client; configure it before first use.
-- `(c Client) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core connection cap for this client; configure it before first use.
+- `(c Client) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide connection cap for this client (0: no cap). It takes effect at once, also after use: a raised cap wakes this core's waiters, a lowered one closes this core's idle connections above it. Clients that share a MaxTotal cap share the change; other cores close their excess idle connections, and wait for a raised cap, when they next use the client.
+- `(c Client) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core connection cap for this client (0: none kept). It takes effect at once on this core, and on the others when they next use the client.
 - `(c Client) Close() !`: Close prevents new use and closes this client's idle connections; checked-out connections close when returned.
 - `(c Client) Query(q query) !Rows`: Query returns the first rowset. With no parameters, multiple statements are allowed and all replies are consumed before returning. Integers and booleans use Value.Int; float4/8 use Value.Float; other OIDs (including numeric and bytea) use Value.Text.
 - `(c Client) Exec(q query) !Result`: Exec returns the affected count of the last command. Use Query with RETURNING to obtain generated IDs (PostgreSQL has no connection-wide last insert ID).
