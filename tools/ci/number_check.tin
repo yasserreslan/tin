@@ -8,19 +8,19 @@ import "twine"
 
 // Compare exact number bits and text with Go and a pinned hard parsing corpus.
 
-// gauge: the functions of #575, how many results each one prints, and the allowed difference from Go in ulps of the result bits
-// (0 = bit-identical). dump mode prints "<name> <i> <input bits...> <result bits>" lines; both sides generate the inputs from the
-// same seed, GAUGE_N random values plus the edge cases.
+// gauge: the functions of #575 and the log family, how many results each one prints, and the allowed difference from Go in ulps
+// of the result bits (0 = bit-identical). dump mode prints "<name> <i> <input bits...> <result bits>" lines; both sides generate
+// the inputs from the same seed, GAUGE_N random values plus the edge cases.
 //
-// expm1's, the inverse hyperbolics' and sincos' arithmetic is Go's, but the compilers fuse multiply-adds differently (arm64 fuses,
-// x86-64 does not, and Go and Tin do not fuse the same products: design/stdlib_verified.md, "gauge: the corpus check"), so these
-// five are allowed exactly one ulp, and never more. FMA is exact everywhere (the software port). #575's second half: erf, erfc,
-// erfcinv and gamma are bit-identical; erfinv uses Log and lgamma uses Log and Sin, so they inherit the documented one-ulp log
-// difference.
+// expm1's and sincos' arithmetic is Go's, but the compilers fuse multiply-adds differently (arm64 fuses, x86-64 does not, and Go and
+// Tin do not fuse the same products: design/stdlib_verified.md, "gauge: the corpus check"), so these two are allowed exactly one
+// ulp, and never more. FMA is exact everywhere (the software port). The log family is bit-identical on each architecture (#942):
+// Log, Log10, Log1p, Asinh, Acosh and Atanh fuse as Go's do, so log, log10, log1p, asinh, acosh, atanh and erfinv (which uses Log)
+// take no allowance. lgamma uses Log and Sin and cancels near its zero crossings, so it is checked with a relative tolerance.
 const GAUGE_INPUTS = 120000
 
 fn funcNames() []str {
-	return []str{"expm1", "asinh", "acosh", "atanh", "sincos", "logb", "f32bits", "f32frombits", "dim", "remainder", "nextafter", "nextafter32", "fma", "erf", "erfc", "erfcinv", "gamma", "erfinv"}
+	return []str{"log", "log10", "log1p", "expm1", "asinh", "acosh", "atanh", "sincos", "logb", "f32bits", "f32frombits", "dim", "remainder", "nextafter", "nextafter32", "fma", "erf", "erfc", "erfcinv", "gamma", "erfinv"}
 }
 
 fn funcResults(name str) i64 {
@@ -31,7 +31,7 @@ fn funcResults(name str) i64 {
 }
 
 fn funcAllowed(name str) i64 {
-	if name == "expm1" || name == "asinh" || name == "acosh" || name == "atanh" || name == "sincos" || name == "erfinv" {
+	if name == "expm1" || name == "sincos" {
 		return 1
 	}
 	return 0
@@ -94,8 +94,8 @@ fn sameInputs(name str, i i64, a []str, b []str, results i64) {
 }
 
 // gaugeRelative checks lgamma, whose result can lose precision through cancellation (nadj - lgamma near its zero crossings), which
-// turns the inherited one-ulp Log difference into a few ulps of the result; it is checked with a relative tolerance instead, and
-// the sign (the last field) must match exactly.
+// turns the one-ulp differences of its own arithmetic into a few ulps of the result; it is checked with a relative tolerance
+// instead, and the sign (the last field) must match exactly.
 fn gaugeRelative(goexe str, tin str, name str, results i64, abs f64, rel f64) i64 {
 	mut differing = 0
 	mut bad = 0
