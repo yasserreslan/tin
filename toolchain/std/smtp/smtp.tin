@@ -1,0 +1,340 @@
+// Package smtp sends mail with the Simple Mail Transfer Protocol over TCP.
+package smtp
+
+import "say"
+import "mint"
+import "seal"
+import "twine"
+import "tls"
+import "wire"
+
+// Client is an SMTP connection with buffered protocol input.
+type Client struct {
+	conn   wire.Conn
+	tlsConn ?tls.Conn
+	buffer str
+	host   str
+	localName str
+	timeout i64
+	secure bool
+	closed bool
+}
+
+// Dial opens an SMTP connection and reads its greeting.
+fn Dial(addr str) !Client {
+	let conn = try wire.Dial(addr)
+	mut c = Client{conn: conn, host: hostOf(addr)}
+	let (code, _, err) = c.response()
+	if err != nil {
+		c.Close()
+		fail err
+	}
+	if code != 220 {
+		c.Close()
+		fail say.Fault("smtp: server rejected connection: %d", code)
+	}
+	return c
+}
+
+// Hello sends EHLO, falling back to HELO when the server does not support extensions.
+fn (c mut Client) Hello(localName str) ! {
+	c.localName = localName
+	let (code, _, err) = c.command("EHLO " + localName)
+	if err != nil { fail err }
+	if code >= 400 {
+		let (fallback, _, ferr) = c.command("HELO " + localName)
+		if ferr != nil { fail ferr }
+		if fallback != 250 { fail say.Fault("smtp: HELO failed: %d", fallback) }
+	} else if code != 250 {
+		fail say.Fault("smtp: EHLO failed: %d", code)
+	}
+}
+
+// Mail begins a mail transaction with the sender address.
+fn (c mut Client) Mail(from str) ! {
+	if !validPathAddress(from) { fail say.Fault("smtp: invalid address %q", from) }
+	try c.expect("MAIL FROM:<" + from + ">", 250)
+}
+
+// Rcpt adds one recipient to the current mail transaction.
+fn (c mut Client) Rcpt(to str) ! {
+	if !validPathAddress(to) { fail say.Fault("smtp: invalid address %q", to) }
+	let (code, _, err) = c.command("RCPT TO:<" + to + ">")
+	if err != nil { fail err }
+	if code != 250 && code != 251 { fail say.Fault("smtp: recipient rejected: %d", code) }
+}
+
+// Verify asks the server whether address is deliverable.
+fn (c mut Client) Verify(address str) ! {
+	if twine.IndexByte(address, '\r') >= 0 || twine.IndexByte(address, '\n') >= 0 { fail say.Fault("smtp: invalid address") }
+	let (code, _, err) = c.command("VRFY " + address)
+	if err != nil { fail err }
+	if code != 250 && code != 251 && code != 252 { fail say.Fault("smtp: address verification failed: %d", code) }
+}
+
+// StartTLS upgrades the connection after the server accepts STARTTLS.
+fn (c mut Client) StartTLS(config tls.Config) ! {
+	let (code, _, err) = c.command("STARTTLS")
+	if err != nil { fail err }
+	if code != 220 { fail say.Fault("smtp: STARTTLS failed: %d", code) }
+	mut cfg = config
+	if cfg.ServerName == "" { cfg.ServerName = c.host }
+	c.tlsConn = try tls.Client(c.conn, cfg)
+	if c.timeout > 0 {
+		if let tc = c.tlsConn {
+			mut conn = tc
+			conn.SetTimeout(c.timeout)
+			c.tlsConn = conn
+		}
+	}
+	c.secure = true
+	c.buffer = ""
+	if c.localName != "" { try c.Hello(c.localName) }
+}
+
+// SetTimeout limits each later read and write to ns nanoseconds; zero removes the limit.
+fn (c mut Client) SetTimeout(ns i64) {
+	c.timeout = ns
+	if c.secure {
+		if let tc = c.tlsConn {
+			mut conn = tc
+			conn.SetTimeout(ns)
+			c.tlsConn = conn
+		}
+	} else {
+		c.conn.SetTimeout(ns)
+	}
+}
+
+// Data sends the message body after DATA and terminates it with a dot line.
+fn (c mut Client) Data(message str) ! {
+	try c.expect("DATA", 354)
+	mut start = i64(0)
+	for i in 0..len(message) {
+		if message[i] == '\n' {
+			mut end = i
+			if end > start && message[end-1] == '\r' { end -= 1 }
+			try c.writeDataLine(message[start:end])
+			start = i+1
+		}
+	}
+	if start < len(message) {
+		try c.writeDataLine(message[start:len(message)])
+	}
+	try c.write(".\r\n")
+	try c.expectResponse(250)
+}
+
+// writeDataLine sends one normalized SMTP data line with dot-stuffing.
+fn (c mut Client) writeDataLine(line str) ! {
+	if twine.HasPrefix(line, ".") { try c.write(".") }
+	try c.write(line)
+	try c.write("\r\n")
+}
+
+// Quit sends QUIT and closes the connection.
+fn (c mut Client) Quit() ! {
+	let (code, _, err) = c.command("QUIT")
+	c.Close()
+	if err != nil { fail err }
+	if code != 221 { fail say.Fault("smtp: QUIT failed: %d", code) }
+}
+
+// AuthPlain authenticates with the SMTP AUTH PLAIN mechanism.
+fn (c mut Client) AuthPlain(username str, password str) ! {
+	if !c.secure && c.host != "localhost" { fail say.Fault("smtp: refusing AUTH PLAIN without TLS") }
+	let token = seal.B64([]u8("\x00" + username + "\x00" + password))
+	let (code, _, err) = c.command("AUTH PLAIN " + token)
+	if err != nil { fail err }
+	if code == 334 {
+		try c.expect("" + token, 235)
+	} else if code != 235 {
+		fail say.Fault("smtp: authentication failed: %d", code)
+	}
+}
+
+// AuthLogin authenticates with the SMTP AUTH LOGIN mechanism.
+fn (c mut Client) AuthLogin(username str, password str) ! {
+	if !c.secure && c.host != "localhost" { fail say.Fault("smtp: refusing AUTH LOGIN without TLS") }
+	let (first, _, err) = c.command("AUTH LOGIN")
+	if err != nil { fail err }
+	if first != 334 { fail say.Fault("smtp: authentication failed: %d", first) }
+	let (second, _, err2) = c.command(seal.B64([]u8(username)))
+	if err2 != nil { fail err2 }
+	if second != 334 { fail say.Fault("smtp: authentication failed: %d", second) }
+	try c.expect(seal.B64([]u8(password)), 235)
+}
+
+// AuthCramMD5 authenticates with SMTP AUTH CRAM-MD5 (RFC 2195).
+fn (c mut Client) AuthCramMD5(username str, password str) ! {
+	let (code, challenge, err) = c.command("AUTH CRAM-MD5")
+	if err != nil { fail err }
+	if code != 334 { fail say.Fault("smtp: authentication failed: %d", code) }
+	let raw = try seal.B64Decode(challenge)
+	let digest = cramMD5(password, str(raw))
+	try c.expect(seal.B64([]u8(username + " " + digest)), 235)
+}
+
+// Close closes the SMTP connection without sending QUIT.
+fn (c mut Client) Close() {
+	if !c.closed {
+		if c.secure {
+			if let tc = c.tlsConn {
+				mut conn = tc
+				conn.Close()
+			}
+		} else {
+			c.conn.Close()
+		}
+		c.closed = true
+	}
+}
+
+// expect sends a command and checks its reply code.
+fn (c mut Client) expect(command str, want i64) ! {
+	let (code, _, err) = c.command(command)
+	if err != nil { fail err }
+	if code != want { fail say.Fault("smtp: unexpected response: %d, want %d", code, want) }
+}
+
+// command writes one command and reads its complete reply.
+fn (c mut Client) command(command str) !(i64, str) {
+	for i in 0..len(command) {
+		if command[i] < ' ' || command[i] >= 0x7f { fail say.Fault("smtp: invalid command") }
+	}
+	try c.write(command + "\r\n")
+	return try c.response()
+}
+
+// response reads an RFC 5321 multiline reply.
+fn (c mut Client) response() !(i64, str) {
+	mut code = i64(0)
+	mut text = ""
+	mut lines = i64(0)
+	for {
+		let line = try c.readLine()
+		lines += 1
+		if lines > 100 { fail say.Fault("smtp: too many response lines") }
+		if len(line) < 4 { fail say.Fault("smtp: short server response") }
+		let (n, err) = mint.Atoi(line[0:3])
+		if err != nil { fail say.Fault("smtp: malformed server response") }
+		if code == 0 { code = n } else if code != n { fail say.Fault("smtp: inconsistent server response") }
+		if len(text) > 0 { text += "\n" }
+		text += line[4:len(line)]
+		if len(text) > 65536 { fail say.Fault("smtp: response too large") }
+		if line[3] != '-' { return code, text }
+	}
+}
+
+// expectResponse reads one reply and checks its code.
+fn (c mut Client) expectResponse(want i64) ! {
+	let (code, _, err) = c.response()
+	if err != nil { fail err }
+	if code != want { fail say.Fault("smtp: unexpected response: %d, want %d", code, want) }
+}
+
+// readLine reads one CRLF-terminated server line, retaining bytes after it.
+fn (c mut Client) readLine() !str {
+	for {
+		let n = twine.Index(c.buffer, "\n")
+		if n >= 0 {
+			mut end = n
+			if end > 0 && c.buffer[end-1] == '\r' { end -= 1 }
+			let line = c.buffer[0:end]
+			c.buffer = c.buffer[n+1:len(c.buffer)]
+			return line
+		}
+		mut buf = make([]u8, 0, 512)
+		let count = try c.read(mut buf, 512)
+		if count <= 0 { fail say.Fault("smtp: unexpected EOF") }
+		c.buffer += str(buf[0:count])
+		if len(c.buffer) > 8192 { fail say.Fault("smtp: server line too long") }
+	}
+}
+
+// write sends an SMTP command over the active transport.
+fn (c mut Client) write(s str) ! {
+	if c.secure {
+		if let tc = c.tlsConn {
+			mut conn = tc
+			try conn.Write(s)
+			return
+		}
+		fail "smtp: TLS connection is missing"
+	}
+	try c.conn.Write(s)
+}
+
+// read reads response bytes from the active transport.
+fn (c mut Client) read(buf mut []u8, max i64) !i64 {
+	if c.secure {
+		if let tc = c.tlsConn {
+			mut conn = tc
+			return try conn.Read(mut buf, max)
+		}
+		fail "smtp: TLS connection is missing"
+	}
+	return try c.conn.Read(mut buf, max)
+}
+
+// SendMail dials the server, sends one message and quits.
+fn SendMail(addr str, from str, to []str, message str) ! {
+	mut c = try Dial(addr)
+	defer c.Close()
+	try c.Hello("localhost")
+	try c.Mail(from)
+	mut accepted = i64(0)
+	mut lastErr = ""
+	for recipient in to {
+		let err = c.Rcpt(recipient)
+		if err == nil {
+			accepted += 1
+		} else {
+			lastErr = say.Str(err)
+		}
+	}
+	if accepted == 0 {
+		if lastErr != "" { fail say.Fault(lastErr) }
+		fail say.Fault("smtp: no recipients")
+	}
+	try c.Data(message)
+	try c.Quit()
+}
+
+// validPathAddress accepts a basic mailbox and rejects command injection characters.
+fn validPathAddress(s str) bool {
+	return len(s) > 2 && twine.IndexByte(s, '@') > 0 && twine.IndexByte(s, '<') < 0 && twine.IndexByte(s, '>') < 0 && twine.IndexByte(s, '\r') < 0 && twine.IndexByte(s, '\n') < 0 && twine.IndexByte(s, ' ') < 0
+}
+
+// hostOf extracts the host part of host:port for SMTP greeting defaults.
+fn hostOf(addr str) str {
+	if len(addr) > 2 && addr[0] == '[' {
+		let close = twine.IndexByte(addr, ']')
+		if close > 0 { return addr[1:close] }
+	}
+	let colon = twine.LastIndexByte(addr, ':')
+	if colon < 0 { return addr }
+	return addr[0:colon]
+}
+
+// cramMD5 computes the RFC 2104 HMAC-MD5 response in lower-case hexadecimal.
+fn cramMD5(password secret str, challenge str) str {
+	mut key = []u8(password)
+	if len(key) > 64 { key = seal.Md5(password) }
+	mut innerPad = make([]u8, 64)
+	mut outerPad = make([]u8, 64)
+	for i in 0..64 {
+		mut b = u8(0)
+		if i < len(key) { b = key[i] }
+		innerPad[i] = b ^ 0x36
+		outerPad[i] = b ^ 0x5c
+	}
+	let inner = seal.Md5(str(innerPad) + challenge)
+	let digest = seal.Md5(str(outerPad) + str(inner))
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for b in digest {
+		out = append(out, digits[b>>4], digits[b&15])
+	}
+	return str(out)
+}

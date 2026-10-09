@@ -1,0 +1,239 @@
+// Package mail reads RFC 5322 messages, addresses and dates.
+package mail
+
+import "mime"
+import "io"
+import "say"
+import "textproto"
+import "tide"
+import "twine"
+
+// Address is a name-addr or addr-spec with an optional display name.
+type Address struct {
+	Name    str
+	Address str
+}
+
+// Header holds canonical header names and all values in wire order.
+type Header map[str][]str
+
+// Message is a parsed RFC 5322 message.
+type Message struct {
+	Header Header
+	Body   str
+}
+
+// ReadMessage reads a message and separates its headers from its body.
+fn ReadMessage(src mut dyn io.Reader) !Message {
+	mut rawBytes = []u8{}
+	mut buf = make([]u8, 4096)
+	for {
+		let n = try src.Read(mut buf)
+		if n <= 0 { break }
+		if len(rawBytes) + n > 67108864 { fail say.Fault("mail: message too large") }
+		rawBytes = append(rawBytes, buf[0:n]...)
+	}
+	let raw = str(rawBytes)
+	let split = twine.Index(raw, "\r\n\r\n")
+	mut width = 2
+	mut at = twine.Index(raw, "\n\n")
+	if split >= 0 {
+		width = 4
+		at = split
+	}
+	if at < 0 {
+		at = len(raw)
+		width = 0
+	}
+	let headerText = raw[0:at]
+	let body = raw[at+width:len(raw)]
+	mut h = make(Header)
+	let lines = twine.Split(twine.ReplaceAll(headerText, "\r\n", "\n"), "\n")
+	mut current = ""
+	for line in lines {
+		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			if current == "" { fail say.Fault("mail: malformed header line") }
+			current += " " + twine.TrimSpace(line)
+			continue
+		}
+		if current != "" { try addHeader(mut h, current) }
+		current = line
+	}
+	if current != "" { try addHeader(mut h, current) }
+	return Message{Header: h, Body: body}
+}
+
+// addHeader validates and stores a complete unfolded header field.
+fn addHeader(h mut Header, line str) ! {
+	let colon = twine.IndexByte(line, ':')
+	if colon <= 0 { fail say.Fault("mail: malformed header line") }
+	let name = line[0:colon]
+	for c in name {
+		if c <= ' ' || c >= 0x7f || c == ':' { fail say.Fault("mail: malformed header line") }
+	}
+	let key = textproto.CanonicalMIMEHeaderKey(name)
+	let (values, found) = h[key]
+	if found {
+		h[key] = append(values, twine.TrimSpace(line[colon+1:len(line)]))
+	} else {
+		h[key] = []str{twine.TrimSpace(line[colon+1:len(line)])}
+	}
+}
+
+// Get returns the first value associated with key, or an empty string.
+fn (h Header) Get(key str) str {
+	let (values, ok) = h[textproto.CanonicalMIMEHeaderKey(key)]
+	if !ok || len(values) == 0 { return "" }
+	return values[0]
+}
+
+// AddressList parses all addresses in the named header field.
+fn (h Header) AddressList(key str) ![]Address {
+	let addresses = try ParseAddressList(h.Get(key))
+	return addresses
+}
+
+// Date parses the Date field as an RFC 5322 date.
+fn (h Header) Date() !i64 {
+	let date = try ParseDate(h.Get("Date"))
+	return date
+}
+
+// ParseDate parses a date in one of the standard RFC 5322 and obsolete formats.
+fn ParseDate(value str) !i64 {
+	let s = twine.TrimSpace(stripComments(value))
+	for layout in []str{tide.RFC1123Z, "Mon, 2 Jan 2006 15:04:05 -0700", tide.RFC1123, tide.RFC822Z, tide.RFC822, tide.RFC850} {
+		let (ns, err) = tide.Parse(layout, s, tide.UTCZone())
+		if err == nil { return ns }
+	}
+	fail say.Fault("mail: invalid date format")
+}
+
+// ParseAddress parses a single address, accepting display names and comments.
+fn ParseAddress(value str) !Address {
+	let s = twine.TrimSpace(value)
+	let open = twine.IndexByte(s, '<')
+	if open >= 0 {
+		let close = twine.IndexByte(s, '>')
+		if close <= open || twine.TrimSpace(s[close+1:len(s)]) != "" { fail say.Fault("mail: invalid string") }
+		let rawName = twine.TrimSpace(stripComments(s[0:open]))
+		let name = try mime.WordDecoder{}.DecodeHeader(rawName)
+		let addr = twine.TrimSpace(s[open+1:close])
+		if !validAddrSpec(addr) { fail say.Fault("mail: invalid string") }
+		return Address{Name: unquote(name), Address: addr}
+	}
+	let commentStart = twine.LastIndexByte(s, '(')
+	let commentEnd = twine.LastIndexByte(s, ')')
+	let addr = twine.TrimSpace(stripComments(s))
+	if !validAddrSpec(addr) { fail say.Fault("mail: invalid string") }
+	mut name = ""
+	if commentStart >= 0 && commentEnd == len(s)-1 && commentEnd > commentStart {
+		name = twine.TrimSpace(s[commentStart+1:commentEnd])
+	}
+	return Address{Name: name, Address: addr}
+}
+
+// ParseAddressList parses comma-separated addresses and RFC 5322 groups.
+fn ParseAddressList(value str) ![]Address {
+	mut out = []Address{}
+	let s = stripComments(value)
+	mut start = i64(0)
+	mut quote = false
+	mut angle = 0
+	mut group = false
+	for i in 0..len(s) {
+		if s[i] == '"' && (i == 0 || s[i-1] != '\\') { quote = !quote }
+		if quote { continue }
+		if s[i] == '<' { angle += 1 }
+		if s[i] == '>' { angle -= 1 }
+		if angle == 0 && s[i] == ':' && !group {
+			group = true
+			start = i+1
+			continue
+		}
+		if angle == 0 && s[i] == ',' {
+			let part = twine.TrimSpace(s[start:i])
+			if len(part) > 0 {
+				let address = try ParseAddress(part)
+				out = append(out, address)
+			}
+			start = i+1
+		}
+		if angle == 0 && s[i] == ';' && group {
+			let part = twine.TrimSpace(s[start:i])
+			if len(part) > 0 {
+				let address = try ParseAddress(part)
+				out = append(out, address)
+			}
+			start = i+1
+			group = false
+		}
+	}
+	if group { fail say.Fault("mail: invalid address") }
+	let tail = twine.TrimSpace(s[start:len(s)])
+	if len(tail) > 0 {
+		let address = try ParseAddress(tail)
+		out = append(out, address)
+	}
+	return out
+}
+
+// validAddrSpec checks the mailbox's required local@domain shape.
+fn validAddrSpec(s str) bool {
+	let at = twine.IndexByte(s, '@')
+	return at > 0 && at < len(s)-1 && twine.IndexByte(s, ' ') < 0 && twine.IndexByte(s, '\t') < 0
+}
+
+// stripComments removes nested RFC comments while preserving quoted text.
+fn stripComments(s str) str {
+	mut out = ""
+	mut depth = i64(0)
+	mut quote = false
+	mut escape = false
+	for c in s {
+		if escape {
+			if depth == 0 { out += str(c) }
+			escape = false
+			continue
+		}
+		if c == '\\' {
+			if depth == 0 { out += str(c) }
+			escape = true
+			continue
+		}
+		if c == '"' && depth == 0 { quote = !quote }
+		if !quote && c == '(' {
+			depth += 1
+			continue
+		}
+		if !quote && c == ')' && depth > 0 {
+			depth -= 1
+			continue
+		}
+		if depth == 0 { out += str(c) }
+	}
+	return out
+}
+
+// unquote removes surrounding quotes and quoted-pair escapes from a display name.
+fn unquote(s str) str {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' { return twine.TrimSpace(s) }
+	mut out = ""
+	mut esc = false
+	for i in 1..len(s)-1 {
+		if esc {
+			out += s[i:i+1]
+			esc = false
+		} else if s[i] == '\\' {
+			esc = true
+		} else {
+			out += s[i:i+1]
+		}
+	}
+	return out
+}
+
+// DecodeHeader decodes RFC 2047 encoded words in a header value.
+fn DecodeHeader(value str) !str {
+	return try mime.WordDecoder{}.DecodeHeader(value)
+}

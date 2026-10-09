@@ -1,0 +1,92 @@
+package main
+
+// Tin side of the mail and textproto Go corpus check.
+
+import "mail"
+import "quarry"
+import "say"
+import "textproto"
+import "twine"
+
+fn main() {
+	let input = quarry.ReadStdin() catch err {
+		say.Line("input ERR", err)
+		return
+	}
+	for line in twine.Split(input, "\n") {
+		let f = twine.Fields(line)
+		if len(f) < 2 { continue }
+		let x = unhex(f[1])
+		if f[0] == "A" {
+			let (a, err) = mail.ParseAddress(x)
+			if err != nil {
+				say.Line("A ERR")
+			} else {
+				say.Line("A", quote(a.Name), quote(a.Address))
+			}
+		} else if f[0] == "L" {
+			let (addresses, err) = mail.ParseAddressList(x)
+			if err != nil {
+				say.Line("L ERR")
+			} else {
+				mut lineOut = "L"
+				for a in addresses { lineOut += " " + quote(a.Name) + " " + quote(a.Address) }
+				say.Line(lineOut)
+			}
+		} else if f[0] == "D" {
+			let (date, err) = mail.ParseDate(x)
+			if err != nil { say.Line("D ERR") } else { say.Line("D", date) }
+		} else if f[0] == "C" {
+			say.Line("C", quote(textproto.CanonicalMIMEHeaderKey(x)))
+		} else if f[0] == "T" {
+			mut r = textproto.NewReader(x)
+			let (body, err) = r.ReadDotBytes()
+			if err != nil { say.Line("T ERR") } else { say.Line("T", quote(body)) }
+		} else if f[0] == "F" {
+			mut r = textproto.NewReader(x)
+			let (line, err) = r.ReadContinuedLine()
+			if err != nil { say.Line("F ERR") } else { say.Line("F", quote(line)) }
+		} else if f[0] == "M" {
+			mut src = stringReader{data: x}
+			let (message, err) = mail.ReadMessage(mut src)
+			if err != nil {
+				say.Line("M ERR")
+			} else {
+				say.Line("M", quote(message.Header.Get("Subject")), quote(message.Header.Get("From")), quote(message.Body))
+			}
+		}
+	}
+}
+
+fn quote(s str) str {
+	return say.Fmt("%q", s)
+}
+
+fn unhex(s str) str {
+	mut out = []u8{}
+	mut i = 0
+	for i+1 < len(s) {
+		out = append(out, u8(nibble(s[i])<<4 | nibble(s[i+1])))
+		i += 2
+	}
+	return str(out)
+}
+
+fn nibble(c u8) i64 {
+	if c >= '0' && c <= '9' { return i64(c-'0') }
+	if c >= 'a' && c <= 'f' { return i64(c-'a')+10 }
+	return i64(c-'A')+10
+}
+
+type stringReader struct {
+	data str
+	pos i64
+}
+
+fn (r mut stringReader) Read(buf mut []u8) !i64 {
+	if r.pos >= len(r.data) { return 0 }
+	let n = min(len(buf), len(r.data)-r.pos)
+	for i in 0..n { buf[i] = r.data[r.pos+i] }
+	r.pos += n
+	return n
+}

@@ -1,0 +1,73 @@
+package main
+
+import "./ci"
+import "say"
+import "twine"
+
+// Compare mail address/date parsing and textproto framing with Go's net packages.
+fn main() {
+	let corpus = []str{
+		"A|Jane Doe <jane@example.com>",
+		"A|\"Doe, Jane\" <jane@example.com>",
+		"A|jane@example.com (Jane)",
+		"A|=?utf-8?q?J=C3=B6rg?= <jorg@example.com>",
+		"A|not an address",
+		"L|Friends: a@example.com, \"B, C\" <b@example.com>;",
+		"L|a@example.com, b@example.com",
+		"L|broken list,",
+		"D|Fri, 21 Nov 1997 09:55:06 -0600",
+		"D|Tue, 1 Jul 2003 10:52:37 +0200",
+		"D|invalid",
+		"C|content-MD5",
+		"C|x-custom-header",
+		"C|bad key",
+		"T|line\r\n..dot\r\n.\r\n",
+		"T|..\r\n.\r\n",
+		"T|unterminated\r\n",
+		"F|Subject: one\r\n\tcontinued\r\n",
+		"F|single line\r\n",
+		"F|unterminated continuation",
+		"M|Subject: one\r\n\tcontinued\r\nFrom: jane@example.com\r\n\r\nbody\r\n",
+		"M|Subject: =?utf-8?q?caf=C3=A9?=\r\n\r\nx",
+		"M|not a header\r\n\r\nx",
+		"M|Subject: missing separator",
+	}
+	mut lines = []str{}
+	for item in corpus {
+		let parts = twine.SplitN(item, "|", 2)
+		lines = append(lines, parts[0] + " " + hex(parts[1]))
+	}
+	let data = twine.Join(lines, "\n") + "\n"
+	let dir = ci.Join(ci.Root(), "bin/ci/mail")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "mail-")
+	let tin = ci.Join(work, "mail-tin")
+	ci.BuildTin("tools/ci/fixtures/mail.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "mail-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/mail"}, ci.Root(), 300), "go build mail")
+	let goOut = ci.ExecIn([]str{goexe}, ci.Root(), 120, data, []str{})
+	ci.Must(goOut, "Go mail reference")
+	let tinOut = ci.ExecIn([]str{tin}, ci.Root(), 120, data, []str{})
+	ci.Must(tinOut, "Tin mail fixture")
+	let want = ci.Lines(goOut.Stdout)
+	let got = ci.Lines(tinOut.Stdout)
+	ci.Check(len(got) == len(want), "mail: line count differs from Go")
+	mut bad = 0
+	for i in 0..len(want) {
+		if got[i] != want[i] {
+			bad += 1
+			say.Line("line", i+1, "Go:", want[i], "Tin:", got[i])
+		}
+	}
+	ci.Check(bad == 0, "mail: " + say.Str(bad) + " lines differ from Go")
+	say.Line("mail/textproto corpus", len(want), "lines match Go")
+}
+
+fn hex(s str) str {
+	let digits = "0123456789abcdef"
+	mut out = []u8{}
+	for i in 0..len(s) {
+		out = append(out, digits[s[i]>>4], digits[s[i]&15])
+	}
+	return str(out)
+}

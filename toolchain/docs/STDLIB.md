@@ -76,6 +76,9 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [lasso](#lasso) | regular expressions with linear-time matching (regexp) |
 | [pack](#pack) | numbers as bytes: byte order and varints (encoding/binary) |
 | [mime](#mime) | media types, RFC 2047 words, quoted-printable and multipart (mime, mime/quotedprintable, mime/multipart) |
+| [mail](#mail) | RFC 5322 message and address parsing (net/mail) |
+| [textproto](#textproto) | line-oriented and dot-framed protocol I/O (net/textproto) |
+| [smtp](#smtp) | SMTP client and message delivery (net/smtp) |
 | [suffixarray](#suffixarray) | byte substring indexing with suffix arrays (index/suffixarray) |
 | [scan](#scan) | a scanner and tokenizer for UTF-8 text (text/scanner) |
 | [image](#image) | images, colors, drawing and PNG encoding (image, image/color, image/draw, image/png) |
@@ -2919,6 +2922,65 @@ Package html tokenizes, parses and escapes HTML, as Go's html and golang.org/x/n
 - `(d WordDecoder) DecodeHeader(v str) !str`: DecodeHeader decodes every encoded word in a header value, like Go's DecodeHeader: the plain text around the words is kept, the whitespace between two encoded words is dropped, and a word that cannot be decoded is kept as it was.
 - `type WordEncoder struct{}`: WordEncoder encodes header text as encoded words when it needs to be, like Go's WordEncoder.
 - `(e WordEncoder) EncodeWord(charset str, s str) str`: EncodeWord returns the text as an RFC 2047 encoded word when it has bytes that are not printable ASCII, and the text itself when it does not.
+
+## mail
+
+Package mail reads RFC 5322 messages, addresses and dates.
+
+- `type Address struct`: Address is a name-addr or addr-spec with an optional display name.
+- `type Header map[str][]str`: Header holds canonical header names and all values in wire order.
+- `type Message struct`: Message is a parsed RFC 5322 message.
+- `ReadMessage(src mut dyn io.Reader) !Message`: ReadMessage reads a message and separates its headers from its body.
+- `(h Header) Get(key str) str`: Get returns the first value associated with key, or an empty string.
+- `(h Header) AddressList(key str) ![]Address`: AddressList parses all addresses in the named header field.
+- `(h Header) Date() !i64`: Date parses the Date field as an RFC 5322 date.
+- `ParseDate(value str) !i64`: ParseDate parses a date in one of the standard RFC 5322 and obsolete formats.
+- `ParseAddress(value str) !Address`: ParseAddress parses a single address, accepting display names and comments.
+- `ParseAddressList(value str) ![]Address`: ParseAddressList parses comma-separated addresses and RFC 5322 groups.
+- `DecodeHeader(value str) !str`: DecodeHeader decodes RFC 2047 encoded words in a header value.
+
+## textproto
+
+Package textproto reads and writes the line-oriented framing used by Internet protocols.
+
+- `type Reader struct`: Reader reads CRLF-terminated lines and dot-framed bodies from a bounded string.
+- `type Writer struct`: Writer builds line-oriented and dot-framed protocol data.
+- `type DotReader struct`: DotReader reads a dot-decoded body from memory.
+- `type DotWriter struct`: DotWriter writes dot-stuffed bytes into a Writer.
+- `NewReader(data str) Reader`: NewReader creates a reader over data.
+- `NewWriter() Writer`: NewWriter creates an empty protocol writer.
+- `(r mut Reader) ReadLine() !str`: ReadLine reads one CRLF or LF terminated line; the terminator is not returned.
+- `(r mut Reader) ReadContinuedLine() !str`: ReadContinuedLine joins a line and following whitespace-prefixed lines with single spaces.
+- `(r mut Reader) ReadDotBytes() !str`: ReadDotBytes reads through the terminating dot line and removes one leading dot per body line.
+- `(r mut Reader) ReadDotReader() !DotReader`: ReadDotReader consumes a dot-framed body and returns a reader over its decoded bytes.
+- `(r mut DotReader) Read(buf mut []u8) !i64`: Read returns the next decoded bytes, or 0 at the end of the dot body.
+- `(w mut Writer) WriteLine(line str)`: WriteLine appends one line and its CRLF terminator.
+- `(w Writer) DotWriter() DotWriter`: DotWriter starts a dot-stuffed body writer.
+- `(d mut DotWriter) Write(data []u8) !i64`: Write dot-stuffs a chunk and appends it to the associated Writer.
+- `(d mut DotWriter) Close() !`: Close writes the terminating dot line.
+- `(w mut Writer) WriteDotBytes(body str)`: WriteDotBytes writes a body with dot-stuffing and the terminating dot line.
+- `(w Writer) String() str`: String returns the bytes written so far.
+- `CanonicalMIMEHeaderKey(key str) str`: CanonicalMIMEHeaderKey returns the canonical capitalization of a header key.
+
+## smtp
+
+Package smtp sends mail with the Simple Mail Transfer Protocol over TCP.
+
+- `type Client struct`: Client is an SMTP connection with buffered protocol input.
+- `Dial(addr str) !Client`: Dial opens an SMTP connection and reads its greeting.
+- `(c mut Client) Hello(localName str) !`: Hello sends EHLO, falling back to HELO when the server does not support extensions.
+- `(c mut Client) Mail(from str) !`: Mail begins a mail transaction with the sender address.
+- `(c mut Client) Rcpt(to str) !`: Rcpt adds one recipient to the current mail transaction.
+- `(c mut Client) Verify(address str) !`: Verify asks the server whether address is deliverable.
+- `(c mut Client) StartTLS(config tls.Config) !`: StartTLS upgrades the connection after the server accepts STARTTLS.
+- `(c mut Client) SetTimeout(ns i64)`: SetTimeout limits each later read and write to ns nanoseconds; zero removes the limit.
+- `(c mut Client) Data(message str) !`: Data sends the message body after DATA and terminates it with a dot line.
+- `(c mut Client) Quit() !`: Quit sends QUIT and closes the connection.
+- `(c mut Client) AuthPlain(username str, password str) !`: AuthPlain authenticates with the SMTP AUTH PLAIN mechanism.
+- `(c mut Client) AuthLogin(username str, password str) !`: AuthLogin authenticates with the SMTP AUTH LOGIN mechanism.
+- `(c mut Client) AuthCramMD5(username str, password str) !`: AuthCramMD5 authenticates with SMTP AUTH CRAM-MD5 (RFC 2195).
+- `(c mut Client) Close()`: Close closes the SMTP connection without sending QUIT.
+- `SendMail(addr str, from str, to []str, message str) !`: SendMail dials the server, sends one message and quits.
 
 ## suffixarray
 

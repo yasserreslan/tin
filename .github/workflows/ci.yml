@@ -100,6 +100,8 @@ jobs:
         run: sh tools/ci/tin.sh path_check
       - name: MIME, quoted-printable and multipart against Go
         run: sh tools/ci/tin.sh mime_check
+      - name: Mail parsing and text protocol framing against Go
+        run: sh tools/ci/tin.sh mail_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
       - name: container/list and container/ring against Go (generated and exhaustive small cases)

@@ -1,0 +1,198 @@
+// Package textproto reads and writes the line-oriented framing used by Internet protocols.
+package textproto
+
+import "say"
+import "twine"
+
+// Reader reads CRLF-terminated lines and dot-framed bodies from a bounded string.
+type Reader struct {
+	data str
+	pos  i64
+}
+
+// Writer builds line-oriented and dot-framed protocol data.
+type Writer struct {
+	data []u8
+}
+
+// DotReader reads a dot-decoded body from memory.
+type DotReader struct {
+	data str
+	pos  i64
+}
+
+// DotWriter writes dot-stuffed bytes into a Writer.
+type DotWriter struct {
+	writer    Writer
+	lineStart bool
+	closed    bool
+}
+
+// NewReader creates a reader over data.
+fn NewReader(data str) Reader {
+	return Reader{data: data}
+}
+
+// NewWriter creates an empty protocol writer.
+fn NewWriter() Writer {
+	return Writer{}
+}
+
+// ReadLine reads one CRLF or LF terminated line; the terminator is not returned.
+fn (r mut Reader) ReadLine() !str {
+	if r.pos >= len(r.data) {
+		fail say.Fault("textproto: unexpected EOF")
+	}
+	let start = r.pos
+	for r.pos < len(r.data) && r.data[r.pos] != '\n' {
+		r.pos += 1
+	}
+	mut end = r.pos
+	if r.pos < len(r.data) {
+		r.pos += 1
+	}
+	if end > start && r.data[end-1] == '\r' {
+		end -= 1
+	}
+	return r.data[start:end]
+}
+
+// ReadContinuedLine joins a line and following whitespace-prefixed lines with single spaces.
+fn (r mut Reader) ReadContinuedLine() !str {
+	mut line = try r.ReadLine()
+	for r.pos < len(r.data) && (r.data[r.pos] == ' ' || r.data[r.pos] == '\t') {
+		let next = try r.ReadLine()
+		line += " " + twine.TrimSpace(next)
+	}
+	return line
+}
+
+// ReadDotBytes reads through the terminating dot line and removes one leading dot per body line.
+fn (r mut Reader) ReadDotBytes() !str {
+	mut out = []u8{}
+	mut ended = false
+	for r.pos < len(r.data) {
+		let line = try r.ReadLine()
+		if line == "." {
+			ended = true
+			break
+		}
+		mut content = line
+		if twine.HasPrefix(line, "..") {
+			content = line[1:len(line)]
+		}
+		out = append(out, content...)
+		out = append(out, u8('\n'))
+	}
+	if !ended {
+		fail say.Fault("textproto: unexpected EOF")
+	}
+	return str(out)
+}
+
+// ReadDotReader consumes a dot-framed body and returns a reader over its decoded bytes.
+fn (r mut Reader) ReadDotReader() !DotReader {
+	let body = try r.ReadDotBytes()
+	return DotReader{data: body}
+}
+
+// Read returns the next decoded bytes, or 0 at the end of the dot body.
+fn (r mut DotReader) Read(buf mut []u8) !i64 {
+	if r.pos >= len(r.data) { return 0 }
+	let n = min(len(buf), len(r.data)-r.pos)
+	for i in 0..n { buf[i] = r.data[r.pos+i] }
+	r.pos += n
+	return n
+}
+
+// WriteLine appends one line and its CRLF terminator.
+fn (w mut Writer) WriteLine(line str) {
+	w.data = append(w.data, line...)
+	w.data = append(w.data, u8('\r'), u8('\n'))
+}
+
+// DotWriter starts a dot-stuffed body writer.
+fn (w Writer) DotWriter() DotWriter {
+	return DotWriter{writer: w, lineStart: true}
+}
+
+// Write dot-stuffs a chunk and appends it to the associated Writer.
+fn (d mut DotWriter) Write(data []u8) !i64 {
+	if d.closed { fail say.Fault("textproto: write to closed dot writer") }
+	for c in data {
+		if d.lineStart && c == '.' { d.writer.data = append(d.writer.data, u8('.')) }
+		d.writer.data = append(d.writer.data, c)
+		d.lineStart = c == '\n'
+	}
+	return len(data)
+}
+
+// Close writes the terminating dot line.
+fn (d mut DotWriter) Close() ! {
+	if d.closed { return }
+	if !d.lineStart { d.writer.data = append(d.writer.data, u8('\r'), u8('\n')) }
+	d.writer.data = append(d.writer.data, u8('.'), u8('\r'), u8('\n'))
+	d.closed = true
+}
+
+// WriteDotBytes writes a body with dot-stuffing and the terminating dot line.
+fn (w mut Writer) WriteDotBytes(body str) {
+	mut start = i64(0)
+	for i in 0..len(body) {
+		if body[i] == '\n' {
+			mut end = i
+			if i > start && body[i-1] == '\r' {
+				end = i-1
+			}
+			w.writeDotLine(body[start:end])
+			start = i + 1
+		}
+	}
+	if start < len(body) {
+		w.writeDotLine(body[start:len(body)])
+	}
+	w.data = append(w.data, u8('.'), u8('\r'), u8('\n'))
+}
+
+// writeDotLine emits one body line, doubling a leading dot.
+fn (w mut Writer) writeDotLine(line str) {
+	if twine.HasPrefix(line, ".") {
+		w.data = append(w.data, u8('.'))
+	}
+	w.data = append(w.data, line...)
+	w.data = append(w.data, u8('\r'), u8('\n'))
+}
+
+// String returns the bytes written so far.
+fn (w Writer) String() str {
+	return str(w.data)
+}
+
+// CanonicalMIMEHeaderKey returns the canonical capitalization of a header key.
+fn CanonicalMIMEHeaderKey(key str) str {
+	if len(key) == 0 {
+		return ""
+	}
+	mut out = []u8{}
+	mut upper = true
+	for _, rune in key {
+		let c = u8(rune)
+		if !isTokenByte(c) {
+			return key
+		}
+		if upper && c >= 'a' && c <= 'z' {
+			out = append(out, u8(c-32))
+		} else if !upper && c >= 'A' && c <= 'Z' {
+			out = append(out, u8(c+32))
+		} else {
+			out = append(out, c)
+		}
+		upper = c == '-'
+	}
+	return str(out)
+}
+
+// isTokenByte reports whether a header key byte is an RFC token byte.
+fn isTokenByte(c u8) bool {
+	return c > ' ' && c < 0x7f && c != '(' && c != ')' && c != '<' && c != '>' && c != '@' && c != ',' && c != ';' && c != ':' && c != '\\' && c != '"' && c != '/' && c != '[' && c != ']' && c != '?' && c != '=' && c != '{' && c != '}'
+}
