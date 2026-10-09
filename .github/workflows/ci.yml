@@ -138,6 +138,8 @@ jobs:
         run: sh tools/ci/tin.sh zlib_stream_check
       - name: ZIP archives against Go's archive/zip (both directions)
         run: sh tools/ci/tin.sh zip_check
+      - name: ELF64 arm64 and amd64 metadata against Go, plus malformed-input faults
+        run: sh tools/ci/tin.sh elf_check
       - name: Memory primitives and deterministic allocation failure
         run: sh tools/ci/tin.sh memory_check
       - name: Embedded file trees (the embed directive) against Go's file trees over the same patterns

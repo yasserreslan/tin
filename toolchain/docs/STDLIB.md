@@ -35,6 +35,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [jsonv2](#jsonv2) | JSON Marshal and Unmarshal with options (encoding/json/v2) |
 | [flume](#flume) | buffered I/O (bufio) |
 | [quarry](#quarry) | files, environment, process (os) |
+| [debug](#debug) | ELF executable metadata (debug/elf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
 | [signal](#signal) | operating-system signals (os/signal) |
