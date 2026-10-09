@@ -261,6 +261,12 @@ fn (ws mut Workspace) SaveHygiene(trim bool, finalNl bool) {
 	ws.Ed.SaveFinalNl = finalNl
 }
 
+// UseGuides turns the indent guides on or off (the settings' indent_guides, on by default: every editor shows the same
+// guides, like the whitespace marks).
+fn (ws mut Workspace) UseGuides(on bool) {
+	editor.SetGuides(on)
+}
+
 // UseRuler turns the ruler on or off and names the column it sits at (the whole program's setting, like
 // the whitespace marks: every editor shows the same line).
 fn (ws mut Workspace) UseRuler(on bool, column f64) {

@@ -90,6 +90,7 @@ fn (ed Editor) dump() {
 //   tabs             prints how many tabs are open, which is active and its name; closeothers keeps the active
 //   counts           prints the text's lines, words and characters
 //   one, closeall leaves one empty tab
+//   guides           toggles the indent guides (prints the new state)
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
 fn RunScript(ed mut Editor, script str) {
@@ -242,6 +243,8 @@ fn RunScript(ed mut Editor, script str) {
 			ed.closeOthers()
 		} else if step == "closeall" {
 			ed.closeAll()
+		} else if step == "guides" {
+			say.Line("guides:", ToggleGuides())
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
 		} else if twine.HasPrefix(step, "ruler:") {

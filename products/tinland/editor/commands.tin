@@ -31,6 +31,7 @@ const CmdDefinition = 24
 const CmdBack = 25
 const CmdInfo = 26
 const CmdComplete = 27
+const CmdToggleGuides = 42
 const CmdRevert = 28
 const CmdJumpBracket = 33
 const CmdMoveLineUp = 34
@@ -49,6 +50,14 @@ const CmdCloseAll = 46
 fn (ed mut Editor) Perform(cmd i64) {
 	if cmd == CmdBack {
 		ed.handleKey(Key{Code: keyLeft, Flags: flagCmd | flagAlt, Chars: ""})
+		return
+	}
+	if cmd == CmdToggleGuides {
+		if ToggleGuides() {
+			ed.Say("indent guides on")
+		} else {
+			ed.Say("indent guides off")
+		}
 		return
 	}
 	if cmd == CmdToggleWrap {

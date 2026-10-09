@@ -1046,6 +1046,54 @@ fn (ed Editor) StatusLine() str {
 	return ed.Message
 }
 
+// NextProblem puts the caret at the next problem the compiler found (the first one when forward is
+// false, wrapping around the end), and reports whether there was one.
+fn (ed mut Editor) NextProblem(forward bool) bool {
+	if len(ed.Diags) == 0 {
+		ed.Say("no problems")
+		return false
+	}
+	// the diagnostics arrive in the order the compiler prints them, which is by line
+	let at = ed.Buf.Row
+	mut best = -1
+	for i in 0..len(ed.Diags) {
+		let line = ed.Diags[i].Line - 1
+		if forward {
+			if line > at {
+				best = i
+				break
+			}
+		} else {
+			if line < at {
+				best = i
+				break
+			}
+		}
+	}
+	if best < 0 {
+		// wrap around: the first problem going forward, the last going back
+		if forward {
+			best = 0
+		} else {
+			for i in (0..len(ed.Diags)).step(1) {
+				best = len(ed.Diags) - 1 - i
+				if ed.Diags[best].Line - 1 <= at {
+					break
+				}
+			}
+			if ed.Diags[best].Line - 1 > at {
+				best = len(ed.Diags) - 1
+			}
+		}
+	}
+	let d = ed.Diags[best]
+	ed.Buf.MoveTo(max(d.Line - 1, 0), max(d.Col - 1, 0), false)
+	ed.Follow = true
+	ed.Redraw = true
+	ed.Say(d.Message)
+	return true
+}
+
 // Counts is what the status bar says about the whole text: the lines, the words and the characters.
 // A word is a run of anything but spaces, tabs, newlines and carriage returns.
 fn (ed Editor) Counts() str {
