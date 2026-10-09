@@ -1,0 +1,31 @@
+// Package namedmap holds named types of another package, for the field regressions of #957.
+package namedmap
+
+// Params is a named map type, as mime.Params is.
+type Params map[str]str
+
+// NewParams returns an empty Params.
+fn NewParams() Params {
+	return Params{}
+}
+
+// Ids is a named slice type.
+type Ids []i64
+
+// Key is a struct key, declared before the map that uses it.
+type Key struct {
+	A i64
+}
+
+// Index is a named map type keyed by Key.
+type Index map[Key]str
+
+// Tag is a value struct key of another package (#841).
+type Tag value struct {
+	raw str
+}
+
+// MakeTag returns the Tag of s.
+fn MakeTag(s str) Tag {
+	return Tag{raw: s}
+}

@@ -1,0 +1,15 @@
+package main
+
+import "say"
+
+// Pair maps by Bag, a struct with a slice field, which cannot be a key (#841): E201 whatever the declaration order.
+type Pair map[Bag]i64
+
+type Bag struct {
+	items []i64
+}
+
+fn main() {
+	let p = Pair{}
+	say.Line(len(p))
+}

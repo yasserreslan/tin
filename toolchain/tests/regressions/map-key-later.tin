@@ -1,0 +1,15 @@
+package main
+
+import "say"
+
+// Index keys a map by Key, which is declared after it (#841): the key is resolved before the map that names it.
+type Index map[Key]str
+
+type Key struct {
+	A i64
+}
+
+fn main() {
+	let m = Index{Key{A: 1}: "one"}
+	say.Line(len(m), m[Key{A: 1}])
+}

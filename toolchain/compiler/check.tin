@@ -299,6 +299,9 @@ fn resolve_type(tx i64) i64 {
 				return ty_int
 			}
 			t = find_type(pkg + "." + cast(TypeName, tx).name)
+			if t == 0 {
+				t = named_first(pkg + "." + cast(TypeName, tx).name)
+			}
 			if t != 0 && is_private(cast(TypeName, tx).name) != 0 {
 				private_use(cast(Node, tx).pos, "type", cast(TypeName, tx).name, pkg)
 			}
@@ -308,6 +311,9 @@ fn resolve_type(tx i64) i64 {
 			}
 			if t == 0 {
 				t = find_type(cast(TypeName, tx).name)
+			}
+			if t == 0 {
+				t = named_first(qual(ck_pkg, cast(TypeName, tx).name))
 			}
 		}
 		if t == 0 && tuple_alias_of(tx) != 0 {
@@ -336,6 +342,7 @@ fn resolve_type(tx i64) i64 {
 	}
 	if k == TX_MAP {
 		let mkt = resolve_type(cast(TypeExpr, tx).a)
+		key_first(cast(Ty, mkt))
 		secret_map_key(cast(Node, tx).pos, mkt)
 		if key_valid(cast(Ty, mkt), cast([]Ty, []i64{})) == 0 {
 			err_code_type(cast(Node, tx).pos, "E201 MAP_KEY", "a map key must compare by value (str, numbers, bool, or structs and enums of those), not ", mkt, "")
@@ -801,6 +808,71 @@ fn value_first(t Ty) {
 	}
 }
 
+// named_seen holds the named types that named_first has resolved, or is resolving, before their turn (#957).
+shared mut named_seen []i64 = []i64{}
+
+// named_first resolves a named non-struct type (a map, slice, func or other type) declared further on, when a name
+// needs it before its turn: the declaration pass gives struct fields their types in declaration order, so a type of
+// another package, or one declared after the struct, is not bound yet (#957). Its own turn then skips it (named_seen).
+// A name still being resolved gives 0, as an undefined name does; generic and tuple declarations are not handled here.
+fn named_first(q str) i64 {
+	let file = ck_file
+	let saved_tbind = ck_tbind
+	mut i = 0
+	for i < len(prog_types) {
+		let d = prog_types[i]
+		if cast(i64, d.tparams) == 0 && cast(Node, d.type_).kind != TX_STRUCT && cast(Node, d.type_).kind != TX_TUPLE && !is_builtin_name(d.name) && qual(file_pkgs[d.file], d.name) == q {
+			if slice_has(named_seen, cast(i64, d)) != 0 {
+				return find_type(q)
+			}
+			named_seen = append(named_seen, cast(i64, d))
+			set_file(d.file)
+			// The declaration is package-level: the type parameters of the instance that asks for it are not in scope.
+			ck_tbind = []i64{}
+			let ut = resolve_type(d.type_)
+			let uk = kind_of(cast(Ty, ut))
+			if d.iota == 0 && (uk == K_INT || uk == K_FLOAT || uk == K_BOOL || uk == K_STRING || uk == K_SLICE || uk == K_MAP || uk == K_FUNC) && cast(Ty, ut).bound == 0 {
+				name_type(q, named_of(ut, q))
+			} else {
+				name_type(q, ut)
+			}
+			set_file(file)
+			ck_tbind = saved_tbind
+			return find_type(q)
+		}
+		i = i + 1
+	}
+	return 0
+}
+
+// key_first resolves and lays out a struct map key declared further on, before the map is checked (#957): key_valid
+// reads the key's fields, and a key without them would pass for any struct, and the map would be laid out without them.
+fn key_first(t Ty) {
+	mut b = t
+	for kind_of(b) == K_VARRAY {
+		b = cast(Ty, b.elem)
+	}
+	if kind_of(b) != K_STRUCT || cast(i64, b.fields) != 0 || slice_has(value_resolving, cast(i64, b)) != 0 {
+		return
+	}
+	let file = ck_file
+	let saved_tbind = ck_tbind
+	mut i = 0
+	for i < len(prog_types) {
+		let d = prog_types[i]
+		if cast(i64, d.tparams) == 0 && cast(Node, d.type_).kind == TX_STRUCT && qual(file_pkgs[d.file], d.name) == b.name {
+			set_file(d.file)
+			ck_tbind = []i64{}
+			resolve_fields(b, cast(TypeExpr, d.type_))
+			layout_struct(b)
+			set_file(file)
+			ck_tbind = saved_tbind
+			return
+		}
+		i = i + 1
+	}
+}
+
 // fields_once reports a struct field, enum variant or @json name given twice (#712): the
 // second would be unreachable, or two fields would write one JSON member.
 fn fields_once(st Ty, src []i64, pos i64) {
@@ -1087,6 +1159,8 @@ fn check() {
 		} else if cast(Node, d.type_).kind == TX_STRUCT {
 			resolve_fields(cast(Ty, find_type(q)), cast(TypeExpr, d.type_))
 			layout_struct(cast(Ty, find_type(q)))
+		} else if slice_has(named_seen, cast(i64, d)) != 0 {
+			// (a named type that named_first resolved before its turn, #957)
 		} else if cast(Node, d.type_).kind != TX_TUPLE {
 			let ut = resolve_type(d.type_)
 			let uk = kind_of(cast(Ty, ut))

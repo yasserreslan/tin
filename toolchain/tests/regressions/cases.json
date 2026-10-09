@@ -1222,5 +1222,44 @@
       "exit": 1,
       "stderr_contains": "does not satisfy shape Named"
     }
+  },
+  {
+    "source": "map-field-foreign.tin",
+    "issue": 957,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1 2 1 one\n0 3\n7 1\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "map-key-foreign-value.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "map-key-later.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1 one\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "map-key-later-bad.tin",
+    "issue": 841,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "E201 MAP_KEY"
+    }
   }
 ]

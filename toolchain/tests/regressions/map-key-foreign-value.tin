@@ -1,0 +1,15 @@
+package main
+
+import "./namedmap"
+import "say"
+
+// Bag keys a struct field's map by another package's value struct (#841): the key is resolved before the map names it.
+type Bag struct {
+	m map[namedmap.Tag]i64
+}
+
+fn main() {
+	mut x = Bag{m: map[namedmap.Tag]i64{}}
+	x.m[namedmap.MakeTag("q")] = 1
+	say.Line(len(x.m))
+}
