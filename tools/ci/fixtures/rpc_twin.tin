@@ -1,0 +1,213 @@
+package main
+
+import "fault"
+import "quarry"
+import "rpc"
+import "rpc/jsonrpc"
+import "say"
+import "wire"
+
+// rpc_twin is the Tin side of the Go twin check: `serve ADDR` serves the Arith, Math, Text, Stats and Users methods over TCP,
+// and `call ADDR` runs the session of toolchain/tests/v2/rpc.tin against a server on ADDR, printing the same lines.
+
+// Args and Reply are the typed parameters of the Arith service.
+type Args struct {
+	A i64
+	B i64
+}
+
+type Reply struct {
+	C i64
+}
+
+// Named is a struct with a slice field.
+type Named struct {
+	Name str
+	Tags []str
+}
+
+fn multiply(a Args) !Reply {
+	return Reply{C: a.A * a.B}
+}
+
+fn divide(a Args) !Reply {
+	if a.B == 0 {
+		fail "divide by zero"
+	}
+	return Reply{C: a.A / a.B}
+}
+
+fn double(n i64) !i64 {
+	return n * 2
+}
+
+fn echo(s str) !str {
+	return "echo " + s
+}
+
+fn sum(xs []i64) !i64 {
+	mut total = 0
+	for x in xs {
+		total += x
+	}
+	return total
+}
+
+fn tag(n Named) !Named {
+	mut tags = append([]str{}, n.Tags...)
+	tags = append(tags, "seen")
+	return Named{Name: n.Name, Tags: tags}
+}
+
+fn angry(s str) !str {
+	fail "<no> & more"
+}
+
+fn setup() !rpc.Server {
+	mut srv = rpc.NewServer()
+	try rpc.RegisterMethod(mut srv, "Arith.Multiply", multiply)
+	try rpc.RegisterMethod(mut srv, "Arith.Divide", divide)
+	try rpc.RegisterMethod(mut srv, "Math.Double", double)
+	try rpc.RegisterMethod(mut srv, "Text.Echo", echo)
+	try rpc.RegisterMethod(mut srv, "Stats.Sum", sum)
+	try rpc.RegisterMethod(mut srv, "Users.Tag", tag)
+	try rpc.RegisterMethod(mut srv, "Text.Angry", angry)
+	return srv
+}
+
+// report prints a call's outcome as the fault's text.
+fn report(label str, err fault) {
+	say.Line(label, "error:", fault.Message(err))
+}
+
+// session makes the calls of the Go twin and prints each outcome.
+fn session(c mut rpc.Client) {
+	let m = rpc.Call[Args, Reply](mut c, "Arith.Multiply", Args{A: 7, B: 6}) catch err {
+		report("multiply", err)
+		Reply{C: -1}
+	}
+	say.Line("multiply", m.C)
+
+	let d = rpc.Call[Args, Reply](mut c, "Arith.Divide", Args{A: 7, B: 2}) catch err {
+		report("divide", err)
+		Reply{C: -1}
+	}
+	say.Line("divide", d.C)
+
+	let z = rpc.Call[Args, Reply](mut c, "Arith.Divide", Args{A: 7, B: 0}) catch err {
+		report("divide by zero", err)
+		Reply{C: -1}
+	}
+	say.Line("divide by zero", z.C)
+
+	let dbl = rpc.Call[i64, i64](mut c, "Math.Double", 21) catch err {
+		report("double", err)
+		-1
+	}
+	say.Line("double", dbl)
+
+	let e = rpc.Call[str, str](mut c, "Text.Echo", "hi") catch err {
+		report("echo", err)
+		""
+	}
+	say.Line("echo", e)
+
+	let total = rpc.Call[[]i64, i64](mut c, "Stats.Sum", []i64{1, 2, 3, 4}) catch err {
+		report("sum", err)
+		-1
+	}
+	say.Line("sum", total)
+
+	let named = rpc.Call[Named, Named](mut c, "Users.Tag", Named{Name: "ada", Tags: []str{"x"}}) catch err {
+		report("tag", err)
+		Named{Name: "", Tags: []str{}}
+	}
+	say.Line("tag", named.Name, named.Tags)
+
+	let angryReply = rpc.Call[str, str](mut c, "Text.Angry", "x") catch err {
+		report("angry", err)
+		""
+	}
+	say.Line("angry", angryReply)
+
+	let nope = rpc.Call[Args, Reply](mut c, "Arith.Nope", Args{A: 1, B: 1}) catch err {
+		report("unknown method", err)
+		Reply{C: -1}
+	}
+	say.Line("unknown method", nope.C)
+
+	let nosvc = rpc.Call[Args, Reply](mut c, "Nope.Call", Args{A: 1, B: 1}) catch err {
+		report("unknown service", err)
+		Reply{C: -1}
+	}
+	say.Line("unknown service", nosvc.C)
+
+	let bad = rpc.Call[Args, Reply](mut c, "Nope", Args{A: 1, B: 1}) catch err {
+		report("ill-formed", err)
+		Reply{C: -1}
+	}
+	say.Line("ill-formed", bad.C)
+
+	mut p1 = rpc.Go[Args, Reply](mut c, "Arith.Multiply", Args{A: 2, B: 3})
+	mut p2 = rpc.Go[Args, Reply](mut c, "Arith.Multiply", Args{A: 4, B: 5})
+	mut p3 = rpc.Go[Args, Reply](mut c, "Arith.Multiply", Args{A: 6, B: 7})
+	let r3 = p3.Wait() catch err {
+		report("pipelined 3", err)
+		Reply{C: -1}
+	}
+	let r1 = p1.Wait() catch err {
+		report("pipelined 1", err)
+		Reply{C: -1}
+	}
+	let r2 = p2.Wait() catch err {
+		report("pipelined 2", err)
+		Reply{C: -1}
+	}
+	say.Line("pipelined", r1.C, r2.C, r3.C)
+
+	c.Close() catch err {
+		report("close", err)
+	}
+	let late = rpc.Call[Args, Reply](mut c, "Arith.Multiply", Args{A: 1, B: 1}) catch err {
+		say.Line("after close:", fault.Message(err), fault.Is(err, rpc.ErrShutdown))
+		Reply{C: -1}
+	}
+	say.Line("after close", late.C)
+}
+
+// call dials addr and runs the session over the connection, with the reader as a task of the scope.
+fn call(addr str) !() {
+	mut c = try jsonrpc.Dial(addr)
+	scope s {
+		s.spawn(fn() ! {
+			c.Input()
+		})
+		session(mut c)
+	}
+}
+
+// serve listens on addr and serves the methods until the process is stopped.
+fn serve(addr str) !() {
+	let srv = try setup()
+	let l = try wire.Listen(addr)
+	jsonrpc.Serve(srv, l)
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) != 3 {
+		say.Line("usage: rpc_twin serve|call ADDR")
+		quarry.Exit(2)
+	}
+	if args[1] == "serve" {
+		serve(args[2]) catch err {
+			say.Line("serve failed:", fault.Message(err))
+			quarry.Exit(1)
+		}
+		return
+	}
+	call(args[2]) catch err {
+		say.Line("call failed:", fault.Message(err))
+		quarry.Exit(1)
+	}
+}

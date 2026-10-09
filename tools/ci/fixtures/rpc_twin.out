@@ -1,0 +1,19 @@
+multiply 42
+divide 3
+divide by zero error: divide by zero
+divide by zero -1
+double 42
+echo echo hi
+sum 10
+tag ada [x seen]
+angry error: <no> & more
+angry 
+unknown method error: rpc: can't find method Arith.Nope
+unknown method -1
+unknown service error: rpc: can't find service Nope.Call
+unknown service -1
+ill-formed error: rpc: service/method request ill-formed: Nope
+ill-formed -1
+pipelined 6 20 42
+after close: connection is shut down true
+after close -1

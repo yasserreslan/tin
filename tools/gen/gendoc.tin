@@ -69,6 +69,7 @@ fn packages() []str {
 		"seal", "crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85)",
 		"herald", "logging (log/slog)",
 		"expvar", "published variables and their JSON handler (expvar)",
+		"rpc", "Go's net/rpc: registered methods, a server and a client over a codec (net/rpc, net/rpc/jsonrpc)",
 		"crucible", "testing helpers (testing)",
 		"constraints", "named generic constraint shapes",
 		"policy", "with policies and slots (context values, retry/cache/trace middleware)",
