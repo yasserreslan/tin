@@ -213,15 +213,15 @@ fn encode(kind i64, id i64, content str) str {
 // nameValue is one name-value pair of a PARAMS stream: lengths (1 or 4 bytes), name, value.
 fn nameValue(name str, value str) str {
 	mut b = []u8{}
-	b = lengthBytes(b, len(name))
-	b = lengthBytes(b, len(value))
+	b = lengthBytes(mut b, len(name))
+	b = lengthBytes(mut b, len(value))
 	b = append(b, name...)
 	b = append(b, value...)
 	return str(b)
 }
 
 // lengthBytes appends a name or value length: one byte below 128, else four with the high bit set.
-fn lengthBytes(b []u8, n i64) []u8 {
+fn lengthBytes(b mut []u8, n i64) []u8 {
 	if n < 128 {
 		return append(b, u8(n))
 	}
@@ -230,7 +230,12 @@ fn lengthBytes(b []u8, n i64) []u8 {
 
 // begin is the BEGIN_REQUEST record of id: role 1 (responder) and flags (1 keeps the connection).
 fn begin(id i64, flags i64) str {
-	return encode(1, id, str([]u8{0, 1, u8(flags), 0, 0, 0, 0, 0}))
+	return beginRole(id, 1, flags)
+}
+
+// beginRole is the BEGIN_REQUEST record of id for role (1 is the responder) and flags.
+fn beginRole(id i64, role i64, flags i64) str {
+	return encode(1, id, str([]u8{u8(role/256), u8(role%256), u8(flags), 0, 0, 0, 0, 0}))
 }
 
 // params is the PARAMS stream of id for the flat name, value list pairs, and its end record.
@@ -297,7 +302,7 @@ fn normalizeDate(s str) str {
 // cgiCases is the CGI request list: the routes, the body and CONTENT_LENGTH rules, the header spelling, the status line and the errors.
 fn cgiCases() []cgiCase {
 	let proto = "SERVER_PROTOCOL=HTTP/1.1"
-	return []cgiCase{
+	mut all = []cgiCase{
 		cgiCase{name: "get-echo", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/a/b?x=1&y=2", "HTTP_HOST=example.test", "HTTP_X_FOO_BAR=v1"}},
 		cgiCase{name: "post-length-short", body: "hello world", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH=5", "CONTENT_TYPE=text/plain"}},
 		cgiCase{name: "post-no-length", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post"}},
@@ -317,6 +322,11 @@ fn cgiCases() []cgiCase {
 		cgiCase{name: "headers-spelling", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/headers"}},
 		cgiCase{name: "big-body", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/big"}},
 	}
+	// Every status code with a reason phrase, and two without one: the Status line is Go's text, or empty.
+	for code in []i64{100, 101, 102, 103, 200, 201, 202, 203, 204, 205, 206, 207, 208, 226, 300, 301, 302, 303, 304, 305, 307, 308, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451, 500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511, 299, 599} {
+		all = append(all, cgiCase{name: "status-" + mint.Itoa(code), body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/status/" + mint.Itoa(code)}})
+	}
+	return all
 }
 
 // fcgiCases is the FastCGI connection list: requests, keep-alive, stdin and params edge cases, and malformed frames.
@@ -344,7 +354,7 @@ fn fcgiCases() []fcgiCase {
 		fcgiCase{name: "get-values", raw: encode(9, 0, nameValue("FCGI_MPXS_CONNS", "")), want: 0},
 		fcgiCase{name: "unknown-type-in-request", raw: begin(9, 1) + encode(12, 9, "xxxx") + params(9, echoPairs) + stdin(9, ""), want: 1},
 		fcgiCase{name: "data-record-ignored", raw: begin(10, 1) + encode(8, 10, "data") + params(10, echoPairs) + stdin(10, ""), want: 1},
-		fcgiCase{name: "role-not-responder", raw: begin(11, 0) + encode(9, 0, nameValue("X", "y")), want: 1},
+		fcgiCase{name: "role-not-responder", raw: beginRole(11, 2, 0) + encode(9, 0, nameValue("X", "y")), want: 1},
 		fcgiCase{name: "abort-before-stdin", raw: begin(12, 0) + params(12, echoPairs) + encode(2, 12, ""), want: 1},
 		fcgiCase{name: "record-for-unknown-id", raw: encode(5, 42, "xyz") + request(13, 0, echoPairs, ""), want: 1},
 		fcgiCase{name: "params-truncated-pair", raw: begin(14, 0) + encode(4, 14, "\x0f\x01REQUEST") + encode(4, 14, "") + stdin(14, ""), want: 1},

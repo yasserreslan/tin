@@ -224,15 +224,15 @@ fn writeEnd(c wire.Conn, id i64, app i64, proto i64) ! {
 // pairs encodes one name-value pair as a FastCGI name-value stream entry.
 fn pairs(name str, value str) str {
 	mut b = []u8{}
-	b = appendSize(b, len(name))
-	b = appendSize(b, len(value))
+	b = appendSize(mut b, len(name))
+	b = appendSize(mut b, len(value))
 	b = append(b, name...)
 	b = append(b, value...)
 	return str(b)
 }
 
 // appendSize appends a name or value length: one byte below 128, else four bytes with the high bit set.
-fn appendSize(b []u8, n i64) []u8 {
+fn appendSize(b mut []u8, n i64) []u8 {
 	if n < 128 {
 		return append(b, u8(n))
 	}
