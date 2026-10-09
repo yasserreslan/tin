@@ -298,41 +298,22 @@ fn main() {
 	say.Line(x)
 }
 
-column selection true
-column text: 
-
-
-
-after a key: true one tzwo
-threez four
-five zsix
-sevenz
---- untitled row 4 col 7 dirty true
-selection: zwo
-threez four
-five zsix
-sevenz
-one tzwo
-threez four
-five zsix
-sevenz
---- untitled row 1 col 6 dirty true
-one two
-three four
-five six
-seven
-column selection true
---- untitled row 4 col 4 dirty true
-selection: 	one two
-	three four
-	five six
-	se
-	one two
-	three four
-	five six
-	seven
---- untitled row 4 col 4 dirty true
-	one two
-	three four
-	five six
-	seven
+encoding UTF-16 LE
+file 0 106 true
+file 1 94 true
+file 2 213 true
+file 3 11715 true
+file 4 282670 true
+encoding UTF-8 BOM
+file 0 55 true
+file 1 94 true
+file 2 213 true
+file 3 11715 true
+file 4 282670 true
+encoding UTF-8
+file 0 52 true
+file 1 94 true
+file 2 213 true
+file 3 11715 true
+file 4 282670 true
+message: switched to products/tinland/tests/fixtures/sample.txt

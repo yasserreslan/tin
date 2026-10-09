@@ -90,6 +90,10 @@ fn (ed Editor) dump() {
 //   guides           toggles the indent guides (prints the new state)
 //   colsel:R0,C0,R1,C1  makes the column selection (rectangle) the script names; coltext prints its text,
 //   colinsert types into every line it covers, coldelete removes them, colindent indents them
+//   colsel:R0,C0,R1,C1  makes the column selection (rectangle) the script names; coltext prints its text,
+//   colkey types into every line it covers
+//   encoding:NAME      writes the file back in utf8, utf8bom, utf16le or utf16be; files prints each open
+//   file's byte count and whether reading it back gives the same text
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
 fn RunScript(ed mut Editor, script str) {
@@ -232,6 +236,47 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
 		} else if step == "guides" {
 			say.Line("guides:", ToggleGuides())
+		} else if twine.HasPrefix(step, "colsel:") {
+			// colsel:R0,C0,R1,C1 makes the rectangle the script names
+			let n = appkit.ParseNumbers(step[7:])
+			if len(n) >= 4 {
+				ed.Buf.SelRow = i64(n[0]) - 1
+				ed.Buf.SelCol = i64(n[1]) - 1
+				ed.Buf.MoveTo(i64(n[2]) - 1, i64(n[3]) - 1, false)
+				ed.Buf.HasSel = true
+				ed.Buf.ColumnSelect()
+			}
+			say.Line("column selection", ed.Buf.ColSel)
+		} else if step == "coltext" {
+			say.Line("column text:", ed.Buf.ColumnText())
+		} else if step == "colkey" {
+			// the key a rectangle answers: typing, backspace, escape
+			ed.handleKey(Key{Code: -1, Chars: "z"})
+			say.Line("after a key:", ed.Buf.ColSel)
+		} else if twine.HasPrefix(step, "encoding:") {
+			// encoding:NAME writes the file back in that encoding
+			let name = step[9:]
+			if name == "utf8" {
+				ed.Buf.SetEncoding(textedit.EncUtf8)
+			} else if name == "utf8bom" {
+				ed.Buf.SetEncoding(textedit.EncUtf8Bom)
+			} else if name == "utf16le" {
+				ed.Buf.SetEncoding(textedit.EncUtf16Le)
+			} else if name == "utf16be" {
+				ed.Buf.SetEncoding(textedit.EncUtf16Be)
+			}
+			say.Line("encoding", ed.EncodingName())
+		} else if step == "files" {
+			// files prints each open file's byte count and whether reading it back gives the same text
+			mut n = 0
+			for n < len(ed.Tabs) {
+				let p = ed.Tabs[n].Buf.Path
+				if len(p) > 0 {
+					let raw = textedit.EncodeText(ed.Tabs[n].Buf.FileText(), ed.Tabs[n].Buf.Enc)
+					say.Line("file", n, len(raw), textedit.DecodeText(raw) == ed.Tabs[n].Buf.Text())
+				}
+				n += 1
+			}
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
 		} else if twine.HasPrefix(step, "colsel:") {

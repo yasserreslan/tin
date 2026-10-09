@@ -43,6 +43,9 @@ type Buffer struct {
 	// CRLF is true when the text the buffer was made from ended its lines with \r\n: FileText writes them back so saving does not change a
 	// file's line endings.
 	CRLF bool
+	// Enc is the encoding the file is written in (one of the Enc constants): UTF-8 unless a byte
+	// order mark said otherwise when it was read.
+	Enc i64
 	// Version counts the edits, so a view can tell its cached highlighting is out of date.
 	Version i64
 	Path   str
@@ -1255,6 +1258,79 @@ fn (b Buffer) columnSpans() []span {
 	return out
 }
 
+// A file's encoding: UTF-8 (no byte order mark), UTF-8 with one, UTF-16 little-endian and UTF-16 big-endian.
+const EncUtf8 = 0
+const EncUtf8Bom = 1
+const EncUtf16Le = 2
+const EncUtf16Be = 3
+
+// EncodingOf is the encoding a file's first bytes say it has: a byte order mark decides, and
+// without one the text is UTF-8 (the editor's own default and what most files are).
+fn EncodingOf(text str) i64 {
+	if len(text) >= 3 && text[0] == 0xef && text[1] == 0xbb && text[2] == 0xbf {
+		return EncUtf8Bom
+	}
+	if len(text) >= 2 && text[0] == 0xff && text[1] == 0xfe {
+		return EncUtf16Le
+	}
+	if len(text) >= 2 && text[0] == 0xfe && text[1] == 0xff {
+		return EncUtf16Be
+	}
+	return EncUtf8
+}
+
+// DecodeText turns a file's bytes into text: a byte order mark is stripped and UTF-16 becomes
+// UTF-8, lone surrogates becoming the replacement character as Go's utf16 does. Text that is
+// already UTF-8 comes back unchanged.
+fn DecodeText(text str) str {
+	match EncodingOf(text) {
+		EncUtf8Bom => {
+			return text[3:]
+		}
+		EncUtf16Le => {
+			return utf16Decode(text[2:], true)
+		}
+		EncUtf16Be => {
+			return utf16Decode(text[2:], false)
+		}
+		_ => {
+			return text
+		}
+	}
+}
+
+// utf16Decode reads a byte slice of UTF-16 code units (little or big endian) as UTF-8.
+fn utf16Decode(text str, little bool) str {
+	let units = len(text) / 2
+	mut out = ""
+	mut i = 0
+	for i < units {
+		let lo = i64(text[i * 2])
+		let hi = i64(text[i * 2 + 1])
+		mut u = hi << 8 | lo
+		if !little {
+			u = lo << 8 | hi
+		}
+		i += 1
+		if u >= 0xd800 && u < 0xdc00 && i < units {
+			let lo2 = i64(text[i * 2])
+			let hi2 = i64(text[i * 2 + 1])
+			mut u2 = hi2 << 8 | lo2
+			if !little {
+				u2 = lo2 << 8 | hi2
+			}
+			if u2 >= 0xdc00 && u2 < 0xe000 {
+				i += 1
+				let r = 0x10000 + (u - 0xd800) << 10 + (u2 - 0xdc00)
+				out += str(i32(r))
+				continue
+			}
+		}
+		out += str(i32(u))
+	}
+	return out
+}
+
 // span is the part of a line a column selection covers.
 type span struct {
 	row  i64
@@ -1379,4 +1455,106 @@ fn (b mut Buffer) UnindentColumn() {
 	}
 	b.Dirty = true
 	b.Version += 1
+}
+
+// EncodeText turns text into the bytes a file of that encoding holds, the byte order mark
+// included.
+fn EncodeText(text str, enc i64) str {
+	match enc {
+		EncUtf8Bom => {
+			return rawBytes([]u8{0xef, 0xbb, 0xbf}) + text
+		}
+		EncUtf16Le => {
+			return rawBytes([]u8{0xff, 0xfe}) + utf16Encode(text, true)
+		}
+		EncUtf16Be => {
+			return rawBytes([]u8{0xfe, 0xff}) + utf16Encode(text, false)
+		}
+		_ => {
+			return text
+		}
+	}
+}
+
+// rawBytes is a str over the given bytes (the byte order marks, which str("...") would UTF-8 encode).
+fn rawBytes(bytes []u8) str {
+	return str(bytes)
+}
+
+// utf16Encode writes UTF-8 as UTF-16 code units (little or big endian).
+fn utf16Encode(text str, little bool) str {
+	mut out = []u8{}
+	mut i = 0
+	for i < len(text) {
+		let r = utf8Decode(text, i)
+		i += utf8Len(text[i])
+		if r < 0x10000 {
+			out = append(out, unitBytes(r, little)...)
+		} else {
+			let r2 = r - 0x10000
+			out = append(out, unitBytes(0xd800 + r2 / 1024, little)...)
+			out = append(out, unitBytes(0xdc00 + r2 % 1024, little)...)
+		}
+	}
+	return str(out)
+}
+
+// unitBytes is one code unit as two bytes, little or big endian first.
+fn unitBytes(u i64, little bool) []u8 {
+	mut b = []u8{u8(u), u8(u / 256)}
+	if !little {
+		b = []u8{u8(u / 256), u8(u)}
+	}
+	return b
+}
+
+// utf8Decode is the code point of the rune that starts at byte i of s (0xfffd for bytes that are
+// not UTF-8), the same rule the rest of the view uses.
+fn utf8Decode(s str, i i64) i64 {
+	let c = i64(s[i])
+	if c < 0x80 {
+		return c
+	}
+	let n = utf8Len(u8(c))
+	mut v = c & (0x7f >> i64(n - 1))
+	mut k = 1
+	for k < n && i + k < len(s) {
+		v = v << 6 | (i64(s[i + k]) & 0x3f)
+		k += 1
+	}
+	return v
+}
+
+// utf8Len is the number of bytes the rune that starts with byte c takes (1 for a byte that starts
+// nothing).
+fn utf8Len(c u8) i64 {
+	if c < 0x80 {
+		return 1
+	}
+	if c >> 5 == 0x6 {
+		return 2
+	}
+	if c >> 4 == 0xe {
+		return 3
+	}
+	if c >> 3 == 0x1e {
+		return 4
+	}
+	return 1
+}
+
+// SetEncoding names the encoding the file is written in (one of the Enc constants).
+fn (b mut Buffer) SetEncoding(enc i64) {
+	b.Enc = enc
+}
+
+// Encoding is the encoding the file is written in.
+fn (b Buffer) Encoding() i64 {
+	return b.Enc
+}
+
+// FileBytes is what the file holds: the text in the buffer's encoding.
+fn (b Buffer) FileBytes() str {
+	let text = b.FileText()
+	return EncodeText(text, b.Enc)
 }

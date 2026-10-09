@@ -3472,11 +3472,21 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) SelectLine(row i64)`: SelectLine selects line row, including its newline when it is not the last line.
 - `(b mut Buffer) ColumnSelect()`: ColumnSelect makes the selection the rectangle from (SelRow, SelCol) to (Row, Col) (a column of 0 becomes the whole line). Either end may be the anchor: the rectangle is kept in text order.
 - `(b Buffer) ColumnSelection() (i64, i64, i64, i64, bool)`: ColumnSelection is the rectangle of a column selection: the first and last line and the byte columns. It is false when the selection is not a column one.
+- `const EncUtf8 = 0`: A file's encoding: UTF-8 (no byte order mark), UTF-8 with one, UTF-16 little-endian and UTF-16 big-endian.
+- `const EncUtf8Bom = 1`
+- `const EncUtf16Le = 2`
+- `const EncUtf16Be = 3`
+- `EncodingOf(text str) i64`: EncodingOf is the encoding a file's first bytes say it has: a byte order mark decides, and without one the text is UTF-8 (the editor's own default and what most files are).
+- `DecodeText(text str) str`: DecodeText turns a file's bytes into text: a byte order mark is stripped and UTF-16 becomes UTF-8, lone surrogates becoming the replacement character as Go's utf16 does. Text that is already UTF-8 comes back unchanged.
 - `(b Buffer) ColumnText() str`: ColumnText is the text of a column selection: one line per touched line, the covered bytes only.
 - `(b mut Buffer) InsertColumn(text str)`: InsertColumn types text at every line of the column selection (a newline in it is written as a line break too), one undo step.
 - `(b mut Buffer) DeleteColumn()`: DeleteColumn removes the rectangle of a column selection, one undo step.
 - `(b mut Buffer) IndentColumn()`: IndentColumn adds a tab at the start of every line the column selection touches (or one, when there is no selection); UnindentColumn removes one.
 - `(b mut Buffer) UnindentColumn()`: UnindentColumn removes one tab (or up to four spaces) from the start of every line the column selection touches.
+- `EncodeText(text str, enc i64) str`: EncodeText turns text into the bytes a file of that encoding holds, the byte order mark included.
+- `(b mut Buffer) SetEncoding(enc i64)`: SetEncoding names the encoding the file is written in (one of the Enc constants).
+- `(b Buffer) Encoding() i64`: Encoding is the encoding the file is written in.
+- `(b Buffer) FileBytes() str`: FileBytes is what the file holds: the text in the buffer's encoding.
 
 ## tinjson
 

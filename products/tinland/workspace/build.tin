@@ -269,7 +269,7 @@ fn (ws Workspace) statusBar(t mut ui.Tree) {
 	t.Leaf(ui.Box().Wide(12.0), 0)
 	t.Text("Spaces: 4", render.FontUI, th.Muted, ui.Box())
 	t.Leaf(ui.Box().Wide(12.0), 0)
-	t.Text("UTF-8", render.FontUI, th.Muted, ui.Box())
+	t.Text(ws.Ed.EncodingName(), render.FontUI, th.Muted, ui.Box())
 	t.Leaf(ui.Box().Wide(12.0), 0)
 	mut eol = "LF"
 	if b.CRLF {

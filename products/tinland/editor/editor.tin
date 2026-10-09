@@ -260,18 +260,23 @@ fn (ed mut Editor) Load(path str) bool {
 		ed.Say("cannot read " + path)
 		return false
 	}
+	// the encoding a byte order mark names, and the text as UTF-8: a UTF-16 file's every other byte
+	// is zero, which is why the bytes are decoded before the zero-byte test
+	let enc = textedit.EncodingOf(text)
+	let plain = textedit.DecodeText(text)
 	// a zero byte in the first few kilobytes means the file is not text
-	mut probe = len(text)
+	mut probe = len(plain)
 	if probe > 8192 {
 		probe = 8192
 	}
 	for i in 0..probe {
-		if text[i] == 0 {
+		if plain[i] == 0 {
 			ed.Say("binary file, not opened: " + path)
 			return false
 		}
 	}
-	let buf = textedit.FromText(text)
+	let buf = textedit.FromText(plain)
+	buf.Enc = enc
 	buf.Path = path
 	let cur = ed.Buf
 	if len(ed.Tabs) == 1 && len(cur.Path) == 0 && !cur.Dirty && len(cur.Lines) == 1 && len(cur.Lines[0]) == 0 {
@@ -323,6 +328,35 @@ fn (ed mut Editor) closeTab() {
 	ed.Redraw = true
 }
 
+// EncodingName is the encoding the status bar shows for the active file.
+fn (ed Editor) EncodingName() str {
+	match ed.Buf.Enc {
+		textedit.EncUtf8Bom => {
+			return "UTF-8 BOM"
+		}
+		textedit.EncUtf16Le => {
+			return "UTF-16 LE"
+		}
+		textedit.EncUtf16Be => {
+			return "UTF-16 BE"
+		}
+		_ => {
+			return "UTF-8"
+		}
+	}
+}
+
+// writeBytes is what the active file is written as: the hygiene, then the buffer's encoding (a byte order mark and UTF-16
+// when it was read as one, so saving does not change a file's encoding either).
+fn (ed Editor) writeBytes() str {
+	return textedit.EncodeText(ed.writeText(ed.Buf.FileText()), ed.Buf.Enc)
+}
+
+// writeBytesFor is writeBytes for tab i.
+fn (ed Editor) writeBytesFor(i i64) str {
+	return textedit.EncodeText(ed.writeText(ed.Tabs[i].Buf.FileText()), ed.Tabs[i].Buf.Enc)
+}
+
 // writeText is what the settings say a file's text is: the trailing spaces and tabs of every line removed
 // and a final newline added when both are on (they are off by default).
 fn (ed Editor) writeText(text str) str {
@@ -357,7 +391,7 @@ fn (ed mut Editor) save(asNew bool) bool {
 			return false
 		}
 	}
-	quarry.WriteFile(path, ed.writeText(ed.Buf.FileText())) catch _ {
+	quarry.WriteFile(path, ed.writeBytes()) catch _ {
 		ed.Say("cannot write " + path)
 		return false
 	}
@@ -384,7 +418,7 @@ fn (ed mut Editor) SaveDirty() i64 {
 		if len(path) == 0 || !ed.Tabs[i].Buf.Dirty {
 			continue
 		}
-		quarry.WriteFile(path, ed.writeText(ed.Tabs[i].Buf.FileText())) catch _ {
+		quarry.WriteFile(path, ed.writeBytesFor(i)) catch _ {
 			continue
 		}
 		ed.Tabs[i].Buf.Dirty = false
