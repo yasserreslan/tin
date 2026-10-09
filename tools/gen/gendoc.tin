@@ -49,6 +49,7 @@ fn packages() []str {
 		"ore", "byte slices (bytes)",
 		"flume", "buffered I/O (bufio)",
 		"quarry", "files, environment, process (os)",
+		"debug", "ELF executable metadata (debug/elf)",
 		"user", "users and groups (os/user)",
 		"spawn", "starting child processes (os/exec)",
 		"signal", "operating-system signals (os/signal)",

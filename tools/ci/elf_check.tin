@@ -1,0 +1,33 @@
+package main
+
+import "./ci"
+import "say"
+
+fn main() {
+	let root = ci.Root()
+	let work = ci.TempDir(ci.Join(root, "bin/ci/elf"), "elf-")
+	let reader = ci.Join(work, "reader")
+	let goExe = ci.Join(work, "go-elf")
+	ci.BuildTin("tools/ci/fixtures/elf_reader.tin", reader, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goExe, "./bench/ref/debug_elf"}, root, 300), "build Go ELF reader")
+	for target in []str{"linux-arm64", "linux-amd64"} {
+		let sample = ci.Join(work, target)
+		ci.BuildTin("tools/ci/fixtures/elf_sample.tin", sample, "", []str{"-target", target})
+		let tinResult = ci.Exec([]str{reader, sample}, root, 30)
+		let goResult = ci.Exec([]str{goExe, sample}, root, 30)
+		ci.Must(tinResult, "Tin reads {target} ELF")
+		ci.Must(goResult, "Go reads {target} ELF")
+		let tinLines = ci.Lines(tinResult.Stdout)
+		let goLines = ci.Lines(goResult.Stdout)
+		ci.Check(len(tinLines) == len(goLines), "{target}: Tin and Go ELF line counts")
+		for i in 0..min(len(tinLines), len(goLines)) {
+			ci.Check(tinLines[i] == goLines[i], "{target} ELF metadata line {i + 1}: Tin {tinLines[i]}, Go {goLines[i]}")
+		}
+	}
+	let bad = ci.Exec([]str{ci.Join(root, "bin/ci/elf_debug")}, root, 30)
+	ci.Must(bad, "Tin rejects foreign and truncated files")
+	ci.Check(bad.Stdout == "foreign file rejected\ntruncated ELF rejected\n", "malformed ELF rejection output")
+	ci.Remove(work)
+	ci.Pass("ELF64 arm64 and amd64 headers, program and section tables agree with Go; foreign and truncated inputs are rejected")
+	say.Line("ELF reader check passed")
+}

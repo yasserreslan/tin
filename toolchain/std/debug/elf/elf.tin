@@ -1,0 +1,137 @@
+// Package elf reads ELF64 little-endian binaries for Linux arm64 and amd64.
+// The first Tin reader keeps a bounded file snapshot and exposes its load and section tables.
+package elf
+
+import "fault"
+import "quarry"
+
+const maxFile = 64 * 1024 * 1024
+const class64 = 2
+const dataLittleEndian = 1
+const machineAMD64 = 62
+const machineARM64 = 183
+
+// ErrFormat marks a truncated, malformed, or unsupported ELF file.
+let ErrFormat = fault("debug/elf: malformed or unsupported ELF")
+
+// Header is the ELF identification and file header fields used by this reader.
+type Header struct {
+	Class i64 // ELF class: 2 for ELF64.
+	Machine i64 // ELF machine number.
+	Entry i64 // Virtual address of the entry point.
+	ProgramOffset i64 // File offset of the program header table.
+	SectionOffset i64 // File offset of the section header table.
+	ProgramEntrySize i64 // Size of one program header.
+	ProgramCount i64 // Number of program headers.
+	SectionEntrySize i64 // Size of one section header.
+	SectionCount i64 // Number of section headers.
+	SectionNames i64 // Index of the section name string table.
+}
+
+// Segment describes one ELF program header.
+type Segment struct {
+	Type i64 // Program header type.
+	Flags i64 // Segment permissions and flags.
+	Offset i64 // File offset of the segment data.
+	Address i64 // Virtual address of the segment.
+	FileSize i64 // Number of file-backed bytes.
+	MemorySize i64 // Number of bytes in memory.
+	Align i64 // Required segment alignment.
+}
+
+// Section describes one ELF section header. Data is its file-backed bytes.
+type Section struct {
+	Name str // Section name from the section name string table.
+	Type i64 // Section type.
+	Flags i64 // Section attributes.
+	Address i64 // Address when the section is loaded.
+	Offset i64 // File offset of section data.
+	Size i64 // Section size in bytes.
+	Link i64 // Index of a related section.
+	Info i64 // Section-specific metadata.
+	Align i64 // Required section alignment.
+	EntrySize i64 // Size of one table entry, or zero.
+	Data []u8 // File-backed data, empty for NOBITS sections.
+}
+
+// File is a validated ELF image with its program and section headers.
+type File struct {
+	Header Header // ELF header fields.
+	Segments []Segment // Program headers.
+	Sections []Section // Section headers and file-backed bytes.
+}
+
+fn read16(b []u8, p i64) i64 {
+	return i64(b[p]) | i64(b[p+1])<<8
+}
+
+fn read32(b []u8, p i64) i64 {
+	return read16(b, p) + read16(b, p+2)*65536
+}
+
+fn read64(b []u8, p i64) i64 {
+	let hi = read32(b, p+4)
+	if hi > 0x7fffffff { return -1 }
+	return read32(b, p) + hi*4294967296
+}
+
+fn validRange(size i64, off i64, n i64) bool {
+	return off >= 0 && n >= 0 && off <= size && n <= size-off
+}
+
+fn sectionName(data []u8, off i64) str {
+	if off < 0 || off >= len(data) { return "" }
+	mut end = off
+	for end < len(data) && data[end] != 0 { end += 1 }
+	return str(data[off:end])
+}
+
+// Open reads and validates an ELF64 little-endian Tin target binary, bounded to 64 MiB.
+fn Open(path str) !File {
+	let bytes = try quarry.ReadFileBound(path, maxFile)
+	let b = []u8(bytes)
+	let n = len(b)
+	if n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != class64 || b[5] != dataLittleEndian || b[6] != 1 {
+		fail ErrFormat
+	}
+	let machine = read16(b, 18)
+	if machine != machineAMD64 && machine != machineARM64 { fail ErrFormat }
+	let phoff = read64(b, 32)
+	let shoff = read64(b, 40)
+	let phentsize = read16(b, 54)
+	let phnum = read16(b, 56)
+	let shentsize = read16(b, 58)
+	let shnum = read16(b, 60)
+	let shstr = read16(b, 62)
+	if phnum > 0 && (phentsize < 56 || !validRange(n, phoff, phentsize*phnum)) { fail ErrFormat }
+	if shnum > 0 && (shentsize < 64 || !validRange(n, shoff, shentsize*shnum) || shstr >= shnum) { fail ErrFormat }
+	let h = Header{Class: class64, Machine: machine, Entry: read64(b, 24), ProgramOffset: phoff, SectionOffset: shoff, ProgramEntrySize: phentsize, ProgramCount: phnum, SectionEntrySize: shentsize, SectionCount: shnum, SectionNames: shstr}
+	mut segments = make([]Segment, 0, phnum)
+	for i in 0..phnum {
+		let p = phoff + i*phentsize
+		let off = read64(b, p+8)
+		let filesz = read64(b, p+32)
+		if !validRange(n, off, filesz) { fail ErrFormat }
+		segments = append(segments, Segment{Type: read32(b, p), Flags: read32(b, p+4), Offset: off, Address: read64(b, p+16), FileSize: filesz, MemorySize: read64(b, p+40), Align: read64(b, p+48)})
+	}
+	mut sections = make([]Section, 0, shnum)
+	mut names = []u8{}
+	if shnum > 0 {
+		let np = shoff + shstr*shentsize
+		let noff = read64(b, np+24)
+		let nsize = read64(b, np+32)
+		if !validRange(n, noff, nsize) { fail ErrFormat }
+		names = b[noff:noff+nsize]
+	}
+	for i in 0..shnum {
+		let p = shoff + i*shentsize
+		let typ = read32(b, p+4)
+		let off = read64(b, p+24)
+		let size = read64(b, p+32)
+		if typ != 8 && !validRange(n, off, size) { fail ErrFormat }
+		mut data = []u8{}
+		if typ != 8 { data = b[off:off+size] }
+		sections = append(sections, Section{Name: sectionName(names, read32(b, p)), Type: typ, Flags: read64(b, p+8), Address: read64(b, p+16), Offset: off, Size: size, Link: read32(b, p+40), Info: read32(b, p+44), Align: read64(b, p+48), EntrySize: read64(b, p+56), Data: data})
+	}
+	return File{Header: h, Segments: segments, Sections: sections}
+}
