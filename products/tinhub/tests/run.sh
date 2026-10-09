@@ -46,6 +46,10 @@ sh products/tinhub/tests/api.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 sh products/tinhub/tests/signin.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 sh products/tinhub/tests/backup.sh "$tmp/tinhub" "$tmp/repo_driver"
 sh products/tinhub/tests/phase2.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
+# the Tin repo cloned and pushed through tinhub, and short clone timings; TINHUB_BENCH_RUNS, _SECONDS and _CLIENTS
+# lengthen them for the numbers in the issues (#1015, #1026)
+TIN_ROOT=$PWD "$compiler" -o "$tmp/fetch_load" products/tinhub/tests/programs/fetch_load.tin
+TINHUB_BENCH_RUNS=${TINHUB_BENCH_RUNS:-1} TINHUB_BENCH_SECONDS=${TINHUB_BENCH_SECONDS:-5} sh products/tinhub/tests/clones.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit" "$tmp/fetch_load"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/workers_driver" products/tinhub/tests/programs/workers_driver.tin
 sh products/tinhub/tests/workers.sh "$tmp/workers_driver"
 # notifications, webhooks and live updates on two nodes, against bench/ref/tinhub_hooks (Go checks the signatures)
