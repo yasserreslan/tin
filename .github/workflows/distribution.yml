@@ -28,6 +28,19 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      # Docker Hub limits unauthenticated pulls per runner address (429 Too Many Requests): the images the
+      # checks run (spawn_check, static_check, distribution_check) come from Google's mirror of it and are
+      # tagged under their Docker Hub names, so docker run and docker build find them locally.
+      - name: Docker images from the Docker Hub mirror
+        if: runner.os == 'Linux'
+        run: |
+          for image in debian:bookworm-slim alpine:3.20; do
+            for attempt in 1 2 3; do
+              docker pull -q "mirror.gcr.io/library/$image" && break
+              sleep 5
+            done
+            docker tag "mirror.gcr.io/library/$image" "$image" || echo "::warning::$image not taken from mirror.gcr.io; Docker Hub is pulled instead"
+          done
       - run: sh tools/ci/tin.sh test_distribution
       - run: make bootstrap dist
       - name: Verify archive and Linux containers

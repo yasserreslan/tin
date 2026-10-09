@@ -1,0 +1,53 @@
+// What main allocates before Serve survives core 0's pool resets (#1056): core 0 runs on
+// main's thread, and each tick (like each request) ends with a reset of its pool.
+package main
+
+import "anvil"
+import "say"
+import "twine"
+
+type Conf struct {
+	name str
+	ports []i64
+}
+
+mut ticks i64
+
+fn hi(q anvil.Req, w mut anvil.Out) {
+	w.Text("hi\n")
+}
+
+fn tick(core i64) {
+	let junk = twine.Repeat("y", 5000) + say.Str(ticks)
+	if len(junk) == 0 {
+		return
+	}
+	ticks += 1
+	if ticks == 5 {
+		anvil.Drain(0)
+	}
+}
+
+fn main() {
+	mut before = []str{}
+	for i in 0..100 {
+		before = append(before, twine.Repeat("x", 3) + say.Str(i))
+	}
+	mut seen = map[str]i64{}
+	seen["a"] = 1
+	seen["b"] = 2
+	let c = Conf{name: twine.Repeat("z", 4), ports: []i64{80, 443}}
+	anvil.OnTick(5, tick)
+	mut r = anvil.NewRouter()
+	r.Get(`/{rest...}`, hi)
+	r.ServeN("127.0.0.1:0", 1) catch err {
+		say.Line("serve", err)
+	}
+	mut total = 0
+	for s in before {
+		total += len(s)
+	}
+	say.Line(len(before), before[0], before[99], total)
+	say.Line(len(seen), seen["a"], seen["b"])
+	say.Line(c.name, c.ports[0], c.ports[1])
+}

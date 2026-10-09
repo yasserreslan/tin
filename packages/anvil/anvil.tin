@@ -426,7 +426,10 @@ fn serve_on(addr str, n i64) ! {
 	}
 	monitor_start(n) // after the mask is set: the monitor thread inherits it (#341)
 	record_setup(n) // TIN_REPLAY_DIR: requests are recorded for replay (#241)
+	// Core 0 serves on main's thread: its resets empty a pool of its own, not main's (#1056).
+	let mainPool = rt_pool_enter()
 	hearth.Run(n, core)
+	rt_pool_leave(mainPool)
 }
 
 
