@@ -1555,17 +1555,36 @@ fn map_str_keys(kt i64) i64 {
 	return i64(kind_of(cast(Ty, kt)) == K_STRING || key_composite(kt) != 0)
 }
 
-// key_in is key e as the word the runtime stores (bits, a str, or an encoded struct/enum).
+// key_in is key e as the word the runtime stores (bits, a str, or an encoded struct/enum): an
+// encoded key is a str of its own, copied out of the scratch, so a set may evaluate its value
+// after the key.
 fn key_in(e Node, kt i64) i64 {
 	if key_composite(kt) == 0 {
 		return to_bits(e)
 	}
+	return key_encode(e, kt, "rt_kb_done")
+}
+
+// key_probe is key e as a lookup or a delete takes it (#893): an encoded key aliases the scratch
+// with no copy, and the map call that reads it comes straight after the encoding.
+fn key_probe(e Node, kt i64) i64 {
+	if key_composite(kt) == 0 {
+		return to_bits(e)
+	}
+	return key_encode(e, kt, "rt_kb_probe")
+}
+
+// key_encode encodes composite key e into the core's scratch and ends it with runtime function done.
+// e's value is taken first: a key inside it may encode into the scratch too (#893).
+fn key_encode(e Node, kt i64, done str) i64 {
 	let pos = e.pos
 	mut stmts = []i64{}
+	let kv = temp(pos, cast(i64, e), kt)
+	stmts = append(stmts, cast(i64, kv))
 	let b = temp(pos, rt_call(pos, "rt_kb_new", cast(i64, []i64{}), ty_int), ty_int)
 	stmts = append(stmts, cast(i64, b))
-	stmts = append(stmts, assign_stmt(pos, sym_ref_node(pos, cast(Sym, b.sym)), cast(i64, call_fn(pos, cast(Fn, key_enc_fn(cast(Ty, kt))), args2(sym_ref_node(pos, cast(Sym, b.sym)), cast(i64, e)), ty_int))))
-	return mk_seq(pos, cast(i64, stmts), rt_call(pos, "rt_kb_done", args1(sym_ref_node(pos, cast(Sym, b.sym))), ty_string), ty_string)
+	stmts = append(stmts, assign_stmt(pos, sym_ref_node(pos, cast(Sym, b.sym)), cast(i64, call_fn(pos, cast(Fn, key_enc_fn(cast(Ty, kt))), args2(sym_ref_node(pos, cast(Sym, b.sym)), sym_ref_node(pos, cast(Sym, kv.sym))), ty_int))))
+	return mk_seq(pos, cast(i64, stmts), rt_call(pos, done, args1(sym_ref_node(pos, cast(Sym, b.sym))), ty_string), ty_string)
 }
 
 // key_out turns a stored key word back into a key of type kt.
@@ -1920,13 +1939,13 @@ fn map_read(pos i64, m Node, k i64, vt i64) i64 {
 		mut zs = []i64{}
 		let z = temp(pos, zero_value(pos, vt), vt)
 		zs = append(zs, cast(i64, z))
-		return mk_seq(pos, cast(i64, zs), rt_call(pos, "rt_map_vget", args3(cast(i64, m), key_in(cast(Node, k), cast(Ty, m.type_).key), sym_ref_node(pos, cast(Sym, z.sym))), vt), vt)
+		return mk_seq(pos, cast(i64, zs), rt_call(pos, "rt_map_vget", args3(cast(i64, m), key_probe(cast(Node, k), cast(Ty, m.type_).key), sym_ref_node(pos, cast(Sym, z.sym))), vt), vt)
 	}
 	if is_dyn_value(cast(Ty, vt)) != 0 {
 		// A dyn value has no zero (#567): a missing key panics, or reads nil from a ?dyn map.
-		return rt_call(pos, "rt_map_get_dyn", args3(cast(i64, m), key_in(cast(Node, k), cast(Ty, m.type_).key), mk_int(pos, i64(kind_of(cast(Ty, vt)) == K_DYN), ty_int)), vt)
+		return rt_call(pos, "rt_map_get_dyn", args3(cast(i64, m), key_probe(cast(Node, k), cast(Ty, m.type_).key), mk_int(pos, i64(kind_of(cast(Ty, vt)) == K_DYN), ty_int)), vt)
 	}
-	let get = from_bits(cast(Node, rt_call(pos, "rt_map_get", args2(cast(i64, m), key_in(cast(Node, k), cast(Ty, m.type_).key)), ty_int)), vt)
+	let get = from_bits(cast(Node, rt_call(pos, "rt_map_get", args2(cast(i64, m), key_probe(cast(Node, k), cast(Ty, m.type_).key)), ty_int)), vt)
 	let vk = kind_of(cast(Ty, vt))
 	if !(vk == K_STRING || vk == K_SLICE || vk == K_MAP || vk == K_STRUCT) {
 		return get
@@ -4917,7 +4936,7 @@ fn chk_builtin(e i64, name str, want i64) i64 {
 		if is_untyped(kt) != 0 {
 			reconvert(cast(Node, args[1]), mt.key)
 		}
-		replace_node(e, rt_call(pos, "rt_map_del", args2(arg0(cast(Call, e)), key_in(cast(Node, args[1]), mt.key)), ty_void))
+		replace_node(e, rt_call(pos, "rt_map_del", args2(arg0(cast(Call, e)), key_probe(cast(Node, args[1]), mt.key)), ty_void))
 		return ty_void
 	}
 	if name == "copy" {

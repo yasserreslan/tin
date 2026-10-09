@@ -329,7 +329,8 @@ argument, a result), so two names never share a value. (`value` is a contextual 
   and it prints and encodes to JSON as a struct does. `same` does not apply: it has no
   identity.
 - Inside a value struct, `[N]T` is an inline array: N elements in the struct's bytes
-  (`type UUID value struct { b [16]u8 }` is 16 bytes, a map key that needs no allocation).
+  (`type UUID value struct { b [16]u8 }` is 16 bytes, and a lookup or delete with a struct
+  key allocates nothing, #893; a set stores a copy of its key).
   `u.b[i]` is bounds-checked (a constant index at compile time), `len(u.b)` is N, `for i, x in
   u.b` ranges over a copy, and it compares, hashes, prints (`[a b c]`) and encodes to JSON as
   its elements do. It cannot be sliced or appended to. Outside a value struct `[N]T` keeps its
