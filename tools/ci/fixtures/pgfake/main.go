@@ -725,10 +725,11 @@ func (f *fake) handle(c net.Conn) {
 		}()
 		s.run()
 	}()
-	c.Close()
+	// the count drops before the close, so a client that has seen the close never finds the old connection still counted
 	f.lock.Lock()
 	f.open--
 	f.lock.Unlock()
+	c.Close()
 }
 
 var (

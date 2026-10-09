@@ -469,11 +469,12 @@ func (f *fake) handle(c net.Conn) {
 	f.lock.Unlock()
 	s := &session{f: f, s: c, stmts: map[uint32]string{}}
 	s.run()
-	c.Close()
-	s.s.Close()
+	// the count drops before the close, so a client that has seen the close never finds the old connection still counted
 	f.lock.Lock()
 	f.open--
 	f.lock.Unlock()
+	c.Close()
+	s.s.Close()
 }
 
 var (

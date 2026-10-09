@@ -130,7 +130,7 @@ const cSerial = 16
 const cPID = 17
 const cKey = 18
 const cParsed = 19
-const cStolen = 20 // another core took this idle connection's slot (MaxTotal): free it, do not use it
+const cStolen = 20 // another core took this idle connection's slot (MaxTotal): free it, do not use it (2: the server has not closed it yet)
 const connWords = 21
 
 const stmtWords = 5 // [SQL ptr, len, signature ptr, len, name serial]
@@ -895,14 +895,23 @@ fn idle_claim(rec i64, conn i64) bool {
 			break
 		}
 	}
-	let stolen = conn[cStolen]
+	mut stolen = conn[cStolen]
 	cap_unlock(k)
+	// the core that took its slot is reading the socket until the server has closed it (steal_idle)
+	for stolen == 2 {
+		pause_briefly()
+		cap_lock(k)
+		stolen = conn[cStolen]
+		cap_unlock(k)
+	}
 	return stolen == 0
 }
 
-// steal_idle takes the slot of a connection idle in some core's pool: it shuts the socket down
-// (the server sees the close at once; the owner still holds the record and the descriptor, so
-// the descriptor number cannot be reused under it) and gives its place in the count back.
+// steal_idle takes the slot of a connection idle in some core's pool: it ends the connection (the
+// owner still holds the record and the descriptor, so the descriptor number cannot be reused under
+// it) and gives its place in the count back once the server has closed it too. Given back at the
+// shutdown, the connection this core dials next could reach the server before the server had
+// noticed the close, and the server would count more than MaxTotal for a moment (#856).
 fn steal_idle(rec i64) bool {
 	let k = rec[rCap]
 	if k == 0 {
@@ -910,20 +919,49 @@ fn steal_idle(rec i64) bool {
 	}
 	cap_lock(k)
 	let idle = k[kIdle]
-	mut took = false
+	mut conn = 0
 	for i in 0..k[kMax] {
 		if idle[i] != 0 {
-			let conn = idle[i]
+			conn = idle[i]
 			idle[i] = 0
-			conn[cStolen] = 1
-			rt_sys_shutdown(conn[cFd], 2)
-			__atomic_add(k + 8*kTotal, -1)
-			took = true
+			conn[cStolen] = 2
+			rt_sys_shutdown(conn[cFd], 1)
 			break
 		}
 	}
 	cap_unlock(k)
-	return took
+	if conn == 0 {
+		return false
+	}
+	// What the server sends until it closes is read and dropped (nothing uses this connection
+	// again); a server that has not closed it in 200 ms is not waited for longer.
+	let b = malloc(512)
+	let until = rt_mono_ns() + 200000000
+	for rt_mono_ns() < until {
+		let n = rt_sys_recv(conn[cFd], b, 512, 0)
+		let e = rt_errno()
+		if n == 0 || (n < 0 && e != EAGAIN && e != EINTR) {
+			break
+		}
+		if n < 0 {
+			pause_briefly()
+		}
+	}
+	free(b)
+	cap_lock(k)
+	conn[cStolen] = 1
+	__atomic_add(k + 8*kTotal, -1)
+	cap_unlock(k)
+	return true
+}
+
+// pause_briefly lets others run for about a millisecond: the task parks, code outside a task yields.
+fn pause_briefly() {
+	if rt_task_current() != 0 {
+		rt_task_park(1000000)
+	} else {
+		__yield()
+	}
 }
 
 // wait_for_slot parks the task for at most 2 ms (less when its time is nearly up): every
