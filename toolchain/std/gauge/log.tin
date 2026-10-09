@@ -165,9 +165,6 @@ fn Log1p(x f64) f64 {
 		f = u - 1.0 // Sqrt(2)/2 < u < Sqrt(2)
 	}
 	let hfsq = 0.5 * f * f
-	mut s f64
-	mut r f64
-	mut z f64
 	if iu == 0 { // |f| < 2**-20
 		if f == 0 {
 			if k == 0 {
@@ -176,19 +173,25 @@ fn Log1p(x f64) f64 {
 			c += f64(k) * expLn2Lo
 			return f64(k)*expLn2Hi + c
 		}
-		r = hfsq * (1.0 - 0.66666666666666666*f) // avoid the division
+		// The products hfsq*(…) stay inline, so the arm64 backend fuses them as Go's does (avoid the division).
 		if k == 0 {
-			return f - r
+			return f - hfsq*(1.0-0.66666666666666666*f)
 		}
-		return f64(k)*expLn2Hi - ((r - (f64(k)*expLn2Lo + c)) - f)
+		let xc = f64(k)*expLn2Lo + c
+		let yc = -xc + hfsq*(1.0-0.66666666666666666*f) - f
+		return -yc + f64(k)*expLn2Hi
 	}
-	s = f / (2.0 + f)
-	z = s * s
-	r = z * (lp1 + z*(lp2+z*(lp3+z*(lp4+z*(lp5+z*(lp6+z*lp7))))))
+	let s = f / (2.0 + f)
+	let z = s * s
+	let r = z * (lp1 + z*(lp2+z*(lp3+z*(lp4+z*(lp5+z*(lp6+z*lp7))))))
+	let g = r + 0.5*f*f
 	if k == 0 {
-		return f - (hfsq - s*(hfsq+r))
+		return f - (hfsq - s*g)
 	}
-	return f64(k)*expLn2Hi - ((hfsq - (s*(hfsq+r) + (f64(k)*expLn2Lo + c))) - f)
+	let xc = f64(k)*expLn2Lo + c
+	let w = xc + s*g
+	let yc = -w + 0.5*f*f - f
+	return -yc + f64(k)*expLn2Hi
 }
 
 // Logb returns the binary exponent of x as an f64 (Go's math.Logb): +Inf for infinities,
