@@ -276,6 +276,11 @@ jobs:
         run: sh tools/ci/tin.sh dump_check
       - name: HTTP client trace hooks against Go net/http
         run: sh tools/ci/tin.sh httptrace_check
+      - name: pprof route availability
+        run: |
+          bin/tinc toolchain/tests/v2/pprof.tin -o bin/ci/pprof-test
+          bin/ci/pprof-test > bin/ci/pprof.out
+          diff -u toolchain/tests/v2/pprof.out bin/ci/pprof.out
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
