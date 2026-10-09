@@ -1,0 +1,10 @@
+package main
+
+import "abacus"
+import "say"
+
+// Importing abacus does not bring gauge's extern floor into scope (#964): the program has no floor of its own.
+fn main() {
+	say.Line(floor(2.5))
+	_ = abacus.FromI64(1)
+}
