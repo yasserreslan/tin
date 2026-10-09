@@ -42,6 +42,18 @@ rows too, moved by compare-and-swap in one transaction per push under the reposi
 `redis.addr` is set. Every `packs.sweep` the sweeps delete the packs crashed pushes left and those retired longer than
 `packs.grace`. See [design/tinhub.md §7](../../design/tinhub.md#7-the-pack-store-1011-1015).
 
+## Accounts and sign-in
+
+`products/tinhub/accounts` holds users, orgs, members, teams, repositories, grants, keys, invites, login requests and
+sessions. A user's role on a repository (read, write or admin) comes from owning it, owning its org, its own grant, its
+teams' grants, and public visibility; site admins have admin everywhere. Every change to access writes an `audit_log`
+row. There are no passwords: an account gets its first key with an invite (`tinhub admin invite`, then
+`tit key add URL CODE`), and a browser signs in when `tit login --code CODE` approves its login request with a key.
+Browser sessions live in Redis (`redis.addr`) behind a cookie signed with `secrets.cookie`. **Losing Redis, flushing it
+or changing `secrets.cookie` signs everyone out**, and they sign in again with `tit login`; nothing else is lost.
+Without `redis.addr` there are no browser sessions, and key-signed requests still work. See
+[design/tinhub.md §11](../../design/tinhub.md#11-accounts-sign-in-and-sessions-1012).
+
 ## Health and shutdown
 
 - `GET /healthz`: 200 while the process runs.
@@ -58,8 +70,11 @@ Logs are herald lines; each request's line carries `req=` (its `X-Request-Id`, e
 ```sh
 sh products/tinhub/tests/run.sh                 # unit tests and the build, on any platform
 TINHUB_TEST_DB=127.0.0.1:5432/tinhub_test TINHUB_TEST_DB_USER=tin TINHUB_TEST_DB_PASSWORD=... \
-  sh products/tinhub/tests/run.sh               # plus Postgres: schema, event queue, server readiness and drain
+  sh products/tinhub/tests/run.sh               # plus Postgres: schema, event queue, accounts, readiness and drain
 ```
+
+With `TINHUB_TEST_REDIS=host:port` as well, the accounts tests also check that sessions survive a restart and that a
+login code is claimed once (under a random key prefix).
 
 The test database is emptied by the tests. CI runs the Postgres checks on Linux x86-64 against the runner's
 PostgreSQL, and the rest on every native job.

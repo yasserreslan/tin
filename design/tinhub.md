@@ -77,7 +77,7 @@ are. tinhub imports tit's packages (`object`, `store`, `packfile`, `change`, `tr
 | `db` | migrations, `Db` (the Postgres clients), query helpers | net |
 | `packs` | `PackStore`, `DirStore`, `S3Store`, the cache | files, net |
 | `repo` | `PgRepo` (a `transport.Repo`) | net, files |
-| `accounts` | access checks, keys, sessions, audit | net |
+| `accounts` | access checks, keys, invites, sign-in, sessions, audit | net (files only through tit's `transport`, for its wire types) |
 | `events` | `Queue`, `Handler`, the worker loop | net |
 
 ---
@@ -362,3 +362,51 @@ only.
 | `LISTEN/NOTIFY` in `postgres` | missing: workers poll; live updates fan out through Redis or polling until it lands | #1013, #1023 |
 | a connection cap that holds (`MaxTotal`) | #856 | phase 1 runs with headroom below Postgres's `max_connections` |
 | memory allocated in main survives `anvil.Serve` | #1056 | config is read into `shared let` before cores start |
+
+---
+
+## 11. Accounts, sign-in and sessions (#1012)
+
+`products/tinhub/accounts` implements §5's access rule and design/tit.md §18 on the tables of migration `0001` (no
+schema change). The interface the protocol (#1018) and the API (#1019) call:
+
+```tin
+const RoleNone = 0; const RoleRead = 1; const RoleWrite = 2; const RoleAdmin = 3
+type Repo struct { Id i64; OwnerId i64; Owner str; Name str; Visibility str; DefaultBranch str; QuotaBytes i64; SizeBytes i64 }
+type User struct { Id i64; OwnerId i64; Name str; Email str; SiteAdmin bool }
+fn FindRepo(c postgres.Client, owner str, name str) !?Repo      // case-insensitive name; deleted repos are nil
+fn UserByEmail(c postgres.Client, email str) !?User
+fn KeysOf(c postgres.Client, userId i64) ![][]u8                 // raw 32-byte ed25519 public keys
+fn RoleOf(c postgres.Client, userId i64, r Repo) !i64           // userId 0 = anonymous
+fn Check(c postgres.Client, userId i64, r Repo, need i64) !     // ErrNotFound below read, ErrForbidden below need
+fn VerifySigned(c, nonceKey, method, path, signature, bodyHash, now) !User   // a Tit-Signature, by a live key
+```
+
+What each role allows: **read** heads, fetch, clone, the API's reads and replay capsules; **write** push; **admin**
+rename, visibility, soft delete and grants. A user who cannot read a repository gets `ErrNotFound` (404), never 403.
+Org members get nothing from membership alone; org owners are admin of the org's repositories. A deleted user, or a
+removed (revoked) key, has no access. Every change that alters access (accounts, site admin, orgs, members, teams,
+repositories, grants, keys, invites, approvals and sign-ins) writes its `audit_log` row in its own transaction, with
+the actor and the request's address; an invite's code is never logged.
+
+**Invites.** `CreateInvite(c, email, siteAdmin) !str` is what `tinhub admin invite` calls; the code lives 7 days and is
+spent once (its row locked `FOR UPDATE`). `POST /tit/v1/keys` (`KeyAdd`) checks that the request is signed by the key it
+adds, over the request's own path, then `AcceptInvite` makes the account when the email has none (named after the
+email's local part, numbered when taken), adds the key and the invite's org membership and site admin flag.
+
+**Sign-in.** A login request's code lives 10 minutes in `login_requests`: `pending`, then `approved` once by a request
+signed with a registered key (a second or late approval is `Moved`), then `used` once when the browser claims it. tit
+§18 adds one thing for browsers: `POST /tit/v1/login` also hands the asking browser a claim token (cookie
+`tinhub_login`, the code's HMAC under `secrets.cookie`), and only the holder of that token turns the approved code into
+a session, so a code seen on someone's screen is worth nothing. The JSON answers are tit's (`LoginAnswer`,
+`LoginState`; a used code reads as `approved`); refusals are tit error frames, with a fresh nonce on `Unauthorized`.
+`accounts.Service.Handle` answers these routes, at the root or under a repository's URL; the node mounts it.
+
+**Sessions.** A session is the Redis key `tinhub:session:<hex SHA-256(id)>` = `v1 <user id>`, 30 days from sign-in;
+the cookie `tinhub_session` is `<id>.<base64url HMAC-SHA256(secrets.cookie, "tinhub session " + id)>`. A node checks the
+HMAC before asking Redis, and Redis holds no usable cookie. Every node with the same Redis and `secrets.cookie` reads
+every session, so sessions survive restarts. **Losing Redis (or flushing it, or changing `secrets.cookie`) signs
+everyone out**; browsers sign in again with `tit login`, and nothing else is lost. A Redis fault on lookup counts as
+signed out. Without `redis.addr` there are no browser sessions (`ErrNoSessions`), which replaces §3's "per process"
+for sessions: a per-core store would sign a browser in on one core only. Requests signed with `Tit-Signature` need no
+session.
