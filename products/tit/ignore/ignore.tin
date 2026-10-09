@@ -85,6 +85,19 @@ fn (r mut Rules) Enter(dir str) ! {
 	try r.addFile(path, dir, false)
 }
 
+// EnterListed is Enter for a directory whose entries the caller has read: its .gitignore is read only when hasFile
+// says it is there, so a walk spends no lookup on the directories without one.
+fn (r mut Rules) EnterListed(dir str, hasFile bool) ! {
+	if hasFile {
+		try r.Enter(dir)
+		return
+	}
+	let (_, seen) = r.dirs[dir]
+	if !seen {
+		r.dirs[dir] = []Pattern{}
+	}
+}
+
 // Add adds the lines of an ignore file whose directory is base (relative to the root, "" for the root);
 // rules added later win over earlier ones in the same directory.
 fn (r mut Rules) Add(base str, text str) {

@@ -123,9 +123,11 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 		}
 	}
 	// the working directory
-	mut files = map[str]quarry.FileInfo{}
-	try walk(root, "", mut files, mut rules, idx, mut rep.Untracked)
-	try compareFiles(root, mut idx, files, mut rep)
+	// what the walk finds of each index entry's file, by the entry's position
+	mut infos = noInfos(len(idx.Entries))
+	mut found = make([]bool, len(idx.Entries))
+	try walk(root, "", mut infos, mut found, mut rules, idx, mut rep.Untracked)
+	try compareFiles(root, mut idx, infos, found, mut rep)
 	sortStatus(mut rep.Staged)
 	sortStatus(mut rep.Unstaged)
 	sift.Sort(mut rep.Untracked)
@@ -136,24 +138,35 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 // each), with no walk for untracked files and no tree read (#807).
 fn Unstaged(root str, idx mut Index) !Report {
 	mut rep = Report{Staged: []FileStatus{}, Unstaged: []FileStatus{}, Untracked: []str{}, Restat: false}
-	mut files = map[str]quarry.FileInfo{}
-	for e in idx.Entries {
-		if e.Stage != 0 {
+	mut infos = noInfos(len(idx.Entries))
+	mut found = make([]bool, len(idx.Entries))
+	for i in 0..len(idx.Entries) {
+		if idx.Entries[i].Stage != 0 {
 			continue
 		}
-		let (info, err) = quarry.Lstat(root + "/" + e.Path)
+		let (info, err) = quarry.Lstat(root + "/" + idx.Entries[i].Path)
 		if err == nil && (info.Type == quarry.FileType.Regular || info.Type == quarry.FileType.Symlink) {
-			files[e.Path] = info
+			infos[i] = info
+			found[i] = true
 		}
 	}
-	try compareFiles(root, mut idx, files, mut rep)
+	try compareFiles(root, mut idx, infos, found, mut rep)
 	sortStatus(mut rep.Unstaged)
 	return rep
 }
 
+// noInfos is n empty file infos, to be filled by position.
+fn noInfos(n i64) []quarry.FileInfo {
+	mut out = make([]quarry.FileInfo, 0, n)
+	for i in 0..n {
+		out = append(out, quarry.FileInfo{Type: quarry.FileType.Regular, Perm: 0, Size: 0, Mtime: 0, Ctime: 0, Inode: 0, Device: 0, Links: 0})
+	}
+	return out
+}
+
 // compareFiles adds to rep what differs between the index and the files found: deleted, of another type, or
 // changed (read and hashed when the stat cache cannot tell); the entries found unchanged get their new stat.
-fn compareFiles(root str, idx mut Index, files map[str]quarry.FileInfo, rep mut Report) ! {
+fn compareFiles(root str, idx mut Index, infos []quarry.FileInfo, found []bool, rep mut Report) ! {
 	// unstaged: the index against the files
 	mut toHash = []str{}
 	mut hashIdx = []i64{}
@@ -162,8 +175,8 @@ fn compareFiles(root str, idx mut Index, files map[str]quarry.FileInfo, rep mut 
 		if e.Stage != 0 {
 			continue
 		}
-		let (info, present) = files[e.Path]
-		if !present {
+		let info = infos[i]
+		if !found[i] {
 			rep.Unstaged = append(rep.Unstaged, FileStatus.Deleted(e.Path))
 			continue
 		}
@@ -184,7 +197,7 @@ fn compareFiles(root str, idx mut Index, files map[str]quarry.FileInfo, rep mut 
 	for k in 0..len(hashed) {
 		let i = hashIdx[k]
 		let e = idx.Entries[i]
-		let info = files[e.Path]
+		let info = infos[i]
 		if len(hashed[k].Err) > 0 {
 			fail fault.Wrap(ErrUnreadable, "{e.Path}: {hashed[k].Err}")
 		}
@@ -204,13 +217,21 @@ fn hasTracked(idx Index, dir str) bool {
 	return at < len(idx.Entries) && twine.HasPrefix(idx.Entries[at].Path, prefix)
 }
 
-fn walk(root str, dir str, files mut map[str]quarry.FileInfo, rules mut ignore.Rules, idx Index, untracked mut []str) ! {
+fn walk(root str, dir str, infos mut []quarry.FileInfo, found mut []bool, rules mut ignore.Rules, idx Index, untracked mut []str) ! {
 	mut full = root
 	if len(dir) > 0 {
 		full = root + "/" + dir
-		try rules.Enter(dir)
 	}
 	let entries = try quarry.ReadDirEntries(full)
+	if len(dir) > 0 {
+		mut hasIgnore = false
+		for e in entries {
+			if e.Name == ".gitignore" {
+				hasIgnore = true
+			}
+		}
+		try rules.EnterListed(dir, hasIgnore)
+	}
 	for e in entries {
 		if len(dir) == 0 && (e.Name == ".tit" || e.Name == ".git") {
 			continue
@@ -223,18 +244,19 @@ fn walk(root str, dir str, files mut map[str]quarry.FileInfo, rules mut ignore.R
 			if rules.Ignored(rel, true) && !hasTracked(idx, rel) {
 				continue
 			}
-			try walk(root, rel, mut files, mut rules, idx, mut untracked)
+			try walk(root, rel, mut infos, mut found, mut rules, idx, mut untracked)
 			continue
 		}
 		if e.Type != quarry.FileType.Regular && e.Type != quarry.FileType.Symlink {
 			continue
 		}
-		let info = try quarry.Lstat(root + "/" + rel)
-		files[rel] = info
-		// a conflicted file has only stages 1 to 3, and is tracked all the same
-		let (b, o, t) = idx.Stages(rel)
-		let tracked = idx.Find(rel)
-		if tracked == nil && !b && !o && !t && !rules.Ignored(rel, false) {
+		// one lookup: a path the index has at any stage is tracked (a conflicted file has only stages 1 to 3); only a
+		// tracked file's stat is wanted
+		let at = idx.lowerBound(rel)
+		if at < len(idx.Entries) && idx.Entries[at].Path == rel {
+			infos[at] = try quarry.Lstat(root + "/" + rel)
+			found[at] = true
+		} else if !rules.Ignored(rel, false) {
 			untracked = append(untracked, rel)
 		}
 	}
