@@ -1046,6 +1046,29 @@ fn (ed Editor) StatusLine() str {
 	return ed.Message
 }
 
+// Counts is what the status bar says about the whole text: the lines, the words and the characters.
+// A word is a run of anything but spaces, tabs, newlines and carriage returns.
+fn (ed Editor) Counts() str {
+	let text = ed.Buf.Text()
+	mut lines = 1
+	mut words = 0
+	mut inWord = false
+	for i in 0..len(text) {
+		let c = text[i]
+		if c == '\n' {
+			lines += 1
+		}
+		let space = c == ' ' || c == '\t' || c == '\n' || c == '\r'
+		if space {
+			inWord = false
+		} else if !inWord {
+			inWord = true
+			words += 1
+		}
+	}
+	return mint.Itoa(lines) + " lines, " + mint.Itoa(words) + " words, " + mint.Itoa(len(text)) + " chars"
+}
+
 // SelectionInfo is what the status bar adds to the cursor position while text is selected: the lines and
 // characters it spans ("" without a selection).
 fn (ed Editor) SelectionInfo() str {

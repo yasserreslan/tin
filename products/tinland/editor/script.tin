@@ -88,6 +88,7 @@ fn (ed Editor) dump() {
 //   sort, trim       sorts the touched lines, removes their trailing spaces and tabs
 //   whitespace       toggles the whitespace marks (prints the new state)
 //   tabs             prints how many tabs are open, which is active and its name; closeothers keeps the active
+//   counts           prints the text's lines, words and characters
 //   one, closeall leaves one empty tab
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
@@ -233,6 +234,8 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
 		} else if step == "selnext" {
 			say.Line("selected:", ed.SelectNext())
+		} else if step == "counts" {
+			say.Line("counts", ed.Counts())
 		} else if step == "tabs" {
 			say.Line("tabs", len(ed.Tabs), ed.Active + 1, ed.Name())
 		} else if step == "closeothers" {

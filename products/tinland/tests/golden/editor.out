@@ -274,11 +274,5 @@ fn main() {
 	say.Line(x)
 }
 
-selected: true
---- untitled row 1 col 20 dirty true
-selection: o
-one two one three one
---- untitled row 1 col 24 dirty true
-xone twxo xone three oxne
---- untitled row 1 col 24 dirty true
-xone twxo xone three oxne
+counts 2 lines, 4 words, 18 chars
+counts 2 lines, 4 words, 18 chars
