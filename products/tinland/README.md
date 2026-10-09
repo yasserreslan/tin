@@ -33,7 +33,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
 | Cmd+1 to 9, Ctrl+Tab | switch tabs |
 | Cmd+Z, Cmd+Shift+Z | undo, redo |
-| Cmd+X, C, V, A | cut, copy, paste, select all (a cut or copy without a selection takes the line) |
+| Cmd+X, C, V, Ctrl+L, A | cut, copy, paste, select the caret's line, select all (a cut or copy without a selection takes the line) |
 | Cmd+F, Cmd+G (Shift: backwards) | find as you type; Tab switches to the replacement, Return replaces, Cmd+Return replaces all |
 | Cmd+L | go to line |
 | Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |

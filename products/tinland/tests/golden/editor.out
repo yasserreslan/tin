@@ -274,4 +274,12 @@ fn main() {
 	say.Line(x)
 }
 
-message: reverted sample.txt
+--- untitled row 3 col 6 dirty true
+selection: three
+one
+two
+three
+--- untitled row 3 col 6 dirty true
+one
+two
+three
