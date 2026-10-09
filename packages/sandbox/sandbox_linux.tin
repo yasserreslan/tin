@@ -54,7 +54,6 @@ const fDupfdCloexec = 1030
 const oWronly = 1
 const oCreat = 64
 const oNonblock = 2048
-const oDirectory = 0x10000
 const oCloexec = 0x80000
 const oPath = 0x200000
 

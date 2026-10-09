@@ -285,3 +285,6 @@ fn syscallNumber(name str) i64 {
 		_ => -1
 	}
 }
+
+// oDirectory is O_DIRECTORY on x86-64.
+const oDirectory = 0x10000

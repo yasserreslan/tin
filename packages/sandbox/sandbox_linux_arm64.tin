@@ -249,3 +249,6 @@ fn syscallNumber(name str) i64 {
 		_ => -1
 	}
 }
+
+// oDirectory is O_DIRECTORY on arm64 (040000; 0x10000 there is O_DIRECT, which a directory refuses with EINVAL).
+const oDirectory = 0x4000
