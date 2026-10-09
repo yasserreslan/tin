@@ -16,12 +16,11 @@ const l6 = 1.531383769920937332e-01
 
 const l7 = 1.479819860511658591e-01
 
-// Log returns the natural logarithm of x. Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN.
-// It is Go's math.Log on each architecture, bit for bit (#942). On arm64 it is Go's pure-Go log, whose fused
-// multiply-adds are written here as the products Tin's arm64 backend fuses the same way (`x*y + z` and `z + x*y`
-// fuse, `z - x*y` does not, so `-z + x*y` stands for Go's fused `x*y - z`). On amd64 it is Go's assembly, the same
-// operations unfused, with its own special cases, Frexp and comparison (logAmd64).
+// Log returns the natural logarithm of x: Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN; bit for bit Go's math.Log (#942).
 fn Log(x f64) f64 {
+	// On arm64 this is Go's pure-Go log, whose fused multiply-adds are written as the products Tin's arm64 backend fuses the
+	// same way (`x*y + z` and `z + x*y` fuse, `z - x*y` does not, so `-z + x*y` stands for Go's fused `x*y - z`). On amd64 it
+	// is Go's assembly, the same operations unfused, with its own special cases, Frexp and comparison (logAmd64).
 	if logAmd64 {
 		if x == 0 {
 			return Inf(-1)
