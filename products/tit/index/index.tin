@@ -249,10 +249,13 @@ fn le64(s str, at i64) i64 {
 
 // Read reads an index file; a missing file is an empty index.
 fn Read(path str) !Index {
-	if !quarry.Exists(path) {
-		return New()
+	let (st, missing) = quarry.Lstat(path)
+	if missing != nil {
+		if !quarry.Exists(path) {
+			return New()
+		}
+		fail missing
 	}
-	let st = try quarry.Lstat(path)
 	let written = st.Mtime
 	let data = try flume.ReadFile(path)
 	if len(data) < 20 + 32 || data[0:8] != "TITINDEX" || i64(pack.LE.U32([]u8(data[8:12]))) != 1 {
@@ -269,11 +272,21 @@ fn Read(path str) !Index {
 		if at >= end {
 			fail fault.Wrap(ErrBadIndex, "{path}: cut off")
 		}
-		let (plen, n) = pack.Uvarint([]u8(data[at:min(end, at + 10)])) catch _ {
-			fail fault.Wrap(ErrBadIndex, "{path}: a bad path length")
+		// the path's length, a uvarint read in place (a slice per entry was most of reading the index, #807)
+		mut p = 0
+		mut shift = 0
+		for {
+			if at >= end || shift > 35 {
+				fail fault.Wrap(ErrBadIndex, "{path}: a bad path length")
+			}
+			let b = i64(data[at])
+			at += 1
+			p = p | ((b & 127) << shift)
+			shift += 7
+			if b < 128 {
+				break
+			}
 		}
-		at += n
-		let p = i64(plen)
 		if p <= 0 || at + p + 2 + 32 + 40 > end {
 			fail fault.Wrap(ErrBadIndex, "{path}: cut off")
 		}
@@ -281,9 +294,10 @@ fn Read(path str) !Index {
 		at += p
 		let mode = try modeOf(i64(data[at]))
 		let stage = i64(data[at + 1])
-		let id = try object.IdOf(data[at + 2:at + 34])
+		// the id's 32 bytes, kept as they are (the length is fixed by the format)
+		let hash = data[at + 2:at + 34]
 		at += 34
-		out = append(out, Entry{Path: name, Hash: id.Bytes(), Mode: mode, Stage: stage, Size: le64(data, at), Mtime: le64(data, at + 8), Ctime: le64(data, at + 16), Inode: le64(data, at + 24), Device: le64(data, at + 32)})
+		out = append(out, Entry{Path: name, Hash: hash, Mode: mode, Stage: stage, Size: le64(data, at), Mtime: le64(data, at + 8), Ctime: le64(data, at + 16), Inode: le64(data, at + 24), Device: le64(data, at + 32)})
 		at += 40
 	}
 	if at != end {
