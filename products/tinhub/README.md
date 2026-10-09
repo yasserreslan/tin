@@ -113,6 +113,25 @@ private key is written only into a run's sandbox directory and removed with it. 
   `{"op":"subscribe"|"unsubscribe","topic":…}`, receive `{"op":"event","topic","id","kind","payload"}`. Any node
   serves any subscriber: each polls the events table.
 
+## Symbols and review diffs
+
+A push's fan-out queues an `index` job for each head it moved and change version it added (`index.EnqueueFor`) and a
+`review.diff` job for each change version (`diffs.EnqueueFor`). The index runs `tinc -symbols -json` on the packages
+that changed, in `packages/sandbox` (or, where the host cannot build one, a plain child process; logged), and keeps
+rows only for current heads and open changes. A file the compiler cannot read is indexed from its text.
+
+- `GET /api/v1/repos/{owner}/{repo}/symbols?q=&ref=&change=&limit=&cursor=`: the declarations at a head (`ref`,
+  default the default branch) or a change's newest version whose names start with `q` (`kind:Name`, `Type.Method`).
+- `GET /api/v1/search?q=fn:ReadFile`: a declaration by name at the default branch of every repository the caller can
+  read.
+- `GET /api/v1/repos/{owner}/{repo}/changes/{change}/diffs/{base|previous}?version=`: a version's kept diff against its
+  base or the version before it (semantic: each changed declaration with its line diff; or `kind: lines` with the
+  reason); 202 until the job has computed it.
+- `GET /api/v1/repos/{owner}/{repo}/changes/{change}/overlaps`: the other open changes that touch the declarations the
+  change's newest version touches, and those declarations.
+
+`TINHUB_TEST_INDEX_TIN=1` adds the index of this repository to the Postgres tests (about a minute).
+
 ## Health and shutdown
 
 - `GET /healthz`: 200 while the process runs.

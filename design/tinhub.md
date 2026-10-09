@@ -58,7 +58,9 @@ products/tinhub/proto/            tit's protocol mounted for every repository (#
 products/tinhub/accounts/         users, orgs, teams, keys, invites, sessions and access (#1012)
 products/tinhub/api/              the JSON API under /api/v1 (#1019)
 products/tinhub/events/           the event queue and the worker loop (#1013)
-products/tinhub/workers/          the job handlers: repack, prune, purge, mirror, index, diffs (#1014, #1020, #1021)
+products/tinhub/workers/          the job handlers: repack, prune, purge, mirror (#1014)
+products/tinhub/index/            the symbol index: the index job, tinc in the sandbox, search (#1020)
+products/tinhub/diffs/            review diffs between versions and overlaps (#1021)
 products/tinhub/capsules/         the capsule store and failure groups (#1022; not `replay`: tit imports std replay)
 products/tinhub/notify/           notifications, webhooks and the live websocket (#1023)
 products/tinhub/review/           reviews, comments, checks and landing (#1025)
@@ -234,10 +236,30 @@ versions (design/tit.md §16).
 
 | table | columns | constraints |
 |---|---|---|
-| `symbols` | `repo_id`, `commit_id text`, `package text`, `name text`, `kind text`, `file text`, `line int`, `end_line int` | index `(repo_id, commit_id)`, index `(lower(name))` |
+| `symbols` | `repo_id`, `commit_id text`, `package text`, `name text`, `kind text`, `file text`, `line int`, `end_line int`, `recv text` (a method's receiver) | index `(repo_id, commit_id)`, index `(lower(name))`, index `(repo_id, lower(name))` |
+| `indexed_commits` | `repo_id`, `commit_id text`, `packages int`, `reindexed int` (the packages the compiler ran on), `base text` (the commit the rest was copied from), `runner text` (`sandbox`, `process`), `created_at` | `primary key (repo_id, commit_id)` |
+| `change_decls` | `repo_id`, `change_id text`, `version int`, `decl text` (`<package dir>: <key>`, as tit overlap names it) | `primary key (repo_id, change_id, version, decl)`, index `(repo_id, decl)` |
 | `change_overlaps` | `repo_id`, `change_id text`, `version int`, `other_change_id text`, `decl text`, `created_at` | `primary key (repo_id, change_id, version, other_change_id, decl)` |
 | `diffs` | `repo_id`, `change_id text`, `version int`, `against text` (`base`, `previous`), `kind text` (`semantic`, `lines`), `body text` (capped; a large one is `""` and stored in the pack store), `stored bool` | `primary key (repo_id, change_id, version, against)` |
 | `bench_results` | `id`, `repo_id`, `commit_id text`, `name text`, `value double precision`, `unit text`, `os text`, `arch text`, `cpu text`, `kernel text`, `machine text`, `created_at` | index `(repo_id, name, created_at)` |
+
+The index (#1020) checks out a commit's Tin files (and the files their `// embed:` lines name) and runs `tinc -symbols
+-json` on them in batches of 300, in `packages/sandbox` with no network (a plain child process where the host cannot
+build a sandbox), under `ulimit -v 2g -t 60` and a timeout, its output written to a file in its scratch directory. One
+error stops a run, so a batch goes on without the file it names (that file's package split off into a batch of its
+own), and a file no run reads, after four drops in its package or a minute of runs, is indexed from its text
+(tit/semantic). A push re-runs only the packages whose Tin files changed since the commit it replaced (the head's old
+target, the version it replaces) and copies the rest. Only heads and the newest versions of open changes keep rows. On
+Linux x86-64 (4 cores) the Tin repository (3153 files, 1719 Tin) indexes in about 62 s within 256mb; an edit of one
+package in under 2 s.
+
+Review diffs (#1021) read the files first (each in an arena of its own past 128mb: tit's inflater takes up to six times
+a file), then compute the semantic diff inside `within 5s` and `limit memory 48mb`; over either, or when the texts
+alone are over 48mb, the diff is a line diff (only what lies between the lines both texts start and end with is split
+and diffed, with tit/diff's cost bound). Against the previous version it is an interdiff: a declaration shows when the
+versions differ in it and the difference is not the rebase's (neither version edited it, or both made the same edit on
+their bases). A diff over 256 KiB is kept in the pack store. The overlap step runs in the same job, from the semantic
+diff's declarations (one read of each text), so there is no separate `overlap` kind.
 
 ### Replay (#1022)
 
@@ -305,8 +327,7 @@ in the push transaction). Workers run handlers by `kind`; a job is an event in t
 |---|---|---|---|
 | `push` | a push | fan-out: index, diffs, overlap, notify, webhooks, mirror, repack check | 30s, 32mb |
 | `index` | `push` | symbols for moved heads and new versions (#1020) | 2m, 256mb |
-| `review.diff` | `push` | semantic diffs of a new version (#1021) | 5s, 48mb |
-| `overlap` | `push` | overlaps of a new version (#1021) | 10s, 32mb |
+| `review.diff` | `push` | semantic diffs of a new version (5s, 48mb each, else a line diff) and its overlaps (#1021) | 30s, 512mb |
 | `repack` | `push` when live packs exceed `repack.packs` | #1014 | 10m, 512mb |
 | `prune` | nightly | #1014 | 30m, 512mb |
 | `purge` | an admin | #1014 | 30m, 512mb |

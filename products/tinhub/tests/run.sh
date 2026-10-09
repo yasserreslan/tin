@@ -72,6 +72,13 @@ if command -v go > /dev/null 2>&1 && (cd bench/ref/tinhub_hooks && go build -o "
 else
 	echo "SKIP tinhub notify (no Go, or the webhook receiver does not build)"
 fi
+# the symbol index of this repository takes about a minute: only with TINHUB_TEST_INDEX_TIN=1
+if [ "${TINHUB_TEST_INDEX_TIN:-}" = 1 ]; then
+	TIN_ROOT=$PWD "$compiler" -o "$tmp/index_tin" products/tinhub/tests/programs/index_tin.tin
+	sh products/tinhub/tests/index.sh "$tmp/index_tin"
+else
+	echo "SKIP tinhub index of the Tin repository (TINHUB_TEST_INDEX_TIN is not 1)"
+fi
 # a server: not ready before tinhub migrate, ready after, and a request in flight at SIGTERM completes
 "$tmp/queue_worker" setup 0 > /dev/null
 dbaddr=${TINHUB_TEST_DB%%/*}
