@@ -64,7 +64,9 @@ fn openWith(g Global, withPacks bool) !Repo {
 		try recoverPending(ws.Store)
 	}
 	let loose = store.NewLoose(ws.Store + "/objects")
-	mut layers = []dyn store.ObjectStore{loose}
+	// the loose store takes the writes and is read last, after the packs, as git reads them (#807: looking in the loose
+	// store first was a stat for every object read from a pack)
+	mut layers = []dyn store.ObjectStore{writes{loose: loose}}
 	mut packs = []packfile.Pack{}
 	let pdir = ws.Store + "/packs"
 	if withPacks && quarry.IsDir(pdir) {
@@ -77,6 +79,7 @@ fn openWith(g Global, withPacks bool) !Repo {
 			}
 		}
 	}
+	layers = append(layers, loose)
 	mut r = Repo{Ws: ws, Store: store.NewLayered(layers), ids: objects{loose: loose, packs: packs}, layers: layers}
 	// a lazy clone reads what it left out from its remote (lazy.tin)
 	let z = try lazyOf(r)
@@ -84,6 +87,37 @@ fn openWith(g Global, withPacks bool) !Repo {
 		r.Store = r.Store.WithFallback(z)
 	}
 	return r
+}
+
+// writes is the layer in front of a repository's store that takes its writes into the loose store; it holds nothing
+// for reads, which find loose objects in the last layer.
+type writes struct {
+	loose store.Loose
+}
+
+// Has is false: the loose store answers as the last layer.
+fn (w writes) Has(id object.Id) bool {
+	return false
+}
+
+// GetRaw fails: the loose store answers as the last layer.
+fn (w mut writes) GetRaw(id object.Id) !(object.Kind, str) {
+	fail fault.Wrap(store.ErrNotFound, id.Hex())
+}
+
+// Get fails: the loose store answers as the last layer.
+fn (w mut writes) Get(id object.Id) !object.Object {
+	fail fault.Wrap(store.ErrNotFound, id.Hex())
+}
+
+// PutRaw writes to the loose store.
+fn (w mut writes) PutRaw(kind object.Kind, body str) !object.Id {
+	return try w.loose.PutRaw(kind, body)
+}
+
+// Put writes to the loose store.
+fn (w mut writes) Put(o object.Object) !object.Id {
+	return try w.loose.Put(o)
 }
 
 fn recoverPending(store str) ! {

@@ -3,7 +3,6 @@ package packfile
 import "../object"
 import "fault"
 import "flume"
-import "pack"
 import "quarry"
 import "seal"
 import "sift"
@@ -65,8 +64,11 @@ type Pack struct {
 	// idx is the index file: its ids, offsets and CRCs are read from it where they are (#807: copying them out on
 	// every open cost more than a status)
 	idx str
-	// ranged counts the entries read one by one (entryBytes)
+	// ranged counts the entries read one by one (entrySpan); win is the last range of the file read for them, from
+	// winAt, which holds the next entries too when they follow (one read for several, #807)
 	ranged i64
+	win    str
+	winAt  i64
 	fanout []i64
 	cache  map[i64]str
 	kinds  map[i64]object.Kind
@@ -111,7 +113,7 @@ fn Open(path str) !Pack {
 	}
 	let count = le64(head, 12)
 	let idxPath = path[0:len(path) - 5] + ".idx"
-	let idx = try flume.ReadFile(idxPath)
+	let idx = try quarry.ReadFileBound(idxPath, 1 << 40)
 	let want = 8 + 4 + 8 + 1024 + count * 44 + 64
 	if count < 0 || count > info.Size || len(idx) != want || idx[0:8] != "TITIDX\x00\x00" || le32(idx, 8) != 1 || le64(idx, 12) != count {
 		fail fault.Wrap(ErrBadPack, "{idxPath}: not the index of this pack")
@@ -130,7 +132,7 @@ fn Open(path str) !Pack {
 	}
 	// The index's hash and the order of its ids are checked by Verify (tit verify), as git checks its own indexes
 	// in fsck: an open reads only what it needs, and an offset is checked where it is used.
-	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ranged: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ranged: 0, win: "", winAt: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
 }
 
 // idsAt is where the ids start in an index: after its header (20 bytes) and fan-out table (1024).
@@ -219,11 +221,11 @@ fn (p mut Pack) load() ! {
 	if p.loaded {
 		return
 	}
-	let data = try flume.ReadFile(p.Path)
+	let data = try quarry.ReadFileBound(p.Path, p.size + 1)
 	if len(data) != p.size || data[len(data) - 32:] != p.trailer || data[0:8] != "TITPACK\x00" {
 		fail fault.Wrap(ErrBadPack, "{p.Path}: the pack does not match its index")
 	}
-	p.data = keep(data)
+	p.data = data
 	p.loaded = true
 }
 
@@ -231,7 +233,8 @@ fn (p Pack) uvarint(at i64) !(i64, i64) {
 	if at >= len(p.data) - 32 {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 	}
-	let (v, n) = pack.Uvarint([]u8(p.data[at:min(len(p.data) - 32, at + 10)])) catch _ {
+	let (v, n, ok) = uvarintAt(p.data, at, len(p.data) - 32)
+	if !ok {
 		fail fault.Wrap(ErrBadPack, "a bad varint at {at}")
 	}
 	if v > u64(1) << 40 {
@@ -243,9 +246,10 @@ fn (p Pack) uvarint(at i64) !(i64, i64) {
 // wholeUnder is the size under which a pack is read whole the first time an object of it is.
 const wholeUnder = 256 << 10
 
-// entryBytes is the entry at off, up to the next one: from the pack's bytes once they are read, otherwise only that
-// range of the file (quarry.ReadAt), so reading a few objects of a large pack reads a few entries of it.
-fn (p mut Pack) entryBytes(off i64) !str {
+// entrySpan is where the entry at off is, up to the next one: in the pack's bytes once they are read (s is p.data, the
+// entry from off to off + n: #807, a slice would copy every entry), otherwise in that range of the file alone
+// (quarry.ReadAt), from 0, so reading a few objects of a large pack reads a few entries of it.
+fn (p mut Pack) entrySpan(off i64) !(str, i64, i64) {
 	if off < 20 || off >= p.size - 32 {
 		fail fault.Wrap(ErrBadPack, "no entry at {off}")
 	}
@@ -254,29 +258,38 @@ fn (p mut Pack) entryBytes(off i64) !str {
 		try p.load()
 	}
 	if p.loaded {
-		let n = try entryLen(p.data[off:min(p.size - 32, off + maxHead)])
+		let n = try entryLenIn(p.data, off, min(p.size - 32, off + maxHead))
 		if off + n > p.size - 32 {
 			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 		}
-		return p.data[off:off + n]
+		return p.data, off, off + n
 	}
 	// the entry's header says how long it is (#807: sorting every offset to find where one entry ends cost more than
-	// a log -n 1): read the header, then the rest when the first read did not hold it
+	// a log -n 1): read a window from the entry on, then the rest when the window did not hold it
 	p.ranged += 1
-	let head = try quarry.ReadAt(p.Path, off, min(maxHead, p.size - 32 - off))
-	let n = try entryLen(head)
-	if off + n > p.size - 32 {
+	let stop = p.size - 32
+	let headEnd = min(stop, off + maxHead)
+	if len(p.win) == 0 || off < p.winAt || headEnd > p.winAt + len(p.win) {
+		p.win = try quarry.ReadAt(p.Path, off, min(windowSize, stop - off))
+		p.winAt = off
+	}
+	let n = try entryLenIn(p.win, off - p.winAt, min(headEnd, p.winAt + len(p.win)) - p.winAt)
+	if off + n > stop {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 	}
-	if n <= len(head) {
-		return head[0:n]
+	if off + n > p.winAt + len(p.win) {
+		p.win = try quarry.ReadAt(p.Path, off, max(n, min(windowSize, stop - off)))
+		p.winAt = off
+		if len(p.win) < n {
+			fail fault.Wrap(ErrBadPack, "{p.Path} is shorter than its index says")
+		}
 	}
-	let e = try quarry.ReadAt(p.Path, off, n)
-	if len(e) != n {
-		fail fault.Wrap(ErrBadPack, "{p.Path} is shorter than its index says")
-	}
-	return e
+	return p.win, off - p.winAt, off - p.winAt + n
 }
+
+// windowSize is how much of the file a read of one entry reads at first: most commits and trees fit, so one read
+// takes the whole entry, and the next entry when it follows.
+const windowSize = 4 << 10
 
 // headAt is the first bytes of the entry at off, enough for its header.
 fn (p mut Pack) headAt(off i64) !str {
@@ -327,92 +340,151 @@ fn (p mut Pack) KindAt(i i64) !object.Kind {
 // maxHead is the most bytes an entry's header takes: its type, size, base (an offset or an id) and compressed length.
 const maxHead = 1 + 10 + 32 + 10
 
-// entryLen is the length of the entry whose first bytes are h: its header and its compressed bytes.
-fn entryLen(h str) !i64 {
-	if len(h) == 0 {
+// entryLenIn is the length of the entry whose first bytes are s[from:end]: its header and its compressed bytes.
+fn entryLenIn(s str, from i64, end i64) !i64 {
+	if end <= from {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 	}
-	let t = i64(h[0])
-	let (_, a) = try varintIn(h, 1)
+	let t = i64(s[from])
+	let (_, a) = try varintTo(s, from + 1, end)
 	mut at = a
 	if t == typeOfsDelta {
-		let (_, b) = try varintIn(h, at)
+		let (_, b) = try varintTo(s, at, end)
 		at = b
 	} else if t == typeRefDelta {
 		at += 32
 	}
-	let (clen, c) = try varintIn(h, at)
-	return c + clen
+	let (clen, c) = try varintTo(s, at, end)
+	return c - from + clen
 }
 
-// storedZlib is the data of a zlib stream made only of stored blocks, when it is exactly size bytes and its Adler-32
-// matches; otherwise "" (the caller inflates it, which also reports what is wrong with it). size 0 is never stored.
-fn storedZlib(z str, size i64) str {
+// storedZlibIn is the data of the zlib stream s[from:end] when it is made only of stored blocks, exactly size bytes,
+// and its Adler-32 matches; otherwise "" (the caller inflates it, which also reports what is wrong with it). size 0 is
+// never stored. The stream is read where it is: only the data is copied out (#807).
+fn storedZlibIn(s str, from i64, end i64, size i64) str {
+	let zn = end - from
 	// the header: deflate with a 32 KiB window, no dictionary, a multiple of 31
-	if size <= 0 || len(z) < 2 + 5 + 4 || (i64(z[0]) & 15) != 8 || (i64(z[1]) & 32) != 0 || (i64(z[0]) * 256 + i64(z[1])) % 31 != 0 {
+	if size <= 0 || zn < 2 + 5 + 4 || (i64(s[from]) & 15) != 8 || (i64(s[from + 1]) & 32) != 0 || (i64(s[from]) * 256 + i64(s[from + 1])) % 31 != 0 {
 		return ""
 	}
 	// one final block, as almost every commit and tree is: the body is a slice of the stream
-	if i64(z[2]) == 1 && len(z) == 2 + 5 + size + 4 {
-		let n = i64(z[3]) | (i64(z[4]) << 8)
-		let nn = i64(z[5]) | (i64(z[6]) << 8)
+	if i64(s[from + 2]) == 1 && zn == 2 + 5 + size + 4 {
+		let n = i64(s[from + 3]) | (i64(s[from + 4]) << 8)
+		let nn = i64(s[from + 5]) | (i64(s[from + 6]) << 8)
 		if n == size && n ^ nn == 65535 {
-			let body = z[7:7 + n]
-			let at = 7 + n
-			let sum = (u32(z[at]) << 24) | (u32(z[at + 1]) << 16) | (u32(z[at + 2]) << 8) | u32(z[at + 3])
-			if stamp.Adler32(body) == sum {
-				return body
+			let at = from + 7 + n
+			let sum = (u32(s[at]) << 24) | (u32(s[at + 1]) << 16) | (u32(s[at + 2]) << 8) | u32(s[at + 3])
+			if adler32In(s, from + 7, at) == sum {
+				return s[from + 7:at]
 			}
 			return ""
 		}
 	}
 	mut out = make([]u8, 0, size)
-	mut at = 2
+	mut at = from + 2
 	for {
-		if at + 5 > len(z) {
+		if at + 5 > end {
 			return ""
 		}
-		let h = i64(z[at])
+		let h = i64(s[at])
 		// BTYPE 00 (stored) and nothing else in the header byte
 		if (h >> 1) != 0 {
 			return ""
 		}
-		let n = i64(z[at + 1]) | (i64(z[at + 2]) << 8)
-		let nn = i64(z[at + 3]) | (i64(z[at + 4]) << 8)
-		if n ^ nn != 65535 || at + 5 + n > len(z) || len(out) + n > size {
+		let n = i64(s[at + 1]) | (i64(s[at + 2]) << 8)
+		let nn = i64(s[at + 3]) | (i64(s[at + 4]) << 8)
+		if n ^ nn != 65535 || at + 5 + n > end || len(out) + n > size {
 			return ""
 		}
 		for k in 0..n {
-			out = append(out, z[at + 5 + k])
+			out = append(out, s[at + 5 + k])
 		}
 		at += 5 + n
 		if h & 1 == 1 {
 			break
 		}
 	}
-	if at + 4 != len(z) || len(out) != size {
+	if at + 4 != end || len(out) != size {
 		return ""
 	}
 	let body = str(out)
-	let sum = (u32(z[at]) << 24) | (u32(z[at + 1]) << 16) | (u32(z[at + 2]) << 8) | u32(z[at + 3])
+	let sum = (u32(s[at]) << 24) | (u32(s[at + 1]) << 16) | (u32(s[at + 2]) << 8) | u32(s[at + 3])
 	if stamp.Adler32(body) != sum {
 		return ""
 	}
 	return body
 }
 
+// adler32In is the Adler-32 of s[from:to], as stamp.Adler32 of that slice, read in place and four bytes a step (#807:
+// it cost more than the SHA-256 that checks each object). The sums fit in 64 bits for up to 2^28 bytes between
+// reductions (b grows by at most 255 * n * n / 2), so they are reduced once every 2^24 bytes.
+@wrap fn adler32In(s str, from i64, to i64) u32 {
+	mut a = u64(1)
+	mut b = u64(0)
+	mut i = from
+	for i < to {
+		let end = min(to, i + (1 << 24))
+		for i + 4 <= end {
+			let c0 = u64(s[i])
+			let c1 = u64(s[i + 1])
+			let c2 = u64(s[i + 2])
+			let c3 = u64(s[i + 3])
+			b = b + 4 * a + 4 * c0 + 3 * c1 + 2 * c2 + c3
+			a = a + c0 + c1 + c2 + c3
+			i += 4
+		}
+		for i < end {
+			a = a + u64(s[i])
+			b = b + a
+			i += 1
+		}
+		a = a % 65521
+		b = b % 65521
+	}
+	return u32(b << 16 | a)
+}
+
 // varintIn is the uvarint at e[at:] and where it ends, within e.
 fn varintIn(e str, at i64) !(i64, i64) {
-	if at >= len(e) {
+	return try varintTo(e, at, len(e))
+}
+
+// varintTo is the uvarint at s[at:] and where it ends, within the bytes before end.
+fn varintTo(s str, at i64, end i64) !(i64, i64) {
+	if at >= end {
 		fail fault.Wrap(ErrBadPack, "an entry runs past its end")
 	}
-	let (v, n) = pack.Uvarint([]u8(e[at:min(len(e), at + 10)])) catch _ {
+	let (v, n, ok) = uvarintAt(s, at, end)
+	if !ok {
 		fail fault.Wrap(ErrBadPack, "a bad varint")
 	}
 	if v > u64(1) << 40 {
 		fail fault.Wrap(ErrBadPack, "a size too large")
 	}
 	return i64(v), at + n
+}
+
+// uvarintAt reads the uvarint at s[at:], within the bytes before end and at most ten of them, as pack.Uvarint reads it
+// from that slice but in place (a slice and its []u8 were two copies a number): its value, its length, and false when
+// it is cut off or overflows.
+fn uvarintAt(s str, at i64, end i64) (u64, i64, bool) {
+	let stop = min(end, at + 10)
+	mut x = u64(0)
+	mut sh = u64(0)
+	mut i = at
+	for i < stop {
+		let c = s[i]
+		if c < 0x80 {
+			if i - at == 9 && c > 1 {
+				return 0, 0, false
+			}
+			return x | (u64(c) << sh), i + 1 - at, true
+		}
+		x = x | (u64(c & 0x7f) << sh)
+		sh += 7
+		i += 1
+	}
+	return 0, 0, false
 }
 
 // entryAt reads the object at offset off, resolving deltas up to MaxDeltaDepth.
@@ -424,20 +496,20 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 	if hit {
 		return p.kinds[off], cached
 	}
-	let e = try p.entryBytes(off)
-	let t = i64(e[0])
-	let (size, a) = try varintIn(e, 1)
+	let (e, from, end) = try p.entrySpan(off)
+	let t = i64(e[from])
+	let (size, a) = try varintTo(e, from + 1, end)
 	mut baseOff = -1
 	mut at = a
 	if t == typeOfsDelta {
-		let (dist, b) = try varintIn(e, at)
+		let (dist, b) = try varintTo(e, at, end)
 		baseOff = off - dist
 		if dist <= 0 || baseOff < 20 {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against no earlier entry")
 		}
 		at = b
 	} else if t == typeRefDelta {
-		if at + 32 > len(e) {
+		if at + 32 > end {
 			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 		}
 		let baseId = try object.IdOf(e[at:at + 32])
@@ -451,19 +523,19 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 		}
 		at += 32
 	}
-	let (clen, c) = try varintIn(e, at)
-	if c + clen > len(e) {
+	let (clen, c) = try varintTo(e, at, end)
+	if c + clen > end {
 		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
 	}
-	let zbytes = e[c:c + clen]
 	// the inflater grows its output by doubling (the buffers it outgrows stay until the pool resets, less than 4 times
 	// the size together) and copies the result once: 6 times the size, and room for its tables
 	let budget = 6 * size + 4194304
 	// budget * 1: a bare name before { would read as a struct literal.
 	// commits and trees are written as zlib's stored blocks: copied out as they are, with no inflater (its tables and
 	// buffers were most of a log's memory, #807)
-	mut body = storedZlib(zbytes, size)
+	mut body = storedZlibIn(e, c, c + clen, size)
 	if len(body) != size {
+		let zbytes = e[c:c + clen]
 		body = limit memory budget * 1 {
 			try squash.Unzlib(zbytes, size + 1)
 		} catch err {
@@ -500,7 +572,7 @@ fn (p mut Pack) remember(off i64, kind object.Kind, body str) {
 	if had {
 		return
 	}
-	p.cache[off] = keep(body)
+	p.cache[off] = body
 	p.kinds[off] = kind
 	p.order = append(p.order, off)
 	p.held += len(body)

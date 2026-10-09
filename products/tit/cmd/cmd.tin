@@ -89,6 +89,10 @@ type Global struct {
 // Out is where a command writes: a buffer, paged on a terminal when it is longer than the screen.
 type Out struct {
 	buf []u8
+	// direct is set when no pager can be wanted (standard output is not a terminal, or TIT_NO_PAGER): spill then
+	// writes the buffer out as it fills, through w
+	direct bool
+	w      ?flume.Writer
 }
 
 // Line writes s and a newline.
@@ -102,13 +106,150 @@ fn (o mut Out) Text(s str) {
 	o.buf = append(o.buf, s...)
 }
 
+// Byte writes c.
+fn (o mut Out) Byte(c u8) {
+	o.buf = append(o.buf, c)
+}
+
+// part writes s[from:to] without making it a string of its own (a slice of a str is a copy, and appending a byte at a
+// time cost several times more): the room is made by appending all of s, at memory speed, then the part is stored
+// over it and the rest cut.
+fn (o mut Out) part(s str, from i64, to i64) {
+	if to <= from {
+		return
+	}
+	let base = len(o.buf)
+	o.buf = append(o.buf, s...)
+	if from > 0 {
+		for k in from..to {
+			o.buf[base + k - from] = s[k]
+		}
+	}
+	o.buf = o.buf[0:base + to - from]
+}
+
+// indented writes each line of s, as splitLines cuts them, after four spaces and with a newline: a message as git log
+// shows it, stored in place as part does.
+fn (o mut Out) indented(s str) {
+	if len(s) == 0 {
+		return
+	}
+	mut lines = 0
+	mut at = 0
+	for {
+		let nl = twine.IndexByteFrom(s, at, '\n')
+		if nl < 0 {
+			break
+		}
+		lines += 1
+		at = nl + 1
+	}
+	mut extra = 4 * lines
+	if at < len(s) {
+		// a last line with no newline gets one
+		extra += 5
+	}
+	let base = len(o.buf)
+	o.buf = append(o.buf, s...)
+	for k in 0..extra {
+		o.buf = append(o.buf, ' ')
+	}
+	mut w = base
+	mut i = 0
+	for i < len(s) {
+		for k in 0..4 {
+			o.buf[w + k] = ' '
+		}
+		w += 4
+		for i < len(s) {
+			let c = s[i]
+			o.buf[w] = c
+			w += 1
+			i += 1
+			if c == '\n' {
+				break
+			}
+		}
+	}
+	if at < len(s) {
+		o.buf[w] = '\n'
+	}
+}
+
+// hex writes the first digits hex digits of the bytes raw (an id's Bytes: Hex()[0:digits] without its strings).
+fn (o mut Out) hex(raw str, digits i64) {
+	for k in 0..digits {
+		let b = raw[k / 2]
+		if k % 2 == 0 {
+			o.buf = append(o.buf, hexDigits[i64(b >> 4)])
+		} else {
+			o.buf = append(o.buf, hexDigits[i64(b & 15)])
+		}
+	}
+}
+
+const hexDigits = "0123456789abcdef"
+
+// spillAt is how much the buffer holds before spill writes it out.
+const spillAt = 32 << 10
+
+// spill writes the buffer to standard output when it holds spillAt bytes and no pager can be wanted: a command with a
+// long output calls it between records, so the output is written as it is made instead of held whole (#807). The
+// bytes are the same.
+fn (o mut Out) spill() {
+	if !o.direct || len(o.buf) < spillAt {
+		return
+	}
+	if o.w == nil {
+		o.w = flume.Stdout()
+	}
+	mut w = o.w
+	if w != nil {
+		writeBytes(mut w, o.buf)
+	}
+	o.buf = o.buf[0:0]
+}
+
+// writeBytes writes b through w and flushes it, a buffer's worth at a time (one Write of all of b would grow w's
+// buffer to its size).
+fn writeBytes(w mut flume.Writer, b []u8) {
+	mut at = 0
+	for at < len(b) {
+		let end = min(len(b), at + 65536)
+		_ = w.Write(b[at:end]) catch _ {
+			0
+		}
+		at = end
+	}
+	w.Flush() catch _ {
+	}
+}
+
+// pagerWanted reports whether output may go through a pager: standard output is a terminal and TIT_NO_PAGER is unset.
+fn pagerWanted() bool {
+	return tty.IsTerminal(1) && len(quarry.Getenv("TIT_NO_PAGER")) == 0
+}
+
 // flush writes the buffer to standard output, through `less -FRX` when it is a terminal and the text is taller than it.
 fn (o mut Out) flush() {
+	if o.direct {
+		// no pager: the buffer goes out as it is, with no copy into a string
+		if len(o.buf) > 0 {
+			if o.w == nil {
+				o.w = flume.Stdout()
+			}
+			mut w = o.w
+			if w != nil {
+				writeBytes(mut w, o.buf)
+			}
+		}
+		return
+	}
 	let text = str(o.buf)
 	if len(text) == 0 {
 		return
 	}
-	if tty.IsTerminal(1) && len(quarry.Getenv("TIT_NO_PAGER")) == 0 {
+	if pagerWanted() {
 		let (_, rows, err) = tty.Size(1)
 		mut lines = 0
 		for i in 0..len(text) {
@@ -1063,7 +1204,7 @@ fn Main(args []str) i64 {
 		quarry.Eprintln("tit: " + fault.Message(perr))
 		return 2
 	}
-	mut o = Out{buf: []u8{}}
+	mut o = Out{buf: []u8{}, direct: !pagerWanted()}
 	let err = run(g, c, mut o)
 	o.flush()
 	if err != nil {
