@@ -1,0 +1,17 @@
+package cgi
+
+import "quarry"
+
+// environ is the process's environment as NAME=value pairs, from /proc/self/environ (its initial block).
+fn environ() !map[str]str {
+	let text = try quarry.ReadFile("/proc/self/environ")
+	mut env = map[str]str{}
+	mut start = 0
+	for i in 0..len(text)+1 {
+		if i == len(text) || text[i] == 0 {
+			addVar(mut env, text[start:i])
+			start = i + 1
+		}
+	}
+	return env
+}

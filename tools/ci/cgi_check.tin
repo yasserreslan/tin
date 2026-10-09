@@ -1,0 +1,366 @@
+package main
+
+import "./ci"
+import "mint"
+import "say"
+import "spawn"
+import "wire"
+
+// cgiCase is one CGI request: the variables of its environment and its standard input.
+type cgiCase struct {
+	name str
+	body str
+	env  []str
+}
+
+// frame is one FastCGI record read back from the server.
+type frame struct {
+	kind    i64
+	id      i64
+	content str
+}
+
+// fcgiServer is a FastCGI program that is running, and the port it listens on.
+type fcgiServer struct {
+	proc spawn.Process
+	port i64
+}
+
+// fcgiCase is one connection: its first raw bytes, the request sent after the first one's responses
+// (then, optional), the number of END records each part waits for (0: until the connection ends or
+// goes quiet), and whether the client closes its write side after the first part.
+type fcgiCase struct {
+	name      str
+	raw       str
+	then      str
+	want      i64
+	halfClose bool
+}
+
+// cgi_check runs the CGI and FastCGI programs of cgi/fcgi (tools/ci/fixtures/cgi_twin.tin) and Go's
+// net/http/cgi and net/http/fcgi (bench/ref/cgi, the same routes) on the same requests, and compares
+// the responses byte for byte: the status line and fields, the body, the exit status and the messages
+// of malformed requests; for FastCGI, the records and the connection's fate on malformed frames.
+fn main() {
+	let err = check()
+	if err != nil {
+		ci.Fail("cgi_check: {say.Str(err)}")
+	}
+}
+
+// check builds both programs, runs every case on both, and fails at the first difference.
+fn check() ! {
+	let root = ci.Root()
+	let dir = ci.Join(root, "bin/ci/cgi")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "cgi-")
+	let tin = ci.Join(work, "cgi-tin")
+	let goexe = ci.Join(work, "cgi-go")
+	ci.BuildTin("tools/ci/fixtures/cgi_twin.tin", tin, "", []str{})
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/cgi"}, root, 120), "build Go CGI reference")
+	mut n = 0
+	for c in cgiCases() {
+		n += 1
+		let got = try runCGI(tin, c)
+		let want = try runCGI(goexe, c)
+		ci.Check(got.Code == want.Code, c.name + ": exit status Tin " + mint.Itoa(got.Code) + ", Go " + mint.Itoa(want.Code))
+		ci.Check(got.Stderr == want.Stderr, c.name + ": stderr Tin [" + got.Stderr + "], Go [" + want.Stderr + "]")
+		ci.Check(got.Stdout == want.Stdout, c.name + ": stdout differs from Go (Tin " + mint.Itoa(len(got.Stdout)) + " bytes, Go " + mint.Itoa(len(want.Stdout)) + ")")
+	}
+	let fcgiTin = try startFCGI(tin)
+	let fcgiGo = try startFCGI(goexe)
+	mut m = 0
+	for s in fcgiCases() {
+		m += 1
+		let got = try fcgiSession(fcgiTin.port, s)
+		let want = try fcgiSession(fcgiGo.port, s)
+		ci.Check(got == want, s.name + ": Tin records [" + got + "] differ from Go [" + want + "]")
+	}
+	let k1 = fcgiTin.proc.Kill()
+	let k2 = fcgiGo.proc.Kill()
+	if k1 != nil || k2 != nil {
+		ci.Fail("cgi_check: could not stop the FastCGI programs")
+	}
+	ci.Remove(work)
+	ci.Pass("cgi: " + mint.Itoa(n) + " CGI requests and " + mint.Itoa(m) + " FastCGI connections match Go's net/http/cgi and net/http/fcgi")
+}
+
+// runCGI runs program exe as a CGI child: exactly the variables of c, c's body on standard input.
+fn runCGI(exe str, c cgiCase) !spawn.Result {
+	return try spawn.Run(spawn.Cmd{Argv: []str{exe}, Env: spawn.Env.Set(c.env), Dir: "", Stdin: spawn.Stdio.Pipe, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Pipe, MaxOutput: 0, Input: c.body})
+}
+
+// startFCGI starts exe as a FastCGI responder (argument fcgi) and reads the port it prints.
+fn startFCGI(exe str) !fcgiServer {
+	mut p = try spawn.Start(spawn.Cmd{Argv: []str{exe, "fcgi"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Inherit, MaxOutput: 0, Input: ""})
+	mut buf = make([]u8, 64)
+	let k = try p.Read(mut buf)
+	let line = str(buf[:k])
+	let (port, perr) = mint.Atoi(trimLine(line))
+	if perr != nil {
+		fail "cgi_check: no port from {exe}: {line}"
+	}
+	return fcgiServer{proc: p, port: port}
+}
+
+// trimLine is s up to its first newline.
+fn trimLine(s str) str {
+	for i in 0..len(s) {
+		if s[i] == '\n' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// fcgiSession sends c's raw bytes on a new connection to port and returns the records the server answers
+// with (STDOUT merged per stream, the Date normalized), then c's then request after the first one's
+// responses; each part reads until want END records came, the connection ended, or it went quiet.
+fn fcgiSession(port i64, s fcgiCase) !str {
+	mut c = try wire.Dial("127.0.0.1:" + mint.Itoa(port))
+	c.SetTimeout(700000000)
+	try c.Write(s.raw)
+	if s.halfClose {
+		c.CloseWrite()
+	}
+	mut out = readRecords(c, s.want)
+	if len(s.then) > 0 && !strContains(out, "CLOSED") {
+		try c.Write(s.then)
+		out += readRecords(c, s.want)
+	}
+	c.Close()
+	return out
+}
+
+// readRecords reads the records of one part of a session as transcript lines, until want END records or the end.
+fn readRecords(c wire.Conn, want i64) str {
+	mut out = ""
+	mut stdout = ""
+	mut ends = 0
+	for {
+		let (f, err) = readFrame(c)
+		if err != "" {
+			out += "CLOSED " + err + "\n"
+			break
+		}
+		if f.kind == 6 {
+			if len(f.content) == 0 {
+				out += "STDOUT " + escape(normalizeDate(stdout)) + "\n"
+				stdout = ""
+			} else {
+				stdout += f.content
+			}
+		} else if f.kind == 7 {
+			out += "STDERR " + escape(f.content) + "\n"
+		} else if f.kind == 3 {
+			out += "END " + mint.Itoa(f.id) + " app=" + mint.Itoa(be32(f.content)) + " proto=" + mint.Itoa(i64(f.content[4])) + "\n"
+			ends += 1
+			if want > 0 && ends >= want {
+				break
+			}
+		} else if f.kind == 10 {
+			if len(f.content) == 0 {
+				out += "VALUES-END\n"
+			} else {
+				out += "VALUES " + escape(f.content) + "\n"
+			}
+		} else if f.kind == 11 {
+			out += "UNKNOWN " + escape(f.content) + "\n"
+		} else {
+			out += "RECORD " + mint.Itoa(f.kind) + " " + mint.Itoa(f.id) + "\n"
+		}
+	}
+	return out
+}
+
+// readFrame reads the next record: its header, then its content and padding. A non-empty err is the reason the read stopped.
+fn readFrame(c wire.Conn) (frame, str) {
+	let (h, herr) = c.ReadFull(8)
+	if herr != nil {
+		return frame{}, "{herr}"
+	}
+	if h[0] != 1 {
+		return frame{}, "bad version " + mint.Itoa(i64(h[0]))
+	}
+	let kind = i64(h[1])
+	let id = i64(h[2])*256 + i64(h[3])
+	let clen = i64(h[4])*256 + i64(h[5])
+	let pad = i64(h[6])
+	mut content = ""
+	if clen+pad > 0 {
+		let (body, berr) = c.ReadFull(clen + pad)
+		if berr != nil {
+			return frame{}, "{berr}"
+		}
+		content = body[:clen]
+	}
+	return frame{kind: kind, id: id, content: content}, ""
+}
+
+// encode is one record: header, content and padding to a multiple of 8.
+fn encode(kind i64, id i64, content str) str {
+	let n = len(content)
+	let pad = (8 - n%8) % 8
+	mut b = []u8{}
+	b = append(b, 1, u8(kind), u8(id/256), u8(id%256), u8(n/256), u8(n%256), u8(pad), 0)
+	b = append(b, content...)
+	for i in 0..pad {
+		b = append(b, 0)
+	}
+	return str(b)
+}
+
+// nameValue is one name-value pair of a PARAMS stream: lengths (1 or 4 bytes), name, value.
+fn nameValue(name str, value str) str {
+	mut b = []u8{}
+	b = lengthBytes(b, len(name))
+	b = lengthBytes(b, len(value))
+	b = append(b, name...)
+	b = append(b, value...)
+	return str(b)
+}
+
+// lengthBytes appends a name or value length: one byte below 128, else four with the high bit set.
+fn lengthBytes(b []u8, n i64) []u8 {
+	if n < 128 {
+		return append(b, u8(n))
+	}
+	return append(b, u8((n>>24)|0x80), u8(n>>16), u8(n>>8), u8(n))
+}
+
+// begin is the BEGIN_REQUEST record of id: role 1 (responder) and flags (1 keeps the connection).
+fn begin(id i64, flags i64) str {
+	return encode(1, id, str([]u8{0, 1, u8(flags), 0, 0, 0, 0, 0}))
+}
+
+// params is the PARAMS stream of id for the flat name, value list pairs, and its end record.
+fn params(id i64, pairs []str) str {
+	mut content = ""
+	for i in 0..len(pairs)/2 {
+		content += nameValue(pairs[2*i], pairs[2*i+1])
+	}
+	return encode(4, id, content) + encode(4, id, "")
+}
+
+// stdin is the STDIN stream of id carrying body, and its end record.
+fn stdin(id i64, body str) str {
+	mut s = ""
+	if len(body) > 0 {
+		s = encode(5, id, body)
+	}
+	return s + encode(5, id, "")
+}
+
+// request is a whole request on id: BEGIN, PARAMS, STDIN.
+fn request(id i64, flags i64, pairs []str, body str) str {
+	return begin(id, flags) + params(id, pairs) + stdin(id, body)
+}
+
+// be32 reads the first four bytes of s as a big-endian number (an END_REQUEST's application status).
+fn be32(s str) i64 {
+	return (i64(s[0])<<24) | (i64(s[1])<<16) | (i64(s[2])<<8) | i64(s[3])
+}
+
+// escape writes s with its control, non-ASCII and backslash bytes as \xNN, so a transcript line stays one line.
+fn escape(s str) str {
+	mut b = []u8{}
+	let hex = "0123456789abcdef"
+	for i in 0..len(s) {
+		let c = s[i]
+		if c >= 32 && c < 127 && c != '\\' {
+			b = append(b, c)
+		} else {
+			b = append(b, '\\', 'x', hex[i64(c)/16], hex[i64(c)%16])
+		}
+	}
+	return str(b)
+}
+
+// normalizeDate replaces the value of the Date header in a response: the time differs from run to run.
+fn normalizeDate(s str) str {
+	let key = "Date: "
+	if len(s) < len(key) {
+		return s
+	}
+	for i in 0..len(s)-len(key)+1 {
+		if s[i:i+len(key)] == key {
+			mut j = i + len(key)
+			for j < len(s) && s[j] != '\r' {
+				j += 1
+			}
+			return s[:i+len(key)] + "DATE" + s[j:]
+		}
+	}
+	return s
+}
+
+// cgiCases is the CGI request list: the routes, the body and CONTENT_LENGTH rules, the header spelling, the status line and the errors.
+fn cgiCases() []cgiCase {
+	let proto = "SERVER_PROTOCOL=HTTP/1.1"
+	return []cgiCase{
+		cgiCase{name: "get-echo", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/a/b?x=1&y=2", "HTTP_HOST=example.test", "HTTP_X_FOO_BAR=v1"}},
+		cgiCase{name: "post-length-short", body: "hello world", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH=5", "CONTENT_TYPE=text/plain"}},
+		cgiCase{name: "post-no-length", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post"}},
+		cgiCase{name: "post-negative-length", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH=-5"}},
+		cgiCase{name: "post-plus-length", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH=+5"}},
+		cgiCase{name: "post-empty-length", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH="}},
+		cgiCase{name: "length-not-a-number", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH=abc"}},
+		cgiCase{name: "length-overflow", body: "hello", env: []str{"REQUEST_METHOD=POST", proto, "REQUEST_URI=/post", "CONTENT_LENGTH=99999999999999999999"}},
+		cgiCase{name: "no-request-method", body: "", env: []str{proto, "REQUEST_URI=/x"}},
+		cgiCase{name: "no-protocol", body: "", env: []str{"REQUEST_METHOD=GET", "REQUEST_URI=/x"}},
+		cgiCase{name: "bad-protocol", body: "", env: []str{"REQUEST_METHOD=GET", "SERVER_PROTOCOL=FTP/1.1", "REQUEST_URI=/x"}},
+		cgiCase{name: "protocol-included", body: "", env: []str{"REQUEST_METHOD=GET", "SERVER_PROTOCOL=INCLUDED", "REQUEST_URI=/x"}},
+		cgiCase{name: "path-info-fallback", body: "", env: []str{"REQUEST_METHOD=GET", "SERVER_PROTOCOL=HTTP/1.0", "SCRIPT_NAME=/cgi-bin/x", "PATH_INFO=/a/b", "QUERY_STRING=q=1&r=2"}},
+		cgiCase{name: "status-201", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/status/201"}},
+		cgiCase{name: "status-204", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/status/204"}},
+		cgiCase{name: "status-not-a-number", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/status/xyz"}},
+		cgiCase{name: "headers-spelling", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/headers"}},
+		cgiCase{name: "big-body", body: "", env: []str{"REQUEST_METHOD=GET", proto, "REQUEST_URI=/big"}},
+	}
+}
+
+// fcgiCases is the FastCGI connection list: requests, keep-alive, stdin and params edge cases, and malformed frames.
+fn fcgiCases() []fcgiCase {
+	let proto = "SERVER_PROTOCOL"
+	let http11 = "HTTP/1.1"
+	mut long = ""
+	for i in 0..200 {
+		long += "x"
+	}
+	let echoPairs = []str{"REQUEST_METHOD", "GET", proto, http11, "REQUEST_URI", "/a/b?x=1", "HTTP_HOST", "example.test", "HTTP_X_FOO_BAR", long}
+	let postPairs = []str{"REQUEST_METHOD", "POST", proto, http11, "REQUEST_URI", "/post", "CONTENT_LENGTH", "5", "CONTENT_TYPE", "text/plain"}
+	let bigPairs = []str{"REQUEST_METHOD", "GET", proto, http11, "REQUEST_URI", "/big"}
+	let headersPairs = []str{"REQUEST_METHOD", "GET", proto, http11, "REQUEST_URI", "/headers"}
+	let badPairs = []str{proto, http11, "REQUEST_URI", "/x"}
+	let lengthPairs = []str{"REQUEST_METHOD", "POST", proto, http11, "REQUEST_URI", "/post", "CONTENT_LENGTH", "abc"}
+	return []fcgiCase{
+		fcgiCase{name: "echo", raw: request(1, 0, echoPairs, ""), want: 1},
+		fcgiCase{name: "post-body-whole", raw: request(2, 0, postPairs, "hello world"), want: 1},
+		fcgiCase{name: "big", raw: request(3, 0, bigPairs, ""), want: 1},
+		fcgiCase{name: "headers", raw: request(4, 0, headersPairs, ""), want: 1},
+		fcgiCase{name: "no-request-method", raw: request(5, 0, badPairs, ""), want: 1},
+		fcgiCase{name: "length-not-a-number", raw: request(6, 0, lengthPairs, "x"), want: 1},
+		fcgiCase{name: "keep-two-requests", raw: request(7, 1, echoPairs, ""), then: request(8, 1, postPairs, "abc"), want: 1},
+		fcgiCase{name: "get-values", raw: encode(9, 0, nameValue("FCGI_MPXS_CONNS", "")), want: 0},
+		fcgiCase{name: "unknown-type-in-request", raw: begin(9, 1) + encode(12, 9, "xxxx") + params(9, echoPairs) + stdin(9, ""), want: 1},
+		fcgiCase{name: "data-record-ignored", raw: begin(10, 1) + encode(8, 10, "data") + params(10, echoPairs) + stdin(10, ""), want: 1},
+		fcgiCase{name: "role-not-responder", raw: begin(11, 0) + encode(9, 0, nameValue("X", "y")), want: 1},
+		fcgiCase{name: "abort-before-stdin", raw: begin(12, 0) + params(12, echoPairs) + encode(2, 12, ""), want: 1},
+		fcgiCase{name: "record-for-unknown-id", raw: encode(5, 42, "xyz") + request(13, 0, echoPairs, ""), want: 1},
+		fcgiCase{name: "params-truncated-pair", raw: begin(14, 0) + encode(4, 14, "\x0f\x01REQUEST") + encode(4, 14, "") + stdin(14, ""), want: 1},
+		fcgiCase{name: "bad-header-version", raw: "\x02" + begin(15, 0)[1:], want: 0},
+		fcgiCase{name: "begin-length-wrong", raw: encode(1, 16, "\x00\x01\x00\x00\x00\x00\x00"), want: 0},
+		fcgiCase{name: "duplicate-begin", raw: begin(17, 1) + begin(17, 1), want: 0},
+		fcgiCase{name: "truncated-header", raw: begin(18, 0)[:5], want: 0, halfClose: true},
+	}
+}
+
+// strContains reports whether sub occurs in s.
+fn strContains(s str, sub str) bool {
+	for i in 0..len(s)-len(sub)+1 {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

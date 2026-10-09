@@ -1,0 +1,275 @@
+// Package fcgi runs an anvil handler, or a Router, as a FastCGI responder: the record protocol of Go's
+// net/http/fcgi (responder role). Serve answers the connections one after another, and each connection's
+// requests in order, each when its stdin ends (Go answers them concurrently, which a sequential client
+// cannot tell apart). The response is the bytes cgi.Format gives, cut into STDOUT records, with Go's
+// Date header and its error for a request whose variables are malformed (a 500 and the message on STDERR).
+package fcgi
+
+import "anvil"
+import "cgi"
+import "say"
+import "wire"
+
+const version = 1
+
+const typeBeginRequest = 1
+
+const typeAbortRequest = 2
+
+const typeEndRequest = 3
+
+const typeParams = 4
+
+const typeStdin = 5
+
+const typeStdout = 6
+
+const typeStderr = 7
+
+const typeData = 8
+
+const typeGetValues = 9
+
+const typeGetValuesResult = 10
+
+const typeUnknownType = 11
+
+const flagKeepConn = 1
+
+const roleResponder = 1
+
+const statusRequestComplete = 0
+
+const statusUnknownRole = 3
+
+const maxWrite = 65535
+
+// record is one record of a connection: its type, request ID and content, without the padding.
+type record struct {
+	kind    i64
+	id      i64
+	content str
+}
+
+// request is a request whose records are arriving: the PARAMS bytes not parsed yet, its variables, its stdin and whether its connection stays open.
+type request struct {
+	id     i64
+	keepOpen bool
+	raw    []u8
+	params map[str]str
+	body   []u8
+}
+
+// Serve answers FastCGI requests that arrive on l with r, one connection after another, until l fails.
+// A task spawned per connection would not run while this loop waits in Accept (see packages/rpc).
+fn Serve(l wire.Listener, r anvil.Router) ! {
+	for {
+		let c = try l.Accept()
+		serveConn(c, r)
+	}
+}
+
+// ServeFunc is Serve for one handler h on every path and method.
+fn ServeFunc(l wire.Listener, h fn(anvil.Req, mut anvil.Out)) ! {
+	mut r = anvil.NewRouter()
+	r.Any(`/{path...}`, h)
+	try Serve(l, r)
+}
+
+// serveConn answers the records of one connection until it ends, a record is malformed or a request asks for it to close.
+fn serveConn(conn wire.Conn, r anvil.Router) {
+	mut c = conn
+	mut reqs = map[i64]request{}
+	for {
+		let (rec, rerr) = readRecord(c)
+		if rerr != nil {
+			break
+		}
+		let (keepOpen, herr) = handleRecord(c, mut reqs, rec, r)
+		if herr != nil || !keepOpen {
+			break
+		}
+	}
+	c.Close()
+}
+
+// handleRecord acts on one record: it reports false when the connection must close, and fails on a record that breaks the protocol.
+fn handleRecord(c wire.Conn, reqs mut map[i64]request, rec record, r anvil.Router) !bool {
+	let (rq, ok) = reqs[rec.id]
+	if !ok && rec.kind != typeBeginRequest && rec.kind != typeGetValues {
+		return true
+	}
+	if rec.kind == typeBeginRequest {
+		if ok {
+			fail "fcgi: received ID that is already in-flight"
+		}
+		if len(rec.content) != 8 {
+			fail "fcgi: invalid begin request record"
+		}
+		let role = i64(rec.content[0])*256 + i64(rec.content[1])
+		let flags = i64(rec.content[2])
+		if role != roleResponder {
+			try writeEnd(c, rec.id, 0, statusUnknownRole)
+			return true
+		}
+		reqs[rec.id] = request{id: rec.id, keepOpen: (flags & flagKeepConn) != 0, raw: []u8{}, params: map[str]str{}, body: []u8{}}
+		return true
+	}
+	if rec.kind == typeParams {
+		mut q = rq
+		if len(rec.content) > 0 {
+			q.raw = append(q.raw, rec.content...)
+			return true
+		}
+		mut env = q.params
+		parseParams(str(q.raw), mut env)
+		q.raw = []u8{}
+		return true
+	}
+	if rec.kind == typeStdin {
+		mut q = rq
+		if len(rec.content) > 0 {
+			q.body = append(q.body, rec.content...)
+			return true
+		}
+		delete(reqs, rec.id)
+		return try serveRequest(c, q, r)
+	}
+	if rec.kind == typeGetValues {
+		try writeStream(c, typeGetValuesResult, 0, pairs("FCGI_MPXS_CONNS", "1"))
+		return true
+	}
+	if rec.kind == typeAbortRequest {
+		delete(reqs, rec.id)
+		try writeEnd(c, rec.id, 0, statusRequestComplete)
+		return rq.keepOpen
+	}
+	if rec.kind == typeData {
+		return true
+	}
+	mut b = make([]u8, 8)
+	b[0] = u8(rec.kind)
+	try writeRecord(c, typeUnknownType, 0, str(b))
+	return true
+}
+
+// serveRequest answers one request: its response on STDOUT (a 500 with the error on STDERR when its variables are malformed), then END_REQUEST.
+fn serveRequest(c wire.Conn, q request, r anvil.Router) !bool {
+	let (out, err) = cgi.Call(r, q.params, str(q.body))
+	mut text = ""
+	if err != nil {
+		try writeRecord(c, typeStderr, q.id, say.Str(err))
+		text = cgi.Format(500, []str{}, "", true)
+	} else {
+		text = cgi.Format(out.Code(), out.HeadersAll(), str(out.Body), true)
+	}
+	try writeStream(c, typeStdout, q.id, text)
+	try writeEnd(c, q.id, 0, statusRequestComplete)
+	return q.keepOpen
+}
+
+// readRecord reads the next record of a connection: the header, then the content and padding.
+fn readRecord(c wire.Conn) !record {
+	let h = try c.ReadFull(8)
+	if h[0] != version {
+		fail "fcgi: invalid header version"
+	}
+	let kind = i64(h[1])
+	let id = i64(h[2])*256 + i64(h[3])
+	let clen = i64(h[4])*256 + i64(h[5])
+	let pad = i64(h[6])
+	mut content = ""
+	if clen+pad > 0 {
+		let body = try c.ReadFull(clen + pad)
+		content = body[:clen]
+	}
+	return record{kind: kind, id: id, content: content}
+}
+
+// writeRecord sends one record: its header, its content and the padding that makes the record a multiple of 8 bytes.
+fn writeRecord(c wire.Conn, kind i64, id i64, content str) ! {
+	let n = len(content)
+	let pad = (8 - n%8) % 8
+	mut b = make([]u8, 0, 8+n+pad)
+	b = append(b, u8(version), u8(kind), u8(id/256), u8(id%256), u8(n/256), u8(n%256), u8(pad), 0)
+	b = append(b, content...)
+	for i in 0..pad {
+		b = append(b, 0)
+	}
+	try c.WriteBytes(b)
+}
+
+// writeStream sends data as records of kind of at most maxWrite bytes, then the empty record that ends the stream.
+fn writeStream(c wire.Conn, kind i64, id i64, data str) ! {
+	mut i = 0
+	for i < len(data) {
+		let j = min(i+maxWrite, len(data))
+		try writeRecord(c, kind, id, data[i:j])
+		i = j
+	}
+	try writeRecord(c, kind, id, "")
+}
+
+// writeEnd sends END_REQUEST: the application status (4 bytes), the protocol status and 3 reserved bytes.
+fn writeEnd(c wire.Conn, id i64, app i64, proto i64) ! {
+	mut b = make([]u8, 8)
+	b[0] = u8(app >> 24)
+	b[1] = u8(app >> 16)
+	b[2] = u8(app >> 8)
+	b[3] = u8(app)
+	b[4] = u8(proto)
+	try writeRecord(c, typeEndRequest, id, str(b))
+}
+
+// pairs encodes one name-value pair as a FastCGI name-value stream entry.
+fn pairs(name str, value str) str {
+	mut b = []u8{}
+	b = appendSize(b, len(name))
+	b = appendSize(b, len(value))
+	b = append(b, name...)
+	b = append(b, value...)
+	return str(b)
+}
+
+// appendSize appends a name or value length: one byte below 128, else four bytes with the high bit set.
+fn appendSize(b []u8, n i64) []u8 {
+	if n < 128 {
+		return append(b, u8(n))
+	}
+	return append(b, u8((n>>24)|0x80), u8(n>>16), u8(n>>8), u8(n))
+}
+
+// parseParams adds the name-value pairs of a PARAMS stream to env; a pair that runs past the end of the stream ends the parse, as Go's parseParams does.
+fn parseParams(text str, env mut map[str]str) {
+	mut i = 0
+	for i < len(text) {
+		let (kl, k1) = readSize(text, i)
+		if k1 < 0 {
+			return
+		}
+		let (vl, k2) = readSize(text, k1)
+		if k2 < 0 {
+			return
+		}
+		if k2+kl+vl > len(text) {
+			return
+		}
+		env[text[k2:k2+kl]] = text[k2+kl:k2+kl+vl]
+		i = k2 + kl + vl
+	}
+}
+
+// readSize reads a name or value length at i: its value and the index after it, or -1 when the bytes are not all there.
+fn readSize(s str, i i64) (i64, i64) {
+	if i >= len(s) {
+		return 0, -1
+	}
+	if (s[i] & 0x80) == 0 {
+		return i64(s[i]), i + 1
+	}
+	if i+4 > len(s) {
+		return 0, -1
+	}
+	let v = ((i64(s[i]) << 24) | (i64(s[i+1]) << 16) | (i64(s[i+2]) << 8) | i64(s[i+3])) & 0x7fffffff
+	return v, i + 4
+}

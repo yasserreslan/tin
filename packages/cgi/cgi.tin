@@ -1,0 +1,355 @@
+// Package cgi runs an anvil handler, or a Router, as a CGI program (RFC 3875) the way Go's
+// net/http/cgi does. Serve reads the request from the environment and standard input and writes the
+// response to standard output. Call and Format are the same steps on values, for cgi/fcgi and tests.
+// The request goes through anvil's in-process path (Router.RunWith), so RemoteAddr and TLS are empty.
+package cgi
+
+import "anvil"
+import "flume"
+import "mint"
+import "say"
+import "signal"
+
+// Serve runs r as a CGI program: the request comes from the environment and standard input, the response goes to standard output.
+fn Serve(r anvil.Router) ! {
+	let env = try environ()
+	let n = try contentLength(env)
+	mut body = ""
+	if n > 0 {
+		body = try readStdin(n)
+	}
+	let res = try Call(r, env, body)
+	try writeStdout(Format(res.Code(), res.HeadersAll(), str(res.Body), false))
+}
+
+// ServeFunc is Serve for one handler h on every path and method.
+fn ServeFunc(h fn(anvil.Req, mut anvil.Out)) ! {
+	mut r = anvil.NewRouter()
+	r.Any(`/{path...}`, h)
+	try Serve(r)
+}
+
+// Call answers the request the CGI variables env describe, with body as its body, through r: Go's cgi.RequestFromMap, then the handler.
+fn Call(r anvil.Router, env map[str]str, body str) !anvil.Out {
+	let method = env["REQUEST_METHOD"]
+	if len(method) == 0 {
+		fail "cgi: no REQUEST_METHOD in environment"
+	}
+	let proto = env["SERVER_PROTOCOL"]
+	if proto != "INCLUDED" && !httpVersion(proto) {
+		fail "cgi: invalid SERVER_PROTOCOL version"
+	}
+	try contentLength(env)
+	mut headers = []str{}
+	let ct = env["CONTENT_TYPE"]
+	if len(ct) > 0 {
+		headers = append(headers, "Content-Type: " + ct)
+	}
+	for k, v in env {
+		if len(k) > 5 && k[:5] == "HTTP_" {
+			headers = append(headers, headerName(k[5:]) + ": " + v)
+		}
+	}
+	mut target = env["REQUEST_URI"]
+	if len(target) == 0 {
+		target = env["SCRIPT_NAME"] + env["PATH_INFO"]
+		let qs = env["QUERY_STRING"]
+		if len(qs) > 0 {
+			target += "?" + qs
+		}
+	}
+	return r.RunWith(method, target, headers, body)
+}
+
+// Format is the response bytes for a status code, its header fields (name and value pairs) and its body: the Status line, the fields sorted by canonical name, a blank line, then the body. fastcgi gives Go's fcgi child instead: a Date, and no Content-Type on 304.
+fn Format(code i64, headers []str, body str, fastcgi bool) str {
+	mut keys = []str{}
+	mut vals = []str{}
+	for i in 0..len(headers)/2 {
+		let k = canonicalKey(headers[2*i])
+		if fastcgi && code == 304 && (k == "Content-Type" || k == "Content-Length" || k == "Transfer-Encoding") {
+			continue
+		}
+		keys = append(keys, k)
+		vals = append(vals, trimSpace(headers[2*i+1]))
+	}
+	mut hasType = false
+	mut hasDate = false
+	for k in keys {
+		if k == "Content-Type" {
+			hasType = true
+		}
+		if k == "Date" {
+			hasDate = true
+		}
+	}
+	if fastcgi && !hasDate {
+		keys = append(keys, "Date")
+		vals = append(vals, httpDate())
+	}
+	if !hasType && !(fastcgi && code == 304) {
+		keys = append(keys, "Content-Type")
+		vals = append(vals, "text/plain; charset=utf-8")
+	}
+	// Insertion sort by name, stable, so the values of one name keep the order they were set in.
+	mut ord = []i64{}
+	for i in 0..len(keys) {
+		ord = append(ord, i64(i))
+		mut j = len(ord) - 1
+		for j > 0 && strLess(keys[ord[j]], keys[ord[j-1]]) {
+			let t = ord[j]
+			ord[j] = ord[j-1]
+			ord[j-1] = t
+			j -= 1
+		}
+	}
+	let text = statusText(code)
+	let status = "Status: {code} {text}\r\n"
+	mut b = make([]u8, 0, 256+len(body))
+	b = append(b, status...)
+	for idx in ord {
+		b = append(b, keys[idx]...)
+		b = append(b, ": "...)
+		b = append(b, vals[idx]...)
+		b = append(b, "\r\n"...)
+	}
+	b = append(b, "\r\n"...)
+	b = append(b, body...)
+	return str(b)
+}
+
+// contentLength is CONTENT_LENGTH as a number: 0 when unset, and Go's error when it is not an integer.
+fn contentLength(env map[str]str) !i64 {
+	let s = env["CONTENT_LENGTH"]
+	if len(s) == 0 {
+		return 0
+	}
+	let (n, err) = mint.ParseInt(s, 10)
+	if err != nil {
+		fail "cgi: bad CONTENT_LENGTH in environment: {s}"
+	}
+	return n
+}
+
+// httpVersion reports whether v is an HTTP version Go's http.ParseHTTPVersion accepts.
+fn httpVersion(v str) bool {
+	if v == "HTTP/1.1" || v == "HTTP/1.0" {
+		return true
+	}
+	return len(v) == 8 && v[:5] == "HTTP/" && v[6] == '.' && isDigit(v[5]) && isDigit(v[7])
+}
+
+// readStdin reads the next n bytes of standard input, fewer at its end.
+fn readStdin(n i64) !str {
+	mut r = flume.New(0)
+	mut out = make([]u8, 0, min(n, 65536))
+	mut left = n
+	for left > 0 {
+		mut buf = make([]u8, min(left, 65536))
+		let k = try r.Read(mut buf)
+		if k == 0 {
+			break
+		}
+		out = append(out, buf[:k]...)
+		left -= k
+	}
+	return str(out)
+}
+
+// writeStdout writes the response to standard output; a broken pipe ends the process with SIGPIPE, as it does in Go.
+fn writeStdout(s str) ! {
+	mut w = flume.Stdout()
+	let n = w.WriteString(s) catch err {
+		try brokenPipe(err)
+		fail err
+	}
+	w.Flush() catch err {
+		try brokenPipe(err)
+		fail err
+	}
+	return
+}
+
+// brokenPipe ends the process with SIGPIPE when err is a write to a closed pipe: Go's runtime does this for standard output, and this process ignores SIGPIPE.
+fn brokenPipe(err fault) ! {
+	if contains(say.Str(err), "Broken pipe") {
+		try signal.Reset(signal.SIGPIPE)
+		try signal.Raise(signal.SIGPIPE)
+	}
+}
+
+// addVar stores a NAME=value entry of the environment in env; an entry without '=' is skipped, as Go's envMap does.
+fn addVar(env mut map[str]str, entry str) {
+	for i in 0..len(entry) {
+		if entry[i] == '=' {
+			env[entry[:i]] = entry[i+1:]
+			return
+		}
+	}
+}
+
+// headerName is the header field name of an HTTP_ variable's name: underscores become hyphens, then canonical case.
+fn headerName(s str) str {
+	mut b = make([]u8, len(s))
+	for i in 0..len(s) {
+		mut c = s[i]
+		if c == '_' {
+			c = '-'
+		}
+		b[i] = c
+	}
+	return canonicalKey(str(b))
+}
+
+// canonicalKey is Go's textproto.CanonicalMIMEHeaderKey: a capital at the start and after each hyphen, small letters elsewhere; a name with a byte that is not a token character is returned as it is.
+fn canonicalKey(name str) str {
+	for i in 0..len(name) {
+		if !isToken(name[i]) {
+			return name
+		}
+	}
+	mut b = make([]u8, len(name))
+	mut upper = true
+	for i in 0..len(name) {
+		mut c = name[i]
+		if upper && c >= 'a' && c <= 'z' {
+			c = c - 32
+		} else if !upper && c >= 'A' && c <= 'Z' {
+			c = c + 32
+		}
+		b[i] = c
+		upper = c == '-'
+	}
+	return str(b)
+}
+
+// isToken reports whether c may appear in a header field name (RFC 9110 5.1).
+fn isToken(c u8) bool {
+	if isDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+		return true
+	}
+	return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == 96 || c == '|' || c == '~'
+}
+
+// isDigit reports whether c is an ASCII digit.
+fn isDigit(c u8) bool {
+	return c >= '0' && c <= '9'
+}
+
+// trimSpace is s without the ASCII white space at either end, as Go's textproto.TrimString.
+fn trimSpace(s str) str {
+	mut a = 0
+	mut e = len(s)
+	for a < e && isSpace(s[a]) {
+		a += 1
+	}
+	for e > a && isSpace(s[e-1]) {
+		e -= 1
+	}
+	return s[a:e]
+}
+
+// isSpace reports whether c is one of the ASCII white space bytes Go trims from a header value.
+fn isSpace(c u8) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12
+}
+
+// strLess is a < b for strings, byte by byte, as Go compares them.
+fn strLess(a str, b str) bool {
+	let n = min(len(a), len(b))
+	for i in 0..n {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
+// contains reports whether sub occurs in s.
+fn contains(s str, sub str) bool {
+	if len(sub) == 0 {
+		return true
+	}
+	for i in 0..len(s)-len(sub)+1 {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// statusText is Go's http.StatusText: the reason phrase of a status code, or "" for a code it does not know.
+fn statusText(code i64) str {
+	let text = match code {
+		100 => "Continue"
+		101 => "Switching Protocols"
+		102 => "Processing"
+		103 => "Early Hints"
+		200 => "OK"
+		201 => "Created"
+		202 => "Accepted"
+		203 => "Non-Authoritative Information"
+		204 => "No Content"
+		205 => "Reset Content"
+		206 => "Partial Content"
+		207 => "Multi-Status"
+		208 => "Already Reported"
+		226 => "IM Used"
+		300 => "Multiple Choices"
+		301 => "Moved Permanently"
+		302 => "Found"
+		303 => "See Other"
+		304 => "Not Modified"
+		305 => "Use Proxy"
+		307 => "Temporary Redirect"
+		308 => "Permanent Redirect"
+		400 => "Bad Request"
+		401 => "Unauthorized"
+		402 => "Payment Required"
+		403 => "Forbidden"
+		404 => "Not Found"
+		405 => "Method Not Allowed"
+		406 => "Not Acceptable"
+		407 => "Proxy Authentication Required"
+		408 => "Request Timeout"
+		409 => "Conflict"
+		410 => "Gone"
+		411 => "Length Required"
+		412 => "Precondition Failed"
+		413 => "Request Entity Too Large"
+		414 => "Request URI Too Long"
+		415 => "Unsupported Media Type"
+		416 => "Requested Range Not Satisfiable"
+		417 => "Expectation Failed"
+		418 => "I'm a teapot"
+		421 => "Misdirected Request"
+		422 => "Unprocessable Entity"
+		423 => "Locked"
+		424 => "Failed Dependency"
+		425 => "Too Early"
+		426 => "Upgrade Required"
+		428 => "Precondition Required"
+		429 => "Too Many Requests"
+		431 => "Request Header Fields Too Large"
+		451 => "Unavailable For Legal Reasons"
+		500 => "Internal Server Error"
+		501 => "Not Implemented"
+		502 => "Bad Gateway"
+		503 => "Service Unavailable"
+		504 => "Gateway Timeout"
+		505 => "HTTP Version Not Supported"
+		506 => "Variant Also Negotiates"
+		507 => "Insufficient Storage"
+		508 => "Loop Detected"
+		510 => "Not Extended"
+		511 => "Network Authentication Required"
+		_ => ""
+	}
+	return text
+}
+
+// httpDate is the current time as the value of a Date header (Go's http.TimeFormat): the runtime's line without its name and CRLF.
+fn httpDate() str {
+	let line = rt_http_date(rt_wall_seconds())
+	return line[6:len(line)-2]
+}

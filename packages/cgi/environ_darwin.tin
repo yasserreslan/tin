@@ -1,0 +1,24 @@
+package cgi
+
+// _NSGetEnviron is the address of libSystem's environ variable, which the runtime does not keep on macOS.
+extern fn _NSGetEnviron() i64
+
+// environ is the process's environment as NAME=value pairs, read from the C environment array.
+fn environ() !map[str]str {
+	let vars = __ld(_NSGetEnviron(), 3)
+	mut env = map[str]str{}
+	mut i = 0
+	for {
+		let p = __ld(vars+8*i, 3)
+		if p == 0 {
+			break
+		}
+		mut n = 0
+		for load8(p+n) != 0 {
+			n += 1
+		}
+		addVar(mut env, rt_str_from_raw(p, n))
+		i += 1
+	}
+	return env
+}
