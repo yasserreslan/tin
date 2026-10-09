@@ -82,6 +82,9 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 	mut commitPacks = []str{}
 	mut treePacks = []str{}
 	mut blobPacks = []str{}
+	// the packs already there: a batch an earlier run wrote but did not record (cut by a signal) is written again,
+	// byte for byte under the same name; such a pack stays as it is, never merged away
+	let had = try packPaths(packs)
 	mut i = 0
 	for i < len(order) {
 		let start = i
@@ -91,13 +94,13 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 		for k in 0..len(b.Git) {
 			ids.Set(b.Git[k], b.Tit[k])
 		}
-		if len(b.Parts[0]) > 0 {
+		if len(b.Parts[0]) > 0 && !holds(had, b.Parts[0]) {
 			commitPacks = append(commitPacks, b.Parts[0])
 		}
-		if len(b.Parts[1]) > 0 {
+		if len(b.Parts[1]) > 0 && !holds(had, b.Parts[1]) {
 			treePacks = append(treePacks, b.Parts[1])
 		}
-		if len(b.Parts[2]) > 0 {
+		if len(b.Parts[2]) > 0 && !holds(had, b.Parts[2]) {
 			blobPacks = append(blobPacks, b.Parts[2])
 		}
 		_ = try arena {
@@ -225,6 +228,31 @@ fn mergeAdopted(dir str, paths []str) {
 			quarry.Eprintln("tit: adopt: {fault.Message(e)}")
 		}
 	}
+}
+
+// packPaths is the paths of the packs in dir.
+fn packPaths(dir str) ![]str {
+	mut paths = []str{}
+	if !quarry.IsDir(dir) {
+		return paths
+	}
+	let names = try quarry.ReadDir(dir)
+	for n in names {
+		if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
+			paths = append(paths, dir + "/" + n)
+		}
+	}
+	return paths
+}
+
+// holds reports whether paths has p.
+fn holds(paths []str, p str) bool {
+	for q in paths {
+		if q == p {
+			return true
+		}
+	}
+	return false
 }
 
 // mergePacks is the path of the pack merged from paths (packfile.Merge).
