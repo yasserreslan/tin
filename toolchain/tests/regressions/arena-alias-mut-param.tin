@@ -1,0 +1,32 @@
+package main
+
+import "say"
+
+type W struct {
+	n i64
+	xs []i64
+}
+
+// A store through a local alias of a mut parameter inside an arena reaches the caller's object, as it does outside an arena (#707).
+fn frame(w mut W) {
+	let live = w
+	arena {
+		live.n = 3
+	}
+}
+
+// The alias of a mut parameter in any position: the store lands in the caller's object (#707).
+fn scaled(k i64, w mut W) {
+	let live = w
+	arena {
+		live.n = k * 2
+	}
+}
+
+fn main() {
+	mut w = W{xs: []i64{0}}
+	frame(mut w)
+	say.Line(w.n)
+	scaled(5, mut w)
+	say.Line(w.n)
+}

@@ -1,0 +1,19 @@
+package main
+
+type W struct {
+	n i64
+	xs []i64
+}
+
+// The alias of a parameter that is not mut is E701 inside an arena at any position, as the same store is outside one (#707).
+fn frame(k i64, w W) {
+	let live = w
+	arena {
+		live.n = k
+	}
+}
+
+fn main() {
+	mut w = W{xs: []i64{0}}
+	frame(5, w)
+}
