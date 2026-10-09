@@ -6711,7 +6711,7 @@ fn defer_wrap(call i64) i64 {
 	if pkg == "say" && is_say_func(m) != 0 {
 		return 3
 	}
-	if pkg == "argo" && m == "Put" {
+	if pkg == "argo" && (m == "Put" || m == "PutV2") {
 		return 1
 	}
 	if pkg == "argo" && (m == "Get" || m == "GetStrict") {
