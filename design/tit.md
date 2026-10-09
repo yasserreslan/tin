@@ -185,6 +185,8 @@ Large files need no fifth kind: a blob over 8 MiB keeps its id and is stored in 
   mirror.git/             a mirror over HTTP(S): the git objects written, then pushed from here (section 7)
   config                  repository config (section 11)
   lock                    the repository write lock (section 12)
+  purged                  tit purge's record: "<unix seconds> <hex id>... <reason>" a line (#1010)
+  packs/staged/, retired/ pending and retired packs (section 16)
 ```
 
 A workspace other than the first has a **file** `.tit` in its working directory: `store <absolute path of
