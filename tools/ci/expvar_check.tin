@@ -1,0 +1,50 @@
+package main
+
+import "./ci"
+import "./nettest"
+import "mint"
+import "say"
+
+// Compare the JSON that expvar serves through anvil with Go's expvar handler for the same
+// registrations (#923).
+//
+// tools/ci/fixtures/expvar.tin publishes its variables and serves them at /debug/vars from an anvil
+// server, after 200 GET /hit requests that each add one to a counter. bench/ref/expvar publishes the
+// same variables with Go's expvar and serves them with net/http after the same 200 additions. The
+// check compares the Content-Type and the body; Go's cmdline and memstats, which expvar registers
+// itself, are not in the comparison (the Go side removes them).
+
+const hits = 200
+
+fn main() {
+	let directory = ci.Join(ci.Root(), "bin/ci/expvar")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "expvar-")
+	let tin = ci.Join(work, "expvar-tin")
+	ci.BuildTin("tools/ci/fixtures/expvar.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "expvar-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/expvar"}, ci.Root(), 300), "go build expvar")
+
+	let want = ci.Exec([]str{goexe}, ci.Root(), 60)
+	ci.Must(want, "expvar Go reference")
+
+	let port = nettest.Port()
+	let server = nettest.StartCoded(tin, []str{}, []str{"TIN_CORES=4"}, ci.Join(work, "expvar.log"), port)
+	server.Ready(10)
+	for i in 0..hits {
+		let r = nettest.Do(port, "GET", "/hit", []str{}, "")
+		ci.Check(r.Status == 200, "GET /hit " + mint.Itoa(i) + ": status " + mint.Itoa(r.Status))
+	}
+	let got = nettest.Do(port, "GET", "/debug/vars", []str{}, "")
+	server.Stop()
+	ci.Check(got.Status == 200, "GET /debug/vars: status " + mint.Itoa(got.Status))
+
+	let gotText = "content-type: " + got.Header("Content-Type") + "\n" + got.Body
+	let diff = ci.Diff("go expvar", want.Stdout, "tin expvar", gotText)
+	if len(diff) > 0 {
+		say.Line(diff)
+	}
+	ci.Check(len(diff) == 0, "expvar: the JSON served by anvil differs from Go's expvar handler")
+	ci.Remove(work)
+	ci.Pass("expvar: " + mint.Itoa(hits) + " hits, the variables served by anvil match Go's expvar handler")
+}

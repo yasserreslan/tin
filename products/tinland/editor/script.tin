@@ -85,6 +85,7 @@ fn (ed Editor) dump() {
 //   fold, unfold, unfoldall  fold the block at the caret, open the fold there, open all
 //   shown            prints the folds' count and the lines on screen
 //   wrap             toggles word wrap (prints the new state); rowof prints the caret's row on the screen
+//   sort, trim       sorts the touched lines, removes their trailing spaces and tabs
 //   whitespace       toggles the whitespace marks (prints the new state)
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
@@ -211,6 +212,10 @@ fn RunScript(ed mut Editor, script str) {
 			ed.Buf.TransformCase(true)
 		} else if step == "lowercase" {
 			ed.Buf.TransformCase(false)
+		} else if step == "sort" {
+			ed.Buf.SortLines()
+		} else if step == "trim" {
+			ed.Buf.TrimTrailingSpace()
 		} else if twine.HasPrefix(step, "gutter:") {
 			let r = parseInt(step[7:])
 			ed.Buf.SelectLine(r)
@@ -224,6 +229,15 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
 		} else if step == "whitespace" {
 			say.Line("whitespace:", ToggleWhitespace())
+		} else if twine.HasPrefix(step, "ruler:") {
+			// ruler:N puts the line at display column N
+			let n = parseInt(step[6:])
+			SetRulerColumn(n)
+			say.Line("ruler column:", n)
+		} else if step == "ruler" {
+			say.Line("ruler:", ToggleRuler(), RulerColumn())
+		} else if step == "rulercol" {
+			say.Line("ruler column:", ed.RulerCol())
 		} else if twine.HasPrefix(step, "snap:") {
 			ed.Snapshot(step[5:])
 		} else if twine.HasPrefix(step, "view:") {

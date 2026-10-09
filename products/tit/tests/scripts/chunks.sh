@@ -21,8 +21,12 @@ cd "$d/r"
 t init . > /dev/null
 t config set user.name Ada
 t config set user.email ada@example.com
-# random data: nothing compresses, so the store's growth is what was stored
-head -c $((mb * 1048576)) /dev/urandom > big.bin
+# incompressible data from a fixed seed (perl's rand, seeded, is the same on every platform), so the
+# chunk cut points are the same on every run: the growth figures below are then exact, not a range
+# (#945: with /dev/urandom one run in six measured a cascade that broke the criterion)
+perl -e 'srand(945); my $n = '$mb' * 1048576; my $b = "C" x 65536;
+	binmode STDOUT;
+	while ($n > 0) { my $k = $n < 65536 ? $n : 65536; print pack("C$k", map { int(rand(256)) } 1 .. $k); $n -= $k }' > big.bin
 cp big.bin "$d/v1.bin"
 t add big.bin
 t commit -m "a large file" > /dev/null

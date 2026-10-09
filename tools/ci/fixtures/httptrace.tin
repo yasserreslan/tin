@@ -1,0 +1,38 @@
+package main
+
+import "quarry"
+import "say"
+import "tls"
+import "wire"
+import "httptrace"
+
+mut events str
+
+fn getConn(host str) { events += "get," }
+fn tlsStart() { events += "tls-start," }
+fn tlsDone(err fault) {
+	if err == nil { events += "tls-done," } else { events += "tls-failed," }
+}
+fn wrote(err fault) {
+	if err == nil { events += "wrote," } else { events += "write-failed," }
+}
+fn firstByte() { events += "first," }
+
+fn run(url str, secure bool) ! {
+	events = ""
+	mut opt = wire.Options{MaxIdle: -1, NoH2: true, Trace: trace()}
+	if secure { opt.TLS = tls.Config{ServerName: "localhost", InsecureSkipVerify: true} }
+	let r = try wire.DoWith("GET", url, []str{}, "", opt)
+	if r.Body != "trace-ok" { fail "unexpected response body: {r.Body}" }
+	say.Line(events, r.Status, r.Body)
+}
+
+fn trace() httptrace.ClientTrace {
+	return httptrace.ClientTrace{GetConn: getConn, TLSHandshakeStart: tlsStart, TLSHandshakeDone: tlsDone, WroteRequest: wrote, GotFirstResponseByte: firstByte}
+}
+
+fn main() {
+	let args = quarry.Args()
+	run(args[1], false) catch err { say.Line("plain error", err) }
+	run(args[2], true) catch err { say.Line("tls error", err) }
+}

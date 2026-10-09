@@ -35,12 +35,13 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+X, C, V, A | cut, copy, paste, select all (a cut or copy without a selection takes the line) |
 | Cmd+F, Cmd+G (Shift: backwards) | find as you type; Tab switches to the replacement, Return replaces, Cmd+Return replaces all |
 | Cmd+L | go to line |
-| Cmd+/ | comment or uncomment lines |
+| Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
+| Cmd+/ | comment or uncomment lines; Edit > Sort Lines and Trim Trailing Whitespace sort the touched lines and remove their trailing spaces and tabs (the command palette has both) |
 | Cmd+Alt+Down, Cmd+Alt+Up | add a caret on the line below or above (typing, Backspace, Delete and the arrows then act on every caret; Escape puts them away) |
 | Cmd+D, Cmd+Shift+K, Alt+Up/Down | duplicate, delete, move lines |
 | Cmd+[ and Cmd+] , Tab, Shift+Tab | unindent, indent |
 | Alt+Left/Right, Cmd+Left/Right/Up/Down | by word, line start/end, document start/end |
-| Cmd+Alt+Z (View > Toggle Word Wrap) | wrap long lines at the edge of the text area instead of scrolling sideways; Up and Down then move by rows, a click lands in the row it is on |
+| Cmd+Alt+R (View > Toggle Ruler), Cmd+Alt+Z (View > Toggle Word Wrap) | wrap long lines at the edge of the text area instead of scrolling sideways; Up and Down then move by rows, a click lands in the row it is on; the ruler (a vertical line at `ruler_column`, 80 by default, and at the wrap column when that one comes first) shows how far a line runs |
 | View > Toggle Whitespace (also in the palette) | show spaces as dots and tabs as arrows |
 | Cmd+Alt+[ , Cmd+Alt+] (Edit > Fold, Unfold, Unfold All) | fold the block at the caret (the lines indented deeper than its first line), open it; a click on the arrow in the gutter does the same. Up and Down skip a fold; a fold that would hide the caret opens; switching tabs drops the folds, and an edit that changes the number of lines moves them as if it was made at the caret |
 | Cmd+Shift+I | format the file with the rules of `tin fmt` |
@@ -64,6 +65,6 @@ Double click selects a word, triple click a line; the wheel scrolls what is unde
 ## Settings and keys
 
 `Tinland > Settings...` (Cmd+,) opens `~/.config/tinland/settings`, creating it with a commented template. One `name = value` per line:
-`theme = dark` or `light`, `autosave = on` (write the files with changes when the window has been quiet for a moment; off by default), `font_size`, `code_font` and `ui_font` (PostScript names), and key bindings by menu title: `key.toggle-terminal =
+`theme = dark` or `light`, `ruler = on` (a vertical line at the column a line should not run past; off by default) with `ruler_column = 80` (that column), `autosave = on` (write the files with changes when the window has been quiet for a moment; off by default), `trim_trailing_whitespace = on` (remove the trailing spaces and tabs of every line when a file is written; off by default), `insert_final_newline = on` (end a written file with a newline when it does not have one; off by default), `font_size`, `code_font` and `ui_font` (PostScript names), and key bindings by menu title: `key.toggle-terminal =
 ctrl+\`` (the title in lower case with dashes; `cmd`, `shift`, `alt` and `ctrl` then the key; `none` removes the key). Restart Tinland to
 apply them.

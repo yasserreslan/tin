@@ -1,0 +1,199 @@
+package main
+
+// expvar: published variables. Each New function registers a name, Add and Set change the value,
+// String renders it as Go's expvar does, Func computes a value at each read, Publish shares a
+// variable under another name, Get and Do read the registry in name order, and Handler writes the
+// JSON that /debug/vars serves.
+
+import "anvil"
+import "expvar"
+import "fault"
+import "gauge"
+import "say"
+
+fn main() {
+	ints()
+	floats()
+	strs()
+	flags()
+	maps()
+	registry()
+	panics()
+	funcs()
+	handler()
+}
+
+// ints covers Int: Add, Set, Value, String and the wrap at the largest value.
+fn ints() {
+	let a = expvar.NewInt("a")
+	say.Line("int", a.Value(), a.String())
+	a.Add(5)
+	a.Add(-2)
+	say.Line("int", a.Value(), a.String())
+	a.Set(42)
+	say.Line("int", a.Value(), a.String())
+
+	let big = expvar.NewInt("big")
+	big.Set(9223372036854775807)
+	big.Add(1)
+	say.Line("wrap", big.Value(), big.String())
+}
+
+// floats covers Float: Add, Set, Value, String in Go's shortest 'g' form, and the special values.
+fn floats() {
+	let f = expvar.NewFloat("f")
+	say.Line("float", f.Value(), f.String())
+	f.Add(0.5)
+	f.Add(0.25)
+	say.Line("float", f.Value(), f.String())
+	for v in []f64{1e21, 123456.0, 1234567.0, 100000.0, 0.0001, 0.00001, -2.5} {
+		f.Set(v)
+		say.Line("float", f.String())
+	}
+	f.Set(gauge.Inf(1))
+	say.Line("float", f.String())
+	f.Set(gauge.NaN())
+	say.Line("float", f.String())
+}
+
+// strs covers String: Set, Value and the JSON quoting of String().
+fn strs() {
+	let s = expvar.NewString("s")
+	say.Line("str", s.String(), len(s.Value()))
+	s.Set("a\"b\\c\n\t\r<>&")
+	say.Line("str", s.String())
+	s.Set("é日本 \x01  ")
+	say.Line("str", s.String(), len(s.Value()))
+	s.Set("\xffok")
+	say.Line("str", s.String())
+	s.Set("")
+	say.Line("str", s.String())
+}
+
+// flags covers Bool: Set, Value and String.
+fn flags() {
+	let flag = expvar.NewBool("flag")
+	say.Line("bool", flag.Value(), flag.String())
+	flag.Set(true)
+	say.Line("bool", flag.Value(), flag.String())
+	flag.Set(false)
+	say.Line("bool", flag.Value(), flag.String())
+}
+
+// maps covers Map: Add, AddFloat, SetString, SetBool, Set (shared with a registered variable),
+// Get, Delete, Init, Do and String.
+fn maps() {
+	let m = expvar.NewMap("m")
+	say.Line("map", m.String())
+	m.Add("z", 1)
+	m.Add("a", 2)
+	m.Add("z", 10)
+	m.AddFloat("f", 0.5)
+	m.SetString("s", "x y")
+	m.SetBool("b", true)
+	let a = expvar.Get("a")
+	if let sv = a {
+		m.Set("shared", sv)
+	}
+	say.Line("map", m.String())
+
+	if let z = m.Get("z") {
+		say.Line("get", z.String())
+	}
+	let missing = m.Get("nope")
+	say.Line("get missing:", missing == nil)
+
+	// A shared variable shows its later changes.
+	if let a2 = expvar.Get("a") {
+		say.Line("shared now", a2.String())
+	}
+	expvar.NewInt("late").Set(0)
+	m.Delete("z")
+	m.Delete("nope")
+	say.Line("map", m.String())
+
+	// Add on a key that holds another kind of variable changes nothing.
+	m.Add("s", 5)
+	say.Line("map kind", m.String())
+
+	let inner = expvar.NewMap("inner")
+	inner.Add("k", 1)
+	m.Set("inner", inner)
+	m.Do(fn(kv expvar.KeyValue) {
+		say.Line("do", kv.Key, kv.Value.String())
+	})
+
+	m.Init()
+	say.Line("map", m.String())
+	m.Add("q", 7)
+	say.Line("map", m.String())
+}
+
+// registry covers Get and Do over every published name, in name order.
+fn registry() {
+	say.Line("get missing:", expvar.Get("nothing") == nil)
+	expvar.Do(fn(kv expvar.KeyValue) {
+		say.Line("var", kv.Key, kv.Value.String())
+	})
+}
+
+// panics covers the name collision: Go panics with the same message.
+fn panics() {
+	guard {
+		expvar.NewInt("a")
+	} catch err {
+		say.Line("panic:", err)
+	}
+	guard {
+		expvar.NewMap("m")
+	} catch err {
+		say.Line("panic:", fault.Is(err, fault.Panic))
+	}
+}
+
+// funcs covers Func and Publish: a computed value runs at each read, Publish shares a variable
+// under a second name, a Func in a Map is read through it, and a taken name panics.
+fn funcs() {
+	let calls = expvar.NewInt("calls")
+	expvar.Publish("doubled", expvar.Func(fn() i64 { return calls.Value() * 2 }))
+	expvar.Publish("enabled", expvar.Func(fn() bool { return true }))
+	expvar.Publish("label", expvar.Func(fn() str { return "x<y & \"z\"" }))
+	expvar.Publish("nan", expvar.Func(fn() f64 { return gauge.NaN() }))
+	expvar.Publish("ratio", expvar.Func(fn() f64 { return 0.25 }))
+	expvar.Publish("control", expvar.Func(fn() str { return "a\x08b\x0cc\x01\\u0008" }))
+	expvar.Publish("calls2", calls)
+	calls.Add(3)
+	if let d = expvar.Get("doubled") {
+		say.Line("func", d.String())
+	}
+	if let c = expvar.Get("calls2") {
+		say.Line("publish", c.String())
+	}
+	for name in []str{"enabled", "label", "nan", "ratio", "control"} {
+		if let v = expvar.Get(name) {
+			say.Line("func", name, v.String())
+		}
+	}
+
+	let m = expvar.NewMap("fm")
+	m.Set("computed", expvar.Func(fn() i64 { return calls.Value() + 1 }))
+	say.Line("func map", m.String())
+	calls.Add(1)
+	say.Line("func map", m.String())
+
+	guard {
+		expvar.Publish("calls", calls)
+	} catch err {
+		say.Line("panic:", err)
+	}
+}
+
+// handler covers Handler through an anvil router: the status, the content type and the body.
+fn handler() {
+	let r = anvil.NewRouter()
+	r.Get("/debug/vars", expvar.Handler)
+	let w = r.Run("GET", "/debug/vars", "")
+	say.Line("status", w.Code())
+	say.Line("type", w.Header("Content-Type"))
+	say.Line(str(w.Body))
+}

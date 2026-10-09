@@ -1,0 +1,190 @@
+package main
+
+import "anvil"
+import "hearth"
+import "mint"
+import "proxy"
+import "quarry"
+import "relay"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// ReverseProxy answers Go's default gateway response when the upstream cannot be reached (#739). It also passes on
+// upstream bodies as Go's ReverseProxy does: a body cut short ends the response early, the Content-Type is sent once,
+// and the upstream's own bodies arrive whole. Core 1 is the upstream, core 2 the proxy, core 0 the client.
+fn main() {
+	hearth.Run(3, worker)
+}
+
+fn worker(id i64) {
+	if id == 1 {
+		upstream()
+		return
+	}
+	if id == 2 {
+		front()
+		return
+	}
+	client()
+}
+
+// client prints the 502 and then each response from the proxy: its status, its framing, its Content-Type values and its body
+// bytes as they arrived. The program ends when the client has printed everything.
+fn client() {
+	let p = proxy.New("http://127.0.0.1:1")
+	let r = anvil.NewRouter()
+	r.Get("/", p.ServeHTTP)
+	let got = r.RunWith("GET", "/", []str{}, "")
+	say.Line(got.Code(), say.Fmt("%q", got.Header("Content-Type")), say.Fmt("%q", got.Header("X-Content-Type-Options")), say.Fmt("%q", str(got.Body)))
+	let (_, addr) = relay.Recv()
+	show("cut chunked", exchange(addr, "/cut"))
+	show("cut length", exchange(addr, "/cut-length"))
+	show("typed", exchange(addr, "/typed"))
+	show("bare", exchange(addr, "/bare"))
+	quarry.Exit(0)
+}
+
+// front serves the proxy on a free port, which it sends to the client, and forwards to the upstream port core 1 sent.
+fn front() {
+	let (_, upstreamPort) = relay.Recv()
+	let probe = wire.Listen("127.0.0.1:0") catch err { panic("front listen: " + say.Str(err)) }
+	let addr = "127.0.0.1:" + mint.Itoa(probe.Port())
+	probe.Close()
+	relay.Send(0, addr)
+	let p = proxy.New("http://127.0.0.1:" + upstreamPort)
+	let r = anvil.NewRouter()
+	r.Get(`/{path...}`, p.ServeHTTP)
+	r.ServeN(addr, 1) catch err { panic("front serve: " + say.Str(err)) }
+}
+
+// upstream answers four requests, one connection each. Two bodies are cut short: a chunked one without its last chunk,
+// and one with fewer bytes than its Content-Length. /typed has a Content-Type; /bare has none.
+fn upstream() {
+	let (l, err) = wire.Listen("127.0.0.1:0")
+	if err != nil {
+		panic("upstream listen: " + say.Str(err))
+	}
+	relay.Send(2, mint.Itoa(l.Port()))
+	for i in 0..4 {
+		let (c, aerr) = l.Accept()
+		if aerr != nil {
+			panic("upstream accept: " + say.Str(aerr))
+		}
+		c.Write(answer(request(c))) catch _ { return }
+		c.Close()
+	}
+	l.Close()
+}
+
+// answer is the upstream's response to the request head req.
+fn answer(req str) str {
+	if twine.HasPrefix(req, "GET /cut-length ") {
+		return "HTTP/1.1 200 OK\r\nContent-Type: text/csv; charset=utf-8\r\nContent-Length: 10\r\nConnection: close\r\n\r\nhello"
+	}
+	if twine.HasPrefix(req, "GET /cut ") {
+		return "HTTP/1.1 200 OK\r\nContent-Type: text/csv; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n"
+	}
+	if twine.HasPrefix(req, "GET /typed ") {
+		return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+	}
+	return "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+}
+
+// request reads the request head from c.
+fn request(c wire.Conn) str {
+	mut b = make([]u8, 0, 512)
+	for twine.Index(str(b), "\r\n\r\n") < 0 {
+		let (n, re) = c.Read(mut b, 512)
+		if re != nil || n == 0 {
+			break
+		}
+	}
+	return str(b)
+}
+
+// exchange sends GET path to addr and returns every byte the proxy sent before it closed the connection.
+fn exchange(addr str, path str) str {
+	mut c = dial(addr)
+	c.SetTimeout(10000000000)
+	c.Write("GET " + path + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") catch err {
+		panic("cannot send " + path + ": " + say.Str(err))
+	}
+	mut out = make([]u8, 0, 4096)
+	for {
+		let (n, re) = c.Read(mut out, 4096)
+		if re != nil {
+			if wire.IsEOF(re) {
+				break
+			}
+			panic("cannot read " + path + ": " + say.Str(re))
+		}
+		if n == 0 {
+			break
+		}
+	}
+	c.Close()
+	return str(out)
+}
+
+// dial connects to addr. The proxy may not be listening yet, so it retries for a few seconds.
+fn dial(addr str) wire.Conn {
+	mut tries = 0
+	for {
+		let (c, err) = wire.DialTimeout(addr, 1000000000)
+		if err == nil {
+			return c
+		}
+		tries += 1
+		if tries == 500 {
+			panic("cannot connect to " + addr + ": " + say.Str(err))
+		}
+		tide.Sleep(10000000)
+	}
+}
+
+// show prints one response: the label, the status, the framing, every Content-Type value and the body bytes.
+fn show(label str, raw str) {
+	let (status, lines, body) = response(raw)
+	let types = values(lines, "content-type")
+	say.Line(label, status, framing(lines), "types=" + mint.Itoa(len(types)), say.Fmt("%q", twine.Join(types, ", ")), say.Fmt("body=%q", body))
+}
+
+// response splits a raw response into its status, its header lines and its body.
+fn response(raw str) (i64, []str, str) {
+	let end = twine.Index(raw, "\r\n\r\n")
+	if end < 0 {
+		return 0, []str{}, raw
+	}
+	let lines = twine.Split(raw[:end], "\r\n")
+	let first = twine.Fields(lines[0])
+	let status = mint.Atoi(first[1]) catch _ {
+		0
+	}
+	return status, lines[1:], raw[end+4:]
+}
+
+// values is the value of every header line named name (in lower case), in order.
+fn values(lines []str, name str) []str {
+	mut out = []str{}
+	for l in lines {
+		let k = twine.IndexByte(l, ':')
+		if k > 0 && twine.ToLower(l[:k]) == name {
+			out = append(out, twine.TrimSpace(l[k+1:]))
+		}
+	}
+	return out
+}
+
+// framing names how the body is delimited: by chunks, or by its Content-Length.
+fn framing(lines []str) str {
+	if len(values(lines, "transfer-encoding")) > 0 {
+		return "chunked"
+	}
+	let cl = values(lines, "content-length")
+	if len(cl) > 0 {
+		return "length=" + cl[0]
+	}
+	return "none"
+}

@@ -207,6 +207,8 @@ fn (ws mut Workspace) Split() {
 		return
 	}
 	let pane = editor.New(textedit.New())
+	pane.SaveTrim = ws.Ed.SaveTrim
+	pane.SaveFinalNl = ws.Ed.SaveFinalNl
 	pane.UseFont()
 	if len(ws.Ed.Buf.Path) > 0 {
 		pane.Load(ws.Ed.Buf.Path)
@@ -246,6 +248,26 @@ fn (ws mut Workspace) CloseSplit() {
 	}
 	ws.Ed = ws.Panes[ws.Active]
 	ws.Dirty = true
+}
+
+// SaveHygiene tells every editor what to do with the text as it is written: remove the trailing spaces and
+// tabs of every line, and end the file with a newline. Both are off until the settings turn them on.
+fn (ws mut Workspace) SaveHygiene(trim bool, finalNl bool) {
+	for i in 0..len(ws.Panes) {
+		ws.Panes[i].SaveTrim = trim
+		ws.Panes[i].SaveFinalNl = finalNl
+	}
+	ws.Ed.SaveTrim = trim
+	ws.Ed.SaveFinalNl = finalNl
+}
+
+// UseRuler turns the ruler on or off and names the column it sits at (the whole program's setting, like
+// the whitespace marks: every editor shows the same line).
+fn (ws mut Workspace) UseRuler(on bool, column f64) {
+	editor.SetRulerColumn(i64(column))
+	if on != editor.RulerShown() {
+		editor.ToggleRuler()
+	}
 }
 
 // UseFont tells every editor the size of a character cell.

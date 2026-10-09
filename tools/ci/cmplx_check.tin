@@ -1,0 +1,382 @@
+package main
+
+// Compare math/cmplx with Go's math/cmplx.
+//
+// A corpus of calls is generated here (a fixed seed, so both sides see the same cases): the edge table of signed zeros,
+// ±1, ±2, ±0.5, denormals, the largest and smallest normals, the reduction thresholds, ±Inf, NaN, a signalling NaN and the
+// neighbours of 0 and ±1 (poles and both branch cuts) is taken in every pair, and so is a generated set of values of every
+// magnitude, of values near the branch cuts and of big arguments. Each line is fed to bench/ref/cmplx (Go's math/cmplx)
+// and to tools/ci/fixtures/cmplx.tin, and the check compares their output line by line: every real part and imaginary
+// part as bits (a NaN is compared as NaN), and the bool and real results.
+//
+// The reference (#916). Go's math/cmplx, built for the platform, with one difference on amd64: there it is built with
+// Go's portable math.Exp and math.Log in place of their assembly (portableOverlay). Go's amd64 Exp is assembly that uses
+// fused multiply-adds when the CPU has them, and it differs from its portable Exp on 297 of the 8,069 Exp lines of this
+// corpus, by one or two ulps; Sin, Cos, Sinh, Cosh, Tan, Cot, Tanh and Pow inherit that. Go's amd64 Log does not normalize
+// a subnormal argument: math.Log(5e-324) is -709.09 there and -744.44 on arm64, which is the true value. The portable
+// kernels are the algorithms gauge ports (FreeBSD's e_exp.c and e_log.c, through Go's exp.go and log.go), and with them
+// Tin matches Go bit for bit on amd64, so no line of the check needs a bound there.
+//
+// The exception (#916). On arm64 the reference is Go's assembly Exp, which Tin matches bit for bit, and Go's pure-Go Log, whose
+// products the arm64 compiler fuses into multiply-adds (ten instructions in math.log). Tin's arm64 backend fuses other products
+// (six in gauge.Log), and 22 of the 8,069 Log lines of this corpus differ from Go's by one ulp. So the results of the functions
+// that pass through gauge.Log may differ from Go's in each component (the real part and the imaginary part) by at most these
+// bounds, the same table on every platform:
+//
+//	Log, Asin, Acos, Asinh, Acosh, Atan, Atanh   1 ulp
+//	Log10                                        2 ulps: Log10 multiplies Log by Log10E and rounds the product, so the
+//	                                             one ulp of Log can come out as two ulps of Log10
+//	Pow                                          2 + 2·L·(|Re y| + |Im y|·|w|/|c|) ulps, where L = Log(Abs(x)), w is Go's
+//	                                             result and c is its component. An ulp of L moves Pow's angle by |Im y|
+//	                                             times it, which moves each component by |w| times that, and it moves the
+//	                                             modulus by |Re y| times it (gauge.Pow takes Log for a fractional
+//	                                             exponent), which moves each component by the same relative amount. An
+//	                                             ulp of c is at least 2⁻⁵³|c|, which gives the factor 2; the 2 covers the
+//	                                             rounding of the other steps.
+//
+// The bounds are per function: Atanh's covers every line, including those whose Atan takes gauge.Atanh and stays exact. A
+// zero, infinite or NaN component of Go's Pow result, or an input whose Log or result is not finite, is compared exactly.
+// Every other function stays bit for bit. A difference beyond these bounds, a sign change (including +0 against -0), or a
+// NaN against a number fails the check, and every such line is counted. On amd64 every line matches exactly, so the bounds
+// are only ever used on arm64. The arm64 exception goes when gauge.Log rounds like Go's arm64 Log: that is a separate
+// accuracy effort in toolchain/std/gauge, not this check.
+
+import "./ci"
+import "cmplx"
+import "dice"
+import "gauge"
+import "mint"
+import "say"
+import "twine"
+
+const SEED = 916
+
+// bitsHex is the hex of a float's bits, for the corpus: its payload is kept, so a NaN goes in exactly.
+fn bitsHex(x f64) str {
+	return digits(gauge.F64bits(x), 16)
+}
+
+// hex64 is the hex of a float's bits, or "nan" for any NaN: the NaN payload is not part of a result.
+fn hex64(x f64) str {
+	if gauge.IsNaN(x) {
+		return "nan"
+	}
+	return bitsHex(x)
+}
+
+// digits writes v in n lowercase hex digits.
+fn digits(v u64, n i64) str {
+	let alphabet = "0123456789abcdef"
+	mut out = []u8{}
+	for k in 0..n {
+		let shift = u64(4 * (n - 1 - k))
+		out = append(out, alphabet[(v>>shift)&15])
+	}
+	return str(out)
+}
+
+// edges is the edge table: signed zeros, units, the denormal and normal limits, reduction thresholds, infinities, NaNs and
+// the neighbours of 0, ±1 and ±2 that sit on the branch cuts.
+fn edges() []f64 {
+	let nz = gauge.Copysign(0, -1)
+	let inf = gauge.Inf(1)
+	let snan = gauge.F64frombits(0x7FF0000000000001)
+	return []f64{
+		0, nz, 1, -1, 2, -2, 0.5, -0.5, 4, -4, 0.25, -0.25, 3, -3, 1.5, -1.5, 10, -100,
+		0.1, 0.3, 0.7071067811865476, 1.4142135623730951, 3.141592653589793, 1.5707963267948966, -1.5707963267948966,
+		1e-300, -1e-300, 1e-9, -1e-9, 1e-17, 5e-324, -5e-324, 2.2250738585072014e-308, -2.2250738585072014e-308,
+		1e100, -1e100, 1e300, -1e300, 1.7976931348623157e308, -1.7976931348623157e308, 1e8, 1e16, 4.5e15,
+		1073741823.0, 1073741824.0, 1073741825.0, -1073741824.0, 1e20, 1e27, 6.5e30,
+		gauge.Nextafter(1, 2), gauge.Nextafter(1, 0), gauge.Nextafter(-1, -2), gauge.Nextafter(-1, 0),
+		gauge.Nextafter(0, 1), gauge.Nextafter(0, -1), gauge.Nextafter(0.5, 1), gauge.Nextafter(2, 3),
+		inf, -inf, gauge.NaN(), -gauge.NaN(), snan,
+	}
+}
+
+// poles are the complex arguments the Pow exponents are drawn from: the special values of Go's pow.go and the unit imaginary.
+fn poles() []cmplx.Complex {
+	let inf = gauge.Inf(1)
+	let nan = gauge.NaN()
+	let nz = gauge.Copysign(0, -1)
+	return []cmplx.Complex{
+		cmplx.New(1, 0), cmplx.New(-1, 0), cmplx.New(0, 0), cmplx.New(nz, 0), cmplx.New(2, 0), cmplx.New(0.5, 0),
+		cmplx.New(-0.5, 0), cmplx.New(0, 1), cmplx.New(0, -1), cmplx.New(1, 1), cmplx.New(-1, -1), cmplx.New(0.5, 2),
+		cmplx.New(3, -0.25), cmplx.New(nan, 0), cmplx.New(0, nan), cmplx.New(inf, 0), cmplx.New(0, inf),
+		cmplx.New(-inf, 1), cmplx.New(1e-3, 2), cmplx.New(2, 1e-3), cmplx.New(-2, 0.5), cmplx.New(0, nz),
+	}
+}
+
+// randFloat is a float of a random mantissa and an exponent in -40..40, with a random sign.
+fn randFloat(rng mut dice.Rand) f64 {
+	let mant = f64(rng.U64()>>11) / 9007199254740992.0
+	let v = gauge.Ldexp(mant, rng.I64n(81)-40)
+	if rng.I64n(2) == 0 {
+		return -v
+	}
+	return v
+}
+
+// bigFloat is a float of a random mantissa and an exponent in -1100..1100: the range Go's reductions and overflows work in.
+fn bigFloat(rng mut dice.Rand) f64 {
+	let mant = f64(rng.U64()>>11) / 9007199254740992.0
+	let v = gauge.Ldexp(mant, rng.I64n(2201)-1100)
+	if rng.I64n(2) == 0 {
+		return -v
+	}
+	return v
+}
+
+// corpus returns the lines fed to both sides: every function on every edge pair and a generated set, the Pow pairs and the
+// Rect and Complex64 cases.
+fn corpus() []str {
+	let e = edges()
+	mut rng = dice.New(SEED)
+	mut lines = []str{}
+	mut zs = []cmplx.Complex{}
+	for re in e {
+		for im in e {
+			zs = append(zs, cmplx.New(re, im))
+		}
+	}
+	for i in 0..2500 {
+		let z = cmplx.New(randFloat(mut rng), randFloat(mut rng))
+		zs = append(zs, z)
+	}
+	for i in 0..800 {
+		let z = cmplx.New(bigFloat(mut rng), randFloat(mut rng))
+		zs = append(zs, z)
+	}
+	// Points next to the branch cuts: the real axis beyond ±1 and the imaginary axis beyond ±i.
+	let axes = []f64{0, gauge.Copysign(0, -1), 1, -1, 2, -2, 0.5, -0.5}
+	for i in 0..800 {
+		let x = randFloat(mut rng)
+		let y = axes[rng.I64n(8)]
+		if rng.I64n(2) == 0 {
+			zs = append(zs, cmplx.New(x, gauge.Nextafter(y, gauge.Inf(-1))))
+		} else {
+			zs = append(zs, cmplx.New(y, x))
+		}
+	}
+	for z in zs {
+		let p = bitsHex(z.Re) + " " + bitsHex(z.Im)
+		for op in unaryOps() {
+			lines = append(lines, op + " " + p)
+		}
+		lines = append(lines, "C64 " + p)
+		lines = append(lines, "C64SQRT " + p)
+	}
+	lines = append(lines, "Inf")
+	lines = append(lines, "NaN")
+
+	// Pow: every edge base against the special exponents, and generated bases against generated exponents.
+	let ps = poles()
+	for z in zs {
+		let base = bitsHex(z.Re) + " " + bitsHex(z.Im)
+		for q in ps {
+			if rng.I64n(4) == 0 {
+				lines = append(lines, "Pow " + base + " " + bitsHex(q.Re) + " " + bitsHex(q.Im))
+			}
+		}
+	}
+
+	// Rect: every radius and phase of the edge table, and generated ones.
+	for r in e {
+		for theta in e {
+			lines = append(lines, "Rect " + bitsHex(r) + " " + bitsHex(theta))
+		}
+	}
+	for i in 0..1000 {
+		lines = append(lines, "Rect " + bitsHex(randFloat(mut rng)) + " " + bitsHex(bigFloat(mut rng)))
+	}
+	return lines
+}
+
+// unaryOps are the one-argument functions of math/cmplx (Pow and Rect are their own lines).
+fn unaryOps() []str {
+	return []str{"Sqrt", "Exp", "Log", "Log10", "Asin", "Acos", "Atan", "Asinh", "Acosh", "Atanh", "Sin", "Cos",
+		"Tan", "Cot", "Sinh", "Cosh", "Tanh", "Conj", "Abs", "Phase", "IsNaN", "IsInf", "Polar"}
+}
+
+// ulpBound is the bound per component of a function in the exception (see the header); every other function is exact.
+fn ulpBound(op str) f64 {
+	if op == "Log10" {
+		return 2
+	}
+	for name in []str{"Log", "Asin", "Acos", "Asinh", "Acosh", "Atan", "Atanh"} {
+		if name == op {
+			return 1
+		}
+	}
+	return 0
+}
+
+// hexBits reads a hex number of at most 16 digits, as the bits of a float.
+fn hexBits(s str) u64 {
+	mut v = u64(0)
+	for i in 0..len(s) {
+		v = v*16 + hexDigit(s[i])
+	}
+	return v
+}
+
+// hexDigit is the value of one lowercase hex digit.
+fn hexDigit(c u8) u64 {
+	if c >= '0' && c <= '9' {
+		return u64(c - '0')
+	}
+	return u64(c-'a') + 10
+}
+
+// ulps is the distance between two output fields in ulps: 0 for the same text, else the distance between the bits of two
+// floats of the same sign. It is -1 when the fields cannot be compared: a NaN against anything but the same text, and two
+// floats of different signs (+0 and -0 included).
+fn ulps(a str, b str) f64 {
+	if a == b {
+		return 0
+	}
+	if a == "nan" || b == "nan" {
+		return -1
+	}
+	let x = hexBits(a)
+	let y = hexBits(b)
+	if x>>63 != y>>63 {
+		return -1
+	}
+	if x > y {
+		return f64(x - y)
+	}
+	return f64(y - x)
+}
+
+// inUlps reports whether two output fields are within n ulps of each other (see ulps).
+fn inUlps(a str, b str, n f64) bool {
+	let d = ulps(a, b)
+	return d >= 0 && d <= n
+}
+
+// bitsFloat is the float of an output field's hex bits.
+fn bitsFloat(s str) f64 {
+	return gauge.F64frombits(hexBits(s))
+}
+
+// finite reports whether a float is neither infinite nor NaN.
+fn finite(v f64) bool {
+	return !gauge.IsNaN(v) && !gauge.IsInf(v, 0)
+}
+
+// powWithin reports whether a Pow line is within its bound (see the header): each component of Tin's result is within
+// 2 + 2·L·(|Re y| + |Im y|·|w|/|c|) ulps of Go's, where L = Log(Abs(x)), w is Go's result and c is its component. A zero
+// component, or an L, a modulus or a component that is not finite, is compared exactly.
+fn powWithin(f []str, w []str, g []str) bool {
+	let x = cmplx.New(bitsFloat(f[1]), bitsFloat(f[2]))
+	let re = gauge.Abs(bitsFloat(f[3]))
+	let im = gauge.Abs(bitsFloat(f[4]))
+	let l = gauge.Abs(gauge.Log(cmplx.Abs(x)))
+	let m = cmplx.Abs(cmplx.New(bitsFloat(w[1]), bitsFloat(w[2])))
+	for k in 1..3 {
+		let c = gauge.Abs(bitsFloat(w[k]))
+		mut n = f64(0)
+		if c != 0 && finite(l) && finite(m) && finite(c) {
+			let b = 2 + 2*l*(re+im*m/c)
+			if finite(b) {
+				n = b
+			}
+		}
+		if !inUlps(w[k], g[k], n) {
+			return false
+		}
+	}
+	return true
+}
+
+// tolerated reports whether a line that differs is allowed by the exception (see the header): its function is in it, the op
+// and the number of fields match, and each field of the result is within the bound of Go's.
+fn tolerated(corpus str, want str, got str) bool {
+	let f = twine.Split(corpus, " ")
+	let w = twine.Split(want, " ")
+	let g = twine.Split(got, " ")
+	if len(w) != len(g) || w[0] != g[0] || f[0] != w[0] {
+		return false
+	}
+	if f[0] == "Pow" {
+		return len(w) == 3 && powWithin(f, w, g)
+	}
+	let n = ulpBound(f[0])
+	for k in 1..len(w) {
+		if !inUlps(w[k], g[k], n) {
+			return false
+		}
+	}
+	return true
+}
+fn run(exe str, data str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 900, data, []str{})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+// portableOverlay writes into dir a go build overlay that replaces the amd64 selectors of math.Exp and math.Log, so Go's
+// portable code is used and the assembly files still build, and returns its path. It needs GOROOT outside the module cache
+// (setup-go and Homebrew installs have one; a toolchain fetched by GOTOOLCHAIN does not).
+fn portableOverlay(dir str) str {
+	let o = ci.Exec([]str{"go", "env", "GOROOT"}, ci.Root(), 60)
+	ci.Must(o, "go env GOROOT")
+	let goroot = twine.TrimSpace(o.Stdout)
+	ci.Mkdirs(dir)
+	let exp = ci.Join(dir, "exp_asm.go")
+	let logPath = ci.Join(dir, "log_asm.go")
+	ci.Write(exp, "package math\n\nconst haveArchExp = false\n\nfunc archExp(x float64) float64\n")
+	ci.Write(logPath, "package math\n\nconst haveArchLog = false\n\nfunc archLog(x float64) float64\n")
+	let expKey = goroot + "/src/math/exp_asm.go"
+	let logKey = goroot + "/src/math/log_asm.go"
+	let overlay = ci.Join(dir, "overlay.json")
+	ci.Write(overlay, `{"Replace": {"` + expKey + `": "` + exp + `", "` + logKey + `": "` + logPath + `"}}` + "\n")
+	return overlay
+}
+
+fn main() {
+	let lines = corpus()
+	let data = twine.Join(lines, "\n") + "\n"
+	let directory = ci.Join(ci.Root(), "bin/ci/cmplx")
+	ci.Mkdirs(directory)
+	let work = ci.TempDir(directory, "cmplx-")
+	let tin = ci.Join(work, "cmplx-tin")
+	ci.BuildTin("tools/ci/fixtures/cmplx.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "cmplx-go")
+	mut build = []str{"go", "build"}
+	if ci.Arch() == "amd64" {
+		build = append(build, "-overlay")
+		build = append(build, portableOverlay(ci.Join(work, "overlay")))
+	}
+	build = append(build, "-o")
+	build = append(build, goexe)
+	build = append(build, "./bench/ref/cmplx")
+	ci.Must(ci.Exec(build, ci.Root(), 300), "go build cmplx")
+	let want = run(goexe, data)
+	let got = run(tin, data)
+	ci.Check(len(got) == len(want), "cmplx: " + mint.Itoa(len(got)) + " lines against Go's " + mint.Itoa(len(want)))
+	mut bad = 0
+	mut eased = 0
+	for i in 0..len(want) {
+		if want[i] == got[i] {
+			continue
+		}
+		if i < len(lines) && tolerated(lines[i], want[i], got[i]) {
+			eased += 1
+			continue
+		}
+		if bad < 6 {
+			if i < len(lines) {
+				say.Line("line " + mint.Itoa(i + 1) + " (corpus: " + lines[i] + "):")
+			} else {
+				say.Line("line " + mint.Itoa(i + 1) + ":")
+			}
+			say.Line("  Go:  " + want[i])
+			say.Line("  Tin: " + got[i])
+		}
+		bad += 1
+	}
+	ci.Check(bad == 0, "cmplx: " + mint.Itoa(bad) + " of " + mint.Itoa(len(want)) + " lines differ beyond the exception")
+	ci.Remove(work)
+	ci.Pass("cmplx: " + mint.Itoa(len(want)) + " lines (" + mint.Itoa(len(lines)) + " corpus cases) match Go's math/cmplx; " + mint.Itoa(eased) + " results differ within the exception's bounds (see the header)")
+}

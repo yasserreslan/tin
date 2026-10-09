@@ -14,8 +14,10 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [relay](#relay) | messages between cores (channels) |
 | [task](#task) | deadline and cancellation of the running code (context) |
 | [wire](#wire) | TCP and HTTP/1.1 and HTTP/2 client (net, net/http) |
+| [httptrace](#httptrace) | observable HTTP client phase hooks (net/http/httptrace) |
 | [jar](#jar) | HTTP cookie jar for wire clients (net/http/cookiejar) |
 | [dump](#dump) | HTTP request and response dumps (net/http/httputil) |
+| [proxy](#proxy) | streaming HTTP reverse proxy (net/http/httputil) |
 | [assay](#assay) | HTTP test requests, recorders and local test servers (net/http/httptest) |
 | [tls](#tls) | TLS 1.3 client and server (crypto/tls) |
 | [hpack](#hpack) | HTTP/2 header compression (golang.org/x/net/http2/hpack) |
@@ -23,6 +25,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [glyph](#glyph) | UTF-8, UTF-16 and Unicode (unicode/utf8, unicode/utf16, unicode) |
 | [mint](#mint) | number and string conversion (strconv) |
 | [gauge](#gauge) | math (math) |
+| [cmplx](#cmplx) | complex numbers and the functions of math/cmplx |
 | [bits](#bits) | bit counting and manipulation (math/bits) |
 | [link](#link) | URLs and their escaping (net/url) |
 | [netip](#netip) | IP addresses, address/port pairs and prefixes as value types (net/netip) |
@@ -48,12 +51,14 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [abacus](#abacus) | arbitrary-precision integers (math/big) |
 | [seal](#seal) | crypto and encodings (crypto/sha256, hmac, encoding/hex, base64, base32, ascii85) |
 | [herald](#herald) | logging (log/slog) |
+| [expvar](#expvar) | published variables and their JSON handler (expvar) |
 | [crucible](#crucible) | testing helpers (testing) |
 | [constraints](#constraints) | named generic constraint shapes |
 | [policy](#policy) | with policies and slots (context values, retry/cache/trace middleware) |
 | [redis](#redis) | Redis client (go-redis) |
 | [mysql](#mysql) | MySQL client (database/sql with go-sql-driver/mysql) |
 | [postgres](#postgres) | PostgreSQL client (database/sql with pgx) |
+| [database](#database) | generic SQL drivers, pooling and queries (database/sql) |
 | [kafka](#kafka) | Kafka client (franz-go, sarama) |
 | [websocket](#websocket) | WebSocket server and client (gorilla/websocket) |
 | [atomic](#atomic) | counters and flags every core may change (sync/atomic) |
@@ -481,6 +486,12 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `(r Resp) Proto() str`: Proto is the protocol of the response: "HTTP/1.1" or "HTTP/1.0" as its status line says, "HTTP/2.0" for HTTP/2.
 - `(r Resp) Reason() str`: Reason is the reason phrase of the status line ("OK" in "HTTP/1.1 200 OK"), "" when there is none (HTTP/2 has none).
 
+## httptrace
+
+Package httptrace provides the HTTP client hooks wire can observe on HTTP/1.1 and TLS. DNS and connect hooks are unavailable because wire's platform resolver combines those phases. HTTP/2 requests currently use a separate path and report only GetConn and TLS handshake hooks.
+
+- `type ClientTrace struct`: ClientTrace contains callbacks for observable HTTP client phases.
+
 ## jar
 
 Package jar is a cookie jar for HTTP clients, as Go's net/http/cookiejar is (#739): it keeps the cookies servers set (RFC 6265 parsing, domain and path matching, Secure, expiry by Max-Age and Expires, HttpOnly) and gives each request the ones it should carry. Do sends a wire request with the jar's cookies and keeps the cookies of its response.
@@ -531,6 +542,30 @@ Not reproduced: an absolute-form request target ("GET http://host/x") is written
 
 - `Request(q anvil.Req, body bool) str`: Request returns the request q as text, as Go's httputil.DumpRequest(req, body): the request line, the Host field, a Transfer-Encoding: chunked field for a chunked request, the other fields (Cache-Control: no-cache added after a Pragma: no-cache, as Go's server does), an empty line and, when body is true, the body (chunked again when it came chunked). A request on a Router.Stream route has no body here: its body is read with BodyStream.
 - `Response(r wire.Resp, body bool) str`: Response returns the response r as text, as Go's httputil.DumpResponse(resp, body): the status line, a Connection: close field when the connection ends after it (HTTP/1.0 without keep-alive, a body read to the end of the connection), the framing (Content-Length, or Transfer-Encoding: chunked), the other fields, an empty line and, when body is true, the body.
+
+## proxy
+
+Package proxy forwards HTTP requests to an upstream server with bounded memory, like Go's net/http/httputil.ReverseProxy.
+
+A basic proxy:
+
+```tin body
+let p = proxy.New("http://127.0.0.1:8081")
+let r = anvil.NewRouter()
+r.Stream("POST", `/{path...}`, p.ServeHTTP)
+r.Get(`/{path...}`, p.ServeHTTP)
+r.Serve(":8080") catch err { say.Line(err) }
+```
+
+Set Director to rewrite a request to a complete upstream URL. ModifyResponse can edit the upstream status and fields and fail or reject them before they are written; ErrorHandler replaces the default 502 response. The proxy removes hop-by-hop fields and appends the caller's address to X-Forwarded-For. Register request-body routes with Router.Stream.
+
+Once the response head is sent its status cannot change, so a failure in the upstream body is not handed to ErrorHandler. The proxy logs it once with herald and aborts the response: the client sees the response end early instead of a body that looks complete, as Go's ReverseProxy aborts the handler.
+
+- `type Response struct`: Response is the upstream status and headers before they are copied to the client.
+- `type Proxy struct`: Proxy is an HTTP reverse proxy. Target is an http:// URL. Director, when set, returns the complete upstream URL for each request, or an empty string to use Target. Use New to get default hooks.
+- `New(target str) Proxy`: New returns a proxy with default hook functions. Set hooks before registering ServeHTTP.
+- `DefaultErrorHandler(q anvil.Req, w mut anvil.Out, err fault)`: DefaultErrorHandler writes Go ReverseProxy's default 502: the status with no body (anvil adds its text/plain content type).
+- `(p Proxy) ServeHTTP(q anvil.Req, w mut anvil.Out)`: ServeHTTP handles a request and can be registered with anvil.Router.Stream. Requests and responses reuse one 32 KiB buffer in each direction; neither body is accumulated.
 
 ## assay
 
@@ -856,6 +891,43 @@ Package gauge is floating-point math and a few integer helpers (like Go's math);
 - `Cos(x f64) f64`: Cos returns the cosine of x (radians). Cos(±Inf) = Cos(NaN) = NaN.
 - `Tan(x f64) f64`: Tan returns the tangent of x (radians). Tan(±0) = ±0, Tan(±Inf) = Tan(NaN) = NaN.
 - `Sincos(x f64) (f64, f64)`: Sincos returns Sin(x), Cos(x) with one argument reduction, like Go's math.Sincos.
+
+## cmplx
+
+Package cmplx is complex arithmetic: the functions of Go's math/cmplx on Complex (a value struct of two f64 parts) and Complex64 (two f32 parts). The real functions come from package gauge; the branches, poles, signed zeros and infinities are Go's, and the expressions keep Go's shape so that arm64 fuses the same products (see the note on mul).
+
+- `type Complex value struct`: Complex is a complex number: Re is the real part and Im the imaginary part (Go's complex128).
+- `type Complex64 value struct`: Complex64 is a complex number with float32 parts (Go's complex64); From64 rounds each part to float32.
+- `New(re f64, im f64) Complex`: New returns the complex number re + im*i (Go's complex(re, im)).
+- `From64(z Complex) Complex64`: From64 rounds each part of z to float32, as Go's complex64(z) does.
+- `(c Complex64) To128() Complex`: To128 widens each part of c to float64 (exact).
+- `Inf() Complex`: Inf returns the complex infinity (+Inf, +Inf).
+- `NaN() Complex`: NaN returns the complex NaN (NaN, NaN).
+- `IsInf(z Complex) bool`: IsInf reports whether either part of z is an infinity.
+- `IsNaN(z Complex) bool`: IsNaN reports whether z is NaN: a part is NaN and neither part is an infinity.
+- `Abs(z Complex) f64`: Abs returns the absolute value (modulus) of z, computed with Hypot so it does not overflow.
+- `Phase(z Complex) f64`: Phase returns the phase (argument) of z, in [-Pi, Pi].
+- `Polar(z Complex) (f64, f64)`: Polar returns the absolute value and the phase of z (Abs and Phase).
+- `Rect(r f64, theta f64) Complex`: Rect returns the complex number with modulus r and phase theta.
+- `Conj(z Complex) Complex`: Conj returns the complex conjugate of z.
+- `Sqrt(z Complex) Complex`: Sqrt returns the principal square root of z, with the sign of the imaginary part chosen as Go does.
+- `Exp(z Complex) Complex`: Exp returns e**z, the complex exponential of z.
+- `Log(z Complex) Complex`: Log returns the natural logarithm of z: ln|z| + i*Phase(z), the principal branch (cut along the negative real axis).
+- `Log10(z Complex) Complex`: Log10 returns the base-10 logarithm of z.
+- `Pow(x Complex, y Complex) Complex`: Pow returns x**y for complex x and y, as exp(y*log(x)) with Go's special cases (x == 0 gives 0, 1, Inf or NaN by y). Go's version panics ("not reached") for x == 0 with a NaN real part and an infinite imaginary part of y; this returns NaN.
+- `Sin(z Complex) Complex`: Sin returns the sine of z.
+- `Sinh(z Complex) Complex`: Sinh returns the hyperbolic sine of z.
+- `Cos(z Complex) Complex`: Cos returns the cosine of z.
+- `Cosh(z Complex) Complex`: Cosh returns the hyperbolic cosine of z.
+- `Tan(z Complex) Complex`: Tan returns the tangent of z.
+- `Tanh(z Complex) Complex`: Tanh returns the hyperbolic tangent of z.
+- `Cot(z Complex) Complex`: Cot returns the cotangent of z.
+- `Asin(z Complex) Complex`: Asin returns the arcsine of z, on the principal branch (cuts on the real axis beyond ±1).
+- `Acos(z Complex) Complex`: Acos returns the arccosine of z.
+- `Asinh(z Complex) Complex`: Asinh returns the inverse hyperbolic sine of z.
+- `Acosh(z Complex) Complex`: Acosh returns the inverse hyperbolic cosine of z, with a real part that is never negative.
+- `Atan(z Complex) Complex`: Atan returns the arctangent of z, on the principal branch (cuts on the imaginary axis beyond ±i).
+- `Atanh(z Complex) Complex`: Atanh returns the inverse hyperbolic tangent of z.
 
 ## bits
 
@@ -1341,7 +1413,7 @@ Package tide is clocks, durations, civil (calendar) time and time zones, like Go
 
 ## dice
 
-Package dice is fast pseudo-random numbers (like Go's math/rand): xoshiro256** generators and a lazily seeded per-core one.
+Package dice is fast pseudo-random numbers: xoshiro256** generators with a lazily seeded per-core one, and math/rand/v2's PCG-DXSM and ChaCha8 behind RandV2 (V2 names where a legacy name exists).
 
 - `type Rand struct`: Rand is a xoshiro256** generator; make one with New or FromState, or call the package functions for this core's generator.
 - `(r mut Rand) Seed(s u64)`: Seed resets r to the sequence for seed s (expanded with splitmix64, so every seed gives a good state).
@@ -1377,6 +1449,38 @@ Package dice is fast pseudo-random numbers (like Go's math/rand): xoshiro256** g
 - `Fill(b mut []u8)`: Fill overwrites b with random bytes from this core's generator.
 - `Bytes(n i64) []u8`: Bytes returns n random bytes from this core's generator.
 - `Str(n i64, alphabet str) str`: Str returns n random characters of alphabet from this core's generator.
+- `shape SourceV2`: SourceV2 is the 64-bit stream a RandV2 draws from: a PCG, a ChaCha8, or a Rand.
+- `type PCG struct`: PCG is Go math/rand/v2's 128-bit PCG-DXSM generator.
+- `NewPCG(d1 u64, d2 u64) PCG`: NewPCG returns a PCG stream initialized with the two seed words (Go's NewPCG).
+- `(p mut PCG) Uint64() u64`: Uint64 returns the next Go-compatible PCG-DXSM value.
+- `(r mut Rand) Uint64() u64`: Uint64 returns the next value of the legacy generator, so a Rand is a v2 source too.
+- `type ChaCha8 struct`: ChaCha8 is Go math/rand/v2's ChaCha8 stream: four interleaved blocks per generation, reseeded from the last four words.
+- `NewChaCha8(seed [32]u8) ChaCha8`: NewChaCha8 returns a ChaCha8 stream seeded with the 32 bytes of seed (Go's NewChaCha8).
+- `(c mut ChaCha8) Uint64() u64`: Uint64 returns the next word of the stream (Go's ChaCha8.Uint64).
+- `type RandV2 struct`: RandV2 draws Go math/rand/v2-style values from a 64-bit source (Go's Rand).
+- `NewV2(source dyn SourceV2) RandV2`: NewV2 returns a RandV2 that draws from source, a PCG, a ChaCha8 or a Rand (Go's New).
+- `(r mut RandV2) Uint64() u64`: Uint64 returns the next value of the source.
+- `(r mut RandV2) Int64() i64`: Int64 returns a non-negative 63-bit value (Go's Int64).
+- `(r mut RandV2) Int() i64`: Int returns a non-negative 63-bit value (Tin's int is i64; Go's Int).
+- `(r mut RandV2) Uint() u64`: Uint returns a uniform 64-bit unsigned value (Go's Uint).
+- `(r mut RandV2) Int32N(n i32) i32`: Int32N returns a uniform value in [0, n); it panics when n <= 0.
+- `(r mut RandV2) Int64N(n i64) i64`: Int64N returns a uniform value in [0, n); it panics when n <= 0.
+- `(r mut RandV2) Float64() f64`: Float64 returns a uniform value in [0, 1) from the low 53 bits of a source word (Go's Float64).
+- `(r mut RandV2) NormFloat64() f64`: NormFloat64 returns a standard normal value by Marsaglia and Tsang's ziggurat, as Go's NormFloat64.
+- `(r mut RandV2) ExpFloat64() f64`: ExpFloat64 returns an exponential value with rate 1 by Marsaglia and Tsang's ziggurat, as Go's ExpFloat64.
+- `(r mut RandV2) Shuffle(n i64, swap fn(i64, i64))`: Shuffle calls swap(i, j) for the pairs of Go's Fisher-Yates shuffle of n elements; it panics when n < 0.
+- `(r mut RandV2) Perm(n i64) []i64`: Perm returns a uniform permutation of 0 through n-1 (Go's Perm); it panics when n < 0.
+- `Int32N(n i32) i32`: Int32N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0.
+- `Int64N(n i64) i64`: Int64N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0.
+- `N(n i64) i64`: N returns a uniform value in [0, n) from this core's v2 stream; it panics when n <= 0 (i64 only: Tin has no generic conversion).
+- `Int64() i64`: Int64 returns a non-negative 63-bit value from this core's v2 stream.
+- `Int() i64`: Int returns a non-negative 63-bit value from this core's v2 stream.
+- `Uint() u64`: Uint returns a uniform 64-bit unsigned value from this core's v2 stream.
+- `Float64() f64`: Float64 returns a uniform value in [0, 1) from this core's v2 stream.
+- `NormFloat64() f64`: NormFloat64 returns a standard normal value from this core's v2 stream.
+- `ExpFloat64() f64`: ExpFloat64 returns an exponential value with rate 1 from this core's v2 stream.
+- `ShuffleV2(n i64, swap fn(i64, i64))`: ShuffleV2 calls swap for the pairs of a Fisher-Yates shuffle of n elements from this core's v2 stream.
+- `PermV2(n i64) []i64`: PermV2 returns a uniform permutation of 0 through n-1 from this core's v2 stream; it panics when n < 0.
 
 ## sift
 
@@ -1458,7 +1562,7 @@ Package atlas is the functions on maps (like Go's maps): keys, values, copies an
 
 ## cairn
 
-Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and an LRU cache for i64 and str values, and the generic Heap, Deque, Set and Cache over any element types.
+Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and an LRU cache for i64 and str values, and the generic Heap, Deque, Set and Cache over any element types, with Go's container/list (List, Element) and container/ring (Ring) over any element types too.
 
 - `type IntHeap struct`: IntHeap is a binary min-heap of i64 values; IntHeap{} is ready to use.
 - `NewIntHeap(n i64) IntHeap`: NewIntHeap returns an empty min-heap with room for n values.
@@ -1556,6 +1660,32 @@ Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and
 - `(c mut Cache[K, V]) Remove(k K) bool`: Remove takes k out and reports whether it was cached.
 - `(c Cache[K, V]) Len() i64`: Len returns the number of cached entries.
 - `(c Cache[K, V]) Keys() []K`: Keys returns the keys from the most to the least recently used.
+- `type Element[T constraints.Any] struct`: Element is a node of a List: Value is its value, and Next and Prev walk the list it is in.
+- `type List[T constraints.Any] struct`: List is a doubly linked list of Elements; use NewList.
+- `NewList[T constraints.Any]() List[T]`: NewList returns an empty list.
+- `(l List[T]) Len() i64`: Len returns the number of elements in the list.
+- `(l List[T]) Front() ?Element[T]`: Front returns the first element, or nil when the list is empty.
+- `(l List[T]) Back() ?Element[T]`: Back returns the last element, or nil when the list is empty.
+- `(e Element[T]) Next() ?Element[T]`: Next returns the element after e, or nil at the back of its list and after Remove.
+- `(e Element[T]) Prev() ?Element[T]`: Prev returns the element before e, or nil at the front of its list and after Remove.
+- `(l mut List[T]) PushFront(v T) Element[T]`: PushFront inserts v at the front and returns its element.
+- `(l mut List[T]) PushBack(v T) Element[T]`: PushBack inserts v at the back and returns its element.
+- `(l mut List[T]) InsertBefore(v T, mark mut Element[T]) ?Element[T]`: InsertBefore inserts v in front of mark and returns its element, or nil when mark is not in l.
+- `(l mut List[T]) InsertAfter(v T, mark mut Element[T]) ?Element[T]`: InsertAfter inserts v after mark and returns its element, or nil when mark is not in l.
+- `(l mut List[T]) Remove(e mut Element[T]) T`: Remove takes e out of l and returns its value; e is left alone when it is not in l.
+- `(l mut List[T]) MoveToFront(e mut Element[T])`: MoveToFront moves e to the front of l; it does nothing when e is not in l or is already first.
+- `(l mut List[T]) MoveToBack(e mut Element[T])`: MoveToBack moves e to the back of l; it does nothing when e is not in l or is already last.
+- `(l mut List[T]) PushBackList(other List[T])`: PushBackList appends a copy of each value of other, in order, to the back of l; other is unchanged, and other may be l itself.
+- `(l mut List[T]) PushFrontList(other List[T])`: PushFrontList prepends a copy of each value of other to the front of l, keeping their order; other is unchanged, and other may be l itself.
+- `type Ring[T constraints.Any] struct`: Ring is an element of a circular list: Value is its value, and Next and Prev move around the ring. A ring always has at least one element; NewRing builds one.
+- `NewRing[T constraints.Any](values []T) ?Ring[T]`: NewRing returns a ring with one element per value, in order, or nil when values is empty. (Go's ring.New gives nil values; a type parameter has no zero value, so the values come in a slice.)
+- `(r Ring[T]) Next() Ring[T]`: Next returns the element after r in its ring.
+- `(r Ring[T]) Prev() Ring[T]`: Prev returns the element before r in its ring.
+- `(r Ring[T]) Len() i64`: Len returns the number of elements in r's ring.
+- `(r Ring[T]) Move(n i64) Ring[T]`: Move returns the element n steps after r, or -n steps before it when n is negative.
+- `(r Ring[T]) Do(f fn(T))`: Do calls f with each value of r's ring, starting at r and going forward.
+- `(r mut Ring[T]) Link(s mut Ring[T]) Ring[T]`: Link makes s follow r: r.Next() becomes s and the rest of s's ring follows s, and it returns r's old next. Within one ring it splits the ring; between two rings it joins them.
+- `(r mut Ring[T]) Unlink(n i64) ?Ring[T]`: Unlink removes the n elements after r from their ring and returns them as a ring, or nil when n <= 0.
 
 ## stamp
 
@@ -2015,6 +2145,62 @@ Package herald writes leveled log lines, one write(2) per line so cores never in
 - `Info4(msg str, k1 str, v1 str, k2 str, v2 str)`: Info4 logs msg with two key/value pairs.
 - `Error2(msg str, k str, v str)`: Error2 logs msg with one key/value pair at error level.
 
+## expvar
+
+Package expvar publishes named variables that a running program can read back, as Go's expvar does: integers, floats, strings, flags and maps of them, plus computed values (Func) and variables published under a second name (Publish). The registry is process-wide, so a variable made on one core is seen by every core. Integer and float updates are atomic; the lists and string values are changed under a short lock. Handler serves the registry as Go's JSON at /debug/vars.
+
+```tin body
+let requests = expvar.NewInt("requests")   // made before the cores start, or in a shared let
+requests.Add(1)
+let r = anvil.NewRouter()
+r.Get("/debug/vars", expvar.Handler)
+```
+
+Nothing is freed while a handle may still use it (there is no collector): see README.md.
+
+- `shape Var`: Var is a published variable: what Get returns and Map.Set takes. Only this package's types implement it.
+- `type KeyValue struct`: KeyValue is one variable of the registry or of a map, as Do passes it.
+- `type Int struct`: Int is an integer variable; the handle is a pointer to its node, so copies share it.
+- `type Float struct`: Float is a float variable; the handle is a pointer to its node, so copies share it.
+- `type String struct`: String is a string variable; the handle is a pointer to its node, so copies share it.
+- `type Bool struct`: Bool is a flag variable; the handle is a pointer to its node, so copies share it. Go's expvar has no Bool (it publishes a flag with Func over a variable that is read, not shared); this package adds it because a flag that several cores set and read needs an atomic word.
+- `type Map struct`: Map is a map of variables; the handle is a pointer to its node, so copies share it.
+- `NewInt(name str) Int`: NewInt publishes a new integer variable named name, starting at 0. It panics if the name is taken, as Go's Publish does.
+- `NewFloat(name str) Float`: NewFloat publishes a new float variable named name, starting at 0. It panics if the name is taken.
+- `NewString(name str) String`: NewString publishes a new string variable named name, starting as "". It panics if the name is taken.
+- `NewBool(name str) Bool`: NewBool publishes a new flag named name, starting as false. It panics if the name is taken.
+- `NewMap(name str) Map`: NewMap publishes a new, empty map named name. It panics if the name is taken.
+- `Publish(name str, v dyn Var)`: Publish publishes v under name, as Go's Publish does. v is shared, not copied: a variable published under two names is one variable, and a later change shows under both. It panics if the name is taken.
+- `Func[T bool | i64 | f64 | str](f fn() T) dyn Var`: Func returns a variable whose value is f's result, computed and encoded as JSON at each read, as Go's expvar.Func does: f runs again whenever the variable is served or read. Go's any has no Tin equivalent, so T is bool, i64, f64 or str. A NaN or an infinity has no JSON form and reads as an empty value, as in Go. Publish the result, or Set it in a Map.
+- `Get(name str) ?dyn Var`: Get returns the variable published as name, or nil when there is none.
+- `Do(f fn(KeyValue))`: Do calls f for each published variable, in name order.
+- `Handler(q anvil.Req, w mut anvil.Out)`: Handler serves every published variable as JSON in Go's format: one "name": value line per variable, in name order, with the application/json content type.
+- `(v Int) Add(delta i64)`: Add adds delta to the integer variable, wrapping on overflow as Go's expvar does.
+- `(v Int) Set(value i64)`: Set stores value in the integer variable.
+- `(v Int) Value() i64`: Value returns the integer variable's value.
+- `(v Int) String() str`: String returns the value in decimal, as Go's expvar writes it.
+- `(v Float) Add(delta f64)`: Add adds delta to the float variable; concurrent adds are not lost.
+- `(v Float) Set(value f64)`: Set stores value in the float variable.
+- `(v Float) Value() f64`: Value returns the float variable's value.
+- `(v Float) String() str`: String returns the value as Go's expvar writes it: the shortest form that reads back exactly.
+- `(v String) Set(value str)`: Set stores value in the string variable. The value is copied, so the caller may change its own.
+- `(v String) Value() str`: Value returns the string variable's value.
+- `(v String) String() str`: String returns the value quoted the way Go's expvar writes it (JSON escapes).
+- `(v Bool) Set(value bool)`: Set stores value in the flag.
+- `(v Bool) Value() bool`: Value returns the flag.
+- `(v Bool) String() str`: String returns "true" or "false".
+- `(v funcVar) String() str`: String computes the value now and returns it as JSON.
+- `(m Map) Add(key str, delta i64)`: Add adds delta to the integer under key, creating it at 0 when the key is new. A key that holds another kind of variable is left alone, as in Go.
+- `(m Map) AddFloat(key str, delta f64)`: AddFloat adds delta to the float under key, creating it at 0 when the key is new. A key that holds another kind of variable is left alone, as in Go.
+- `(m Map) Set(key str, av dyn Var)`: Set stores av under key, replacing whatever the key held. av is shared, not copied: later changes to it show in the map, as in Go.
+- `(m Map) SetString(key str, value str)`: SetString stores a new string variable holding value under key. This package's helper: Go makes such a value with new(String), which has no handle here.
+- `(m Map) SetBool(key str, value bool)`: SetBool stores a new flag holding value under key. This package's helper, as SetString.
+- `(m Map) Get(key str) ?dyn Var`: Get returns the variable under key, or nil when there is none.
+- `(m Map) Delete(key str)`: Delete removes key from m. The variable stays valid for any handle that holds it.
+- `(m Map) Init() Map`: Init removes every key from m and returns m.
+- `(m Map) Do(f fn(KeyValue))`: Do calls f for each variable of m, in key order.
+- `(m Map) String() str`: String returns m as Go's expvar writes it on one line: {"a": 1, "b": "x"}.
+
 ## crucible
 
 Package crucible is for tests and micro-benchmarks: labeled checks that collect failures, Done to report them (exit status 1 on failure), and Bench to time a function.
@@ -2158,18 +2344,29 @@ for r in rows.Rows {
 
 ## postgres
 
-Package postgres is a PostgreSQL protocol 3.0 client over TCP. Query interpolation binds binary parameters as $1, $2, ...; a plain str cannot be used as SQL. Connections are pooled per core (Options.Pool, default max(2, 64/cores); Options.MaxTotal caps them for the process) and waiting request tasks park without blocking it. Authentication supports SCRAM-SHA-256, MD5 and cleartext. Options.SSLMode turns on TLS 1.3 (SSLRequest): "require" encrypts, "verify-full" (the default when Options.TLS is set) also checks the server's certificate and name.
+Package postgres implements a database/sql driver for the PostgreSQL client.
 
-Sizing: a Client opened in a global's initializer is opened on every core, so a 32-core pod with Pool 16 may open 512 connections to one server, and a fleet of pods multiplies that. Pool, when not set, is max(2, 64/cores) per core: about 64 for the process, at least 2 on each core. Options.MaxTotal caps the connections of the whole process, over all cores (Clients with the same address, user, database and MaxTotal share one cap): a core at the cap waits, within the request's deadline and Options.Timeout, until a connection is released or a core that has one idle gives up its slot. Set MaxTotal to at least the number of cores that serve database requests; below that, cores share connections by closing and dialing again.
-
-```tin body
-let pw = quarry.Getenv("POSTGRES_PASSWORD")
-let name = "ana"
-let db = postgres.Open(postgres.Options{Addr: "127.0.0.1:5432", User: "app", Password: pw, Database: "shop"})
-let rows = try db.Query("INSERT INTO users(name) VALUES ({name}) RETURNING id")
-let id = rows.Rows[0][0].Int()
-```
-
+- `type SQLDriver struct`: SQLDriver adapts the PostgreSQL client to database/sql.
+- `NewSQLDriver(options Options) SQLDriver`: NewSQLDriver creates a database/sql driver with these PostgreSQL connection options.
+- `(d SQLDriver) Open(name str) !dyn sql.Conn`: Open creates a PostgreSQL connection for a database/sql data source name.
+- `(c sqlConn) Prepare(query query) !dyn sql.Stmt`: Prepare compiles a parameterized PostgreSQL query for this connection.
+- `(c sqlConn) Begin() !dyn sql.Conn`: Begin pins a PostgreSQL connection for a database/sql transaction.
+- `(c sqlConn) Finish(commit bool) !bool { fail "postgres: no active transaction" }`: End refuses to finish a connection without an active transaction.
+- `(c sqlConn) SetMaxOpen(n i64) !bool`: SetMaxOpen updates the client's process-wide connection cap.
+- `(c sqlConn) SetMaxIdle(n i64) !bool`: SetMaxIdle updates the client's per-core connection cap.
+- `(c sqlConn) Close() ! { try c.client.Close() }`: Close closes the client pool owned by this generic database handle.
+- `(c sqlTxConn) Prepare(query query) !dyn sql.Stmt`: Prepare compiles a query for this PostgreSQL transaction.
+- `(c sqlTxConn) Begin() !dyn sql.Conn { fail "postgres: nested transaction" }`: Begin rejects nested transactions.
+- `(c sqlTxConn) SetMaxOpen(n i64) !bool { fail "sql: cannot set pool limits inside a transaction" }`: SetMaxOpen is invalid on a transaction connection.
+- `(c sqlTxConn) SetMaxIdle(n i64) !bool { fail "sql: cannot set pool limits inside a transaction" }`: SetMaxIdle is invalid on a transaction connection.
+- `(c sqlTxConn) Finish(commit bool) !bool`: Commit commits the PostgreSQL transaction.
+- `(c sqlTxConn) Close() !`: Close rolls back a transaction whose owner closes it.
+- `(s sqlStmt) Query() !sql.Rows`: Query runs the prepared query and converts the PostgreSQL result values.
+- `(s sqlTxStmt) Query() !sql.Rows`: Query runs the prepared query within its PostgreSQL transaction.
+- `(s sqlStmt) Exec() !sql.Result`: Exec runs the prepared query and returns its affected row count.
+- `(s sqlTxStmt) Exec() !sql.Result`: Exec runs the prepared statement within its PostgreSQL transaction.
+- `(s sqlStmt) Close() ! { }`: Close releases the statement wrapper without closing the shared client.
+- `(s sqlTxStmt) Close() ! { }`: Close releases a transaction statement wrapper.
 - `type Value enum`: Value is one column of a row.
 - `type Rows struct`: Rows is a query's result.
 - `type Result struct`: Result is what a statement without rows did.
@@ -2182,6 +2379,9 @@ let id = rows.Rows[0][0].Int()
 - `(v Value) Float() f64`: Float is v as a float.
 - `(v Value) Text() str`: Text is v as text ("" for NULL).
 - `(r Rows) Col(name str) i64`: Col is the index of the named column, or -1.
+- `(c Client) SetMaxOpen(n i64) !`: SetMaxOpen sets the process-wide connection cap for this client; configure it before first use.
+- `(c Client) SetMaxIdle(n i64) !`: SetMaxIdle sets the per-core connection cap for this client; configure it before first use.
+- `(c Client) Close() !`: Close prevents new use and closes this client's idle connections; checked-out connections close when returned.
 - `(c Client) Query(q query) !Rows`: Query returns the first rowset. With no parameters, multiple statements are allowed and all replies are consumed before returning. Integers and booleans use Value.Int; float4/8 use Value.Float; other OIDs (including numeric and bytea) use Value.Text.
 - `(c Client) Exec(q query) !Result`: Exec returns the affected count of the last command. Use Query with RETURNING to obtain generated IDs (PostgreSQL has no connection-wide last insert ID).
 - `(c Client) Ping() !`: Ping checks that the server answers.
@@ -2190,6 +2390,48 @@ let id = rows.Rows[0][0].Int()
 - `(t mut Tx) Exec(q query) !Result`: Exec runs a statement in the transaction and returns its affected count.
 - `(t mut Tx) Commit() !`: Commit makes the transaction's changes permanent. An aborted transaction must be rolled back explicitly; PostgreSQL's implicit COMMIT-to-ROLLBACK is not success.
 - `(t mut Tx) Rollback() !`: Rollback undoes the transaction's changes and releases its connection.
+
+## database
+
+Package database groups database interfaces and drivers.
+
+- `type Value enum`: Value is one database value returned by a driver.
+- `type Result struct`: Result reports the affected row count and optional inserted ID.
+- `NewResult(affected i64, lastID ?i64) Result`: NewResult creates a result with the affected count and optional inserted ID.
+- `shape Driver { Open(name str) !dyn Conn }`: Driver opens a connection for a driver-specific data source name.
+- `shape Conn`: Conn prepares statements and closes a driver connection.
+- `shape Stmt`: Stmt executes queries and closes a prepared statement.
+- `type Rows struct`: Rows is a materialized result set with a deterministic cursor.
+- `NewRows(columns []str, values [][]Value) Rows`: NewRows creates a result set from column names and row values.
+- `type Row struct`: Row holds the first row of a query result, or its query fault.
+- `type DB struct`: DB is a database handle backed by the registered driver's connection pool.
+- `type Statement struct`: Stmt is a prepared statement tied to its database connection.
+- `type Tx struct`: Tx is a transaction that uses its connection until it finishes.
+- `Register(name str, driver dyn Driver) !`: Register adds a driver under a unique non-empty name.
+- `Drivers() []str`: Drivers returns the registered names in lexical order.
+- `Open(driverName str, dataSourceName str) !DB`: Open opens a database by its registered driver name and data source name.
+- `(db mut DB) Close() !`: Close closes the database and prevents later operations.
+- `(db DB) Prepare(query query) !Statement`: Prepare creates a reusable statement for query.
+- `(db DB) Query(query query) !Rows`: Query executes query and returns its rows.
+- `(db DB) QueryRow(query query) Row`: QueryRow executes query and returns its first row or deferred query fault.
+- `(db DB) Exec(query query) !Result`: Exec executes a statement and returns its result.
+- `(db DB) SetMaxOpen(n i64) !bool`: SetMaxOpen sets the process-wide cap on open connections.
+- `(db DB) SetMaxIdle(n i64) !bool`: SetMaxIdle sets the per-core cap on idle connections.
+- `(s mut Statement) Close() !`: Close closes a prepared statement.
+- `(s Statement) Query() !Rows`: Query executes the prepared query and returns rows.
+- `(s Statement) Exec() !Result`: Exec executes the prepared statement and returns its result.
+- `(r Rows) Columns() []str { return r.columns }`: Columns returns the result column names.
+- `(r mut Rows) Next() bool`: Next advances the cursor and reports whether a row is available.
+- `(r Rows) Values() []Value`: Values returns the current row's values, or an empty slice before Next or after exhaustion.
+- `(r mut Rows) Close() ! { r.closed = true }`: Close marks the rows exhausted.
+- `(r Row) Scan() ![]Value`: Scan returns the row values or its deferred query fault.
+- `(r Result) LastInsertId() !i64`: LastInsertId returns the inserted ID when the driver reports one.
+- `(r Result) RowsAffected() !i64 { return r.affected }`: RowsAffected returns the number of rows affected.
+- `(db DB) Begin() !Tx`: Begin starts a transaction on the database connection.
+- `(tx Tx) Query(query query) !Rows`: Query executes a query inside the transaction.
+- `(tx Tx) Exec(query query) !Result`: Exec executes a statement inside the transaction.
+- `(tx mut Tx) Commit() !`: Commit commits the transaction.
+- `(tx mut Tx) Rollback() !`: Rollback rolls back the transaction.
 
 ## kafka
 
@@ -3235,6 +3477,8 @@ Package textedit is the editing model behind Tinland: a text buffer with a curso
 - `(b mut Buffer) SelectWordAt(row i64, col i64)`: SelectWordAt selects the word (letters, digits and underscores) around column col of row, or the one character there when it is not part of a word.
 - `(b mut Buffer) SetText(text str)`: SetText replaces the whole text as one undo step, keeping the cursor on its line and column (or the nearest place that exists).
 - `(b mut Buffer) JoinLines()`: JoinLines joins the current line with the line below, collapsing leading indentation into a single space.
+- `(b mut Buffer) SortLines()`: SortLines sorts the touched lines (the cursor's line when nothing is selected) by their text in bytewise order, one undo step; the cursor stays on its line. sift wants a slice it may move, so the lines are copied, sorted and written back.
+- `(b mut Buffer) TrimTrailingSpace()`: TrimTrailingSpace removes the spaces and tabs at the end of every touched line (the cursor's line when nothing is selected), one undo step for the whole thing.
 - `(b mut Buffer) TransformCase(upper bool)`: TransformCase converts the selected text (or the word under the cursor) to uppercase or lowercase.
 - `(b mut Buffer) SelectLine(row i64)`: SelectLine selects line row, including its newline when it is not the last line.
 

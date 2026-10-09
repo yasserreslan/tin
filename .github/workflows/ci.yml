@@ -100,6 +100,12 @@ jobs:
         run: sh tools/ci/tin.sh mime_check
       - name: Users and groups against Go's os/user
         run: sh tools/ci/tin.sh user_check
+      - name: container/list and container/ring against Go (generated and exhaustive small cases)
+        run: sh tools/ci/tin.sh list_ring_check
+      - name: expvar JSON served by anvil against Go's expvar handler (same registrations, 200 hits)
+        run: sh tools/ci/tin.sh expvar_check
+      - name: Complex functions against Go's math/cmplx (edge tables and a generated corpus, bit for bit)
+        run: sh tools/ci/tin.sh cmplx_check
       - name: IP addresses, ports and prefixes against Go's net/netip (38,094 generated and edge cases)
         run: sh tools/ci/tin.sh netip_check
       - name: Tokens against Go's text/scanner (5,649 source texts, mode flags and Scan/Next/Peek orders)
@@ -165,6 +171,8 @@ jobs:
         run: sh tools/ci/tin.sh cipher_check
       - name: HPKE base mode (RFC 9180 vectors and Go crypto/hpke twin)
         run: sh tools/ci/tin.sh hpke_check
+      - name: Dice v2 (PCG-DXSM and ChaCha8 streams and the RandV2 methods, against Go math/rand/v2)
+        run: sh tools/ci/tin.sh dice_v2_check
       - name: TLS 1.3 client (RFC 8448 trace, openssl and Python interop, https and wss)
         run: sh tools/ci/tin.sh tls_check
       - name: TLS 1.3 server (anvil.ServeTLS against openssl, Python and Tin clients; malformed handshakes, one core, shutdown)
@@ -238,6 +246,8 @@ jobs:
           MYSQL_ADDR=127.0.0.1:3306 MYSQL_USER=tin MYSQL_PASSWORD=tinpass MYSQL_DATABASE=tin sh tools/ci/tin.sh mysql_check
       - name: PostgreSQL client (SCRAM, binary parameters, pool, transactions, reconnects)
         run: sh tools/ci/tin.sh postgres_check
+      - name: Generic database/sql client against Go database/sql
+        run: sh tools/ci/tin.sh dbsql_check
       - name: PostgreSQL client against the runner's PostgreSQL (Linux x86-64)
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
@@ -250,6 +260,8 @@ jobs:
         run: sh tools/ci/tin.sh http_check
       - name: HTTP request and response dumps against Go's httputil
         run: sh tools/ci/tin.sh dump_check
+      - name: HTTP client trace hooks against Go net/http
+        run: sh tools/ci/tin.sh httptrace_check
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

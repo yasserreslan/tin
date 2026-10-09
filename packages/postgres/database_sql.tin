@@ -1,0 +1,145 @@
+// Package postgres implements a database/sql driver for the PostgreSQL client.
+package postgres
+
+import "database/sql"
+
+// SQLDriver adapts the PostgreSQL client to database/sql.
+type SQLDriver struct {
+	options Options
+}
+
+// NewSQLDriver creates a database/sql driver with these PostgreSQL connection options.
+fn NewSQLDriver(options Options) SQLDriver {
+	return SQLDriver{options: options}
+}
+
+// Open creates a PostgreSQL connection for a database/sql data source name.
+fn (d SQLDriver) Open(name str) !dyn sql.Conn {
+	mut options = d.options
+	if name != "" { options.Addr = name }
+	let client = Open(options)
+	return sqlConn{client: client}
+}
+
+type sqlConn struct {
+	client Client
+}
+
+// Prepare compiles a parameterized PostgreSQL query for this connection.
+fn (c sqlConn) Prepare(query query) !dyn sql.Stmt {
+	return sqlStmt{client: c.client, query: query}
+}
+
+// Begin pins a PostgreSQL connection for a database/sql transaction.
+fn (c sqlConn) Begin() !dyn sql.Conn {
+	let tx = try c.client.Begin()
+	return sqlTxConn{tx: tx}
+}
+
+// End refuses to finish a connection without an active transaction.
+fn (c sqlConn) Finish(commit bool) !bool { fail "postgres: no active transaction" }
+
+// SetMaxOpen updates the client's process-wide connection cap.
+fn (c sqlConn) SetMaxOpen(n i64) !bool {
+	try c.client.SetMaxOpen(n)
+	return true
+}
+
+// SetMaxIdle updates the client's per-core connection cap.
+fn (c sqlConn) SetMaxIdle(n i64) !bool {
+	try c.client.SetMaxIdle(n)
+	return true
+}
+
+// Close closes the client pool owned by this generic database handle.
+fn (c sqlConn) Close() ! { try c.client.Close() }
+
+type sqlTxConn struct {
+	tx Tx
+}
+
+// Prepare compiles a query for this PostgreSQL transaction.
+fn (c sqlTxConn) Prepare(query query) !dyn sql.Stmt {
+	return sqlTxStmt{tx: c.tx, query: query}
+}
+
+// Begin rejects nested transactions.
+fn (c sqlTxConn) Begin() !dyn sql.Conn { fail "postgres: nested transaction" }
+
+// SetMaxOpen is invalid on a transaction connection.
+fn (c sqlTxConn) SetMaxOpen(n i64) !bool { fail "sql: cannot set pool limits inside a transaction" }
+
+// SetMaxIdle is invalid on a transaction connection.
+fn (c sqlTxConn) SetMaxIdle(n i64) !bool { fail "sql: cannot set pool limits inside a transaction" }
+
+// Commit commits the PostgreSQL transaction.
+fn (c sqlTxConn) Finish(commit bool) !bool {
+	mut tx = c.tx
+	if commit { try tx.Commit() } else { try tx.Rollback() }
+	return true
+}
+
+// Close rolls back a transaction whose owner closes it.
+fn (c sqlTxConn) Close() ! {
+	mut tx = c.tx
+	try tx.Rollback()
+}
+
+type sqlStmt struct {
+	client Client
+	query query
+}
+
+type sqlTxStmt struct {
+	tx Tx
+	query query
+}
+
+// Query runs the prepared query and converts the PostgreSQL result values.
+fn (s sqlStmt) Query() !sql.Rows {
+	let rows = try s.client.Query(s.query)
+	return sql.NewRows(rows.Columns, convertSQLRows(rows.Rows))
+}
+
+fn convertSQLRows(source [][]Value) [][]sql.Value {
+	mut values = [][]sql.Value{}
+	for _, row in source {
+		mut converted = []sql.Value{}
+		for _, value in row {
+			match value {
+				Null => { converted = append(converted, sql.Value.Null) }
+				Int(n) => { converted = append(converted, sql.Value.Int(n)) }
+				Float(n) => { converted = append(converted, sql.Value.Float(n)) }
+				Text(text) => { converted = append(converted, sql.Value.Text(text)) }
+			}
+		}
+		values = append(values, converted)
+	}
+	return values
+}
+
+// Query runs the prepared query within its PostgreSQL transaction.
+fn (s sqlTxStmt) Query() !sql.Rows {
+	mut tx = s.tx
+	let rows = try tx.Query(s.query)
+	return sql.NewRows(rows.Columns, convertSQLRows(rows.Rows))
+}
+
+// Exec runs the prepared query and returns its affected row count.
+fn (s sqlStmt) Exec() !sql.Result {
+	let result = try s.client.Exec(s.query)
+	return sql.NewResult(result.Affected, nil)
+}
+
+// Exec runs the prepared statement within its PostgreSQL transaction.
+fn (s sqlTxStmt) Exec() !sql.Result {
+	mut tx = s.tx
+	let result = try tx.Exec(s.query)
+	return sql.NewResult(result.Affected, nil)
+}
+
+// Close releases the statement wrapper without closing the shared client.
+fn (s sqlStmt) Close() ! { }
+
+// Close releases a transaction statement wrapper.
+fn (s sqlTxStmt) Close() ! { }

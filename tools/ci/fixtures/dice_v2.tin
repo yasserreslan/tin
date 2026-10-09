@@ -1,0 +1,68 @@
+package main
+
+import "dice"
+import "say"
+
+// checkRand prints every draw of r in the order bench/ref/dice_v2 prints them.
+fn checkRand(label str, r mut dice.RandV2) {
+	let ns = []i64{1, 2, 3, 5, 6, 7, 8, 100, 1000, 65536, 1000000007, 4294967295, 4294967296, 4294967297, 4611686018427387907}
+	let n32 = []i32{1, 2, 3, 7, 100, 1000, 65536, 1000000007, 2147483647}
+	mut xs = []i64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	for i in 0..300 {
+		let n = ns[i%len(ns)]
+		let v1 = r.Int64N(n)
+		say.Line(label, i, "I64N", n, v1)
+		let m = n32[i%len(n32)]
+		let v2 = r.Int32N(m)
+		say.Line(label, i, "I32N", m, v2)
+		let v3 = r.Int64()
+		say.Line(label, i, "I64", v3)
+		let v4 = r.Int()
+		say.Line(label, i, "INT", v4)
+		let v5 = r.Uint()
+		say.Line(label, i, "UINT", v5)
+		let f = r.Float64()
+		say.Line(label, i, "F64", say.Fmt("%.17g", f))
+		let nf = r.NormFloat64()
+		say.Line(label, i, "NORM", say.Fmt("%.17g", nf))
+		let ef = r.ExpFloat64()
+		say.Line(label, i, "EXP", say.Fmt("%.17g", ef))
+		let p = r.Perm(i%13)
+		say.Line(label, i, "PERM", p)
+		r.Shuffle(i64(len(xs)), fn(a i64, b i64) {
+			let t = xs[a]
+			xs[a] = xs[b]
+			xs[b] = t
+		})
+		say.Line(label, i, "SHUF", xs)
+	}
+	for i in 0..20000 {
+		let tn = r.NormFloat64()
+		say.Line(label, i, "TNORM", say.Fmt("%.17g", tn))
+		let te = r.ExpFloat64()
+		say.Line(label, i, "TEXP", say.Fmt("%.17g", te))
+	}
+}
+
+fn main() {
+	for seed in 0..64 {
+		mut p = dice.NewPCG(u64(seed), u64(seed) ^ 0x9e3779b97f4a7c15)
+		for i in 0..8 {
+			say.Line("P", seed, i, p.Uint64())
+		}
+	}
+	mut seed = [32]u8{}
+	for s in 0..8 {
+		for i in 0..32 {
+			seed[i] = u8(s*37 + i*11)
+		}
+		mut c = dice.NewChaCha8(seed)
+		for i in 0..400 {
+			say.Line("C", s, i, c.Uint64())
+		}
+	}
+	mut pcg = dice.NewV2(dice.NewPCG(1, 2))
+	checkRand("PCG", mut pcg)
+	mut chacha = dice.NewV2(dice.NewChaCha8([32]u8{}))
+	checkRand("CHACHA8", mut chacha)
+}

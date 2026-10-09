@@ -250,6 +250,33 @@ fn main() {
 	say.Line(x)
 }
 
+ruler: true 80
+ruler column: 80
+ruler column: 80
+wrap: true
+ruler column: 46
+ruler column: 7
+wrap: false
+ruler: false 80
+--- untitled row 4 col 11 dirty true
+	Delta    
+alpha
+bravo   
+charlie
+--- untitled row 4 col 8 dirty true
+selection: 	Delta
+alpha
+bravo
+charlie
+	Delta
+alpha
+bravo
+charlie
+--- untitled row 4 col 8 dirty true
+	delta
+alpha
+bravo
+charlie
 at untitled 1 13
 at untitled 1 7
 --- untitled row 1 col 7 dirty true

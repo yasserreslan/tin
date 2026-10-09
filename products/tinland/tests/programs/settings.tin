@@ -24,6 +24,12 @@ fn main() {
 	}
 	let s = app.LoadSettings()
 	say.Line("read", s.Theme, s.FontSize, s.CodeFont, len(s.Keys))
+	quarry.WriteFile(path, "trim_trailing_whitespace = on\ninsert_final_newline = off\n") catch _ {
+	}
+	let h = app.LoadSettings()
+	say.Line("hygiene", h.TrimTrailing, h.FinalNewline)
+	let def = app.DefaultSettings()
+	say.Line("hygiene defaults", def.TrimTrailing, def.FinalNewline)
 	let (k1, m1) = s.Binding("Toggle Terminal", "`", appkit.ModCtrl)
 	say.Line("rebound", k1, m1 == appkit.ModCmd | appkit.ModShift)
 	let (k2, m2) = s.Binding("Go to File...", "p", appkit.ModCmd)
