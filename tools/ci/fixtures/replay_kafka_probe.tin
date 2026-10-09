@@ -1,0 +1,80 @@
+package replaykafka
+
+import "fault"
+import "kafka"
+import "quarry"
+import "replay"
+import "say"
+import "tide"
+import "twine"
+
+// Copied into a temporary lib/replaykafka by replay_check.tin: one task records a produce and a
+// fetch of the kafka client against the fake broker (tools/ci/fixtures/kafka_fake.tin, the
+// broker's address in KAFKA_ADDR), then the same code replays from that tape: the broker is
+// gone by then, and the recorded answers still come back exactly. A changed topic makes the
+// replay diverge, because the request is the effect's key.
+
+let bus = kafka.Open(kafka.Options{Brokers: []str{quarry.Getenv("KAFKA_ADDR")}, ClientID: "tin-replay", Timeout: 10s})
+
+mut summary str
+mut topic str
+
+// work sends one record and fetches it back, and sums up what it got.
+fn work() str {
+	let ack = bus.Send(topic, kafka.Message{Key: "k", Value: "v"}) catch err {
+		return "send {err}"
+	}
+	let rs = bus.Fetch(topic, ack.Partition, ack.Offset, 1s) catch err {
+		return "fetch {err}"
+	}
+	mut out = "{ack.Partition} {ack.Offset} {len(rs)}"
+	for _, r in rs {
+		out = out + " {r.Offset} {r.Key} {r.Value}"
+	}
+	return out
+}
+
+mut gTape i64
+
+// inTask runs work in a task with tape tp and returns its summary.
+fn inTask(tp i64) str {
+	gTape = tp
+	summary = ""
+	let s = rt_scope_open()
+	s.spawn(fn() ! {
+		rt_tape_set(curTask, gTape)
+		summary = work()
+		rt_tape_set(curTask, 0)
+	})
+	rt_scope_close(s) catch err {
+		say.Line("task:", fault.Message(err))
+	}
+	return summary
+}
+
+fn Run() {
+	say.Line("recording on:", replay.Setup(1))
+	topic = "t"
+	let tp = rt_tape_new(1)
+	let recorded = inTask(tp)
+	say.Line("recorded:", recorded)
+	say.Line("effects:", tp[4])
+	quarry.WriteFile(quarry.Getenv("TAPE_OUT"), rt_str_from_raw(tp[1], tp[2])) catch err {
+		say.Line("tape:", fault.Message(err))
+	}
+	let rp = rt_tape_new(2)
+	rt_tape_load(rp, tp[1], tp[2])
+	let replayed = inTask(rp)
+	say.Line("replayed same:", replayed == recorded, "left:", rt_tape_left(rp), "diverged:", rt_tape_diverged(rp))
+	if replayed != recorded {
+		say.Line("replayed:", replayed)
+	}
+	// A changed topic is a changed request, and the request is the effect's key.
+	topic = "u"
+	let rq = rt_tape_new(2)
+	rt_tape_load(rq, tp[1], tp[2])
+	let other = inTask(rq)
+	say.Line("other topic:", rt_tape_diverged(rq))
+	say.Line("other summary has the divergence:", twine.Contains(other, "divergence"))
+	_ = tide.Now()
+}

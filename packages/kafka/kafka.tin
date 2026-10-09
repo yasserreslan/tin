@@ -38,7 +38,10 @@ type Acks enum {
 	NoAck  // none: Send returns once the request is written, without an offset
 }
 
-// Options says where and how to connect, and how to produce and fetch.
+// Options says where and how to connect, and how to produce and fetch. The idempotent
+// producer (Options.NoIdempotence) is on by default with Acks.All; recording a request
+// (TIN_REPLAY_DIR with TIN_REPLAY_KEY) turns it off for that request's sends, so the recorded
+// effects depend on the request only (design/interface_replay.md, kafka@1).
 type Options struct {
 	Brokers       []str       // "host:port" of at least one broker (default "127.0.0.1:9092"); the rest of the cluster is found from it
 	ClientID      str         // sent with every request (default "tin")
