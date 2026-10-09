@@ -1,0 +1,61 @@
+// Package buildinfo reads the build metadata Tin's own Mach-O executables carry: the LC_UUID and LC_BUILD_VERSION load commands.
+//
+// Contract: the compiler does not write Go's buildinfo blob (the "\xff Go buildinf:" record that debug/buildinfo of Go reads),
+// and ELF executables carry no build metadata today. A Tin Mach-O executable carries an LC_UUID, a hash of its code, so
+// identical builds have the same UUID (toolchain/docs/COMPILER.md, section 9), and an LC_BUILD_VERSION naming macOS and
+// the minimum and SDK versions the compiler targets. Nothing else is written, so this package reads only those two commands.
+package buildinfo
+
+import "debug/macho"
+import "fault"
+import "quarry"
+
+// ErrNoBuildInfo marks a file with no Tin build metadata: an ELF executable, or a Mach-O file without LC_UUID or LC_BUILD_VERSION.
+let ErrNoBuildInfo = fault("debug/buildinfo: no Tin build metadata in this file")
+
+// Info is the build metadata of one Mach-O executable.
+type Info struct {
+	UUID str // The LC_UUID as 8-4-4-4-12 upper-case hex.
+	Platform i64 // The LC_BUILD_VERSION platform number (1 for macOS).
+	MinOS str // The minimum OS version as major.minor.patch.
+	SDK str // The SDK version as major.minor.patch.
+	Dylibs []str // The libraries the file loads, in order.
+}
+
+// packed formats a version packed as xxxx.yy.zz (16 bits, 8 bits, 8 bits) as major.minor.patch.
+fn packed(v i64) str {
+	let major = v / 65536
+	let minor = v / 256 % 256
+	let patch = v % 256
+	return "{major}.{minor}.{patch}"
+}
+
+// hexUUID formats the 16 bytes of an LC_UUID as 8-4-4-4-12 upper-case hex.
+fn hexUUID(b str) str {
+	let digits = "0123456789ABCDEF"
+	mut out = ""
+	for i in 0..len(b) {
+		if i == 4 || i == 6 || i == 8 || i == 10 { out += "-" }
+		let c = i64(b[i])
+		out += digits[c/16:c/16+1] + digits[c%16:c%16+1]
+	}
+	return out
+}
+
+// Read returns the build metadata of a Mach-O executable: ErrNoBuildInfo for an ELF file or one without Tin's commands.
+fn Read(path str) !Info {
+	let f = macho.Open(path) catch err {
+		if fault.Is(err, macho.ErrFormat) && isELF(path) {
+			fail ErrNoBuildInfo
+		}
+		fail err
+	}
+	if f.UUID == "" || f.Build.Platform == 0 { fail ErrNoBuildInfo }
+	return Info{UUID: hexUUID(f.UUID), Platform: f.Build.Platform, MinOS: packed(f.Build.MinOS), SDK: packed(f.Build.SDK), Dylibs: f.Dylibs}
+}
+
+// isELF reports whether the file starts with the ELF magic number.
+fn isELF(path str) bool {
+	let (head, err) = quarry.ReadAt(path, 0, 4)
+	return err == nil && head == "\x7fELF"
+}

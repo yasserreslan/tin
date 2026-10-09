@@ -1,0 +1,73 @@
+package main
+
+import "debug/buildinfo"
+import "debug/macho"
+import "fault"
+import "quarry"
+import "say"
+
+// hexOf is the lower-case hex of the bytes.
+fn hexOf(b str) str {
+	let digits = "0123456789abcdef"
+	mut out = ""
+	for i in 0..len(b) {
+		let c = i64(b[i])
+		out += digits[c/16:c/16+1] + digits[c%16:c%16+1]
+	}
+	return out
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) != 2 {
+		say.Line("usage: macho_reader FILE")
+		return
+	}
+	let f = macho.Open(args[1]) catch err {
+		say.Line("rejected {fault.Is(err, macho.ErrFormat)}")
+		return
+	}
+	say.Line("header {f.Header.CPU} {f.Header.SubCPU} {f.Header.Type} {f.Header.Commands} {f.Header.CommandBytes} {f.Header.Flags}")
+	for c in f.Commands {
+		say.Line("command {c.Cmd} {c.Size}")
+	}
+	for s in f.Segments {
+		say.Line("segment {s.Name} {s.Address} {s.MemorySize} {s.Offset} {s.FileSize} {s.MaxProt} {s.InitProt} {s.Sections} {s.Flags}")
+	}
+	for s in f.Sections {
+		say.Line("section {s.Segment} {s.Name} {s.Address} {s.Size} {s.Offset} {s.Align} {s.RelocOffset} {s.Relocations} {s.Flags}")
+	}
+	for d in f.Dylibs {
+		say.Line("dylib {d}")
+	}
+	if f.UUID == "" {
+		say.Line("uuid none")
+	} else {
+		say.Line("uuid {hexOf(f.UUID)}")
+	}
+	say.Line("build {f.Build.Platform} {f.Build.MinOS} {f.Build.SDK} {f.Build.Tools}")
+	say.Line("entry {f.Entry}")
+	let symbols = f.Symbols() catch err {
+		say.Line("symbols rejected {fault.Is(err, macho.ErrFormat)}")
+		return
+	}
+	say.Line("symbols {len(symbols)}")
+	for s in symbols {
+		say.Line("symbol {s.Name} {s.Type} {s.Section} {s.Desc} {s.Value}")
+	}
+	for i, s in f.Sections {
+		if s.Name == "__text" || s.Name == "__cstring" || s.Name == "__const" {
+			let data = f.ReadSection(i) catch err {
+				say.Line("section-data rejected {fault.Is(err, macho.ErrFormat)}")
+				return
+			}
+			let head = data[0:min(8, len(data))]
+			say.Line("section-data {s.Segment}.{s.Name} {len(data)} {hexOf(head)}")
+		}
+	}
+	let info = buildinfo.Read(args[1]) catch err {
+		say.Line("buildinfo none {fault.Is(err, buildinfo.ErrNoBuildInfo)}")
+		return
+	}
+	say.Line("buildinfo {info.UUID} {info.Platform} {info.MinOS} {info.SDK} {len(info.Dylibs)}")
+}

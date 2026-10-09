@@ -1,0 +1,26 @@
+header 16777228 0 2 6 304 2097285
+command 25 152 32
+command 2 24 184
+command 27 24 208
+command 12 56 232
+command 50 24 288
+command 2147483688 24 312
+segment __TEXT 4294967296 4096 0 389 7 5 1 0
+section __TEXT __text 4294967632 8 336 2 0 0 2147484672
+dylib /usr/lib/libSystem.B.dylib
+uuid 00112233445566778899aabbccddeeff
+build 1 720896 917504 0
+entry 256
+symbols 2
+symbol _main 15 1 0 4294967632
+symbol x.y 14 1 16 4294967640
+code 8 1 8
+buildinfo 00112233-4455-6677-8899-AABBCCDDEEFF 1 11.0.0 14.0.0 1
+cut open ok 6
+cut symbols rejected true
+cut code 8
+header cut rejected true
+fat rejected true
+bad segment rejected true
+foreign rejected true
+elf buildinfo none true
