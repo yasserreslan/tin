@@ -228,7 +228,7 @@ Where Go asks an interface at run time (fs.ReadDir tries ReadDirFS, then a file'
 
 ## embed
 
-Package embed is the file tree the compiler puts into a program's image (#928), read-only, as Go's embed.FS is. A line "//embed: PATTERN" at column 1, directly above a top-level "let NAME str", makes NAME the blob of the files PATTERN names, relative to the directory of the source file (globs with * and ?; directories are walked, hidden names left out). Parse reads that blob as a file system: Open, ReadDir, Stat and ReadFile satisfy the fs package's shapes, so fs.ReadFile, fs.WalkDir and fs.Glob work on it. Nothing is read from disk at run time, and the bytes stay in the image.
+Package embed is the file tree the compiler puts into a program's image (#928), read-only, as Go's embed.FS is. A line "// embed: PATTERN" at column 1, directly above a top-level "let NAME str", makes NAME the blob of the files PATTERN names, relative to the directory of the source file (globs with * and ?; directories are walked, hidden names left out). Parse reads that blob as a file system: Open, ReadDir, Stat and ReadFile satisfy the fs package's shapes, so fs.ReadFile, fs.WalkDir and fs.Glob work on it. Nothing is read from disk at run time, and the bytes stay in the image.
 
 The blob has one record per file: its slash-separated name, a newline, its size in decimal, a newline and its bytes. The compiler writes each directory's records in name order, and Parse checks that order, so a blob that is not a tree from the compiler fails with ErrFormat rather than giving unsorted listings.
 
