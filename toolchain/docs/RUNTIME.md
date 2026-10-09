@@ -659,6 +659,7 @@ another task. Resource cleanup callbacks run before the owning pool is reset.
   returns (after the drain), it runs `core.stop` and closes its uses, last opened first; after
   `main` returns, core 0 does the same and then runs `app.stop`. Stop handlers get a fresh
   core root, so the drain's cancellation does not stop their own waits; their faults are logged.
+  A fault that `main` returns is printed after `app.stop` as `main failed: <msg>`, and the status is 1 (#925).
   A function-level `use x = e` is `let x = try e` plus a deferred `x.Close()` (it also runs
   while a panic unwinds); a fault from `Close` is joined after the function's own fault.
   `anvil.Drain(d)` starts the same graceful shutdown as SIGTERM from code, with grace `d`.

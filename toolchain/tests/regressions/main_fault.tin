@@ -1,0 +1,10 @@
+package main
+
+// #925: a main that returns a fault reports it on stderr and exits 1, after its output.
+
+import "say"
+
+fn main() ! {
+	say.Line("before")
+	fail "boom"
+}

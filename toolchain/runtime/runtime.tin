@@ -528,6 +528,17 @@ fn rt_exit() {
 	rt_sys_exit(0)
 }
 
+// rt_main_exit ends the process after main returns fault f (0: none): "main failed: <msg>" on stderr and status 1 (#925).
+fn rt_main_exit(f i64) {
+	if f == 0 {
+		rt_exit()
+	}
+	rt_flush_core()
+	let m = "main failed: " + cast(str, f) + "\n"
+	rt_write_all(2, cast(i64, m)+8, len(m))
+	rt_sys_exit(1)
+}
+
 // rt_main_begin ends initialization: from here allocations go to the request pool.
 fn rt_main_begin() {
 	__ctx()[ctxIngot] = 0
