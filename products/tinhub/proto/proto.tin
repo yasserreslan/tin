@@ -4,6 +4,7 @@ import "../../tit/transport"
 import "../accounts"
 import "../packs"
 import "../repo"
+import "../signin"
 import "anvil"
 import "fault"
 import "io"
@@ -155,6 +156,10 @@ fn access(q anvil.Req, w mut anvil.Out) ?Access {
 
 // get answers heads (and every other GET tit's server knows).
 fn get(q anvil.Req, w mut anvil.Out) {
+	if signin.Handles(q.Path) {
+		signin.Serve(q, mut w)
+		return
+	}
 	let a = access(q, mut w)
 	if a == nil {
 		return
@@ -184,6 +189,16 @@ fn answer(srv transport.Server, q anvil.Req, within_ i64, mem i64) !transport.Re
 // post answers a push (streamed to a file as it arrives), a fetch (its pack streamed out an entry at a time), and
 // the other POSTs tit's server knows.
 fn post(q anvil.Req, w mut anvil.Out) {
+	if signin.Handles(q.Path) {
+		// tit login and tit key add take a remote's URL: sign-in answers under every repository's too
+		mut b = q.BodyStream()
+		let body = readBody(mut b, 64 * 1024) catch err {
+			refuse(mut w, 413, "TooLarge", fault.Message(err))
+			return
+		}
+		signin.ServeBody(q, mut w, body)
+		return
+	}
 	let a = access(q, mut w)
 	if a == nil {
 		return
