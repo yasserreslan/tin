@@ -42,7 +42,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [debug/elf](#debug/elf) | ELF executable headers, sections, symbols and dynamic tables (debug/elf) |
 | [debug/macho](#debug/macho) | Mach-O executable headers, load commands, sections and symbols (debug/macho) |
 | [debug/buildinfo](#debug/buildinfo) | Tin's build metadata in Mach-O executables: the LC_UUID and LC_BUILD_VERSION commands (debug/buildinfo) |
-| [debug](#debug) | ELF executable metadata (debug/elf) |
+| [debug](#debug) | binary formats of the executables Tin writes (debug/elf, debug/macho, debug/buildinfo) |
 | [debug/dwarf](#debug/dwarf) | DWARF compilation units, DIEs and source line tables (debug/dwarf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
@@ -1364,6 +1364,7 @@ Contract: the compiler does not write Go's buildinfo blob (the "\xff Go buildinf
 
 - `type Info struct`: Info is the build metadata of one Mach-O executable.
 - `Read(path str) !Info`: Read returns the build metadata of a Mach-O executable: ErrNoBuildInfo for an ELF file or one without Tin's commands.
+
 ## debug/dwarf
 
 Package dwarf reads the DWARF 4 sections written by Tin's compiler with -g. It reads ELF files lazily through debug/elf; Go's debug/dwarf is the model.
