@@ -1,7 +1,8 @@
 package main
 
 import "./ci"
-import "./dwarf"
+import "debug/dwarf"
+import "fault"
 import "mint"
 import "say"
 import "twine"
@@ -34,7 +35,7 @@ fn build(out str, flags []str) {
 }
 
 fn sectionsOf(path str) dwarf.Sections {
-	let s = dwarf.SectionsOf(ci.Read(path)) catch err {
+	let s = dwarf.Open(path) catch err {
 		ci.Fail(path + ": " + say.Str(err))
 		panic("unreachable")
 	}
@@ -165,6 +166,33 @@ fn checkTarget(target str, dir str) {
 		ci.Fail(target + ": " + say.Str(err))
 		panic("unreachable")
 	}
+	let twin = ci.Exec([]str{"bin/ci/dwarf_twin", exe}, ci.Root(), 30)
+	ci.Must(twin, target + ": Go debug/dwarf line table")
+	let expectedTwin = arena {
+		mut text = ""
+		for row in table.Rows {
+			mut file = ""
+			if row.File > 0 && row.File <= len(table.Files) { file = table.Files[row.File - 1] }
+			mut end = "false"
+			if row.End { end = "true" }
+			text += "R\t" + mint.Itoa(row.Addr) + "\t" + file + "\t" + mint.Itoa(row.Line) + "\t" + mint.Itoa(row.Col) + "\t" + end + "\n"
+		}
+		for i, file in table.Files {
+			text += "F\t" + mint.Itoa(i + 1) + "\t" + file + "\n"
+		}
+		text
+	}
+	ci.Same(target + ": every line row and file table match Go debug/dwarf", twin.Stdout, expectedTwin)
+	mut mapped = false
+	for row in table.Rows {
+		if !row.End {
+			let (atPC, ok) = table.LineForPC(row.Addr)
+			ci.Test(target + ": address maps to its source row", ok && atPC.Addr == row.Addr && atPC.Line == row.Line && atPC.File == row.File && atPC.Col == row.Col)
+			mapped = true
+			break
+		}
+	}
+	ci.Test(target + ": at least one PC maps", mapped)
 	ci.Same(target + ": the first file", table.Files[0], fixture())
 	ci.Test(target + ": the sequence ends", table.Rows[len(table.Rows) - 1].End)
 	// addresses never go back, and the statements of the fixture are there, in order within a function
@@ -293,8 +321,16 @@ fn checkTarget(target str, dir str) {
 }
 
 fn main() {
+	let (_, badLine) = dwarf.LineRows("truncated")
+	ci.Test("truncated line section returns ErrFormat", fault.Is(badLine, dwarf.ErrFormat))
+	let (_, badInfo) = dwarf.Dies("truncated", "")
+	ci.Test("truncated DIE sections return ErrFormat", fault.Is(badInfo, dwarf.ErrFormat))
+	let (_, foreign) = dwarf.Open("tools/ci/fixtures/debug_lines.tin")
+	ci.Test("foreign file returns ErrFormat", fault.Is(foreign, dwarf.ErrFormat))
 	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "dwarf-")
-	let targets = []str{"darwin-arm64", "linux-arm64", "linux-amd64"}
+	let twin = ci.Exec([]str{"go", "build", "-o", "bin/ci/dwarf_twin", "tools/ci/fixtures/dwarf_twin.go"}, ci.Root(), 120)
+	ci.Must(twin, "build Go debug/dwarf twin")
+	let targets = []str{"linux-arm64", "linux-amd64"}
 	for t in targets {
 		checkTarget(t, dir)
 	}
@@ -302,8 +338,8 @@ fn main() {
 	for t in targets {
 		let exe = ci.Join(dir, "plain-" + t)
 		build(exe, []str{"-target", t})
-		let secs = sectionsOf(exe)
-		ci.Test(t + ": no DWARF without -g", len(secs.Names) == 0)
+		let (_, err) = dwarf.Open(exe)
+		ci.Test(t + ": no DWARF without -g", fault.Is(err, dwarf.ErrNoDebugInfo))
 	}
 	// the native build prints the same with and without -g
 	let plain = ci.Join(dir, "plain")

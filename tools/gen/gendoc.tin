@@ -59,6 +59,8 @@ fn packages() []str {
 		"debug/elf", "ELF executable headers, sections, symbols and dynamic tables (debug/elf)",
 		"debug/macho", "Mach-O executable headers, load commands, sections and symbols (debug/macho)",
 		"debug/buildinfo", "Tin's build metadata in Mach-O executables: the LC_UUID and LC_BUILD_VERSION commands (debug/buildinfo)",
+		"debug", "ELF executable metadata (debug/elf)",
+		"debug/dwarf", "DWARF compilation units, DIEs and source line tables (debug/dwarf)",
 		"user", "users and groups (os/user)",
 		"spawn", "starting child processes (os/exec)",
 		"signal", "operating-system signals (os/signal)",
