@@ -201,3 +201,10 @@ creates a dedicated `tin` database/user with a SCRAM verifier; it does not insta
 `TIN_DEADLINE_MS`. The crypto suite checks published PBKDF2/RFC 1321 vectors and Unicode
 normalization/bidirectional/prohibited-input cases; the fixed Unicode 3.2 tables of
 `packages/postgres/sasl/sasl.tin` are kept as generated once (RFC 3454 and RFC 4013 pin them to Unicode 3.2, so they never change).
+
+tinhub (`products/tinhub/tests/run.sh`, design/tinhub.md): every native job runs its unit tests and builds the binary.
+On `ubuntu-24.04` the same script also runs against the runner's PostgreSQL, in a `tinhub_test` database it empties
+first: the migrations (from an empty database, twice, and two migrators at once applying each migration once), the
+schema's constraints, the event queue (four worker processes run 10,000 jobs and none is lost; a worker killed in the
+middle of a job loses it to another once its lease passes; a job over its memory budget fails alone), and a server
+that refuses to start before `tinhub migrate`, turns ready after it, and finishes a request in flight at SIGTERM.

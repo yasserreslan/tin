@@ -1,0 +1,308 @@
+package main
+
+import "./config"
+import "./db"
+import "./events"
+import "anvil"
+import "fault"
+import "hearth"
+import "mint"
+import "herald"
+import "postgres"
+import "quarry"
+import "say"
+import "seal"
+import "tide"
+import "tls"
+import "twine"
+
+// tinhub: hosting for tit repositories (design/tinhub.md). One binary in roles: node (the protocol, the API, health),
+// worker (the event queue) and runner (sandboxed replays).
+
+const version = "0.1.0"
+
+// Boot is what the command line and the configuration say, read once on core 0 before the cores start.
+type Boot struct {
+	Command str
+	Args    []str
+	Conf    config.Config
+	Err     str
+}
+
+fn usage() str {
+	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub version [-v]\n"
+}
+
+// parseBoot reads the command, its --config and --roles flags, and loads the configuration.
+fn parseBoot(argv []str) Boot {
+	mut command = ""
+	mut path = ""
+	mut roles = ""
+	mut rest = []str{}
+	mut i = 1
+	for i < len(argv) {
+		let a = argv[i]
+		if a == "--config" || a == "--roles" {
+			if i + 1 >= len(argv) {
+				return Boot{Command: command, Args: rest, Conf: emptyConfig(), Err: "{a} needs a value"}
+			}
+			if a == "--config" {
+				path = argv[i + 1]
+			} else {
+				roles = argv[i + 1]
+			}
+			i += 2
+			continue
+		}
+		if len(command) == 0 {
+			command = a
+		} else {
+			rest = append(rest, a)
+		}
+		i += 1
+	}
+	if command == "version" || command == "" || command == "help" || command == "-h" || command == "--help" {
+		return Boot{Command: command, Args: rest, Conf: emptyConfig(), Err: ""}
+	}
+	if len(roles) > 0 {
+		quarry.Setenv(config.EnvName("roles"), roles) catch _ {
+		}
+	}
+	let c = config.Load(config.Path(path)) catch err {
+		return Boot{Command: command, Args: rest, Conf: emptyConfig(), Err: fault.Message(err)}
+	}
+	return Boot{Command: command, Args: rest, Conf: c, Err: ""}
+}
+
+fn emptyConfig() config.Config {
+	let vals = config.Resolve(map[str]str{}, noEnv) catch _ {
+		map[str]str{}
+	}
+	let c = config.Build(vals) catch _ {
+		panic("tinhub: the default configuration does not build")
+	}
+	return c
+}
+
+fn noEnv(name str) (str, bool) {
+	return "", false
+}
+
+// boot is read on every core from the same command line, file and environment (a shared let cannot call into packages
+// whose globals are not initialized yet, E130), so every core holds the same configuration.
+let boot = parseBoot(quarry.Args())
+
+fn dbOptions(c config.Config) db.Options {
+	return db.Options{Addr: c.DbAddr, User: c.DbUser, Password: c.DbPassword, Name: c.DbName, MaxTotal: c.DbMaxTotal}
+}
+
+// pg is this core's client of the primary.
+let pg = db.Open(dbOptions(boot.Conf))
+
+fn level(name str) i64 {
+	return match name {
+		"debug" => herald.LDebug
+		"warn" => herald.LWarn
+		"error" => herald.LError
+		_ => herald.LInfo
+	}
+}
+
+// handlers is every job kind this binary runs (design/tinhub.md §6); later issues add theirs here.
+fn handlers() []events.Handler {
+	return []events.Handler{}
+}
+
+fn runner() events.Runner {
+	return events.Runner{Db: pg, Handlers: handlers(), Lease: boot.Conf.WorkerLease, Poll: tide.Second}
+}
+
+// working reports whether this process runs workers: tinhub run with the worker role, on core 0.
+fn working() bool {
+	return boot.Command == "run" && len(boot.Err) == 0 && boot.Conf.Has("worker") && hearth.ID() == 0
+}
+
+on core.start {
+	herald.SetLevel(level(boot.Conf.LogLevel))
+	if working() {
+		for slot in 0..boot.Conf.Workers {
+			let s = slot
+			detach {
+				runner().Loop(s)
+			}
+		}
+	}
+}
+
+// The drain (SIGTERM) cancels the worker loops; the jobs they held go back to the queue here, where waits work again.
+on core.stop {
+	if working() {
+		let n = events.ReleaseAll(pg) catch err {
+			herald.Log(herald.LError, "giving back jobs", []str{"error", fault.Message(err)})
+			0
+		}
+		if n > 0 {
+			herald.Log(herald.LInfo, "gave back jobs", []str{"jobs", say.Str(n)})
+		}
+	}
+}
+
+// requestId is the request's X-Request-Id when it is a short safe token, else a fresh one.
+fn requestId(q anvil.Req) str {
+	let given = q.Header("x-request-id")
+	if len(given) > 0 && len(given) <= 64 {
+		mut ok = true
+		for c in given {
+			let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+			if !alnum && c != '-' && c != '_' && c != '.' {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return given
+		}
+	}
+	return seal.Hex(seal.RandomBytes(8))
+}
+
+// logged gives every request an id (echoed in X-Request-Id) and writes one log line for it.
+fn logged(q anvil.Req, w mut anvil.Out, next fn(anvil.Req, mut anvil.Out)) {
+	let id = requestId(q)
+	w.SetValue("req", id)
+	w.Head("X-Request-Id", id)
+	next(q, mut w)
+	herald.Log(herald.LInfo, "request", []str{"req", id, "method", q.Method, "route", q.Pattern(), "status", say.Str(w.Code()), "client", q.ClientIP()})
+}
+
+fn healthz(q anvil.Req, w mut anvil.Out) {
+	w.Text("ok\n")
+}
+
+// readyz is 200 when Postgres answers and its schema is the one this binary needs.
+fn readyz(q anvil.Req, w mut anvil.Out) {
+	db.Current(pg) catch err {
+		w.Status(503)
+		w.Text("not ready: {fault.Message(err)}\n")
+		return
+	}
+	w.Text("ready\n")
+}
+
+// testWait answers after ?ms= milliseconds.
+fn testWait(q anvil.Req, w mut anvil.Out) {
+	let ms = mint.Atoi(q.Param("ms")) catch _ {
+		0
+	}
+	tide.Wait(ms * tide.Millisecond) catch err {
+		w.Status(503)
+		w.Text("{fault.Message(err)}\n")
+		return
+	}
+	w.Text("waited {ms}ms\n")
+}
+
+// metrics answers the queue's depth per kind and the age of its oldest ready job, as Prometheus text, to clients on
+// this machine only (a scraper next to the node, or through the operator's own proxy).
+fn metrics(q anvil.Req, w mut anvil.Out) {
+	let ip = q.ClientIP()
+	if ip != "127.0.0.1" && ip != "::1" {
+		w.Status(404)
+		w.Text("404 page not found\n")
+		return
+	}
+	let all = events.QueueStats(pg) catch err {
+		w.Status(503)
+		w.Text("{fault.Message(err)}\n")
+		return
+	}
+	let kinds = events.StatsByKind(pg) catch err {
+		w.Status(503)
+		w.Text("{fault.Message(err)}\n")
+		return
+	}
+	w.Type("text/plain; version=0.0.4")
+	w.Text("# TYPE tinhub_jobs_ready gauge\n")
+	for k in kinds {
+		w.Text("tinhub_jobs_ready{{kind=\"{k.Kind}\"}} {k.Ready}\n")
+	}
+	w.Text("# TYPE tinhub_jobs_dead gauge\n")
+	for k in kinds {
+		w.Text("tinhub_jobs_dead{{kind=\"{k.Kind}\"}} {k.Dead}\n")
+	}
+	w.Text("# TYPE tinhub_jobs_oldest_ready_seconds gauge\n")
+	for k in kinds {
+		w.Text("tinhub_jobs_oldest_ready_seconds{{kind=\"{k.Kind}\"}} {k.OldestAge}\n")
+	}
+	w.Text("# TYPE tinhub_jobs_claimed gauge\ntinhub_jobs_claimed {all.Claimed}\n")
+}
+
+// routes is every route this process serves: health on every role, the rest on a node.
+fn routes(c config.Config) anvil.Router {
+	mut r = anvil.NewRouter()
+	r.Use(logged)
+	r.Get("/healthz", healthz)
+	r.Get("/readyz", readyz)
+	r.Get("/metrics", metrics)
+	// tests/run.sh checks the drain with a request that waits; never on in a deployment
+	if quarry.Getenv("TINHUB_TEST_ROUTES") == "1" {
+		r.Get("/test/wait", testWait)
+	}
+	return r
+}
+
+fn run(c config.Config) ! {
+	if c.Has("node") {
+		try c.RequireSecrets()
+	}
+	try db.Current(pg)
+	// the drain (SIGTERM) waits this long for requests in flight, so a push that has begun completes
+	let grace = c.Shutdown / 1000000000
+	try quarry.Setenv("TIN_GRACE", "{grace}")
+	anvil.Deadline(c.PushDeadline / 1000000)
+	let r = routes(c)
+	herald.Log(herald.LInfo, "tinhub starting", []str{"version", version, "roles", twine.Join(c.Roles, ","), "listen", c.Listen})
+	if len(c.TLSCert) > 0 {
+		// the files are read again when they change, so a renewed certificate needs no restart
+		let cert = anvil.TLSCert{CertPEM: "", KeyPEM: "", CertFile: c.TLSCert, KeyFile: c.TLSKey}
+		try r.ServeTLSConfig(c.Listen, anvil.TLSConfig{CertPEM: "", KeyPEM: "", Certificates: []anvil.TLSCert{cert}, ClientAuth: 0, ClientCAs: "", MinVersion: tls.VersionTLS13})
+		return
+	}
+	try r.Serve(c.Listen)
+}
+
+fn migrate() ! {
+	let n = try db.Migrate(pg)
+	let at = try db.Applied(pg)
+	say.Line("tinhub: applied {n} migrations; the database is at migration {at}")
+}
+
+fn main() {
+	let b = boot
+	if len(b.Err) > 0 {
+		quarry.Eprintln("tinhub: {b.Err}")
+		quarry.Exit(2)
+	}
+	match b.Command {
+		"version" => {
+			say.Line("tinhub {version}")
+			quarry.Exit(0)
+		}
+		"run" => {
+			run(b.Conf) catch err {
+				quarry.Eprintln("tinhub: {fault.Message(err)}")
+				quarry.Exit(1)
+			}
+		}
+		"migrate" => {
+			migrate() catch err {
+				quarry.Eprintln("tinhub: migrate: {fault.Message(err)}")
+				quarry.Exit(1)
+			}
+		}
+		_ => {
+			quarry.Eprint(usage())
+			quarry.Exit(2)
+		}
+	}
+}

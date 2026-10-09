@@ -306,6 +306,14 @@ jobs:
           sudo -u postgres psql -v ON_ERROR_STOP=1 -c "SET password_encryption = 'scram-sha-256'; CREATE ROLE tin LOGIN PASSWORD 'tinpass';"
           sudo -u postgres createdb -O tin tin
           POSTGRES_ADDR=127.0.0.1:5432 POSTGRES_USER=tin POSTGRES_PASSWORD=tinpass POSTGRES_DATABASE=tin sh tools/ci/tin.sh postgres_check
+      - name: tinhub (unit tests and the build; design/tinhub.md)
+        if: ${{ !(runner.os == 'Linux' && runner.arch == 'X64') }}
+        run: sh products/tinhub/tests/run.sh
+      - name: tinhub against the runner's PostgreSQL (schema, event queue, readiness, drain; Linux x86-64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          sudo -u postgres createdb -O tin tinhub_test
+          TINHUB_TEST_DB=127.0.0.1:5432/tinhub_test TINHUB_TEST_DB_USER=tin TINHUB_TEST_DB_PASSWORD=tinpass sh products/tinhub/tests/run.sh
       - name: HTTP correctness, RSS stability and shutdown (Linux)
         if: runner.os == 'Linux'
         run: sh tools/ci/tin.sh http_check
