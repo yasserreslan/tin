@@ -7,6 +7,8 @@ The goal is a language in which everything Go's built-ins and standard library l
 
 The inventory is the 176 packages `go list std` reports for Go 1.26 (without `internal`, `vendor` and `cmd`), plus the language itself. The `koussa` column is how many of the files in Anghami's service (about 5,600 Go files, 1.15 million lines) import the package, as production files plus test files. It is a yardstick for what real services need, not a port target.
 
+Every package this page marks `n/a` or `design`, or leaves out on purpose, is decided with its reason and its Tin counterpart in `design/stdlib_decisions.md`.
+
 | status | meaning |
 |---|---|
 | done | covers what the Go package is used for |
@@ -35,7 +37,7 @@ The inventory is the 176 packages `go list std` reports for Go 1.26 (without `in
 | structs, methods | yes; fields and methods follow the capitalized-export rule | done |
 | struct embedding | not documented | missing |
 | struct tags | none: attributes checked by the compiler are the plan | design |
-| interfaces, type assertions, type switches | shapes: `shape` declarations (method sets, composition, named unions, generic parameters and instances like `Seq[i64]`), structural satisfaction, static dispatch by monomorphization, and explicit `dyn S` two-word values with method tables, optionals, slices, `keep` and region checks. `!dyn` results (#568), formatting (#569) and map values (#567) work. No type assertions or type switches by design (an `enum` is a closed set); #141 | partial |
+| interfaces, type assertions, type switches | shapes: `shape` declarations (method sets, composition, named unions, generic parameters and instances like `Seq[i64]`), structural satisfaction, static dispatch by monomorphization, and explicit `dyn S` two-word values with method tables, optionals, slices, `keep` and region checks. Map values and `!dyn` results remain deferred. No type assertions or type switches by design (an `enum` is a closed set); #141 | partial |
 | generics | type parameters with imported library shapes `constraints.Any`, `constraints.Comparable` and `sift.Ordered`, plus unions; inference; methods on generic types | partial |
 | function values, closures | capturing closures as region objects with shared cells (Go 1.22 per-iteration loop variables), frame-resident descriptors for closures only the library calls (no pool allocation), deep-copied by keep(), escape into globals rejected, defer with captures; a local closure cannot recurse and cannot capture a mut parameter; cells for every captured variable (by-value copies of never-reassigned variables are a later optimization) | done |
 | method values and expressions | not documented | missing |
@@ -186,8 +188,8 @@ Ordered by import path, as `go list std` prints them.
 | `net/http/cookiejar` |  | missing |  |  |
 | `net/http/fcgi` |  | missing |  | low priority |
 | `net/http/httptest` | 1+57 | partial | anvil.Router.Run | runs a request through a router without a socket; no ResponseRecorder or test Server |
-| `net/http/httptrace` |  | missing |  |  |
-| `net/http/httputil` | 5+0 | missing |  | ReverseProxy, DumpRequest |
+| `net/http/httptrace` |  | partial | httptrace | client hooks that wire can observe on HTTP/1.1 and TLS; DNS and connect hooks are not observable (#915) |
+| `net/http/httputil` | 5+0 | partial | dump | DumpRequest and DumpResponse; no ReverseProxy |
 | `net/http/pprof` | 1+0 | missing |  | profiling endpoints; part of the performance goal |
 | `net/mail` | 6+0 | missing |  |  |
 | `net/netip` |  | partial | link | only the check that a bracketed URL host is an IPv6 address, with Go's fault messages (private to link); no Addr, Prefix or AddrPort types |
@@ -220,7 +222,7 @@ Ordered by import path, as `go list std` prints them.
 | `strings` | 657+147 | partial | twine | every function except the iterator forms and Reader: Index family, Split family with SplitAfter, Fields and FieldsFunc, Map, Title, Unicode ToUpper, ToLower, ToTitle, EqualFold by SimpleFold, Trim family with Func forms, Cut, CutPrefix, CutSuffix, Replacer, Lines, ToValidUTF8, Clone, Builder (Cap, Grow, Write); Lines is a slice, not an iterator; no NewReader (with the io port), no ToUpperSpecial |
 | `structs` |  | n/a |  |  |
 | `sync` | 69+32 | design | share-nothing cores, relay, scope, once | no Mutex or RWMutex by design (tasks on a core cannot race); a `scope` is the WaitGroup, `once { }` is per core; Pool and Map have no equivalent |
-| `sync/atomic` | 7+12 | missing |  | the runtime has atomic operations as compiler intrinsics; there is no public package |
+| `sync/atomic` | 7+12 | partial | atomic | Int and Bool (Load, Store, Add, Swap, CompareSwap) for counters every core changes; no unsigned types or function forms (design/stdlib_decisions.md) |
 | `syscall` | 2+1 | missing |  | low priority |
 | `testing` | 4+1071 | partial | crucible, `tin test` | checks, Run, benchmarks; no t.Parallel, subtests with cleanup, TempDir, fuzzing, example tests |
 | `testing/cryptotest` |  | missing |  |  |
