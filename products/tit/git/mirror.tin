@@ -163,7 +163,7 @@ fn MirrorBatch(titDir str, gitDir str, known Back, order []object.Id, start i64,
 		ts = append(ts, t)
 		gs = append(gs, g)
 	}
-	return Batch{Git: gs, Tit: ts, Next: k, Pack: ""}
+	return Batch{Git: gs, Tit: ts, Next: k, Pack: "", Parts: make([]str, 3)}
 }
 
 // commitBody is a tit commit in git's format: an adopted commit as it was (its change id comes from that git id),

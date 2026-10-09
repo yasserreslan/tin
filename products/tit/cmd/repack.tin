@@ -7,11 +7,11 @@ import "quarry"
 import "twine"
 
 // tit repack (#778): every pack into three (commits and tags, trees, blobs), its deltas searched again and its entries compressed on every core. adopt
-// leaves a pack for each batch it converts, and each pack is one more index to search for every object read. Loose
-// objects stay as they are (large files among them are kept in chunks). The new pack is in place before the old ones
-// go, so a crash leaves objects twice, never missing.
+// leaves three packs (it merges its batches' packs of each kind), but each later adopt and each fetch adds packs, and
+// each pack is one more index to search for every object read. Loose objects stay as they are (large files among them
+// are kept in chunks). The new pack is in place before the old ones go, so a crash leaves objects twice, never missing.
 
-fn doRepack(g Global, o mut Out) ! {
+fn doRepack(g Global, all bool, o mut Out) ! {
 	mut r = try open(g)
 	use lock = change.Lock(r.Ws.Store)
 	let dir = r.Ws.Store + "/packs"
@@ -24,7 +24,7 @@ fn doRepack(g Global, o mut Out) ! {
 			}
 		}
 	}
-	if len(old) < 4 {
+	if len(old) < 4 && !(all && len(old) > 0) {
 		o.Line("Nothing to repack: {len(old)} packs.")
 		return
 	}
@@ -32,10 +32,11 @@ fn doRepack(g Global, o mut Out) ! {
 	mut commits = []object.Id{}
 	mut trees = []object.Id{}
 	mut blobs = []object.Id{}
-	for p in r.ids.packs {
+	for k in 0..len(r.ids.packs) {
+		mut p = r.ids.packs[k]
 		for i in 0..p.Count {
 			let id = p.IdAt(i)
-			let (kind, _) = try r.Store.GetRaw(id)
+			let kind = try p.KindAt(i)
 			match kind {
 				Commit, Tag => {
 					commits = append(commits, id)

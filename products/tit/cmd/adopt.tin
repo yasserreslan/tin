@@ -6,6 +6,7 @@ import "../ignore"
 import "../index"
 import "../object"
 import "../oplog"
+import "../packfile"
 import "argo"
 import "fault"
 import "flume"
@@ -15,8 +16,9 @@ import "tty"
 import "twine"
 
 // tit adopt (#789): bring a git repository in. The first run starts a tit repository in the git working directory;
-// every run converts what is new since the last (the git-ids table remembers), in batches that each end as a
-// verified pack, then moves the refs in one oplog operation. Until the cutover, run it again after new git commits.
+// every run converts what is new since the last (the git-ids table remembers), in batches that each end as three
+// verified packs (commits and tags, trees, blobs), merges the batches' packs of each kind into one when there were
+// several, then moves the refs in one oplog operation. Until the cutover, run it again after new git commits.
 
 // adoptBudget is about how many bytes of objects one batch converts before it is written as a pack.
 const adoptBudget = 64 * 1024 * 1024
@@ -76,6 +78,13 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 	let budget = batchBudget()
 	let packs = r.Ws.Store + "/packs"
 	let shown = tty.IsTerminal(2) && !g.Json
+	// the packs this run writes, by kind: commits and tags, trees, blobs
+	mut commitPacks = []str{}
+	mut treePacks = []str{}
+	mut blobPacks = []str{}
+	// the packs already there: a batch an earlier run wrote but did not record (cut by a signal) is written again,
+	// byte for byte under the same name; such a pack stays as it is, never merged away
+	let had = try packPaths(packs)
 	mut i = 0
 	for i < len(order) {
 		let start = i
@@ -84,6 +93,15 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 		}
 		for k in 0..len(b.Git) {
 			ids.Set(b.Git[k], b.Tit[k])
+		}
+		if len(b.Parts[0]) > 0 && !holds(had, b.Parts[0]) {
+			commitPacks = append(commitPacks, b.Parts[0])
+		}
+		if len(b.Parts[1]) > 0 && !holds(had, b.Parts[1]) {
+			treePacks = append(treePacks, b.Parts[1])
+		}
+		if len(b.Parts[2]) > 0 && !holds(had, b.Parts[2]) {
+			blobPacks = append(blobPacks, b.Parts[2])
 		}
 		_ = try arena {
 			try git.WriteIds(idsPath, ids)
@@ -96,6 +114,10 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 	}
 	if shown && len(order) > 0 {
 		quarry.Eprint("\n")
+	}
+	// several batches: their packs of each kind become one, so every command opens three packs, not three a batch
+	for kind in [][]str{commitPacks, treePacks, blobPacks} {
+		mergeAdopted(packs, kind)
 	}
 	// the refs, in one operation: branches, tags and remote-tracking branches, as git has them
 	let titRefs = change.NewRefs(r.Ws.Store)
@@ -177,6 +199,66 @@ fn doAdopt(g Global, path str, o mut Out) ! {
 	if len(headName) > 0 {
 		o.Line("HEAD is " + shortBranch(headName) + ".")
 	}
+}
+
+// mergeAdopted merges the packs of one kind that the batches wrote into one pack (their entries copied as they are),
+// then removes them. The new pack is in place before they go, so an interruption leaves objects twice, never missing;
+// a merge that fails leaves the batches' packs as they are (tit repack joins them), and says so.
+fn mergeAdopted(dir str, paths []str) {
+	if len(paths) < 2 {
+		return
+	}
+	let (merged, err) = arena {
+		try mergePacks(dir, paths)
+	}
+	if err != nil {
+		quarry.Eprintln("tit: adopt: the batches' packs stay apart ({fault.Message(err)}); tit repack joins them")
+		return
+	}
+	for p in paths {
+		if p == merged {
+			continue
+		}
+		let base = p[0:len(p) - 5]
+		quarry.Remove(base + ".idx") catch e {
+			quarry.Eprintln("tit: adopt: {fault.Message(e)}")
+			continue
+		}
+		quarry.Remove(p) catch e {
+			quarry.Eprintln("tit: adopt: {fault.Message(e)}")
+		}
+	}
+}
+
+// packPaths is the paths of the packs in dir.
+fn packPaths(dir str) ![]str {
+	mut paths = []str{}
+	if !quarry.IsDir(dir) {
+		return paths
+	}
+	let names = try quarry.ReadDir(dir)
+	for n in names {
+		if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
+			paths = append(paths, dir + "/" + n)
+		}
+	}
+	return paths
+}
+
+// holds reports whether paths has p.
+fn holds(paths []str, p str) bool {
+	for q in paths {
+		if q == p {
+			return true
+		}
+	}
+	return false
+}
+
+// mergePacks is the path of the pack merged from paths (packfile.Merge).
+fn mergePacks(dir str, paths []str) !str {
+	let p = try packfile.Merge(paths, dir)
+	return p.Path
 }
 
 // excludeFromGit adds .tit/ to git's info/exclude, so git status leaves tit's directory alone.

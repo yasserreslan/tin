@@ -46,6 +46,9 @@ t config set --user user.email ada@example.com
 at=$(date +%s)
 "$tit" adopt . > "$d/adopt.txt" 2>&1 || fail "adopt: $(cat "$d/adopt.txt")"
 echo "ok #789 adopt took $(($(date +%s) - at)) s"
+packs=$(ls .tit/packs | grep -c '\.pack$')
+[ "$packs" = 3 ] || fail "adopt left $packs packs, not three (commits and tags, trees, blobs)"
+echo "ok #807 adopt left three packs, one of each kind"
 commits=$(git rev-list --count main)
 t log --format=git-id > "$d/tit.ids"
 git log --format=%H > "$d/git.ids"

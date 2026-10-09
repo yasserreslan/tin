@@ -18,6 +18,25 @@ fn IndexByte(s str, c u8) i64 {
 	return p - ps
 }
 
+// IndexByteFrom returns the byte offset of the first c in s at or after from, or -1 (also when from is past the end):
+// IndexByte of s[from:] without copying that slice.
+fn IndexByteFrom(s str, from i64, c u8) i64 {
+	let n = len(s)
+	mut at = from
+	if at < 0 {
+		at = 0
+	}
+	if at >= n {
+		return -1
+	}
+	let ps = cast(i64, s) + 8
+	let p = memchr(ps+at, i64(c), n-at)
+	if p == 0 {
+		return -1
+	}
+	return p - ps
+}
+
 // LastIndexByte returns the byte offset of the last c in s, or -1.
 fn LastIndexByte(s str, c u8) i64 {
 	{

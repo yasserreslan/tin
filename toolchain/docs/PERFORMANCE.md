@@ -793,3 +793,24 @@ the figure is the server's own, not a failing baseline.
 
 The same run compared the HTTP/1.1 path with main (wrk, as above): head/base 0.994 (`/json`) and
 0.998 (`/plaintext`) on amd64, 1.002 and 0.987 on arm64.
+
+## tit against git (Linux)
+
+`bench/tit/run.sh`, run by `.github/workflows/bench-linux.yml` (#807). The bench clones the Tin repository and adopts it into tit. It then runs each command 7 times, alternating tit and git, and reports medians that include starting the process. The run measured tit as of branch `tin2/tit-wave5` (#975) on 2026-10-09: GitHub-hosted shared runners with 4 CPUs, Linux 6.17.0-1022-azure, and git 2.55.0. The repository had 572 commits and 3005 files. On shared runners only the ratios are meaningful.
+
+| operation | arm64 (Neoverse-N2): git / tit ms | tit/git | amd64 (EPYC 9V74): git / tit ms | tit/git |
+|---|---|---|---|---|
+| status (clean) | 8.6 / 15.8 | 1.84 | 12.1 / 21.8 | 1.80 |
+| status (20 files changed) | 8.7 / 16.0 | 1.84 | 12.1 / 22.4 | 1.85 |
+| diff (20 files changed) | 6.5 / 11.8 | 1.81 | 8.0 / 13.8 | 1.73 |
+| log (whole history) | 11.7 / 19.2 | 1.63 | 12.0 / 21.0 | 1.75 |
+| log -n 1 | 2.9 / 3.0 | 1.02 | 2.7 / 2.4 | 0.86 |
+
+The run before this work (2026-10-09, same runners) had tit/git between 2.85 and 4.31. Most of the gain came from three changes:
+- commands that do not hash or pack no longer start every core;
+- pack indexes are read where they lie instead of being copied;
+- each commit is read and decoded once, and stored blocks are copied out without an inflater.
+
+`log -n 1` is now level with git. status and diff still walk the whole tree and `lstat` every file, as git does. What is left is per-file work and the process's memory faults, followed in #807.
+
+Packing on every core (#778): the earlier run measured a repack of the whole history at 2.45x faster on 4 cores than on 1 (arm64; amd64 2.02x). It ran with core 0 coordinating but not packing. Core 0 now takes jobs as well, and repack no longer reads every object to sort them by kind. `bench/tit/run.sh` repacks with `tit repack --all`, because adopt now leaves three packs. The 8-core criterion of #778 cannot be measured on GitHub's 4-CPU runners.

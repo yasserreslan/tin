@@ -62,13 +62,11 @@ type Pack struct {
 	trailer str
 	loaded  bool
 	data    str
-	ids    str
-	offs   []i64
-	// ends is the entries' offsets in order, then the trailer's: an entry runs to the next one
-	ends []i64
+	// idx is the index file: its ids, offsets and CRCs are read from it where they are (#807: copying them out on
+	// every open cost more than a status)
+	idx str
 	// ranged counts the entries read one by one (entryBytes)
 	ranged i64
-	crcs   []u32
 	fanout []i64
 	cache  map[i64]str
 	kinds  map[i64]object.Kind
@@ -78,11 +76,11 @@ type Pack struct {
 }
 
 fn le32(s str, at i64) i64 {
-	return i64(pack.LE.U32([]u8(s[at:at + 4])))
+	return i64(s[at]) | (i64(s[at + 1]) << 8) | (i64(s[at + 2]) << 16) | (i64(s[at + 3]) << 24)
 }
 
 fn le64(s str, at i64) i64 {
-	return i64(pack.LE.U64([]u8(s[at:at + 8])))
+	return le32(s, at) | (le32(s, at + 4) << 32)
 }
 
 // readHead is the first n bytes of a file (fewer when it is shorter).
@@ -118,9 +116,6 @@ fn Open(path str) !Pack {
 	if count < 0 || count > info.Size || len(idx) != want || idx[0:8] != "TITIDX\x00\x00" || le32(idx, 8) != 1 || le64(idx, 12) != count {
 		fail fault.Wrap(ErrBadPack, "{idxPath}: not the index of this pack")
 	}
-	if str(seal.Sha256(idx[0:len(idx) - 32])) != idx[len(idx) - 32:] {
-		fail fault.Wrap(ErrBadPack, "{idxPath}: its hash does not match")
-	}
 	mut fanout = make([]i64, 256)
 	mut prev = 0
 	for i in 0..256 {
@@ -133,29 +128,41 @@ fn Open(path str) !Pack {
 	if fanout[255] != count {
 		fail fault.Wrap(ErrBadPack, "{idxPath}: the fan-out table does not end at the count")
 	}
-	let idsAt = 20 + 1024
-	let ids = idx[idsAt:idsAt + 32 * count]
-	for i in 1..count {
-		if !(ids[32 * (i - 1):32 * i] < ids[32 * i:32 * (i + 1)]) {
-			fail fault.Wrap(ErrBadPack, "{idxPath}: ids are not in order")
+	// The index's hash and the order of its ids are checked by Verify (tit verify), as git checks its own indexes
+	// in fsck: an open reads only what it needs, and an offset is checked where it is used.
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ranged: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+}
+
+// idsAt is where the ids start in an index: after its header (20 bytes) and fan-out table (1024).
+const idsAt = 20 + 1024
+
+// off is the offset in the pack of the entry at position i of the index.
+fn (p Pack) off(i i64) i64 {
+	return le64(p.idx, idsAt + 32 * p.Count + 8 * i)
+}
+
+// crc is the CRC-32 of the entry at position i.
+fn (p Pack) crc(i i64) u32 {
+	return u32(le32(p.idx, idsAt + 40 * p.Count + 4 * i))
+}
+
+// offOf is off, checked to lie inside the pack.
+fn (p Pack) offOf(i i64) !i64 {
+	let o = p.off(i)
+	if o < 20 || o >= p.size - 32 {
+		fail fault.Wrap(ErrBadPack, "{p.Path}: an offset outside the pack")
+	}
+	return o
+}
+
+// idBefore reports whether the 32-byte id at a in ids sorts before the one at b.
+fn idBefore(ids str, a i64, b i64) bool {
+	for k in 0..32 {
+		if ids[a + k] != ids[b + k] {
+			return ids[a + k] < ids[b + k]
 		}
 	}
-	mut offs = make([]i64, count)
-	mut crcs = make([]u32, count)
-	let offAt = idsAt + 32 * count
-	let crcAt = offAt + 8 * count
-	for i in 0..count {
-		offs[i] = le64(idx, offAt + 8 * i)
-		crcs[i] = u32(le32(idx, crcAt + 4 * i))
-		if offs[i] < 20 || offs[i] >= info.Size - 32 {
-			fail fault.Wrap(ErrBadPack, "{idxPath}: an offset outside the pack")
-		}
-	}
-	mut ends = make([]i64, len(offs))
-	copy(ends, offs)
-	sift.Sort(mut ends)
-	ends = append(ends, info.Size - 32)
-	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", ids: ids, offs: offs, ends: ends, ranged: 0, crcs: crcs, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+	return false
 }
 
 // Find is the position of the object in the index, or -1.
@@ -169,11 +176,23 @@ fn (p Pack) Find(id object.Id) i64 {
 	mut hi = p.fanout[first]
 	for lo < hi {
 		let mid = (lo + hi) / 2
-		let at = p.ids[32 * mid:32 * mid + 32]
-		if at == raw {
+		// compared in place: a slice of the index would be a copy per step
+		let at = idsAt + 32 * mid
+		mut c = 0
+		for k in 0..32 {
+			if p.idx[at + k] != raw[k] {
+				if p.idx[at + k] < raw[k] {
+					c = -1
+				} else {
+					c = 1
+				}
+				break
+			}
+		}
+		if c == 0 {
 			return mid
 		}
-		if at < raw {
+		if c < 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
@@ -189,7 +208,7 @@ fn (p Pack) Has(id object.Id) bool {
 
 // IdAt is the id of the object at position i of the index.
 fn (p Pack) IdAt(i i64) object.Id {
-	let id = object.IdOf(p.ids[32 * i:32 * i + 32]) catch _ {
+	let id = object.IdOf(p.idx[idsAt + 32 * i:idsAt + 32 * i + 32]) catch _ {
 		object.NoId
 	}
 	return id
@@ -222,38 +241,164 @@ fn (p Pack) uvarint(at i64) !(i64, i64) {
 }
 
 // wholeUnder is the size under which a pack is read whole the first time an object of it is.
-const wholeUnder = 2 << 20
+const wholeUnder = 256 << 10
 
 // entryBytes is the entry at off, up to the next one: from the pack's bytes once they are read, otherwise only that
 // range of the file (quarry.ReadAt), so reading a few objects of a large pack reads a few entries of it.
 fn (p mut Pack) entryBytes(off i64) !str {
-	mut lo = 0
-	mut hi = len(p.ends)
-	for lo < hi {
-		let mid = (lo + hi) / 2
-		if p.ends[mid] <= off {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo >= len(p.ends) || off < 20 {
+	if off < 20 || off >= p.size - 32 {
 		fail fault.Wrap(ErrBadPack, "no entry at {off}")
 	}
-	let end = p.ends[lo]
 	// a small pack, or one read entry by entry many times already, is read whole: one read beats many
 	if !p.loaded && (p.size <= wholeUnder || (p.ranged >= 64 && p.size <= 256 << 20)) {
 		try p.load()
 	}
 	if p.loaded {
-		return p.data[off:end]
+		let n = try entryLen(p.data[off:min(p.size - 32, off + maxHead)])
+		if off + n > p.size - 32 {
+			fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+		}
+		return p.data[off:off + n]
 	}
+	// the entry's header says how long it is (#807: sorting every offset to find where one entry ends cost more than
+	// a log -n 1): read the header, then the rest when the first read did not hold it
 	p.ranged += 1
-	let e = try quarry.ReadAt(p.Path, off, end - off)
-	if len(e) != end - off {
+	let head = try quarry.ReadAt(p.Path, off, min(maxHead, p.size - 32 - off))
+	let n = try entryLen(head)
+	if off + n > p.size - 32 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	if n <= len(head) {
+		return head[0:n]
+	}
+	let e = try quarry.ReadAt(p.Path, off, n)
+	if len(e) != n {
 		fail fault.Wrap(ErrBadPack, "{p.Path} is shorter than its index says")
 	}
 	return e
+}
+
+// headAt is the first bytes of the entry at off, enough for its header.
+fn (p mut Pack) headAt(off i64) !str {
+	if off < 20 || off >= p.size - 32 {
+		fail fault.Wrap(ErrBadPack, "no entry at {off}")
+	}
+	if p.loaded {
+		return p.data[off:min(p.size - 32, off + maxHead)]
+	}
+	return try quarry.ReadAt(p.Path, off, min(maxHead, p.size - 32 - off))
+}
+
+// KindAt is the kind of the object at position i of the index, from its entry's header, or a delta's from its
+// base's: nothing is read past the headers or inflated, so sorting a pack's objects by kind reads none of their
+// bodies (#778: repack read every object twice, once only for its kind).
+fn (p mut Pack) KindAt(i i64) !object.Kind {
+	mut off = try p.offOf(i)
+	for depth in 0..MaxDeltaDepth + 1 {
+		let h = try p.headAt(off)
+		let t = i64(h[0])
+		if t == typeOfsDelta {
+			let (_, a) = try varintIn(h, 1)
+			let (dist, _) = try varintIn(h, a)
+			if dist <= 0 || off - dist < 20 {
+				fail fault.Wrap(ErrBadPack, "a delta at {off} against no earlier entry")
+			}
+			off = off - dist
+			continue
+		}
+		if t == typeRefDelta {
+			let (_, a) = try varintIn(h, 1)
+			if a + 32 > len(h) {
+				fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+			}
+			let baseId = try object.IdOf(h[a:a + 32])
+			let pos = p.Find(baseId)
+			if pos < 0 {
+				fail fault.Wrap(ErrBadPack, "a delta at {off} against {baseId.Hex()}, which this pack lacks")
+			}
+			off = try p.offOf(pos)
+			continue
+		}
+		return try kindOf(t)
+	}
+	fail fault.Wrap(ErrBadPack, "a delta chain longer than {MaxDeltaDepth}")
+}
+
+// maxHead is the most bytes an entry's header takes: its type, size, base (an offset or an id) and compressed length.
+const maxHead = 1 + 10 + 32 + 10
+
+// entryLen is the length of the entry whose first bytes are h: its header and its compressed bytes.
+fn entryLen(h str) !i64 {
+	if len(h) == 0 {
+		fail fault.Wrap(ErrBadPack, "an entry runs past the end")
+	}
+	let t = i64(h[0])
+	let (_, a) = try varintIn(h, 1)
+	mut at = a
+	if t == typeOfsDelta {
+		let (_, b) = try varintIn(h, at)
+		at = b
+	} else if t == typeRefDelta {
+		at += 32
+	}
+	let (clen, c) = try varintIn(h, at)
+	return c + clen
+}
+
+// storedZlib is the data of a zlib stream made only of stored blocks, when it is exactly size bytes and its Adler-32
+// matches; otherwise "" (the caller inflates it, which also reports what is wrong with it). size 0 is never stored.
+fn storedZlib(z str, size i64) str {
+	// the header: deflate with a 32 KiB window, no dictionary, a multiple of 31
+	if size <= 0 || len(z) < 2 + 5 + 4 || (i64(z[0]) & 15) != 8 || (i64(z[1]) & 32) != 0 || (i64(z[0]) * 256 + i64(z[1])) % 31 != 0 {
+		return ""
+	}
+	// one final block, as almost every commit and tree is: the body is a slice of the stream
+	if i64(z[2]) == 1 && len(z) == 2 + 5 + size + 4 {
+		let n = i64(z[3]) | (i64(z[4]) << 8)
+		let nn = i64(z[5]) | (i64(z[6]) << 8)
+		if n == size && n ^ nn == 65535 {
+			let body = z[7:7 + n]
+			let at = 7 + n
+			let sum = (u32(z[at]) << 24) | (u32(z[at + 1]) << 16) | (u32(z[at + 2]) << 8) | u32(z[at + 3])
+			if stamp.Adler32(body) == sum {
+				return body
+			}
+			return ""
+		}
+	}
+	mut out = make([]u8, 0, size)
+	mut at = 2
+	for {
+		if at + 5 > len(z) {
+			return ""
+		}
+		let h = i64(z[at])
+		// BTYPE 00 (stored) and nothing else in the header byte
+		if (h >> 1) != 0 {
+			return ""
+		}
+		let n = i64(z[at + 1]) | (i64(z[at + 2]) << 8)
+		let nn = i64(z[at + 3]) | (i64(z[at + 4]) << 8)
+		if n ^ nn != 65535 || at + 5 + n > len(z) || len(out) + n > size {
+			return ""
+		}
+		for k in 0..n {
+			out = append(out, z[at + 5 + k])
+		}
+		at += 5 + n
+		if h & 1 == 1 {
+			break
+		}
+	}
+	if at + 4 != len(z) || len(out) != size {
+		return ""
+	}
+	let body = str(out)
+	let sum = (u32(z[at]) << 24) | (u32(z[at + 1]) << 16) | (u32(z[at + 2]) << 8) | u32(z[at + 3])
+	if stamp.Adler32(body) != sum {
+		return ""
+	}
+	return body
 }
 
 // varintIn is the uvarint at e[at:] and where it ends, within e.
@@ -300,7 +445,7 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 		if pos < 0 {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against {baseId.Hex()}, which this pack lacks")
 		}
-		baseOff = p.offs[pos]
+		baseOff = try p.offOf(pos)
 		if baseOff == off {
 			fail fault.Wrap(ErrBadPack, "a delta at {off} against itself")
 		}
@@ -315,10 +460,15 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 	// the size together) and copies the result once: 6 times the size, and room for its tables
 	let budget = 6 * size + 4194304
 	// budget * 1: a bare name before { would read as a struct literal.
-	let body = limit memory budget * 1 {
-		try squash.Unzlib(zbytes, size + 1)
-	} catch err {
-		fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
+	// commits and trees are written as zlib's stored blocks: copied out as they are, with no inflater (its tables and
+	// buffers were most of a log's memory, #807)
+	mut body = storedZlib(zbytes, size)
+	if len(body) != size {
+		body = limit memory budget * 1 {
+			try squash.Unzlib(zbytes, size + 1)
+		} catch err {
+			fail fault.Wrap(ErrBadPack, "entry at {off}: {fault.Message(err)}")
+		}
 	}
 	if baseOff < 0 {
 		if len(body) != size {
@@ -376,7 +526,8 @@ fn (p mut Pack) GetRaw(id object.Id) !(object.Kind, str) {
 	if pos < 0 {
 		fail fault.Wrap(ErrBadPack, "{id.Hex()} is not in {p.Path}")
 	}
-	let (kind, body) = try p.entryAt(p.offs[pos], 0)
+	let off = try p.offOf(pos)
+	let (kind, body) = try p.entryAt(off, 0)
 	if object.Hash(kind, body) != id {
 		fail fault.Wrap(object.ErrCorrupt, "{id.Hex()} in {p.Path}: the content does not match the id")
 	}
@@ -405,8 +556,8 @@ fn (p mut Pack) Deltas() i64 {
 		return 0
 	}
 	mut n = 0
-	for off in p.offs {
-		let t = i64(p.data[off])
+	for i in 0..p.Count {
+		let t = i64(p.data[p.off(i)])
 		if t == typeOfsDelta || t == typeRefDelta {
 			n += 1
 		}
@@ -416,12 +567,22 @@ fn (p mut Pack) Deltas() i64 {
 
 // Verify checks the pack's hash, then reads every entry, checks its CRC and that its content matches its id.
 fn (p mut Pack) Verify() ! {
+	if str(seal.Sha256(p.idx[0:len(p.idx) - 32])) != p.idx[len(p.idx) - 32:] {
+		fail fault.Wrap(ErrBadPack, "{p.Path}: its index's hash does not match")
+	}
+	for i in 1..p.Count {
+		if !idBefore(p.idx, idsAt + 32 * (i - 1), idsAt + 32 * i) {
+			fail fault.Wrap(ErrBadPack, "{p.Path}: its index's ids are not in order")
+		}
+	}
 	try p.load()
 	if str(seal.Sha256(p.data[0:len(p.data) - 32])) != p.data[len(p.data) - 32:] {
 		fail fault.Wrap(ErrBadPack, "{p.Path}: its trailing hash does not match")
 	}
-	mut sorted = make([]i64, len(p.offs))
-	copy(sorted, p.offs)
+	mut sorted = make([]i64, p.Count)
+	for i in 0..p.Count {
+		sorted[i] = try p.offOf(i)
+	}
 	sift.Sort(mut sorted)
 	mut next = map[i64]i64{}
 	for k in 0..len(sorted) {
@@ -433,9 +594,9 @@ fn (p mut Pack) Verify() ! {
 	}
 	for i in 0..p.Count {
 		let id = p.IdAt(i)
-		let off = p.offs[i]
+		let off = p.off(i)
 		let end = next[off]
-		if stamp.Crc32(p.data[off:end]) != p.crcs[i] {
+		if stamp.Crc32(p.data[off:end]) != p.crc(i) {
 			fail fault.Wrap(ErrBadPack, "{id.Hex()}: its CRC does not match")
 		}
 		let (_, _, err) = p.GetRaw(id)
@@ -449,7 +610,7 @@ fn (p mut Pack) Verify() ! {
 // offset delta) or its base's id (a ref delta), and its compressed bytes, as they are in the pack.
 fn (p mut Pack) entry(pos i64) !(i64, i64, i64, str, str) {
 	try p.load()
-	let off = p.offs[pos]
+	let off = try p.offOf(pos)
 	let t = i64(p.data[off])
 	let (size, a) = try p.uvarint(off + 1)
 	mut at = a

@@ -9,6 +9,7 @@ fn main() {
 	say.Line("index", twine.Index(s, "l"), twine.Index(s, "lo"), twine.Index(s, "world"), twine.Index(s, "xyz"), twine.Index(s, ""), twine.Index("", "a"), twine.Index("aaab", "ab"), twine.Index("ab", "abc"))
 	say.Line("lastindex", twine.LastIndex(s, "l"), twine.LastIndex(s, "o"), twine.LastIndex(s, "hello"), twine.LastIndex(s, ""), twine.LastIndex(s, "zz"), twine.LastIndex("abab", "ab"), twine.LastIndex("ab", "abc"))
 	say.Line("indexbyte", twine.IndexByte(s, 'o'), twine.IndexByte(s, 'z'), twine.IndexByte("", 'a'), twine.LastIndexByte(s, 'o'), twine.LastIndexByte(s, 'z'))
+	say.Line("indexbytefrom", twine.IndexByteFrom(s, 0, 'o'), twine.IndexByteFrom(s, 5, 'o'), twine.IndexByteFrom(s, 9, 'o'), twine.IndexByteFrom(s, -3, 'h'), twine.IndexByteFrom(s, 12, 'd'), twine.IndexByteFrom(s, 11, 'd'), twine.IndexByteFrom("", 0, 'a'))
 	say.Line("prefix", twine.HasPrefix(s, "hell"), twine.HasPrefix(s, "world"), twine.HasPrefix(s, ""), twine.HasPrefix("", "a"))
 	say.Line("suffix", twine.HasSuffix(s, "world"), twine.HasSuffix(s, "hello"), twine.HasSuffix(s, ""), twine.HasSuffix("d", "world"))
 

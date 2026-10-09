@@ -2,6 +2,7 @@ contains true false true true false true false
 index 2 3 7 -1 0 -1 2 -1
 lastindex 10 8 0 12 -1 2 -1
 indexbyte 4 -1 -1 8 -1
+indexbytefrom 4 8 -1 0 -1 11 -1
 prefix true false true false
 suffix true false true false
 split [a b c] [a b c ] [abc] 1 [a b c]

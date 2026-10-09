@@ -155,6 +155,24 @@ fn commitOf[S store.ObjectStore](s mut S, id object.Id) !object.CommitData {
 	}
 }
 
+// readCommit is commitOf for a walk: the commit is decoded in an arena, so only its data stays (#807: what decoding
+// leaves behind was most of a long log's memory).
+fn readCommit[S store.ObjectStore](s mut S, id object.Id) !object.CommitData {
+	let (kind, body) = try s.GetRaw(id)
+	let o = try object.Decode(kind, body)
+	return try commitIn(o, id)
+}
+
+// commitIn is the commit's data, or the fault of an object that is not a commit.
+fn commitIn(o object.Object, id object.Id) !object.CommitData {
+	return match o {
+		Commit(c) => c
+		Blob(_) => try notCommit(id)
+		Tree(_) => try notCommit(id)
+		Tag(_) => try notCommit(id)
+	}
+}
+
 fn notCommit(id object.Id) !object.CommitData {
 	fail fault.Wrap(ErrBadRev, "{id.Hex()} is not a commit")
 }
@@ -357,6 +375,13 @@ type queued struct {
 // Walk lists the commits reachable from starts and not from hide, newest first: by commit time (Date), with every
 // commit after all its children (Topo), or following first parents only (FirstParent); at most most commits (0: all).
 fn Walk[S store.ObjectStore](s mut S, starts []object.Id, hide []object.Id, order Order, most i64) ![]object.Id {
+	let (ids, _) = try WalkCommits(mut s, starts, hide, order, most)
+	return ids
+}
+
+// WalkCommits is Walk with the data of each commit it lists, in the same order. Each commit is read and decoded once,
+// when the walk first meets it (#807): log prints from these instead of reading every commit again.
+fn WalkCommits[S store.ObjectStore](s mut S, starts []object.Id, hide []object.Id, order Order, most i64) !([]object.Id, []object.CommitData) {
 	mut hidden = map[str]bool{}
 	if len(hide) > 0 {
 		let hs = try Walk(mut s, hide, []object.Id{}, Order.Date, 0)
@@ -365,7 +390,9 @@ fn Walk[S store.ObjectStore](s mut S, starts []object.Id, hide []object.Id, orde
 		}
 	}
 	mut out = []object.Id{}
-	mut seen = map[str]bool{}
+	mut outData = []object.CommitData{}
+	// the commits met and not listed yet, by raw id: read when queued, used when taken from the queue
+	mut met = map[str]object.CommitData{}
 	let first = match order {
 		FirstParent => true
 		Date, Topo => false
@@ -375,23 +402,27 @@ fn Walk[S store.ObjectStore](s mut S, starts []object.Id, hide []object.Id, orde
 	})
 	mut seq = 0
 	for id in starts {
-		if seen[id.Bytes()] {
+		let (_, known) = met[id.Bytes()]
+		if known {
 			continue
 		}
-		seen[id.Bytes()] = true
-		let c = try commitOf(mut s, id)
+		let c = try readCommit(mut s, id)
+		met[id.Bytes()] = c
 		heap.Push(queued{when: c.Committer.When, seq: seq, raw: id.Bytes()})
 		seq += 1
 	}
+	mut taken = map[str]bool{}
 	for {
 		let q = heap.Pop()
 		if q == nil {
 			break
 		}
 		let id = try object.IdOf(q.raw)
-		let c = try commitOf(mut s, id)
+		let c = met[q.raw]
+		taken[q.raw] = true
 		if !hidden[q.raw] {
 			out = append(out, id)
+			outData = append(outData, c)
 			if most > 0 && len(out) >= most && !isTopo(order) {
 				break
 			}
@@ -401,22 +432,26 @@ fn Walk[S store.ObjectStore](s mut S, starts []object.Id, hide []object.Id, orde
 			ps = ps[0:1]
 		}
 		for p in ps {
-			if seen[p.Bytes()] {
+			let (_, known) = met[p.Bytes()]
+			if known || taken[p.Bytes()] {
 				continue
 			}
-			seen[p.Bytes()] = true
-			let pc = try commitOf(mut s, p)
+			let pc = try readCommit(mut s, p)
+			met[p.Bytes()] = pc
 			heap.Push(queued{when: pc.Committer.When, seq: seq, raw: p.Bytes()})
 			seq += 1
 		}
 	}
 	if isTopo(order) {
-		out = try topo(mut s, out)
+		let (ids, data) = try topo(out, outData)
+		out = ids
+		outData = data
 		if most > 0 && len(out) > most {
 			out = out[0:most]
+			outData = outData[0:most]
 		}
 	}
-	return out
+	return out, outData
 }
 
 fn isTopo(o Order) bool {
@@ -428,14 +463,13 @@ fn isTopo(o Order) bool {
 
 // topo reorders commits so that every commit comes after all of its children in the list, keeping date order where
 // it can (Kahn's algorithm, taking the next commit in date order whose children are all out).
-fn topo[S store.ObjectStore](s mut S, ids []object.Id) ![]object.Id {
+fn topo(ids []object.Id, data []object.CommitData) !([]object.Id, []object.CommitData) {
 	mut inList = map[str]bool{}
 	for id in ids {
 		inList[id.Bytes()] = true
 	}
 	mut children = map[str]i64{}
-	for id in ids {
-		let c = try commitOf(mut s, id)
+	for c in data {
 		for p in c.Parents {
 			if inList[p.Bytes()] {
 				children[p.Bytes()] += 1
@@ -444,6 +478,7 @@ fn topo[S store.ObjectStore](s mut S, ids []object.Id) ![]object.Id {
 	}
 	mut done = map[str]bool{}
 	mut out = []object.Id{}
+	mut outData = []object.CommitData{}
 	// the first position not taken yet: the scan starts there, so a list already in order takes one pass
 	mut from = 0
 	for len(out) < len(ids) {
@@ -459,8 +494,8 @@ fn topo[S store.ObjectStore](s mut S, ids []object.Id) ![]object.Id {
 			}
 			done[k] = true
 			out = append(out, id)
-			let c = try commitOf(mut s, id)
-			for p in c.Parents {
+			outData = append(outData, data[x])
+			for p in data[x].Parents {
 				if inList[p.Bytes()] {
 					children[p.Bytes()] -= 1
 				}
@@ -472,7 +507,7 @@ fn topo[S store.ObjectStore](s mut S, ids []object.Id) ![]object.Id {
 			fail fault.Wrap(ErrBadRev, "the history has a cycle")
 		}
 	}
-	return out
+	return out, outData
 }
 
 // IsAncestor reports whether a is b or one of b's ancestors.

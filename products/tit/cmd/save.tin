@@ -557,8 +557,7 @@ fn readWork(root str, rel str) !(str, object.Mode) {
 // worktreeChanges is how the tracked files on the disk differ from the index, their new contents put in s.
 fn worktreeChanges(r Repo, s mut store.Layered) ![]diff.FileChange {
 	mut idx = try r.readIndex()
-	mut rules = ignore.New(r.Ws.Root)
-	let rep = try index.Status(mut s, r.Ws.Root, object.NoId, mut idx, mut rules)
+	let rep = try index.Unstaged(r.Ws.Root, mut idx)
 	let focus = worktree.FocusOf(r.Ws)
 	mut out = []diff.FileChange{}
 	for f in rep.Unstaged {

@@ -127,7 +127,11 @@ fn ModeText(m Mode) str {
 
 // Hash is the id of the object with this kind and body.
 fn Hash(kind Kind, body str) Id {
-	return Id{raw: str(seal.Sha256("{KindName(kind)} {len(body)}\x00{body}"))}
+	// the header and the body hashed in turn: joining them first copied every body read (#807)
+	mut h = seal.NewSha256()
+	h.WriteStr("{KindName(kind)} {len(body)}\x00")
+	h.WriteStr(body)
+	return Id{raw: str(h.Sum())}
 }
 
 // Hex is the id as 64 lower-case hex digits.

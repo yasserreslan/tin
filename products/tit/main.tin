@@ -13,9 +13,40 @@ fn main() {
 			quarry.Exit(cmd.Main(args[1:]))
 		}
 	}
+	// Commands that write packs or hash many files run on every core: deltas, compression and hashing go to the
+	// others. The rest run on one, since starting the cores costs milliseconds (each runs every package's global
+	// initializers), more than log, show or a status with a warm stat cache take (#807). The pool cannot start later
+	// in a command: hearth.Run gives core 0 a fresh pool when it returns, so what the command made before is gone.
 	mut code = 0
-	cores.Start(0, fn() {
+	if packing(command(args[1:])) {
+		cores.Start(0, fn() {
+			code = cmd.Main(args[1:])
+		})
+	} else {
 		code = cmd.Main(args[1:])
-	})
+	}
 	quarry.Exit(code)
+}
+
+// command is the command's name: the first argument that is not a global option (-C takes a value).
+fn command(args []str) str {
+	mut i = 0
+	for i < len(args) {
+		let a = args[i]
+		if a == "-C" {
+			i += 2
+			continue
+		}
+		if len(a) > 0 && a[0] == '-' {
+			i += 1
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+// packing reports whether the command writes packs or hashes many files.
+fn packing(name str) bool {
+	return name == "adopt" || name == "repack" || name == "push" || name == "sync" || name == "ship" || name == "add" || name == "commit"
 }

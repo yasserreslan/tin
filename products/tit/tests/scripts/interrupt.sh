@@ -23,12 +23,18 @@ t adopt . > /dev/null
 t config set user.name Ada
 t config set user.email ada@example.com
 
-bg "$tit" log
+# the log writes into a pipe nobody reads, so it is still running (blocked on the full pipe) when the interrupt comes,
+# however fast it is
+mkfifo "$d/slow"
+sleep 60 < "$d/slow" &
+reader=$!
+bg "$tit" log > "$d/slow"
 pid=$!
-sleep 0.05
+sleep 0.2
 kill -INT $pid
 status=0
 wait $pid > /dev/null 2>&1 || status=$?
+kill $reader 2> /dev/null || true
 [ $status = 130 ] || fail "an interrupted log exited with $status"
 [ ! -e .tit/lock ] || fail "the interrupted log left the lock"
 [ "$(t log -n 1 --format=subject)" = c8000 ] || fail "log after the interrupt"

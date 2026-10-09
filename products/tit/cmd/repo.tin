@@ -11,6 +11,7 @@ import "../store"
 import "../worktree"
 import "fault"
 import "quarry"
+import "seal"
 import "trail"
 import "twine"
 
@@ -47,6 +48,12 @@ fn (m objects) Match(prefix str) ![]object.Id {
 }
 
 fn open(g Global) !Repo {
+	return try openWith(g, true)
+}
+
+// openWith is open, with the packs or without them: a command that may need no object (a status with a warm cache)
+// opens them only when it does, since opening reads and checks every pack's index (#807).
+fn openWith(g Global, withPacks bool) !Repo {
 	mut dir = g.Dir
 	if len(dir) == 0 {
 		dir = try quarry.Getwd()
@@ -60,7 +67,7 @@ fn open(g Global) !Repo {
 	mut layers = []dyn store.ObjectStore{loose}
 	mut packs = []packfile.Pack{}
 	let pdir = ws.Store + "/packs"
-	if quarry.IsDir(pdir) {
+	if withPacks && quarry.IsDir(pdir) {
 		let names = try quarry.ReadDir(pdir)
 		for n in names {
 			if twine.HasSuffix(n, ".pack") && !twine.HasPrefix(n, "tmp-") {
@@ -178,25 +185,33 @@ fn (r mut Repo) treeOf(commit object.Id) !object.Id {
 // so that status and the commands that compare with the last commit need not read it (reading one object of a pack
 // reads the pack). A commit's tree never changes: the file is only a cache, and one that does not match is ignored.
 fn (r mut Repo) headTreeOf(head object.Id) !object.Id {
-	let path = r.Ws.State() + "/head-tree"
-	if quarry.Exists(path) {
-		let text = quarry.ReadFile(path) catch _ {
-			""
-		}
-		let parts = twine.Split(twine.TrimSpace(text), " ")
-		if len(parts) == 2 && parts[0] == head.Hex() {
-			let t = object.ParseId(parts[1]) catch _ {
-				object.NoId
-			}
-			if t != object.NoId {
-				return t
-			}
-		}
+	let cached = r.cachedHeadTree(head)
+	if cached != object.NoId {
+		return cached
 	}
+	let path = r.Ws.State() + "/head-tree"
 	let tree = try r.treeOf(head)
 	quarry.WriteFile(path, head.Hex() + " " + tree.Hex() + "\n") catch _ {
 	}
 	return tree
+}
+
+// cachedHeadTree is head's tree from the head-tree file, or NoId when the file has another commit's (or none).
+fn (r Repo) cachedHeadTree(head object.Id) object.Id {
+	let path = r.Ws.State() + "/head-tree"
+	if !quarry.Exists(path) {
+		return object.NoId
+	}
+	let text = quarry.ReadFile(path) catch _ {
+		""
+	}
+	let parts = twine.Split(twine.TrimSpace(text), " ")
+	if len(parts) == 2 && parts[0] == head.Hex() {
+		return object.ParseId(parts[1]) catch _ {
+			object.NoId
+		}
+	}
+	return object.NoId
 }
 
 fn notCommitTree(id object.Id) !object.Id {
@@ -208,5 +223,27 @@ fn (r Repo) config() !identity.Config {
 }
 
 fn (r Repo) readIndex() !index.Index {
-	return try index.Read(r.Ws.IndexPath())
+	mut idx = try index.Read(r.Ws.IndexPath())
+	// the tree of this very index file, remembered by its hash (index-tree: "<sum> <tree>"): status need not hash
+	// every entry again to see that nothing is staged
+	if len(idx.Sum) == 32 {
+		let text = quarry.ReadFile(r.Ws.State() + "/index-tree") catch _ {
+			""
+		}
+		let parts = twine.Split(twine.TrimSpace(text), " ")
+		if len(parts) == 2 && parts[0] == seal.Hex([]u8(idx.Sum)) {
+			idx.Tree = object.ParseId(parts[1]) catch _ {
+				object.NoId
+			}
+		}
+	}
+	return idx
+}
+
+// rememberIndexTree keeps the tree status computed for the index file it read.
+fn (r Repo) rememberIndexTree(idx index.Index) {
+	if len(idx.Sum) == 32 && idx.Tree != object.NoId {
+		quarry.WriteFile(r.Ws.State() + "/index-tree", seal.Hex([]u8(idx.Sum)) + " " + idx.Tree.Hex() + "\n") catch _ {
+		}
+	}
 }

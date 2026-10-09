@@ -228,12 +228,14 @@ fn modeOf(m str, path str) !object.Mode {
 	fail fault.Wrap(ErrBadObject, "{path}: mode {m}")
 }
 
-// Batch is what one batch converted: the git ids, their tit ids, where the next batch starts and the pack written.
+// Batch is what one batch converted: the git ids, their tit ids, where the next batch starts and the pack written
+// (the last); Parts is the packs of its commits and tags, its trees and its blobs, "" for a kind it has none of.
 type Batch struct {
-	Git  []str
-	Tit  []str
-	Next i64
-	Pack str
+	Git   []str
+	Tit   []str
+	Next  i64
+	Pack  str
+	Parts []str
 }
 
 // deps is what a commit or tag needs converted first: its parents, or its object; nothing for a tree or a blob.
@@ -349,7 +351,7 @@ fn ConvertBatch(r Repo, packDir str, known Ids, order []str, start i64, budget i
 		k += 1
 	}
 	let (gs, ts) = local.Pairs()
-	mut out = Batch{Git: gs, Tit: ts, Next: k, Pack: ""}
+	mut out = Batch{Git: gs, Tit: ts, Next: k, Pack: "", Parts: make([]str, 3)}
 	if len(ts) > 0 {
 		// commits and tags in a pack of their own, trees in another, blobs in a third: a log then reads only the
 		// first, a checkout the second and what it writes (a pack is read whole the first time one of its objects is)
@@ -371,11 +373,12 @@ fn ConvertBatch(r Repo, packDir str, known Ids, order []str, start i64, budget i
 				}
 			}
 		}
-		for part in [][]object.Id{commits, trees, blobs} {
+		for j, part in [][]object.Id{commits, trees, blobs} {
 			if len(part) > 0 {
 				mut p = try packfile.Write(mut mem, part, packDir)
 				try p.Verify()
 				out.Pack = p.Path
+				out.Parts[j] = p.Path
 			}
 		}
 	}
