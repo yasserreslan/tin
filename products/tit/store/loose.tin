@@ -23,9 +23,26 @@ fn NewLoose(dir str) Loose {
 }
 
 fn (l Loose) path(id object.Id) str {
-	let h = id.Hex()
-	return l.dir + "/" + h[0:2] + "/" + h[2:]
+	let raw = id.Bytes()
+	if len(raw) != 32 {
+		let h = id.Hex()
+		return l.dir + "/" + h[0:2] + "/" + h[2:]
+	}
+	// built in one buffer: the hex, its slices and the joins were six strings for each lookup (#807)
+	mut b = make([]u8, 0, len(l.dir) + 66)
+	b = append(b, l.dir...)
+	b = append(b, '/')
+	for k in 0..32 {
+		if k == 1 {
+			b = append(b, '/')
+		}
+		b = append(b, hexDigits[i64(raw[k] >> 4)])
+		b = append(b, hexDigits[i64(raw[k] & 15)])
+	}
+	return str(b)
 }
+
+const hexDigits = "0123456789abcdef"
 
 // Has reports whether the store holds the object.
 fn (l Loose) Has(id object.Id) bool {

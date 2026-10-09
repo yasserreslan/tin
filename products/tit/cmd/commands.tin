@@ -359,22 +359,98 @@ type logJson struct {
 	message str
 }
 
+// writeCommit writes a commit as git log does. Its lines are written into the buffer piece by piece: joining them
+// first made several strings a line, most of what a long log allocated after reading its commits (#807).
 fn writeCommit(g Global, r mut Repo, id object.Id, c object.CommitData, o mut Out) {
-	o.Line(paint(g, "33", "commit " + id.Hex()))
-	if len(c.Parents) > 1 {
-		mut ps = []str{}
-		for p in c.Parents {
-			ps = append(ps, p.Hex()[0:12])
-		}
-		o.Line("Merge:  " + joinWords(ps))
+	if g.Color && !g.Json || len(id.Bytes()) != 32 {
+		o.Line(paint(g, "33", "commit " + id.Hex()))
+	} else {
+		o.Text("commit ")
+		o.hex(id.Bytes(), 64)
+		o.Byte('\n')
 	}
-	o.Line("Change: " + c.Change.Letters()[0:12])
-	o.Line("Author: " + c.Author.Name + " <" + c.Author.Email + ">")
-	o.Line("Date:   " + dateText(c.Author))
-	o.Line("")
-	for line in splitLines(c.Message) {
-		o.Text("    ")
-		o.Line(line)
+	if len(c.Parents) > 1 {
+		o.Text("Merge:  ")
+		for k, p in c.Parents {
+			if k > 0 {
+				o.Byte(' ')
+			}
+			if len(p.Bytes()) == 32 {
+				o.hex(p.Bytes(), 12)
+			} else {
+				o.Text(p.Hex()[0:12])
+			}
+		}
+		o.Byte('\n')
+	}
+	let letters = c.Change.Letters()
+	if len(letters) < 12 {
+		o.Line("Change: " + letters[0:12])
+	}
+	o.Text("Change: ")
+	o.part(letters, 0, 12)
+	o.Text("\nAuthor: ")
+	o.Text(c.Author.Name)
+	o.Text(" <")
+	o.Text(c.Author.Email)
+	o.Text(">\nDate:   ")
+	writeDate(c.Author, mut o)
+	o.Text("\n\n")
+	o.indented(c.Message)
+}
+
+const weekdays = "SunMonTueWedThuFriSat"
+
+const months = "JanFebMarAprMayJunJulAugSepOctNovDec"
+
+// writeDate writes dateText(p) without the strings tide.Format makes. Times outside about 1700 to 2240 (and zones
+// beyond a day) go through dateText itself.
+fn writeDate(p object.Person, o mut Out) {
+	if p.When < -(1 << 33) || p.When > 1 << 33 || p.Zone < -1440 || p.Zone > 1440 {
+		o.Text(dateText(p))
+		return
+	}
+	let c = tide.UTCSec(p.When + p.Zone * 60)
+	o.part(weekdays, 3 * c.Weekday, 3 * c.Weekday + 3)
+	o.Byte(' ')
+	o.part(months, 3 * (c.Month - 1), 3 * c.Month)
+	o.Byte(' ')
+	writeNum(c.Day, 1, mut o)
+	o.Byte(' ')
+	writeNum(c.Hour, 2, mut o)
+	o.Byte(':')
+	writeNum(c.Min, 2, mut o)
+	o.Byte(':')
+	writeNum(c.Sec, 2, mut o)
+	o.Byte(' ')
+	writeNum(c.Year, 4, mut o)
+	o.Byte(' ')
+	mut zone = p.Zone
+	if zone < 0 {
+		o.Byte('-')
+		zone = -zone
+	} else {
+		o.Byte('+')
+	}
+	writeNum(zone / 60, 2, mut o)
+	writeNum(zone % 60, 2, mut o)
+}
+
+// writeNum writes v (at least 0) in decimal with at least width digits.
+fn writeNum(v i64, width i64, o mut Out) {
+	mut digits = 1
+	mut p = 10
+	for p <= v {
+		digits += 1
+		p *= 10
+	}
+	for k in digits..width {
+		o.Byte('0')
+	}
+	mut d = p / 10
+	for d > 0 {
+		o.Byte(u8('0' + (v / d) % 10))
+		d /= 10
 	}
 }
 
@@ -467,10 +543,14 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 		}
 	}
 	mut first = true
+	let plain = !(g.Color && !g.Json)
 	for at in 0..len(ids) {
+		// what is written so far goes out when there is a lot of it (no pager wanted): a long log is not held whole
+		o.spill()
 		let id = ids[at]
 		if la.Format == "id" {
-			o.Line(id.Hex())
+			o.hex(id.Bytes(), 64)
+			o.Byte('\n')
 			continue
 		}
 		if la.Format == "git-id" {
@@ -499,6 +579,17 @@ fn doLog(g Global, la LogArgs, o mut Out) ! {
 			mut b = make([]u8, 0, 256)
 			argo.Put(mut b, logJson{commit: id.Hex(), change: c.Change.Letters(), parents: ps, author: c.Author.Name, email: c.Author.Email, time: c.Author.When, message: c.Message})
 			o.Line(str(b))
+		} else if la.OneLine && plain {
+			o.hex(id.Bytes(), 12)
+			o.Byte(' ')
+			let m = c.Message
+			let nl = twine.IndexByteFrom(m, 0, '\n')
+			if nl < 0 {
+				o.part(m, 0, len(m))
+			} else {
+				o.part(m, 0, nl)
+			}
+			o.Byte('\n')
 		} else if la.OneLine {
 			o.Line(paint(g, "33", id.Hex()[0:12]) + " " + firstLine(c.Message))
 		} else {

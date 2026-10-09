@@ -155,8 +155,8 @@ fn commitOf[S store.ObjectStore](s mut S, id object.Id) !object.CommitData {
 	}
 }
 
-// readCommit is commitOf for a walk: the commit is decoded in an arena, so only its data stays (#807: what decoding
-// leaves behind was most of a long log's memory).
+// readCommit is commitOf for a walk: the commit's body (GetRaw), decoded (object.Decode), and its data. The decode is
+// not in an arena, which would keep only the data, because that crashes in the full program (#993).
 fn readCommit[S store.ObjectStore](s mut S, id object.Id) !object.CommitData {
 	let (kind, body) = try s.GetRaw(id)
 	let o = try object.Decode(kind, body)
