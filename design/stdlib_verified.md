@@ -32,45 +32,20 @@ ParseFloat now return 0 with the range fault. toolchain/tests/v2/mint.out record
 
 ## gauge: the corpus check
 
-`bench/ref/gauge/corpus.go` and `corpus.tin` run every transcendental function over the same
-deterministic inputs (about 20,000 per function: 70 edge cases plus uniform, log-uniform, raw-bit
-and quarter-integer values, so NaN, infinities, subnormals and arguments up to 1.8e308 are all in) and
-print a hash of the result bits, or every result with `dump`. The Go side uses Go's pure algorithms for
-Exp, Exp2, Sinh, Cosh, Tanh and Pow, because `math.Exp` is assembly on arm64 and amd64 and returns 0 for
-Exp(-745) where the true value rounds to the smallest subnormal.
+`bench/ref/gauge/corpus.go` and `corpus.tin` run every transcendental function over the same deterministic inputs (about 20,000 per function: 70 edge cases plus uniform, log-uniform, raw-bit and quarter-integer values, so NaN, infinities, subnormals and arguments up to 1.8e308 are all in) and print a hash of the result bits, or every result with `dump`. The Go side uses Go's pure algorithms for Exp, Exp2, Sinh, Cosh, Tanh and Pow, because `math.Exp` is assembly on arm64 and amd64 and returns 0 for Exp(-745) where the true value rounds to the smallest subnormal. Log, Log10, Log1p, Asinh, Acosh and Atanh call Go's own `math.Log` and `math.Log1p` on each architecture, which `gauge` matches bit for bit (#942).
 
     go build -o /tmp/ref ./bench/ref/gauge && tin build bench/ref/gauge/corpus.tin -o /tmp/corpus
-    /tmp/ref corpus > go.txt; /tmp/corpus corpus > tin.txt; diff go.txt tin.txt
+    /tmp/ref corpus > go.txt; /tmp/corpus corpus > tin.txt
 
-Result (macOS arm64): bit-identical to Go for 25 of 35 hashes, over 1,184,332 results in all: sin, cos,
-tan (with Payne-Hanek reduction up to 1.8e308), asin, acos, atan, atan2, sinh, cosh, tanh, exp, exp2,
-cbrt, hypot, mod, and the functions of #575 that touch no fused expression (logb, ilogb, sincos,
-f32bits, f32frombits, dim, remainder, nextafter, nextafter32, fma). The ten that differ are log, log2,
-log10, log1p, pow and the pow subset, plus expm1, asinh, acosh and atanh (#575), whose algorithms call
-the log family or have fused expressions of their own: for about one input in a thousand the result
-differs by exactly one ulp. #575's error functions and gamma (erf, erfc, erfinv, erfcinv, gamma and
-lgamma) are in the corpus too: all but lgamma are bit-identical or one ulp, and lgamma's few-ulp
-results are the same Log difference amplified at its zero crossings. The cause is the fused multiply-add. Both
-compilers fuse on arm64, but not the same products. In the disassembly of Go's `math.log` the last
-line `k*Ln2Hi - (...)` is one fused instruction and `hfsq = 0.5*f*f` is folded into the fused operations
-that use it rather than rounded once; Tin's compiler has no `x*y - a` form, fuses the right-hand product
-of an add, and rounds a product that has two uses once.
-Neither is wrong, and Go's own results differ between its arm64 and amd64 builds for the same reason.
+The two sides print the functions in different orders, so compare them by name (`sort` both files first).
 
-`tools/ci/number_check.tin` runs the same functions from `bench/ref/gauge` over 120,000 inputs each
-(GAUGE_N, one function at a time) and compares every result bit for bit: logb, ilogb, sincos,
-f32bits, f32frombits, dim, remainder, nextafter, nextafter32, fma, erf, erfc, erfcinv and gamma are
-bit-identical, and expm1, asinh, acosh, atanh and erfinv stay within one ulp (on macOS arm64: 224,
-150, 76, 17 and 1 results of 120,077). lgamma goes through Log and Sin and cancels near its zero
-crossings, so it is checked with a 1e-14 absolute plus 1e-13 relative tolerance (its Go twin uses
-pureLog, because math.Log is assembly on amd64 and its subnormal results differ from Go's own pure
-algorithm): 119,833 of 120,077
-results are bit-identical and the worst relative difference is 7.7e-15, the inherited Log
-difference amplified by cancellation. The special values are pinned in
-`toolchain/tests/v2/gauge_more.tin`, which agrees with Go's line for line.
+Result (Linux amd64): all 41 hashes are identical. Result (Linux arm64, and the same on macOS arm64): 38 of 41 are identical. The three that differ are log2, expm1 and lgamma, which differ only on arm64, where Go's compiler fuses their multiply-adds in a different way than Tin's (below). Log, Log10, Log1p, Asinh, Acosh, Atanh, Pow and Erfinv are identical on every platform.
 
-Error against exact arithmetic (Python `decimal`, 800 digits for log1p), in ulps, on the inputs where the
-result is a normal number:
+The fused multiply-add is the cause. Go's arm64 compiler fuses `x*y + z`, `z + x*y` and `x*y - z` (as FNMSUB) into one instruction that rounds once. Tin's arm64 backend fuses `x*y + z`, `z + x*y` and `z - x*y`, but not `x*y - z`, and it fuses the products it finds in each expression, which need not be the ones Go fuses. So `gauge` writes each function in the shape whose fused products Go's compiler fuses. The disassembly of Go's `math.log`, `log1p`, `asinh`, `acosh` and `atanh` on arm64 gives the shape, `-z + x*y` stands for Go's `x*y - z`, and a product Go rounds is a local (`let p = x*y`), which Tin does not fuse. On amd64 Go fuses nothing, and the same source is unfused, which is Go's amd64 code. The amd64 `Log` is Go's assembly (`log_amd64.s`): its `Frexp` does not normalize a subnormal, and its comparison with Sqrt(2)/2 is `<=`. `gauge.Log` follows both on amd64 (`logAmd64`, `toolchain/std/gauge/log.tin`), so `Log(5e-324)` is Go's amd64 value, -709.09, and not the true -744.44.
+
+`tools/ci/number_check.tin` runs the same functions from `bench/ref/gauge` over about 120,000 inputs each (GAUGE_N, one function at a time) and compares every result bit for bit. On Linux amd64 every function is bit-identical, and expm1 and sincos need no ulp of their allowance. On Linux arm64 and macOS arm64 the same holds for log, log10, log1p, asinh, acosh, atanh, erf, erfc, erfcinv, gamma, erfinv, logb, f32bits, f32frombits, dim, remainder, nextafter, nextafter32 and fma. expm1 has 224 results one ulp off (sincos is allowed one, none used). lgamma goes through Log and Sin and cancels near its zero crossings, so it is checked with a 1e-14 absolute plus 1e-13 relative tolerance: 119,975 of 120,077 results are bit-identical on arm64, with a worst relative difference of 2.16e-16. Its Go twin uses `math.Log`, which is the same function as `gauge.Log` on each architecture. The special values are pinned in `toolchain/tests/v2/gauge_more.tin` and `toolchain/tests/v2/gauge_log.tin`, which agree with Go's line for line.
+
+Error against exact arithmetic (Python `decimal`, 800 digits for log1p), in ulps, on the inputs where the result is a normal number. The table was measured on macOS arm64 before #942 and is kept as measured. Since #942 the corpus hashes of log, log10, log1p and pow agree with Go on every platform (above), so for those rows Tin now equals Go.
 
 | function | inputs | Tin = Go | max Tin | max Go | mean Tin | mean Go |
 |---|---|---|---|---|---|---|
@@ -80,7 +55,4 @@ result is a normal number:
 | log1p | 12,875 | 99.93% | 0.707 | 0.707 | 0.2034 | 0.2034 |
 | pow (4,000 sampled) | 3,476 | 99.94% | 141 | 141 | 4.209 | 4.209 |
 
-The two large maxima are Go's algorithms, not the port: Log2 loses precision for x near 1 (it adds
-Log(frac)/ln2 to an exponent of 1), and Pow's error grows with the size of the result. They are
-reproduced faithfully. A more accurate Log2 and Pow would be a Tin improvement on Go, and the corpus
-would then show them as deliberate differences.
+The large maximum of Log2 is Go's algorithm, not the port: Log2 loses precision for x near 1 (it adds Log(frac)/ln2 to an exponent of 1), and Pow's error grows with the size of the result. They are reproduced faithfully. A more accurate Log2 and Pow would be a Tin improvement on Go, and the corpus would then show them as deliberate differences.

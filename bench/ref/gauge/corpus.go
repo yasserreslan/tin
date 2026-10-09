@@ -731,52 +731,6 @@ func isNegInt(x float64) bool {
 	return x < 0 && x == math.Floor(x)
 }
 
-// pureLog is Go's log.go algorithm (math.Log is assembly on amd64, where its subnormal
-// results differ from the pure one), and pureLgamma is Go's lgamma.go on top of it.
-func pureLog(x float64) float64 {
-	const (
-		Ln2Hi = 6.93147180369123816490e-01 /* 3fe62e42 fee00000 */
-		Ln2Lo = 1.90821492927058770002e-10 /* 3dea39ef 35793c76 */
-		L1    = 6.666666666666735130e-01   /* 3FE55555 55555593 */
-		L2    = 3.999999999940941908e-01   /* 3FD99999 9997FA04 */
-		L3    = 2.857142874366239149e-01   /* 3FD24924 94229359 */
-		L4    = 2.222219843214978396e-01   /* 3FCC71C5 1D8E78AF */
-		L5    = 1.818357216161805012e-01   /* 3FC74664 96CB03DE */
-		L6    = 1.531383769920937332e-01   /* 3FC39A09 D078C69F */
-		L7    = 1.479819860511658591e-01   /* 3FC2F112 DF3E5244 */
-		Sqrt2 = 1.4142135623730951
-	)
-
-	// special cases
-	switch {
-	case math.IsNaN(x) || math.IsInf(x, 1):
-		return x
-	case x < 0:
-		return math.NaN()
-	case x == 0:
-		return math.Inf(-1)
-	}
-
-	// reduce
-	f1, ki := math.Frexp(x)
-	if f1 < Sqrt2/2 {
-		f1 *= 2
-		ki--
-	}
-	f := f1 - 1
-	k := float64(ki)
-
-	// compute
-	s := f / (2 + f)
-	s2 := s * s
-	s4 := s2 * s2
-	t1 := s2 * (L1 + s4*(L3+s4*(L5+s4*L7)))
-	t2 := s4 * (L2 + s4*(L4+s4*L6))
-	R := t1 + t2
-	hfsq := 0.5 * f * f
-	return k*Ln2Hi - ((hfsq - (s*(hfsq+R) + k*Ln2Lo)) - f)
-}
-
 var _lgamA = [...]float64{
 	7.72156649015328655494e-02, // 0x3FB3C467E37DB0C8
 	3.22467033424113591611e-01, // 0x3FD4A34CC4A60FAD
@@ -897,7 +851,7 @@ func pureLgamma(x float64) (lgamma float64, sign int) {
 		if neg {
 			sign = -1
 		}
-		lgamma = -pureLog(x)
+		lgamma = -math.Log(x)
 		return
 	}
 	var nadj float64
@@ -911,7 +865,7 @@ func pureLgamma(x float64) (lgamma float64, sign int) {
 			lgamma = math.Inf(1) // -integer
 			return
 		}
-		nadj = pureLog(math.Pi / math.Abs(t*x))
+		nadj = math.Log(math.Pi / math.Abs(t*x))
 		if t < 0 {
 			sign = -1
 		}
@@ -925,7 +879,7 @@ func pureLgamma(x float64) (lgamma float64, sign int) {
 		var y float64
 		var i int
 		if x <= 0.9 {
-			lgamma = -pureLog(x)
+			lgamma = -math.Log(x)
 			switch {
 			case x >= (Ymin - 1 + 0.27): // 0.7316 <= x <=  0.9
 				y = 1 - x
@@ -977,7 +931,7 @@ func pureLgamma(x float64) (lgamma float64, sign int) {
 		p := y * (_lgamS[0] + y*(_lgamS[1]+y*(_lgamS[2]+y*(_lgamS[3]+y*(_lgamS[4]+y*(_lgamS[5]+y*_lgamS[6]))))))
 		q := 1 + y*(_lgamR[1]+y*(_lgamR[2]+y*(_lgamR[3]+y*(_lgamR[4]+y*(_lgamR[5]+y*_lgamR[6])))))
 		lgamma = 0.5*y + p/q
-		z := 1.0 // Lgamma(1+s) = pureLog(s) + Lgamma(s)
+		z := 1.0 // Lgamma(1+s) = math.Log(s) + Lgamma(s)
 		switch i {
 		case 7:
 			z *= (y + 6)
@@ -993,16 +947,16 @@ func pureLgamma(x float64) (lgamma float64, sign int) {
 			fallthrough
 		case 3:
 			z *= (y + 2)
-			lgamma += pureLog(z)
+			lgamma += math.Log(z)
 		}
 	case x < Two58: // 8 <= x < 2**58
-		t := pureLog(x)
+		t := math.Log(x)
 		z := 1 / x
 		y := z * z
 		w := _lgamW[0] + z*(_lgamW[1]+y*(_lgamW[2]+y*(_lgamW[3]+y*(_lgamW[4]+y*(_lgamW[5]+y*_lgamW[6])))))
 		lgamma = (x-0.5)*(t-1) + w
 	default: // 2**58 <= x <= math.Inf
-		lgamma = x * (pureLog(x) - 1)
+		lgamma = x * (math.Log(x) - 1)
 	}
 	if neg {
 		lgamma = nadj - lgamma

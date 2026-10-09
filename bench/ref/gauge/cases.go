@@ -47,8 +47,11 @@ func cases() {
 	for _, x := range []float64{0, nz, 1, -1, 0.5, 10, 100, 709, 709.78, 710, -708, -745, -745.2, -746, 1e-10, 1e-20, inf, ninf, nan} {
 		fmt.Println("exp", x, r(pureExp(x)), r(pureExp2(x)), r(pureSinh(x)), r(pureCosh(x)), r(pureTanh(x)))
 	}
-	for _, x := range []float64{0, nz, 1, 2, 8, 0.125, 10, 1000, 1e-310, sub, 1e300, 2.5, 0.001, -1, inf, ninf, nan} {
+	for _, x := range []float64{0, nz, 1, 2, 8, 0.125, 10, 1000, 1e300, 2.5, 0.001, -1, inf, ninf, nan} {
 		fmt.Println("log", x, r(math.Log(x)), r(math.Log2(x)), r(math.Log10(x)), r(math.Log1p(x)))
+	}
+	for _, x := range []float64{1e-310, sub} {
+		fmt.Println("logsub", x, math.Log(x) < -700, r(math.Log2(x)), r(math.Log1p(x)))
 	}
 	fmt.Println("log2exact", math.Log2(8), math.Log2(0.125), math.Log2(1), math.Log2(1024), math.Log2(sub))
 	fmt.Println("log1p", r(math.Log1p(1e-20)), r(math.Log1p(-0.5)), r(math.Log1p(1e300)), math.Log1p(-1), math.Log1p(-2), math.Log1p(1e-300))

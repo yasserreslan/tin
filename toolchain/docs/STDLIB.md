@@ -956,7 +956,7 @@ Package gauge is floating-point math and a few integer helpers (like Go's math);
 - `Gcd(a i64, b i64) i64`: Gcd returns the greatest common divisor of |a| and |b| (0 when both are 0).
 - `Lcm(a i64, b i64) i64`: Lcm returns the least common multiple of |a| and |b| (0 when either is 0; wraps on overflow).
 - `Lgamma(x f64) (f64, i64)`: Lgamma returns the natural logarithm of the absolute value of Gamma(x) and its sign (+1 or -1), like Go's math.Lgamma. Lgamma(±Inf) = +Inf, Lgamma(0) = +Inf, Lgamma(NaN) = NaN.
-- `Log(x f64) f64`: Log returns the natural logarithm of x. Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN.
+- `Log(x f64) f64`: Log returns the natural logarithm of x: Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN; bit for bit Go's math.Log (#942).
 - `Log2(x f64) f64`: Log2 returns the binary logarithm of x, exact for powers of two.
 - `Log10(x f64) f64`: Log10 returns the decimal logarithm of x.
 - `Log1p(x f64) f64`: Log1p returns log(1 + x), accurate even when x is close to zero.

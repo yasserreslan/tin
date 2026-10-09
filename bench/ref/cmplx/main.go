@@ -1,7 +1,7 @@
 // Command cmplx reads a corpus of math/cmplx calls on stdin and prints what Go's math/cmplx says for each. Every float is
 // the hex of its bits, except that a NaN prints as "nan": the payload of a NaN is not part of the result (Go's NaN() and
 // the propagated ones differ across the operations that make them). tools/ci/fixtures/cmplx.tin prints the same lines and
-// tools/ci/cmplx_check.tin compares them (#916). On amd64 the check builds this with Go's portable Exp and Log (see there).
+// tools/ci/cmplx_check.tin compares them (#916). On amd64 the check builds this with Go's portable Exp (see there).
 //
 //	<op> <re> <im> [<re2> <im2>]   a complex argument; ops with one complex argument read two fields
 //	<op> <r> <theta>               Rect reads two real fields

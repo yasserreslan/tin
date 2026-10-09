@@ -49,8 +49,13 @@ fn main() {
 	for _, x in []f64{0, nz, 1, -1, 0.5, 10, 100, 709, 709.78, 710, -708, -745, -745.2, -746, 1e-10, 1e-20, inf, ninf, nan} {
 		say.Line("exp", x, r(gauge.Exp(x)), r(gauge.Exp2(x)), r(gauge.Sinh(x)), r(gauge.Cosh(x)), r(gauge.Tanh(x)))
 	}
-	for _, x in []f64{0, nz, 1, 2, 8, 0.125, 10, 1000, 1e-310, sub, 1e300, 2.5, 0.001, -1, inf, ninf, nan} {
+	for _, x in []f64{0, nz, 1, 2, 8, 0.125, 10, 1000, 1e300, 2.5, 0.001, -1, inf, ninf, nan} {
 		say.Line("log", x, r(gauge.Log(x)), r(gauge.Log2(x)), r(gauge.Log10(x)), r(gauge.Log1p(x)))
+	}
+	// Subnormal arguments: Log is Go's on each architecture (#942), and amd64's assembly does not normalize them, so only
+	// the range of Log is printed here; the gauge twin in number_check checks its bits.
+	for _, x in []f64{1e-310, sub} {
+		say.Line("logsub", x, gauge.Log(x) < -700, r(gauge.Log2(x)), r(gauge.Log1p(x)))
 	}
 	say.Line("log2exact", gauge.Log2(8), gauge.Log2(0.125), gauge.Log2(1), gauge.Log2(1024), gauge.Log2(sub))
 	say.Line("log1p", r(gauge.Log1p(1e-20)), r(gauge.Log1p(-0.5)), r(gauge.Log1p(1e300)), gauge.Log1p(-1), gauge.Log1p(-2), gauge.Log1p(1e-300))

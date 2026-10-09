@@ -134,8 +134,8 @@ fn Acosh(x f64) f64 {
 	if x >= f64(large) {
 		return Log(x) + Ln2
 	}
-	if x > 2 {
-		return Log(2*x - 1/(x+Sqrt(x*x-1)))
+	if x > 2 { // x*x-1 stays a fused product (-1 + x*x), as Go's arm64 fuses x*x - 1
+		return Log(2*x - 1/(x+Sqrt(-1+x*x)))
 	}
 	let t = x - 1
 	return Log1p(t + Sqrt(2*t+t*t))

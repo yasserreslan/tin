@@ -16,27 +16,42 @@ const l6 = 1.531383769920937332e-01
 
 const l7 = 1.479819860511658591e-01
 
-// Log returns the natural logarithm of x. Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN.
+// Log returns the natural logarithm of x: Log(+Inf) = +Inf, Log(0) = -Inf, Log(x < 0) = NaN; bit for bit Go's math.Log (#942).
 fn Log(x f64) f64 {
-	if IsNaN(x) || IsInf(x, 1) {
-		return x
-	}
-	if x < 0 {
-		return NaN()
-	}
-	if x == 0 {
-		return Inf(-1)
+	// On arm64 this is Go's pure-Go log, whose fused multiply-adds are written as the products Tin's arm64 backend fuses the
+	// same way (`x*y + z` and `z + x*y` fuse, `z - x*y` does not, so `-z + x*y` stands for Go's fused `x*y - z`). On amd64 it
+	// is Go's assembly, the same operations unfused, with its own special cases, Frexp and comparison (logAmd64).
+	if logAmd64 {
+		if x == 0 {
+			return Inf(-1)
+		}
+		if F64bits(x)>>63 != 0 {
+			return NaN()
+		}
+		if IsNaN(x) || IsInf(x, 1) {
+			return x
+		}
+	} else {
+		if IsNaN(x) || IsInf(x, 1) {
+			return x
+		}
+		if x < 0 {
+			return NaN()
+		}
+		if x == 0 {
+			return Inf(-1)
+		}
 	}
 	mut f1 f64
 	mut ki i64
-	if x >= smallestNormal { // x > 0 and finite here: Frexp without the call
+	if x >= smallestNormal || logAmd64 { // x > 0 and finite here: Frexp without the call; amd64 keeps a subnormal's bits
 		let bits = F64bits(x)
 		ki = i64(bits>>f64Shift) - f64Bias + 1
 		f1 = F64frombits(bits&0x000fffffffffffff | u64(f64Bias-1)<<f64Shift)
 	} else {
 		f1, ki = Frexp(x)
 	}
-	if f1 < sqrt2Half {
+	if f1 < sqrt2Half || logAmd64 && f1 == sqrt2Half { // amd64 tests f1 <= Sqrt2/2 (CMPSD "not less than")
 		f1 *= 2
 		ki -= 1
 	}
@@ -45,11 +60,12 @@ fn Log(x f64) f64 {
 	let s = f / (2 + f)
 	let s2 = s * s
 	let s4 = s2 * s2
-	let t1 = s2 * (l1 + s4*(l3+s4*(l5+s4*l7)))
 	let t2 = s4 * (l2 + s4*(l4+s4*l6))
-	let r = t1 + t2
-	let hfsq = 0.5 * f * f
-	return k*expLn2Hi - ((hfsq - (s*(hfsq+r) + k*expLn2Lo)) - f)
+	let r = s2*(l1+s4*(l3+s4*(l5+s4*l7))) + t2
+	let hfsq = 0.5 * f
+	let w = k*expLn2Lo + s*(r+hfsq*f)
+	let y = -w + hfsq*f - f
+	return -y + k*expLn2Hi
 }
 
 // Log2 returns the binary logarithm of x, exact for powers of two.
@@ -148,9 +164,6 @@ fn Log1p(x f64) f64 {
 		f = u - 1.0 // Sqrt(2)/2 < u < Sqrt(2)
 	}
 	let hfsq = 0.5 * f * f
-	mut s f64
-	mut r f64
-	mut z f64
 	if iu == 0 { // |f| < 2**-20
 		if f == 0 {
 			if k == 0 {
@@ -159,19 +172,25 @@ fn Log1p(x f64) f64 {
 			c += f64(k) * expLn2Lo
 			return f64(k)*expLn2Hi + c
 		}
-		r = hfsq * (1.0 - 0.66666666666666666*f) // avoid the division
+		// hfsq*(…) stays inline, so the arm64 backend fuses it as Go's does; Go's code avoids a division here.
 		if k == 0 {
-			return f - r
+			return f - hfsq*(1.0-0.66666666666666666*f)
 		}
-		return f64(k)*expLn2Hi - ((r - (f64(k)*expLn2Lo + c)) - f)
+		let xc = f64(k)*expLn2Lo + c
+		let yc = -xc + hfsq*(1.0-0.66666666666666666*f) - f
+		return -yc + f64(k)*expLn2Hi
 	}
-	s = f / (2.0 + f)
-	z = s * s
-	r = z * (lp1 + z*(lp2+z*(lp3+z*(lp4+z*(lp5+z*(lp6+z*lp7))))))
+	let s = f / (2.0 + f)
+	let z = s * s
+	let r = z * (lp1 + z*(lp2+z*(lp3+z*(lp4+z*(lp5+z*(lp6+z*lp7))))))
+	let g = r + 0.5*f*f
 	if k == 0 {
-		return f - (hfsq - s*(hfsq+r))
+		return f - (hfsq - s*g)
 	}
-	return f64(k)*expLn2Hi - ((hfsq - (s*(hfsq+r) + (f64(k)*expLn2Lo + c))) - f)
+	let xc = f64(k)*expLn2Lo + c
+	let w = xc + s*g
+	let yc = -w + 0.5*f*f - f
+	return -yc + f64(k)*expLn2Hi
 }
 
 // Logb returns the binary exponent of x as an f64 (Go's math.Logb): +Inf for infinities,
