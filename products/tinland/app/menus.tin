@@ -123,6 +123,7 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	let nav = appkit.AddMenu(m, "Go")
 	item(m, nav, "Go to File...", "p", cmd, workspace.CmdQuickOpen)
 	item(m, nav, "Go to Line...", "l", cmd, editor.CmdGoto)
+	item(m, nav, "Go to Symbol in File...", "o", cmd | shift, workspace.CmdGotoSymbol)
 	item(m, nav, "Jump to Matching Bracket", "\\", cmd | shift, editor.CmdJumpBracket)
 	item(m, nav, "Go to Declaration", "b", cmd | shift, editor.CmdDefinition)
 	appkit.AddItem(m, nav, "Back", "\xef\x9c\x82", cmd | alt, editor.CmdBack)

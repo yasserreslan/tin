@@ -11,6 +11,7 @@ const PickNewFile = 2
 const PickNewFolder = 3
 const PickRename = 4
 const PickRecent = 5
+const PickSymbol = 6
 
 // Picker is the state of the box.
 type Picker struct {
@@ -72,6 +73,7 @@ fn commands() []command {
 		command{name: "View: Search in Project", cmd: CmdSearch},
 		command{name: "Go: Go to File...", cmd: CmdQuickOpen},
 		command{name: "Go: Go to Line...", cmd: 16},
+		command{name: "Go: Go to Symbol in File...", cmd: 128},
 		command{name: "Go: Jump to Matching Bracket", cmd: 33},
 		command{name: "Go: Go to Declaration", cmd: 24},
 		command{name: "Go: Back", cmd: 25},
@@ -122,6 +124,28 @@ fn (ws mut Workspace) refilter() {
 		items = project.Ranked(ws.Picker.Query, ws.Recent, 14)
 		for it in items {
 			targets = append(targets, 0)
+		}
+	} else if ws.Picker.Kind == PickSymbol {
+		// the active file's declarations: its own kind after the name, sorted as the rows are
+		mut names = []str{}
+		mut ids = []i64{}
+		for i in 0..len(ws.Ed.Syms) {
+			let sy = ws.Ed.Syms[i]
+			if sy.Kind == "local" || (len(sy.File) > 0 && sy.File != ws.Ed.Buf.Path) {
+				continue
+			}
+			names = append(names, sy.Name + "  " + sy.Kind)
+			ids = append(ids, i)
+		}
+		items = project.Ranked(ws.Picker.Query, names, 20)
+		for it in items {
+			mut id = 0
+			for k in 0..len(names) {
+				if names[k] == it {
+					id = ids[k]
+				}
+			}
+			targets = append(targets, id)
 		}
 	} else if ws.Picker.Kind == PickFile {
 		if ws.HasProj {
@@ -206,6 +230,13 @@ fn (ws mut Workspace) accept(i i64) {
 		ws.OpenFile(ws.Proj.Root + "/" + item)
 	} else if kind == PickRecent {
 		ws.OpenFile(item)
+	} else if kind == PickSymbol {
+		if target >= 0 && target < len(ws.Ed.Syms) {
+			let sy = ws.Ed.Syms[target]
+			ws.Ed.Buf.MoveTo(sy.Line - 1, max(sy.Col - 1, 0), false)
+			ws.Ed.Follow = true
+			ws.Ed.Say("at " + sy.Name)
+		}
 	} else {
 		ws.Perform(target)
 	}
@@ -248,6 +279,9 @@ fn (ws Workspace) pickerPrompt() str {
 	}
 	if ws.Picker.Kind == PickRecent {
 		return "Open recent file"
+	}
+	if ws.Picker.Kind == PickSymbol {
+		return "Go to symbol in file"
 	}
 	if ws.Picker.Kind == PickNewFile {
 		return "New file name"

@@ -13,6 +13,7 @@ const CmdNewFolder = 103
 const CmdRevealInProject = 104
 const CmdRevealFinder = 126
 const CmdCopyPath = 127
+const CmdGotoSymbol = 128
 const CmdQuickOpen = 105
 const CmdPalette = 106
 const CmdSearch = 107
@@ -376,6 +377,8 @@ fn (ws mut Workspace) Perform(cmd i64) {
 			appkit.RunCapture("open -R '" + ws.Ed.Buf.Path + "'")
 			ws.Ed.Say("revealed in Finder")
 		}
+	} else if cmd == CmdGotoSymbol {
+		ws.OpenPicker(PickSymbol)
 	} else if cmd == CmdCopyPath {
 		if len(ws.Ed.Buf.Path) > 0 {
 			appkit.SetClipboard(ws.Ed.Buf.Path)
