@@ -1,0 +1,15 @@
+package main
+
+import "./nestedkey"
+import "say"
+
+// Bag keys its map by another package's value struct, whose field struct is declared after it in that package (#841).
+type Bag struct {
+	m map[nestedkey.Id]i64
+}
+
+fn main() {
+	mut x = Bag{m: map[nestedkey.Id]i64{}}
+	x.m[nestedkey.MakeId("q")] = 1
+	say.Line(len(x.m), x.m[nestedkey.MakeId("q")])
+}

@@ -1,0 +1,17 @@
+package main
+
+import "say"
+
+// Node holds a map keyed by Edge, and Edge holds a Node: the map makes Node no key, so Edge is not one either (#841).
+type Node struct {
+	edges map[Edge]i64
+}
+
+type Edge struct {
+	from Node
+}
+
+fn main() {
+	mut n = Node{edges: map[Edge]i64{}}
+	say.Line(len(n.edges))
+}

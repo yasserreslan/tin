@@ -1758,6 +1758,10 @@ fn check_shape(pos i64, t Ty, sd Decl, bind_ []i64) {
 		return
 	}
 	if constraints_shape(sd, "Comparable") != 0 {
+		if key_valid(t, cast([]Ty, []i64{})) == 2 {
+			shape_later(pos, t, sd)
+			return
+		}
 		if key_valid(t, cast([]Ty, []i64{})) != 0 {
 			return
 		}
