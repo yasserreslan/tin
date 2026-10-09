@@ -41,7 +41,7 @@ CGI (RFC 3875) and FastCGI handler adapters over an anvil handler, following Go'
 
 `tools/ci/cgi_check.tin` (`sh tools/ci/tin.sh cgi_check`) runs `tools/ci/fixtures/cgi_twin.tin` as a CGI
 program and as a FastCGI responder, and `bench/ref/cgi` (Go's `net/http/cgi` and `net/http/fcgi`, the same
-routes) on 82 CGI requests and 18 FastCGI connections: the bytes of each response, the exit status and the
+routes) on 82 CGI requests and 20 FastCGI connections: the bytes of each response, the exit status and the
 stderr of malformed requests must be equal (the FastCGI `Date` is normalized). The strict test is
 `toolchain/tests/v2/cgi.tin`. The FastCGI transcripts were also compared on Linux arm64 (the Tin server in a
 container, the probe in the same container).

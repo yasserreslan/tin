@@ -343,6 +343,7 @@ fn fcgiCases() []fcgiCase {
 	let headersPairs = []str{"REQUEST_METHOD", "GET", proto, http11, "REQUEST_URI", "/headers"}
 	let badPairs = []str{proto, http11, "REQUEST_URI", "/x"}
 	let lengthPairs = []str{"REQUEST_METHOD", "POST", proto, http11, "REQUEST_URI", "/post", "CONTENT_LENGTH", "abc"}
+	let pb = nameValue("REQUEST_METHOD", "GET") + nameValue(proto, http11) + nameValue("REQUEST_URI", "/split")
 	return []fcgiCase{
 		fcgiCase{name: "echo", raw: request(1, 0, echoPairs, ""), want: 1},
 		fcgiCase{name: "post-body-whole", raw: request(2, 0, postPairs, "hello world"), want: 1},
@@ -362,6 +363,8 @@ fn fcgiCases() []fcgiCase {
 		fcgiCase{name: "begin-length-wrong", raw: encode(1, 16, "\x00\x01\x00\x00\x00\x00\x00"), want: 0},
 		fcgiCase{name: "duplicate-begin", raw: begin(17, 1) + begin(17, 1), want: 0},
 		fcgiCase{name: "truncated-header", raw: begin(18, 0)[:5], want: 0, halfClose: true},
+		fcgiCase{name: "params-split-across-records", raw: begin(19, 0) + encode(4, 19, pb[:7]) + encode(4, 19, pb[7:]) + encode(4, 19, "") + stdin(19, ""), want: 1},
+		fcgiCase{name: "stdin-split-across-records", raw: begin(20, 0) + params(20, postPairs) + encode(5, 20, "hel") + encode(5, 20, "lo world") + encode(5, 20, ""), want: 1},
 	}
 }
 
