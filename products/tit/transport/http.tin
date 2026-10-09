@@ -153,7 +153,12 @@ fn Serve(addr str, dir str, allowFile str, public bool) ! {
 	if !set {
 		try quarry.Setenv("TIN_REQUEST_MEMORY", "0")
 	}
-	try anvil.Serve(addr, handle)
+	// pushes and fetches stream (#1009): a push's pack goes to a file as it arrives, a fetch's pack goes out an entry at
+	// a time; heads is a GET with no body
+	mut r = anvil.NewRouter()
+	r.Stream("POST", `/{rest...}`, handleStream)
+	r.Get(`/{rest...}`, handle)
+	try r.Serve(addr)
 }
 
 // ServeSecret is the key a repository's server signs nonces with, from dir/serve-secret (made when missing), so every
@@ -191,22 +196,78 @@ fn serverFromEnv() !Server {
 	return s
 }
 
-fn handle(q anvil.Req, w mut anvil.Out) {
+// coreServer is this core's server, made on its first request; nil (with the answer written) when it cannot be.
+fn coreServer(w mut anvil.Out) ?Server {
 	if served == nil {
 		let made = serverFromEnv() catch e {
 			w.Status(500)
 			w.Body = []u8(Frame(Kind.Error, Encode(ErrorAnswer{Code: "Internal", Message: fault.Message(e), Ref: "", Nonce: ""}), ""))
-			return
+			return nil
 		}
 		served = keep(made)
 	}
-	let cur = served
+	return served
+}
+
+fn reply(w mut anvil.Out, r Reply) {
+	w.Status(r.Status)
+	w.Type("application/x-tit")
+	w.Body = []u8(r.Body)
+}
+
+fn handle(q anvil.Req, w mut anvil.Out) {
+	let cur = coreServer(mut w)
 	if cur == nil {
 		return
 	}
 	mut srv = cur
-	let r = srv.Handle(q.Method, q.Path, q.Header("tit-signature"), q.Body(), tide.Wall() / 1000000000)
-	w.Status(r.Status)
+	reply(mut w, srv.Handle(q.Method, q.Path, q.Header("tit-signature"), q.Body(), tide.Wall() / 1000000000))
+}
+
+// outWriter is an anvil response streamed as an io.Writer.
+type outWriter struct {
+	w anvil.Out
+}
+
+// Write sends data.
+fn (o mut outWriter) Write(data []u8) !i64 {
+	try o.w.Write(data)
+	return len(data)
+}
+
+// handleStream answers a POST as its body arrives: a push's pack to a file, a fetch's pack out an entry at a time.
+fn handleStream(q anvil.Req, w mut anvil.Out) {
+	let cur = coreServer(mut w)
+	if cur == nil {
+		return
+	}
+	mut srv = cur
+	let now = tide.Wall() / 1000000000
+	mut body = q.BodyStream()
+	if !twine.HasSuffix(q.Path, "/tit/v1/fetch") {
+		reply(mut w, HandleStream(mut srv, q.Method, q.Path, q.Header("tit-signature"), mut body, now))
+		return
+	}
+	let req = readBody(mut body, MaxHeader + streamBuf) catch e {
+		reply(mut w, srv.Refusal(fault.Wrap(ErrRefused, "BadRequest: " + fault.Message(e)), now))
+		return
+	}
+	mut f = srv.StartFetch(q.Path, q.Header("tit-signature"), req, now) catch e {
+		reply(mut w, srv.Refusal(e, now))
+		return
+	}
+	w.Status(200)
 	w.Type("application/x-tit")
-	w.Body = []u8(r.Body)
+	w.Stream() catch _ {
+		return
+	}
+	mut out = outWriter{w: w}
+	let (_, herr) = out.Write([]u8(f.Head))
+	if herr != nil {
+		return
+	}
+	SendFetch(mut f, mut out) catch _ {
+		// the answer has begun: the client sees a cut pack, which it refuses (its trailing hash)
+		w.Abort()
+	}
 }

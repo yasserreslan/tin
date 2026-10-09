@@ -1,0 +1,28 @@
+package transport
+
+import "flume"
+import "quarry"
+
+// The client's pack files (#1009): a fetch writes its pack to a file, where packfile.KeepFile indexes it as it lies,
+// and a push sends its pack from a file. The bodies are still read and sent whole: reading a wire.Stream from here
+// trips a false E312 in the region pass (#1036), so the download and the upload stream through wire.DoStream once
+// that is fixed, with no change to the callers.
+
+// FetchTo asks for what req wants and writes the answer's pack to a new file at path (none when the answer has no
+// pack); it gives the answer's header.
+fn (h mut Http) FetchTo(req FetchRequest, path str) !FetchAnswer {
+	let (a, data) = try h.Fetch(req)
+	if len(data) > 0 {
+		try quarry.WriteFile(path, data)
+	}
+	return a
+}
+
+// PushFile sends req with the pack in the file at path ("" for none).
+fn (h mut Http) PushFile(req PushRequest, path str) !PushAnswer {
+	mut data = ""
+	if len(path) > 0 {
+		data = try flume.ReadFile(path)
+	}
+	return try h.Push(req, data)
+}
