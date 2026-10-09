@@ -196,10 +196,9 @@ fn poolRun(exe str, out str, env []str, fake Fake, useFake bool, cores i64, extr
 fn poolCap(out str, env []str, fake Fake) {
 	let exe = ci.Join(out, "mysql_pool_cap")
 	ci.BuildTin("tools/ci/fixtures/pool_cap_mysql.tin", exe, "", []str{})
-	// A core that takes the slot of another's idle connection shuts that socket down and dials its own; the server notices the close a
-	// moment after the new connection arrives, so its count may run one or two over the cap while that happens (the process never
-	// holds more).
-	let slack = 2
+	// A core that takes the slot of another's idle connection ends it and dials its own only once the server has closed it (#856): the
+	// server never counts more than the cap either, not even for a moment.
+	let slack = 0
 	// Eight cores, four per core, six for the process: the cap holds, and every request is served even though two cores can hold none
 	// of them at a time.
 	let (peak1, _) = poolRun(exe, out, env, fake, true, 8, []str{"MYSQL_POOL=4", "MYSQL_MAX_TOTAL=6"}, 48, 150, 0)
