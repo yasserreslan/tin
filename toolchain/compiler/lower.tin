@@ -2870,6 +2870,10 @@ fn get_cell_addr(pos i64, os Sym) i64 {
 	if os.cell != 0 {
 		return sym_ref_node(pos, cast(Sym, os.cell_sym))
 	}
+	// A value struct parameter's word holds the address of its caller's bytes (passed by pointer, #891): the cell is that word.
+	if is_value_struct(cast(Ty, os.type_)) != 0 && view_param(os) != 0 {
+		return sym_ref_node(pos, os)
+	}
 	os.addr = 1
 	return mk_unary(pos, "&", sym_ref_node(pos, os))
 }

@@ -1,0 +1,67 @@
+package main
+
+import "say"
+
+// A value struct parameter read inside guard { } gave garbage (#891): the block captured the parameter's word, the address
+// of the caller's bytes, as if it were the bytes. A method call on the parameter and a fault path read it the same way.
+type V value struct {
+	x i64
+	y i64
+}
+
+type S value struct {
+	b [16]u8
+	name str
+	n u8
+}
+
+fn (s S) first() u8 {
+	return s.b[0]
+}
+
+fn viaClosure(v V) i64 {
+	let f = fn() i64 {
+		return v.y
+	}
+	return f()
+}
+
+fn viaGuard(v V) i64 {
+	let r = guard {
+		v.y
+	} catch err {
+		say.Line(err)
+		-1
+	}
+	return r
+}
+
+fn viaMethod(s S) u8 {
+	let r = guard {
+		s.first() + s.n
+	} catch err {
+		say.Line(err)
+		0
+	}
+	return r
+}
+
+fn failing(v V) i64 {
+	let r = guard {
+		if v.y > 0 {
+			fail "boom"
+		}
+		v.y
+	} catch err {
+		say.Line("caught", err, v.y)
+		v.x
+	}
+	return r
+}
+
+fn main() {
+	let v = V{x: 1, y: 2}
+	say.Line(viaClosure(v), viaGuard(v))
+	say.Line(viaMethod(S{b: [16]u8{7}, name: "tin", n: 1}))
+	say.Line(failing(V{x: 3, y: 4}), failing(V{x: 9, y: 0}))
+}

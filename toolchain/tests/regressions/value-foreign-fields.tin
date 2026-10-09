@@ -1,0 +1,25 @@
+package main
+
+import "./valuepkg"
+import "say"
+
+// Two and Vals have three fields of another package's value struct (#708): each field keeps its own slot, in a reference
+// struct and in a value struct.
+type Two struct {
+	A valuepkg.Color
+	B valuepkg.Color
+	C valuepkg.Color
+}
+
+type Vals value struct {
+	A valuepkg.Color
+	B valuepkg.Color
+	C valuepkg.Color
+}
+
+fn main() {
+	let t = Two{A: valuepkg.Hex(0xff0000), B: valuepkg.Hex(0x00ff00), C: valuepkg.Hex(0x0000ff)}
+	say.Line(t.A.R, t.B.G, t.C.B)
+	let v = Vals{A: valuepkg.Hex(0xff0000), B: valuepkg.Hex(0x00ff00), C: valuepkg.Hex(0x0000ff)}
+	say.Line(v.A.R, v.B.G, v.C.B)
+}

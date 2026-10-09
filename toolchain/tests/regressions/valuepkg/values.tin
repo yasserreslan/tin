@@ -1,0 +1,23 @@
+// Package valuepkg holds value structs of another package, for the regressions of #708 and #939.
+package valuepkg
+
+// Model is a color model: a value struct with one number, like image/color's Model.
+type Model value struct {
+	id i64
+}
+
+// PaletteModel is the model of palette colors.
+let PaletteModel = Model{id: 12}
+
+// Color is a color with four float channels, a value struct of another package.
+type Color value struct {
+	R f64
+	G f64
+	B f64
+	A f64
+}
+
+// Hex is the opaque color of an RGB value.
+fn Hex(rgb i64) Color {
+	return Color{R: f64((rgb >> 16) & 255) / 255.0, G: f64((rgb >> 8) & 255) / 255.0, B: f64(rgb & 255) / 255.0, A: 1.0}
+}
