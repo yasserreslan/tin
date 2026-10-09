@@ -795,6 +795,9 @@ fn (ed mut Editor) command(k Key, shift bool) {
 		if len(ed.Needle) > 0 && !b.Find(ed.Needle, !shift) {
 			ed.Say("not found: " + ed.Needle)
 		}
+	} else if c == 'l' && shift {
+		// Cmd+Shift+L selects every occurrence of the selected text
+		ed.SelectNext()
 	} else if c == 'l' {
 		ed.Mode = modeGoto
 		ed.Prompt = ""

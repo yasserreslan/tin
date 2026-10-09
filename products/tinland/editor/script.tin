@@ -231,6 +231,8 @@ fn RunScript(ed mut Editor, script str) {
 			// where the caret is on the screen: its row from the top and its column in that row
 			let dc = textedit.DisplayCol(ed.Buf.Lines[ed.Buf.Row], ed.Buf.Col, 4)
 			say.Line("caret row", ed.visRow(ed.Buf.Row, dc), "col", dc - ed.baseOf(dc), "top", ed.Scroll, ed.ScrollSeg)
+		} else if step == "selnext" {
+			say.Line("selected:", ed.SelectNext())
 		} else if step == "tabs" {
 			say.Line("tabs", len(ed.Tabs), ed.Active + 1, ed.Name())
 		} else if step == "closeothers" {

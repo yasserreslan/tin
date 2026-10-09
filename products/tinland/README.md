@@ -38,7 +38,7 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | Cmd+L | go to line |
 | Cmd+S (Shift: Save As), Cmd+N, Cmd+W, Cmd+Q | save, new tab, close tab, quit (each asks about unsaved changes) |
 | Cmd+/ | comment or uncomment lines; Edit > Sort Lines and Trim Trailing Whitespace sort the touched lines and remove their trailing spaces and tabs (the command palette has both) |
-| Cmd+Alt+Down, Cmd+Alt+Up | add a caret on the line below or above (typing, Backspace, Delete and the arrows then act on every caret; Escape puts them away) |
+| Cmd+Alt+Down, Cmd+Alt+Up, Cmd+Shift+L | add a caret on the line below or above (typing, Backspace, Delete and the arrows then act on every caret; Escape puts them away), and select every occurrence of the selected text so typing changes them all at once |
 | Cmd+D, Cmd+Shift+K, Alt+Up/Down | duplicate, delete, move lines |
 | Cmd+[ and Cmd+] , Tab, Shift+Tab | unindent, indent |
 | Alt+Left/Right, Cmd+Left/Right/Up/Down | by word, line start/end, document start/end |
