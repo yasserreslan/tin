@@ -2,6 +2,7 @@ package proto
 
 import "../../tit/transport"
 import "../accounts"
+import "../capsules"
 import "../packs"
 import "../repo"
 import "../signin"
@@ -155,6 +156,8 @@ fn access(q anvil.Req, w mut anvil.Out) ?Access {
 	for k in keys {
 		s.Allow(email, k)
 	}
+	// replay capsules (design/tit.md §17): the repository's, as far as this signer's role and replay grant allow
+	s.SetReplays(capsules.StoreFor(r, userId, role))
 	// a push never takes the repository past its quota
 	mut most = d.Pack
 	let room = r.QuotaBytes - r.SizeBytes

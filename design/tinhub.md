@@ -59,7 +59,7 @@ products/tinhub/accounts/         users, orgs, teams, keys, invites, sessions an
 products/tinhub/api/              the JSON API under /api/v1 (#1019)
 products/tinhub/events/           the event queue and the worker loop (#1013)
 products/tinhub/workers/          the job handlers: repack, prune, purge, mirror, index, diffs (#1014, #1020, #1021)
-products/tinhub/replay/           the capsule store and failure groups (#1022)
+products/tinhub/capsules/         the capsule store and failure groups (#1022; not `replay`: tit imports std replay)
 products/tinhub/live/             notifications, webhooks and the websocket (#1023)
 products/tinhub/review/           reviews, comments, checks and landing (#1025)
 products/tinhub/runner/           the runner role (#1028)
@@ -236,7 +236,18 @@ versions (design/tit.md §16).
 | table | columns | constraints |
 |---|---|---|
 | `capsules` | `repo_id`, `id text` (hex SHA-256 of the bytes), `group_id text`, `commit_id text`, `name text`, `signer text`, `summary jsonb`, `status int`, `route text`, `size_bytes bigint`, `created_at`, `expires_at` | `primary key (repo_id, id)`, index `(expires_at)` |
-| `replay_groups` | `repo_id`, `id text`, `panic text`, `route text`, `state text` (`open`, `closed`), `fixed_by text` (a change id), `reopened_by text`, `count bigint`, `first_at`, `last_at` | `primary key (repo_id, id)` |
+| `replay_groups` | `repo_id`, `id text`, `panic text`, `route text`, `state text` (`open`, `closed`), `fixed_by text` (a change id), `reopened_by text`, `count bigint`, `first_at`, `last_at`, `decl text` (the declaration that panicked, from `symbols`) | `primary key (repo_id, id)` |
+| `replay_grants` | `id`, `repo_id`, `user_id`, `team_id`, `created_at` | exactly one of `user_id`, `team_id`; `unique (repo_id, user_id)`, `unique (repo_id, team_id)` |
+| `replay_settings` | `repo_id`, `retention_days int` (1 to 3650; no row is 30), `updated_at` | `primary key (repo_id)` |
+
+The replay tables after `0001` (`replay_grants`, `replay_settings`, `replay_groups.decl`) come from the replay
+migration. A group is the hex SHA-256 of a capsule summary's route and panic (its status when there is no panic); the
+signer is left out, so a server's new key keeps its groups. The replay permission is separate from read and write: an
+admin has it, anyone else only through a replay grant (their own or a team's); write access may upload capsules but
+not read them. A landed change whose message says `fixes replay <id>` (a group's or capsule's id, or a prefix of 8 or
+more hex digits) marks the group (`capsules.ChangeLanded`, called by landing in its transaction); the group closes
+when that change's saved test passes on main (`capsules.CheckPassed`, called by the checks code); a capsule of a
+closed group reopens it, moving `fixed_by` to `reopened_by`.
 
 ### Events, webhooks (#1013, #1023)
 

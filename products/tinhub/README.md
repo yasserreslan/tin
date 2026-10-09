@@ -62,6 +62,19 @@ Phase 1 is one Linux server with every role, Postgres beside it and packs on dis
 a container image and compose file, the nightly backup and the restore, and the mirror sync that keeps the Tin repo a
 read-only copy of GitHub. Follow [deploy/RUNBOOK.md](deploy/RUNBOOK.md) for install, upgrade, secrets and restore.
 
+## Replay
+
+`tit replay push` uploads sealed capsules to `POST /<owner>/<repo>/tit/v1/replay` (signed; write access or the replay
+permission). tinhub keeps them in the pack store under `repos/<id>/capsules/<id>.tcap`, holds no key and never opens
+them; capsules with the same panic and route form a failure group. Reading capsules takes the replay permission: an
+admin of the repository, or a replay grant. Capsules expire after the repository's retention (30 days unless set);
+the `replay.retention` job deletes them nightly. The API, under `/api/v1/repos/<owner>/<repo>/replay`:
+
+- `GET groups` (`?state=open|closed`, `?cursor=`, `?limit=`), `GET groups/<id>`, `DELETE groups/<id>`
+- `GET capsules` (`?group=`), `GET capsules/<id>`, `GET capsules/<id>/download` (the sealed bytes), `DELETE capsules/<id>`
+- `GET retention`, `PUT retention` (`{"days": N}`, admin)
+- `PUT grants/<user>`, `DELETE grants/<user>` (admin)
+
 ## Health and shutdown
 
 - `GET /healthz`: 200 while the process runs.
