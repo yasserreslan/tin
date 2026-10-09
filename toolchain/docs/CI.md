@@ -178,7 +178,7 @@ sh tools/ci/tin.sh x509_check            # certificates and RSA signatures again
 
 Diagnostics are uploaded for 14 days even if a job fails. No compiled output is cached: a stale compiler or test binary cannot make a fresh checkout pass.
 
-`dbsql_check` compares the strict generic database/sql path against Go's `database/sql` driver for driver registration, queries, rows, results, transactions, and closed-handle faults; `postgres_check` also runs that interface over its PostgreSQL fake server in plain and TLS modes.
+`dbsql_check` compares the strict generic database/sql path against Go's `database/sql` driver for process-wide driver registration (a driver registered on core 0 is found on core 1, a duplicate name is refused), queries, typed `Scan` destinations with their NULL and conversion faults, rows, results, transactions, and closed-handle faults; `postgres_check` also runs that interface over its PostgreSQL fake server in plain and TLS modes, and checks `SetMaxOpen` and `SetMaxIdle` changed after use on a live client (a cap lowered holds from the next use, a cap raised wakes the requests queued behind it, `SetMaxIdle(0)` keeps no idle connection).
 
 PostgreSQL checks use a private users table in the selected database; choose a throwaway
 instance/database for local real-server checks. They exercise `examples/postgres.tin`

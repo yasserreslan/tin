@@ -90,7 +90,8 @@ const rID = 10
 const rTls = 11 // the kept tls.Config for this client's sslmode, or 0 for plain TCP
 const rCap = 12 // the cap record of Options.MaxTotal (see cap_record), 0: no cap
 const rClosed = 13
-const recWords = 14
+const rIdle = 14 // SetMaxIdle: 0 for the default (the pool cap), else the idle cap plus 1
+const recWords = 15
 
 // A core's pool for one Client.
 const pIdle = 0 // a stack of idle connections
@@ -175,6 +176,8 @@ fn Open(o Options) Client {
 	rec[rPool] = o.Pool // 0: default_pool(), which needs the core count, known only when the cores run
 	if o.MaxTotal > 0 {
 		rec[rCap] = cap_record(addr + "\x00" + o.User + "\x00" + o.Database + "\x00" + mint.Itoa(o.MaxTotal), o.MaxTotal)
+	} else {
+		rec[rCap] = cap_private()
 	}
 	rec[rTimeout] = o.Timeout
 	rec[rID] = id
@@ -690,6 +693,8 @@ fn contains(s str, part str) bool {
 
 // ---- the pool ----
 
+// pool is this core's pool for c. It follows the limits set so far: idle connections above
+// them are closed here, so a limit lowered on another core takes effect at the next use.
 fn (c Client) pool() i64 {
 	if pools == 0 {
 		pools = calloc(maxClients+1, 8)
@@ -698,36 +703,45 @@ fn (c Client) pool() i64 {
 	mut p = pools[id]
 	if p == 0 {
 		p = calloc(poolWords, 8)
-		p[pIdleCap] = pool_cap(c.rec)
+		p[pIdleCap] = idle_cap(c.rec)
 		p[pIdle] = calloc(p[pIdleCap]+1, 8)
 		pools[id] = p
-	} else if p[pIdleCap] < pool_cap(c.rec) {
-		p[pIdleCap] = pool_cap(c.rec)
-		p[pIdle] = realloc(p[pIdle], (p[pIdleCap]+1)*8)
+	} else if p[pIdleCap] != idle_cap(c.rec) {
+		let want = idle_cap(c.rec)
+		if want > p[pIdleCap] {
+			p[pIdle] = realloc(p[pIdle], (want+1)*8)
+		}
+		p[pIdleCap] = want
 	}
+	trim_idle(c.rec, p)
 	return p
 }
 
-// SetMaxOpen sets the process-wide connection cap for this client; configure it before first use.
+// SetMaxOpen sets the process-wide connection cap for this client (0: no cap). It takes effect at
+// once, also after use: a raised cap wakes this core's waiters, a lowered one closes this core's
+// idle connections above it. Clients that share a MaxTotal cap share the change; other cores close
+// their excess idle connections, and wait for a raised cap, when they next use the client.
 fn (c Client) SetMaxOpen(n i64) ! {
 	if !c.open { fail "postgres: the client is not open" }
+	mut maxConns = n
+	if maxConns < 0 { maxConns = 0 }
+	let k = c.rec[rCap]
+	cap_grow(k, maxConns)
+	__atomic_store(k + 8*kMax, maxConns)
 	let p = c.pool()
-	if p[pTotal] > 0 { fail "postgres: SetMaxOpen must be called before first use" }
-	if n <= 0 {
-		c.rec[rCap] = 0
-		return
-	}
-	let key = rec_str(c.rec, rAddr) + "\x00" + rec_str(c.rec, rUser) + "\x00" + rec_str(c.rec, rDB) + "\x00" + mint.Itoa(n)
-	c.rec[rCap] = cap_record(key, n)
+	wake_all(p)
 }
 
-// SetMaxIdle sets the per-core connection cap for this client; configure it before first use.
+// SetMaxIdle sets the per-core connection cap for this client (0: none kept). It takes effect at
+// once on this core, and on the others when they next use the client.
 fn (c Client) SetMaxIdle(n i64) ! {
 	if !c.open { fail "postgres: the client is not open" }
-	if n < 0 { n = 0 }
-	let p = c.pool()
-	if p[pTotal] > 0 { fail "postgres: SetMaxIdle must be called before first use" }
-	c.rec[rPool] = n
+	if n <= 0 {
+		c.rec[rIdle] = 1
+	} else {
+		c.rec[rIdle] = n + 1
+	}
+	let _ = c.pool()
 }
 
 // Close prevents new use and closes this client's idle connections; checked-out connections close when returned.
@@ -769,8 +783,9 @@ const kKeyN = 1
 const kMax = 2
 const kTotal = 3 // connections of all cores (atomic)
 const kLock = 4
-const kIdle = 5 // [kMax] connections idle in some core's pool, 0 for a free place (under kLock)
-const capWords = 6
+const kIdle = 5 // [kIdleCap] connections idle in some core's pool, 0 for a free place (under kLock)
+const kIdleCap = 6 // the places in kIdle (at least kMax once SetMaxOpen raised it)
+const capWords = 7
 
 shared mut capLock i64
 shared mut capTab i64 // [maxClients]: the cap records, in the order they were first made
@@ -798,11 +813,67 @@ fn cap_record(key str, max i64) i64 {
 		k[kKeyN] = len(key)
 		k[kMax] = max
 		k[kIdle] = calloc(max, 8)
+		k[kIdleCap] = max
 		capTab[capN] = k
 		capN += 1
 	}
 	__atomic_store(&capLock, 0)
 	return k
+}
+
+// cap_private is a cap record for one client (no MaxTotal): it counts the client's connections,
+// with no limit until SetMaxOpen sets one.
+fn cap_private() i64 {
+	return calloc(capWords, 8)
+}
+
+// cap_grow makes room in the idle list of k for n connections (the list never shrinks).
+fn cap_grow(k i64, maxConns i64) {
+	cap_lock(k)
+	if maxConns > k[kIdleCap] {
+		let idle = calloc(maxConns, 8)
+		if k[kIdleCap] > 0 {
+			memmove(idle, k[kIdle], 8*k[kIdleCap])
+			free(k[kIdle])
+		}
+		k[kIdle] = idle
+		k[kIdleCap] = maxConns
+	}
+	cap_unlock(k)
+}
+
+// over_cap reports whether the process holds more connections than the cap of rec allows.
+fn over_cap(rec i64) bool {
+	let k = rec[rCap]
+	let max = __atomic_load(k + 8*kMax)
+	return max > 0 && __atomic_load(k + 8*kTotal) > max
+}
+
+// trim_idle closes this core's idle connections while they exceed its pool cap or the process is
+// over its cap (the connections they hold are given back).
+fn trim_idle(rec i64, p i64) {
+	for p[pIdleN] > 0 && (p[pIdleN] > p[pIdleCap] || over_cap(rec)) {
+		p[pIdleN] -= 1
+		let conn = p[pIdle][p[pIdleN]]
+		if idle_claim(rec, conn) {
+			conn_free(conn)
+			p[pTotal] -= 1
+			unreserve(rec)
+		} else {
+			conn_free(conn)
+			p[pTotal] -= 1
+		}
+	}
+}
+
+// wake_all wakes every waiter on this core: a raised cap may let them dial.
+fn wake_all(p i64) {
+	for {
+		let w = next_waiter(p)
+		if w == 0 { break }
+		w[wDone] = 1
+		rt_task_wake(w[wTask])
+	}
 }
 
 fn cap_lock(k i64) {
@@ -836,16 +907,23 @@ fn pool_cap(rec i64) i64 {
 	return default_pool()
 }
 
-// reserve takes one of the process's MaxTotal connections for one about to be dialed; false when
-// every core together hold them all.
+// idle_cap is how many idle connections one core of the client rec keeps (SetMaxIdle, else the pool cap).
+fn idle_cap(rec i64) i64 {
+	if rec[rIdle] > 0 {
+		return rec[rIdle] - 1
+	}
+	return pool_cap(rec)
+}
+
+// reserve takes one of the process's connections for one about to be dialed; false when the cap
+// (SetMaxOpen, or MaxTotal) is reached and every core together hold it. Connections are counted
+// even without a cap, so a cap set later counts them too.
 fn reserve(rec i64) bool {
 	let k = rec[rCap]
-	if k == 0 {
-		return true
-	}
 	for {
 		let n = __atomic_load(k + 8*kTotal)
-		if n >= k[kMax] {
+		let maxConns = __atomic_load(k + 8*kMax)
+		if maxConns > 0 && n >= maxConns {
 			return false
 		}
 		if __atomic_cas(k + 8*kTotal, n, n+1) == n {
@@ -857,21 +935,15 @@ fn reserve(rec i64) bool {
 
 // unreserve gives back what reserve took, for a connection that was closed or never dialed.
 fn unreserve(rec i64) {
-	let k = rec[rCap]
-	if k != 0 {
-		__atomic_add(k + 8*kTotal, -1)
-	}
+	__atomic_add(rec[rCap] + 8*kTotal, -1)
 }
 
 // idle_add lists conn, just put in this core's idle stack, as one another core may take.
 fn idle_add(rec i64, conn i64) {
 	let k = rec[rCap]
-	if k == 0 {
-		return
-	}
 	cap_lock(k)
 	let idle = k[kIdle]
-	for i in 0..k[kMax] {
+	for i in 0..k[kIdleCap] {
 		if idle[i] == 0 {
 			idle[i] = conn
 			break
@@ -884,12 +956,9 @@ fn idle_add(rec i64, conn i64) {
 // another core took its slot meanwhile (the socket is shut down: free the record and go on).
 fn idle_claim(rec i64, conn i64) bool {
 	let k = rec[rCap]
-	if k == 0 {
-		return true
-	}
 	cap_lock(k)
 	let idle = k[kIdle]
-	for i in 0..k[kMax] {
+	for i in 0..k[kIdleCap] {
 		if idle[i] == conn {
 			idle[i] = 0
 			break
@@ -914,13 +983,10 @@ fn idle_claim(rec i64, conn i64) bool {
 // noticed the close, and the server would count more than MaxTotal for a moment (#856).
 fn steal_idle(rec i64) bool {
 	let k = rec[rCap]
-	if k == 0 {
-		return false
-	}
 	cap_lock(k)
 	let idle = k[kIdle]
 	mut conn = 0
-	for i in 0..k[kMax] {
+	for i in 0..k[kIdleCap] {
 		if idle[i] != 0 {
 			conn = idle[i]
 			idle[i] = 0
@@ -1200,7 +1266,9 @@ fn next_waiter(p i64) i64 {
 // release returns a connection to the pool; a broken one (ok false) is closed.
 fn (c Client) release(conn i64, ok bool) {
 	let p = c.pool()
-	if !ok || c.rec[rClosed] != 0 {
+	// A connection is closed, not kept, when it is broken, the client closed, the process is over
+	// its cap (SetMaxOpen lowered it) or this core's idle stack is full (SetMaxIdle).
+	if !ok || c.rec[rClosed] != 0 || over_cap(c.rec) {
 		conn_free(conn)
 		p[pTotal] -= 1
 		unreserve(c.rec)
@@ -1214,6 +1282,12 @@ fn (c Client) release(conn i64, ok bool) {
 		return
 	}
 	if conn != 0 {
+		if p[pIdleN] >= p[pIdleCap] {
+			conn_free(conn)
+			p[pTotal] -= 1
+			unreserve(c.rec)
+			return
+		}
 		let idle = p[pIdle]
 		idle[p[pIdleN]] = conn
 		p[pIdleN] += 1

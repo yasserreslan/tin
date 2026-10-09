@@ -1,6 +1,7 @@
 package main
 
 import "database/sql"
+import "hearth"
 import "postgres"
 import "say"
 
@@ -10,36 +11,104 @@ fn (d fakeDriver) Open(name str) !dyn sql.Conn { return fakeConn{} }
 
 type fakeConn struct { }
 
-fn (c fakeConn) Prepare(query query) !dyn sql.Stmt { return fakeStmt{} }
+fn (c fakeConn) Prepare(query query) !dyn sql.Stmt { return fakeStmt{text: query.Parts[0]} }
 fn (c fakeConn) Begin() !dyn sql.Conn { return fakeConn{} }
 fn (c fakeConn) Finish(commit bool) !bool { return true }
 fn (c fakeConn) SetMaxOpen(n i64) !bool { return true }
 fn (c fakeConn) SetMaxIdle(n i64) !bool { return true }
 fn (c fakeConn) Close() ! { }
 
-type fakeStmt struct { }
+type fakeStmt struct {
+	text str
+}
+
+// fakeTable is the columns and rows the fake server answers a query text with.
+fn fakeTable(text str) ([]str, [][]sql.Value) {
+	if text == "SELECT id, name FROM users" {
+		return []str{"id", "name"}, [][]sql.Value{[]sql.Value{sql.Value.Int(4), sql.Value.Text("Ada")}}
+	}
+	if text == "SELECT typed" {
+		return []str{"id", "score", "name", "ok", "raw"}, [][]sql.Value{[]sql.Value{sql.Value.Int(4), sql.Value.Float(2.5), sql.Value.Text("Ada"), sql.Value.Int(1), sql.Value.Text("raw")}}
+	}
+	if text == "SELECT nulls" {
+		return []str{"a", "b", "c", "d", "e"}, [][]sql.Value{[]sql.Value{sql.Value.Null, sql.Value.Null, sql.Value.Null, sql.Value.Null, sql.Value.Null}}
+	}
+	if text == "SELECT text" {
+		return []str{"n", "f", "b", "t"}, [][]sql.Value{[]sql.Value{sql.Value.Text("12"), sql.Value.Text("1.5"), sql.Value.Text("t"), sql.Value.Text("abc")}}
+	}
+	if text == "SELECT bad" {
+		return []str{"n"}, [][]sql.Value{[]sql.Value{sql.Value.Text("abc")}}
+	}
+	if text == "SELECT ints" {
+		return []str{"n"}, [][]sql.Value{[]sql.Value{sql.Value.Int(7)}}
+	}
+	if text == "SELECT float" {
+		return []str{"f"}, [][]sql.Value{[]sql.Value{sql.Value.Float(3.0)}}
+	}
+	if text == "SELECT fraction" {
+		return []str{"f"}, [][]sql.Value{[]sql.Value{sql.Value.Float(1.5)}}
+	}
+	if text == "SELECT bits" {
+		return []str{"a", "b"}, [][]sql.Value{[]sql.Value{sql.Value.Int(1), sql.Value.Int(0)}}
+	}
+	if text == "SELECT badbit" {
+		return []str{"a"}, [][]sql.Value{[]sql.Value{sql.Value.Int(2)}}
+	}
+	if text == "SELECT bytes" {
+		return []str{"b"}, [][]sql.Value{[]sql.Value{sql.Value.Text("bytes")}}
+	}
+	if text == "SELECT null int" {
+		return []str{"n"}, [][]sql.Value{[]sql.Value{sql.Value.Null}}
+	}
+	return []str{}, [][]sql.Value{}
+}
 
 fn (s fakeStmt) Query() !sql.Rows {
-	return sql.NewRows([]str{"id", "name"}, [][]sql.Value{[]sql.Value{sql.Value.Int(4), sql.Value.Text("Ada")}})
+	let (columns, rows) = fakeTable(s.text)
+	return sql.NewRows(columns, rows)
 }
 fn (s fakeStmt) Exec() !sql.Result { return sql.NewResult(3, 17) }
 fn (s fakeStmt) Close() ! { }
 
+// otherCore runs on core 1: the driver registered on core 0 is visible here too.
+fn otherCore(core i64) {
+	if core != 1 { return }
+	mut duplicate fault = nil
+	sql.Register("fake", fakeDriver{}) catch err { duplicate = err }
+	say.Line(duplicate)
+	let db = sql.Open("fake", "") catch err { panic(err) }
+	let id = sql.NewInt64()
+	let name = sql.NewString()
+	db.QueryRow("SELECT id, name FROM users").Scan(id, name) catch err { panic(err) }
+	say.Line("core 1 scans", id.Get(), name.Get())
+	let (_, missing) = sql.Open("missing", "")
+	say.Line(missing)
+}
+
 fn main() {
-	let postgresDriver = postgres.NewSQLDriver(postgres.Options{})
-	sql.Register("pg", postgresDriver) catch _ { }
 	let driver = fakeDriver{}
-	sql.Register("fake", driver) catch _ { }
+	sql.Register("fake", driver) catch err { panic(err) }
 	mut duplicate fault = nil
 	sql.Register("fake", driver) catch err { duplicate = err }
 	say.Line(duplicate)
+	sql.Register("", driver) catch err { panic(err) }
+	sql.Register("pg", postgres.NewSQLDriver(postgres.Options{})) catch err { panic(err) }
+	say.Line(sql.Drivers())
+	hearth.Run(2, otherCore)
 	let db = sql.Open("fake", "") catch err { panic(err) }
-	let _ = db.SetMaxOpen(4) catch err { panic(err) }
-	let _ = db.SetMaxIdle(2) catch err { panic(err) }
+	db.SetMaxOpen(4) catch err { panic(err) }
+	db.SetMaxIdle(2) catch err { panic(err) }
 	let rows = tryQuery(db)
 	say.Line(rows.Columns())
 	mut cursor = rows
+	mut early fault = nil
+	cursor.Scan(sql.NewInt64()) catch err { early = err }
+	say.Line(early)
 	say.Line(cursor.Next())
+	let cid = sql.NewInt64()
+	let cname = sql.NewString()
+	cursor.Scan(cid, cname) catch err { panic(err) }
+	say.Line(cid.Get(), cname.Get())
 	say.Line(cursor.Values())
 	say.Line(cursor.Next())
 	let result = db.Exec("UPDATE users SET name = 'Ada'") catch err { panic(err) }
@@ -47,21 +116,70 @@ fn main() {
 	let lastID = result.LastInsertId() catch _ { -1 }
 	say.Line(affected)
 	say.Line(lastID)
-	let row = db.QueryRow("SELECT id, name FROM users")
-	let one = row.Scan() catch err { panic(err) }
-	say.Line(one)
-	mut tx = db.Begin() catch err { panic(err) }
-	let txRows = tx.Query("SELECT id, name FROM users") catch err { panic(err) }
-	say.Line(txRows.Columns())
-	let txCopy = tx
-	tx.Commit() catch err { panic(err) }
-	say.Line("tx committed")
-	mut finishedTx fault = nil
-	let _ = txCopy.Query("SELECT id, name FROM users") catch err {
-		finishedTx = err
-		sql.NewRows([]str{}, [][]sql.Value{})
-	}
-	say.Line(finishedTx)
+	let rowID = sql.NewInt64()
+	let rowName = sql.NewString()
+	db.QueryRow("SELECT id, name FROM users").Scan(rowID, rowName) catch err { panic(err) }
+	say.Line(rowID.Get(), rowName.Get())
+	mut wide fault = nil
+	db.QueryRow("SELECT id, name FROM users").Scan(sql.NewInt64()) catch err { wide = err }
+	say.Line(wide)
+	let typedID = sql.NewInt64()
+	let typedScore = sql.NewFloat64()
+	let typedName = sql.NewString()
+	let typedOK = sql.NewBool()
+	let typedRaw = sql.NewBytes()
+	db.QueryRow("SELECT typed").Scan(typedID, typedScore, typedName, typedOK, typedRaw) catch err { panic(err) }
+	say.Line(typedID.Get(), typedScore.Get(), typedName.Get(), typedOK.Get(), str(typedRaw.Get()))
+	let nInt = sql.NewNullInt64()
+	let nFloat = sql.NewNullFloat64()
+	let nString = sql.NewNullString()
+	let nBool = sql.NewNullBool()
+	let nBytes = sql.NewNullBytes()
+	db.QueryRow("SELECT nulls").Scan(nInt, nFloat, nString, nBool, nBytes) catch err { panic(err) }
+	say.Line(nInt.Get() == nil, nFloat.Get() == nil, nString.Get() == nil, nBool.Get() == nil, nBytes.Get() == nil)
+	mut nullErr fault = nil
+	db.QueryRow("SELECT null int").Scan(sql.NewInt64()) catch err { nullErr = err }
+	say.Line(nullErr)
+	let textN = sql.NewInt64()
+	let textF = sql.NewFloat64()
+	let textB = sql.NewBool()
+	let textT = sql.NewString()
+	db.QueryRow("SELECT text").Scan(textN, textF, textB, textT) catch err { panic(err) }
+	say.Line(textN.Get(), textF.Get(), textB.Get(), textT.Get())
+	mut badInt fault = nil
+	db.QueryRow("SELECT bad").Scan(sql.NewInt64()) catch err { badInt = err }
+	say.Line(badInt)
+	let ints = sql.NewString()
+	db.QueryRow("SELECT ints").Scan(ints) catch err { panic(err) }
+	say.Line(ints.Get())
+	let intBytes = sql.NewBytes()
+	db.QueryRow("SELECT ints").Scan(intBytes) catch err { panic(err) }
+	say.Line(str(intBytes.Get()))
+	let fracBytes = sql.NewBytes()
+	db.QueryRow("SELECT fraction").Scan(fracBytes) catch err { panic(err) }
+	say.Line(str(fracBytes.Get()))
+	mut fraction fault = nil
+	db.QueryRow("SELECT fraction").Scan(sql.NewInt64()) catch err { fraction = err }
+	say.Line(fraction)
+	let whole = sql.NewInt64()
+	db.QueryRow("SELECT float").Scan(whole) catch err { panic(err) }
+	say.Line(whole.Get())
+	let bits = sql.NewBool()
+	let bitsOff = sql.NewBool()
+	db.QueryRow("SELECT bits").Scan(bits, bitsOff) catch err { panic(err) }
+	say.Line(bits.Get(), bitsOff.Get())
+	mut badBit fault = nil
+	db.QueryRow("SELECT badbit").Scan(sql.NewBool()) catch err { badBit = err }
+	say.Line(badBit)
+	let bytesCell = sql.NewBytes()
+	db.QueryRow("SELECT bytes").Scan(bytesCell) catch err { panic(err) }
+	say.Line(str(bytesCell.Get()))
+	mut noRows fault = nil
+	db.QueryRow("SELECT none").Scan(sql.NewInt64()) catch err { noRows = err }
+	say.Line(noRows)
+	db.SetMaxOpen(1) catch err { panic(err) }
+	db.SetMaxIdle(0) catch err { panic(err) }
+	say.Line("limits changed after use")
 	let stmt = db.Prepare("SELECT 1") catch err { panic(err) }
 	db.Close() catch _ { }
 	mut closed fault = nil
@@ -86,6 +204,18 @@ fn main() {
 		sql.NewRows([]str{}, [][]sql.Value{})
 	}
 	say.Line(closedStmt)
+	mut tx = db2.Begin() catch err { panic(err) }
+	let txRows = tx.Query("SELECT id, name FROM users") catch err { panic(err) }
+	say.Line(txRows.Columns())
+	let txCopy = tx
+	tx.Commit() catch err { panic(err) }
+	say.Line("tx committed")
+	mut finishedTx fault = nil
+	let _ = txCopy.Query("SELECT id, name FROM users") catch err {
+		finishedTx = err
+		sql.NewRows([]str{}, [][]sql.Value{})
+	}
+	say.Line(finishedTx)
 }
 
 fn tryQuery(db sql.DB) sql.Rows {

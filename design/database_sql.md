@@ -17,13 +17,24 @@ fault when that boundary stops the operation. Closing a `DB` prevents new
 operations, closes idle connections and closes checked-out connections when
 they are returned. Pool capacity is process-wide, following the existing
 clients' cap contract, while per-core idle connections remain local to their
-owning core. The PostgreSQL adapter requires `SetMaxOpen` and `SetMaxIdle` before
-first use because its existing client fixes those limits when the per-core pool
-is first created.
+owning core.
 
-Driver names are immutable after registration on each core. Registering an empty
-or already registered name fails with Go's registration fault text. Tin's
-mutable package globals are per-core, so the current registry is also per-core;
-a process-wide registry of mutable driver values needs a shared driver lifecycle
-contract that this patch does not provide. This remains an open requirement in
-issue #921.
+Driver registration is process-wide. `Register` links each driver into a list in
+process memory (shared state under a spin lock, each entry kept in the ingot
+heap), so a driver registered on core 0 is found on every core. A name already
+registered is refused with Go's text; an empty name is allowed, as in Go.
+
+Pool limits change after first use, with Go's semantics where a core can apply
+them:
+- `SetMaxOpen(n)` sets the cap of the client's cap record (0: no cap). A cap
+  that is raised wakes the waiters on the calling core. A cap that is lowered
+  closes the calling core's idle connections above it; other cores do so when
+  they next use the client, and a connection released while the process is over
+  the cap is closed rather than kept. Clients that share a `MaxTotal` cap share
+  the change.
+- `SetMaxIdle(n)` sets how many idle connections each core keeps (0: none).
+  It does not limit how many connections may be open; that is `Options.Pool`.
+
+Known gap: a waiter on a core that holds connections of its own sees a raised
+cap when that core releases one or its wait ends. A core that holds none polls
+the cap every 2 ms, so it sees the change within that time.
