@@ -1,0 +1,297 @@
+// Capsule envelope version 2 (design/interface_replay.md section 6.1; #1004): a fresh data key per capsule, wrapped
+// for each reader (HPKE X25519 and an ML-KEM-768 mask, so a reader's key holds while either does), a plain summary,
+// and the server's ed25519 signature. Version 1 (one symmetric TIN_REPLAY_KEY) stays readable.
+package replay
+
+import "seal"
+
+const envMagic2 = "TINCAP\x02\x00"
+
+const readerBlock = 1200 // key id 32, HPKE enc 32, ML-KEM ciphertext 1088, sealed data key 48
+
+const mostReaders = 64
+
+const pubPrefix = "tinreplay1:"
+
+const keyPrefix = "tinreplaykey1:"
+
+const sigContext = "tin replay capsule v2\n"
+
+// Recipient is a reader a version 2 capsule is sealed for: its key id (SHA-256 of its public key's bytes), its X25519
+// public key and its ML-KEM-768 encapsulation key.
+type Recipient struct {
+	Id str
+	X  str
+	Ek str
+}
+
+// Identity is a reader's private key: its key id, its X25519 private key and its ML-KEM-768 decapsulation key.
+type Identity struct {
+	Id str
+	X  str
+	Dk str
+}
+
+// NewIdentity makes a reader's key pair: the private key's text (for a file of mode 0600, TIN_REPLAY_IDENTITY) and the
+// public key's text (for a server's TIN_REPLAY_RECIPIENTS).
+fn NewIdentity() !(str, str) {
+	let x = seal.X25519NewPrivateKey()
+	let seed = seal.RandomBytes(64)
+	mut raw = []u8{}
+	raw = append(raw, x...)
+	raw = append(raw, seed...)
+	let id = try ParseIdentity(keyPrefix + seal.B64(raw))
+	let xpub = try seal.X25519PublicKey(x)
+	let (_, ek) = try seal.MLKEM768KeyFromSeed(seed)
+	mut pub = []u8{}
+	pub = append(pub, xpub...)
+	pub = append(pub, ek...)
+	if str(seal.Sha256(str(pub))) != id.Id {
+		fail "capsule: a key pair that does not match"
+	}
+	return keyPrefix + seal.B64(raw), pubPrefix + seal.B64(pub)
+}
+
+// ParseIdentity reads a reader's private key from its text (surrounding space is ignored).
+fn ParseIdentity(text str) !Identity {
+	let t = trimSpace(text)
+	if len(t) < len(keyPrefix) || t[:len(keyPrefix)] != keyPrefix {
+		fail "capsule: not a replay private key (tinreplaykey1:...)"
+	}
+	let (raw, err) = seal.B64Decode(t[len(keyPrefix):])
+	if err != nil || len(raw) != 96 {
+		fail "capsule: a damaged replay private key"
+	}
+	let x = raw[0:32]
+	let seed = raw[32:96]
+	let xpub = try seal.X25519PublicKey(x)
+	let (dk, ek) = try seal.MLKEM768KeyFromSeed(seed)
+	mut pub = []u8{}
+	pub = append(pub, xpub...)
+	pub = append(pub, ek...)
+	return Identity{Id: str(seal.Sha256(str(pub))), X: str(x), Dk: str(dk)}
+}
+
+// ParseRecipient reads a reader's public key from its text.
+fn ParseRecipient(text str) !Recipient {
+	let t = trimSpace(text)
+	if len(t) < len(pubPrefix) || t[:len(pubPrefix)] != pubPrefix {
+		fail "capsule: not a replay public key (tinreplay1:...)"
+	}
+	let (raw, err) = seal.B64Decode(t[len(pubPrefix):])
+	if err != nil || len(raw) != 32 + 1184 {
+		fail "capsule: a damaged replay public key"
+	}
+	return Recipient{Id: str(seal.Sha256(str(raw))), X: str(raw[0:32]), Ek: str(raw[32:])}
+}
+
+// ParseRecipients reads a comma list of readers' public keys (TIN_REPLAY_RECIPIENTS): one to 64 of them.
+fn ParseRecipients(listText str) ![]Recipient {
+	mut out = []Recipient{}
+	mut at = 0
+	for at <= len(listText) {
+		mut end = at
+		for end < len(listText) && listText[end] != ',' {
+			end += 1
+		}
+		let part = trimSpace(listText[at:end])
+		if len(part) > 0 {
+			let r = try ParseRecipient(part)
+			out = append(out, r)
+		}
+		at = end + 1
+	}
+	if len(out) == 0 || len(out) > mostReaders {
+		fail "capsule: TIN_REPLAY_RECIPIENTS must list 1 to {mostReaders} readers' public keys"
+	}
+	return out
+}
+
+// wrap seals the data key d for one reader: its block (key id, HPKE enc, ML-KEM ciphertext, sealed key).
+fn wrap(d str, r Recipient) !str {
+	let (ss, ct) = try seal.MLKEM768Encapsulate([]u8(r.Ek))
+	let mask = seal.HmacSha256(str(ss), "tin replay pq" + r.Id)
+	let pt = make([]u8, 32)
+	for i in 0..32 {
+		pt[i] = d[i] ^ mask[i]
+	}
+	let (enc, sealed) = try seal.HPKESeal(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEChaCha20Poly1305, []u8(r.X), []u8("tin replay v2" + r.Id), ct, pt)
+	if len(enc) != 32 || len(ct) != 1088 || len(sealed) != 48 {
+		fail "capsule: unexpected sizes sealing a data key"
+	}
+	return r.Id + str(enc) + str(ct) + str(sealed)
+}
+
+// unwrap opens a reader's block with its identity: the data key.
+fn unwrap(block str, id Identity) !str {
+	let enc = block[32:64]
+	let ct = block[64:1152]
+	let sealed = block[1152:1200]
+	let pt = seal.HPKEOpen(seal.HPKEKEM.HPKEX25519, seal.HPKEAEAD.HPKEChaCha20Poly1305, []u8(id.X), []u8(enc), []u8("tin replay v2" + id.Id), []u8(ct), []u8(sealed)) catch _ {
+		fail "capsule: damaged or forged"
+	}
+	let ss = try seal.MLKEM768Decapsulate([]u8(id.Dk), []u8(ct))
+	let mask = seal.HmacSha256(str(ss), "tin replay pq" + id.Id)
+	let d = make([]u8, 32)
+	for i in 0..32 {
+		d[i] = pt[i] ^ mask[i]
+	}
+	return str(d)
+}
+
+// xorStream is data XOR the keystream of key and nonce (block i = HMAC-SHA256(key, nonce || word i)), as version 1.
+fn xorStream(key str, nonce str, data str) []u8 {
+	let out = make([]u8, len(data))
+	mut i = 0
+	for i * 32 < len(data) {
+		let ks = seal.HmacSha256(key, nonce + word(i))
+		mut j = 0
+		for j < 32 && i * 32 + j < len(data) {
+			out[i * 32 + j] = data[i * 32 + j] ^ ks[j]
+			j += 1
+		}
+		i += 1
+	}
+	return out
+}
+
+// SealV2 is the version 2 envelope of a capsule body for readers, signed with the ed25519 seed signSeed; ks is the
+// secret handles' key (section 5.1, carried so a reader replays with the same handles) and summary the plain summary.
+fn SealV2(body str, ks str, summary str, readers []Recipient, signSeed str) !str {
+	if len(readers) == 0 || len(readers) > mostReaders {
+		fail "capsule: 1 to {mostReaders} readers"
+	}
+	if len(ks) != 32 {
+		fail "capsule: the secret handles' key must be 32 bytes"
+	}
+	let signer = try seal.Ed25519PublicKey([]u8(signSeed))
+	let d = str(seal.RandomBytes(32))
+	mut out = make([]u8, 0, 256 + len(summary) + len(readers) * readerBlock + len(body))
+	out = append(out, envMagic2...)
+	out = append(out, signer...)
+	out = append(out, word(len(summary))...)
+	out = append(out, summary...)
+	out = append(out, word(len(readers))...)
+	for r in readers {
+		let block = try wrap(d, r)
+		out = append(out, block...)
+	}
+	let nonce = str(seal.RandomBytes(16))
+	out = append(out, nonce...)
+	out = append(out, xorStream(str(seal.HmacSha256(d, "tin replay enc")), nonce, ks + body)...)
+	let tag = seal.HmacSha256(str(seal.HmacSha256(d, "tin replay mac")), str(out))
+	out = append(out, tag...)
+	let sig = try seal.SignEd25519([]u8(signSeed), []u8(sigContext + str(seal.Sha256(str(out)))))
+	out = append(out, sig...)
+	return str(out)
+}
+
+// v2 is a version 2 envelope's parts, as read before any key is used.
+type v2 struct {
+	signer  str
+	summary str
+	blocks  str
+	nonce   str
+	ct      str
+	tag     str
+	sig     str
+	signed  str
+}
+
+fn split2(data str) !v2 {
+	let n = len(data)
+	if n < 8 || data[:8] != envMagic2 {
+		fail "capsule: not a version 2 capsule"
+	}
+	mut r = reader{b: data, pos: 40}
+	if n < 40 + 8 {
+		fail "capsule: damaged (truncated)"
+	}
+	let summary = try r.bytes()
+	let count = try r.word()
+	if count < 1 || count > mostReaders || r.pos + count * readerBlock + 16 + 32 + 64 > n {
+		fail "capsule: damaged (truncated)"
+	}
+	let blocks = data[r.pos:r.pos + count * readerBlock]
+	let at = r.pos + count * readerBlock
+	return v2{signer: data[8:40], summary: summary, blocks: blocks, nonce: data[at:at + 16], ct: data[at + 16:n - 96], tag: data[n - 96:n - 64], sig: data[n - 64:], signed: data[:n - 64]}
+}
+
+// Version is a capsule's envelope version (1 or 2), 0 when it is not a capsule.
+fn Version(data str) i64 {
+	if len(data) >= 8 && data[:8] == magic {
+		return 1
+	}
+	if len(data) >= 8 && data[:8] == envMagic2 {
+		return 2
+	}
+	return 0
+}
+
+// Summary is a version 2 capsule's signer (its ed25519 public key, hex) and plain summary, read without a key; the
+// signature is checked against the signer the capsule names (a forger can only name their own key).
+fn Summary(data str) !(str, str) {
+	let p = try split2(data)
+	seal.VerifyEd25519([]u8(p.signer), []u8(sigContext + str(seal.Sha256(p.signed))), []u8(p.sig)) catch _ {
+		fail "capsule: damaged or forged"
+	}
+	return seal.Hex([]u8(p.signer)), p.summary
+}
+
+// UnsealV2 opens a version 2 capsule for identity, trusting the signers listed (ed25519 public keys, hex): the secret
+// handles' key and the body. It checks, in order, the signer, the signature, that the capsule is sealed for identity,
+// and the tag; only then is the body decrypted.
+fn UnsealV2(data str, id Identity, signers []str) !(str, str) {
+	let p = try split2(data)
+	let signerHex = seal.Hex([]u8(p.signer))
+	mut trusted = false
+	for s in signers {
+		if trimSpace(s) == signerHex {
+			trusted = true
+		}
+	}
+	if !trusted {
+		fail "capsule: signed by {signerHex}, not a trusted signer (TIN_REPLAY_SIGNERS)"
+	}
+	seal.VerifyEd25519([]u8(p.signer), []u8(sigContext + str(seal.Sha256(p.signed))), []u8(p.sig)) catch _ {
+		fail "capsule: damaged or forged"
+	}
+	mut block = ""
+	mut i = 0
+	for i < len(p.blocks) {
+		if p.blocks[i:i + 32] == id.Id {
+			block = p.blocks[i:i + readerBlock]
+		}
+		i += readerBlock
+	}
+	if len(block) == 0 {
+		fail "capsule: not sealed for this key"
+	}
+	let d = try unwrap(block, id)
+	let tag = seal.HmacSha256(str(seal.HmacSha256(d, "tin replay mac")), p.signed[:len(p.signed) - 32])
+	mut diff = u8(0)
+	for k in 0..32 {
+		diff |= tag[k] ^ p.tag[k]
+	}
+	if diff != 0 {
+		fail "capsule: damaged or forged"
+	}
+	let pt = xorStream(str(seal.HmacSha256(d, "tin replay enc")), p.nonce, p.ct)
+	if len(pt) < 32 {
+		fail "capsule: damaged (truncated)"
+	}
+	return str(pt[0:32]), str(pt[32:])
+}
+
+// trimSpace is s without the spaces, tabs and newlines around it.
+fn trimSpace(s str) str {
+	mut a = 0
+	mut b = len(s)
+	for a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r') {
+		a += 1
+	}
+	for b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\n' || s[b - 1] == '\r') {
+		b -= 1
+	}
+	return s[a:b]
+}

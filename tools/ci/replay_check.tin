@@ -4,6 +4,7 @@ import "./ci"
 import "./capsule"
 import "./nettest"
 import "mint"
+import "replay"
 import "say"
 import "seal"
 import "tide"
@@ -101,6 +102,67 @@ fn openCapsule(data str) (capsule.Body, bool) {
 		return emptyBody(), false
 	}
 	return c, true
+}
+
+// ---- envelope version 2 (#1004) ----
+
+// reader is a replay identity for the checks: its private key's file and its public key's text.
+type reader struct {
+	file str
+	pub  str
+}
+
+fn newReader(e Env, name str) reader {
+	let (priv, pub) = replay.NewIdentity() catch err {
+		flag("a replay identity: " + say.Str(err))
+		return reader{file: "", pub: ""}
+	}
+	let file = ci.Join(e.Work, name + ".key")
+	ci.Write(file, priv + "\n")
+	return reader{file: file, pub: pub}
+}
+
+// signSeedHex is the ed25519 seed the checks' servers sign version 2 capsules with.
+fn signSeedHex() str {
+	return twine.Repeat("5a", 32)
+}
+
+fn signerHex() str {
+	let seed = seal.HexDecode(signSeedHex()) catch _ {
+		return ""
+	}
+	let pub = seal.Ed25519PublicKey(seed) catch _ {
+		[]u8{}
+	}
+	return seal.Hex(pub)
+}
+
+// handlesKey is Ks for the checks' key (section 5.1).
+fn handlesKey() str {
+	return str(seal.HmacSha256(capsule.CheckKey(), "tin replay secret"))
+}
+
+// sealedV2 is a version 2 capsule of body for readers, signed by the checks' signer.
+fn sealedV2(body str, readers []reader, summary str) str {
+	mut list = ""
+	for r in readers {
+		if len(list) > 0 {
+			list = list + ","
+		}
+		list = list + r.pub
+	}
+	let rs = replay.ParseRecipients(list) catch err {
+		flag("recipients: " + say.Str(err))
+		return ""
+	}
+	let seed = seal.HexDecode(signSeedHex()) catch _ {
+		return ""
+	}
+	let data = replay.SealV2(body, handlesKey(), summary, rs, str(seed)) catch err {
+		flag("seal v2: " + say.Str(err))
+		return ""
+	}
+	return data
 }
 
 fn rawBody(data str) (str, bool) {
@@ -207,6 +269,17 @@ fn replayMode(e Env) {
 	modeCase(e, exe, "peer malformed", sealed(noEffects, 200, who, 2, "not an address"), 0, "replay: status 200 (recorded 200)\npeer  client \n", "", trust, true)
 	let whole = capsule.Build(recorded, 500, request, 1, "")
 	modeCase(e, exe, "truncated body", capsule.Seal(whole[0:len(whole) - 3], capsule.CheckKey()), 4, "", "replay: capsule: damaged (truncated)\n", none, true)
+	// Version 2 (#1004): opened with a reader's identity and a trusted signer; no TIN_REPLAY_KEY needed. Another reader, an
+	// untrusted signer, an edited byte and a missing identity are refused.
+	let ra = newReader(e, "reader-a")
+	let rb = newReader(e, "reader-b")
+	let v2 = sealedV2(capsule.Build(recorded, 500, request, 1, ""), []reader{ra}, "status=500\nmethod=POST\npath=/checkout/7\n")
+	let as = []str{"TIN_REPLAY_IDENTITY=" + ra.file, "TIN_REPLAY_SIGNERS=" + signerHex()}
+	modeCase(e, exe, "version 2 capsule", v2, 0, okOut, "", as, false)
+	modeCase(e, exe, "version 2, another reader", v2, 4, "", "replay: capsule: not sealed for this key\n", []str{"TIN_REPLAY_IDENTITY=" + rb.file, "TIN_REPLAY_SIGNERS=" + signerHex()}, false)
+	modeCase(e, exe, "version 2, untrusted signer", v2, 4, "", "not a trusted signer", []str{"TIN_REPLAY_IDENTITY=" + ra.file, "TIN_REPLAY_SIGNERS=" + twine.Repeat("00", 32)}, false)
+	modeCase(e, exe, "version 2, edited", flip(v2, len(v2) - 120), 4, "", "replay: capsule: damaged or forged\n", as, false)
+	modeCase(e, exe, "version 2, no identity", v2, 4, "", "set TIN_REPLAY_IDENTITY", []str{"TIN_REPLAY_SIGNERS=" + signerHex()}, false)
 	// The driver: tin replay CAPSULE --against BUILD [--live KIND]... (exit 2 for a usage error).
 	let driver = ci.Join(e.Work, "driver.tcap")
 	ci.Write(driver, sealed(recorded, 500, request, 1, ""))
@@ -316,6 +389,70 @@ fn capsules(e Env) {
 			}
 		}
 	}
+	// Version 2 recording (#1004): the same bodies, sealed for the readers listed and signed; the summary is plain; only a
+	// listed reader opens them; a bad list leaves recording off.
+	let ra = newReader(e, "rec-reader-a")
+	let rb = newReader(e, "rec-reader-b")
+	let v2spool = ci.Join(e.Work, "spool-v2")
+	let v2env = []str{"TIN_REPLAY_SECRET_HEADERS= X-Api-Key ", "TIN_REPLAY_DROP_HEADERS=x-email", "TIN_REPLAY_RECIPIENTS=" + ra.pub, "TIN_REPLAY_SIGNING_KEY=" + signSeedHex()}
+	let v2out = runCapsuleCase(exe, "basic", v2spool, v2env)
+	equal("v2 basic output", v2out, basic)
+	let v2names = spoolNames(v2spool)
+	equal("v2 names", twine.Join(v2names, ","), twine.Join(names, ","))
+	if len(v2names) == 2 && len(names) == 2 {
+		let raw = ci.Read(ci.Join(v2spool, v2names[0]))
+		equal("v2 version", mint.Itoa(replay.Version(raw)), "2")
+		let (signer, summary, serr) = replay.Summary(raw)
+		if serr != nil {
+			flag("v2 summary: " + say.Str(serr))
+		}
+		equal("v2 signer", signer, signerHex())
+		equal("v2 summary", summary, "status=500\nmethod=POST\npath=/checkout/7\n")
+		let (_, panicSummary, perr) = replay.Summary(ci.Read(ci.Join(v2spool, v2names[1])))
+		if perr != nil {
+			flag("v2 summary of a panic: " + say.Str(perr))
+		}
+		equal("v2 summary of a panic, without its message", panicSummary, "status=500\nmethod=GET\npath=/boom\n")
+		let ida = replay.ParseIdentity(ci.Read(ra.file)) catch err {
+			flag("identity a: " + say.Str(err))
+			return
+		}
+		let idb = replay.ParseIdentity(ci.Read(rb.file)) catch err {
+			flag("identity b: " + say.Str(err))
+			return
+		}
+		let (ks, body, oerr) = replay.UnsealV2(raw, ida, []str{signerHex()})
+		if oerr != nil {
+			flag("v2 open: " + say.Str(oerr))
+		}
+		let (v1body, _) = rawBody(ci.Read(ci.Join(spool, names[0])))
+		equal("v2 body is the v1 body", seal.Hex(seal.Sha256(body)), seal.Hex(seal.Sha256(v1body)))
+		equal("v2 carries the handles' key", seal.Hex([]u8(ks)), seal.Hex([]u8(handlesKey())))
+		let (_, _, berr) = replay.UnsealV2(raw, idb, []str{signerHex()})
+		equal("v2 another reader", say.Str(berr), "capsule: not sealed for this key")
+		for needle in secretTexts() {
+			if twine.Contains(raw, needle) {
+				flag("secret text " + needle + " in a version 2 capsule")
+			}
+		}
+		// TIN_REPLAY_SUMMARY_PANIC=1 adds the panic message to the summary
+		let pspool = ci.Join(e.Work, "spool-v2-panic")
+		mut penv = []str{"TIN_REPLAY_SUMMARY_PANIC=1"}
+		for x in v2env {
+			penv = append(penv, x)
+		}
+		runCapsuleCase(exe, "basic", pspool, penv)
+		let pn = spoolNames(pspool)
+		if len(pn) == 2 {
+			let (_, ps, pserr) = replay.Summary(ci.Read(ci.Join(pspool, pn[1])))
+			if pserr != nil {
+				flag("v2 summary with the panic: " + say.Str(pserr))
+			}
+			equal("v2 summary with the panic", ps, "status=500\nmethod=GET\npath=/boom\npanic=boom: index 3 out of range\n")
+		}
+	}
+	let badV2 = runCapsuleCase(exe, "off", ci.Join(e.Work, "spool-v2-bad"), []str{"TIN_REPLAY_RECIPIENTS=tinreplay1:AAAA", "TIN_REPLAY_SIGNING_KEY=" + signSeedHex()})
+	equal("v2 bad recipients", ci.Lines(badV2)[0], "on: false false")
 	// TIN_REPLAY_SAMPLE=1 keeps a 200, flagged as sampled.
 	let sampleSpool = ci.Join(e.Work, "spool-sample")
 	runCapsuleCase(exe, "sample", sampleSpool, []str{"TIN_REPLAY_SAMPLE=1"})
