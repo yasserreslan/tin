@@ -1,0 +1,30 @@
+package main
+
+import "./valuepkg"
+import "say"
+
+// Cfg has a field of another package's value struct and a second field (#939): each keeps its own slot, and a failing
+// !Cfg return hands back a zero Cfg (its value struct field included).
+type Cfg value struct {
+	M valuepkg.Model
+	W i64
+}
+
+fn load(ok bool) !Cfg {
+	if !ok {
+		fail "bad header"
+	}
+	return Cfg{M: valuepkg.PaletteModel, W: 7}
+}
+
+fn main() {
+	let c = Cfg{M: valuepkg.PaletteModel, W: 7}
+	say.Line("W", c.W, "M", c.M, "M is PaletteModel:", c.M == valuepkg.PaletteModel)
+	let g = load(true) catch err {
+		say.Line("unreachable", err)
+		Cfg{M: valuepkg.PaletteModel, W: -1}
+	}
+	say.Line("loaded", g.W, g.M, g.M == valuepkg.PaletteModel)
+	let (z, err) = load(false)
+	say.Line("caught", err, "zero", z.W, z.M)
+}

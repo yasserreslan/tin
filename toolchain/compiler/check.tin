@@ -775,7 +775,8 @@ shared mut value_resolving []i64 = []i64{}
 
 // value_first resolves and lays out a value struct declared further on before a field holds its
 // bytes, so its size is known when the holder is laid out (#669). One still being resolved is
-// left as it is: its holder holds itself, which resolve_fields reports (E205).
+// left as it is: its holder holds itself, which resolve_fields reports (E205). The declaration is
+// found by its qualified name, so a value struct of another package is laid out the same way (#939).
 fn value_first(t Ty) {
 	mut b = t
 	for kind_of(b) == K_VARRAY || opt_value(b) != 0 {
@@ -788,7 +789,7 @@ fn value_first(t Ty) {
 	mut i = 0
 	for i < len(prog_types) {
 		let d = prog_types[i]
-		if cast(i64, d.tparams) == 0 && cast(Node, d.type_).kind == TX_STRUCT && file_pkgs[d.file] == ck_pkg && qual(ck_pkg, d.name) == b.name {
+		if cast(i64, d.tparams) == 0 && cast(Node, d.type_).kind == TX_STRUCT && qual(file_pkgs[d.file], d.name) == b.name {
 			set_file(d.file)
 			resolve_fields(b, cast(TypeExpr, d.type_))
 			layout_struct(b)
@@ -866,9 +867,8 @@ fn resolve_fields(st Ty, tx TypeExpr) {
 		} else {
 			rec.ty = resolve_type(f.ty)
 		}
-		if st.value != 0 {
-			value_first(cast(Ty, rec.ty))
-		}
+		// A reference struct holds a value struct field's bytes inline too, so its size is needed now (#939).
+		value_first(cast(Ty, rec.ty))
 		if cast(Ty, f.ty).kind >= TX_NAME {
 			sb_forbid(cast(Node, f.ty).pos, rec.ty, "a struct or enum field cannot hold ")
 		}
