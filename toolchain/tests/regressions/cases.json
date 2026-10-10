@@ -105,6 +105,17 @@
     "target": "linux-amd64"
   },
   {
+    "source": "amd64-float-slice-pressure.tin",
+    "issue": 731,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "285164\n",
+      "stderr": ""
+    },
+    "platform": "linux"
+  },
+  {
     "source": "pool-reset-and-keep.tin",
     "issue": 2,
     "expected": {
