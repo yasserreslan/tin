@@ -65,6 +65,7 @@ fn main() {
 	mut badKey = i64(0)
 	mut badValue = i64(0)
 	mut badOK = true
+	mut badHash = i64(0)
 	for i in i64(0)..n {
 		kk = lcg(kk)
 		let value = m[kk]
@@ -77,8 +78,9 @@ fn main() {
 				badValue = value
 				let (_, ok) = m[kk]
 				badOK = ok
+				badHash = rtHashK0
 			}
 		}
 	}
-	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK)
+	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash)
 }

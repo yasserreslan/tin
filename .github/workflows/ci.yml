@@ -397,7 +397,7 @@ jobs:
         env:
           SEED_BASE: ${{ inputs.seed_base || github.run_number }}
         run: |
-          expected='4200000 0 0 8819997900000 -1 0 0 true'
+          expected='4200000 0 0 8819997900000 -1 0 0 true 0'
           for i in $(seq 0 199); do
             seed=$((SEED_BASE * 1000 + i))
             actual=$(bin/map_growth_stress "$seed")
