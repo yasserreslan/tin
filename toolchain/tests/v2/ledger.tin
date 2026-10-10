@@ -141,6 +141,10 @@ fn textCases() []Case {
 		Case{name: "ReadAllReuseRecord", input: "a,b\nc,d", fpr: -1},
 		Case{name: "StartLine1", input: "a,\"b\nc\"d,e", fpr: -1},
 		Case{name: "StartLine2", input: "a,b\n\"d\n\n,e", fpr: -1},
+		// A final "\r" inside an unterminated quoted field: the fault stays on the line before it (#1235).
+		Case{name: "StartLineTrailingCR", input: "a,b\n\"d\n\n\r", fpr: -1},
+		Case{name: "LazyStartLineTrailingCR", input: "a,b\n\"d\n\n\r", fpr: -1, lazy: true},
+		Case{name: "QuotedTrailingCROnly", input: "\"d\r", fpr: -1},
 		Case{name: "CRLFInQuotedField", input: "A,\"Hello\r\nHi\",B\r\n", fpr: -1},
 		Case{name: "BinaryBlobField", input: "x09\x41\xb4\x1c,aktau", fpr: -1},
 		Case{name: "TrailingCR", input: "field1,field2\r", fpr: -1},

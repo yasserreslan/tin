@@ -130,8 +130,12 @@ fn (r mut Reader) Read() ![]str {
 			}
 			line = l
 			eol = e
-			posLine += 1
-			posCol = 1
+			// A last line that held only the "\r" dropped before the end is empty: Go's reader
+			// counts a line only when it has bytes, so the position stays where it was (#1235).
+			if len(l) > 0 || e {
+				posLine += 1
+				posCol = 1
+			}
 		}
 	}
 	if r.FieldsPerRecord > 0 {

@@ -125,6 +125,15 @@ read 0 err ledger: record on line 1; line 2, column 2: extraneous or missing " i
 case StartLine2
 read 0 ok pos=1:1 nf=2 61 62
 read 1 err ledger: record on line 2; line 4, column 3: extraneous or missing " in quoted-field
+case StartLineTrailingCR
+read 0 ok pos=1:1 nf=2 61 62
+read 1 err ledger: record on line 2; line 3, column 2: extraneous or missing " in quoted-field
+case LazyStartLineTrailingCR
+read 0 ok pos=1:1 nf=2 61 62
+read 1 ok pos=2:1 nf=1 640a0a
+read 2 eof
+case QuotedTrailingCROnly
+read 0 err ledger: line 1, column 3: extraneous or missing " in quoted-field
 case CRLFInQuotedField
 read 0 ok pos=1:1 nf=3 41 48656c6c6f0a4869 42
 read 1 eof
