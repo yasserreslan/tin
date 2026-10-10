@@ -226,3 +226,21 @@ export function compareSpec(spec, fallback) {
 	if (at < 0) return { from: fallback, to: s || fallback };
 	return { from: s.slice(0, at) || fallback, to: s.slice(at + 3) || fallback };
 }
+
+// filterGrouped is the items [{label, sub} | {head}] whose label or sub holds q (ignoring case), each group's head kept
+// when an item under it matches.
+export function filterGrouped(items, q) {
+	const want = String(q || "").toLowerCase();
+	const hit = (it) => !want || String(it.label || "").toLowerCase().includes(want) || String(it.sub || "").toLowerCase().includes(want);
+	const out = [];
+	let head = null;
+	for (const it of items) {
+		if (it.head) head = it;
+		else if (hit(it)) {
+			if (head) out.push(head);
+			head = null;
+			out.push(it);
+		}
+	}
+	return out;
+}

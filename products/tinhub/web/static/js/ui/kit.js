@@ -98,6 +98,16 @@ export function dialog({ title, body, actions = [], wide = false, onClose }) {
 			e.stopPropagation();
 			close();
 		}
+		// Tab moves among the dialog's controls, not the page under it
+		if (e.key === "Tab") {
+			const fs = [...box.querySelectorAll("a[href], button, input, textarea, select, [tabindex]:not([tabindex='-1'])")].filter((x) => !x.disabled && x.offsetParent !== null);
+			if (!fs.length) return;
+			const i = fs.indexOf(document.activeElement);
+			if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === fs.length - 1)) {
+				e.preventDefault();
+				fs[e.shiftKey ? (i <= 0 ? fs.length - 1 : i - 1) : 0].focus();
+			}
+		}
 	});
 	let closed = false;
 	function close(v) {
@@ -109,7 +119,7 @@ export function dialog({ title, body, actions = [], wide = false, onClose }) {
 		if (onClose) onClose(v);
 	}
 	document.body.appendChild(overlay);
-	const f = box.querySelector("[autofocus], input, textarea, select, .btn.primary");
+	const f = box.querySelector("[autofocus], input, textarea, select, .btn.primary") || box.querySelector(".dialog-foot .btn"); // a dangerous confirm starts on Cancel
 	if (f) setTimeout(() => f.focus(), 20);
 	return { close, el: box };
 }
@@ -147,7 +157,10 @@ export function popover(anchor, content, { align = "left", onClose, width } = {}
 		if (!el.contains(e.target) && !anchor.contains(e.target)) close();
 	});
 	const offKey = on(document, "keydown", (e) => {
-		if (e.key === "Escape") close();
+		if (e.key === "Escape") {
+			close();
+			if (anchor.isConnected) anchor.focus();
+		}
 		if (e.key === "ArrowDown" || e.key === "ArrowUp") {
 			const items = [...el.querySelectorAll(".menu-item")];
 			if (!items.length) return;
@@ -195,8 +208,7 @@ export function picker(anchor, { items, placeholder = "Filter", onPick, current,
 	const list = h("div");
 	const draw = () => {
 		clear(list);
-		const q = input.value.toLowerCase();
-		const shown = items.filter((it) => !q || it.label.toLowerCase().includes(q) || (it.sub || "").toLowerCase().includes(q)).slice(0, 100);
+		const shown = fmt.filterGrouped(items, input.value).slice(0, 100);
 		if (!shown.length) list.appendChild(h("div.menu-head", { style: { "text-transform": "none" } }, "Nothing matches."));
 		for (const it of shown) {
 			if (it.head) {

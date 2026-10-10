@@ -57,3 +57,17 @@ test("compareSpec", () => {
 	assert.deepEqual(f.compareSpec("", "main"), { from: "main", to: "main" });
 	assert.deepEqual(f.compareSpec("...feature", "main"), { from: "main", to: "feature" });
 });
+
+test("filterGrouped", () => {
+	const items = [{ head: "Branches" }, { label: "main", sub: "default" }, { label: "feature/x" }, { head: "Tags" }, { label: "v1.0" }, { label: "Feature-tag" }];
+	assert.deepEqual(f.filterGrouped(items, ""), items);
+	assert.deepEqual(
+		f.filterGrouped(items, "FEAT").map((x) => x.head || x.label),
+		["Branches", "feature/x", "Tags", "Feature-tag"],
+	);
+	assert.deepEqual(
+		f.filterGrouped(items, "default").map((x) => x.head || x.label),
+		["Branches", "main"],
+	);
+	assert.deepEqual(f.filterGrouped(items, "nothing"), []);
+});
