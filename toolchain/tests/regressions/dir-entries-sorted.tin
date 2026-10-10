@@ -1,0 +1,66 @@
+package main
+
+import "quarry"
+import "say"
+
+// ReadDirEntries sorts a large directory bytewise and keeps each entry's type with its name (#807: the sort was
+// insertion sort, quadratic in a directory of a few thousand files).
+
+let d = "/tmp/tin-test-dir-entries-{quarry.Pid()}"
+
+fn main() {
+	quarry.RemoveAll(d) catch _ {
+	}
+	quarry.MkdirAll(d) catch err {
+		say.Line(err)
+		return
+	}
+	// names in a scrambled order, with shared prefixes and both cases
+	let n = 1500
+	for i in 0..n {
+		let k = (i * 7919) % n
+		quarry.WriteFile("{d}/f{k}", "") catch err {
+			say.Line(err)
+			return
+		}
+	}
+	for name in []str{"a", "a.b", "a0", "B", "_"} {
+		quarry.WriteFile("{d}/{name}", "") catch err {
+			say.Line(err)
+			return
+		}
+	}
+	for name in []str{"f7x", "f70x", "Dir"} {
+		quarry.MkdirAll("{d}/{name}") catch err {
+			say.Line(err)
+			return
+		}
+	}
+	let es = quarry.ReadDirEntries(d) catch err {
+		say.Line(err)
+		return
+	}
+	let names = quarry.ReadDir(d) catch err {
+		say.Line(err)
+		return
+	}
+	mut sorted = true
+	mut same = len(es) == len(names)
+	mut dirs = []str{}
+	for i in 0..len(es) {
+		if i > 0 && !(es[i - 1].Name < es[i].Name) {
+			sorted = false
+		}
+		if i < len(names) && es[i].Name != names[i] {
+			same = false
+		}
+		if es[i].Type == quarry.FileType.Dir {
+			dirs = append(dirs, es[i].Name)
+		}
+	}
+	say.Line("entries", len(es), "sorted", sorted, "same as ReadDir", same)
+	say.Line("first", es[0].Name, es[1].Name, es[2].Name, es[3].Name, es[4].Name, es[5].Name)
+	say.Line("dirs", dirs[0], dirs[1], dirs[2])
+	quarry.RemoveAll(d) catch _ {
+	}
+}

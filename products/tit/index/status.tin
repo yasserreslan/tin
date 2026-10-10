@@ -97,7 +97,9 @@ fn Status[S store.ObjectStore](s mut S, root str, head object.Id, idx mut Index,
 	mut conflicted = map[str]bool{}
 	mut inIndex = map[str]bool{}
 	for e in idx.Entries {
-		inIndex[e.Path] = true
+		if !same {
+			inIndex[e.Path] = true
+		}
 		if e.Stage != 0 {
 			if !conflicted[e.Path] {
 				conflicted[e.Path] = true

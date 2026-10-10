@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 # A git server over smart HTTP for the tests (#805): each request runs `git http-backend` as CGI on the repositories
-# under ROOT, one connection at a time. Usage: githttp.pl ROOT PORT
+# under ROOT, one connection at a time. Usage: githttp.pl ROOT PORT (0: a free port, which it prints)
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -9,7 +9,7 @@ use File::Temp qw(tempfile);
 my ($root, $port) = @ARGV;
 my $server = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => $port, Listen => 16, ReuseAddr => 1, Proto => "tcp") or die "listen: $!";
 $| = 1;
-print "listening on $port\n";
+print "listening on " . $server->sockport . "\n";
 while (my $c = $server->accept) {
 	binmode $c;
 	my $line = <$c>;

@@ -18,8 +18,8 @@ git init -q --bare -b main "$d/srv/a.git"
 git init -q --bare -b main "$d/srv/b.git"
 git -C "$d/srv/a.git" config http.receivepack true
 git -C "$d/srv/b.git" config http.receivepack true
-port=$((20000 + ($$ + 11) % 20000))
-perl "$root/products/tit/tests/githttp.pl" "$d/srv" "$port" > "$d/srv.log" 2>&1 &
+# the server takes a free port and says which: a port picked here can be one the system has in use already
+perl "$root/products/tit/tests/githttp.pl" "$d/srv" 0 > "$d/srv.log" 2>&1 &
 server=$!
 trap 'kill $server 2> /dev/null || true' EXIT HUP INT TERM
 n=0
@@ -28,6 +28,7 @@ until grep -q listening "$d/srv.log" 2> /dev/null; do
 	[ $n -lt 50 ] || fail "the git server did not start: $(cat "$d/srv.log")"
 	sleep 0.1
 done
+port=$(sed -n 's/^listening on //p' "$d/srv.log")
 url="http://127.0.0.1:$port"
 
 mkdir "$d/r"

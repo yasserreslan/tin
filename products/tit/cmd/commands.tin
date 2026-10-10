@@ -70,6 +70,9 @@ fn fpath(f index.FileStatus) str {
 
 // collapse shows an untracked directory with no tracked files in it as "dir/", as git does, instead of each file.
 fn collapse(untracked []str, idx index.Index) []str {
+	if len(untracked) == 0 {
+		return []str{}
+	}
 	mut tracked = map[str]bool{}
 	for e in idx.Entries {
 		for i in 0..len(e.Path) {
