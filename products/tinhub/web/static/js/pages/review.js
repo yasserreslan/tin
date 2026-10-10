@@ -184,18 +184,21 @@ export async function render(ctx) {
 		const voteRows = votes.length
 			? votes.map((v) => h("div.row", {}, avatar(v.name, "sm"), h("b.grow.ellipsis", {}, v.name), h("span", { class: v.vote === "approve" ? "green" : "amber", title: v.vote === "approve" ? "Approved" : "Requested changes" }, icon(v.vote === "approve" ? "checkCircle" : "alert", "sm")), h("span.tiny.faint", { title: v.version < newest.version ? "On an older version" : "" }, "v" + v.version)))
 			: h("p.small.muted", {}, "No votes yet.");
+		// the caller's own vote on the newest version
+		const mineV = me ? votes.find((v) => v.name === me.name && v.version === newest.version) : null;
+		const mine = mineV ? mineV.vote : "";
 		const voteBtns =
 			me && rv && rv.state !== "landed" && rv.state !== "abandoned"
 				? h(
 						"div.row",
 						{ style: { "margin-top": "10px" } },
 						(() => {
-							const b = btn("Approve", { sm: true, success: true, icon: "thumbsUp" });
+							const b = btn(mine === "approve" ? "Approved" : "Approve", { sm: true, success: mine !== "approve", icon: "thumbsUp", class: mine === "approve" ? "selected" : "" });
 							b.onclick = () => vote("approve", b);
 							return b;
 						})(),
 						(() => {
-							const b = btn("Request changes", { sm: true, icon: "thumbsDown" });
+							const b = btn(mine === "changes" ? "Changes requested" : "Request changes", { sm: true, icon: "thumbsDown", class: mine === "changes" ? "selected" : "" });
 							b.onclick = () => vote("changes", b);
 							return b;
 						})(),

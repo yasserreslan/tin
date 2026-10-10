@@ -52,6 +52,7 @@ sh products/tinhub/tests/repo.sh "$tmp/repo_driver"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/tit" products/tit/main.tin 2>/dev/null
 sh products/tinhub/tests/api.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 sh products/tinhub/tests/signin.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
+sh products/tinhub/tests/web.sh "$tmp/tinhub" "$tmp/repo_driver"
 sh products/tinhub/tests/backup.sh "$tmp/tinhub" "$tmp/repo_driver"
 sh products/tinhub/tests/phase2.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit"
 # the Tin repo cloned and pushed through tinhub, and short clone timings; TINHUB_BENCH_RUNS, _SECONDS and _CLIENTS
