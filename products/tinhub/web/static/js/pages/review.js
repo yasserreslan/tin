@@ -31,6 +31,14 @@ export async function render(ctx) {
 	const canWrite = repo.role === "write" || repo.role === "admin";
 	body.append(skeleton(8));
 
+	// a short id (tit and this site show twelve letters) opens the change under its full id, which the server finds
+	if (ch.length < 32) {
+		const one = await api.get(C()).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
+		if (!ctx.alive()) return;
+		if (!one) return unreviewed(ctx, repo, body, base, R, ch);
+		if (one.change && one.change !== ch) return navigate(`${base}/change/${one.change}${ctx.params.tab ? "/" + ctx.params.tab : ""}${location.search}${location.hash}`, { replace: true });
+	}
+
 	const state = { review: null, versions: [], comments: [], votes: { votes: [], counted: {} }, commit: null };
 	const loadAll = async () => {
 		const [review, versions, comments, votes] = await Promise.all([

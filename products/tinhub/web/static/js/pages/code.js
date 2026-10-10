@@ -216,9 +216,9 @@ function renderBlob(ctx, body, bar, repo, base, apiBase, rev, path, res) {
 	const head = h(
 		"div.box-head",
 		{},
-		h("span.mono.small", {}, res.binary ? "binary" : `${fmt.count(lines)} lines`),
+		h("span.mono.small.nowrap", {}, res.binary ? "binary" : `${fmt.count(lines)} lines`),
 		h("span.faint", {}, "·"),
-		h("span.small.muted", {}, fmt.bytes(res.size)),
+		h("span.small.muted.nowrap", {}, fmt.bytes(res.size)),
 		lang ? badge(lang, "outline") : null,
 		h("span.spacer"),
 		isMd ? segmented([{ value: "preview", label: "Preview" }, { value: "code", label: "Code" }], mode, (v) => ((mode = v), draw())) : null,

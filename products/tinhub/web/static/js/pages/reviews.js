@@ -31,7 +31,7 @@ export function reviewRow(repo, base, r) {
 			"div.grow",
 			{ style: { "min-width": "0" } },
 			h("div.title.ellipsis", {}, title(repo, r.commit, fmt.shortChange(r.change))),
-			h("div.row.small.muted", { style: { "margin-top": "4px", "flex-wrap": "wrap", gap: "6px" } }, h("span.mono", {}, fmt.shortChange(r.change)), "·", r.opened_by ? ["opened by ", h("b", {}, r.opened_by), " ·"] : null, h("span", {}, "into ", h("span.mono", {}, r.target.replace("refs/heads/", ""))), "·", "updated ", time(r.updated_at)),
+			h("div.row.small.muted", { style: { "margin-top": "4px", "flex-wrap": "wrap", gap: "6px" } }, h("span.mono", {}, fmt.shortChange(r.change)), h("span", {}, "·"), r.opened_by ? [h("span", {}, "opened by ", h("b", {}, r.opened_by)), h("span", {}, "·")] : null, h("span", {}, "into ", h("span.mono", {}, r.target.replace("refs/heads/", ""))), h("span", {}, "·"), h("span", {}, "updated ", time(r.updated_at))),
 		),
 		h("span.badge.outline", { title: "Newest version" }, "v" + r.version),
 		r.opened_by ? avatar(r.opened_by, "sm") : null,

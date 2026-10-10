@@ -190,6 +190,9 @@ rows only for current heads and open changes. A file the compiler cannot read is
 Each change gets a review when its first version arrives in a push (the push's change versions) or on its first use
 through the API. Under `/api/v1/repos/{owner}/{repo}`:
 
+- `GET changes/{change}`: the change's versions, oldest first, and its full id (`change`): a unique prefix of four
+  letters or more (tit and the web show twelve) names it too, and the web's review page then opens under the full id.
+
 - `GET changes/{change}/review`: state (`open`, `approved`, `changes_requested`, `landed`, `abandoned`), target, newest
   version, the votes that count, the checks, and `blocked` (why it cannot land yet, `""` when it can).
   `PATCH` with `{"state": "abandoned"|"open"}` (the author or a writer).
