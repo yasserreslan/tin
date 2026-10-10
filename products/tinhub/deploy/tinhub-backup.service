@@ -1,4 +1,4 @@
-# The nightly backup (deploy/RUNBOOK.md): a pg_dump and the new pack files, into /var/backups/tinhub.
+# The nightly backup (deploy/RUNBOOK.md): a pg_dump and the objects the last one lacks, into /var/backups/tinhub.
 [Unit]
 Description=tinhub nightly backup
 After=postgresql.service

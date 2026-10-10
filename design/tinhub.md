@@ -20,16 +20,30 @@ replay capsules and sign-in) is design/tit.md §15 – §18; nothing here change
 2. **Sign-in with tit keys, never passwords.** `users` has no password hash. An account's first key comes with an
    invite (`tinhub admin invite`, then `tit key add`); a browser signs in with a login request that a registered key
    approves (design/tit.md §18). The design page's `seal.Pbkdf2Sha256` note is dropped.
-3. **Refs, change versions and the repository lock live in Postgres from phase 1.** A push commits in one
+3. **Content lives in object storage, in every deployment; Postgres holds the pointers.** Packs and their indexes,
+   replay capsules and review diffs are objects in an S3-compatible bucket (Cloudflare R2, AWS S3, MinIO:
+   `packs.store = s3`, the default), from a single server up. Postgres keeps what points at them and their state (a
+   `packs` row's hash, size and `pending`/`live`/`retired`; a `diffs` row's kind and `stored`), never the bytes. A
+   node's disk holds a cache of the bucket and scratch space, nothing of record, so a node is replaced without a copy
+   and phase 2 only adds nodes. Development runs on a local S3-compatible store (`products/tinhub/dev/local-s3.sh`,
+   MinIO); `packs.store = dir` (content on local disk) is for tests and quick experiments only.
+4. **Refs, change versions, the repository lock and the job queue live in Postgres.** A push commits in one
    transaction under `pg_advisory_xact_lock(<repo id>)`: the pack goes live, refs move by compare-and-swap, the new
-   change versions are inserted and a `push` event is queued. Phase 2 only adds nodes; no data moves out of files.
-4. **Data first, pointer second.** A pack is written and fsynced (directory) or uploaded (S3) and recorded as
-   `pending` before any ref can reach it; a ref moves only if it still holds the value the client saw.
-5. **One binary, many roles.** `node` (the tit protocol, the JSON API, live updates, health), `worker` (the event
+   change versions are inserted and a `push` event is queued. This state stays in Postgres because it changes, and
+   changes several rows at once: a push moves many refs and inserts versions and an event atomically, and workers
+   claim jobs with `FOR UPDATE SKIP LOCKED`. An object store offers at most a conditional write on one key
+   (`If-Match`/`If-None-Match`), no transaction across keys and no queue; and content keys are content hashes or
+   written by one job (§7), so no content write needs even that. Review text (comments, check
+   summaries), accounts, access and audit rows are small, queried, and written in the same transactions, so they stay
+   rows too.
+5. **Data first, pointer second.** A pack is uploaded (S3), or written and fsynced (directory), and recorded as
+   `pending` before any ref can reach it; a ref moves only if it still holds the value the client saw. A diff is put
+   in the store before its row says `stored`.
+6. **One binary, many roles.** `node` (the tit protocol, the JSON API, live updates, health), `worker` (the event
    queue's handlers) and `runner` (sandboxed replays, #1028) are the same program started with different roles.
-6. **Postgres holds everything that changes, Redis only what can be rebuilt** (sessions, the ref cache, rate
+7. **Postgres holds everything that changes, Redis only what can be rebuilt** (sessions, the ref cache, rate
    limits). Losing Redis signs everyone out and resets rate limits; nothing else.
-7. **Linux arm64 and x86-64 only.** tinhub is built and run on Linux; on macOS it builds for development and runs
+8. **Linux arm64 and x86-64 only.** tinhub is built and run on Linux; on macOS it builds for development and runs
    the unit tests that need no Postgres.
 
 ### Cleanup
@@ -95,7 +109,11 @@ tinhub admin invite EMAIL [--site-admin] [--config FILE]   a one-use invite code
 tinhub check [--config FILE]                               every live pack is in the store; fingerprints of refs and packs
 tinhub packs copy [--config FILE]                          copy every pack under packs.dir into the s3.* bucket, idempotently
 tinhub packs sweep [--config FILE]                         run the pending and retired sweeps once
+tinhub packs backup DIR [--config FILE]                    copy every object in the store that DIR lacks into DIR (the nightly backup)
+tinhub packs restore DIR [--config FILE]                   copy every object under DIR that the store lacks back (making the bucket when it can)
 ```
+
+`tinhub run` lists the bucket once at start (`repos/`, one key) and stops when the s3.* keys cannot read it.
 
 **Configuration** is a file of `key = value` lines (`#` starts a comment, blank lines are ignored; a value may be
 quoted with `"`), read from `--config`, else `$TINHUB_CONFIG`, else `/etc/tinhub/tinhub.conf` when it exists. Every
@@ -114,15 +132,15 @@ removed), which is how a secret comes from a mounted file. Unknown keys are refu
 | `db.replica` | none | a read replica's address (phase 2): stale-tolerant API reads go there |
 | `db.max_total` | `16` | the connection cap across all cores |
 | `redis.addr` | none | Redis; without it sessions and rate limits stay per process and the ref cache is off |
-| `packs.store` | `dir` | `dir` or `s3` |
-| `packs.dir` | `/var/lib/tinhub` | the directory store's root (`dir`), or the cache's root (`s3`) |
+| `packs.store` | `s3` | `s3` (object storage; every deployment) or `dir` (local disk; development and tests only) |
+| `packs.dir` | `/var/lib/tinhub` | the node's cache of the bucket and scratch space (`s3`), or the directory store's root (`dir`) |
 | `packs.cache` | `10gb` | the node's pack cache size (`s3`) |
 | `packs.grace` | `1h` | how long a retired pack stays readable |
 | `packs.sweep` | `10m` | how often the sweeps run |
-| `s3.endpoint`, `s3.region`, `s3.bucket` | none, `auto`, none | the object store (phase 2) |
-| `s3.access_key` | none | the access key id |
-| `s3.secret_key` | none | **secret** |
-| `s3.path_style` | `true` | path-style addressing (MinIO); `false` for virtual-hosted buckets |
+| `s3.endpoint`, `s3.region`, `s3.bucket` | none, `auto`, none | the object store, required with `packs.store = s3`: R2 is `https://<account id>.r2.cloudflarestorage.com` with region `auto` |
+| `s3.access_key` | none | the access key id, required with `packs.store = s3` |
+| `s3.secret_key` | none | **secret**, required with `packs.store = s3` |
+| `s3.path_style` | `true` | path-style addressing (R2, MinIO); `false` for virtual-hosted buckets |
 | `secrets.nonce` | none | **secret**, required: signs protocol nonces; the same on every node |
 | `secrets.cookie` | none | **secret**, required: signs session cookies; the same on every node |
 | `push.deadline` | `60s` | a push's `within` |
@@ -249,7 +267,7 @@ comment (the bench, #1029). How the rows are used is §14.
 | `indexed_commits` | `repo_id`, `commit_id text`, `packages int`, `reindexed int` (the packages the compiler ran on), `base text` (the commit the rest was copied from), `runner text` (`sandbox`, `process`), `created_at` | `primary key (repo_id, commit_id)` |
 | `change_decls` | `repo_id`, `change_id text`, `version int`, `decl text` (`<package dir>: <key>`, as tit overlap names it) | `primary key (repo_id, change_id, version, decl)`, index `(repo_id, decl)` |
 | `change_overlaps` | `repo_id`, `change_id text`, `version int`, `other_change_id text`, `decl text`, `created_at` | `primary key (repo_id, change_id, version, other_change_id, decl)` |
-| `diffs` | `repo_id`, `change_id text`, `version int`, `against text` (`base`, `previous`), `kind text` (`semantic`, `lines`), `body text` (capped; a large one is `""` and stored in the pack store), `stored bool` | `primary key (repo_id, change_id, version, against)` |
+| `diffs` | `repo_id`, `change_id text`, `version int`, `against text` (`base`, `previous`), `kind text` (`semantic`, `lines`), `body text` (`""`: the diff is in the pack store; only rows written before every diff went there hold one), `stored bool` (true: in the pack store) | `primary key (repo_id, change_id, version, against)` |
 | `bench_results` | `id`, `repo_id`, `commit_id text`, `name text`, `value double precision`, `unit text`, `os text`, `arch text`, `cpu text`, `kernel text`, `machine text`, `created_at`; `change_id text` and `line_hash text` (migration `0007_bench`) | index `(repo_id, name, created_at)`, `unique (repo_id, line_hash) where line_hash <> ''` |
 | `bench_files` (migration `0007_bench`) | `repo_id`, `blob text` (a results file read already), `lines int`, `created_at` | `primary key (repo_id, blob)` |
 
@@ -268,7 +286,7 @@ a file), then compute the semantic diff inside `within 5s` and `limit memory 48m
 alone are over 48mb, the diff is a line diff (only what lies between the lines both texts start and end with is split
 and diffed, with tit/diff's cost bound). Against the previous version it is an interdiff: a declaration shows when the
 versions differ in it and the difference is not the rebase's (neither version edited it, or both made the same edit on
-their bases). A diff over 256 KiB is kept in the pack store. The overlap step runs in the same job, from the semantic
+their bases). Every diff is kept in the pack store, its row the pointer. The overlap step runs in the same job, from the semantic
 diff's declarations (one read of each text), so there is no separate `overlap` kind.
 
 ### Replay (#1022)
@@ -406,12 +424,16 @@ shape PackStore {
 `bench/ref/s3sig`'s signature-checking fake, on the S3 store.
 
 Keys: `repos/<repo id>/packs/<hash>.pack`, `repos/<repo id>/packs/<hash>.idx`, `repos/<repo id>/capsules/<id>.tcap`,
-`repos/<repo id>/diffs/<change>/<version>.<against>`. The directory store keeps a key at `<packs.dir>/<key>`, written
-through a temporary file in the same directory, synced and renamed. The S3 store keeps it at the same key in the
-bucket (multipart above 64 MiB), with the node's copies under `<packs.dir>/cache`: what a node wrote or read stays
+`repos/<repo id>/diffs/<change>/<version>.<against>`. Pack, index and capsule keys are content hashes, written with
+the same bytes whenever they are written; a diff's key is written again only by its own job running again (the last
+write wins, and its row is written after it). So no write needs a condition, and a copy skips a key the target holds
+at the same size. The S3 store, the one every deployment runs (§1), keeps a key at the same key in the bucket (multipart
+above 64 MiB, in equal 16 MiB parts as R2 requires), with the node's copies under `<packs.dir>/cache`: what a node wrote or read stays
 there, and the sweep keeps the copies under `packs.cache` by retiring the oldest as tit retires a pack
 (`packfile.Retire`: a fetch that opened one follows it into `retired/`) and deleting retired copies after
 `packs.grace`. The state of each pack is the `packs` row, never the file: a reader lists live packs from Postgres.
+The directory store (development and tests) keeps a key at `<packs.dir>/<key>`, written through a temporary file in
+the same directory, synced and renamed.
 
 A push over `PgRepo` (`products/tinhub/repo`; design/tit.md §16): the pack is streamed to `TempDir()`
 (`<packs.dir>/tmp`), verified and indexed there; `Stage` inserts the `pending` row under the repository's lock (a pack
@@ -452,23 +474,24 @@ only.
 |---|---|---|---|
 | nodes | one Linux server, every role | several stateless nodes behind a load balancer (`/readyz`); workers as their own nodes | nodes per region |
 | Postgres | on the same host | a primary and a replica; refs always on the primary | primary plus regional replicas |
-| packs | `packs.store = dir` on local disk | `packs.store = s3`, a pack cache on each node's NVMe | replicated object storage |
+| content | `packs.store = s3`: an R2 bucket, a cache on the server's disk | the same bucket, a cache on each node's NVMe | replicated object storage |
 | TLS | anvil (TLS 1.3, HTTP/2), certificates from files, read again when they change (SIGHUP is ignored) | the load balancer or anvil | |
-| backup | nightly `pg_dump` and an incremental copy of new packs (`deploy/backup.sh`), `tinhub check` after a restore | the provider's snapshots plus the same | |
-| move | | config, then `tinhub packs copy` | |
+| backup | nightly `pg_dump` and an incremental copy of the bucket's new objects (`deploy/backup.sh`, `tinhub packs backup`), `tinhub check` after a restore | the provider's snapshots plus the same | |
+| move | | config only: nodes, roles, `db.replica` | |
 
 Phase 1 is `products/tinhub/deploy`: the systemd units (tinhub, the nightly backup, the mirror sync), a container
-image and a compose file with Postgres beside it, the backup and restore scripts, and `RUNBOOK.md` (install, upgrade,
+image and a compose file with Postgres beside it and the bucket's keys from the environment, the backup and restore scripts, and `RUNBOOK.md` (install, upgrade,
 secrets, restore, the mirror). The Tin repo is imported with `tit adopt` and kept a read-only mirror of GitHub by
 `deploy/mirror-sync.sh` (fetch, `tit adopt` again, push with the mirror account's key, the only one with write
 access); GitHub stays the source of truth, with issues and CI, until the cutover.
 
-Phase 2 (#1026) is the same binary with other config: `packs.store = s3` and the `s3.*` keys after `tinhub packs copy`
-(which makes the bucket when it can, and copies only what the bucket lacks, so it runs again after the switch), nodes
+Phase 2 (#1026) is the same binary with other config and the same bucket: nodes
 with `roles = node` behind the load balancer and worker nodes with `roles = worker`, one shared Redis, and
 `db.replica`. The API's lists of repositories, changes and versions read the replica; access checks, refs and the
 packs objects are read from always use the primary, so a stale replica never names a pack a node cannot find.
-`products/tinhub/tests/phase2.sh` moves a phase 1 node to two nodes and a worker node on a bucket, then kills nodes
+An install that began on `packs.store = dir` (before object storage was the default) moves with `tinhub packs copy`
+(which makes the bucket when it can, and copies only what the bucket lacks, so it runs again after the switch), then
+`packs.store = s3`. `products/tinhub/tests/phase2.sh` moves such a node to two nodes and a worker node on a bucket, then kills nodes
 (SIGKILL) mid-push, mid-fetch and mid-job: every push tit reported is on main, `tinhub check` finds every live pack and
 every job finishes. A rolling upgrade is one node at a time: the drain finishes its requests, and a migration that
 adds tables or columns is applied first (`tinhub migrate`) while the old binaries still run.

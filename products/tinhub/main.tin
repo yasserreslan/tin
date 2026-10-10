@@ -47,7 +47,7 @@ type Boot struct {
 }
 
 fn usage() str {
-	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub check [--config FILE]\n       tinhub admin invite EMAIL [--site-admin] [--config FILE]\n       tinhub version [-v]\n"
+	return "usage: tinhub run [--config FILE] [--roles node,worker,runner]\n       tinhub migrate [--config FILE]\n       tinhub packs sweep|copy [--config FILE]\n       tinhub packs backup|restore DIR [--config FILE]\n       tinhub check [--config FILE]\n       tinhub admin invite EMAIL [--site-admin] [--config FILE]\n       tinhub version [-v]\n"
 }
 
 // parseBoot reads the command, its --config and --roles flags, and loads the configuration.
@@ -92,9 +92,11 @@ fn parseBoot(argv []str) Boot {
 }
 
 fn emptyConfig() config.Config {
-	let vals = config.Resolve(map[str]str{}, noEnv) catch _ {
+	mut vals = config.Resolve(map[str]str{}, noEnv) catch _ {
 		map[str]str{}
 	}
+	// a placeholder for commands that read no configuration: the default store needs a bucket
+	vals["packs.store"] = "dir"
 	let c = config.Build(vals) catch _ {
 		panic("tinhub: the default configuration does not build")
 	}
@@ -188,17 +190,34 @@ fn working() bool {
 	return boot.Command == "run" && len(boot.Err) == 0 && boot.Conf.Has("worker") && hearth.ID() == 0
 }
 
+// s3Client is the client for the bucket the s3.* keys name.
+fn s3Client(c config.Config) !s3.Client {
+	return try s3.New(s3.Config{Endpoint: c.S3Endpoint, Region: c.S3Region, AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, Token: "", PathStyle: c.S3PathStyle, SignPayload: false, UnsignedPayload: false, Attempts: 0, Backoff: 0, Timeout: 0, TLS: nil})
+}
+
 // openStore is the pack store packs.store names: the directory store at packs.dir, or the bucket with the node's
 // copies under packs.dir/cache.
 fn openStore(c config.Config) !dyn packs.PackStore {
 	if c.PacksStore == "s3" {
-		let client = try s3.New(s3.Config{Endpoint: c.S3Endpoint, Region: c.S3Region, AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, Token: "", PathStyle: c.S3PathStyle, SignPayload: false, UnsignedPayload: false, Attempts: 0, Backoff: 0, Timeout: 0, TLS: nil})
+		let client = try s3Client(c)
 		let st dyn packs.PackStore = packs.S3Store{Client: client, Bucket: c.S3Bucket, Cache: c.PacksDir + "/cache"}
 		return st
 	}
 	let d = try packs.NewDirStore(c.PacksDir)
 	let st dyn packs.PackStore = d
 	return st
+}
+
+// probeStore fails when the bucket cannot be read with the configured keys, so a node with a wrong endpoint, bucket or
+// key stops at start instead of failing its first push.
+fn probeStore(c config.Config) ! {
+	if c.PacksStore != "s3" {
+		return
+	}
+	let client = try s3Client(c)
+	_ = client.List(c.S3Bucket, s3.ListOptions{Prefix: "repos/", Delimiter: "", Token: "", StartAfter: "", MaxKeys: 1}) catch err {
+		fail fault.Wrap(err, "the bucket {c.S3Bucket} at {c.S3Endpoint} (s3.*)")
+	}
 }
 
 // pendingAge is how old a pending pack is before the sweep deletes it: no push runs past its deadline, so none can
@@ -483,6 +502,7 @@ fn run(c config.Config) ! {
 		try c.RequireSecrets()
 	}
 	try db.Current(pg)
+	try probeStore(c)
 	// the drain (SIGTERM) waits this long for requests in flight, so a push that has begun completes
 	let grace = c.Shutdown / 1000000000
 	try quarry.Setenv("TIN_GRACE", "{grace}")
@@ -570,6 +590,13 @@ fn main() {
 				}
 				quarry.Exit(0)
 			}
+			if len(b.Args) == 2 && (b.Args[0] == "backup" || b.Args[0] == "restore") {
+				backupNow(b.Conf, b.Args[1], b.Args[0] == "restore") catch err {
+					quarry.Eprintln("tinhub: packs {b.Args[0]}: {fault.Message(err)}")
+					quarry.Exit(1)
+				}
+				quarry.Exit(0)
+			}
 			if len(b.Args) != 1 || b.Args[0] != "sweep" {
 				quarry.Eprint(usage())
 				quarry.Exit(2)
@@ -601,12 +628,39 @@ fn copyNow(c config.Config) ! {
 		fail "set s3.bucket and the other s3.* keys first"
 	}
 	mut from = try packs.NewDirStore(c.PacksDir)
-	let client = try s3.New(s3.Config{Endpoint: c.S3Endpoint, Region: c.S3Region, AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, Token: "", PathStyle: c.S3PathStyle, SignPayload: false, UnsignedPayload: false, Attempts: 0, Backoff: 0, Timeout: 0, TLS: nil})
-	// the bucket is made when it can be; one that exists already, or credentials that may not make one, are no fault
-	client.CreateBucket(c.S3Bucket) catch _ {
-	}
+	let client = try s3Client(c)
+	makeBucket(client, c.S3Bucket)
 	mut to = packs.S3Store{Client: client, Bucket: c.S3Bucket, Cache: c.PacksDir + "/cache"}
 	let got = try packs.Copy(mut from, mut to, "repos/", c.PacksDir + "/tmp")
+	say.Line("tinhub: copied {got.Copied} objects ({got.Bytes} bytes), {got.Skipped} already there")
+}
+
+// makeBucket makes the bucket when it can be: one that exists already, or credentials that may not make one (an R2
+// token scoped to one bucket), are no fault.
+fn makeBucket(client s3.Client, bucket str) {
+	client.CreateBucket(bucket) catch _ {
+	}
+}
+
+// backupNow is tinhub packs backup DIR: every object in the pack store (the bucket, or packs.dir) that DIR lacks is
+// copied into DIR, laid out as the directory store keeps it, so the nightly backup (deploy/backup.sh) holds the content
+// the database dump points at whatever the store. Objects never change once written, so one already in DIR at the same
+// size is skipped and nothing is deleted from DIR. With restore it copies the other way: every object under DIR that
+// the store lacks goes back into it, making the bucket first when it can (deploy/restore.sh).
+fn backupNow(c config.Config, dir str, restore bool) ! {
+	mut st = try openStore(c)
+	mut d = try packs.NewDirStore(dir)
+	mut got = packs.CopyResult{Copied: 0, Skipped: 0, Bytes: 0}
+	if restore {
+		if c.PacksStore == "s3" {
+			// a restore may go to a new bucket
+			let client = try s3Client(c)
+			makeBucket(client, c.S3Bucket)
+		}
+		got = try packs.Copy(mut d, mut st, "repos/", c.PacksDir + "/tmp")
+	} else {
+		got = try packs.Copy(mut st, mut d, "repos/", c.PacksDir + "/tmp")
+	}
 	say.Line("tinhub: copied {got.Copied} objects ({got.Bytes} bytes), {got.Skipped} already there")
 }
 
