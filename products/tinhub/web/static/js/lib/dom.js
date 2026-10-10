@@ -3,6 +3,28 @@
 
 const SVG = "http://www.w3.org/2000/svg";
 
+// The native insertion methods (append, replaceChildren, after, ...) take children the way h() does: null, undefined
+// and booleans are skipped and arrays are flattened, so a conditional child never shows up as the text "null".
+function nodesOf(xs, out = []) {
+	for (const x of xs) {
+		if (x === null || x === undefined || x === false || x === true) continue;
+		if (Array.isArray(x)) nodesOf(x, out);
+		else out.push(x);
+	}
+	return out;
+}
+for (const proto of [Element.prototype, DocumentFragment.prototype, CharacterData.prototype]) {
+	for (const m of ["append", "prepend", "replaceChildren", "after", "before", "replaceWith"]) {
+		const native = proto[m];
+		if (typeof native !== "function" || native.tinhub) continue;
+		const wrapped = function (...xs) {
+			return native.apply(this, nodesOf(xs));
+		};
+		wrapped.tinhub = true;
+		Object.defineProperty(proto, m, { value: wrapped, writable: true, configurable: true });
+	}
+}
+
 function apply(el, attrs) {
 	for (const [k, v] of Object.entries(attrs)) {
 		if (v === undefined || v === null || v === false) continue;

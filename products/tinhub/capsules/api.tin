@@ -27,6 +27,7 @@ fn Mount(r mut anvil.Router) {
 	r.Delete(`/api/v1/repos/{owner}/{repo}/replay/capsules/{id}`, deleteCapsule)
 	r.Get(`/api/v1/repos/{owner}/{repo}/replay/retention`, getRetention)
 	r.Put(`/api/v1/repos/{owner}/{repo}/replay/retention`, putRetention)
+	r.Get(`/api/v1/repos/{owner}/{repo}/replay/grants`, listGrants)
 	r.Put(`/api/v1/repos/{owner}/{repo}/replay/grants/{user}`, putGrant)
 	r.Delete(`/api/v1/repos/{owner}/{repo}/replay/grants/{user}`, deleteGrant)
 }
@@ -562,6 +563,33 @@ fn userId(c call, name str) !i64 {
 type grantOut struct {
 	user   str
 	replay bool
+}
+
+type grantList struct {
+	users []str
+	teams []str
+}
+
+// listGrants is who holds the replay permission by a grant: users and teams by name (admins).
+fn listGrants(q anvil.Req, w mut anvil.Out) {
+	let c = begin(q, mut w, needAdmin)
+	if c == nil {
+		return
+	}
+	let id = c.r.Id
+	let rows = c.d.Db.Query("SELECT coalesce(o.name, ''), coalesce(t.name, '') FROM replay_grants g LEFT JOIN users u ON u.id = g.user_id AND u.deleted_at IS NULL LEFT JOIN owners o ON o.id = u.owner_id LEFT JOIN teams t ON t.id = g.team_id WHERE g.repo_id = {id} ORDER BY 1, 2") catch err {
+		answerErr(mut w, err)
+		return
+	}
+	mut out = grantList{users: []str{}, teams: []str{}}
+	for x in rows.Rows {
+		if len(x[0].Text()) > 0 {
+			out.users = append(out.users, x[0].Text())
+		} else if len(x[1].Text()) > 0 {
+			out.teams = append(out.teams, x[1].Text())
+		}
+	}
+	send(mut w, out)
 }
 
 // putGrant gives a user the replay permission.

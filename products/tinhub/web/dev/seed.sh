@@ -80,6 +80,19 @@ printf '\nSee products/tinhub for the hosting service.\n' >> README.md
 as ada add README.md > /dev/null
 as bob config set --user user.name bob > /dev/null 2>&1 || true
 as ada commit -m "README: point at tinhub" > /dev/null
+# benchmark history: a few commits, each recording two benchmarks with tit bench record under .bench/
+mkdir -p .bench
+i=0
+for v in "212 41.8" "208 41.2" "214 40.9" "196 38.4" "198 38.1" "187 37.6"; do
+	i=$((i + 1))
+	set -- $v
+	as ada bench record fib "$1" --unit ms > /dev/null 2>&1 || fail "tit bench record"
+	as ada bench record parse_json "$2" --unit us > /dev/null 2>&1 || fail "tit bench record"
+	cp .tit/bench/fib.jsonl .tit/bench/parse_json.jsonl .bench/
+	printf 'run %s\n' "$i" > .bench/RUNS
+	as ada add .bench > /dev/null
+	as ada commit -m "bench: run $i on the Linux box" > /dev/null
+done
 as ada push > "$dir/push.out" 2>&1 || fail "push: $(cat "$dir/push.out")"
 as ada ship v0.1.0 > "$dir/ship.out" 2>&1 || fail "ship: $(cat "$dir/ship.out")"
 
@@ -108,4 +121,24 @@ cp "$root/products/tinhub/main.tin" main.tin
 as ada add README.md main.tin > /dev/null
 as ada commit -m "tinhub: the binary" > /dev/null
 as ada push > "$dir/push.out" 2>&1 || fail "push tinhub: $(cat "$dir/push.out")"
+# replay failure groups for ada/tin, written straight into the database (development only: real capsules come sealed
+# from a deployed server through tit replay push); skipped without psql and the TINHUB_DB_* environment
+if command -v psql > /dev/null 2>&1 && [ -n "${TINHUB_DB_ADDR:-}" ]; then
+	PGPASSWORD=${TINHUB_DB_PASSWORD:-} psql -q -h "${TINHUB_DB_ADDR%:*}" -p "${TINHUB_DB_ADDR##*:}" -U "${TINHUB_DB_USER:-tin}" "${TINHUB_DB_NAME:-tinhub}" > /dev/null <<-'SQL' || echo "seed: no replay rows" >&2
+	WITH r AS (SELECT r.id FROM repos r JOIN owners o ON o.id = r.owner_id WHERE o.name = 'ada' AND r.name = 'tin')
+	INSERT INTO replay_groups (repo_id, id, panic, route, state, fixed_by, count, first_at, last_at)
+	SELECT r.id, g.id, g.panic, g.route, g.state, g.fixed, g.n, now() - g.first * interval '1 hour', now() - g.last * interval '1 minute' FROM r, (VALUES
+		('9f2c1a7e40b1', 'index out of range [3] with length 3', 'POST /api/v1/carts/{id}/items', 'open', '', 41, 30, 4),
+		('a07d55c3e9f0', 'nil map write in checkout.applyCoupon', 'POST /api/v1/checkout', 'open', '', 7, 6, 38),
+		('3be0c4d12a88', 'division by zero in pricing.perUnit', 'GET /api/v1/quote', 'closed', 'opylwpwyxsztonmnnyzxmvknnmortstt', 3, 72, 900)
+	) AS g(id, panic, route, state, fixed, n, first, last)
+	ON CONFLICT DO NOTHING;
+	WITH r AS (SELECT r.id FROM repos r JOIN owners o ON o.id = r.owner_id WHERE o.name = 'ada' AND r.name = 'tin')
+	INSERT INTO capsules (repo_id, id, group_id, name, signer, status, route, size_bytes, created_at, expires_at)
+	SELECT r.id, encode(sha256(convert_to(g || n::text, 'UTF8')), 'hex'), g, 'checkout', 'prod-eu-1', 500, rt, 2048 + n * 311, now() - n * interval '7 minutes', now() + interval '30 days' FROM r, (VALUES
+		('9f2c1a7e40b1', 'POST /api/v1/carts/c_81/items'), ('a07d55c3e9f0', 'POST /api/v1/checkout')
+	) AS x(g, rt), generate_series(1, 4) AS n
+	ON CONFLICT DO NOTHING;
+	SQL
+fi
 echo "seeded $base: ada (site admin) and bob; sessions in $dir/ada.cookie and $dir/bob.cookie"
