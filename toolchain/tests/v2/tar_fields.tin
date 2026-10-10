@@ -1,0 +1,136 @@
+package main
+
+// Header number fields read as Go's archive/tar reads them (#1232): base-256 values (GNU tar
+// writes a uid, gid or size that does not fit the octal digits so), an empty field as 0, a
+// checksum computed with signed bytes, and the end of the archive as two zero blocks or one at
+// the end of the data. Before, each of these failed with "invalid octal header field" or read a
+// device number of -1, and a zero block followed by a header was read as the end.
+
+import "say"
+import "tar"
+
+fn main() ! {
+	let plain = try archive("f")
+	say.Line("plain", fails(plain))
+	mut a = try archive("f")
+	base256(mut a, 116, 8, 3000000)
+	say.Line("gid base-256", fails(a))
+	mut b = try archive("f")
+	base256(mut b, 124, 12, 3)
+	say.Line("size base-256", fails(b))
+	mut c = try archive("f")
+	for i in 329..345 {
+		c[i] = 0
+	}
+	for i in 100..108 {
+		c[i] = u8(' ')
+	}
+	checksum(mut c, false)
+	say.Line("empty fields", fails(c))
+	mut d = try archive("é")
+	checksum(mut d, true)
+	say.Line("signed checksum", fails(d))
+	mut e = try archive("f")
+	base256(mut e, 108, 8, -5)
+	say.Line("negative uid", fails(e))
+	mut f = try archive("f")
+	f[116] = u8('9')
+	checksum(mut f, false)
+	say.Line("digit 9", fails(f))
+	// The writer ends with two zero blocks; a header after the first one is not the end.
+	mut g = try archive("f")
+	mut hdr = g[:512]
+	let at = i64(len(g)) - 512
+	for i in 0..512 {
+		g[at+i] = hdr[i]
+	}
+	for i in 124..136 {
+		g[at+i] = u8('0')
+	}
+	mut last = g[at:]
+	checksum(mut last, false)
+	say.Line("zero block then header", entries(g))
+	let h = try archive("f")
+	say.Line("one zero block at the end", entries(h[:len(h)-512]))
+	say.Line("half a block after a zero one", entries(h[:len(h)-256]))
+}
+
+// archive writes one regular file of three bytes named name.
+fn archive(name str) ![]u8 {
+	mut w = tar.NewWriter()
+	try w.WriteHeader(tar.Header{Name: name, Mode: 0o644, Uid: 7, Gid: 5, Size: 3, Mtime: 1700000000, Type: tar.TypeFlag.Regular, Linkname: ""})
+	try w.Write([]u8("abc"))
+	try w.Close()
+	return try w.Bytes()
+}
+
+// base256 stores v in the field at as GNU tar does and fixes the checksum.
+fn base256(b mut []u8, at i64, n i64, v i64) {
+	mut x = v
+	mut i = at + n - 1
+	for i >= at {
+		b[i] = u8(x & 0xff)
+		x >>= 8
+		i -= 1
+	}
+	if v < 0 {
+		b[at] |= 0xc0
+	} else {
+		b[at] = 0x80
+	}
+	checksum(mut b, false)
+}
+
+// checksum sets the header checksum, summing the bytes as unsigned or as signed.
+fn checksum(b mut []u8, signed bool) {
+	for i in 148..156 {
+		b[i] = u8(' ')
+	}
+	mut sum = i64(0)
+	for i in 0..512 {
+		if signed {
+			sum += i64(i8(b[i]))
+		} else {
+			sum += i64(b[i])
+		}
+	}
+	let s = say.Fmt("%06o", sum)
+	for i in 0..6 {
+		b[148+i] = s[i]
+	}
+	b[154] = 0
+	b[155] = u8(' ')
+}
+
+fn first(b []u8) !str {
+	mut r = try tar.NewReader(b, tar.MaxArchiveSize)
+	let h = try r.Next()
+	if h == nil {
+		return "none"
+	}
+	return say.Fmt("%s mode=%o uid=%d gid=%d size=%d dev=%d,%d", h.Name, h.Mode, h.Uid, h.Gid, h.Size, h.Devmajor, h.Devminor)
+}
+
+fn fails(b []u8) str {
+	let s = first(b) catch e {
+		return say.Fmt("fails: %v", e)
+	}
+	return s
+}
+
+fn entries(b []u8) str {
+	mut r = tar.NewReader(b, tar.MaxArchiveSize) catch e {
+		return say.Fmt("fails: %v", e)
+	}
+	mut n = 0
+	for {
+		let h = r.Next() catch e {
+			return say.Fmt("%d entries, then fails: %v", n, e)
+		}
+		if h == nil {
+			return say.Fmt("%d entries, then the end", n)
+		}
+		n += 1
+	}
+	return ""
+}

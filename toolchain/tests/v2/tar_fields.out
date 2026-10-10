@@ -1,0 +1,10 @@
+plain f mode=644 uid=7 gid=5 size=3 dev=0,0
+gid base-256 f mode=644 uid=7 gid=3000000 size=3 dev=0,0
+size base-256 f mode=644 uid=7 gid=5 size=3 dev=0,0
+empty fields f mode=0 uid=7 gid=5 size=3 dev=0,0
+signed checksum é mode=644 uid=7 gid=5 size=3 dev=0,0
+negative uid fails: tar: invalid numeric header field
+digit 9 fails: tar: invalid numeric header field
+zero block then header 1 entries, then fails: tar: zero block followed by a header
+one zero block at the end 1 entries, then the end
+half a block after a zero one 1 entries, then fails: tar: unexpected EOF in header
