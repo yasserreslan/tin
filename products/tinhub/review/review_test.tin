@@ -750,6 +750,11 @@ fn TestLandConflict(t mut crucible.T) {
 	_ = w.call(w.bob, "POST", w.base() + idz.Letters() + "/approvals", "{{\"vote\":\"approve\"}}")
 	let lz = w.call(w.bob, "POST", w.base() + idz.Letters() + "/land", "")
 	t.True("Z is on main: main moves to its commit as it is: {str(lz.Body)}", lz.Code() == 200 && !landOf(lz).landed[0].rebased && landOf(lz).landed[0].commit == cz.Hex() && mainOf(w.c, w.r.Id) == cz.Hex())
+	// X is approved, not landed: "active" lists it, "open" (waiting for votes) does not
+	let active = w.call(w.carol, "GET", "/api/v1/repos/ada/tin/reviews?state=active", "")
+	t.True("the active reviews: {str(active.Body)}", active.Code() == 200 && twine.Count(str(active.Body), "\"change\":") == 1 && twine.Contains(str(active.Body), idx.Letters()))
+	let waiting = w.call(w.carol, "GET", "/api/v1/repos/ada/tin/reviews?state=open", "")
+	t.True("no review waits for votes: {str(waiting.Body)}", waiting.Code() == 200 && twine.Count(str(waiting.Body), "\"change\":") == 0)
 	let ab = w.call(w.carol, "PATCH", w.base() + idx.Letters() + "/review", "{{\"state\":\"abandoned\"}}")
 	crucible.Equal(mut t, "a reader cannot abandon another's change", ab.Code(), 403)
 	let ab2 = w.call(w.ada, "PATCH", w.base() + idx.Letters() + "/review", "{{\"state\":\"abandoned\"}}")

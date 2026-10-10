@@ -122,7 +122,10 @@ fn landOne(repoId i64, ch str, by i64) !Landed {
 fn Readiness(c postgres.Client, r accounts.Repo, ch str, version i64) !str {
 	let t = try TallyOf(c, r, ch)
 	if t.Blocking > 0 {
-		return "{t.Blocking} writer(s) requested changes"
+		if t.Blocking == 1 {
+			return "a writer requested changes"
+		}
+		return "{t.Blocking} writers requested changes"
 	}
 	if t.Approvals < t.Needed {
 		return "{t.Approvals} of {t.Needed} approvals"

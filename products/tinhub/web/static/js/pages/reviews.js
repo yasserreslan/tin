@@ -9,8 +9,9 @@ import { frame, onLive } from "./repo.js";
 import { title } from "../ui/commits.js";
 import { avatar, empty, skeleton, stateBadge, time, errorBox, segmented, badge } from "../ui/kit.js";
 
+// "Open" is every review still to land: waiting, approved or with changes requested, what the tab's count counts
 const STATES = [
-	{ value: "open", label: "Open" },
+	{ value: "active", label: "Open" },
 	{ value: "approved", label: "Approved" },
 	{ value: "changes_requested", label: "Changes requested" },
 	{ value: "landed", label: "Landed" },
@@ -40,7 +41,7 @@ export function reviewRow(repo, base, r) {
 export async function render(ctx) {
 	const { repo, body, base } = await frame(ctx, "reviews");
 	ctx.title("Reviews", `${repo.owner}/${repo.name}`);
-	const state = ctx.query.state ?? "open";
+	let state = ctx.query.state ?? "active";
 	const list = h("div.box", {}, skeleton(5));
 	const load = async (st) => {
 		list.replaceChildren(skeleton(5));
@@ -65,8 +66,9 @@ export async function render(ctx) {
 			h(
 				"div.actions",
 				{},
-				segmented(STATES, state, (v) => {
-					setQuery({ state: v === "open" ? "" : v || "all" });
+				segmented(STATES, state === "all" ? "" : state, (v) => {
+					state = v || "all";
+					setQuery({ state: v === "active" ? "" : state });
 					load(v);
 				}),
 			),

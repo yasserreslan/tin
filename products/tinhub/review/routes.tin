@@ -24,7 +24,8 @@ import "twine"
 //   POST  changes/<change>/checks            {"name", "state", "url", "description", "version"}: signed with a tit key
 //                                             (Tit-Signature; unsigned, the 401 carries a nonce), write access
 //   POST  changes/<change>/land              {"stack": bool}: write access; 200 and what landed, or 409 and why not
-//   GET   reviews?state=                     the repository's reviews, newest first
+//   GET   reviews?state=                     the repository's reviews, newest first; state "active" is every one not
+//                                             landed or abandoned (open, approved, changes_requested)
 //   GET   review/settings, PUT (admin)       {"approvals": N, "checks": [names]}
 //
 // A request signed with Tit-Signature is its signer's; any other is Deps.Auth's (a session). A repository the caller
@@ -740,7 +741,7 @@ fn listReviews(c call, state str) !listOut {
 	mut out = listOut{reviews: []listItem{}}
 	let repoId = c.r.Id
 	try within readWithin {
-		let rows = try c.d.Db.Query("SELECT r.change_id, r.state, r.target, coalesce(v.version, 0), extract(epoch FROM r.updated_at)::bigint, coalesce(v.commit_id, ''), coalesce(o.name, ''), extract(epoch FROM r.created_at)::bigint FROM reviews r LEFT JOIN LATERAL (SELECT version, commit_id FROM changes x WHERE x.repo_id = r.repo_id AND x.change_id = r.change_id ORDER BY version DESC LIMIT 1) v ON true LEFT JOIN users u ON u.id = r.opened_by LEFT JOIN owners o ON o.id = u.owner_id WHERE r.repo_id = {repoId} AND ({state} = '' OR r.state = {state}) ORDER BY r.updated_at DESC, r.change_id LIMIT 200")
+		let rows = try c.d.Db.Query("SELECT r.change_id, r.state, r.target, coalesce(v.version, 0), extract(epoch FROM r.updated_at)::bigint, coalesce(v.commit_id, ''), coalesce(o.name, ''), extract(epoch FROM r.created_at)::bigint FROM reviews r LEFT JOIN LATERAL (SELECT version, commit_id FROM changes x WHERE x.repo_id = r.repo_id AND x.change_id = r.change_id ORDER BY version DESC LIMIT 1) v ON true LEFT JOIN users u ON u.id = r.opened_by LEFT JOIN owners o ON o.id = u.owner_id WHERE r.repo_id = {repoId} AND ({state} = '' OR r.state = {state} OR ({state} = 'active' AND r.state IN ('open', 'approved', 'changes_requested'))) ORDER BY r.updated_at DESC, r.change_id LIMIT 200")
 		mut list = []listItem{}
 		for x in rows.Rows {
 			list = append(list, listItem{change: x[0].Text(), state: x[1].Text(), target: x[2].Text(), version: x[3].Int(), updated_at: x[4].Int(), commit: x[5].Text(), opened_by: x[6].Text(), created_at: x[7].Int()})
