@@ -1,0 +1,8 @@
+flat missed 0 twice 0 bad 0
+flat delete current missed 0 twice 0 bad 0
+flat no deletes missed 0 twice 0 bad 0
+convert missed 0 twice 0 bad 0
+rebuild missed 0 twice 0 bad 0
+rebuild delete current missed 0 twice 0 bad 0
+chunked grows missed 0 twice 0 bad 0
+churn len 550 range 550 sum 10373475
