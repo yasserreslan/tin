@@ -1,0 +1,70 @@
+package main
+
+// scroll's tokens match Go's encoding/xml (#1240): a namespace declaration ends with its element,
+// line ends are normalized, a quoted '>' or a comment does not end a doctype, a name with an empty
+// prefix or local part is all local, and the malformed documents Go refuses are refused. The
+// expected lines are Go 1.27's encoding/xml Decoder.Token, printed the same way.
+
+import "say"
+import "scroll"
+
+fn main() {
+	let docs = []str{
+		"<r><a xmlns=\"urn:a\"/><b/></r>",
+		"<r><a xmlns=\"urn:a\"></a><b/></r>",
+		"<r xmlns:p=\"urn:r\"><a xmlns:p=\"urn:a\"/><p:b/></r>",
+		"<r>a\r\nb\rc<![CDATA[x\r\ny\rz]]>&#13;</r>",
+		"<r a=\"x\r\ny\rz\"/>",
+		"<!DOCTYPE r [<!ENTITY a \"x>y\"><!-- c > --><!ATTLIST r b CDATA '>'>]><r/>",
+		"<!DOCTYPE r [<!-- a --><!-- b -->]><r/>",
+		"<x:/>",
+		"<r :a=\"1\" b:=\"2\"/>",
+		"<r><!-x></r>",
+		"<r a=\"<\"/>",
+		"<r><![CDAT[x]]></r>",
+		"<a:b:c/>",
+		"<r a:b:c=\"1\"/>",
+		"<r\xc3/>",
+		"<r><!-- a -- b --></r>",
+		"<r><!-- a ---></r>",
+		"<a:x xmlns:a=\"u\" xmlns:b=\"u\"></b:x>",
+	}
+	for doc in docs {
+		say.Line("doc", say.Fmt("%q", doc))
+		mut d = scroll.NewDecoder(doc)
+		for {
+			let t = d.Next() catch _ {
+				say.Line("fault")
+				break
+			}
+			match t {
+				StartElement(n, attrs) => {
+					mut line = "start " + n.Space + " " + n.Local
+					for a in attrs {
+						line += " " + a.Name.Space + ":" + a.Name.Local + "=" + say.Fmt("%q", a.Value)
+					}
+					say.Line(line)
+				}
+				EndElement(n) => {
+					say.Line("end", n.Space, n.Local)
+				}
+				CharData(text) => {
+					say.Line("text", say.Fmt("%q", text))
+				}
+				Comment(text) => {
+					say.Line("comment", say.Fmt("%q", text))
+				}
+				ProcInst(target, inst) => {
+					say.Line("pi", target, say.Fmt("%q", inst))
+				}
+				Directive(text) => {
+					say.Line("directive", say.Fmt("%q", text))
+				}
+				Done => {
+					say.Line("done")
+					break
+				}
+			}
+		}
+	}
+}

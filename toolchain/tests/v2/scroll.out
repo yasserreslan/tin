@@ -62,9 +62,9 @@ err line1
 <b></a> scroll: 3:8: end tag a does not match b
 err <a>text</b> scroll: 1:12: end tag b does not match a
 err <a b=c/> scroll: 1:6: expected a quoted attribute value
-err <a:x xmlns:a="u" xmlns:b="u"></b:x> ok
-err <a><!-- a -- b --></a> ok
-err <a><!-- a ---></a> ok
+err <a:x xmlns:a="u" xmlns:b="u"></b:x> scroll: 1:36: end tag b:x does not match a:x
+err <a><!-- a -- b --></a> scroll: 1:16: -- is not allowed inside a comment
+err <a><!-- a ---></a> scroll: 1:12: -- is not allowed inside a comment
 malformed 39 39
 chars 0 scroll: 1:1: character 18 is not allowed in XML
 chars 1 scroll: 1:22: character 11 is not allowed in XML

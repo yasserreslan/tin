@@ -16,6 +16,16 @@ fn decodeText(text str, line i64, col i64) !str {
 	mut out = ""
 	mut i = 0
 	for i < len(text) {
+		if text[i] == '\r' {
+			// Line ends are normalized before parsing (XML 1.0 §2.11): "\r\n" and a lone "\r"
+			// are read as "\n". A "\r" written as &#13; stays.
+			out += "\n"
+			i += 1
+			if i < len(text) && text[i] == '\n' {
+				i += 1
+			}
+			continue
+		}
 		if text[i] != '&' {
 			let (r, n) = glyph.DecodeRune(text, i)
 			try checkChar(r, line, col)
@@ -132,4 +142,26 @@ fn indexOfByteFrom(s str, c u8, from i64) i64 {
 		i += 1
 	}
 	return -1
+}
+
+// normalizeNewlines reads "\r\n" and a lone "\r" as "\n" (XML 1.0 §2.11).
+fn normalizeNewlines(text str) str {
+	if indexOfByteFrom(text, '\r', 0) < 0 {
+		return text
+	}
+	mut out = []u8{}
+	mut i = 0
+	for i < len(text) {
+		if text[i] == '\r' {
+			out = append(out, u8('\n'))
+			i += 1
+			if i < len(text) && text[i] == '\n' {
+				i += 1
+			}
+			continue
+		}
+		out = append(out, text[i])
+		i += 1
+	}
+	return str(out)
 }
