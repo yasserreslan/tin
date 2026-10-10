@@ -1827,7 +1827,7 @@ Package cairn is a set of containers: heaps, deques, a queue, sets, a bitset and
 - `(h Heap[T]) Peek() ?T`: Peek returns the first value without removing it, or nil when the heap is empty.
 - `(h Heap[T]) Len() i64`: Len returns the number of values in the heap.
 - `(h mut Heap[T]) Clear()`: Clear removes every value.
-- `type Deque[T constraints.Any] struct`: Deque is a double-ended queue in a slice with a moving head; use NewDeque.
+- `type Deque[T constraints.Any] struct`: Deque is a double-ended queue in a growing ring buffer; use NewDeque. Every push and pop is O(1) amortized at either end.
 - `NewDeque[T constraints.Any]() Deque[T]`: NewDeque returns an empty deque.
 - `(d Deque[T]) Len() i64`: Len returns the number of values in the deque.
 - `(d mut Deque[T]) PushBack(v T)`: PushBack appends v at the back.

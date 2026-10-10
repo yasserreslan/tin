@@ -91,86 +91,104 @@ fn (h mut Heap[T]) Clear() {
 	h.n = 0
 }
 
-// Deque is a double-ended queue in a slice with a moving head; use NewDeque.
+// Deque is a double-ended queue in a growing ring buffer; use NewDeque. Every push and pop is
+// O(1) amortized at either end.
 type Deque[T constraints.Any] struct {
 	buf  []T
 	head i64
+	n    i64
 }
 
 // NewDeque returns an empty deque.
 fn NewDeque[T constraints.Any]() Deque[T] {
-	return Deque[T]{buf: make([]T, 0, 8), head: 0}
+	return Deque[T]{buf: make([]T, 0, 8), head: 0, n: 0}
 }
 
 // Len returns the number of values in the deque.
 fn (d Deque[T]) Len() i64 {
-	return len(d.buf) - d.head
+	return d.n
 }
 
-// compact moves the live values to the front when half the slice is consumed.
-fn (d mut Deque[T]) compact() {
-	if d.head > 0 && d.head*2 >= len(d.buf) {
-		mut nb = make([]T, 0, len(d.buf))
-		nb = append(nb, d.buf[d.head:len(d.buf)]...)
-		d.buf = nb
-		d.head = 0
+// grow doubles the ring, unrolling the values to start at index 0. A type parameter has no zero
+// value, so the free slots hold copies of v (the value being pushed) until a push overwrites them.
+fn (d mut Deque[T]) grow(v T) {
+	let c = len(d.buf)
+	mut nc = c * 2
+	if nc < 8 {
+		nc = 8
 	}
-}
-
-// PushBack appends v at the back.
-fn (d mut Deque[T]) PushBack(v T) {
-	d.compact()
-	d.buf = append(d.buf, v)
-}
-
-// PushFront prepends v at the front.
-fn (d mut Deque[T]) PushFront(v T) {
-	if d.head > 0 {
-		d.head -= 1
-		d.buf[d.head] = v
-		return
+	mut nb = make([]T, 0, nc)
+	{
+		mut j = d.head
+		for i in 0..d.n {
+			nb = append(nb, d.buf[j])
+			j += 1
+			if j == c {
+				j = 0
+			}
+		}
 	}
-	mut nb = make([]T, 0, len(d.buf)*2+8)
-	nb = append(nb, v)
-	nb = append(nb, d.buf...)
+	for len(nb) < nc {
+		nb = append(nb, v)
+	}
 	d.buf = nb
 	d.head = 0
 }
 
+// PushBack appends v at the back.
+fn (d mut Deque[T]) PushBack(v T) {
+	if d.n == len(d.buf) {
+		d.grow(v)
+	}
+	mut i = d.head + d.n
+	if i >= len(d.buf) {
+		i -= len(d.buf)
+	}
+	d.buf[i] = v
+	d.n += 1
+}
+
+// PushFront prepends v at the front.
+fn (d mut Deque[T]) PushFront(v T) {
+	if d.n == len(d.buf) {
+		d.grow(v)
+	}
+	mut h = d.head - 1
+	if h < 0 {
+		h += len(d.buf)
+	}
+	d.buf[h] = v
+	d.head = h
+	d.n += 1
+}
+
 // PopFront removes and returns the front value, or nil when the deque is empty.
 fn (d mut Deque[T]) PopFront() ?T {
-	if d.Len() == 0 {
+	if d.n == 0 {
 		return nil
 	}
 	let v = d.buf[d.head]
-	d.head += 1
-	if d.head == len(d.buf) {
-		d.buf = d.buf[0:0]
-		d.head = 0
+	mut h = d.head + 1
+	if h == len(d.buf) {
+		h = 0
 	}
+	d.head = h
+	d.n -= 1
 	return v
 }
 
 // PopBack removes and returns the back value, or nil when the deque is empty.
 fn (d mut Deque[T]) PopBack() ?T {
-	if d.Len() == 0 {
+	if d.n == 0 {
 		return nil
 	}
-	let v = d.buf[len(d.buf)-1]
-	d.buf = d.buf[0 : len(d.buf)-1]
-	if d.head > len(d.buf) {
-		d.head = len(d.buf)
-	}
-	if d.head == len(d.buf) {
-		d.buf = d.buf[0:0]
-		d.head = 0
-	}
-	return v
+	d.n -= 1
+	return d.buf[d.slot(d.n)]
 }
 
 // Front returns the front value, or nil when the deque is empty.
 fn (d Deque[T]) Front() ?T {
-	if d.Len() == 0 {
+	if d.n == 0 {
 		return nil
 	}
 	return d.buf[d.head]
@@ -178,18 +196,27 @@ fn (d Deque[T]) Front() ?T {
 
 // Back returns the back value, or nil when the deque is empty.
 fn (d Deque[T]) Back() ?T {
-	if d.Len() == 0 {
+	if d.n == 0 {
 		return nil
 	}
-	return d.buf[len(d.buf)-1]
+	return d.buf[d.slot(d.n-1)]
+}
+
+// slot returns the buffer index of the i-th value from the front.
+fn (d Deque[T]) slot(i i64) i64 {
+	mut j = d.head + i
+	if j >= len(d.buf) {
+		j -= len(d.buf)
+	}
+	return j
 }
 
 // At returns the i-th value from the front, panicking when i is out of range.
 fn (d Deque[T]) At(i i64) T {
-	if i < 0 || i >= d.Len() {
+	if i < 0 || i >= d.n {
 		panic("cairn: Deque index out of range")
 	}
-	return d.buf[d.head+i]
+	return d.buf[d.slot(i)]
 }
 
 // Set is a set of comparable keys in insertion order; use NewSet.
