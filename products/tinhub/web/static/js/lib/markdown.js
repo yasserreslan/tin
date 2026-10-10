@@ -1,4 +1,5 @@
-// A safe Markdown reader (CommonMark's common subset plus GitHub tables, task lists, strikethrough and bare links).
+// A safe Markdown reader (CommonMark's common subset, with reference links and entities, plus GitHub tables, task
+// lists, strikethrough and bare links).
 // parse makes a tree of plain objects with no DOM, so it is tested in Node (web/test/markdown.test.js); render builds
 // DOM from it with text nodes only. Raw HTML is shown as text, and only http(s), mailto and relative links are kept.
 
@@ -62,7 +63,63 @@ function splitRow(line) {
 // parse reads Markdown source into a list of blocks.
 export function parse(src) {
 	const lines = String(src || "").replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
-	return blocks(lines);
+	const saved = refs;
+	refs = definitions(lines);
+	try {
+		return blocks(lines);
+	} finally {
+		refs = saved;
+	}
+}
+
+// refs maps the link reference definitions of the source being parsed ("[label]: url 'title'"), by normalized label.
+let refs = new Map();
+
+const DEF = /^ {0,3}\[([^\]]+)\]:[ \t]*<?([^\s<>]+)>?(?:[ \t]+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?[ \t]*$/;
+
+const refLabel = (l) => l.trim().replace(/\s+/g, " ").toLowerCase();
+
+// definitions takes the reference definitions out of lines (blanking them, outside code fences, where a paragraph
+// could start) and returns them; the first definition of a label wins.
+function definitions(lines) {
+	const out = new Map();
+	let fence = "";
+	let prevBlank = true;
+	for (let i = 0; i < lines.length; i++) {
+		const l = lines[i];
+		const f = FENCE.exec(l);
+		if (fence) {
+			if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !f[2]) {
+				fence = "";
+				prevBlank = true;
+				continue;
+			}
+		} else if (f) fence = f[1];
+		else if (prevBlank) {
+			const m = DEF.exec(l);
+			if (m && /\S/.test(m[1])) {
+				const label = refLabel(m[1]);
+				if (!out.has(label)) out.set(label, { href: m[2], title: m[3] ?? m[4] ?? m[5] ?? "" });
+				lines[i] = "";
+				prevBlank = true;
+				continue;
+			}
+		}
+		prevBlank = isBlank(l) || ATX.test(l) || HR.test(l);
+	}
+	return out;
+}
+
+// ENTITIES are the named character references read in text; others stay as written.
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0", ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", copy: "©", reg: "®", trade: "™", hellip: "…", mdash: "—", ndash: "–", lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", laquo: "«", raquo: "»", middot: "·", bull: "•", deg: "°", plusmn: "±", times: "×", divide: "÷", para: "¶", sect: "§", cent: "¢", pound: "£", euro: "€", yen: "¥", larr: "←", rarr: "→", uarr: "↑", darr: "↓", harr: "↔", lArr: "⇐", rArr: "⇒", hArr: "⇔", le: "≤", ge: "≥", ne: "≠", infin: "∞", check: "✓", star: "☆", hearts: "♥", zwj: "\u200d", zwnj: "\u200c", shy: "\u00ad" };
+
+// entities reads the character references in text: &copy;, &#169; and &#xA9;.
+export function entities(text) {
+	return text.replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{1,31}));/g, (all, dec, hex, name) => {
+		if (name) return Object.hasOwn(ENTITIES, name) ? ENTITIES[name] : all;
+		const n = dec ? parseInt(dec, 10) : parseInt(hex, 16);
+		return n === 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? "\ufffd" : String.fromCodePoint(n);
+	});
 }
 
 function blocks(lines) {
@@ -148,7 +205,7 @@ function blocks(lines) {
 			continue;
 		}
 		// a paragraph, or a setext heading
-		const para = [line.trim()];
+		const para = [line.trimStart()];
 		i++;
 		let level = 0;
 		while (i < lines.length && !isBlank(lines[i])) {
@@ -164,10 +221,10 @@ function blocks(lines) {
 				break;
 			}
 			if (FENCE.test(l) || ATX.test(l) || HR.test(l) || QUOTE.test(l) || BULLET.test(l) || /^( {0,3})1[.)]\s/.test(l)) break;
-			para.push(l.trim());
+			para.push(l.trimStart());
 			i++;
 		}
-		const textSrc = para.join("\n");
+		const textSrc = para.join("\n").trimEnd();
 		out.push(level ? { t: "h", level, c: inline(textSrc) } : { t: "p", c: inline(textSrc) });
 	}
 	return out;
@@ -236,7 +293,7 @@ export function inline(src) {
 	let buf = "";
 	const flush = () => {
 		if (buf) {
-			out.push({ t: "text", v: buf });
+			out.push({ t: "text", v: entities(buf) });
 			buf = "";
 		}
 	};
@@ -282,7 +339,7 @@ export function inline(src) {
 			continue;
 		}
 		if (c === "!" && s[i + 1] === "[") {
-			const l = link(s, i + 1);
+			const l = link(s, i + 1) || refLink(s, i + 1);
 			if (l) {
 				flush();
 				const src2 = safeUrl(l.href);
@@ -292,7 +349,7 @@ export function inline(src) {
 			}
 		}
 		if (c === "[") {
-			const l = link(s, i);
+			const l = link(s, i) || refLink(s, i);
 			if (l) {
 				flush();
 				out.push({ t: "link", href: safeUrl(l.href), title: l.title, c: inline(l.text) });
@@ -461,7 +518,37 @@ function link(s, i) {
 		while (s[k] === " ") k++;
 	}
 	if (s[k] !== ")") return null;
-	return { text, href, title, end: k + 1 };
+	return { text, href: entities(href), title: entities(title), end: k + 1 };
+}
+
+// closeBracket is the index of the "]" that closes the "[" at i, or -1.
+function closeBracket(s, i) {
+	let depth = 0;
+	for (let j = i; j < s.length; j++) {
+		if (s[j] === "\\") j++;
+		else if (s[j] === "[") depth++;
+		else if (s[j] === "]" && --depth === 0) return j;
+	}
+	return -1;
+}
+
+// refLink reads a reference link at i ("[text][label]", "[label][]" or "[label]") whose label is defined.
+function refLink(s, i) {
+	if (!refs.size) return null;
+	const j = closeBracket(s, i);
+	if (j < 0) return null;
+	const text = s.slice(i + 1, j);
+	let label = text;
+	let end = j + 1;
+	if (s[j + 1] === "[") {
+		const k = closeBracket(s, j + 1);
+		if (k < 0) return null;
+		if (k > j + 2) label = s.slice(j + 2, k);
+		end = k + 1;
+	}
+	const def = refs.get(refLabel(label));
+	if (!def) return null;
+	return { text, href: entities(def.href), title: entities(def.title), end };
 }
 
 // plain is a node list's text, without markup.
