@@ -1,0 +1,56 @@
+package main
+
+// A range over a map takes the map's slot count when it starts. When the body inserts
+// enough to make the map grow, the grow drops the deleted entries and the tables get
+// shorter than that count; the range then read past their end and crashed (#1222).
+
+import "say"
+import "twine"
+
+// fill makes a map of n keys, deletes all but the last live, and ranges over it, inserting
+// add new keys during the first step. It reports how many keys the range saw, and whether
+// it saw one twice or one the map never held.
+fn fill(n i64, live i64, add i64) {
+	mut m = make(map[i64]str)
+	mut i = 0
+	for i < n {
+		m[i] = say.Fmt("v%d", i)
+		i += 1
+	}
+	for j in 0..n-live {
+		delete(m, j)
+	}
+	mut seen = make(map[i64]i64)
+	mut first = true
+	mut junk = []str{}
+	mut bad = 0
+	for k, v in m {
+		if first {
+			first = false
+			for a in 0..add {
+				m[1000000+a] = "new"
+			}
+			// Fill the memory the old tables leave behind with nonzero bytes.
+			for q in 0..400 {
+				junk = append(junk, twine.Repeat("\x01", 64))
+			}
+		}
+		if seen[k] > 0 {
+			bad += 1
+		}
+		seen[k] += 1
+		if k < n-live || (k >= n && k < 1000000) || len(v) == 0 {
+			bad += 1
+		}
+	}
+	say.Line(n, "keys, range saw", len(seen) > 0, "bad", bad, "len", len(m), "junk", len(junk))
+}
+
+fn main() {
+	// A flat map: 2048 entries fill its tables, and one insert makes it grow.
+	fill(2048, 4, 1)
+	fill(2048, 100, 3000)
+	// A chunked map (more than 4096 entries) rebuilds when most of its entries are dead.
+	fill(40000, 10, 2000)
+	fill(40960, 10, 1)
+}

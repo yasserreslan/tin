@@ -669,5 +669,9 @@ fn dateInSec(year0 i64, month0 i64, day0 i64, hour0 i64, min0 i64, sec0 i64, nan
 // the instant Go's time.Date picks: the one whose zone offset is valid there.
 fn DateIn(year0 i64, month0 i64, day0 i64, hour0 i64, min0 i64, sec0 i64, nano0 i64, z Zone) i64 {
 	let (unix, nano) = dateInSec(year0, month0, day0, hour0, min0, sec0, nano0, z)
+	// Borrow a second before 1970, as Date does, so the earliest instants do not overflow.
+	if unix < 0 && nano > 0 {
+		return (unix+1)*Second + (nano - Second)
+	}
 	return unix*Second + nano
 }

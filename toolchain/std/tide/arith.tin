@@ -28,7 +28,13 @@ fn absToUnix(sec i64, nsec i64) i64 {
 		n += Second
 		s -= 1
 	}
-	return (s - unixToInternal)*Second + n
+	// Before 1970 borrow a second back, so that the earliest instants (1677-09-21) do not
+	// overflow on the way to a result that fits, as Date does (#362).
+	let u = s - unixToInternal
+	if u < 0 && n > 0 {
+		return (u+1)*Second + (n - Second)
+	}
+	return u*Second + n
 }
 
 // addMod returns (a + b) % d for a and b in [0, d), without overflowing.

@@ -1539,6 +1539,9 @@ fn rt_flush() {
 // newline (say.Text) waits for the next one.
 fn rt_out(p i64, n i64) {
 	rt_lock(&rtOutLock)
+	if rtOutHold && rtOut[0]+n > rtOut[1] && rtOut[0]+n <= rtOutHoldMost {
+		rt_out_grow(rtOut[0] + n)
+	}
 	if rtOut[0]+n > rtOut[1] {
 		rt_flush()
 		if n > rtOut[1] {
@@ -1553,6 +1556,21 @@ fn rt_out(p i64, n i64) {
 		rt_flush()
 	}
 	rt_unlock(&rtOutLock)
+}
+
+// rtOutHoldMost bounds the stdout buffer while it is held: past it, held lines go out as plain text.
+const rtOutHoldMost = 64 << 20
+
+// rt_out_grow doubles the held stdout buffer until it holds need bytes: crucible's -json capture takes a test's
+// lines from the buffer as output events, and a test that printed more than 64 KiB had the rest written out as
+// plain lines between the JSON events (#1217).
+fn rt_out_grow(need i64) {
+	mut c = rtOut[1]
+	for c < need {
+		c *= 2
+	}
+	rtOut[2] = realloc(rtOut[2], c)
+	rtOut[1] = c
 }
 
 fn rt_panic(msg str) {
@@ -3598,6 +3616,11 @@ fn rt_map_slots(m i64) i64 {
 }
 
 fn rt_map_live(m i64, i i64) bool {
+	// A range takes its slot count when it starts; a grow inside its body can compact the
+	// entries into tables shorter than that, and the slots past the end are not entries (#1222).
+	if i >= m[10] {
+		return false
+	}
 	if m[15] != 0 {
 		return load8(rt_cmap_lw(m, i)) == 1
 	}
@@ -3874,7 +3897,15 @@ fn fb_pad(f i64, n i64, c i64) {
 
 // fmt_pad writes n bytes at p padded to the current verb's width.
 fn fmt_pad(f i64, p i64, n i64) {
-	let w = f[fWidth]
+	mut w = f[fWidth]
+	if w > 0 {
+		// Width counts runes, as Go does: each continuation byte widens the field by one.
+		for i in 0..n {
+			if load8(p+i)&0xc0 == 0x80 {
+				w += 1
+			}
+		}
+	}
 	if w <= n {
 		fb_raw(f, p, n)
 		return
@@ -4072,32 +4103,42 @@ fn fmt_uint_buf(buf i64, v i64, base i64, upper bool) i64 {
 	return i
 }
 
+// fmtUnsigned is set (per core) while fmt_int formats an unsigned value: its bits are the number, with no sign.
+mut fmtUnsigned bool
+
 fn fmt_int(f i64, v i64, verb i64) {
-	let buf = fmt_frame_scratch(f, 80)
+	let buf = fmt_frame_scratch(f, 160+f[fWidth]+f[fPrec])
 	if verb == 'c' {
 		let n = rt_utf8_put(buf, v)
 		fmt_pad(f, buf, n)
 		return
 	}
 	if verb == 'q' {
-		store8(buf, '\'')
-		let n = rt_utf8_put(buf+1, v)
-		store8(buf+1+n, '\'')
-		fmt_pad(f, buf, n+2)
+		fmt_quote_char(f, v)
 		return
 	}
 	if verb == 'U' {
-		store8(buf, 'U')
-		store8(buf+1, '+')
-		mut i = fmt_uint_buf(buf+8, v, 16, true)
-		mut n = 64 - i
-		for n < 4 {
+		// As Go's %U: at least four digits (more with a larger precision), and with # the
+		// character itself when it prints; zero padding does not apply.
+		let start = f[fLen]
+		let at = buf + len64(f[fPrec]) + 16
+		mut i = fmt_uint_buf(at, v, 16, true)
+		for 64-i < 4 || 64-i < f[fPrec] {
 			i -= 1
-			store8(buf+8+i, '0')
-			n += 1
+			store8(at+i, '0')
 		}
-		memmove(buf+2, buf+8+i, n)
-		fmt_pad(f, buf, n+2)
+		fb_str(f, "U+")
+		fb_raw(f, at+i, 64-i)
+		if f[fSharp] != 0 && v >= 0 && v <= 0x10ffff && rt_is_print(v) {
+			fb_str(f, " '")
+			fb_reserve(f, 4)
+			f[fLen] += rt_utf8_put(f[fData]+f[fLen], v)
+			fb_byte(f, '\'')
+		}
+		let zero = f[fZero]
+		f[fZero] = 0
+		fmt_pad_since(f, start)
+		f[fZero] = zero
 		return
 	}
 	mut base = 10
@@ -4107,36 +4148,104 @@ fn fmt_int(f i64, v i64, verb i64) {
 	} else if verb == 'X' {
 		base = 16
 		upper = true
-	} else if verb == 'o' {
+	} else if verb == 'o' || verb == 'O' {
 		base = 8
 	} else if verb == 'b' {
 		base = 2
 	}
-	let neg = v < 0 && base == 10
+	// As Go's fmtInteger: a signed value prints its sign in every base, a precision is a minimum
+	// count of digits (and turns off zero padding), and zero padding without one fills the
+	// width with digits, after the sign and before any 0x prefix.
+	let neg = v < 0 && !fmtUnsigned
 	if neg {
 		v = -v
 	}
-	mut i = fmt_uint_buf(buf+16, v, base, upper)
+	mut prec = 0
 	if f[fPrec] >= 0 {
-		for 64-i < f[fPrec] {
-			i -= 1
-			store8(buf+16+i, '0')
+		prec = f[fPrec]
+		if prec == 0 && v == 0 {
+			let zero = f[fZero]
+			f[fZero] = 0
+			fmt_pad(f, buf, 0)
+			f[fZero] = zero
+			return
+		}
+	} else if f[fZero] != 0 && f[fMinus] == 0 && f[fWidth] > 0 {
+		prec = f[fWidth]
+		if neg || f[fPlus] != 0 || f[fSpace] != 0 {
+			prec -= 1
 		}
 	}
-	if f[fSharp] != 0 && base == 16 {
+	let at = buf + len64(prec) + 32
+	mut i = fmt_uint_buf(at, v, base, upper)
+	for 64-i < prec {
 		i -= 1
-		store8(buf+16+i, 'x')
+		store8(at+i, '0')
+	}
+	if f[fSharp] != 0 {
+		if base == 16 {
+			i -= 1
+			store8(at+i, verb)
+			i -= 1
+			store8(at+i, '0')
+		} else if base == 2 {
+			i -= 1
+			store8(at+i, 'b')
+			i -= 1
+			store8(at+i, '0')
+		} else if base == 8 && load8(at+i) != '0' {
+			i -= 1
+			store8(at+i, '0')
+		}
+	}
+	if verb == 'O' {
 		i -= 1
-		store8(buf+16+i, '0')
+		store8(at+i, 'o')
+		i -= 1
+		store8(at+i, '0')
 	}
 	if neg {
 		i -= 1
-		store8(buf+16+i, '-')
+		store8(at+i, '-')
 	} else if f[fPlus] != 0 {
 		i -= 1
-		store8(buf+16+i, '+')
+		store8(at+i, '+')
+	} else if f[fSpace] != 0 {
+		i -= 1
+		store8(at+i, ' ')
 	}
-	fmt_pad(f, buf+16+i, 64-i)
+	let zero = f[fZero]
+	f[fZero] = 0
+	fmt_pad(f, at+i, 64-i)
+	f[fZero] = zero
+}
+
+// len64 rounds n up to a multiple of 8, the room fmt_int keeps before a number's digits.
+fn len64(n i64) i64 {
+	return (n + 7) & -8
+}
+
+// fmt_quote_char writes the character r quoted as Go's %q does (strconv.QuoteRune, or
+// QuoteRuneToASCII with the + flag), padded to the width; a value that is not a rune is U+FFFD.
+fn fmt_quote_char(f i64, r i64) {
+	if r < 0 || r > 0x10ffff || (r >= 0xd800 && r <= 0xdfff) {
+		r = 0xfffd
+	}
+	let start = f[fLen]
+	fb_byte(f, '\'')
+	if r == '\'' || r == '\\' {
+		fb_byte(f, '\\')
+		fb_byte(f, r)
+	} else if r >= ' ' && r < 0x7f {
+		fb_byte(f, r)
+	} else if r >= 0x80 && rt_is_print(r) && f[fPlus] == 0 {
+		fb_reserve(f, 4)
+		f[fLen] += rt_utf8_put(f[fData]+f[fLen], r)
+	} else {
+		fmt_quote_rune(f, r)
+	}
+	fb_byte(f, '\'')
+	fmt_pad_since(f, start)
 }
 
 fn rt_fmt_i(v i64) {
@@ -4152,7 +4261,9 @@ fn rt_fmt_p(v i64) {
 		return
 	}
 	f[fSharp] = 1
+	fmtUnsigned = true
 	fmt_int(f, v, 'x')
+	fmtUnsigned = false
 }
 
 fn rt_fmt_b(b bool) {
@@ -4357,17 +4468,32 @@ fn fmt_string(f i64, s str, verb i64) {
 		if verb == 'X' {
 			digits = "0123456789ABCDEF"
 		}
-		for i in 0..len(s) {
+		// As Go's %x of a string: a precision counts input bytes, the space flag separates the
+		// bytes, # adds 0x (before each byte when they are separated), and the width pads.
+		mut n = len(s)
+		if f[fPrec] >= 0 && f[fPrec] < n {
+			n = f[fPrec]
+		}
+		let start = f[fLen]
+		for i in 0..n {
+			if i > 0 && f[fSpace] != 0 {
+				fb_byte(f, ' ')
+			}
+			if f[fSharp] != 0 && (i == 0 || f[fSpace] != 0) {
+				fb_byte(f, '0')
+				fb_byte(f, verb)
+			}
 			fb_byte(f, i64(digits[i64(s[i])>>4]))
 			fb_byte(f, i64(digits[i64(s[i])&15]))
 		}
+		fmt_pad_since(f, start)
 		return
 	}
-	mut n = len(s)
-	if f[fPrec] >= 0 && f[fPrec] < n {
-		n = f[fPrec]
+	// A precision counts runes, as Go's does, so a string is never cut inside a character.
+	if f[fPrec] >= 0 && f[fPrec] < len(s) {
+		s = rt_runes_prefix(s, f[fPrec])
 	}
-	fmt_pad(f, cast(i64, s)+8, n)
+	fmt_pad(f, cast(i64, s)+8, len(s))
 }
 
 fn rt_fmt_s(s str) {
@@ -4418,6 +4544,14 @@ fn fmt_nonfinite(f i64, x f64, verb i64) bool {
 	} else if x < 0 {
 		text = "-Inf"
 	}
+	if f[fSpace] != 0 && f[fPlus] == 0 && text[0] != '-' {
+		// The space flag leaves a space where a + would go.
+		if x != x {
+			text = " NaN"
+		} else {
+			text = " Inf"
+		}
+	}
 	let zero = f[fZero]
 	f[fZero] = 0
 	fmt_pad(f, cast(i64, text)+8, len(text))
@@ -4433,7 +4567,24 @@ fn fmt_float_number(f i64, x f64, verb i64, prec i64) {
 		store8(buf, '+')
 		n += 1
 	}
-	fmt_pad(f, buf, n)
+	fmt_float_pad(f, buf, n)
+}
+
+// fmt_float_pad pads a formatted float as Go does: the space flag puts a space where a + would
+// go, and zero padding goes after the sign (or that space).
+fn fmt_float_pad(f i64, p i64, n i64) {
+	if f[fSpace] == 0 || f[fPlus] != 0 || load8(p) == '-' {
+		fmt_pad(f, p, n)
+		return
+	}
+	fb_byte(f, ' ')
+	if f[fWidth] > 0 {
+		f[fWidth] -= 1
+		fmt_pad(f, p, n)
+		f[fWidth] += 1
+		return
+	}
+	fb_raw(f, p, n)
 }
 
 // fmt_shortest writes x with the fewest digits that read back exactly, laid out the way
@@ -4610,7 +4761,7 @@ fn shortest_into(out i64, x f64, lo i64, hi i64, json bool, plus bool) i64 {
 fn fmt_shortest(f i64, x f64, lo i64, hi i64) {
 	let out = fmt_frame_scratch(f, 400)
 	let n = shortest_into(out, x, lo, hi, false, f[fPlus] != 0)
-	fmt_pad(f, out, n)
+	fmt_float_pad(f, out, n)
 }
 
 // rt_float_json is x as encoding/json writes it (exponent below 1e-6 or from 1e21).
@@ -4624,8 +4775,17 @@ fn fmt_float(f i64, x f64, verb i64) {
 	if fmt_nonfinite(f, x, verb) {
 		return
 	}
-	if verb == 'v' || ((verb == 'g' || verb == 'G') && f[fPrec] < 0) {
+	if (verb == 'v' && f[fPrec] < 0) || ((verb == 'g' || verb == 'G') && f[fPrec] < 0) {
+		let start = f[fLen]
 		fmt_shortest(f, x, -4, 6)
+		if verb == 'G' {
+			// %G writes its exponent with a capital E.
+			for i in start..f[fLen] {
+				if load8(f[fData]+i) == 'e' {
+					store8(f[fData]+i, 'E')
+				}
+			}
+		}
 		return
 	}
 	mut prec = f[fPrec]
@@ -4999,13 +5159,9 @@ fn rt_keep_closure(f i64) i64 {
 fn rt_fmt_u(v i64) {
 	let f = rt_frame()
 	let verb = rt_fmt_arg(f, false)
-	if verb == 'd' || verb == 'v' {
-		let buf = rt_alloc(80)
-		let i = fmt_uint_buf(buf+16, v, 10, false)
-		fmt_pad(f, buf+16+i, 64-i)
-		return
-	}
+	fmtUnsigned = true
 	fmt_int(f, v, verb)
+	fmtUnsigned = false
 }
 
 fn rt_fmt_slint(s i64, width i64, signed i64) {
@@ -5032,13 +5188,9 @@ fn rt_fmt_slint(s i64, width i64, signed i64) {
 			let shift = 64 - 8*width
 			v = (v << shift) >> shift
 		}
-		if signed == 0 && (verb == 'v' || verb == 'd') {
-			let buf = rt_alloc(80)
-			let j = fmt_uint_buf(buf+16, v, 10, false)
-			fb_raw(f, buf+16+j, 64-j)
-		} else {
-			fmt_int(f, v, verb)
-		}
+		fmtUnsigned = signed == 0
+		fmt_int(f, v, verb)
+		fmtUnsigned = false
 	}
 	fb_byte(f, ']')
 }
@@ -5064,7 +5216,9 @@ fn rt_fmt_slp(s i64) {
 			fb_byte(f, ' ')
 		}
 		f[fSharp] = 1
+		fmtUnsigned = true
 		fmt_int(f, d[i], 'x')
+		fmtUnsigned = false
 	}
 	fb_byte(f, ']')
 }

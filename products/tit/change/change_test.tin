@@ -197,3 +197,46 @@ fn TestLock(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// A process that read a stale lock's text clears only that lock: when the holder it read let go and another process
+// locked since, the live lock stays as its owner wrote it, and that owner can release it (#1210).
+fn TestLockStaleRace(t mut crucible.T) {
+	let d = fresh("lockrace")
+	let path = d + "/lock"
+	let host = quarry.Hostname() catch _ {
+		"?"
+	}
+	let stale = "999999999 {host} 0\n"
+	// the read saw the stale text, but a live process holds the lock now
+	let live = Lock(d) catch err {
+		t.Error("lock: {fault.Message(err)}")
+		return
+	}
+	let mine = quarry.ReadFile(path) catch _ {
+		""
+	}
+	clearStale(path, stale)
+	let after = quarry.ReadFile(path) catch _ {
+		"(gone)"
+	}
+	crucible.Equal(mut t, "the live lock is kept", after, mine)
+	t.NoFault("its owner releases it", live.Close())
+	let left = quarry.ReadDir(d) catch _ {
+		[]str{"?"}
+	}
+	crucible.Equal(mut t, "nothing left beside it", len(left), 0)
+	// the stale lock itself is cleared
+	quarry.WriteFile(path, stale) catch _ {
+	}
+	clearStale(path, stale)
+	t.True("the stale lock is gone", !quarry.Exists(path))
+	let left2 = quarry.ReadDir(d) catch _ {
+		[]str{"?"}
+	}
+	crucible.Equal(mut t, "nothing left after clearing", len(left2), 0)
+	// no lock at all: nothing happens
+	clearStale(path, stale)
+	t.True("still no lock", !quarry.Exists(path))
+	quarry.RemoveAll(d) catch _ {
+	}
+}

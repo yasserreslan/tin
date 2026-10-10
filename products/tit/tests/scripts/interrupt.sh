@@ -54,11 +54,25 @@ kill $reader 2> /dev/null || true
 [ "$(t log -n 1 --format=subject)" = c8000 ] || fail "log after the interrupt"
 echo "ok an interrupted log exits with 130"
 
-bg "$tit" watch --every 50 > /dev/null
+# the save is made once the watch is running, and the interrupt comes once the watch has kept it: fixed sleeps lost the
+# race on a busy machine, and the watch was interrupted before it kept anything
+bg "$tit" watch --every 50 > "$d/watch.out"
 pid=$!
-sleep 0.5
+n=0
+until grep -q Watching "$d/watch.out"; do
+	n=$((n + 1))
+	[ $n -le 300 ] || fail "tit watch did not start in 30 s"
+	running $pid || fail "tit watch exited before it started"
+	sleep 0.1
+done
 printf 'saved\n' > f.txt
-sleep 0.3
+n=0
+until t timeline f.txt | grep -q "before tit watch"; do
+	n=$((n + 1))
+	[ $n -le 300 ] || fail "watch kept nothing in 30 s"
+	running $pid || fail "tit watch exited before it kept the save"
+	sleep 0.1
+done
 kill -INT $pid
 status=0
 wait $pid > /dev/null 2>&1 || status=$?

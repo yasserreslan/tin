@@ -1,6 +1,7 @@
 package main
 
 import "./ci"
+import "say"
 import "tinjson"
 import "twine"
 
@@ -141,6 +142,21 @@ fn TestOther(t mut crucible.T) {
 }
 `
 
+// A test that prints more than the 64 KiB output buffer, and bytes JSON must escape (#1217).
+const FLOOD = `package geo
+
+import "crucible"
+import "say"
+
+fn TestFlood(t mut crucible.T) {
+	for i in 0..3000 {
+		say.Line("line {i} of a test that prints far more than the output buffer holds")
+	}
+	say.Line("bell\x07 bad\xff end")
+	crucible.Equal(mut t, "area", Area(2, 2), 4)
+}
+`
+
 // tinTest writes the files (name, text pairs) into a folder and runs `tin test` on it; it returns the exit code and what was printed.
 fn tinTest(names []str, texts []str, args []str) (i64, str) {
 	let dir = ci.TempDir(ci.Join(ci.Root(), "bin/ci"), "tintest-")
@@ -241,6 +257,18 @@ fn main() {
 	let (code12, out12) = tinTest(n4, t4, []str{"-json", "-run", "Other"})
 	ci.Test("json with -run: exit 0", code12 == 0)
 	ci.Same("json with -run: events", kinds(events(out12)), "run:TestOther,pass:TestOther,summary:")
+
+	// every line of a test's output is an event, however much it printed, and every line is JSON (#1217)
+	let (n5, t5) = files2(LIB, FLOOD)
+	let (code14, out14) = tinTest(n5, t5, []str{"-json"})
+	let flood = events(out14)
+	ci.Test("json flood: exit 0", code14 == 0)
+	ci.Same("json flood: every line is an event", say.Str(len(flood)), say.Str(len(ci.Lines(out14))))
+	ci.Same("json flood: run, 3001 lines, pass and the summary", say.Str(len(flood)), "3004")
+	if len(flood) == 3004 {
+		ci.Same("json flood: the last line", flood[3000].Get("message").Text(), "line 2999 of a test that prints far more than the output buffer holds")
+		ci.Same("json flood: escaped bytes", flood[3001].Get("message").Text(), "bell\x07 bad\ufffd end")
+	}
 
 	// no test files
 	let (code13, out13) = tinTest([]str{"geo.tin"}, []str{LIB}, []str{})
