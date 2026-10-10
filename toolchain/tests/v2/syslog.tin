@@ -52,7 +52,7 @@ fn run() ! {
 	say.Line(dialErr("unixgram", "/tmp/tin-test-syslog-none.sock", 0))
 
 	// A datagram round trip: Info, Write, Herald, then Close and Err reconnects.
-	let path = "/tmp/tin-test-syslog.sock"
+	let path = "/tmp/tin-test-syslog-{quarry.Pid()}.sock"
 	quarry.Remove(path) catch _ {}
 	mut c = try syslog.Listen("unixgram", path)
 	mut w = try syslog.Dial("unixgram", path, syslog.LogLocal0|syslog.LogNotice, "probe")
@@ -75,7 +75,7 @@ fn run() ! {
 	quarry.Remove(path) catch _ {}
 
 	// A stream: two lines in order on one connection.
-	let spath = "/tmp/tin-test-syslog-stream.sock"
+	let spath = "/tmp/tin-test-syslog-stream-{quarry.Pid()}.sock"
 	quarry.Remove(spath) catch _ {}
 	mut s = try syslog.Listen("unix", spath)
 	mut sw = try syslog.Dial("unix", spath, syslog.LogDaemon|syslog.LogInfo, "sd")

@@ -326,7 +326,11 @@ fn compare(name str, want []str, got []str, sent i64) {
 	ci.Check(bad == 0, name + ": " + mint.Itoa(bad) + " frames differ")
 }
 
-// check runs every comparison in order: the Go client and the Tin client on the same script, then their frames compared.
+// transportSeconds bounds one transport's run, Go's client and Tin's: a run that hangs (#1064) fails the check and names its
+// transport instead of holding the job until CI cancels it.
+const transportSeconds = 120
+
+// check builds both clients and runs every transport in order, each in a process of its own that the deadline ends.
 fn check() ! {
 	let root = ci.Root()
 	let work = ci.TempDir("/tmp", "tin-syslog-")
@@ -334,20 +338,57 @@ fn check() ! {
 	ci.BuildTin("tools/ci/fixtures/syslog.tin", tin, "", []str{})
 	let goexe = ci.Join(work, "syslog-go")
 	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "./bench/ref/syslog"}, root, 300), "go build syslog")
+	mut self = quarry.Args()[0]
+	if !twine.HasPrefix(self, "/") {
+		self = ci.Join(root, self)
+	}
 	mut total = 0
 	for idx, r in runs() {
-		let (text, sent) = script(r, SEED+i64(idx))
-		let port = 41000 + i64(idx)
-		let want = try deliver(r, goexe, text, sent, work, port)
-		let got = try deliver(r, tin, text, sent, work, port)
-		compare(r.network + " " + mint.Itoa(r.priority), want, got, sent)
-		total += len(want)
+		let o = ci.Exec([]str{self, "transport", mint.Itoa(idx), work, tin, goexe}, root, transportSeconds)
+		if o.Code == 124 {
+			let step = quarry.ReadFile(ci.Join(work, "step-" + mint.Itoa(idx))) catch _ {
+				"starting"
+			}
+			ci.Fail("syslog: the " + r.network + " run did not finish within " + mint.Itoa(transportSeconds) + " s, " + step)
+		}
+		ci.Must(o, "syslog: the " + r.network + " run")
+		let (_, sent) = script(r, SEED+i64(idx))
+		total += sent
 	}
 	ci.Remove(work)
 	ci.Pass("syslog: " + mint.Itoa(total) + " frames over " + mint.Itoa(len(runs())) + " connections (unixgram, unix, tcp, udp) match Go's log/syslog")
 }
 
+// transport runs run idx: the Go client and the Tin client on the same script, then their frames compared. The step it is on
+// is in the file step-<idx> of work, for check to name when the run does not finish.
+fn transport(idx i64, work str, tin str, goexe str) ! {
+	let r = runs()[idx]
+	let (text, sent) = script(r, SEED+idx)
+	let port = 41000 + idx
+	let name = r.network + " " + mint.Itoa(r.priority)
+	let step = ci.Join(work, "step-" + mint.Itoa(idx))
+	ci.Write(step, "waiting for " + mint.Itoa(sent) + " messages from Go's client")
+	let want = try deliver(r, goexe, text, sent, work, port)
+	ci.Write(step, "waiting for " + mint.Itoa(sent) + " messages from Tin's client")
+	let got = try deliver(r, tin, text, sent, work, port)
+	ci.Write(step, "comparing the frames")
+	compare(name, want, got, sent)
+}
+
 fn main() {
+	let args = quarry.Args()
+	if len(args) == 6 && args[1] == "transport" {
+		let idx = mint.Atoi(args[2]) catch _ {
+			-1
+		}
+		if idx < 0 || idx >= len(runs()) {
+			ci.Fail("syslog_check transport: no run " + args[2])
+		}
+		transport(idx, args[3], args[4], args[5]) catch err {
+			ci.Fail("syslog_check: " + say.Str(err))
+		}
+		return
+	}
 	check() catch err {
 		ci.Fail("syslog_check: " + say.Str(err))
 	}

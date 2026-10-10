@@ -11,7 +11,25 @@ import "say"
 // Status on four cores (#783): 300 files, every one changed after staging, are hashed by the worker pool, and the
 // result equals status on one core.
 
-let dir = "/tmp/tin-test-tit-status-cores"
+// dir is the scratch directory (#1065): $TIN_TEST_DIR when the script that writes the golden output names one (it
+// reads what this program leaves there), else this run's own, removed when main ends.
+let given = quarry.Getenv("TIN_TEST_DIR")
+let dir = scratchDir("tin-test-tit-status-cores")
+
+fn scratchDir(name str) str {
+	if len(given) > 0 {
+		return given
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
+
+// done removes this run's own scratch directory.
+fn done() {
+	if len(given) == 0 {
+		quarry.RemoveAll(dir) catch _ {
+		}
+	}
+}
 
 fn run() {
 	quarry.RemoveAll(dir) catch _ {
@@ -52,4 +70,5 @@ fn run() {
 
 fn main() {
 	cores.Start(4, run)
+	done()
 }

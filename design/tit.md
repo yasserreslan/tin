@@ -582,6 +582,11 @@ repos.
 The lock is held only for step 4. A crash before step 4 leaves a pending pack that nothing reaches; a crash inside it
 leaves the repository as before or after the push (tit: the oplog's pending operation, §9; tinhub: the transaction).
 
+A fetch's answer is streamed (`packfile.ReuseTo`, #1009): entries that go as they are stored are copied from the
+pack's file a window at a time (1 MiB), each window freed before the next, so a clone of a file of any size costs the
+server a window, not the file (#1076). Only objects that go whole (a delta whose base is not sent, a loose object) are
+held in memory, one at a time.
+
 Repack (#1007) and prune (#1010) use the same calls: write a pack, `Stage`, `Commit` an update with no refs and no
 changes (the pack becomes live), then `Retire` the packs it replaces. Prune never removes an object younger than its
 retention, so a push whose checks saw an object still finds it at `Commit`.

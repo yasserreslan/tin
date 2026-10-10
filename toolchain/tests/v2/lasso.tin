@@ -160,20 +160,40 @@ fn main() {
 	find(`(?i:ab)c`, "ABc")
 	find(`(?i:ab)c`, "ABC")
 
-	// The pathological case: (a*)*b against a long run of a's, which must stay linear.
+	// The pathological cases: (a*)*b and (x+x+)+y against a long run of a's, which must stay
+	// linear. Four times the input must take well under 16 times as long (what a quadratic match
+	// takes); the best of three runs keeps a busy machine from deciding the result.
 	mut s = ""
 	for i in 0..100000 {
 		s += "a"
 	}
+	let s4 = s + s + s + s
 	let slow = lasso.MustCompile(`(a*)*b`)
-	let t0 = tide.Now()
-	let matched = slow.Match(s)
-	let ms = (tide.Now() - t0) / 1000000
-	say.Line("pathological", matched, ms < 50)
+	say.Line("pathological", slow.Match(s), linear(slow, s, s4))
 	let nested = lasso.MustCompile(`(x+x+)+y`)
-	let t1 = tide.Now()
-	let m2 = nested.Match(s)
-	say.Line("nested", m2, (tide.Now()-t1)/1000000 < 50)
+	say.Line("nested", nested.Match(s), linear(nested, s, s4))
+}
+
+// linear reports whether matching re against s4, four times s, takes less than 8 times as long as
+// against s, each the best of three runs.
+fn linear(re lasso.Regexp, s str, s4 str) bool {
+	return 8 * bestNs(re, s) > bestNs(re, s4)
+}
+
+// bestNs is the shortest of three runs of re.Match(s), in nanoseconds, each in an arena.
+fn bestNs(re lasso.Regexp, s str) i64 {
+	mut best = 0
+	for i in 0..3 {
+		let t0 = tide.Now()
+		arena {
+			re.Match(s)
+		}
+		let ns = tide.Now() - t0
+		if i == 0 || ns < best {
+			best = ns
+		}
+	}
+	return best
 }
 
 // splitOf renders Split's pieces, quoted.

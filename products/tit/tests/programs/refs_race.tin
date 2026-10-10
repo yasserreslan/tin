@@ -12,7 +12,16 @@ import "tide"
 // the commit for a count, and moves it to the commit for the next count, trying again on a conflict. No update may
 // be lost: the ref ends at the commit for processes × steps. The program runs itself as the writers.
 
-let dir = "/tmp/tin-test-tit-refs-race"
+// dir is this run's own scratch directory (#1065), which the writers it starts are given as their second argument.
+let dir = scratchDir("tin-test-tit-refs-race")
+
+fn scratchDir(name str) str {
+	let args = quarry.Args()
+	if len(args) > 2 && args[1] == "writer" {
+		return args[2]
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
 
 const procs = 8
 
@@ -76,7 +85,7 @@ fn main() {
 	}
 	mut ps = []spawn.Process{}
 	for i in 0..procs {
-		let p = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
+		let p = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer", dir}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
 			say.Line(err)
 			return
 		}

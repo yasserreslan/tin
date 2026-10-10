@@ -11,7 +11,25 @@ import "seal"
 // The golden output is what `git merge-file -p` gave for the same files (regenerate with
 // products/tit/tests/merge_git.sh).
 
-let dir = "/tmp/tin-test-tit-merge"
+// dir is the scratch directory (#1065): $TIN_TEST_DIR when the script that writes the golden output names one (it
+// reads what this program leaves there), else this run's own, removed when main ends.
+let given = quarry.Getenv("TIN_TEST_DIR")
+let dir = scratchDir("tin-test-tit-merge")
+
+fn scratchDir(name str) str {
+	if len(given) > 0 {
+		return given
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
+
+// done removes this run's own scratch directory.
+fn done() {
+	if len(given) == 0 {
+		quarry.RemoveAll(dir) catch _ {
+		}
+	}
+}
 
 let words = []str{"fn", "let", "mut", "return", "x", "y", "count", "+", "1", "if", "{{", "}}", "say.Line", "len", "for"}
 
@@ -54,6 +72,7 @@ fn join(ls []str) str {
 }
 
 fn main() {
+	defer done()
 	quarry.RemoveAll(dir) catch _ {
 	}
 	quarry.MkdirAll(dir) catch err {

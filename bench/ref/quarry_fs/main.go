@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -25,6 +26,14 @@ func typ(m fs.FileMode) string {
 	return "Regular"
 }
 
+// d is this run's own directory (#1065); the lines name it as /tmp/tin-test-quarry-fs.
+var d string
+
+// named is an error's text with this run's directory named as the golden output names it.
+func named(err error) string {
+	return strings.ReplaceAll(fmt.Sprint(err), d, "/tmp/tin-test-quarry-fs")
+}
+
 func show(label, path string, follow bool) {
 	var fi fs.FileInfo
 	var err error
@@ -34,7 +43,7 @@ func show(label, path string, follow bool) {
 		fi, err = os.Lstat(path)
 	}
 	if err != nil {
-		fmt.Println(label, "error:", err)
+		fmt.Println(label, "error:", named(err))
 		return
 	}
 	st := fi.Sys().(*syscall.Stat_t)
@@ -52,7 +61,7 @@ func show(label, path string, follow bool) {
 }
 
 func main() {
-	d := "/tmp/tin-test-quarry-fs"
+	d = fmt.Sprintf("/tmp/tin-test-quarry-fs-%d", os.Getpid())
 	os.RemoveAll(d)
 	os.MkdirAll(d+"/sub/deeper", 0o755)
 	os.WriteFile(d+"/a.txt", []byte("hello, tin"), 0o644)
@@ -76,7 +85,7 @@ func main() {
 	t1, _ := os.Readlink(d + "/link")
 	fmt.Println("readlink:", t1)
 	_, e1 := os.Readlink(d + "/a.txt")
-	fmt.Println("readlink of a file:", e1)
+	fmt.Println("readlink of a file:", named(e1))
 	e2 := os.Symlink("x", d+"/link")
 	fmt.Println("symlink over a name:", e2 != nil)
 	es, _ := os.ReadDir(d)
@@ -86,7 +95,7 @@ func main() {
 	_, e3 := os.ReadDir(d + "/a.txt")
 	fmt.Println("entries of a file:", e3 != nil)
 	_, e4 := os.Open(d + "/missing")
-	fmt.Println("sync missing:", e4)
+	fmt.Println("sync missing:", named(e4))
 	f, _ := os.OpenFile(d+"/lock", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	f.WriteString("4242\n")
 	f.Sync()
