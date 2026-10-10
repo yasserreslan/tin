@@ -72,6 +72,8 @@ fn main() {
 	mut badValue = i64(0)
 	mut badOK = true
 	mut badHash = i64(0)
+	mut scanFound = false
+	mut scanValue = i64(0)
 	for i in i64(0)..n {
 		kk = lcg(kk)
 		let value = m[kk]
@@ -88,5 +90,15 @@ fn main() {
 			}
 		}
 	}
-	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash)
+	if badAt >= 0 {
+		// Scan entry storage directly after a failure: this bypasses the hash index and tells
+		// whether the entry was never stored or only became unreachable through lookup.
+		for entryKey, entryValue in m {
+			if entryKey == badKey {
+				scanFound = true
+				scanValue = entryValue
+			}
+		}
+	}
+	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash, scanFound, scanValue)
 }
