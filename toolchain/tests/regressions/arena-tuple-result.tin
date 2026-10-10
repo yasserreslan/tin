@@ -1,0 +1,79 @@
+package main
+
+// #1067: arena { f() } gives every result of a call with several, references copied out of the arena.
+
+import "say"
+
+type Big value struct {
+	a i64
+	b i64
+	c i64
+	name str
+}
+
+type Node struct {
+	name str
+	kids []str
+}
+
+fn words(n i64) ([]str, i64) {
+	mut out = []str{}
+	for i in 0..n {
+		out = append(out, "w{i}")
+	}
+	return out, n * 2
+}
+
+fn big(n i64) (Big, Node, bool) {
+	return Big{a: n, b: n + 1, c: n + 2, name: "big{n}"}, Node{name: "node{n}", kids: []str{"k{n}", "j{n}"}}, true
+}
+
+fn pair(n i64) (i64, str) {
+	return n, "ok{n}"
+}
+
+fn run(n i64) !(i64, str) {
+	let (a, b) = try arena {
+		if n < 0 {
+			fail "negative {n}"
+		}
+		pair(n)
+	}
+	return a, b
+}
+
+fn twoIB() (i64, bool) {
+	return 7, false
+}
+
+fn twoBI() (bool, i64) {
+	return false, 7
+}
+
+fn main() {
+	let (d, e) = arena {
+		twoIB()
+	}
+	say.Line("arena (i64, bool)", d, e)
+	let (f, h) = arena {
+		twoBI()
+	}
+	say.Line("arena (bool, i64)", f, h)
+	let (ws, m) = arena {
+		words(3)
+	}
+	say.Line(ws, m)
+	let (g, nd, ok) = arena {
+		big(5)
+	}
+	say.Line(g.a, g.b, g.c, g.name, nd.name, nd.kids, ok)
+	let (x, y) = run(4) catch e {
+		say.Line(e)
+		return
+	}
+	say.Line(x, y)
+	let (_, _) = run(-1) catch e {
+		say.Line(e)
+		return
+	}
+}

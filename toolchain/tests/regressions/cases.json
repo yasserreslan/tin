@@ -1387,5 +1387,15 @@
       "stdout": "34\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "arena-tuple-result.tin",
+    "issue": 1067,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "arena (i64, bool) 7 false\narena (bool, i64) false 7\n[w0 w1 w2] 6\n5 6 7 big5 node5 [k5 j5] true\n4 ok4\nnegative -1\n",
+      "stderr": ""
+    }
   }
 ]
