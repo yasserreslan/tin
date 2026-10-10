@@ -41,11 +41,11 @@ REDIS_ADDR=127.0.0.1:$port TIN_REPLAY_RECIPIENTS=$(cat "$tmp/runner.pub") \
 	SHOP_PORT=19196 PAYMENTS_PORT=19197 sh $shop/record.sh "$compiler" "$tmp/spool" > /dev/null || fail "recording shop"
 "$driver" shop "$tmp/packs" $shop > /dev/null
 "$driver" upload "$tmp/packs" "$tmp/spool" > /dev/null
-# two failures, in two groups, or one per request path where capsules carry no route pattern; before the owner opts in,
-# a check queues nothing
+# two failures, in two groups (the capsules name POST /checkout/{id}, so the five carts are one route); before the
+# owner opts in, a check queues nothing
 "$driver" check "$tmp/packs" main > "$tmp/first"
 groups=$(wc -l < "$tmp/first")
-[ "$groups" -ge 2 ] || fail "$groups failure groups, not 2 or more"
+[ "$groups" -eq 2 ] || fail "$groups failure groups, not 2"
 [ "$(sort -u "$tmp/first")" = 0 ] || fail "a check was queued before the opt-in: $(cat "$tmp/first")"
 "$driver" optin "$tmp/secrets/runner.key" PAYMENTS_URL=http://127.0.0.1:19197 > /dev/null
 for b in main fix/declined-cart fix/retry-charge fix/coupon-lookup fix/limit-cart-size fix/split-on-colon; do
