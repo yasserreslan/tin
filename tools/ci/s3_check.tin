@@ -1,0 +1,400 @@
+package main
+
+import "./ci"
+import "mint"
+import "quarry"
+import "say"
+import "seal"
+import "spawn"
+import "twine"
+
+// packages/s3 (#1001): AWS Signature Version 4 against the AWS SDK for Go v2 and AWS's published examples, then every
+// call end to end against a fake S3 server that checks each signature, and against a real server when one is given.
+//
+// 1. The signatures. AWS's documented examples (GET Object with a Range, PUT Object, GET Bucket Lifecycle, List Objects
+//    and a presigned URL, AKIAIOSFODNN7EXAMPLE on 2013-05-24) and 3,000 generated requests (odd keys with spaces,
+//    non-ASCII letters, ~ + = and the reserved characters, query parameters with empty and repeated values, header
+//    values with runs of blanks and tabs, ignored headers, session tokens, default ports, presigned URLs) are signed by
+//    tools/ci/fixtures/s3_sig.tin and by bench/ref/s3sig (github.com/aws/aws-sdk-go-v2/aws/signer/v4), line by line.
+// 2. The fake. bench/ref/s3sig/fake is gofakes3 behind the SDK's signer, which recomputes every request's signature
+//    from the wire and hashes every signed body; tools/ci/fixtures/s3_live.tin runs put, get, ranges, head, list pages,
+//    delete, presigned GET and PUT, retries after 503 SlowDown, multipart and abort against it, without and with a
+//    session token, and a 40 MiB multipart upload.
+// 3. A real server, when S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY and S3_BUCKET are set (MinIO in CI): the same calls,
+//    then one multipart upload of S3_UPLOAD_BYTES (default 1 GiB; a sparse file on Linux) whose peak resident memory
+//    must stay under 128 MiB. `s3_check real` runs only this part.
+
+// gen is a 64-bit linear congruential generator with a fixed seed: the corpus is the same on every run.
+type gen struct {
+	state u64
+}
+
+// next returns the next value.
+fn (g mut gen) next() u64 {
+	g.state = g.state *% 6364136223846793005 +% 1442695040888963407
+	return g.state >> 33
+}
+
+// intn returns a value in [0, n).
+fn (g mut gen) intn(n i64) i64 {
+	return i64(g.next() % u64(n))
+}
+
+// pick is one of xs.
+fn (g mut gen) pick(xs []str) str {
+	return xs[g.intn(len(xs))]
+}
+
+// hex is a corpus field: s in hex, "-" when empty.
+fn hex(s str) str {
+	if len(s) == 0 {
+		return "-"
+	}
+	return seal.Hex([]u8(s))
+}
+
+// request is one corpus line's fields, before encoding.
+type request struct {
+	name    str
+	method  str
+	scheme  str
+	host    str
+	path    str
+	query   []str
+	headers []str
+	payload str
+	length  i64
+	access  str
+	secretK str
+	token   str
+	region  str
+	service str
+	unix    i64
+	expires i64
+}
+
+// line encodes a request as a corpus line.
+fn line(r request) str {
+	mut f = []str{hex(r.name), hex(r.method), hex(r.scheme), hex(r.host), hex(r.path), hex(mint.Itoa(len(r.query) / 2))}
+	for q in r.query {
+		f = append(f, hex(q))
+	}
+	f = append(f, hex(mint.Itoa(len(r.headers) / 2)))
+	for h in r.headers {
+		f = append(f, hex(h))
+	}
+	f = append(f, hex(r.payload), hex(mint.Itoa(r.length)), hex(r.access), hex(r.secretK), hex(r.token), hex(r.region), hex(r.service), hex(mint.Itoa(r.unix)), hex(mint.Itoa(r.expires)))
+	return twine.Join(f, " ")
+}
+
+const emptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// examples are AWS's documented Signature Version 4 examples for S3 (virtual-hosted examplebucket, us-east-1,
+// 2013-05-24T00:00:00Z) and the signatures AWS publishes for them.
+fn examples() ([]request, []str) {
+	let base = request{name: "", method: "GET", scheme: "https", host: "examplebucket.s3.amazonaws.com", path: "/test.txt", query: []str{}, headers: []str{}, payload: emptyHash, length: 0, access: "AKIAIOSFODNN7EXAMPLE", secretK: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", token: "", region: "us-east-1", service: "s3", unix: 1369353600, expires: 0}
+	mut get = base
+	get.name = "aws-get-object"
+	get.headers = []str{"Range", "bytes=0-9", "x-amz-content-sha256", emptyHash}
+	let putHash = "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"
+	let put = request{name: "aws-put-object", method: "PUT", scheme: "https", host: "examplebucket.s3.amazonaws.com", path: "/test$file.text", query: []str{}, headers: []str{"Date", "Fri, 24 May 2013 00:00:00 GMT", "x-amz-storage-class", "REDUCED_REDUNDANCY", "x-amz-content-sha256", putHash}, payload: putHash, length: 0, access: base.access, secretK: base.secretK, token: "", region: "us-east-1", service: "s3", unix: 1369353600, expires: 0}
+	let life = request{name: "aws-get-lifecycle", method: "GET", scheme: "https", host: "examplebucket.s3.amazonaws.com", path: "/", query: []str{"lifecycle", ""}, headers: []str{"x-amz-content-sha256", emptyHash}, payload: emptyHash, length: 0, access: base.access, secretK: base.secretK, token: "", region: "us-east-1", service: "s3", unix: 1369353600, expires: 0}
+	let list = request{name: "aws-list-objects", method: "GET", scheme: "https", host: "examplebucket.s3.amazonaws.com", path: "/", query: []str{"max-keys", "2", "prefix", "J"}, headers: []str{"x-amz-content-sha256", emptyHash}, payload: emptyHash, length: 0, access: base.access, secretK: base.secretK, token: "", region: "us-east-1", service: "s3", unix: 1369353600, expires: 0}
+	let pre = request{name: "aws-presign", method: "GET", scheme: "https", host: "examplebucket.s3.amazonaws.com", path: "/test.txt", query: []str{}, headers: []str{}, payload: "UNSIGNED-PAYLOAD", length: 0, access: base.access, secretK: base.secretK, token: "", region: "us-east-1", service: "s3", unix: 1369353600, expires: 86400}
+	let want = []str{
+		"aws-get-object AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
+		"aws-put-object AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class, Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd",
+		"aws-get-lifecycle AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+		"aws-list-objects AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7",
+		"aws-presign https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404",
+	}
+	return []request{get, put, life, list, pre}, want
+}
+
+// pieces are the parts keys and values are made of: every class of character the escaping rules treat apart.
+fn pieces() []str {
+	return []str{" ", "~", "+", "=", "%", "/", "//", "é", "日本", "a", "Z", "09", "-", "_", ".", "..", "!", "*", "'", "(", ")", "&", "$", "@", ":", ",", ";", "?", "#", "[", "]", " ", "%20", "%2F", "file.txt", "repos/7/packs/ab12.pack", "\t", "\U0001F600"}
+}
+
+// text is up to n random pieces.
+fn (g mut gen) text(n i64) str {
+	let ps = pieces()
+	mut b = twine.NewBuilder(32)
+	for i in 0..g.intn(n + 1) {
+		b.Str(ps[g.intn(len(ps))])
+	}
+	return b.String()
+}
+
+// alnum is n random letters and digits, plus extra characters.
+fn (g mut gen) alnum(n i64, extra str) str {
+	let set = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" + extra
+	mut b = twine.NewBuilder(n)
+	for i in 0..n {
+		b.Byte(set[g.intn(len(set))])
+	}
+	return b.String()
+}
+
+// generated is n requests built from the pieces.
+fn generated(n i64) []request {
+	mut g = gen{state: 1001}
+	let methods = []str{"GET", "PUT", "HEAD", "DELETE", "POST"}
+	let hosts = []str{"examplebucket.s3.amazonaws.com", "s3.us-east-1.amazonaws.com", "127.0.0.1:9000", "localhost:80", "minio.local:443", "bucket.r2.example:443", "[::1]:9000", "[::1]:443", "Host.Example.COM", "acct.r2.cloudflarestorage.com"}
+	let qnames = []str{"prefix", "delimiter", "max-keys", "list-type", "continuation-token", "uploadId", "partNumber", "a", "A", "a b", "é", "x=y", "k+", "~t", "", "uploads", "X-Amz-Meta"}
+	let hnames = []str{"x-amz-meta-color", "X-Amz-Meta-Color", "Content-Type", "content-md5", "Range", "x-amz-storage-class", "User-Agent", "Expect", "X-Amzn-Trace-Id", "Transfer-Encoding", "Authorization", "x-amz-acl", "Cache-Control", "If-None-Match", "Content-Length", "x-amz-content-sha256"}
+	let presignNames = []str{"Content-Type", "Range", "Cache-Control", "User-Agent", "Expect", "If-None-Match"}
+	let hvalues = []str{"  a   b  ", "\tleading tab", "trailing tab\t", "x", "", "日本 語", "a,b", "   ", " nbsp ", "bytes=0-9", "text/plain; charset=utf-8", "\"etag\"", "a  \t  b", " \t "}
+	let regions = []str{"us-east-1", "auto", "eu-west-2", "ap-southeast-2"}
+	mut out = []request{}
+	for i in 0..n {
+		let presign = g.intn(10) < 3
+		mut path = "/" + g.text(6)
+		match g.intn(8) {
+			0 => path = ""
+			1 => path = "/"
+			2 => path = "/bucket/" + g.text(4)
+			_ => {}
+		}
+		mut query = []str{}
+		for j in 0..g.intn(5) {
+			let k = g.pick(qnames)
+			query = append(query, k, g.text(3))
+			if g.intn(4) == 0 {
+				query = append(query, k, g.text(2))
+			}
+		}
+		mut headers = []str{}
+		for j in 0..g.intn(6) {
+			if presign {
+				headers = append(headers, g.pick(presignNames), g.pick(hvalues) + g.text(1))
+			} else {
+				headers = append(headers, g.pick(hnames), g.pick(hvalues) + g.text(1) + g.pick(hvalues))
+			}
+		}
+		mut payload = emptyHash
+		match g.intn(3) {
+			0 => payload = "UNSIGNED-PAYLOAD"
+			1 => payload = seal.Sha256Hex(g.text(5))
+			_ => {}
+		}
+		mut length = 0
+		if !presign && g.intn(2) == 0 {
+			length = g.intn(10000000000)
+		}
+		mut token = ""
+		if g.intn(5) < 2 {
+			token = g.alnum(40 + g.intn(80), "/+=")
+		}
+		mut expires = 0
+		if presign {
+			expires = 1 + g.intn(604800)
+		}
+		out = append(out, request{name: "g" + mint.Itoa(i), method: g.pick(methods), scheme: g.pick([]str{"http", "https"}), host: g.pick(hosts), path: path, query: query, headers: headers, payload: payload, length: length, access: "AKIA" + g.alnum(16, ""), secretK: g.alnum(40, "/+"), token: token, region: g.pick(regions), service: g.pick([]str{"s3", "s3", "s3", "s3-object-lambda"}), unix: g.intn(4102444800), expires: expires})
+	}
+	return out
+}
+
+// run feeds input to exe and returns its output lines.
+fn run(exe str, input str) []str {
+	let o = ci.ExecIn([]str{exe}, ci.Root(), 300, input, []str{"TIN_ROOT=" + ci.Root()})
+	ci.Must(o, exe)
+	return ci.Lines(o.Stdout)
+}
+
+// compareLines checks that got equals want, line by line.
+fn compareLines(name str, want []str, got []str) {
+	mut i = 0
+	for i < len(want) && i < len(got) {
+		ci.Check(want[i] == got[i], name + " line " + mint.Itoa(i + 1) + ":\nGo  " + want[i] + "\nTin " + got[i])
+		i += 1
+	}
+	ci.Check(len(got) == len(want), name + ": " + mint.Itoa(len(got)) + " lines against " + mint.Itoa(len(want)))
+}
+
+// fake is a running fake S3 server and its port.
+type fake struct {
+	proc spawn.Process
+	port i64
+}
+
+// startFake starts the fake server with the credentials and reads its port.
+fn startFake(exe str, args []str) !fake {
+	mut argv = []str{exe}
+	for a in args {
+		argv = append(argv, a)
+	}
+	mut p = try spawn.Start(spawn.Cmd{Argv: argv, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Inherit, MaxOutput: 0, Input: ""})
+	ci.TrackPid(p.Pid())
+	mut buf = make([]u8, 64)
+	let k = try p.Read(mut buf)
+	let port = try mint.Atoi(twine.TrimSpace(str(buf[0:k])))
+	return fake{proc: p, port: port}
+}
+
+// stop ends the fake server.
+fn (f mut fake) stop() {
+	f.proc.Kill() catch _ {
+	}
+	f.proc.Wait() catch _ {
+	}
+}
+
+// unset are the variables a run against the fake must not inherit.
+fn unset() []str {
+	return []str{"S3_ENDPOINT", "S3_REGION", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_TOKEN", "S3_BUCKET", "S3_VIRTUAL", "S3_UNSIGNED", "S3_FLAKY", "S3_UPLOAD_BYTES", "S3_PART_BYTES", "S3_BIG_FILE"}
+}
+
+// live runs s3_live with the environment set and checks it passed; it gives its output.
+fn live(exe str, mode str, set []str, seconds i64, what str) str {
+	let o = ci.ExecEnv([]str{exe, mode}, ci.Root(), seconds, set, unset())
+	ci.Must(o, what)
+	ci.Check(twine.Contains(o.Stdout, "\ndone\n") && !twine.Contains(o.Stdout, "FAIL"), what + ":\n" + o.Stdout + o.Stderr)
+	return o.Stdout
+}
+
+// against runs the live checks against the fake at port, with a session token or none.
+fn againstFake(liveExe str, port i64, token str, work str, flaky bool) {
+	mut set = []str{"S3_ENDPOINT=http://127.0.0.1:" + mint.Itoa(port), "S3_ACCESS_KEY=tinkey", "S3_SECRET_KEY=tin/secret+key=", "S3_BUCKET=tin-ci", "S3_WORK=" + work}
+	if len(token) > 0 {
+		set = append(set, "S3_TOKEN=" + token)
+	}
+	if flaky {
+		set = append(set, "S3_FLAKY=1")
+	}
+	let out = live(liveExe, "basic", set, 300, "s3_live basic against the fake")
+	ci.Check(len(ci.Lines(out)) > 30, "s3_live basic printed too little:\n" + out)
+}
+
+// word is the value after name in s3_live's output ("peak_kib 3000"), "" when missing.
+fn word(out str, name str) str {
+	for l in ci.Lines(out) {
+		let f = twine.Fields(l)
+		if len(f) == 2 && f[0] == name {
+			return f[1]
+		}
+	}
+	return ""
+}
+
+// signatures compares AWS's examples and the generated corpus, signed by Tin and by the AWS SDK for Go v2.
+fn signatures(work str, ref str) {
+	let tin = ci.Join(work, "s3-sig-tin")
+	ci.BuildTin("tools/ci/fixtures/s3_sig.tin", tin, "", []str{})
+	let goexe = ci.Join(work, "s3-sig-go")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", goexe, "."}, ref, 600), "go build bench/ref/s3sig")
+	let (ex, want) = examples()
+	let corpus = generated(3000)
+	mut b = twine.NewBuilder(1 << 20)
+	for r in ex {
+		b.Str(line(r))
+		b.Byte('\n')
+	}
+	for r in corpus {
+		b.Str(line(r))
+		b.Byte('\n')
+	}
+	let input = b.String()
+	let goLines = run(goexe, input)
+	let tinLines = run(tin, input)
+	for i, w in want {
+		ci.Check(i < len(goLines) && goLines[i] == w, "the AWS SDK for Go v2 does not give AWS's example:\nwant " + w + "\ngot  " + goLines[min(i, len(goLines) - 1)])
+		ci.Check(i < len(tinLines) && tinLines[i] == w, "packages/s3 does not give AWS's example:\nwant " + w + "\ngot  " + tinLines[min(i, len(tinLines) - 1)])
+	}
+	compareLines("signatures", goLines, tinLines)
+	mut presigned = 0
+	for r in corpus {
+		if r.expires > 0 {
+			presigned += 1
+		}
+	}
+	ci.Pass("s3: " + mint.Itoa(len(want)) + " AWS examples and " + mint.Itoa(len(corpus)) + " generated requests (" + mint.Itoa(presigned) + " presigned) sign as the AWS SDK for Go v2 does")
+}
+
+// fakes runs every call against the fake, which checks each signature and signed body: without a session token (and
+// with 503s to retry, and a 40 MiB multipart upload), then with one.
+fn fakes(work str, ref str, liveExe str, files str) {
+	let fakeExe = ci.Join(work, "s3-fake")
+	ci.Must(ci.Exec([]str{"go", "build", "-o", fakeExe, "./fake"}, ref, 600), "go build bench/ref/s3sig/fake")
+	mut f1 = startFake(fakeExe, []str{"tinkey", "tin/secret+key="}) catch err {
+		ci.Fail("start the fake S3 server: " + say.Str(err))
+		return
+	}
+	againstFake(liveExe, f1.port, "", files, true)
+	let bigSet = []str{"S3_ENDPOINT=http://127.0.0.1:" + mint.Itoa(f1.port), "S3_ACCESS_KEY=tinkey", "S3_SECRET_KEY=tin/secret+key=", "S3_BUCKET=tin-ci", "S3_WORK=" + files, "S3_UPLOAD_BYTES=41943040", "S3_PART_BYTES=5242880"}
+	let bigOut = live(liveExe, "big", bigSet, 300, "s3_live big against the fake")
+	f1.stop()
+	let token = "FwoGZXIvYXdzEJr//////////wEaDOtoken+with/slashes=="
+	mut f2 = startFake(fakeExe, []str{"tinkey", "tin/secret+key=", token}) catch err {
+		ci.Fail("start the fake S3 server: " + say.Str(err))
+		return
+	}
+	againstFake(liveExe, f2.port, token, files, false)
+	f2.stop()
+	ci.Pass("s3: put, get, ranges, head, list pages, delete, presigned URLs, retries, multipart and abort against a signature-checking fake (with and without a session token; 40 MiB multipart, peak " + word(bigOut, "peak_kib") + " KiB)")
+}
+
+// real runs every call against the server S3_ENDPOINT names, then one large multipart upload whose peak memory is
+// checked on Linux.
+fn real(liveExe str, files str) {
+	let endpoint = ci.Env("S3_ENDPOINT")
+	mut set = []str{"S3_ENDPOINT=" + endpoint, "S3_ACCESS_KEY=" + ci.Env("S3_ACCESS_KEY"), "S3_SECRET_KEY=" + ci.Env("S3_SECRET_KEY"), "S3_BUCKET=" + ci.Env("S3_BUCKET"), "S3_WORK=" + files}
+	for name in []str{"S3_REGION", "S3_TOKEN", "S3_VIRTUAL"} {
+		if len(ci.Env(name)) > 0 {
+			set = append(set, name + "=" + ci.Env(name))
+		}
+	}
+	live(liveExe, "basic", set, 600, "s3_live basic against " + endpoint)
+	mut size = 1073741824
+	if len(ci.Env("S3_UPLOAD_BYTES")) > 0 {
+		size = ci.Num(ci.Env("S3_UPLOAD_BYTES"))
+	}
+	let big = ci.Join(files, "big.src")
+	if ci.Linux() {
+		// A sparse file with a marked block every 256 MiB: no time or disk spent writing it, and parts that differ.
+		ci.Must(ci.Exec([]str{"truncate", "-s", mint.Itoa(size), big}, "", 60), "truncate")
+		mut at = 0
+		for at < size {
+			ci.Must(ci.Sh("printf 'block at %d\\n' " + mint.Itoa(at) + " | dd of=" + big + " bs=1 seek=" + mint.Itoa(at) + " conv=notrunc status=none", "", 60), "mark")
+			at += 268435456
+		}
+	}
+	mut bigLive = []str{"S3_UPLOAD_BYTES=" + mint.Itoa(size), "S3_BIG_FILE=" + big, "S3_UNSIGNED=1"}
+	for s in set {
+		bigLive = append(bigLive, s)
+	}
+	if len(ci.Env("S3_PART_BYTES")) > 0 {
+		bigLive = append(bigLive, "S3_PART_BYTES=" + ci.Env("S3_PART_BYTES"))
+	}
+	let out = live(liveExe, "big", bigLive, 1200, "s3_live big against " + endpoint)
+	let peak = ci.Num(word(out, "peak_kib"))
+	if ci.Linux() {
+		ci.Check(peak > 0 && peak < 131072, "s3: the multipart upload of " + mint.Itoa(size) + " bytes peaked at " + mint.Itoa(peak) + " KiB (limit 128 MiB)")
+	}
+	ci.Pass("s3: every call against " + endpoint + ", and a multipart upload of " + mint.Itoa(size) + " bytes in " + word(out, "upload_seconds") + " s with a peak of " + mint.Itoa(peak) + " KiB")
+}
+
+// main runs the three parts; `s3_check real` runs only the third, which then needs S3_ENDPOINT.
+fn main() {
+	let args = quarry.Args()
+	let onlyReal = len(args) > 1 && args[1] == "real"
+	let dir = ci.Join(ci.Root(), "bin/ci/s3")
+	ci.Mkdirs(dir)
+	let work = ci.TempDir(dir, "s3-")
+	let ref = ci.Join(ci.Root(), "bench/ref/s3sig")
+	let liveExe = ci.Join(work, "s3-live")
+	ci.BuildTin("tools/ci/fixtures/s3_live.tin", liveExe, "", []str{})
+	let files = ci.Join(work, "files")
+	ci.Mkdirs(files)
+	if !onlyReal {
+		signatures(work, ref)
+		fakes(work, ref, liveExe, files)
+	}
+	if len(ci.Env("S3_ENDPOINT")) == 0 {
+		ci.Check(!onlyReal, "s3_check real: S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY and S3_BUCKET name the server")
+		ci.Pass("s3: no S3_ENDPOINT, the real-server checks are skipped")
+	} else {
+		real(liveExe, files)
+	}
+	ci.Remove(work)
+}

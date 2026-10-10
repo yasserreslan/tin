@@ -1,0 +1,172 @@
+package s3
+
+import "flume"
+import "io"
+import "quarry"
+import "seal"
+import "wire"
+
+// ---- request bodies and response sinks ----
+
+// region reads bytes [off, off+n) of an open file with pread: the file is never read into
+// memory, whatever its size, and each Read copies straight into the caller's buffer.
+type region struct {
+	fd   i64
+	off  i64
+	left i64
+}
+
+// openRegion opens the file at path for reading n bytes from off; close it with done.
+fn openRegion(path str, off i64, n i64) !region {
+	let (fd, size) = try quarry.OpenRegular(path)
+	if off < 0 || n < 0 || off + n > size {
+		rt_sys_close(fd)
+		fail "s3: {path}: bytes {off}..{off + n} are past its end ({size} bytes)"
+	}
+	return region{fd: fd, off: off, left: n}
+}
+
+// Read fills buf with the region's next bytes: 0 at its end. A file that shrank fails.
+fn (r mut region) Read(buf mut []u8) !i64 {
+	if r.left <= 0 || len(buf) == 0 {
+		return 0
+	}
+	mut want = len(buf)
+	if want > r.left {
+		want = r.left
+	}
+	let k = rt_sys_pread(r.fd, cast(i64, buf)[2], want, r.off)
+	if k == 0 {
+		fail "s3: the file ended {r.left} bytes early (it changed while it was sent)"
+	}
+	if k < 0 {
+		fail "s3: reading the file failed (errno {rt_errno()})"
+	}
+	r.off += k
+	r.left -= k
+	return k
+}
+
+// done closes the region's file.
+fn (r mut region) done() {
+	if r.fd >= 0 {
+		rt_sys_close(r.fd)
+		r.fd = -1
+	}
+}
+
+// hashRegion is the hex SHA-256 of bytes [off, off+n) of the file at path, read through buf.
+fn hashRegion(path str, off i64, n i64, buf mut []u8) !str {
+	mut r = try openRegion(path, off, n)
+	mut h = seal.NewSha256()
+	for {
+		let k = r.Read(mut buf) catch err {
+			r.done()
+			fail err
+		}
+		if k == 0 {
+			break
+		}
+		_ = try h.Write(buf[0:k])
+	}
+	r.done()
+	return seal.Hex(h.Sum())
+}
+
+// maxErrorBody bounds the error answer kept in memory (S3's are well under 1 KiB).
+const maxErrorBody = 1048576
+
+// collect keeps a whole (small) answer in memory: an XML result or an error.
+type collect struct {
+	rep  reply
+	body []u8
+	most i64
+}
+
+// Begin keeps the answer's status and fields.
+fn (c mut collect) Begin(h wire.Head) ! {
+	c.rep = replyHead(h, "")
+}
+
+// Write keeps data, refusing an answer longer than most bytes.
+fn (c mut collect) Write(data []u8) !i64 {
+	if len(c.body) + len(data) > c.most {
+		fail "s3: an answer longer than {c.most} bytes"
+	}
+	c.body = append(c.body, data...)
+	return len(data)
+}
+
+// ok reports whether a status is a success (2xx).
+fn ok(status i64) bool {
+	return status >= 200 && status < 300
+}
+
+// fileSink writes a successful answer's body to a new file at path; an error answer stays in
+// memory.
+type fileSink struct {
+	rep   reply
+	path  str
+	file  flume.Writer
+	open  bool
+	err   []u8
+	bytes i64
+}
+
+// Begin creates the file for a successful answer.
+fn (f mut fileSink) Begin(h wire.Head) ! {
+	f.rep = replyHead(h, "")
+	if ok(h.Status) {
+		f.file = try flume.Create(f.path)
+		f.open = true
+	}
+}
+
+// Write appends data to the file, or to the error kept in memory.
+fn (f mut fileSink) Write(data []u8) !i64 {
+	if !f.open {
+		if len(f.err) + len(data) <= maxErrorBody {
+			f.err = append(f.err, data...)
+		}
+		return len(data)
+	}
+	_ = try f.file.Write(data)
+	f.bytes += len(data)
+	return len(data)
+}
+
+// finish closes the file, if one was made.
+fn (f mut fileSink) finish() ! {
+	if f.open {
+		f.open = false
+		try f.file.Close()
+	}
+}
+
+// gate hands a successful answer's body to w; an error answer stays in memory.
+type gate[W io.Writer] struct {
+	rep     reply
+	w       W
+	pass    bool
+	err     []u8
+	written i64
+}
+
+// Begin opens the gate for a successful answer.
+fn (g mut gate[W]) Begin(h wire.Head) ! {
+	g.rep = replyHead(h, "")
+	g.pass = ok(h.Status)
+}
+
+// Write passes data on to w, or keeps an error answer.
+fn (g mut gate[W]) Write(data []u8) !i64 {
+	if !g.pass {
+		if len(g.err) + len(data) <= maxErrorBody {
+			g.err = append(g.err, data...)
+		}
+		return len(data)
+	}
+	let n = try g.w.Write(data)
+	g.written += n
+	return n
+}

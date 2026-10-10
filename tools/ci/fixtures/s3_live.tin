@@ -1,0 +1,366 @@
+package main
+
+import "fault"
+import "flume"
+import "mint"
+import "quarry"
+import "s3"
+import "say"
+import "seal"
+import "tide"
+import "twine"
+import "wire"
+
+// The live half of tools/ci/s3_check.tin: packages/s3 against a running server (the check's fake, or MinIO in CI).
+//
+//	s3_live basic   put, get, ranged get, head, list with pagination, delete, presigned URLs, retries, small multipart and abort
+//	s3_live big     one multipart upload of S3_UPLOAD_BYTES (the file S3_BIG_FILE, made if missing), its ETag and ranges
+//
+// The server comes from S3_ENDPOINT, S3_REGION (us-east-1), S3_ACCESS_KEY, S3_SECRET_KEY, S3_TOKEN, S3_BUCKET and
+// S3_VIRTUAL (set: virtual-hosted addressing instead of the path style); S3_WORK is a directory for files. Each step
+// prints one "ok" line; a failure prints "FAIL ..." and exits 1. big prints "peak_kib N" (VmHWM after the upload, Linux).
+
+mut failed = false
+
+// check reports one step.
+fn check(name str, good bool, detail str) {
+	if good {
+		say.Line("ok", name)
+		return
+	}
+	say.Line("FAIL", name, detail)
+	failed = true
+}
+
+// must ends the run on a fault.
+fn must(name str, err fault) {
+	if err != nil {
+		say.Line("FAIL", name, err)
+		quarry.Exit(1)
+	}
+}
+
+// env is an environment variable with a default.
+fn env(name str, def str) str {
+	let v = quarry.Getenv(name)
+	if len(v) == 0 {
+		return def
+	}
+	return v
+}
+
+// client is the client the environment describes.
+fn client() !s3.Client {
+	let cfg = s3.Config{Endpoint: env("S3_ENDPOINT", ""), Region: env("S3_REGION", "us-east-1"), AccessKey: env("S3_ACCESS_KEY", ""), SecretKey: env("S3_SECRET_KEY", ""), Token: env("S3_TOKEN", ""), PathStyle: len(quarry.Getenv("S3_VIRTUAL")) == 0, UnsignedPayload: len(quarry.Getenv("S3_UNSIGNED")) > 0, Backoff: 20 * tide.Millisecond}
+	return try s3.New(cfg)
+}
+
+// pattern writes n bytes to path: each 4 KiB block names its offset, so a byte out of place shows.
+fn pattern(path str, n i64) ! {
+	mut w = try flume.Create(path)
+	mut block = make([]u8, 65536)
+	mut off = 0
+	for off < n {
+		for i in 0..len(block) {
+			block[i] = u8((off + i) / 4096 % 251 + (off + i) % 7)
+		}
+		let k = min(len(block), n - off)
+		_ = try w.Write(block[0:k])
+		off += k
+	}
+	try w.Close()
+}
+
+// fileHash is the hex SHA-256 of the file at path.
+fn fileHash(path str) !str {
+	mut r = try flume.Open(path)
+	mut h = seal.NewSha256()
+	mut buf = make([]u8, 1 << 20)
+	for {
+		let k = try r.Read(mut buf)
+		if k == 0 {
+			break
+		}
+		_ = try h.Write(buf[0:k])
+	}
+	r.Close()
+	return seal.Hex(h.Sum())
+}
+
+// sink collects what GetTo writes.
+type sink struct {
+	b []u8
+}
+
+// Write keeps data.
+fn (s mut sink) Write(data []u8) !i64 {
+	s.b = append(s.b, data...)
+	return len(data)
+}
+
+// strReader reads a string, for PutReader.
+type strReader struct {
+	s  str
+	at i64
+}
+
+// Read gives the string's next bytes.
+fn (r mut strReader) Read(buf mut []u8) !i64 {
+	let n = min(len(buf), len(r.s) - r.at)
+	for i in 0..n {
+		buf[i] = r.s[r.at + i]
+	}
+	r.at += n
+	return n
+}
+
+// ensureBucket makes the bucket unless it is there.
+fn ensureBucket(c s3.Client, bucket str) {
+	c.CreateBucket(bucket) catch err {
+		let code = s3.ErrorCode(err)
+		if code != "BucketAlreadyOwnedByYou" && code != "BucketAlreadyExists" {
+			must("create bucket", err)
+		}
+	}
+}
+
+// multipartETag is the ETag S3 gives an upload of the file in parts of part bytes: the MD5 of the parts' MD5s, "-" and
+// the number of parts.
+fn multipartETag(path str, size i64, part i64) !str {
+	mut all = []u8{}
+	mut off = 0
+	mut parts = 0
+	mut buf = make([]u8, 1 << 20)
+	mut r = try flume.Open(path)
+	for off < size {
+		let n = min(part, size - off)
+		mut h = seal.NewMd5()
+		mut done = 0
+		for done < n {
+			let k = try r.Read(mut buf[0:min(len(buf), n - done)])
+			if k == 0 {
+				fail "short read"
+			}
+			_ = try h.Write(buf[0:k])
+			done += k
+		}
+		all = append(all, h.Sum()...)
+		off += n
+		parts += 1
+	}
+	r.Close()
+	return "\"" + seal.Md5Hex(str(all)) + "-" + say.Str(parts) + "\""
+}
+
+// basic runs every call once, against small objects.
+fn basic(c s3.Client, bucket str, work str) ! {
+	let pre = "tin-s3-check/" + say.Str(quarry.Pid()) + "-" + say.Str(tide.Wall() / tide.Second) + "/"
+	// A key with a space, non-ASCII letters and the characters a signature escapes.
+	let odd = pre + "a b/ünï~+=$&@,;:!*'().txt"
+	let etag = try c.PutBytes(bucket, odd, "hello, object store")
+	check("put bytes", len(etag) > 2, etag)
+	let got = try c.GetBytes(bucket, odd, 1 << 20)
+	check("get bytes", got == "hello, object store", got)
+	let info = try c.Head(bucket, odd)
+	check("head", info.Size == 19 && info.ETag == etag, say.Str(info.Size) + " " + info.ETag)
+	let mid = try c.GetRange(bucket, odd, 7, 6)
+	check("get range", mid == "object", mid)
+	let tail = try c.GetRange(bucket, odd, 13, 100)
+	check("get range past the end", tail == " store", tail)
+
+	// A file of 3 MiB and a bit: put from the file, get to a file, ranges against the file.
+	let src = work + "/basic.src"
+	let size = 3 * 1048576 + 12345
+	try pattern(src, size)
+	let fkey = pre + "files/data.bin"
+	let fetag = try c.Put(bucket, fkey, src)
+	check("put file", len(fetag) > 2, fetag)
+	let dst = work + "/basic.dst"
+	let n = try c.GetFile(bucket, fkey, dst)
+	let srcHash = try fileHash(src)
+	let dstHash = try fileHash(dst)
+	check("get file", n == size && srcHash == dstHash, say.Str(n))
+	for r in []i64{0, 1, 4095, 4096, 1048575, size - 10} {
+		let part = try c.GetRange(bucket, fkey, r, 777)
+		let want = try quarry.ReadAt(src, r, 777)
+		check("range at {r}", part == want, say.Str(len(part)))
+	}
+	mut w = sink{b: []u8{}}
+	let wrote = try s3.GetRangeTo(c, bucket, fkey, 1000, 5000, mut w)
+	let span = try quarry.ReadAt(src, 1000, 5000)
+	check("range to a writer", wrote == 5000 && str(w.b) == span, say.Str(wrote))
+	mut all = sink{b: []u8{}}
+	let whole = try s3.GetTo(c, bucket, fkey, mut all)
+	check("get to a writer", whole == size && seal.Sha256Hex(str(all.b)) == srcHash, say.Str(whole))
+	let streamed = try s3.PutReader(c, bucket, pre + "files/reader.txt", strReader{s: "read from a reader", at: 0}, 18)
+	check("put from a reader", len(streamed) > 2, streamed)
+	let back = try c.GetBytes(bucket, pre + "files/reader.txt", 100)
+	check("put from a reader: content", back == "read from a reader", back)
+
+	// List: seven keys read three at a time, and one level with a delimiter.
+	for i in 0..7 {
+		_ = try c.PutBytes(bucket, pre + "list/k" + say.Str(i), say.Str(i))
+	}
+	mut keys = []str{}
+	mut token = ""
+	mut pages = 0
+	for {
+		let page = try c.List(bucket, s3.ListOptions{Prefix: pre + "list/", Token: token, MaxKeys: 3})
+		pages += 1
+		for o in page.Objects {
+			keys = append(keys, twine.TrimPrefix(o.Key, pre + "list/"))
+		}
+		if !page.Truncated {
+			break
+		}
+		token = page.NextToken
+	}
+	check("list pages", pages == 3 && twine.Join(keys, ",") == "k0,k1,k2,k3,k4,k5,k6", say.Str(pages) + " " + twine.Join(keys, ","))
+	let level = try c.List(bucket, s3.ListOptions{Prefix: pre, Delimiter: "/"})
+	check("list a level", twine.Join(level.Prefixes, ",") == pre + "a b/," + pre + "files/," + pre + "list/", twine.Join(level.Prefixes, ","))
+	let every = try c.ListAll(bucket, pre)
+	check("list all", len(every) == 10, say.Str(len(every)))
+
+	// Presigned URLs: a GET and a PUT without credentials.
+	let gurl = try c.Presign("GET", bucket, odd, 10 * tide.Minute)
+	let gr = try wire.Get(gurl)
+	check("presigned get", gr.Status == 200 && gr.Body == "hello, object store", say.Str(gr.Status) + " " + gr.Body)
+	let purl = try c.Presign("PUT", bucket, pre + "presigned put.txt", 10 * tide.Minute)
+	let pr = try wire.Do("PUT", purl, []str{}, "sent with a presigned URL")
+	check("presigned put", pr.Status == 200, say.Str(pr.Status) + " " + pr.Body)
+	let sent = try c.GetBytes(bucket, pre + "presigned put.txt", 100)
+	check("presigned put: content", sent == "sent with a presigned URL", sent)
+
+	// Errors: a missing object is ErrNotFound with S3's code; deleting it is no fault.
+	try c.Delete(bucket, odd)
+	let (_, herr) = c.Head(bucket, odd)
+	check("head after delete", fault.Is(herr, s3.ErrNotFound), say.Str(herr))
+	let (_, gerr) = c.GetBytes(bucket, odd, 100)
+	check("get missing", fault.Is(gerr, s3.ErrNotFound) && s3.ErrorCode(gerr) == "NoSuchKey", say.Str(gerr))
+	try c.Delete(bucket, odd)
+	check("delete missing", true, "")
+	let (_, berr) = c.GetBytes(bucket + "-missing-bucket", "x", 100)
+	check("missing bucket", fault.Is(berr, s3.ErrService) && s3.ErrorCode(berr) == "NoSuchBucket", say.Str(berr))
+
+	if len(quarry.Getenv("S3_FLAKY")) > 0 {
+		let fe = try c.PutBytes(bucket, pre + "flaky503", "after two 503s")
+		let fb = try c.GetBytes(bucket, pre + "flaky503", 100)
+		check("retry after 503 SlowDown", len(fe) > 2 && fb == "after two 503s", fe + " " + fb)
+		let one = s3.New(s3.Config{Endpoint: env("S3_ENDPOINT", ""), Region: env("S3_REGION", "us-east-1"), AccessKey: env("S3_ACCESS_KEY", ""), SecretKey: env("S3_SECRET_KEY", ""), Token: env("S3_TOKEN", ""), PathStyle: true, Attempts: 1}) catch err {
+			must("config", err)
+			c
+		}
+		let (_, se) = one.PutBytes(bucket, pre + "flaky503-again", "x")
+		check("no retry: SlowDown", s3.ErrorCode(se) == "SlowDown" && fault.Is(se, s3.ErrService), say.Str(se))
+		try c.Delete(bucket, pre + "flaky503")
+		try c.Delete(bucket, pre + "flaky503-again")
+		// A completion answered 200 with an error in its body is an error, tried again.
+		let small = work + "/complete200.src"
+		try pattern(small, s3.MinPartSize + 1000)
+		let ce = try c.Upload(bucket, pre + "complete200.bin", small, s3.MinPartSize)
+		let cw = try multipartETag(small, s3.MinPartSize + 1000, s3.MinPartSize)
+		check("retry a completion answered 200 with an error", ce == cw, ce + " " + cw)
+		try c.Delete(bucket, pre + "complete200.bin")
+	}
+
+	// Multipart: three parts of 5 MiB and the rest, then an upload that is aborted.
+	let msrc = work + "/multi.src"
+	let msize = 2 * s3.MinPartSize + 777777
+	try pattern(msrc, msize)
+	let mkey = pre + "multi/obj.bin"
+	let metag = try c.Upload(bucket, mkey, msrc, s3.MinPartSize)
+	let mwant = try multipartETag(msrc, msize, s3.MinPartSize)
+	check("multipart etag", metag == mwant, metag + " " + mwant)
+	let minfo = try c.Head(bucket, mkey)
+	check("multipart head", minfo.Size == msize, say.Str(minfo.Size))
+	let mdst = work + "/multi.dst"
+	_ = try c.GetFile(bucket, mkey, mdst)
+	let mh1 = try fileHash(msrc)
+	let mh2 = try fileHash(mdst)
+	check("multipart content", mh1 == mh2, "")
+	let id = try c.CreateMultipart(bucket, pre + "multi/aborted.bin")
+	_ = try c.UploadPart(bucket, pre + "multi/aborted.bin", id, 1, msrc, 0, s3.MinPartSize)
+	try c.AbortMultipart(bucket, pre + "multi/aborted.bin", id)
+	let (_, aerr) = c.UploadPart(bucket, pre + "multi/aborted.bin", id, 2, msrc, 0, s3.MinPartSize)
+	check("abort", fault.Is(aerr, s3.ErrNotFound) && s3.ErrorCode(aerr) == "NoSuchUpload", say.Str(aerr))
+	let (_, gone) = c.Head(bucket, pre + "multi/aborted.bin")
+	check("aborted object is missing", fault.Is(gone, s3.ErrNotFound), say.Str(gone))
+
+	// Clean up.
+	let mine = try c.ListAll(bucket, pre)
+	for o in mine {
+		try c.Delete(bucket, o.Key)
+	}
+	let left = try c.ListAll(bucket, pre)
+	check("deleted everything", len(left) == 0, say.Str(len(left)))
+}
+
+// peakKiB is the process's peak resident memory (VmHWM) in KiB, -1 where /proc is missing.
+fn peakKiB() i64 {
+	let text = quarry.ReadFile("/proc/self/status") catch _ {
+		return -1
+	}
+	for line in twine.Split(text, "\n") {
+		if twine.HasPrefix(line, "VmHWM:") {
+			let f = twine.Fields(line)
+			if len(f) >= 2 {
+				return mint.Atoi(f[1]) catch _ {
+					-1
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// big uploads one large file in parts and checks it.
+fn big(c s3.Client, bucket str, work str) ! {
+	let size = try mint.Atoi(env("S3_UPLOAD_BYTES", "1073741824"))
+	let part = try mint.Atoi(env("S3_PART_BYTES", "16777216"))
+	let path = env("S3_BIG_FILE", work + "/big.src")
+	if !quarry.Exists(path) {
+		try pattern(path, size)
+	}
+	let real = try quarry.Size(path)
+	check("big file", real == size, say.Str(real))
+	let key = "tin-s3-check/" + say.Str(quarry.Pid()) + "-big.bin"
+	let start = tide.Now()
+	let etag = try c.Upload(bucket, key, path, part)
+	let took = tide.Since(start)
+	say.Line("peak_kib", peakKiB())
+	say.Line("upload_seconds", tide.Seconds(took))
+	let want = try multipartETag(path, size, part)
+	check("big etag", etag == want, etag + " " + want)
+	let info = try c.Head(bucket, key)
+	check("big size", info.Size == size, say.Str(info.Size))
+	for at in []i64{0, part - 100, part, size / 2, size - 5000} {
+		let got = try c.GetRange(bucket, key, at, 5000)
+		let local = try quarry.ReadAt(path, at, 5000)
+		check("big range at {at}", got == local, say.Str(len(got)))
+	}
+	try c.Delete(bucket, key)
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) < 2 {
+		say.Line("usage: s3_live basic|big")
+		quarry.Exit(2)
+	}
+	let c = client() catch err {
+		must("config", err)
+		return
+	}
+	let bucket = env("S3_BUCKET", "tin-ci")
+	let work = env("S3_WORK", quarry.TempDir())
+	ensureBucket(c, bucket)
+	if args[1] == "basic" {
+		must("basic", basic(c, bucket, work))
+	} else {
+		must("big", big(c, bucket, work))
+	}
+	if failed {
+		quarry.Exit(1)
+	}
+	say.Line("done")
+}

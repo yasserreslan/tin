@@ -46,6 +46,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [debug/dwarf](#debug/dwarf) | DWARF compilation units, DIEs and source line tables (debug/dwarf) |
 | [user](#user) | users and groups (os/user) |
 | [spawn](#spawn) | starting child processes (os/exec) |
+| [sandbox](#sandbox) | running a program fenced by Linux: namespaces, cgroup v2 limits, seccomp, a timeout (Linux only) |
 | [signal](#signal) | operating-system signals (os/signal) |
 | [trail](#trail) | paths (path, path/filepath on Unix) |
 | [lever](#lever) | command-line flags (flag) |
@@ -81,6 +82,7 @@ Generated from the comments in `toolchain/std/*/` and `packages/*/` by `tools/ge
 | [database](#database) | generic SQL drivers, pooling and queries (database/sql) |
 | [kafka](#kafka) | Kafka client (franz-go, sarama) |
 | [websocket](#websocket) | WebSocket server and client (gorilla/websocket) |
+| [s3](#s3) | S3-compatible object storage client with Signature Version 4 (aws-sdk-go-v2 s3) |
 | [atomic](#atomic) | counters and flags every core may change (sync/atomic) |
 | [lane](#lane) | a bounded queue between the tasks of one core (buffered channels) |
 | [replay](#replay) | recording and reading request capsules for tin replay |
@@ -509,6 +511,10 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options) !Stream`: DoStream sends one request with its body read from body, and returns the response once its headers are in; see the section comment above.
 - `type Copied struct`: decimal is a Content-Length header's value. Copied is what DoStreamTo gives back: the response's status and how many body bytes it copied.
 - `DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body R, opt Options, w mut W) !Copied`: DoStreamTo is DoStream with the response's body copied to w as it arrives, a buffer at a time, whatever its status (an error answer's body too). Reading the Stream here, inside wire, keeps a caller's code from tripping #1036 (a false E312 on Stream.Read from outside the package).
+- `type Head struct`: Head is a response's status and header fields, as DoStreamToHead gives them before the body.
+- `(h Head) Header(name str) str`: Header returns the response header name (any case), or "".
+- `shape HeadWriter`: HeadWriter is an io.Writer that is told the response's head before its body: a client that must know the status before it keeps a body (an object store's error answer is no object).
+- `DoStreamToHead[R io.Reader, W HeadWriter](method str, url str, headers []str, body R, opt Options, w mut W) !Copied`: DoStreamToHead is DoStreamTo with w.Begin called once with the response's status and fields before any body byte is written to w; a fault from Begin ends the call, closing the connection.
 - `(s mut Stream) Read(buf mut []u8) !i64`: Read fills buf with the next bytes of the body and returns how many; 0 at its end, after which the connection is back in the pool or closed. A connection that fails or ends early is closed and Read fails: it never gives a truncated body as complete.
 - `(s mut Stream) Close()`: Close ends the response: a body not read to its end closes the connection.
 - `(s Stream) Header(name str) str`: Header returns the response header name (any case), or "".
@@ -1302,7 +1308,7 @@ Package quarry is the operating system interface (like Go's os): arguments, envi
 - `LookupEnv(key str) (str, bool)`: LookupEnv returns the value of key and whether it is set (an empty value is still set).
 - `Setenv(key str, value str) !`: Setenv sets environment variable key to value; an empty key or one holding '=' or NUL is a fault.
 - `Unsetenv(key str) !`: Unsetenv removes environment variable key.
-- `ReadAt(path str, off i64, n i64) !str`: ReadAt returns up to n bytes of the file at path from offset off: fewer at the file's end, "" past it. Only those bytes are read (pread), so one record of a large file costs its own size. Inside a request task, or recording or replaying a tape, it reads the file through ReadFileBound and gives the same bytes.
+- `ReadAt(path str, off i64, n i64) !str`: ReadAt returns up to n bytes of the file at path from offset off: fewer at the file's end, "" past it. Only those bytes are read (pread), so one record of a large file costs its own size, inside a request task too (a local file's pages come from the page cache; a whole file read for a few bytes cost a request its size in memory). Recording or replaying a tape, and inside a task on a file system that may wait for a daemon or a server (FUSE, 9p, CIFS: see useRing) or without the core's io_uring, it reads the file through ReadFileBound and gives the same bytes.
 - `ReadFile(path str) !str`: ReadFile returns the whole content of the file at path. A file larger than 64 MiB (anvil's request limit) fails with fault.LimitExceeded before it is read, and so does a device or pipe past it, read by read (#745); ReadFileBound sets another bound.
 - `ReadFileBound(path str, n i64) !str`: ReadFileBound returns the whole content of the file at path when it is at most n bytes, and otherwise fails with fault.LimitExceeded: a regular file by its size, before anything is read, a device or pipe as soon as more than n bytes have come (#745).
 - `OpenRegular(path str) !(i64, i64)`: OpenRegular opens the regular file at path for reading and returns its descriptor and size; the caller closes the descriptor. Inside a request task it opens the file as ReadFile does: through the core's io_uring (Linux), or on a helper thread, always there under a slow mount, so an open that waits (a FIFO with no writer, a hung network mount) waits within the task's deadline and the core serves others meanwhile (#744). A directory ("is a directory"), a FIFO, a device or a socket ("not a regular file") is refused after the open: it has no size to send. It is for code that hands the file to the system, as anvil's SendFile does.
@@ -1421,6 +1427,18 @@ Package spawn starts child processes, like Go's os/exec: Run a program and colle
 - `(p Process) Read(buf mut []u8) !i64`: Read reads the child's standard output (Stdio.Pipe on Cmd.Stdout) into buf, up to its length, and returns how many bytes came; 0 is end of file.
 - `(p Process) ReadStderr(buf mut []u8) !i64`: ReadStderr is Read for the child's standard error.
 - `LookPath(name str) !str`: LookPath finds name like Go's exec.LookPath: a name with a slash is used as it is, otherwise each PATH entry is tried in order and the first executable file wins.
+
+## sandbox
+
+Package sandbox runs a program fenced by Linux (#1002): its own cgroup v2 (memory.max with no swap, cpu.max, pids.max, cpu.weight), new user, mount, PID, network, IPC, UTS and cgroup namespaces, a root built from read-only bind mounts of the system directories and the given inputs plus one writable scratch directory (pivot_root, a fresh /proc, no other host file visible), no network (a down loopback only), a seccomp allow-list, a hard timeout that kills the whole process tree, and its stdout and stderr captured up to a cap. It is meant for code from your own repositories (builds, tests, generated programs); code from anyone else belongs in a microVM, not here. Linux only: on macOS Run fails. The caller needs unprivileged user namespaces (or root) and, for the cgroup limits, a delegated cgroup v2 directory (Spec.Cgroup) that holds no processes of its own; see the package README for the exact requirements and how CI runs the escape tests.
+
+- `type Bind struct`: Bind is a host file or directory mounted read-only inside the sandbox.
+- `type Spec struct`: Spec describes one sandboxed run. Zero values mean: no cgroup limit for Memory, CPU, Pids and Weight (they need Cgroup), DefaultTimeout, DefaultMaxOutput, DefaultSystem, ScratchPath "/scratch", and Dir the scratch path (or "/" without one).
+- `type Result struct`: Result is how a sandboxed run ended and what it printed.
+- `const DefaultTimeout = 60 * 1000 * 1000 * 1000`: DefaultTimeout is Run's timeout when Spec.Timeout is 0: one minute.
+- `const DefaultMaxOutput = 1024 * 1024`: DefaultMaxOutput is Run's cap on each of stdout and stderr when Spec.MaxOutput is 0: 1 MiB.
+- `DefaultSystem() []str`: DefaultSystem is the host directories mounted read-only when Spec.System is empty; a missing one is skipped and a symlink (a merged /usr's /bin) is recreated as the same symlink.
+- `Run(spec Spec) !Result`: Run runs spec.Argv in a new sandbox and waits for it: the output is read while it runs, the wait goes through the scheduler (other tasks keep running), and a task deadline (within) kills the tree like the timeout but fails with fault.DeadlineExceeded. A program that exits non-zero, dies of a signal, times out or is killed for memory is a Result, not a fault; a sandbox that cannot be built (no user namespaces, a missing input, a cgroup that is not delegated) or a program that cannot be executed is a fault that names the step.
 
 ## signal
 
@@ -3011,6 +3029,70 @@ fn echo(ws websocket.Conn, m websocket.Message) ! {
 - `IsClosed(err fault) bool`: IsClosed reports whether err is the normal end of a connection: the peer closed it.
 - `(c Conn) Read() !Message`: Read returns the next message; it answers pings and joins fragments on the way. When the peer closes, it answers the close and fails with "websocket: closed (code)". The returned message lives in the caller's pool. For a long-lived stream, use Each to reset message allocations after every callback without invalidating the Conn.
 - `(c Conn) Each(h fn(Conn, Message) !) !`: Each reads messages and calls h until a read or callback fails. Every callback has a reusable message pool: use keep() to retain its data after the callback returns. The Conn and all objects allocated before Each remain valid. Callbacks may wait. A closed peer returns the same IsClosed fault as Read; callback faults propagate.
+
+## s3
+
+Package s3 is a client for S3-compatible object stores (AWS S3, Cloudflare R2, MinIO) over wire's HTTP client, signed with AWS Signature Version 4.
+
+Bodies are streamed: Put sends a file from its descriptor (pread into wire's 64 KiB send buffer), GetFile and GetTo write the answer as it arrives, and Upload sends a large file as a multipart upload, one part at a time, so a file of any size moves in the memory of a few buffers. Over https a streamed body is signed UNSIGNED-PAYLOAD (TLS keeps it whole); over http (unless Config.UnsignedPayload), or with Config.SignPayload, each body is hashed first, which reads it twice.
+
+```tin body
+let c = try s3.New(s3.Config{Endpoint: "http://127.0.0.1:9000", Region: "us-east-1", AccessKey: "minio", SecretKey: "minio-secret", PathStyle: true})
+let etag = try c.Put("packs", "repos/7/packs/ab12.pack", "/tmp/ab12.pack")
+let part = try c.GetRange("packs", "repos/7/packs/ab12.pack", 4096, 512)
+let info = try c.Head("packs", "repos/7/packs/ab12.pack")
+```
+
+Calls that may be repeated (GET, HEAD, PUT, DELETE) are tried again, through policy.Retry, after a connection error or a 408, 429, 500, 502, 503 (SlowDown) or 504 answer; a POST (creating and completing a multipart upload) only after such an answer, never after a lost connection, and a body read from a caller's reader never. A missing object fails with a fault that matches ErrNotFound; any other S3 error answer matches ErrService, and its message holds the Code and Message S3 gave (ErrorCode reads the code back).
+
+Addressing is virtual-hosted (bucket.host/key) unless Config.PathStyle (host/bucket/key), which MinIO and most local servers want. A bucket name with dots cannot be used virtual-hosted over https (the certificate names one level). Keys whose characters XML 1.0 cannot hold (most control characters) cannot be listed.
+
+- `(r mut region) Read(buf mut []u8) !i64`: Read fills buf with the region's next bytes: 0 at its end. A file that shrank fails.
+- `(c mut collect) Begin(h wire.Head) !`: Begin keeps the answer's status and fields.
+- `(c mut collect) Write(data []u8) !i64`: Write keeps data, refusing an answer longer than most bytes.
+- `(f mut fileSink) Begin(h wire.Head) !`: Begin creates the file for a successful answer.
+- `(f mut fileSink) Write(data []u8) !i64`: Write appends data to the file, or to the error kept in memory.
+- `(g mut gate[W]) Begin(h wire.Head) !`: Begin opens the gate for a successful answer.
+- `(g mut gate[W]) Write(data []u8) !i64`: Write passes data on to w, or keeps an error answer.
+- `type Config struct`: Config says where the store is and how to sign for it.
+- `type Client struct`: Client makes requests to one store; it holds no connections (wire keeps them per core).
+- `type Object struct`: Object is what S3 says about an object: in a list, or from Head.
+- `type ListOptions struct`: ListOptions select the objects List gives.
+- `type ListResult struct`: ListResult is one page of a list.
+- `type Part struct`: Part is one uploaded part of a multipart upload: its number (from 1) and ETag.
+- `const MinPartSize = 5242880`: MinPartSize is the smallest part S3 takes (but for the last): 5 MiB.
+- `const MaxParts = 10000`: MaxParts is the most parts one upload may have.
+- `const DefaultPartSize = 16777216`: DefaultPartSize is Upload's part size when it is given 0: 16 MiB.
+- `New(cfg Config) !Client`: New checks cfg and makes a client.
+- `ErrorCode(err fault) str`: ErrorCode is the S3 error code in err's chain ("NoSuchKey", "SlowDown", "NotFound" for a HEAD's 404, "HTTP502" for an answer without an XML error), or "" when err is no S3 answer.
+- `(c Client) Put(bucket str, key str, path str) !str`: Put uploads the file at path as the object key in one request, streamed from the file. A file over 5 GiB needs Upload. It gives the object's ETag.
+- `(c Client) PutBytes(bucket str, key str, data str) !str`: PutBytes uploads data as the object key and gives its ETag.
+- `PutReader[R io.Reader](c Client, bucket str, key str, src R, size i64) !str`: PutReader uploads size bytes read from src as the object key, streamed, and gives its ETag. The body cannot be read again, so the call is never tried twice, and it cannot be hashed first: it is signed UNSIGNED-PAYLOAD whatever the scheme.
+- `(c Client) GetBytes(bucket str, key str, maxBytes i64) !str`: GetBytes gives the whole object key; at most maxBytes of it (a larger one fails).
+- `(c Client) GetRange(bucket str, key str, off i64, n i64) !str`: GetRange gives n bytes of the object key from offset off: fewer at the object's end.
+- `(c Client) GetFile(bucket str, key str, path str) !i64`: GetFile writes the object key to a file at path, as it arrives (through a temporary file next to it, renamed when the whole object is in), and gives its size.
+- `GetTo[W io.Writer](c Client, bucket str, key str, w mut W) !i64`: GetTo writes the object key to w as it arrives and gives how many bytes it wrote. A try is repeated only when nothing reached w yet. w must be a struct (a reference): a value struct would be written as a copy.
+- `GetRangeTo[W io.Writer](c Client, bucket str, key str, off i64, n i64, w mut W) !i64`: GetRangeTo writes n bytes of the object key from offset off to w (n < 0: to its end).
+- `(c Client) Head(bucket str, key str) !Object`: Head describes the object key; a missing one fails with ErrNotFound.
+- `(c Client) Delete(bucket str, key str) !`: Delete removes the object key; removing one that does not exist is not a fault (S3 says so).
+- `(c Client) List(bucket str, opt ListOptions) !ListResult`: List gives one page of the bucket's objects (ListObjectsV2).
+- `(c Client) ListAll(bucket str, prefix str) ![]Object`: ListAll gives every object whose key starts with prefix, reading page after page.
+- `(c Client) CreateBucket(bucket str) !`: CreateBucket makes a bucket (in Config.Region: AWS wants it named outside us-east-1).
+- `(c Client) CreateMultipart(bucket str, key str) !str`: CreateMultipart starts a multipart upload of the object key and gives its upload id.
+- `(c Client) UploadPart(bucket str, key str, id str, number i64, path str, off i64, n i64) !str`: UploadPart sends bytes [off, off+n) of the file at path as part number (1 to 10000) of the upload id, streamed from the file, and gives the part's ETag.
+- `(c Client) CompleteMultipart(bucket str, key str, id str, parts []Part) !str`: CompleteMultipart joins the parts (in number order) into the object and gives its ETag.
+- `(c Client) AbortMultipart(bucket str, key str, id str) !`: AbortMultipart stops the upload id and drops its parts.
+- `(c Client) Upload(bucket str, key str, path str, partSize i64) !str`: Upload sends the file at path as the object key in parts of partSize bytes (0: DefaultPartSize; raised to MinPartSize, and as needed to stay within MaxParts), one after the other, each streamed from the file: memory stays at a few buffers whatever the size. A file of at most one part goes as a plain Put. A failed upload is aborted. It gives the ETag.
+- `(c Client) Presign(method str, bucket str, key str, expires i64) !str`: Presign is a URL that lets anyone holding it make one method call ("GET", "PUT") on the object key, without credentials, for expires (ns, from 1 s to 7 days) from now.
+- `(c Client) PresignAt(method str, bucket str, key str, expires i64, unix i64) !str`: PresignAt is Presign signed at the instant unix (seconds): for tests and for URLs made ahead.
+- `const UnsignedPayload = "UNSIGNED-PAYLOAD"`: UnsignedPayload is the x-amz-content-sha256 value of a body that is not hashed: S3 then trusts the transport (TLS) for the body's integrity.
+- `const EmptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`: EmptyHash is the SHA-256 of an empty body, in hex.
+- `type Request struct`: Request is one HTTP request to sign. Path is the URI path as it goes on the wire, already escaped (EscapePath); Query and Headers are name, value pairs, the query's unescaped.
+- `type Signed struct`: Signed is a signed request: the fields to add to its headers (X-Amz-Date, the session token and Authorization, as name, value pairs) and its query string, escaped and in order.
+- `EscapePath(s str) str`: EscapePath escapes an object key (or a whole path) for a URL path the way S3 signs it: every byte except A-Z a-z 0-9 - . _ ~ and / becomes %XX.
+- `EscapeQuery(s str) str`: EscapeQuery escapes a query parameter's name or value for a signed query: every byte except A-Z a-z 0-9 - . _ ~ becomes %XX (a space is %20, never +).
+- `SignRequest(cfg Config, service str, r Request, unix i64) Signed`: SignRequest signs r with the credentials and region of cfg for service ("s3") at the instant unix (seconds): the X-Amz-Date, X-Amz-Security-Token (with a session token) and Authorization fields to send with r, and r's query in its signed form.
+- `PresignRequest(cfg Config, service str, r Request, expires i64, unix i64) str`: PresignRequest signs r in its query (a presigned URL) for expires seconds from unix and gives the query string to put after "?": r's parameters, the X-Amz-* ones and X-Amz-Signature last. Headers in r are signed as they are (none are moved to the query).
 
 ## atomic
 

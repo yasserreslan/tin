@@ -1,0 +1,20 @@
+# /etc/tinhub/tinhub.conf for phase 1: one server, every role, Postgres on localhost, packs on disk
+# (design/tinhub.md §3 lists every key). Secrets are file:PATH, files readable by the tinhub user only.
+roles = node,worker,runner
+listen = :443
+public_url = https://tinhub.example.org
+tls.cert = /etc/tinhub/tls/fullchain.pem
+tls.key = /etc/tinhub/tls/privkey.pem
+db.addr = 127.0.0.1:5432
+db.user = tinhub
+db.name = tinhub
+db.password = file:/etc/tinhub/secrets/db
+redis.addr = 127.0.0.1:6379
+packs.store = dir
+packs.dir = /var/lib/tinhub
+secrets.nonce = file:/etc/tinhub/secrets/nonce
+secrets.cookie = file:/etc/tinhub/secrets/cookie
+log.level = info
+# the runner (design/tinhub.md §12): without runner.key it runs no replays; the toolchain is a Tin release unpacked here
+runner.key = file:/etc/tinhub/secrets/runner
+runner.tin = /usr/local/lib/tin

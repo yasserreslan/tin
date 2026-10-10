@@ -1,0 +1,129 @@
+package s3
+
+import "mint"
+import "scroll"
+
+// ---- the XML of S3's answers ----
+
+// leaf is one element of an XML answer, in document order of its end: its path from the root
+// ("ListBucketResult/Contents/Key") and its text (the text directly inside it).
+type leaf struct {
+	path str
+	text str
+}
+
+// leaves reads an XML document into its elements, each at its end tag.
+fn leaves(doc str) ![]leaf {
+	mut d = scroll.NewDecoder(doc)
+	mut stack = []str{}
+	mut texts = []str{}
+	mut out = []leaf{}
+	for {
+		let t = try d.Next()
+		match t {
+			StartElement(n, _) => {
+				mut p = n.Local
+				if len(stack) > 0 {
+					p = stack[len(stack) - 1] + "/" + n.Local
+				}
+				stack = append(stack, p)
+				texts = append(texts, "")
+			}
+			EndElement(_) => {
+				let k = len(stack) - 1
+				out = append(out, leaf{path: stack[k], text: texts[k]})
+				stack = stack[0:k]
+				texts = texts[0:k]
+			}
+			CharData(s) => {
+				if len(texts) > 0 {
+					texts[len(texts) - 1] = texts[len(texts) - 1] + s
+				}
+			}
+			Done => {
+				break
+			}
+			_ => {}
+		}
+	}
+	return out
+}
+
+// field is the text of the first element at path, or "".
+fn field(ls []leaf, path str) str {
+	for l in ls {
+		if l.path == path {
+			return l.text
+		}
+	}
+	return ""
+}
+
+// root is the name of the document's root element, "" when it has none.
+fn root(ls []leaf) str {
+	if len(ls) == 0 {
+		return ""
+	}
+	return ls[len(ls) - 1].path
+}
+
+// number is s as a decimal integer, 0 when it is not one.
+fn number(s str) i64 {
+	return mint.Atoi(s) catch _ {
+		0
+	}
+}
+
+// parseList reads a ListObjectsV2 answer.
+fn parseList(doc str) !ListResult {
+	let ls = try leaves(doc)
+	if root(ls) != "ListBucketResult" {
+		fail "s3: a list answer whose root is {root(ls)}, not ListBucketResult"
+	}
+	mut r = ListResult{Objects: []Object{}, Prefixes: []str{}, Truncated: false, NextToken: ""}
+	mut cur = Object{Key: "", Size: 0, ETag: "", LastModified: "", StorageClass: "", ContentType: ""}
+	for l in ls {
+		match l.path {
+			"ListBucketResult/Contents/Key" => cur.Key = l.text
+			"ListBucketResult/Contents/Size" => cur.Size = number(l.text)
+			"ListBucketResult/Contents/ETag" => cur.ETag = l.text
+			"ListBucketResult/Contents/LastModified" => cur.LastModified = l.text
+			"ListBucketResult/Contents/StorageClass" => cur.StorageClass = l.text
+			"ListBucketResult/Contents" => {
+				r.Objects = append(r.Objects, cur)
+				cur = Object{Key: "", Size: 0, ETag: "", LastModified: "", StorageClass: "", ContentType: ""}
+			}
+			"ListBucketResult/CommonPrefixes/Prefix" => r.Prefixes = append(r.Prefixes, l.text)
+			"ListBucketResult/IsTruncated" => r.Truncated = l.text == "true"
+			"ListBucketResult/NextContinuationToken" => r.NextToken = l.text
+			_ => {}
+		}
+	}
+	return r
+}
+
+// serviceError is an S3 error answer: its status, its Code and Message and request id.
+type serviceError struct {
+	status    i64
+	code      str
+	message   str
+	requestID str
+}
+
+// parseError reads an S3 error document; a body that is not one leaves code and message empty.
+fn parseError(status i64, body str) serviceError {
+	mut e = serviceError{status: status, code: "", message: "", requestID: ""}
+	if len(body) == 0 {
+		return e
+	}
+	let ls = leaves(body) catch _ {
+		return e
+	}
+	if root(ls) != "Error" {
+		return e
+	}
+	e.code = field(ls, "Error/Code")
+	e.message = field(ls, "Error/Message")
+	e.requestID = field(ls, "Error/RequestId")
+	return e
+}

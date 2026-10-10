@@ -1,0 +1,1148 @@
+package sandbox
+
+import "mint"
+import "quarry"
+import "say"
+import "sift"
+import "twine"
+
+// The Linux sandbox (#1002). The parent makes the cgroup, resolves every bind source to its canonical path and writes a plan:
+// a list of raw system calls with their arguments. clone3 then starts a copy of this process (no CLONE_VM: a copy-on-write
+// fork, so it shares no memory with the runtime) in new user, mount, PID, network, IPC and UTS namespaces and, with CLONE_INTO_CGROUP, in the cgroup. That copy is
+// the sandbox's init (PID 1): it runs the plan with raw system calls only (no allocation, no scheduler), forks the program,
+// which installs the seccomp filter and execs, and then reaps until the program exits, writes its wait status to a pipe and
+// exits, which kills whatever the program left behind. The parent reads stdout and stderr in two tasks and waits on a pidfd
+// in a third, so the core goes on serving other tasks; the timeout kills init (and cgroup.kill the cgroup), and the kernel
+// kills the rest of the PID namespace.
+
+// Namespace and clone flags.
+const cloneNewNS = 0x20000
+const cloneNewCgroup = 0x02000000
+const cloneNewUTS = 0x04000000
+const cloneNewIPC = 0x08000000
+const cloneNewUser = 0x10000000
+const cloneNewPID = 0x20000000
+const cloneNewNet = 0x40000000
+const clonePidfd = 0x1000
+const cloneIntoCgroup = 0x200000000 // CLONE_INTO_CGROUP (Linux 5.7).
+const cloneArgsSize = 88            // struct clone_args up to its cgroup field.
+
+// Signals.
+const sigKill = 9
+const sigChld = 17
+
+// mount(2) flags and mount_setattr(2) attributes.
+const msNosuid = 2
+const msNodev = 4
+const msNoexec = 8
+const msBind = 4096
+const msRec = 16384
+const msPrivate = 262144
+const mntDetach = 2
+const attrRdonly = 1
+const attrNosuid = 2
+const attrNodev = 4
+const attrNoexec = 8
+const atRecursive = 0x8000
+const atFdcwd = -100
+
+// fcntl(2) commands.
+const fSetfl = 4
+const fDupfdCloexec = 1030
+
+// open(2) flags.
+const oWronly = 1
+const oCreat = 64
+const oNonblock = 2048
+const oCloexec = 0x80000
+const oPath = 0x200000
+
+// Error numbers.
+const ePERM = 1
+const eNOENT = 2
+const eINTR = 4
+const eAGAIN = 11
+const eACCES = 13
+const eBUSY = 16
+const eEXIST = 17
+const eNOTDIR = 20
+const eNOSYS = 38
+const eNOSPC = 28 // clone3 past user.max_user_namespaces.
+
+// prctl(2), seccomp(2), wait4(2) and close_range(2).
+const prSetPdeathsig = 1
+const prSetDumpable = 4
+const prSetNoNewPrivs = 38
+const seccompSetModeFilter = 1
+const waitAll = 0x40000000 // __WALL: reap clone children too.
+const closeRangeCloexec = 4
+const sigSetmask = 2
+const ssDisable = 2
+
+// Socket families the filter lets socket(2) and socketpair(2) create.
+const afUnix = 1
+const afInet = 2
+const afInet6 = 10
+
+// Classic BPF for the seccomp filter.
+const bpfLdAbs = 0x20  // BPF_LD | BPF_W | BPF_ABS
+const bpfJeq = 0x15    // BPF_JMP | BPF_JEQ | BPF_K
+const bpfJge = 0x35    // BPF_JMP | BPF_JGE | BPF_K
+const bpfJset = 0x45   // BPF_JMP | BPF_JSET | BPF_K
+const bpfJa = 0x05     // BPF_JMP | BPF_JA
+const bpfRet = 0x06    // BPF_RET | BPF_K
+const bpfMaxInsns = 4096
+const retAllow = 0x7fff0000
+const retErrno = 0x00050000
+const retKillProcess = 0x80000000
+const seccompNr = 0    // offsetof(struct seccomp_data, nr)
+const seccompArch = 4  // offsetof(struct seccomp_data, arch)
+const seccompArg0 = 16 // offsetof(struct seccomp_data, args[0]), its low 32 bits on a little-endian CPU.
+
+// The inside user and group the caller's are mapped to; not 0, so exec drops every capability.
+const insideID = 1000
+
+// Plan operations: kind, system call number, six arguments, the errno to ignore (-1 any), the step that names it.
+const opWords = 10
+const opSys = 0
+const opWrite = 1   // open a0 for writing, write a1 (length a2), close.
+const opTouch = 2   // create the empty file a0 for a bind to land on.
+const opSignals = 3 // every signal back to SIG_DFL (a0 is a zeroed sigaction).
+const opLoopUp = 4  // the loopback up: socket(AF_INET) (nr in the op), ioctl a0 SIOCSIFFLAGS with the ifreq at a1, close.
+
+// The loopback of a private network namespace (Spec.Loopback): socket(2) and ioctl(2) values.
+const sockDgram = 2
+const sockCloexec = 0x80000
+const siocSifflags = 0x8914
+const iffUp = 1
+
+// The record init reads (words of a calloc'd block).
+const rSetup = 0
+const rSetupN = 1
+const rExec = 2
+const rExecN = 3
+const rErrFd = 4
+const rStatusFd = 5
+const rArgv = 6
+const rEnvp = 7
+const rCands = 8
+const rCandsN = 9
+const rBuf = 10
+const rNrOpenat = 11
+const rNrWrite = 12
+const rNrClose = 13
+const rNrExit = 14
+const rNrClone = 15
+const rNrWait4 = 16
+const rNrCloseRange = 17
+const rNrExecve = 18
+const rNrSigaction = 19
+const rStepFork = 20
+const rStepExec = 21
+const recWords = 22
+
+// Step numbers on the error pipe: the setup plan's from 0, the fork, the execve, then the exec plan's.
+const stepFork = 1000000
+const stepExec = 1000001
+const execBase = 1000002
+
+// allowedSyscalls is the seccomp allow-list, by name; a name the architecture lacks is skipped. What is not here gets
+// EPERM: mount and the new mount API, umount2, pivot_root, chroot, ptrace, process_vm_readv/writev, kexec_load, bpf,
+// perf_event_open, userfaultfd, unshare, setns, keyctl, add_key, request_key, the module calls, reboot, swapon, the
+// clock setters, open_by_handle_at, io_uring (the Tin runtime falls back to threads), personality and the rest. socket
+// and socketpair are allowed for AF_UNIX only (and AF_INET and AF_INET6 with Spec.Network or Spec.Loopback), clone without a CLONE_NEW* flag,
+// and clone3 gets ENOSYS so a C library falls back to clone, whose flags the filter can see.
+fn allowedSyscalls() []str {
+	return []str{
+		"read", "write", "readv", "writev", "pread64", "pwrite64", "preadv", "pwritev", "preadv2", "pwritev2",
+		"open", "openat", "openat2", "close", "close_range", "creat", "lseek",
+		"stat", "fstat", "lstat", "newfstatat", "statx", "statfs", "fstatfs",
+		"access", "faccessat", "faccessat2", "readlink", "readlinkat", "getdents", "getdents64", "getcwd", "chdir", "fchdir",
+		"mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", "rename", "renameat", "renameat2", "link", "linkat", "symlink", "symlinkat",
+		"chmod", "fchmod", "fchmodat", "fchmodat2", "chown", "fchown", "lchown", "fchownat", "umask",
+		"truncate", "ftruncate", "fallocate", "fsync", "fdatasync", "sync_file_range", "sync", "syncfs", "fadvise64", "readahead",
+		"utime", "utimes", "utimensat", "futimesat",
+		"dup", "dup2", "dup3", "fcntl", "flock", "ioctl", "pipe", "pipe2", "sendfile", "splice", "tee", "vmsplice", "copy_file_range", "mknod", "mknodat",
+		"select", "pselect6", "poll", "ppoll", "epoll_create", "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait", "epoll_pwait2",
+		"eventfd", "eventfd2", "signalfd", "signalfd4", "timerfd_create", "timerfd_settime", "timerfd_gettime",
+		"inotify_init", "inotify_init1", "inotify_add_watch", "inotify_rm_watch",
+		"getxattr", "lgetxattr", "fgetxattr", "listxattr", "llistxattr", "flistxattr", "setxattr", "lsetxattr", "fsetxattr", "removexattr", "lremovexattr", "fremovexattr",
+		"memfd_create",
+		"brk", "mmap", "munmap", "mremap", "mprotect", "madvise", "mlock", "mlock2", "munlock", "mlockall", "munlockall", "mincore", "msync", "membarrier",
+		"execve", "execveat", "exit", "exit_group", "wait4", "waitid", "fork", "vfork", "kill", "tkill", "tgkill",
+		"getpid", "getppid", "gettid", "getpgid", "setpgid", "getpgrp", "getsid", "setsid",
+		"getuid", "geteuid", "getgid", "getegid", "getresuid", "getresgid", "getgroups",
+		"setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "setfsuid", "setfsgid",
+		"capget", "capset", "prctl", "arch_prctl", "set_tid_address", "set_robust_list", "get_robust_list", "futex", "futex_waitv", "rseq",
+		"sched_yield", "sched_getaffinity", "sched_setaffinity", "sched_getparam", "sched_setparam", "sched_getscheduler", "sched_setscheduler",
+		"sched_get_priority_max", "sched_get_priority_min", "sched_rr_get_interval", "sched_getattr", "sched_setattr", "getcpu",
+		"getpriority", "setpriority", "getrlimit", "setrlimit", "prlimit64", "getrusage", "times", "uname", "sysinfo",
+		"pidfd_open", "pidfd_send_signal", "restart_syscall",
+		"rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "rt_sigpending", "rt_sigtimedwait", "rt_sigqueueinfo", "rt_tgsigqueueinfo", "rt_sigsuspend",
+		"sigaltstack", "pause", "alarm", "getitimer", "setitimer",
+		"nanosleep", "clock_nanosleep", "clock_gettime", "clock_getres", "gettimeofday", "time",
+		"timer_create", "timer_settime", "timer_gettime", "timer_getoverrun", "timer_delete",
+		"getrandom",
+		"connect", "bind", "listen", "accept", "accept4", "getsockname", "getpeername", "sendto", "recvfrom", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg",
+		"shutdown", "setsockopt", "getsockopt",
+		"shmget", "shmat", "shmctl", "shmdt", "semget", "semop", "semctl", "semtimedop", "msgget", "msgsnd", "msgrcv", "msgctl",
+		"landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self", "seccomp",
+		"map_shadow_stack", "get_mempolicy", "ioprio_get", "ioprio_set", "pkey_alloc", "pkey_free", "pkey_mprotect",
+	}
+}
+
+// mut: per core, the number of sandboxes this core has made, for unique cgroup names.
+mut sandboxSeq = 0
+
+// plan is the list of operations init (setup) or the program (exec) runs, with a description per step for errors.
+type plan struct {
+	ops   []i64
+	steps []str
+	mem   []i64 // calloc'd blocks the operations point at.
+	base  i64   // the number of its first step on the error pipe.
+}
+
+// newPlan is an empty plan whose steps are numbered from base.
+fn newPlan(base i64) plan {
+	return plan{ops: []i64{}, steps: []str{}, mem: []i64{}, base: base}
+}
+
+// sysnr is the number of a system call this file uses, which every architecture has.
+fn sysnr(name str) i64 {
+	let n = syscallNumber(name)
+	if n < 0 {
+		panic("sandbox: no system call " + name)
+	}
+	return n
+}
+
+// add appends one operation.
+fn (p mut plan) add(kind i64, step str, nr i64, a []i64, ignore i64) {
+	p.ops = append(p.ops, kind, nr)
+	for i in 0..6 {
+		mut v = i64(0)
+		if i < len(a) {
+			v = a[i]
+		}
+		p.ops = append(p.ops, v)
+	}
+	p.ops = append(p.ops, ignore, p.base+len(p.steps))
+	p.steps = append(p.steps, step)
+}
+
+// sys appends a system call that must succeed.
+fn (p mut plan) sys(step str, name str, a []i64) {
+	p.add(opSys, step, sysnr(name), a, 0)
+}
+
+// sysIgnore appends a system call whose errno e (or any, -1) is not a failure.
+fn (p mut plan) sysIgnore(step str, name str, a []i64, e i64) {
+	p.add(opSys, step, sysnr(name), a, e)
+}
+
+// mkdirs appends a mkdir for every directory from below root down to path itself, an existing one being fine.
+fn (p mut plan) mkdirs(root str, path str, last bool) {
+	for i in 1..len(path)+1 {
+		if i == len(path) || path[i] == '/' {
+			if i == len(path) && !last {
+				break
+			}
+			let d = root + path[0:i]
+			p.sysIgnore("mkdir " + d, "mkdirat", []i64{atFdcwd, rt_cstr(d), 493}, eEXIST)
+		}
+	}
+}
+
+// bindMount appends what puts the host object at canonical path source (a directory when dir) at inside path, with
+// attributes attr (recursive).
+fn (p mut plan) bindMount(what str, source str, dir bool, inside str, attr i64) {
+	let target = "/newroot" + inside
+	p.mkdirs("/newroot", inside, dir)
+	if !dir {
+		p.add(opTouch, "create " + target, 0, []i64{rt_cstr(target)}, 0)
+	}
+	let from = "/oldroot" + source
+	p.sys("bind " + what + " on " + inside, "mount", []i64{rt_cstr(from), rt_cstr(target), 0, msBind | msRec, 0})
+	p.sys("mount_setattr " + inside, "mount_setattr", []i64{atFdcwd, rt_cstr(target), atRecursive, p.mountAttr(attr), 32})
+}
+
+// mount is one entry of the new root: a bind of a host object (at its canonical path), or a symlink.
+type mount struct {
+	what   str
+	source str
+	dir    bool
+	inside str
+	attr   i64
+	link   str
+}
+
+// alloc is n zeroed words that live until the plan is freed.
+fn (p mut plan) alloc(n i64) i64 {
+	let m = calloc(n, 8)
+	p.mem = append(p.mem, m)
+	return m
+}
+
+// free releases the plan's words.
+fn (p mut plan) free() {
+	for m in p.mem {
+		free(m)
+	}
+	p.mem = []i64{}
+}
+
+// mountAttr is a struct mount_attr setting attr.
+fn (p mut plan) mountAttr(attr i64) i64 {
+	let m = p.alloc(4)
+	m[0] = attr
+	return m
+}
+
+// resolve is host path p with every symlink followed (the kernel's name for an O_PATH descriptor of it), so the child can
+// bind it from under /oldroot, and whether it is a directory.
+fn resolve(what str, p str) !(str, bool) {
+	let info = quarry.Stat(p) catch e {
+		fail say.Fault("sandbox: %s %s: %v", what, p, e)
+	}
+	let fd = rt_sys_open(rt_cstr(p), oPath | oCloexec, 0)
+	if fd < 0 {
+		fail say.Fault("sandbox: %s %s: %s", what, p, errnoText(rt_errno()))
+	}
+	let real = quarry.Readlink("/proc/self/fd/" + mint.Itoa(fd)) catch e {
+		rt_sys_close(fd)
+		fail say.Fault("sandbox: %s %s: %v", what, p, e)
+	}
+	rt_sys_close(fd)
+	if len(real) == 0 || real[0] != '/' {
+		fail say.Fault("sandbox: %s %s is not reachable from this root (%s)", what, p, real)
+	}
+	return real, info.Type == quarry.FileType.Dir
+}
+
+// mounts resolves every bind source of s: the system directories (a missing one skipped, a symlink kept as a symlink), the
+// inputs and the scratch directory.
+fn mounts(s Spec) ![]mount {
+	mut out = []mount{}
+	let ro = attrRdonly | attrNosuid | attrNodev
+	for d in s.System {
+		let info = quarry.Lstat(d) catch _ {
+			continue
+		}
+		if info.Type == quarry.FileType.Symlink {
+			let target = try quarry.Readlink(d)
+			out = append(out, mount{what: d, source: "", dir: false, inside: d, attr: 0, link: target})
+			continue
+		}
+		let (real, dir) = try resolve("system directory", d)
+		out = append(out, mount{what: d, source: real, dir: dir, inside: d, attr: ro, link: ""})
+	}
+	for b in s.Inputs {
+		let (real, dir) = try resolve("input", b.From)
+		out = append(out, mount{what: b.From, source: real, dir: dir, inside: b.To, attr: ro, link: ""})
+	}
+	if len(s.Scratch) > 0 {
+		let (real, dir) = try resolve("scratch", s.Scratch)
+		if !dir {
+			fail say.Fault("sandbox: scratch %s is not a directory", s.Scratch)
+		}
+		out = append(out, mount{what: s.Scratch, source: real, dir: true, inside: s.ScratchPath, attr: attrNosuid | attrNodev, link: ""})
+	}
+	return out
+}
+
+// setupPlan is everything init does before it forks the program: the identity maps, a private mount tree, the new root
+// (pivot_root twice, as bubblewrap does, so host paths stay reachable under /oldroot while the root is built), /dev, /proc,
+// the working directory, a cgroup namespace and the standard descriptors.
+fn setupPlan(s Spec, ms []mount, stdin i64, stdout i64, stderr i64) plan {
+	mut p = newPlan(0)
+	p.sys("prctl PR_SET_PDEATHSIG", "prctl", []i64{prSetPdeathsig, sigKill})
+	p.add(opSignals, "reset signals", 0, []i64{p.alloc(4)}, 0)
+	let ss = p.alloc(3)
+	ss[1] = ssDisable
+	p.sys("sigaltstack", "sigaltstack", []i64{ss, 0})
+	let euid = linux_raw(sysnr("geteuid"), 0, 0, 0, 0, 0, 0)
+	let egid = linux_raw(sysnr("getegid"), 0, 0, 0, 0, 0, 0)
+	let uidMap = say.Fmt("%d %d 1\n", insideID, euid)
+	let gidMap = say.Fmt("%d %d 1\n", insideID, egid)
+	let deny = "deny"
+	p.add(opWrite, "write /proc/self/setgroups", 0, []i64{rt_cstr("/proc/self/setgroups"), rt_cstr(deny), len(deny)}, 0)
+	p.add(opWrite, "write /proc/self/uid_map", 0, []i64{rt_cstr("/proc/self/uid_map"), rt_cstr(uidMap), len(uidMap)}, 0)
+	p.add(opWrite, "write /proc/self/gid_map", 0, []i64{rt_cstr("/proc/self/gid_map"), rt_cstr(gidMap), len(gidMap)}, 0)
+	// Init is a copy of this process (its memory, its environment): nothing in the sandbox may read it through /proc/1. The
+	// program's exec makes it dumpable again, as any exec does.
+	p.sys("prctl PR_SET_DUMPABLE", "prctl", []i64{prSetDumpable, 0})
+	let host = "sandbox"
+	p.sys("sethostname", "sethostname", []i64{rt_cstr(host), len(host)})
+	// Loopback: the namespace's own lo up (init holds CAP_NET_ADMIN over the network namespace its user namespace owns), so the
+	// program can reach itself on 127.0.0.1 and ::1 and nothing else: the namespace has no other interface.
+	if s.Loopback && !s.Network {
+		let ifr = p.alloc(5) // struct ifreq: the name "lo", then ifr_flags at byte 16.
+		store8(ifr, 'l')
+		store8(ifr+1, 'o')
+		__st(ifr+16, iffUp, 1)
+		p.add(opLoopUp, "bring the loopback up", sysnr("socket"), []i64{sysnr("ioctl"), ifr}, 0)
+	}
+	p.sys("make the mount tree private", "mount", []i64{0, rt_cstr("/"), 0, msRec | msPrivate, 0})
+	let tmpfs = "tmpfs"
+	let mode = "mode=0755"
+	p.sys("mount a tmpfs on /tmp", "mount", []i64{rt_cstr(tmpfs), rt_cstr("/tmp"), rt_cstr(tmpfs), msNosuid | msNodev, rt_cstr(mode)})
+	p.sys("mkdir /tmp/newroot", "mkdirat", []i64{atFdcwd, rt_cstr("/tmp/newroot"), 493})
+	p.sys("mkdir /tmp/oldroot", "mkdirat", []i64{atFdcwd, rt_cstr("/tmp/oldroot"), 493})
+	p.sys("pivot_root to /tmp", "pivot_root", []i64{rt_cstr("/tmp"), rt_cstr("/tmp/oldroot")})
+	p.sys("chdir /", "chdir", []i64{rt_cstr("/")})
+	p.sys("mount a tmpfs on the new root", "mount", []i64{rt_cstr(tmpfs), rt_cstr("/newroot"), rt_cstr(tmpfs), msNosuid | msNodev, rt_cstr(mode)})
+	for m in ms {
+		if len(m.link) > 0 {
+			let at = "/newroot" + m.inside
+			p.mkdirs("/newroot", m.inside, false)
+			p.sys("symlink " + m.inside, "symlinkat", []i64{rt_cstr(m.link), atFdcwd, rt_cstr(at)})
+			continue
+		}
+		p.bindMount(m.what, m.source, m.dir, m.inside, m.attr)
+	}
+	// A minimal /dev: the harmless character devices, bound from the host's, and the /proc/self/fd links.
+	p.sys("mkdir /dev", "mkdirat", []i64{atFdcwd, rt_cstr("/newroot/dev"), 493})
+	let devAttr = p.mountAttr(attrNosuid | attrNoexec)
+	for name in []str{"null", "zero", "full", "random", "urandom"} {
+		let target = "/newroot/dev/" + name
+		let source = "/oldroot/dev/" + name
+		p.add(opTouch, "create " + target, 0, []i64{rt_cstr(target)}, 0)
+		p.sys("bind /dev/" + name, "mount", []i64{rt_cstr(source), rt_cstr(target), 0, msBind, 0})
+		p.sys("mount_setattr /dev/" + name, "mount_setattr", []i64{atFdcwd, rt_cstr(target), 0, devAttr, 32})
+	}
+	let links = []str{"fd", "/proc/self/fd", "stdin", "/proc/self/fd/0", "stdout", "/proc/self/fd/1", "stderr", "/proc/self/fd/2"}
+	for i in (0..len(links)).step(2) {
+		p.sys("symlink /dev/" + links[i], "symlinkat", []i64{rt_cstr(links[i+1]), atFdcwd, rt_cstr("/newroot/dev/" + links[i])})
+	}
+	// A fresh /proc for the PID namespace, with the parts that reach the kernel itself read-only.
+	p.sys("mkdir /proc", "mkdirat", []i64{atFdcwd, rt_cstr("/newroot/proc"), 493})
+	let proc = "proc"
+	p.sys("mount /proc", "mount", []i64{rt_cstr(proc), rt_cstr("/newroot/proc"), rt_cstr(proc), msNosuid | msNodev | msNoexec, 0})
+	let roAttr = p.mountAttr(attrRdonly | attrNosuid | attrNodev | attrNoexec)
+	for name in []str{"sys", "sysrq-trigger", "irq", "bus"} {
+		let at = "/newroot/proc/" + name
+		p.sysIgnore("bind /proc/" + name, "mount", []i64{rt_cstr(at), rt_cstr(at), 0, msBind | msRec, 0}, eNOENT)
+		p.sysIgnore("mount_setattr /proc/" + name, "mount_setattr", []i64{atFdcwd, rt_cstr(at), atRecursive, roAttr, 32}, eNOENT)
+	}
+	// Into the new root: pivot_root(".", ".") stacks the old root on it, and the detach drops the host's tree.
+	p.sys("chdir /newroot", "chdir", []i64{rt_cstr("/newroot")})
+	p.sys("pivot_root to the new root", "pivot_root", []i64{rt_cstr("."), rt_cstr(".")})
+	p.sys("detach the host's mounts", "umount2", []i64{rt_cstr("."), mntDetach})
+	p.sys("chdir /", "chdir", []i64{rt_cstr("/")})
+	p.sys("make the root read-only", "mount_setattr", []i64{atFdcwd, rt_cstr("/"), 0, p.mountAttr(attrRdonly | attrNosuid | attrNodev), 32})
+	p.sys("chdir " + s.Dir, "chdir", []i64{rt_cstr(s.Dir)})
+	p.sys("unshare the cgroup namespace", "unshare", []i64{cloneNewCgroup})
+	p.sys("dup stdin", "dup3", []i64{stdin, 0, 0})
+	p.sys("dup stdout", "dup3", []i64{stdout, 1, 0})
+	p.sys("dup stderr", "dup3", []i64{stderr, 2, 0})
+	return p
+}
+
+// execPlan is what the program does after the fork: an empty signal mask, every other descriptor close-on-exec, no new
+// privileges and the seccomp filter, the last step before execve.
+fn execPlan(network bool) plan {
+	mut p = newPlan(execBase)
+	let fprog = p.fprog(filterProgram(network))
+	p.sys("sigprocmask", "rt_sigprocmask", []i64{sigSetmask, p.alloc(1), 0, 8})
+	p.sys("close_range", "close_range", []i64{3, 0xffffffff, closeRangeCloexec})
+	p.sys("prctl PR_SET_NO_NEW_PRIVS", "prctl", []i64{prSetNoNewPrivs, 1, 0, 0, 0})
+	p.sys("seccomp", "seccomp", []i64{seccompSetModeFilter, 0, fprog})
+	return p
+}
+
+// candidates is the paths execve tries for argv0: itself when it has a slash, else each directory of PATH in env (or
+// /usr/local/bin:/usr/bin:/bin) joined with it.
+fn candidates(argv0 str, env []str) []str {
+	for i in 0..len(argv0) {
+		if argv0[i] == '/' {
+			return []str{argv0}
+		}
+	}
+	mut path = "/usr/local/bin:/usr/bin:/bin"
+	for e in env {
+		if twine.HasPrefix(e, "PATH=") {
+			path = e[5:len(e)]
+		}
+	}
+	mut out = []str{}
+	for d in twine.Split(path, ":") {
+		mut dir = d
+		if len(dir) == 0 {
+			dir = "."
+		}
+		out = append(out, dir + "/" + argv0)
+	}
+	return out
+}
+
+// cstrs is a NULL-terminated vector of C strings, freed with the plan.
+fn (p mut plan) cstrs(xs []str) i64 {
+	let v = p.alloc(len(xs) + 1)
+	for i, x in xs {
+		v[i] = rt_cstr(x)
+	}
+	return v
+}
+
+// ---- The seccomp filter.
+
+// ins appends one BPF instruction (code, jt, jf, k) to prog.
+fn ins(prog mut []i64, code i64, jt i64, jf i64, k i64) {
+	prog = append(prog, code, jt, jf, k)
+}
+
+// tree is a binary search over the sorted allowed numbers nums[lo:hi]: each leaf compares a few numbers, allowing a match,
+// and denies the rest with EPERM. A far branch is a BPF_JA, whose offset has 32 bits.
+fn tree(nums []i64, lo i64, hi i64) []i64 {
+	mut p = []i64{}
+	if hi-lo <= 3 {
+		for i in lo..hi {
+			ins(mut p, bpfJeq, 0, 1, nums[i])
+			ins(mut p, bpfRet, 0, 0, retAllow)
+		}
+		ins(mut p, bpfRet, 0, 0, retErrno|ePERM)
+		return p
+	}
+	let mid = (lo + hi) / 2
+	let left = tree(nums, lo, mid)
+	let right = tree(nums, mid, hi)
+	ins(mut p, bpfJge, 0, 1, nums[mid])
+	ins(mut p, bpfJa, 0, 0, len(left)/4)
+	for x in left {
+		p = append(p, x)
+	}
+	for x in right {
+		p = append(p, x)
+	}
+	return p
+}
+
+// argBlock appends a check of system call nr's first argument against allowed values: a match is allowed, another value
+// gets EPERM, and another system call goes on past the block.
+fn argBlock(prog mut []i64, nr i64, values []i64) {
+	let m = len(values)
+	ins(mut prog, bpfJeq, 0, m+3, nr)
+	ins(mut prog, bpfLdAbs, 0, 0, seccompArg0)
+	for i, v in values {
+		ins(mut prog, bpfJeq, m-i, 0, v)
+	}
+	ins(mut prog, bpfRet, 0, 0, retErrno|ePERM)
+	ins(mut prog, bpfRet, 0, 0, retAllow)
+}
+
+// filterProgram is the seccomp program as (code, jt, jf, k) quadruples: another architecture is killed, socket families,
+// clone flags and clone3 are checked, then the allow-list.
+fn filterProgram(network bool) []i64 {
+	mut nums = []i64{}
+	for name in allowedSyscalls() {
+		let n = syscallNumber(name)
+		if n >= 0 {
+			nums = append(nums, n)
+		}
+	}
+	sift.Ints(mut nums)
+	mut uniq = []i64{}
+	for i, n in nums {
+		if i == 0 || n != nums[i-1] {
+			uniq = append(uniq, n)
+		}
+	}
+	mut p = []i64{}
+	ins(mut p, bpfLdAbs, 0, 0, seccompArch)
+	ins(mut p, bpfJeq, 1, 0, auditArch)
+	ins(mut p, bpfRet, 0, 0, retKillProcess)
+	ins(mut p, bpfLdAbs, 0, 0, seccompNr)
+	mut families = []i64{afUnix}
+	if network {
+		families = []i64{afUnix, afInet, afInet6}
+	}
+	argBlock(mut p, sysnr("socket"), families)
+	argBlock(mut p, sysnr("socketpair"), []i64{afUnix})
+	let nsFlags = cloneNewNS | cloneNewCgroup | cloneNewUTS | cloneNewIPC | cloneNewUser | cloneNewPID | cloneNewNet
+	ins(mut p, bpfJeq, 0, 4, sysnr("clone"))
+	ins(mut p, bpfLdAbs, 0, 0, seccompArg0)
+	ins(mut p, bpfJset, 0, 1, nsFlags)
+	ins(mut p, bpfRet, 0, 0, retErrno|ePERM)
+	ins(mut p, bpfRet, 0, 0, retAllow)
+	ins(mut p, bpfJeq, 0, 1, sysnr("clone3"))
+	ins(mut p, bpfRet, 0, 0, retErrno|eNOSYS)
+	let t = tree(uniq, 0, len(uniq))
+	for x in t {
+		p = append(p, x)
+	}
+	return p
+}
+
+// fprog packs a filter program into struct sock_filter[] and returns a struct sock_fprog pointing at it, freed with the plan.
+fn (p mut plan) fprog(prog []i64) i64 {
+	let n = len(prog) / 4
+	if n > bpfMaxInsns {
+		panic("sandbox: seccomp filter too long")
+	}
+	let filter = p.alloc(n)
+	for i in 0..n {
+		let at = filter + 8*i
+		__st(at, prog[4*i] | (prog[4*i+1] << 16) | (prog[4*i+2] << 24), 2)
+		__st(at+4, prog[4*i+3], 2)
+	}
+	let fp = p.alloc(2)
+	__st(fp, n, 1)
+	fp[1] = filter
+	return fp
+}
+
+// ---- The child: raw system calls only, from here until execve.
+
+// childFail reports the failed step and its errno on the error pipe and exits 127.
+fn childFail(rec i64, step i64, errno i64) {
+	let buf = rec[rBuf]
+	buf[0] = step
+	buf[1] = errno
+	linux_raw(rec[rNrWrite], rec[rErrFd], buf, 16, 0, 0, 0)
+	linux_raw(rec[rNrExit], 127, 0, 0, 0, 0, 0)
+}
+
+// childOps runs n plan operations from ops.
+fn childOps(rec i64, ops i64, n i64) {
+	for i in 0..n {
+		let o = ops + 8*opWords*i
+		let kind = o[0]
+		if kind == opSys {
+			let r = linux_raw(o[1], o[2], o[3], o[4], o[5], o[6], o[7])
+			if r < 0 && r > -4096 && o[8] != -1 && 0-r != o[8] {
+				childFail(rec, o[9], 0-r)
+			}
+		} else if kind == opWrite {
+			let fd = linux_raw(rec[rNrOpenat], atFdcwd, o[2], oWronly|oCloexec, 0, 0, 0)
+			if fd < 0 {
+				childFail(rec, o[9], 0-fd)
+			}
+			let w = linux_raw(rec[rNrWrite], fd, o[3], o[4], 0, 0, 0)
+			linux_raw(rec[rNrClose], fd, 0, 0, 0, 0, 0)
+			if w < 0 {
+				childFail(rec, o[9], 0-w)
+			}
+		} else if kind == opTouch {
+			let fd = linux_raw(rec[rNrOpenat], atFdcwd, o[2], oWronly|oCreat|oCloexec, 420, 0, 0)
+			if fd < 0 {
+				childFail(rec, o[9], 0-fd)
+			}
+			linux_raw(rec[rNrClose], fd, 0, 0, 0, 0, 0)
+		} else if kind == opLoopUp {
+			let fd = linux_raw(o[1], afInet, sockDgram|sockCloexec, 0, 0, 0, 0)
+			if fd < 0 {
+				childFail(rec, o[9], 0-fd)
+			}
+			let r = linux_raw(o[2], fd, siocSifflags, o[3], 0, 0, 0)
+			linux_raw(rec[rNrClose], fd, 0, 0, 0, 0, 0)
+			if r < 0 {
+				childFail(rec, o[9], 0-r)
+			}
+		} else if kind == opSignals {
+			for sig in 1..65 {
+				linux_raw(rec[rNrSigaction], sig, o[2], 0, 8, 0, 0)
+			}
+		}
+	}
+}
+
+// childProgram is the program's side of the fork: its plan (the seccomp filter last), then execve of each candidate path
+// until one is not missing.
+fn childProgram(rec i64) {
+	childOps(rec, rec[rExec], rec[rExecN])
+	let cands = rec[rCands]
+	mut last = eNOENT
+	for i in 0..rec[rCandsN] {
+		let r = linux_raw(rec[rNrExecve], cands[i], rec[rArgv], rec[rEnvp], 0, 0, 0)
+		last = 0 - r
+		if last != eNOENT && last != eNOTDIR && last != eACCES {
+			break
+		}
+	}
+	childFail(rec, rec[rStepExec], last)
+}
+
+// childInit is the sandbox's PID 1: the setup plan, the fork of the program, then a reaper that writes the program's wait
+// status to the status pipe and exits, which makes the kernel kill everything left in the PID namespace.
+fn childInit(rec i64) {
+	childOps(rec, rec[rSetup], rec[rSetupN])
+	let pid = linux_raw(rec[rNrClone], sigChld, 0, 0, 0, 0, 0)
+	if pid < 0 {
+		childFail(rec, rec[rStepFork], 0-pid)
+	}
+	if pid == 0 {
+		childProgram(rec)
+	}
+	// Init keeps only the status pipe: the program has its own copies of the rest.
+	let sfd = rec[rStatusFd]
+	if sfd > 0 {
+		linux_raw(rec[rNrCloseRange], 0, sfd-1, 0, 0, 0, 0)
+	}
+	linux_raw(rec[rNrCloseRange], sfd+1, 0xffffffff, 0, 0, 0, 0)
+	let buf = rec[rBuf]
+	for {
+		let r = linux_raw(rec[rNrWait4], -1, buf, waitAll, 0, 0, 0)
+		if r == pid {
+			linux_raw(rec[rNrWrite], sfd, buf, 4, 0, 0, 0)
+			linux_raw(rec[rNrExit], 0, 0, 0, 0, 0, 0)
+		}
+		if r < 0 && r != 0-eINTR {
+			linux_raw(rec[rNrExit], 0, 0, 0, 0, 0, 0)
+		}
+	}
+}
+
+// cloneInit starts init with clone3 and returns its pid (or -errno). The child returns here with 0 on a copy of this
+// stack and never comes back.
+fn cloneInit(args i64, rec i64) i64 {
+	let pid = linux_raw(sysnr("clone3"), args, cloneArgsSize, 0, 0, 0, 0)
+	if pid == 0 {
+		childInit(rec)
+		linux_raw(rec[rNrExit], 127, 0, 0, 0, 0, 0) // not reached: init leaves with exit_group.
+	}
+	return pid
+}
+
+// ---- The parent.
+
+// pipePair makes a close-on-exec pipe and returns (read end, write end).
+fn pipePair() !(i64, i64) {
+	let fds = calloc(1, 8)
+	let r = rt_sys_pipe(fds)
+	if r < 0 {
+		free(fds)
+		fail say.Fault("sandbox: pipe: %s", errnoText(rt_errno()))
+	}
+	let a = aboveStdio(i64(i32(__ld(fds, 2))))
+	let b = aboveStdio(i64(i32(__ld(fds+4, 2))))
+	free(fds)
+	rt_sys_fcntl(a, fSetfl, oNonblock) // the parent's end never blocks the core.
+	return a, b
+}
+
+// aboveStdio moves fd above the standard descriptors (a parent started with one of them closed gets it back from open or
+// pipe), so init's dup3 onto 0, 1 and 2 cannot overwrite a descriptor it has yet to copy.
+fn aboveStdio(fd i64) i64 {
+	if fd < 0 || fd > 2 {
+		return fd
+	}
+	let n = rt_sys_fcntl(fd, fDupfdCloexec, 3)
+	if n < 0 {
+		return fd
+	}
+	rt_sys_close(fd)
+	return n
+}
+
+// closeFds closes every descriptor in fds that is open.
+fn closeFds(fds []i64) {
+	for fd in fds {
+		if fd >= 0 {
+			rt_sys_close(fd)
+		}
+	}
+}
+
+// sandboxRun builds the cgroup, runs s and removes the cgroup again, whatever happened.
+fn sandboxRun(s Spec) !Result {
+	mut cg = ""
+	mut cgfd = -1
+	if len(s.Cgroup) > 0 {
+		let (p, fd) = try makeCgroup(s)
+		cg = p
+		cgfd = fd
+	}
+	mut res = runIn(s, cg, cgfd) catch e {
+		removeCgroup(cg, cgfd) catch _ { }
+		fail e
+	}
+	if len(cg) > 0 {
+		res.OOM = oomKills(cg) > 0
+		try removeCgroup(cg, cgfd)
+	}
+	return res
+}
+
+// runIn starts init in cgroup cgfd (-1 for none), collects the output, waits with the timeout and decodes the status.
+fn runIn(s Spec, cg str, cgfd i64) !Result {
+	let ms = try mounts(s)
+	let devnull = aboveStdio(rt_sys_open(rt_cstr("/dev/null"), 0, 0))
+	if devnull < 0 {
+		fail say.Fault("sandbox: /dev/null: %s", errnoText(rt_errno()))
+	}
+	mut opened = []i64{devnull}
+	let (outR, outW) = pipePair() catch e {
+		closeFds(opened)
+		fail e
+	}
+	opened = append(opened, outR, outW)
+	let (errR, errW) = pipePair() catch e {
+		closeFds(opened)
+		fail e
+	}
+	opened = append(opened, errR, errW)
+	let (failR, failW) = pipePair() catch e {
+		closeFds(opened)
+		fail e
+	}
+	opened = append(opened, failR, failW)
+	let (statR, statW) = pipePair() catch e {
+		closeFds(opened)
+		fail e
+	}
+	mut setup = setupPlan(s, ms, devnull, outW, errW)
+	mut exec = execPlan(s.Network || s.Loopback)
+	let cands = candidates(s.Argv[0], s.Env)
+	let rec = exec.alloc(recWords)
+	rec[rSetup] = cast(i64, setup.ops)[2]
+	rec[rSetupN] = len(setup.ops) / opWords
+	rec[rExec] = cast(i64, exec.ops)[2]
+	rec[rExecN] = len(exec.ops) / opWords
+	rec[rErrFd] = failW
+	rec[rStatusFd] = statW
+	rec[rArgv] = exec.cstrs(s.Argv)
+	rec[rEnvp] = exec.cstrs(s.Env)
+	rec[rCands] = exec.cstrs(cands)
+	rec[rCandsN] = len(cands)
+	rec[rBuf] = exec.alloc(4)
+	rec[rNrOpenat] = sysnr("openat")
+	rec[rNrWrite] = sysnr("write")
+	rec[rNrClose] = sysnr("close")
+	rec[rNrExit] = sysnr("exit_group")
+	rec[rNrClone] = sysnr("clone")
+	rec[rNrWait4] = sysnr("wait4")
+	rec[rNrCloseRange] = sysnr("close_range")
+	rec[rNrExecve] = sysnr("execve")
+	rec[rNrSigaction] = sysnr("rt_sigaction")
+	rec[rStepFork] = stepFork
+	rec[rStepExec] = stepExec
+	let args = exec.alloc(11)
+	let pidfdp = exec.alloc(1)
+	mut flags = cloneNewUser | cloneNewNS | cloneNewPID | cloneNewIPC | cloneNewUTS | clonePidfd
+	if !s.Network {
+		flags |= cloneNewNet
+	}
+	if cgfd >= 0 {
+		flags |= cloneIntoCgroup
+		args[10] = cgfd
+	}
+	args[0] = flags
+	args[1] = pidfdp
+	args[4] = sigChld
+	let pid = cloneInit(args, rec)
+	// The child has its own copies now: the parent keeps the read ends.
+	closeFds([]i64{devnull, outW, errW, failW, statW})
+	let pidfd = i64(i32(__ld(pidfdp, 2)))
+	setup.free()
+	exec.free()
+	if pid < 0 {
+		closeFds([]i64{outR, errR, failR, statR})
+		fail say.Fault("sandbox: clone3: %s%s", errnoText(0-pid), cloneHint(0-pid))
+	}
+	mut res = Result{Code: 0, Signal: 0, TimedOut: false, OOM: false, Stdout: "", Stderr: "", StdoutTruncated: false, StderrTruncated: false}
+	waitAndCollect(s, cg, pid, pidfd, outR, errR, mut res) catch e {
+		closeFds([]i64{outR, errR, failR, statR, pidfd})
+		fail e
+	}
+	let failure = readWords(failR, 2)
+	let status = readWords(statR, 1)
+	closeFds([]i64{outR, errR, failR, statR, pidfd})
+	if len(failure) == 2 {
+		let step = failure[0]
+		mut what = "exec " + s.Argv[0]
+		if step == stepFork {
+			what = "fork the program"
+		} else if step >= 0 && step < len(setup.steps) {
+			what = setup.steps[step]
+		} else if step >= execBase && step-execBase < len(exec.steps) {
+			what = exec.steps[step-execBase]
+		}
+		fail say.Fault("sandbox: %s: %s", what, errnoText(failure[1]))
+	}
+	if len(status) == 1 {
+		let st = status[0] & 0xffff
+		if st & 0x7f == 0 {
+			res.Code = (st >> 8) & 0xff
+		} else {
+			res.Code = -1
+			res.Signal = st & 0x7f
+		}
+	} else {
+		// init itself was killed (the timeout, or the OOM killer chose it): so was the program.
+		res.Code = -1
+		res.Signal = sigKill
+	}
+	return res
+}
+
+// cloneHint explains the usual reason clone3 is refused.
+fn cloneHint(e i64) str {
+	if e == ePERM || e == eNOSPC || e == eACCES {
+		return " (user namespaces need kernel.apparmor_restrict_unprivileged_userns=0 or root, and user.max_user_namespaces > 0)"
+	}
+	if e == eNOSYS {
+		return " (Linux 5.7 or later is needed)"
+	}
+	return ""
+}
+
+// waitAndCollect reads stdout and stderr in two tasks while a third waits for init with the timeout; the timeout (or the
+// task's deadline) kills the tree and reaps init.
+fn waitAndCollect(s Spec, cg str, pid i64, pidfd i64, outR i64, errR i64, res mut Result) ! {
+	mut out = ""
+	mut errText = ""
+	mut outCut = false
+	mut errCut = false
+	mut timedOut = false
+	scope sc {
+		sc.spawn(fn() ! {
+			let (o, cut) = try drain(outR, s.MaxOutput)
+			out = o
+			outCut = cut
+		})
+		sc.spawn(fn() ! {
+			let (o, cut) = try drain(errR, s.MaxOutput)
+			errText = o
+			errCut = cut
+		})
+		sc.spawn(fn() ! {
+			let r = rt_task_wait(pidfd, 1, s.Timeout)
+			if r != waitReady {
+				killTree(cg, pid)
+				reap(pidfd)
+				if r == waitDeadline {
+					fail cast(fault, rt_wait_fault())
+				}
+				timedOut = true
+				return
+			}
+			reap(pidfd)
+		})
+	}
+	res.Stdout = out
+	res.Stderr = errText
+	res.StdoutTruncated = outCut
+	res.StderrTruncated = errCut
+	res.TimedOut = timedOut
+}
+
+// killTree kills every process of the sandbox: cgroup.kill when there is a cgroup, and init, whose death makes the kernel
+// kill the rest of its PID namespace.
+fn killTree(cg str, pid i64) {
+	if len(cg) > 0 {
+		writeFile(cg + "/cgroup.kill", "1") catch _ { }
+	}
+	rt_sys_kill(pid, sigKill)
+}
+
+// reap waits (blocking: init is exiting or dead) for init and reaps it.
+fn reap(pidfd i64) {
+	let info = calloc(16, 8)
+	rt_sys_waitid(3, pidfd, info, 4) // P_PIDFD, WEXITED
+	free(info)
+}
+
+// drain reads fd to its end, keeping at most max bytes; the rest is read and dropped so the program never blocks on a full
+// pipe. It reports whether anything was dropped.
+fn drain(fd i64, max i64) !(str, bool) {
+	let chunk = make([]u8, 65536)
+	mut out = []u8{}
+	mut cut = false
+	for {
+		let r = rt_task_wait(fd, 1, 0)
+		if r == waitDeadline {
+			fail cast(fault, rt_wait_fault())
+		}
+		let n = rt_sys_read(fd, cast(i64, chunk)[2], len(chunk))
+		if n == 0 {
+			break
+		}
+		if n < 0 {
+			let e = rt_errno()
+			if e == eAGAIN || e == eINTR {
+				continue
+			}
+			fail say.Fault("sandbox: read output: %s", errnoText(e))
+		}
+		let room = max - len(out)
+		if n > room {
+			cut = true
+			if room > 0 {
+				out = append(out, chunk[0:room]...)
+			}
+		} else {
+			out = append(out, chunk[0:n]...)
+		}
+	}
+	return str(out), cut
+}
+
+// readWords reads up to n words a dead child left in a non-blocking pipe; fewer means it wrote nothing (or a short write).
+fn readWords(fd i64, n i64) []i64 {
+	let buf = calloc(n, 8)
+	let got = rt_sys_read(fd, buf, 8*n)
+	mut out = []i64{}
+	if n == 1 && got == 4 {
+		out = append(out, i64(i32(__ld(buf, 2))))
+	} else if got == 8*n {
+		for i in 0..n {
+			out = append(out, buf[i])
+		}
+	}
+	free(buf)
+	return out
+}
+
+// ---- The cgroup.
+
+// makeCgroup makes a child cgroup of s.Cgroup with the controllers and limits s asks for and returns its path and an open
+// descriptor for CLONE_INTO_CGROUP.
+fn makeCgroup(s Spec) !(str, i64) {
+	if !quarry.Exists(s.Cgroup + "/cgroup.controllers") {
+		fail say.Fault("sandbox: %s is not a cgroup v2 directory (no cgroup.controllers)", s.Cgroup)
+	}
+	mut want = []str{}
+	if s.Memory > 0 {
+		want = append(want, "memory")
+	}
+	if s.CPU > 0.0 || s.Weight > 0 {
+		want = append(want, "cpu")
+	}
+	if s.Pids > 0 {
+		want = append(want, "pids")
+	}
+	let enabled = twine.Fields(readText(s.Cgroup + "/cgroup.subtree_control"))
+	for c in want {
+		mut on = false
+		for e in enabled {
+			if e == c {
+				on = true
+			}
+		}
+		if !on {
+			writeFile(s.Cgroup + "/cgroup.subtree_control", "+" + c) catch e {
+				fail say.Fault("sandbox: enable the %s controller in %s: %v (the directory must be delegated to this user, have %s in cgroup.controllers, and hold no processes of its own)", c, s.Cgroup, e, c)
+			}
+		}
+	}
+	mut path = ""
+	for {
+		sandboxSeq += 1
+		path = say.Fmt("%s/tin-sandbox-%d-%d-%d", s.Cgroup, quarry.Pid(), rt_core_id(), sandboxSeq)
+		if rt_sys_mkdir(rt_cstr(path), 493) == 0 {
+			break
+		}
+		if rt_errno() != eEXIST {
+			fail say.Fault("sandbox: mkdir %s: %s", path, errnoText(rt_errno()))
+		}
+	}
+	setLimits(s, path) catch e {
+		rt_sys_rmdir(rt_cstr(path))
+		fail e
+	}
+	let fd = rt_sys_open(rt_cstr(path), oDirectory | oCloexec, 0)
+	if fd < 0 {
+		let e = rt_errno()
+		rt_sys_rmdir(rt_cstr(path))
+		fail say.Fault("sandbox: open %s: %s", path, errnoText(e))
+	}
+	return path, fd
+}
+
+// setLimits writes s's limits into the cgroup at path.
+fn setLimits(s Spec, path str) ! {
+	if s.Memory > 0 {
+		try writeFile(path + "/memory.max", mint.Itoa(s.Memory))
+		// No swap: going over memory.max is an OOM kill, not a slow crawl. Without swap accounting the file is missing.
+		writeFile(path + "/memory.swap.max", "0") catch e {
+			if quarry.Exists(path + "/memory.swap.max") {
+				fail e
+			}
+		}
+		// The whole sandbox goes when one of its processes is OOM-killed.
+		try writeFile(path + "/memory.oom.group", "1")
+	}
+	if s.CPU > 0.0 {
+		let period = 100000
+		mut quota = i64(s.CPU * f64(period))
+		if quota < 1000 {
+			quota = 1000
+		}
+		try writeFile(path + "/cpu.max", say.Fmt("%d %d", quota, period))
+	}
+	if s.Weight > 0 {
+		try writeFile(path + "/cpu.weight", mint.Itoa(s.Weight))
+	}
+	if s.Pids > 0 {
+		try writeFile(path + "/pids.max", mint.Itoa(s.Pids))
+	}
+}
+
+// oomKills is the oom_kill count of the cgroup's memory.events (0 without the memory controller).
+fn oomKills(cg str) i64 {
+	let text = readText(cg + "/memory.events")
+	for line in twine.Split(text, "\n") {
+		let f = twine.Fields(line)
+		if len(f) == 2 && f[0] == "oom_kill" {
+			return mint.Atoi(f[1]) catch _ { 0 }
+		}
+	}
+	return 0
+}
+
+// removeCgroup kills anything left in the cgroup and removes it, waiting (through the scheduler) while it empties.
+fn removeCgroup(cg str, cgfd i64) ! {
+	if len(cg) == 0 {
+		return
+	}
+	if cgfd >= 0 {
+		rt_sys_close(cgfd)
+	}
+	writeFile(cg + "/cgroup.kill", "1") catch _ { }
+	for i in 0..5000 {
+		if rt_sys_rmdir(rt_cstr(cg)) == 0 {
+			return
+		}
+		let e = rt_errno()
+		if e == eNOENT {
+			return
+		}
+		if e != eBUSY {
+			fail say.Fault("sandbox: rmdir %s: %s", cg, errnoText(e))
+		}
+		// 1 ms through the scheduler; past the task's deadline (the run was cut short) the cgroup still goes, blocking.
+		if rt_task_wait(-1, 0, 1000000) == waitDeadline {
+			rt_sleep_ns(1000000)
+		}
+	}
+	fail say.Fault("sandbox: rmdir %s: still busy after 5 s", cg)
+}
+
+// writeFile writes text to an existing file (a cgroup knob), in one write.
+fn writeFile(path str, text str) ! {
+	let fd = rt_sys_open(rt_cstr(path), oWronly, 0)
+	if fd < 0 {
+		fail say.Fault("open %s: %s", path, errnoText(rt_errno()))
+	}
+	let n = rt_sys_write(fd, rt_cstr(text), len(text))
+	let e = rt_errno()
+	rt_sys_close(fd)
+	if n < 0 {
+		fail say.Fault("write %s to %s: %s", text, path, errnoText(e))
+	}
+}
+
+// readText is a small file's text (a cgroup file), or "" when it cannot be read.
+fn readText(path str) str {
+	return quarry.ReadFile(path) catch _ { "" }
+}
+
+// errnoText is rt_sys_strerror with its first letter lowered, as Go spells errno texts.
+fn errnoText(e i64) str {
+	let p = rt_sys_strerror(e)
+	let s = rt_str_from_raw(p, strlen(p))
+	if len(s) > 0 && s[0] >= 'A' && s[0] <= 'Z' {
+		store8(cast(i64, s)+8, i64(s[0])+32)
+	}
+	return s
+}

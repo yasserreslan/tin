@@ -182,13 +182,15 @@ fn limitFault(path str, cap i64) ! {
 }
 
 // ReadAt returns up to n bytes of the file at path from offset off: fewer at the file's end, "" past it. Only those
-// bytes are read (pread), so one record of a large file costs its own size. Inside a request task, or recording or
-// replaying a tape, it reads the file through ReadFileBound and gives the same bytes.
+// bytes are read (pread), so one record of a large file costs its own size, inside a request task too (a local file's
+// pages come from the page cache; a whole file read for a few bytes cost a request its size in memory). Recording or
+// replaying a tape, and inside a task on a file system that may wait for a daemon or a server (FUSE, 9p, CIFS: see
+// useRing) or without the core's io_uring, it reads the file through ReadFileBound and gives the same bytes.
 fn ReadAt(path str, off i64, n i64) !str {
 	if off < 0 || n < 0 {
 		fail invalidFault("read", path)
 	}
-	if rt_tape() != 0 || rt_task_current() != 0 {
+	if rt_tape() != 0 || (rt_task_current() != 0 && !useRing(path)) {
 		let s = try ReadFileBound(path, 1 << 60)
 		if off >= len(s) {
 			return ""

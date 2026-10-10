@@ -1,0 +1,738 @@
+// Package s3 is a client for S3-compatible object stores (AWS S3, Cloudflare R2, MinIO) over
+// wire's HTTP client, signed with AWS Signature Version 4.
+//
+// Bodies are streamed: Put sends a file from its descriptor (pread into wire's 64 KiB send
+// buffer), GetFile and GetTo write the answer as it arrives, and Upload sends a large file as a
+// multipart upload, one part at a time, so a file of any size moves in the memory of a few
+// buffers. Over https a streamed body is signed UNSIGNED-PAYLOAD (TLS keeps it whole); over
+// http (unless Config.UnsignedPayload), or with Config.SignPayload, each body is hashed first,
+// which reads it twice.
+//
+//	let c = try s3.New(s3.Config{Endpoint: "http://127.0.0.1:9000", Region: "us-east-1", AccessKey: "minio", SecretKey: "minio-secret", PathStyle: true})
+//	let etag = try c.Put("packs", "repos/7/packs/ab12.pack", "/tmp/ab12.pack")
+//	let part = try c.GetRange("packs", "repos/7/packs/ab12.pack", 4096, 512)
+//	let info = try c.Head("packs", "repos/7/packs/ab12.pack")
+//
+// Calls that may be repeated (GET, HEAD, PUT, DELETE) are tried again, through policy.Retry,
+// after a connection error or a 408, 429, 500, 502, 503 (SlowDown) or 504 answer; a POST
+// (creating and completing a multipart upload) only after such an answer, never after a lost
+// connection, and a body read from a caller's reader never. A missing object fails with a
+// fault that matches ErrNotFound; any other S3 error answer matches ErrService, and its
+// message holds the Code and Message S3 gave (ErrorCode reads the code back).
+//
+// Addressing is virtual-hosted (bucket.host/key) unless Config.PathStyle (host/bucket/key),
+// which MinIO and most local servers want. A bucket name with dots cannot be used
+// virtual-hosted over https (the certificate names one level). Keys whose characters XML 1.0
+// cannot hold (most control characters) cannot be listed.
+package s3
+
+import "fault"
+import "flume"
+import "io"
+import "policy"
+import "quarry"
+import "say"
+import "scroll"
+import "seal"
+import "tide"
+import "tls"
+import "twine"
+import "wire"
+
+// ErrNotFound is the fault of an object (or upload) that does not exist: S3's NoSuchKey,
+// NoSuchUpload, and a 404 to a HEAD.
+let ErrNotFound = fault("not found")
+
+// ErrService is the fault of every other S3 error answer.
+let ErrService = fault("S3 error")
+
+// Config says where the store is and how to sign for it.
+type Config struct {
+	Endpoint    str        // "https://s3.us-east-1.amazonaws.com", "http://127.0.0.1:9000", "https://ACCOUNT.r2.cloudflarestorage.com"; "" is AWS's endpoint for Region
+	Region      str        // "us-east-1"; R2 uses "auto"
+	AccessKey   str        // the access key id
+	SecretKey   secret str // the secret access key
+	Token       secret str // a session token (temporary credentials), "" for none
+	PathStyle   bool       // address buckets in the path (host/bucket/key) instead of the host name
+	SignPayload bool       // hash streamed bodies over https too, instead of UNSIGNED-PAYLOAD
+	UnsignedPayload bool   // send streamed bodies UNSIGNED-PAYLOAD over http too (a server on a trusted network): no hashing pass
+	Attempts    i64        // tries of a call that may be repeated (0: 4)
+	Backoff     i64        // ns to wait before the second try, doubled for each later one (0: 200 ms)
+	Timeout     i64        // ns for each request, its body included (0: no limit)
+	TLS         ?tls.Config // roots and verification for https (nil: the system's roots)
+}
+
+// Client makes requests to one store; it holds no connections (wire keeps them per core).
+type Client struct {
+	cfg    Config
+	scheme str
+	host   str
+}
+
+// Object is what S3 says about an object: in a list, or from Head.
+type Object struct {
+	Key          str
+	Size         i64
+	ETag         str // as S3 gives it, with its quotes
+	LastModified str // as S3 gives it (ISO 8601 in a list, an HTTP date from Head)
+	StorageClass str // in a list
+	ContentType  str // from Head
+}
+
+// ListOptions select the objects List gives.
+type ListOptions struct {
+	Prefix     str // only keys that start with it
+	Delimiter  str // keys with it after the prefix are rolled up into Prefixes ("/" lists one level)
+	Token      str // the NextToken of the page before, "" for the first page
+	StartAfter str // only keys after it (the first page)
+	MaxKeys    i64 // at most this many keys and prefixes (0: S3's 1000)
+}
+
+// ListResult is one page of a list.
+type ListResult struct {
+	Objects   []Object
+	Prefixes  []str
+	Truncated bool // more pages follow: list again with Token = NextToken
+	NextToken str
+}
+
+// Part is one uploaded part of a multipart upload: its number (from 1) and ETag.
+type Part struct {
+	Number i64
+	ETag   str
+}
+
+// MinPartSize is the smallest part S3 takes (but for the last): 5 MiB.
+const MinPartSize = 5242880
+
+// MaxParts is the most parts one upload may have.
+const MaxParts = 10000
+
+// DefaultPartSize is Upload's part size when it is given 0: 16 MiB.
+const DefaultPartSize = 16777216
+
+// maxSinglePut is the largest object one PUT may carry: 5 GiB.
+const maxSinglePut = 5368709120
+
+// New checks cfg and makes a client.
+fn New(cfg Config) !Client {
+	if len(cfg.Region) == 0 {
+		fail "s3: Config.Region is empty (R2 uses \"auto\")"
+	}
+	if len(cfg.AccessKey) == 0 || len(reveal(cfg.SecretKey)) == 0 {
+		fail "s3: Config.AccessKey and Config.SecretKey are needed"
+	}
+	mut ep = cfg.Endpoint
+	if len(ep) == 0 {
+		ep = "https://s3." + cfg.Region + ".amazonaws.com"
+	}
+	mut scheme = ""
+	mut rest = ""
+	if twine.HasPrefix(ep, "https://") {
+		scheme = "https"
+		rest = ep[8:]
+	} else if twine.HasPrefix(ep, "http://") {
+		scheme = "http"
+		rest = ep[7:]
+	} else {
+		fail "s3: endpoint {ep} is not an http:// or https:// URL"
+	}
+	rest = twine.TrimSuffix(rest, "/")
+	if len(rest) == 0 || twine.ContainsAny(rest, "/?#@ ") {
+		fail "s3: endpoint {ep} must be a scheme and a host[:port], without a path"
+	}
+	return Client{cfg: cfg, scheme: scheme, host: signHost(scheme, rest)}
+}
+
+// attempts is how many tries a call that may be repeated gets.
+fn (c Client) attempts() i64 {
+	if c.cfg.Attempts > 0 {
+		return c.cfg.Attempts
+	}
+	return 4
+}
+
+// backoff is the wait before the second try.
+fn (c Client) backoff() i64 {
+	if c.cfg.Backoff > 0 {
+		return c.cfg.Backoff
+	}
+	return 200 * tide.Millisecond
+}
+
+// options are wire's options for a call whose answer may be up to maxBody bytes.
+fn (c Client) options(maxBody i64) wire.Options {
+	return wire.Options{Timeout: c.cfg.Timeout, MaxBody: maxBody, TLS: c.cfg.TLS, MaxIdle: 0, NoH2: true}
+}
+
+// target is where a request goes: the host it names and its escaped path.
+type target struct {
+	host str
+	path str
+}
+
+// at is the target of an object (key "" for the bucket itself).
+fn (c Client) at(bucket str, key str) !target {
+	if len(bucket) == 0 {
+		fail "s3: empty bucket name"
+	}
+	if twine.ContainsAny(bucket, "/?#% ") {
+		fail "s3: bad bucket name {bucket}"
+	}
+	if c.cfg.PathStyle {
+		if len(key) == 0 {
+			return target{host: c.host, path: "/" + bucket}
+		}
+		return target{host: c.host, path: "/" + bucket + "/" + EscapePath(key)}
+	}
+	return target{host: bucket + "." + c.host, path: "/" + EscapePath(key)}
+}
+
+// hashStreams reports whether a streamed body is signed with its SHA-256 (over http unless
+// Config.UnsignedPayload, over https when Config.SignPayload), not UNSIGNED-PAYLOAD.
+fn (c Client) hashStreams() bool {
+	return (c.scheme == "http" && !c.cfg.UnsignedPayload) || c.cfg.SignPayload
+}
+
+// prepared is a signed request: its URL and the header fields to send.
+type prepared struct {
+	url     str
+	headers []str
+}
+
+// prepare signs a request now: method, target, query pairs, extra header pairs, body hash and length.
+fn (c Client) prepare(method str, t target, query []str, headers []str, hash str, length i64) prepared {
+	mut hs = []str{}
+	for h in headers {
+		hs = append(hs, h)
+	}
+	hs = append(hs, "X-Amz-Content-Sha256", hash)
+	let r = Request{Method: method, Scheme: c.scheme, Host: t.host, Path: t.path, Query: query, Headers: hs, PayloadHash: hash, ContentLength: length}
+	let s = SignRequest(c.cfg, "s3", r, tide.Wall() / tide.Second)
+	for h in s.Headers {
+		hs = append(hs, h)
+	}
+	mut url = c.scheme + "://" + t.host + t.path
+	if len(s.Query) > 0 {
+		url = url + "?" + s.Query
+	}
+	return prepared{url: url, headers: hs}
+}
+
+// reply is an answer: its status, the fields a caller reads, and its (small) body; final is a
+// fault no try may repeat.
+type reply struct {
+	status  i64
+	etag    str
+	length  str
+	ctype   str
+	lastMod str
+	class   str
+	body    str
+	final   fault
+}
+
+// replyOf is the reply of a response read whole.
+fn replyOf(r wire.Resp) reply {
+	return reply{status: r.Status, etag: r.Header("ETag"), length: r.Header("Content-Length"), ctype: r.Header("Content-Type"), lastMod: r.Header("Last-Modified"), class: r.Header("X-Amz-Storage-Class"), body: r.Body}
+}
+
+// withBody is r with the body kept of it.
+fn withBody(r reply, body str) reply {
+	mut out = r
+	out.body = body
+	return out
+}
+
+// replyHead is the reply of a streamed response's head, with what was kept of its body.
+fn replyHead(h wire.Head, body str) reply {
+	return reply{status: h.Status, etag: h.Header("ETag"), length: h.Header("Content-Length"), ctype: h.Header("Content-Type"), lastMod: h.Header("Last-Modified"), class: h.Header("X-Amz-Storage-Class"), body: body}
+}
+
+// retryable reports whether an answer with this status may be asked for again.
+fn retryable(status i64) bool {
+	return status == 408 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+}
+
+// what names a call in a fault: method, bucket and key.
+fn what(method str, bucket str, key str) str {
+	if len(key) == 0 {
+		return "{method} {bucket}"
+	}
+	return "{method} {bucket}/{key}"
+}
+
+// failure is the fault of an error answer.
+fn failure(op str, r reply) ! {
+	let e = parseError(r.status, r.body)
+	mut code = e.code
+	if len(code) == 0 {
+		code = match r.status {
+			404 => "NotFound"
+			403 => "Forbidden"
+			_ => "HTTP{r.status}"
+		}
+	}
+	mut text = "s3 {code} ({r.status}) {op}"
+	if len(e.message) > 0 {
+		text = text + ": " + e.message
+	}
+	if len(e.requestID) > 0 {
+		text = text + " (request {e.requestID})"
+	}
+	if code == "NoSuchKey" || code == "NoSuchUpload" || code == "NotFound" {
+		fail fault.Wrap(ErrNotFound, text)
+	}
+	fail fault.Wrap(ErrService, text)
+}
+
+// ErrorCode is the S3 error code in err's chain ("NoSuchKey", "SlowDown", "NotFound" for a
+// HEAD's 404, "HTTP502" for an answer without an XML error), or "" when err is no S3 answer.
+fn ErrorCode(err fault) str {
+	mut e = err
+	for e != nil {
+		let cause = fault.Cause(e)
+		if cause != nil && fault.Cause(cause) == nil && (fault.Is(cause, ErrNotFound) || fault.Is(cause, ErrService)) {
+			let m = fault.Message(e)
+			if twine.HasPrefix(m, "s3 ") {
+				let rest = m[3:]
+				let sp = twine.IndexByte(rest, ' ')
+				if sp > 0 {
+					return rest[0:sp]
+				}
+			}
+			return ""
+		}
+		e = cause
+	}
+	return ""
+}
+
+// outcome is a try's result inside the retry policy: the reply, or a fault no try may repeat.
+type outcome struct {
+	r   reply
+	err fault
+}
+
+// run makes a call with try, again while it fails in a way that may be repeated: a lost
+// connection when idempotent (try gave a fault), a retryable status when retry. The final
+// answer may still be an error answer: the caller turns it into a fault with failure.
+fn (c Client) run(op str, idempotent bool, retry bool, attempt fn() !reply) !reply {
+	mut tries = c.attempts()
+	if !retry {
+		tries = 1
+	}
+	let o = try with policy.Retry(tries).Backoff(c.backoff()) {
+		let (r, err) = attempt()
+		mut out = outcome{r: r, err: nil}
+		if err != nil {
+			if !idempotent {
+				out.err = err
+			} else {
+				fail err
+			}
+		} else if r.final != nil {
+			out.err = r.final
+		} else if retryable(r.status) {
+			try failure(op, r)
+		}
+		out
+	}
+	if o.err != nil {
+		fail o.err
+	}
+	return o.r
+}
+
+// simple sends a request whose body is in memory and whose answer is small (at most maxBody).
+fn (c Client) simple(method str, bucket str, key str, query []str, headers []str, body str, maxBody i64) !reply {
+	let t = try c.at(bucket, key)
+	let hash = seal.Sha256Hex(body)
+	let op = what(method, bucket, key)
+	let opt = c.options(maxBody)
+	return try c.run(op, method != "POST", true, fn() !reply {
+		let p = c.prepare(method, t, query, headers, hash, len(body))
+		let r = try wire.DoWith(method, p.url, p.headers, body, opt)
+		mut rep = replyOf(r)
+		// S3 may answer a POST (completing an upload) 200 with an error in the body: it is an error, and may be tried again.
+		if method == "POST" && ok(rep.status) && twine.Contains(rep.body, "<Error>") && !twine.Contains(rep.body, "Result") {
+			rep.status = 500
+		}
+		return rep
+	})
+}
+
+// expect turns an error answer into its fault.
+fn expect(op str, r reply) !reply {
+	if !ok(r.status) {
+		try failure(op, r)
+	}
+	return r
+}
+
+// ---- objects ----
+
+// Put uploads the file at path as the object key in one request, streamed from the file. A
+// file over 5 GiB needs Upload. It gives the object's ETag.
+fn (c Client) Put(bucket str, key str, path str) !str {
+	let size = try quarry.Size(path)
+	if size == 0 {
+		return try c.PutBytes(bucket, key, "")
+	}
+	if size > maxSinglePut {
+		fail "s3: {path} is {size} bytes, over the 5 GiB of one PUT: use Upload"
+	}
+	return try c.putRegion(bucket, key, []str{}, path, 0, size)
+}
+
+// putRegion sends bytes [off, off+n) of the file at path as one PUT with query (a part's or none).
+fn (c Client) putRegion(bucket str, key str, query []str, path str, off i64, n i64) !str {
+	let t = try c.at(bucket, key)
+	mut hash = UnsignedPayload
+	if c.hashStreams() {
+		mut buf = make([]u8, 1048576)
+		hash = try hashRegion(path, off, n, mut buf)
+	}
+	let op = what("PUT", bucket, key)
+	let opt = c.options(maxErrorBody)
+	let r = try c.run(op, true, true, fn() !reply {
+		let p = c.prepare("PUT", t, query, []str{}, hash, n)
+		mut hs = p.headers
+		hs = append(hs, "Content-Length", say.Str(n))
+		mut body = try openRegion(path, off, n)
+		mut sink = collect{rep: reply{status: 0}, body: []u8{}, most: maxErrorBody}
+		let (_, err) = wire.DoStreamToHead("PUT", p.url, hs, body, opt, mut sink)
+		body.done()
+		if err != nil {
+			fail err
+		}
+		return withBody(sink.rep, str(sink.body))
+	})
+	let done = try expect(op, r)
+	return done.etag
+}
+
+// PutBytes uploads data as the object key and gives its ETag.
+fn (c Client) PutBytes(bucket str, key str, data str) !str {
+	let r = try c.simple("PUT", bucket, key, []str{}, []str{}, data, maxErrorBody)
+	let done = try expect(what("PUT", bucket, key), r)
+	return done.etag
+}
+
+// PutReader uploads size bytes read from src as the object key, streamed, and gives its ETag.
+// The body cannot be read again, so the call is never tried twice, and it cannot be hashed
+// first: it is signed UNSIGNED-PAYLOAD whatever the scheme.
+fn PutReader[R io.Reader](c Client, bucket str, key str, src R, size i64) !str {
+	if size <= 0 {
+		return try c.PutBytes(bucket, key, "")
+	}
+	let t = try c.at(bucket, key)
+	let op = what("PUT", bucket, key)
+	let p = c.prepare("PUT", t, []str{}, []str{}, UnsignedPayload, size)
+	mut hs = p.headers
+	hs = append(hs, "Content-Length", say.Str(size))
+	mut sink = collect{rep: reply{status: 0}, body: []u8{}, most: maxErrorBody}
+	_ = try wire.DoStreamToHead("PUT", p.url, hs, src, c.options(maxErrorBody), mut sink)
+	let r = withBody(sink.rep, str(sink.body))
+	let done = try expect(op, r)
+	return done.etag
+}
+
+// rangeHeader is the Range field of n bytes from off (n < 0: to the end).
+fn rangeHeader(off i64, n i64) str {
+	if n < 0 {
+		return "bytes={off}-"
+	}
+	return "bytes={off}-{off + n - 1}"
+}
+
+// GetBytes gives the whole object key; at most maxBytes of it (a larger one fails).
+fn (c Client) GetBytes(bucket str, key str, maxBytes i64) !str {
+	let r = try c.simple("GET", bucket, key, []str{}, []str{}, "", max(maxBytes, maxErrorBody))
+	let done = try expect(what("GET", bucket, key), r)
+	if len(done.body) > maxBytes {
+		fail fault.Wrap(fault.LimitExceeded, "s3: GET {bucket}/{key}: the object is over {maxBytes} bytes")
+	}
+	return done.body
+}
+
+// GetRange gives n bytes of the object key from offset off: fewer at the object's end.
+fn (c Client) GetRange(bucket str, key str, off i64, n i64) !str {
+	if off < 0 || n <= 0 {
+		fail "s3: bad range {off}+{n}"
+	}
+	mut most = n
+	if most < maxErrorBody {
+		most = maxErrorBody
+	}
+	let r = try c.simple("GET", bucket, key, []str{}, []str{"Range", rangeHeader(off, n)}, "", most)
+	let done = try expect(what("GET", bucket, key), r)
+	if done.status == 200 && off > 0 {
+		fail "s3: GET {bucket}/{key}: the server ignored the Range"
+	}
+	if len(done.body) > n {
+		return done.body[0:n]
+	}
+	return done.body
+}
+
+// GetFile writes the object key to a file at path, as it arrives (through a temporary file
+// next to it, renamed when the whole object is in), and gives its size.
+fn (c Client) GetFile(bucket str, key str, path str) !i64 {
+	let t = try c.at(bucket, key)
+	let op = what("GET", bucket, key)
+	let tmp = path + ".s3-part"
+	let opt = c.options(1 << 50)
+	let r = try c.run(op, true, true, fn() !reply {
+		let p = c.prepare("GET", t, []str{}, []str{}, EmptyHash, 0)
+		mut sink = fileSink{rep: reply{status: 0}, path: tmp, file: flume.Writer{}, open: false, err: []u8{}, bytes: 0}
+		let (_, err) = wire.DoStreamToHead("GET", p.url, p.headers, wire.NoBody{}, opt, mut sink)
+		let ferr = sink.finish()
+		if err != nil || ferr != nil {
+			quarry.Remove(tmp) catch _ {
+			}
+			if err != nil {
+				fail err
+			}
+			fail ferr
+		}
+		return withBody(sink.rep, str(sink.err))
+	})
+	let done = try expect(op, r)
+	try quarry.Rename(tmp, path)
+	return number(done.length)
+}
+
+// GetTo writes the object key to w as it arrives and gives how many bytes it wrote. A try
+// is repeated only when nothing reached w yet. w must be a struct (a reference): a value struct
+// would be written as a copy.
+fn GetTo[W io.Writer](c Client, bucket str, key str, w mut W) !i64 {
+	return try getTo(c, bucket, key, []str{}, mut w)
+}
+
+// GetRangeTo writes n bytes of the object key from offset off to w (n < 0: to its end).
+fn GetRangeTo[W io.Writer](c Client, bucket str, key str, off i64, n i64, w mut W) !i64 {
+	if off < 0 || n == 0 {
+		fail "s3: bad range {off}+{n}"
+	}
+	return try getTo(c, bucket, key, []str{"Range", rangeHeader(off, n)}, mut w)
+}
+
+// getTo is GetTo with extra request fields.
+fn getTo[W io.Writer](c Client, bucket str, key str, headers []str, w mut W) !i64 {
+	let t = try c.at(bucket, key)
+	let op = what("GET", bucket, key)
+	let opt = c.options(1 << 50)
+	mut g = gate[W]{rep: reply{status: 0}, w: w, pass: false, err: []u8{}, written: 0}
+	let r = try c.run(op, true, true, fn() !reply {
+		let p = c.prepare("GET", t, []str{}, headers, EmptyHash, 0)
+		g.err = []u8{}
+		let (_, err) = wire.DoStreamToHead("GET", p.url, p.headers, wire.NoBody{}, opt, mut g)
+		if err != nil {
+			if g.written > 0 {
+				return reply{status: 0, final: err}
+			}
+			fail err
+		}
+		return withBody(g.rep, str(g.err))
+	})
+	_ = try expect(op, r)
+	return g.written
+}
+
+// Head describes the object key; a missing one fails with ErrNotFound.
+fn (c Client) Head(bucket str, key str) !Object {
+	let r = try c.simple("HEAD", bucket, key, []str{}, []str{}, "", maxErrorBody)
+	let done = try expect(what("HEAD", bucket, key), r)
+	return Object{Key: key, Size: number(done.length), ETag: done.etag, LastModified: done.lastMod, StorageClass: done.class, ContentType: done.ctype}
+}
+
+// Delete removes the object key; removing one that does not exist is not a fault (S3 says so).
+fn (c Client) Delete(bucket str, key str) ! {
+	let r = try c.simple("DELETE", bucket, key, []str{}, []str{}, "", maxErrorBody)
+	_ = try expect(what("DELETE", bucket, key), r)
+}
+
+// List gives one page of the bucket's objects (ListObjectsV2).
+fn (c Client) List(bucket str, opt ListOptions) !ListResult {
+	mut q = []str{"list-type", "2"}
+	if len(opt.Prefix) > 0 {
+		q = append(q, "prefix", opt.Prefix)
+	}
+	if len(opt.Delimiter) > 0 {
+		q = append(q, "delimiter", opt.Delimiter)
+	}
+	if len(opt.Token) > 0 {
+		q = append(q, "continuation-token", opt.Token)
+	}
+	if len(opt.StartAfter) > 0 {
+		q = append(q, "start-after", opt.StartAfter)
+	}
+	if opt.MaxKeys > 0 {
+		q = append(q, "max-keys", say.Str(opt.MaxKeys))
+	}
+	let r = try c.simple("GET", bucket, "", q, []str{}, "", 64 << 20)
+	let done = try expect(what("LIST", bucket, opt.Prefix), r)
+	return try parseList(done.body)
+}
+
+// ListAll gives every object whose key starts with prefix, reading page after page.
+fn (c Client) ListAll(bucket str, prefix str) ![]Object {
+	mut all = []Object{}
+	mut token = ""
+	for {
+		let page = try c.List(bucket, ListOptions{Prefix: prefix, Delimiter: "", Token: token, StartAfter: "", MaxKeys: 0})
+		for o in page.Objects {
+			all = append(all, o)
+		}
+		if !page.Truncated || len(page.NextToken) == 0 {
+			break
+		}
+		token = page.NextToken
+	}
+	return all
+}
+
+// CreateBucket makes a bucket (in Config.Region: AWS wants it named outside us-east-1).
+fn (c Client) CreateBucket(bucket str) ! {
+	mut body = ""
+	if c.cfg.Region != "us-east-1" && c.cfg.Region != "auto" {
+		body = "<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LocationConstraint>" + c.cfg.Region + "</LocationConstraint></CreateBucketConfiguration>"
+	}
+	let r = try c.simple("PUT", bucket, "", []str{}, []str{}, body, maxErrorBody)
+	_ = try expect(what("PUT", bucket, ""), r)
+}
+
+// ---- multipart uploads ----
+
+// CreateMultipart starts a multipart upload of the object key and gives its upload id.
+fn (c Client) CreateMultipart(bucket str, key str) !str {
+	let r = try c.simple("POST", bucket, key, []str{"uploads", ""}, []str{}, "", maxErrorBody)
+	let done = try expect(what("POST", bucket, key), r)
+	let ls = try leaves(done.body)
+	let id = field(ls, "InitiateMultipartUploadResult/UploadId")
+	if len(id) == 0 {
+		fail "s3: POST {bucket}/{key}?uploads: no UploadId in the answer"
+	}
+	return id
+}
+
+// UploadPart sends bytes [off, off+n) of the file at path as part number (1 to 10000) of the
+// upload id, streamed from the file, and gives the part's ETag.
+fn (c Client) UploadPart(bucket str, key str, id str, number i64, path str, off i64, n i64) !str {
+	if number < 1 || number > MaxParts {
+		fail "s3: part number {number} is not in 1..{MaxParts}"
+	}
+	let etag = try c.putRegion(bucket, key, []str{"partNumber", say.Str(number), "uploadId", id}, path, off, n)
+	if len(etag) == 0 {
+		fail "s3: part {number} of {bucket}/{key}: no ETag in the answer"
+	}
+	return etag
+}
+
+// completeBody is the XML that completes an upload with its parts.
+fn completeBody(parts []Part) str {
+	mut w = scroll.NewWriter()
+	w.Start("CompleteMultipartUpload", []scroll.Attr{}) catch _ {
+	}
+	for p in parts {
+		w.Start("Part", []scroll.Attr{}) catch _ {
+		}
+		w.Element("PartNumber", say.Str(p.Number)) catch _ {
+		}
+		w.Element("ETag", p.ETag) catch _ {
+		}
+		w.End("Part") catch _ {
+		}
+	}
+	w.End("CompleteMultipartUpload") catch _ {
+	}
+	return w.String()
+}
+
+// CompleteMultipart joins the parts (in number order) into the object and gives its ETag.
+fn (c Client) CompleteMultipart(bucket str, key str, id str, parts []Part) !str {
+	let op = what("POST", bucket, key)
+	let r = try c.simple("POST", bucket, key, []str{"uploadId", id}, []str{"Content-Type", "application/xml"}, completeBody(parts), maxErrorBody)
+	let done = try expect(op, r)
+	// S3 may answer 200 and put an error in the body.
+	let ls = try leaves(done.body)
+	if root(ls) == "Error" {
+		try failure(op, reply{status: 500, body: done.body})
+	}
+	return field(ls, "CompleteMultipartUploadResult/ETag")
+}
+
+// AbortMultipart stops the upload id and drops its parts.
+fn (c Client) AbortMultipart(bucket str, key str, id str) ! {
+	let r = try c.simple("DELETE", bucket, key, []str{"uploadId", id}, []str{}, "", maxErrorBody)
+	_ = try expect(what("DELETE", bucket, key), r)
+}
+
+// Upload sends the file at path as the object key in parts of partSize bytes (0:
+// DefaultPartSize; raised to MinPartSize, and as needed to stay within MaxParts), one after the
+// other, each streamed from the file: memory stays at a few buffers whatever the size. A file
+// of at most one part goes as a plain Put. A failed upload is aborted. It gives the ETag.
+fn (c Client) Upload(bucket str, key str, path str, partSize i64) !str {
+	let size = try quarry.Size(path)
+	mut part = partSize
+	if part <= 0 {
+		part = DefaultPartSize
+	}
+	if part < MinPartSize {
+		part = MinPartSize
+	}
+	if (size + part - 1) / part > MaxParts {
+		part = (size + MaxParts - 1) / MaxParts
+	}
+	if part > maxSinglePut {
+		part = maxSinglePut
+	}
+	if size <= part {
+		return try c.Put(bucket, key, path)
+	}
+	let id = try c.CreateMultipart(bucket, key)
+	mut parts = []Part{}
+	mut off = 0
+	mut number = 1
+	for off < size {
+		let n = min(part, size - off)
+		// Each part's request memory is given back when it is sent: only its ETag is kept.
+		let etag = arena {
+			try c.UploadPart(bucket, key, id, number, path, off, n)
+		} catch err {
+			c.AbortMultipart(bucket, key, id) catch _ {
+			}
+			fail err
+		}
+		parts = append(parts, Part{Number: number, ETag: etag})
+		off += n
+		number += 1
+	}
+	let etag = c.CompleteMultipart(bucket, key, id, parts) catch err {
+		c.AbortMultipart(bucket, key, id) catch _ {
+		}
+		fail err
+	}
+	return etag
+}
+
+// ---- presigned URLs ----
+
+// Presign is a URL that lets anyone holding it make one method call ("GET", "PUT") on the
+// object key, without credentials, for expires (ns, from 1 s to 7 days) from now.
+fn (c Client) Presign(method str, bucket str, key str, expires i64) !str {
+	return try c.PresignAt(method, bucket, key, expires, tide.Wall() / tide.Second)
+}
+
+// PresignAt is Presign signed at the instant unix (seconds): for tests and for URLs made ahead.
+fn (c Client) PresignAt(method str, bucket str, key str, expires i64, unix i64) !str {
+	let secs = expires / tide.Second
+	if secs < 1 || secs > 604800 {
+		fail "s3: a presigned URL lasts 1 s to 7 days, not {tide.FormatDuration(expires)}"
+	}
+	let t = try c.at(bucket, key)
+	let r = Request{Method: method, Scheme: c.scheme, Host: t.host, Path: t.path, Query: []str{}, Headers: []str{}, PayloadHash: UnsignedPayload, ContentLength: 0}
+	let q = PresignRequest(c.cfg, "s3", r, secs, unix)
+	return c.scheme + "://" + t.host + t.path + "?" + q
+}

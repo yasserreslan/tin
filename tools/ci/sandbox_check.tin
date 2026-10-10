@@ -1,0 +1,154 @@
+package main
+
+import "./ci"
+import "mint"
+import "quarry"
+import "twine"
+
+// Run the #1002 sandbox escape tests (tools/ci/fixtures/sandbox.tin) on Linux.
+//
+// The fixture runs as root: GitHub's Ubuntu 24.04 runners refuse user namespaces to unprivileged processes
+// (kernel.apparmor_restrict_unprivileged_userns=1) and only root may make a cgroup there, so a check that is not root runs it with
+// `sudo -n`. As root it makes /sys/fs/cgroup/tin-sandbox-check, enables memory, cpu and pids for it, and passes it as Spec.Cgroup.
+// The sandbox's processes are the caller's user without any capability on the host, so root's sandbox cannot read a directory
+// only its owner may enter (/home/runner is 0750): everything the sandbox mounts (the probes, a copy of the toolchain tree with
+// tinc, the input and scratch directories) is put in a fresh directory under /tmp that every user can enter. The Go probe
+// (sandbox_sys.go) is built static for the seccomp tests. A runner without a cgroup v2 hierarchy (this check on a cgroup v1 or
+// hybrid machine) skips the cgroup tests, except on CI, where they must run.
+
+fn expectedCommon() []str {
+	return []str{
+		"exit 7 0 false false",
+		"signal -1 15 false false",
+		"path 0 0 false false found",
+		"output true true false false",
+		"cap 1048576 true 0 false 0",
+		"missing fault sandbox: exec /no/such/program: no such file or directory",
+		"identity 0 0 false false 1000 1000 sandbox 2 /proc/1 /proc/2",
+		"read input ok 11 0",
+		"write input fail 0",
+		"write scratch ok 1 0",
+		"scratch on host x",
+		"write root fail 0",
+		"write usr fail 0",
+		"read source fail 0",
+		"list source dir fail 0",
+		"read shadow fail 0",
+		"list etc fail 0",
+		"list home fail 0",
+		"list root fail 0",
+		"list tmp fail 0",
+		"read init environ fail 0",
+		"read own status ok",
+		"write proc sys fail 0",
+		"netdev ok lo 0",
+		"dial internet fail 0",
+		"dial host fail 0",
+		"dial host with Network 0 0 false false ok connected",
+		"seccomp getpid ok",
+		"seccomp socket-unix ok",
+		"seccomp socket-inet operation not permitted",
+		"seccomp socket-inet6 operation not permitted",
+		"seccomp socket-netlink operation not permitted",
+		"seccomp unshare-user operation not permitted",
+		"seccomp unshare-mount operation not permitted",
+		"seccomp clone-newuser operation not permitted",
+		"seccomp mount operation not permitted",
+		"seccomp keyctl operation not permitted",
+		"seccomp io_uring_setup operation not permitted",
+		"seccomp ptrace operation not permitted",
+		"seccomp exit 0 0",
+		"timeout -1 9 true false",
+		"timeout leftovers 0",
+		"deadline true",
+		"deadline leftovers 0",
+		"tinc 0 0 0",
+		"hello 0 0 false false hello from the sandbox",
+	}
+}
+
+fn expectedCgroup() []str {
+	return []str{
+		"cgroup 3 0 false false",
+		"cgroup timeout -1 9 true false",
+		"cgroup timeout leftovers 0",
+		"cgroup controllers true",
+		"limits 0 0 false false",
+		"pids true true 0",
+		"fork bomb true true",
+		"oom -1 9 false true",
+		"under limit 0 0 false false ok 16",
+		"cgroups left 0",
+	}
+}
+
+// normalize drops what varies from run to run: the size of /proc/self/status.
+fn normalize(line str) str {
+	if twine.HasPrefix(line, "read own status ok ") {
+		return "read own status ok"
+	}
+	return line
+}
+
+fn main() {
+	if ci.OS() != "linux" {
+		ci.Pass("sandbox: Linux only (namespaces, cgroup v2 and seccomp); nothing to check on this system")
+		return
+	}
+	let root = ci.Root()
+	let build = ci.Join(root, "bin/ci/sandbox")
+	ci.Mkdirs(build)
+	// A directory every user can enter, for what the sandbox mounts.
+	let work = ci.TempDir("/tmp", "tin-sandbox-")
+	ci.Must(ci.Exec([]str{"chmod", "0755", work}, "", 20), "chmod work")
+	ci.BuildTin("tools/ci/fixtures/sandbox_probe.tin", ci.Join(work, "probe"), "", []str{})
+	ci.Must(ci.ExecEnv([]str{"go", "build", "-o", ci.Join(work, "sys-probe"), "./tools/ci/fixtures/sandbox_sys.go"}, root, 300, []str{"CGO_ENABLED=0"}, []str{}), "go build sandbox_sys")
+	let tin = ci.Join(work, "tin")
+	ci.CopyTree(root, tin)
+	ci.Mkdirs(ci.Join(tin, "bin"))
+	ci.Copy(ci.Tinc(), ci.Join(tin, "bin/tinc"))
+	ci.Mkdirs(ci.Join(work, "in"))
+	ci.Write(ci.Join(work, "in/data.txt"), "input data\n")
+	ci.Mkdirs(ci.Join(work, "scratch"))
+	// Root's sandbox writes here as a plain user: the directory is open to all, so this check can remove what it leaves.
+	ci.Must(ci.Exec([]str{"chmod", "-R", "a+rX", work}, "", 60), "chmod tree")
+	ci.Must(ci.Exec([]str{"chmod", "0777", ci.Join(work, "scratch")}, "", 20), "chmod scratch")
+	let exe = ci.Join(build, "sandbox")
+	ci.BuildTin("tools/ci/fixtures/sandbox.tin", exe, "", []str{})
+	mut argv = []str{exe, root, work, "auto"}
+	let uid = twine.TrimSpace(ci.Exec([]str{"id", "-u"}, "", 10).Stdout)
+	mut how = "as root"
+	if uid != "0" {
+		argv = []str{"sudo", "-n", exe, root, work, "auto"}
+		how = "as root through sudo"
+	}
+	let r = ci.Exec(argv, root, 600)
+	ci.Write(ci.Join(build, "sandbox.stdout.log"), r.Stdout)
+	ci.Write(ci.Join(build, "sandbox.stderr.log"), r.Stderr)
+	ci.Check(r.Code == 0, "sandbox: exit " + mint.Itoa(r.Code) + ": " + r.Stderr + r.Stdout)
+	mut got = []str{}
+	for line in ci.Lines(r.Stdout) {
+		got = append(got, normalize(line))
+	}
+	mut want = expectedCommon()
+	let cgroupNone = len(got) > 0 && got[len(got)-1] == "cgroup none"
+	mut where = "with cgroup v2 limits"
+	if cgroupNone {
+		ci.Check(ci.Env("GITHUB_ACTIONS") != "true", "sandbox: CI has no cgroup v2 hierarchy at /sys/fs/cgroup; the cgroup tests must run there")
+		want = append(want, "cgroup none")
+		where = "without cgroup v2 (no unified hierarchy at /sys/fs/cgroup): the cgroup tests did not run"
+	} else {
+		for line in expectedCgroup() {
+			want = append(want, line)
+		}
+	}
+	let g = twine.Join(got, "\n")
+	let w = twine.Join(want, "\n")
+	ci.Check(g == w, "sandbox:\n" + ci.Diff("want", w, "got", g))
+	// What the sandboxed programs wrote is root's when the fixture ran as root; the scratch directory lets this user remove it.
+	ci.Remove(work)
+	if quarry.Exists(work) {
+		ci.Exec([]str{"sudo", "-n", "rm", "-rf", work}, "", 60)
+	}
+	ci.Pass("sandbox: " + mint.Itoa(len(want)) + " results " + how + ", " + where)
+}

@@ -1,0 +1,105 @@
+package main
+
+import "mint"
+import "quarry"
+import "say"
+import "tide"
+import "twine"
+import "wire"
+
+// The probe of tools/ci/sandbox_check.tin (#1002), a static Tin program the check runs inside packages/sandbox: one command per run,
+// printing one line, "ok ..." or "fail <reason>".
+//
+//	read PATH     read a file
+//	list PATH     list a directory
+//	write PATH    create PATH with one byte in it
+//	dial ADDR     connect to host:port over TCP (2 s at most)
+//	netdev        the network interfaces this process sees (/proc/net/dev)
+//	alloc MB      allocate and touch MB mebibytes
+//	spew N        write N bytes to stdout
+//	sleep MARK    sleep forever (MARK only marks the process in its argv)
+
+fn result(what str, err fault) {
+	if err != nil {
+		say.Line("fail", err)
+		return
+	}
+	say.Line("ok", what)
+}
+
+fn main() {
+	let args = quarry.Args()
+	if len(args) < 2 {
+		say.Line("fail usage")
+		quarry.Exit(2)
+	}
+	let cmd = args[1]
+	mut arg = ""
+	if len(args) > 2 {
+		arg = args[2]
+	}
+	match cmd {
+		"read" => {
+			let (text, err) = quarry.ReadFile(arg)
+			result(mint.Itoa(len(text)), err)
+		}
+		"list" => {
+			let (names, err) = quarry.ReadDir(arg)
+			result(mint.Itoa(len(names)), err)
+		}
+		"write" => {
+			let err = quarry.WriteFile(arg, "x")
+			result("1", err)
+		}
+		"dial" => {
+			let (c, err) = wire.DialTimeout(arg, 2000000000)
+			if err == nil {
+				mut cc = c
+				cc.Close()
+			}
+			result("connected", err)
+		}
+		"netdev" => {
+			let (text, err) = quarry.ReadFile("/proc/net/dev")
+			mut names = []str{}
+			for line in twine.Split(text, "\n") {
+				let i = twine.Index(line, ":")
+				if i > 0 {
+					names = append(names, twine.TrimSpace(line[0:i]))
+				}
+			}
+			result(twine.Join(names, ","), err)
+		}
+		"alloc" => {
+			let mb = mint.Atoi(arg) catch _ { 0 }
+			mut blocks = [][]u8{}
+			for i in 0..mb {
+				let b = make([]u8, 1048576)
+				for j in (0..len(b)).step(4096) {
+					b[j] = 1
+				}
+				blocks = append(blocks, b)
+			}
+			say.Line("ok", len(blocks))
+		}
+		"spew" => {
+			let n = mint.Atoi(arg) catch _ { 0 }
+			let chunk = twine.Repeat("x", 65536)
+			mut left = n
+			for left > 0 {
+				let k = min(left, len(chunk))
+				say.Text(chunk[0:k])
+				left -= k
+			}
+		}
+		"sleep" => {
+			for {
+				tide.Sleep(3600000000000)
+			}
+		}
+		_ => {
+			say.Line("fail unknown command", cmd)
+			quarry.Exit(2)
+		}
+	}
+}

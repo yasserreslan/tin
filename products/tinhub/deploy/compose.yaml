@@ -1,0 +1,36 @@
+# tinhub and Postgres on one host: docker compose -f products/tinhub/deploy/compose.yaml up
+# Put the secrets in ./secrets/{db,nonce,cookie} first (deploy/RUNBOOK.md).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: tinhub
+      POSTGRES_DB: tinhub
+      POSTGRES_PASSWORD_FILE: /run/secrets/db
+    secrets: [db]
+    volumes: [pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "tinhub"]
+      interval: 2s
+  tinhub:
+    build:
+      context: ../../..
+      dockerfile: products/tinhub/deploy/Dockerfile
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      TINHUB_DB_ADDR: postgres:5432
+      TINHUB_DB_PASSWORD: file:/run/secrets/db
+      TINHUB_SECRETS_NONCE: file:/run/secrets/nonce
+      TINHUB_SECRETS_COOKIE: file:/run/secrets/cookie
+    secrets: [db, nonce, cookie]
+    volumes: [packs:/var/lib/tinhub]
+    ports: ["8080:8080"]
+    stop_grace_period: 45s
+secrets:
+  db: {file: ./secrets/db}
+  nonce: {file: ./secrets/nonce}
+  cookie: {file: ./secrets/cookie}
+volumes:
+  pg: {}
+  packs: {}
