@@ -1,0 +1,52 @@
+package main
+
+// #1105: quarry.ReadAt inside a task without the core's io_uring (TIN_IO_URING=0 here; macOS, or a container that
+// refuses io_uring) read the whole file for each range, so reading a pack's objects one by one was quadratic in its
+// size. It reads only the range now: 200 reads of a 16 MiB file fit in a 4 MiB budget.
+
+import "quarry"
+import "say"
+
+let path = "/tmp/tin-test-readat-{quarry.Pid()}"
+
+fn reads() !i64 {
+	mut sum = 0
+	try limit memory 4 * 1024 * 1024 + 0 {
+		scope sc {
+			sc.spawn(fn() ! {
+				for i in 0..200 {
+					let off = i64(i) * 80000
+					let s = try quarry.ReadAt(path, off, 100)
+					sum += len(s) + i64(s[0])
+				}
+			})
+		}
+	}
+	return sum
+}
+
+fn main() {
+	mut b = make([]u8, 16 * 1024 * 1024)
+	for i in 0..len(b) {
+		b[i] = u8(i % 251)
+	}
+	quarry.WriteFile(path, str(b)) catch err {
+		say.Line(err)
+		return
+	}
+	let n = reads() catch err {
+		say.Line("failed:", err)
+		quarry.Remove(path) catch _ {}
+		return
+	}
+	let past = quarry.ReadAt(path, 16 * 1024 * 1024 + 5, 10) catch err {
+		say.Line(err)
+		return
+	}
+	let tail = quarry.ReadAt(path, 16 * 1024 * 1024 - 3, 10) catch err {
+		say.Line(err)
+		return
+	}
+	say.Line("read", n, "past the end", len(past), "at the end", len(tail))
+	quarry.Remove(path) catch _ {}
+}
