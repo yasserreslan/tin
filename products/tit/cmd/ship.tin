@@ -85,14 +85,18 @@ fn changelog(r mut Repo, version str, head object.Id) !str {
 }
 
 fn doShip(g Global, a ShipArgs, o mut Out) ! {
-	let (branch, tagId, message) = try shipTag(g, a)
+	let (branch, tagId, message, again) = try shipTag(g, a)
 	if a.DryRun {
 		o.Text(message)
 		return
 	}
 	o.Text(message)
 	o.Line("")
-	o.Line("Tagged " + a.Version + " (" + tagId.Hex()[0:12] + ").")
+	if again {
+		o.Line("Tagged " + a.Version + " (" + tagId.Hex()[0:12] + ") before: pushing it again.")
+	} else {
+		o.Line("Tagged " + a.Version + " (" + tagId.Hex()[0:12] + ").")
+	}
 	if !a.Push {
 		return
 	}
@@ -103,22 +107,33 @@ fn doShip(g Global, a ShipArgs, o mut Out) ! {
 		return
 	}
 	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(branch), Dir: "", Lease: false, Lazy: false}, mut o)
-	try pushTag(g, a.Remote, a.Version, tagId)
+	let sent = try pushTag(g, a.Remote, a.Version, tagId)
+	if !sent {
+		fail "{a.Version} is shipped already: {a.Remote} has the tag"
+	}
 	o.Line("Pushed the tag " + a.Version + " to " + a.Remote + ".")
 }
 
-// shipTag makes the tag under the lock (released when it returns, before the push takes it again).
-fn shipTag(g Global, a ShipArgs) !(str, object.Id, str) {
+// shipTag makes the tag under the lock (released when it returns, before the push takes it again), and reports whether
+// the tag was there already: a ship of HEAD whose push did not finish (the network, a server down) is shipped again.
+fn shipTag(g Global, a ShipArgs) !(str, object.Id, str, bool) {
 	mut r = try open(g)
 	use lock = change.Lock(r.Ws.Store)
 	let full = "refs/tags/" + a.Version
 	try change.CheckName(full)
 	let refs = change.NewRefs(r.Ws.Store)
 	let taken = try refs.Get(full)
-	if taken != nil {
-		fail "a tag {a.Version} exists already"
-	}
 	let branch = try currentBranch(r)
+	if taken != nil {
+		let (tagId, tagged, message) = try annotatedTag(mut r, taken.Target)
+		let at = r.resolve("HEAD") catch _ {
+			object.NoId
+		}
+		if !a.Push || len(branch) == 0 || tagged != at || at == object.NoId {
+			fail "a tag {a.Version} exists already"
+		}
+		return branch, tagId, message, true
+	}
 	if len(branch) == 0 {
 		fail "HEAD is detached: ship from a branch"
 	}
@@ -129,7 +144,7 @@ fn shipTag(g Global, a ShipArgs) !(str, object.Id, str) {
 	let head = try r.resolve("HEAD")
 	let message = try changelog(mut r, a.Version, head)
 	if a.DryRun {
-		return branch, object.NoId, message
+		return branch, object.NoId, message, false
 	}
 	let cfg = try r.config()
 	let who = try identity.Who(cfg, identity.FixedClock{At: now()})
@@ -142,15 +157,53 @@ fn shipTag(g Global, a ShipArgs) !(str, object.Id, str) {
 	mut loose = store.NewLoose(r.Ws.Store + "/objects")
 	let id = try loose.Put(object.Object.Tag(t))
 	try recordRefs(r, "tit ship " + a.Version, oplog.Op.Tag(a.Version), []oplog.RefChange{oplog.RefChange{Name: full, Before: "", After: commitText(id)}})
-	return branch, id, message
+	return branch, id, message, false
 }
 
-// pushTag sends a tag object and creates its ref on the server (refused there when the tag exists).
-fn pushTag(g Global, remote str, name str, id object.Id) ! {
+// annotatedTag is the tag object a ref names, the commit it tags and its message; NoId for both when the ref names
+// a commit (a lightweight tag) or anything but a tag object.
+fn annotatedTag(r mut Repo, t change.Target) !(object.Id, object.Id, str) {
+	let id = match t {
+		Commit(x) => x
+		Change(_) => object.NoId
+	}
+	if id == object.NoId {
+		return object.NoId, object.NoId, ""
+	}
+	let o = try r.Store.Get(id)
+	mut tagged = object.NoId
+	mut message = ""
+	match o {
+		Tag(td) => {
+			tagged = td.Object
+			message = td.Message
+		}
+		Commit(_) => {
+		}
+		Blob(_) => {
+		}
+		Tree(_) => {
+		}
+	}
+	if tagged == object.NoId {
+		return object.NoId, object.NoId, ""
+	}
+	return id, tagged, message
+}
+
+// pushTag sends a tag object and creates its ref on the server (refused there when the tag names something else), and
+// reports whether it sent it: false when the server has the tag already.
+fn pushTag(g Global, remote str, name str, id object.Id) !bool {
 	mut r = try open(g)
 	use lock = change.Lock(r.Ws.Store)
 	let url = try remoteURL(r, remote)
 	mut c = try client(r, url)
+	let heads = try c.Heads()
+	for ref in heads.Refs {
+		if ref.Name == "refs/tags/" + name && ref.Target == id.Hex() {
+			return false
+		}
+	}
 	let tmp = r.Ws.Store + "/tmp-push-" + seal.Hex(seal.RandomBytes(8))
 	let p = try packfile.Write(mut r.Store, []object.Id{id}, tmp)
 	let data = try flume.ReadFile(p.Path)
@@ -158,4 +211,5 @@ fn pushTag(g Global, remote str, name str, id object.Id) ! {
 	_ = c.Push(transport.PushRequest{Changes: []transport.ChangeUpdate{}, Refs: []transport.RefUpdate{transport.RefUpdate{Name: "refs/tags/" + name, Old: "", New: id.Hex()}}}, data) catch e {
 		fail fault.Wrap(e, "the branch is pushed, the tag {name} is not")
 	}
+	return true
 }

@@ -117,6 +117,23 @@ t clone "$url" "$d/tagged" > /dev/null || fail "a clone of a repository with ann
 [ "$(t -C "$d/tagged" tag | tr '\n' ' ')" = "v1.0 v1.1 " ] || fail "the clone's tags: $(t -C "$d/tagged" tag)"
 [ "$(t -C "$d/tagged" log --format=subject -n 1 v1.0)" = "Add dirty" ] || fail "the clone's v1.0"
 echo "ok a clone takes the annotated tags"
+# a ship whose tag did not reach the server (--no-push here; a network failure alike): shipping the version again on
+# the same commit pushes the tag it made, and once the server has it, a third ship is refused
+printf 'six\n' >> a.txt
+t commit -am "Add six" > /dev/null
+t ship v1.2 --no-push > /dev/null
+[ "$(t -C "$d/server" tag | tr '\n' ' ')" = "v1.0 v1.1 " ] || fail "--no-push pushed: $(t -C "$d/server" tag)"
+made=$(t log --format=id -n 1 v1.2)
+t ship v1.2 > "$d/out.txt" 2>&1 || fail "shipping a tag the server lacks again: $(cat "$d/out.txt")"
+grep -q "^Pushed the tag v1.2 to origin\.$" "$d/out.txt" || fail "the second ship said: $(cat "$d/out.txt")"
+[ "$(t -C "$d/server" tag | tr '\n' ' ')" = "v1.0 v1.1 v1.2 " ] || fail "the server's tags after the second ship: $(t -C "$d/server" tag)"
+[ "$(t -C "$d/server" log --format=id -n 1 v1.2)" = "$made" ] || fail "the server's v1.2 is not the tagged commit"
+t ship v1.2 > "$d/out.txt" 2>&1 && fail "a shipped tag shipped again"
+grep -q "shipped already" "$d/out.txt" || fail "the third ship said: $(cat "$d/out.txt")"
+printf 'seven\n' >> a.txt
+t commit -am "Add seven" > /dev/null
+t ship v1.2 > "$d/out.txt" 2>&1 && fail "a tag of another commit shipped again"
+echo "ok ship again pushes a tag the server lacks"
 
 # a branch above the trunk carries a version of each of its changes (the reviews a hosting server opens), and an
 # amended change pushed again by sync its next version
