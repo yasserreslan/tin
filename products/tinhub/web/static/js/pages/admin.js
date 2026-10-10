@@ -41,7 +41,8 @@ export async function render(ctx) {
 
 async function invites(ctx, me, owned, main) {
 	const email = input("", { type: "email", placeholder: "person@example.com", autocomplete: "off" });
-	const orgs = [...(me.site_admin ? [["", "No org"]] : []), ...owned.map((o) => [o.name, o.display || o.name])];
+	// the name with the display name: two orgs can share a display name
+	const orgs = [...(me.site_admin ? [["", "No org"]] : []), ...owned.map((o) => [o.name, o.display && o.display !== o.name ? `${o.display} (${o.name})` : o.name])];
 	const org = select(orgs, me.site_admin ? "" : owned[0].name);
 	const admin = me.site_admin ? checkbox("Make them a site admin", false, "Site admins can read every repository and this page.") : null;
 	const result = h("div");
