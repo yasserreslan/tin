@@ -61,6 +61,11 @@ fn setInfoIn(tx mut postgres.Tx, by Actor, r Repo, info RepoInfo) !Repo {
 	try lockRepo(mut tx, by, r, RoleAdmin)
 	let d = info.Description
 	let b = info.DefaultBranch
+	// a new default branch is one the repository has (#1136); an empty one may name the branch its first push makes
+	let heads = try tx.Query("SELECT count(f.name) FILTER (WHERE f.name = 'refs/heads/' || {b}), count(f.name), min(p.default_branch) FROM repos p LEFT JOIN refs f ON f.repo_id = p.id AND f.name LIKE 'refs/heads/%' WHERE p.id = {r.Id}")
+	if len(heads.Rows) == 1 && heads.Rows[0][2].Text() != b && heads.Rows[0][1].Int() > 0 && heads.Rows[0][0].Int() == 0 {
+		fail fault.Wrap(ErrInvalid, "{r.Owner}/{r.Name} has no branch {b}")
+	}
 	_ = try tx.Exec("UPDATE repos SET description = {d}, default_branch = {b} WHERE id = {r.Id}")
 	try audit(mut tx, by, "repo.info", "repo", r.Id, []str{"description", d, "default_branch", b})
 	return try repoIn(mut tx, r.Id)
