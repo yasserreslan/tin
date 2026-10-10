@@ -7,7 +7,7 @@ import * as api from "../lib/api.js";
 import * as store from "../lib/store.js";
 import * as live from "../lib/live.js";
 import * as fmt from "../lib/format.js";
-import { addCommands } from "../ui/layout.js";
+import { addCommands, setRepo } from "../ui/layout.js";
 import { avatar, btn, busy, copyButton, popover, tabs, toast, visibility } from "../ui/kit.js";
 
 const cache = new Map();
@@ -101,6 +101,7 @@ export async function frame(ctx, tab, { wide = false } = {}) {
 	const body = h("div", { class: ["container", "page", wide && "wide"] });
 	ctx.main.replaceChildren(head, body);
 	ctx.title(`${repo.owner}/${repo.name}`);
+	ctx.cleanup(setRepo({ owner: repo.owner, name: repo.name, rev: repo.default_branch || "main" }));
 	ctx.cleanup(
 		addCommands([
 			{ label: `${repo.owner}/${repo.name}: Code`, icon: "code", href: b, group: "This repository" },

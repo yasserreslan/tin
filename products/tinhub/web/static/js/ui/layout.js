@@ -152,6 +152,48 @@ function baseCommands() {
 	return out;
 }
 
+// The repository a page shows, so the palette can find its files: { owner, name, rev }, null when none. A page sets it
+// with setRepo, which gives the cleanup that unsets it.
+let repoShown = null;
+const fileLists = new Map();
+
+export function setRepo(r) {
+	repoShown = r;
+	return () => {
+		if (repoShown === r) repoShown = null;
+	};
+}
+
+// filesOf is every file path of the repository at its revision, fetched once (the compare from nothing lists them).
+function filesOf(r) {
+	const key = `${r.owner}/${r.name}@${r.rev}`;
+	if (!fileLists.has(key)) {
+		if (fileLists.size >= 4) fileLists.delete(fileLists.keys().next().value);
+		const list = api
+			.get(api.R(r.owner, r.name)("/compare"), { to: r.rev })
+			.then((x) => (x.files || []).map((f) => f.path))
+			.catch(() => {
+				fileLists.delete(key);
+				return [];
+			});
+		fileLists.set(key, list);
+	}
+	return fileLists.get(key);
+}
+
+// pathScore ranks a path for q: its file name first, then the whole path, then q's letters in order in the file name
+// (in the whole path when q names a directory).
+function pathScore(path, q) {
+	const p = path.toLowerCase();
+	const base = p.slice(p.lastIndexOf("/") + 1);
+	if (base.startsWith(q)) return 5;
+	if (base.includes(q)) return 4;
+	if (p.includes(q)) return 3;
+	let i = 0;
+	for (const c of q.includes("/") ? p : base) if (c === q[i]) i++;
+	return i === q.length ? 1 : 0;
+}
+
 function score(label, q) {
 	const l = label.toLowerCase();
 	if (!q) return 1;
@@ -164,7 +206,7 @@ function score(label, q) {
 
 export function palette(initial = "") {
 	if (paletteOpen) return;
-	const input = h("input", { placeholder: "Jump to a repository, page or command…  (type # for symbols)", "aria-label": "Search", autocomplete: "off", spellcheck: "false" });
+	const input = h("input", { placeholder: repoShown ? "Jump to a file, repository, page or command…  (type # for symbols)" : "Jump to a repository, page or command…  (type # for symbols)", "aria-label": "Search", autocomplete: "off", spellcheck: "false" });
 	input.value = initial;
 	const list = h("div.palette-list", { role: "listbox" });
 	let items = [];
@@ -223,8 +265,16 @@ export function palette(initial = "") {
 					remote = (r.results || []).map((x) => ({ label: (x.recv ? x.recv + "." : "") + x.name, sub: `${x.owner}/${x.repo} · ${x.file}:${x.line}`, icon: x.kind === "type" ? "box" : "fn", href: `/${x.owner}/${x.repo}/blob/${x.commit}/${x.file}#L${x.line}`, group: "Symbols" }));
 				}
 			} else {
-				const r = await api.get("/repos", { q, limit: 8 });
-				remote = (r.repos || []).map((x) => ({ label: `${x.owner}/${x.name}`, icon: x.visibility === "private" ? "lock" : "repo", href: `/${x.owner}/${x.name}`, group: "Repositories", sub: x.description ? x.description.slice(0, 40) : "" }));
+				const shown = repoShown;
+				const [r, paths] = await Promise.all([api.get("/repos", { q, limit: 8 }), shown && q.length >= 2 ? filesOf(shown) : []]);
+				const lq = q.toLowerCase();
+				const files = paths
+					.map((path) => ({ path, s: pathScore(path, lq) }))
+					.filter((x) => x.s > 0)
+					.sort((a, b) => b.s - a.s || a.path.length - b.path.length)
+					.slice(0, 8)
+					.map((x) => ({ label: x.path, icon: "file", href: `/${shown.owner}/${shown.name}/blob/${encodeURIComponent(shown.rev)}/${api.enc(x.path)}`, group: `Files in ${shown.owner}/${shown.name}` }));
+				remote = [...files, ...(r.repos || []).map((x) => ({ label: `${x.owner}/${x.name}`, icon: x.visibility === "private" ? "lock" : "repo", href: `/${x.owner}/${x.name}`, group: "Repositories", sub: x.description ? x.description.slice(0, 40) : "" }))];
 			}
 		} catch {
 			remote = [];
@@ -269,7 +319,8 @@ export function palette(initial = "") {
 	setTimeout(() => input.focus(), 10);
 }
 
-// keys binds the global shortcuts: / and Ctrl+K open the palette, g h home, g e explore.
+// keys binds the global shortcuts: / and Ctrl+K open the palette (t too on a repository's pages, to find a file), g h
+// home, g e explore.
 export function keys() {
 	let g = 0;
 	document.addEventListener("keydown", (e) => {
@@ -281,7 +332,7 @@ export function keys() {
 			return;
 		}
 		if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
-		if (e.key === "/") {
+		if (e.key === "/" || (e.key === "t" && repoShown)) {
 			e.preventDefault();
 			palette();
 		} else if (e.key === "g") g = Date.now();

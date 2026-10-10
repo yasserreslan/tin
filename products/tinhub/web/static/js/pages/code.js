@@ -11,6 +11,7 @@ import { refButton } from "../ui/refs.js";
 import { fileView, markdown, parseLines } from "../ui/code.js";
 import { btn, copyButton, empty, skeleton, time, avatar, segmented, errorBox, badge } from "../ui/kit.js";
 import * as store from "../lib/store.js";
+import { setRepo } from "../ui/layout.js";
 
 const enc = encodeURIComponent;
 
@@ -112,6 +113,8 @@ export async function render(ctx) {
 	const { repo, body, base } = await frame(ctx, "code");
 	const apiBase = api.R(repo.owner, repo.name)();
 	const rev = ctx.params.rev || repo.default_branch || "main";
+	// the palette finds files at the revision shown
+	if (ctx.params.rev) ctx.cleanup(setRepo({ owner: repo.owner, name: repo.name, rev }));
 	const path = (ctx.params.path || "").replace(/^\/+|\/+$/g, "");
 	const blob = Boolean(ctx.route.blob);
 	body.append(skeleton(8));
