@@ -415,9 +415,10 @@ fn checkOfRow(r []postgres.Value) CheckInfo {
 	return CheckInfo{Id: r[0].Int(), Target: r[1].Text(), Commit: r[2].Text(), Group: r[3].Text(), Capsule: r[4].Text(), State: r[5].Text(), Reason: r[6].Text(), Capsules: r[7].Int(), Created: r[8].Int(), Finished: r[9].Int(), By: r[10].Text(), Counts: counts}
 }
 
-// ChecksOf is the repository's checks, newest first: of one failure group when groupId is set, at most n.
-fn ChecksOf(c postgres.Client, repoId i64, groupId str, n i64) ![]CheckInfo {
-	let rows = try c.Query("SELECT k.id, k.target, k.commit_id, k.group_id, k.capsule_id, k.state, k.reason, k.capsules, (extract(epoch FROM k.created_at))::bigint, coalesce((extract(epoch FROM k.finished_at))::bigint, 0), coalesce(o.name, ''), coalesce((SELECT string_agg(verdict || ':' || n, ',') FROM (SELECT verdict, count(*) AS n FROM runner_check_results WHERE check_id = k.id GROUP BY verdict) v), '') FROM runner_checks k LEFT JOIN users u ON u.id = k.requested_by LEFT JOIN owners o ON o.id = u.owner_id WHERE k.repo_id = {repoId} AND ({groupId} = '' OR k.group_id = {groupId}) ORDER BY k.id DESC LIMIT {n}")
+// ChecksOf is the repository's checks, newest first: of one failure group when groupId is set, older than the check
+// before when it is not 0, at most n.
+fn ChecksOf(c postgres.Client, repoId i64, groupId str, before i64, n i64) ![]CheckInfo {
+	let rows = try c.Query("SELECT k.id, k.target, k.commit_id, k.group_id, k.capsule_id, k.state, k.reason, k.capsules, (extract(epoch FROM k.created_at))::bigint, coalesce((extract(epoch FROM k.finished_at))::bigint, 0), coalesce(o.name, ''), coalesce((SELECT string_agg(verdict || ':' || n, ',') FROM (SELECT verdict, count(*) AS n FROM runner_check_results WHERE check_id = k.id GROUP BY verdict) v), '') FROM runner_checks k LEFT JOIN users u ON u.id = k.requested_by LEFT JOIN owners o ON o.id = u.owner_id WHERE k.repo_id = {repoId} AND ({groupId} = '' OR k.group_id = {groupId}) AND ({before} = 0 OR k.id < {before}) ORDER BY k.id DESC LIMIT {n}")
 	mut out = []CheckInfo{}
 	for r in rows.Rows {
 		out = append(out, checkOfRow(r))

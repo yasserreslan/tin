@@ -6,6 +6,7 @@ import { h } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import * as api from "../lib/api.js";
 import * as fmt from "../lib/format.js";
+import { ORDER, worst } from "../lib/verdicts.js";
 import { refsOf } from "./refs.js";
 import { badge, btn, busy, callout, empty, errorBox, skeleton, time } from "./kit.js";
 
@@ -19,55 +20,76 @@ export const VERDICTS = {
 	skipped: { label: "Skipped", color: "outline", icon: "ban", means: "The capsule could not be replayed, usually because it was not sealed for the runner's key." },
 };
 
-const ORDER = ["panicked", "failing", "timeout", "diverged", "skipped", "passed"];
+// OUTCOME is a whole check's outcome in one word, by its worst verdict.
+const OUTCOME = { passed: "Fixed", panicked: "Still panics", failing: "Still fails", timeout: "Timed out", diverged: "Diverged", skipped: "Skipped" };
 
 function verdictBadge(v, n) {
 	const d = VERDICTS[v] || { label: v, color: "outline", icon: "dot" };
 	return badge(n === undefined ? d.label : `${n} ${d.label.toLowerCase()}`, d.color, d.icon);
 }
 
-// summary is a check's outcome in one badge row: its state while it is not done, else its verdicts counted.
-function summary(k) {
-	if (k.state === "queued") return [badge("Queued", "outline", "clock")];
-	if (k.state === "running") return [badge(h("span.row", { style: { gap: "6px" } }, h("span.spinner", { style: { width: "10px", height: "10px" } }), "Building and replaying"), "blue")];
-	if (k.state === "failed") return [badge("Failed", "red", "alert")];
-	if (k.state === "skipped") return [badge("Skipped", "outline", "ban")];
-	const counts = [...(k.counts || [])].sort((a, b) => ORDER.indexOf(a.verdict) - ORDER.indexOf(b.verdict));
-	if (!counts.length) return [badge("No capsules", "outline")];
-	return counts.map((c) => verdictBadge(c.verdict, c.count));
+// outcome is a check's state or outcome as one badge: the first thing to read on its row.
+export function outcome(k) {
+	if (k.state === "queued") return badge("Queued", "outline", "clock");
+	if (k.state === "running") return badge(h("span.row", { style: { gap: "6px" } }, h("span.spinner", { style: { width: "10px", height: "10px" } }), "Running"), "blue");
+	if (k.state === "failed") return badge("Could not run", "red", "alert");
+	if (k.state === "skipped") return badge("Skipped", "outline", "ban");
+	const v = worst(k.counts);
+	if (!v) return badge("No capsules", "outline");
+	const d = VERDICTS[v];
+	return badge(OUTCOME[v], d.color, d.icon);
 }
 
-// headline is the check's outcome in words.
+// tally is how many of a done check's capsules passed, in words ("2 of 5 capsules pass").
+function tally(k) {
+	if (k.state !== "done") return "";
+	const total = (k.counts || []).reduce((n, c) => n + c.count, 0);
+	if (!total) return "";
+	const passed = ((k.counts || []).find((c) => c.verdict === "passed") || { count: 0 }).count;
+	if (total === 1) return "";
+	if (passed === total) return `all ${total} capsules pass`;
+	return `${passed} of ${fmt.plural(total, "capsule")} pass`;
+}
+
+// headline is the check's outcome in one sentence.
 function headline(k) {
-	if (k.state === "queued") return "Waiting for the runner";
-	if (k.state === "running") return "Building the revision and replaying the capsules";
+	if (k.state === "queued") return "Waiting for the runner.";
+	if (k.state === "running") return "Building the revision and replaying the capsules.";
 	if (k.state !== "done") return k.reason || k.state;
-	const n = Object.fromEntries((k.counts || []).map((c) => [c.verdict, c.count]));
-	const total = k.capsules || 0;
-	if (total && n.passed === total) return total === 1 ? "The capsule passes: this revision handles the recorded failure." : `All ${total} capsules pass: this revision handles every recorded failure.`;
-	if (n.panicked) return `Still panics on ${fmt.plural(n.panicked, "capsule")}: the fix does not reach these requests.`;
-	if (n.failing) return `Still answers 5xx on ${fmt.plural(n.failing, "capsule")}.`;
-	if (n.diverged) return `Diverged on ${fmt.plural(n.diverged, "capsule")}: the revision makes different calls than production, so the replay cannot judge past them.`;
-	if (n.timeout) return `Timed out on ${fmt.plural(n.timeout, "capsule")}.`;
-	return k.reason || `${fmt.plural(total, "capsule")} replayed.`;
+	return {
+		passed: "Handles the recorded failure: the same calls as production, no panic, no 5xx.",
+		panicked: "The panic is still there: the fix does not reach this request.",
+		failing: "Answers 5xx on the same calls production made.",
+		diverged: "Makes different calls than production did, so the replay cannot judge the answer.",
+		timeout: "The replay did not finish.",
+		skipped: "The capsules could not be opened by the runner.",
+	}[worst(k.counts)] || k.reason || "";
 }
 
+// resultRow is one capsule's verdict: a line, with the explanation one click away.
 function resultRow(r) {
 	const d = VERDICTS[r.verdict] || VERDICTS.skipped;
+	const facts = [
+		h("span", {}, "recorded ", h("b", {}, r.recorded ? String(r.recorded) : "none")),
+		h("span", {}, "now ", h("b", {}, r.status ? String(r.status) : r.verdict === "skipped" ? "not run" : "no response")),
+		r.effect >= 0 ? h("span", {}, "first different call: effect ", h("b", {}, String(r.effect)), ` (${r.got}${r.want ? ` vs ${r.want}` : ", nothing recorded"})`) : null,
+		r.left > 0 ? h("span", {}, fmt.plural(r.left, "recorded call") + " not made") : null,
+		r.panic_in ? h("span", {}, "panicked in ", h("span.mono", {}, r.panic_in)) : null,
+	];
 	return h(
-		"div.rcheck-result",
+		"details.rcheck-result",
 		{},
-		h("div.row", { style: { gap: "8px", "flex-wrap": "wrap", "align-items": "center" } }, verdictBadge(r.verdict), h("b.small", {}, r.label), h("span.spacer"), r.route ? h("span.mono.small.muted", {}, r.route) : null, h("span.mono.small.muted", { title: r.capsule }, fmt.short(r.capsule, 10))),
-		h("p.rcheck-why", {}, r.detail || d.means),
 		h(
-			"div.row.tiny.muted",
-			{ style: { gap: "12px", "flex-wrap": "wrap" } },
-			h("span", {}, "recorded ", h("b", {}, r.recorded ? String(r.recorded) : "none")),
-			h("span", {}, "now ", h("b", {}, r.status ? String(r.status) : r.verdict === "skipped" ? "not run" : "no response")),
-			r.effect >= 0 ? h("span", {}, "first different call: effect ", h("b", {}, String(r.effect)), ` (${r.got}${r.want ? ` vs ${r.want}` : ", nothing recorded"})`) : null,
-			r.left > 0 ? h("span", {}, fmt.plural(r.left, "recorded call") + " not made") : null,
-			r.panic_in ? h("span", {}, "panicked in ", h("span.mono", {}, r.panic_in)) : null,
+			"summary",
+			{},
+			verdictBadge(r.verdict),
+			h("span.rcheck-label", {}, r.label),
+			h("span.spacer"),
+			r.route ? h("span.mono.small.muted", {}, r.route) : null,
+			h("span.mono.small.muted", { title: r.capsule }, fmt.short(r.capsule, 8)),
 		),
+		h("p.rcheck-why", {}, r.detail || d.means),
+		h("div.row.tiny.muted", { style: { gap: "12px", "flex-wrap": "wrap" } }, facts),
 	);
 }
 
@@ -87,6 +109,7 @@ export function checksPanel(ctx, repo, base, R, group, capsules) {
 	const list = h("div", {}, skeleton(3));
 	const open = new Set(ctx.query.check ? [Number(ctx.query.check)] : []);
 	let timer = 0;
+	let showOlder = false;
 
 	refsOf(repo.owner, repo.name).then(
 		(refs) => {
@@ -111,39 +134,82 @@ export function checksPanel(ctx, repo, base, R, group, capsules) {
 		}
 	};
 
-	const row = (k) => {
+	const row = (k, older) => {
 		const box = h("div.rcheck-detail", { hidden: !open.has(k.id) });
+		const chevron = h("span.rcheck-chevron", {}, icon("chevronRight", "sm"));
 		const toggle = h(
 			"button.rcheck-row",
 			{ type: "button", "aria-expanded": String(open.has(k.id)) },
-			icon(open.has(k.id) ? "chevronDown" : "chevronRight", "sm"),
+			chevron,
+			h("div.rcheck-outcome", {}, outcome(k)),
 			h(
 				"div.grow",
-				{ style: { "min-width": "0", "text-align": "left" } },
-				h("div.row", { style: { gap: "8px", "flex-wrap": "wrap", "align-items": "center" } }, icon("branch", "sm"), h("b.mono", {}, k.target), h("a.hash", { href: `${base}/commit/${k.commit}`, onclick: (e) => e.stopPropagation() }, fmt.short(k.commit, 8)), k.capsule ? h("span.small.muted", {}, "one capsule ", h("span.mono", {}, fmt.short(k.capsule, 8))) : null),
-				h("div.small.muted", { style: { "margin-top": "4px" } }, headline(k)),
+				{ style: { "min-width": "0" } },
+				h("div.row", { style: { gap: "8px", "flex-wrap": "wrap" } }, h("b.mono", {}, k.target), h("span.mono.small.muted", {}, fmt.short(k.commit, 8)), k.capsule ? h("span.small.muted", {}, "one capsule") : null),
+				h("div.small.muted.rcheck-headline", {}, [tally(k), headline(k)].filter(Boolean).join(". ").replace(/^./, (c) => c.toUpperCase())),
 			),
-			h("div.row", { style: { gap: "6px", "flex-wrap": "wrap", "justify-content": "flex-end" } }, summary(k)),
-			h("div.tiny.muted", { style: { "min-width": "90px", "text-align": "right" } }, k.by ? h("div", {}, k.by) : null, time(k.created_at)),
+			h("div.tiny.muted.nowrap", {}, time(k.created_at)),
 		);
-		toggle.onclick = () => {
-			const now = !open.has(k.id);
+		const show = (now) => {
 			if (now) open.add(k.id);
 			else open.delete(k.id);
 			toggle.setAttribute("aria-expanded", String(now));
-			toggle.firstChild.replaceWith(icon(now ? "chevronDown" : "chevronRight", "sm"));
 			box.hidden = !now;
 			if (now) detail(k, box);
 		};
+		toggle.onclick = () => show(!open.has(k.id));
 		if (open.has(k.id)) detail(k, box);
-		return h("div.rcheck", { id: `check-${k.id}` }, toggle, box);
+		return h(older ? "div.rcheck.rcheck-older" : "div.rcheck", { id: `check-${k.id}` }, toggle, box);
+	};
+
+	// latestFirst keeps each revision's newest check on top and puts its earlier checks behind one toggle.
+	const listOf = (checks) => {
+		const seen = new Set();
+		const latest = [];
+		const older = [];
+		for (const k of checks) {
+			if (seen.has(k.target)) older.push(k);
+			else {
+				seen.add(k.target);
+				latest.push(k);
+			}
+		}
+		const rows = latest.map((k) => row(k, false));
+		if (!older.length) return rows;
+		const more = h("details.rcheck-more", { open: showOlder }, h("summary.small.muted", {}, `${fmt.plural(older.length, "earlier check")} of the same revisions`), older.map((k) => row(k, true)));
+		more.addEventListener("toggle", () => (showOlder = more.open));
+		return [...rows, more];
+	};
+
+	// older holds the pages read with "Show older checks", and cursor the next page's before (0 when none is left)
+	let older = [];
+	let cursor = 0;
+	const page = (before) => api.get(R("/replay/checks"), { group: group.id, limit: 30, before: before || undefined });
+
+	const render = (first) => {
+		const ids = new Set(first.map((k) => k.id));
+		const checks = [...first, ...older.filter((k) => !ids.has(k.id))];
+		const more = cursor ? btn("Show older checks", { sm: true }) : null;
+		if (more)
+			more.onclick = () =>
+				busy(more, async () => {
+					const d = await page(cursor);
+					if (!ctx.alive()) return;
+					older = [...older, ...(d.checks || [])];
+					cursor = d.next || 0;
+					render(first);
+				});
+		list.replaceChildren(
+			checks.length ? listOf(checks) : empty("runner", "No checks yet", "Push your fix to a branch, then replay this failure against it. A check tells you whether the fix handles the request that failed in production, before you merge it."),
+			more ? h("div.rcheck-more-pages", {}, more) : null,
+		);
 	};
 
 	const load = async () => {
 		clearTimeout(timer);
 		let d;
 		try {
-			d = await api.get(R("/replay/checks"), { group: group.id, limit: 30 });
+			d = await page(0);
 		} catch (err) {
 			list.replaceChildren(errorBox(err));
 			return;
@@ -153,7 +219,8 @@ export function checksPanel(ctx, repo, base, R, group, capsules) {
 			d.opted_in ? null : callout("warn", h("b", {}, "The runner is off for this repository. "), `Checks build and replay on tinhub's runner, which only replays capsules of owners that opted in. An owner of ${repo.owner} turns it on with `, h("code", {}, `PUT /api/v1/orgs/${repo.owner}/runner`), ", then adds the runner's public key to the recording server's ", h("code", {}, "TIN_REPLAY_RECIPIENTS"), "."),
 		);
 		const checks = d.checks || [];
-		list.replaceChildren(checks.length ? checks.map(row) : empty("runner", "No checks yet", "Push your fix to a branch, then replay this failure against it. A check tells you whether the fix handles the request that failed in production, before you merge it."));
+		if (!older.length) cursor = d.next || 0;
+		render(checks);
 		if (checks.some((k) => k.state === "queued" || k.state === "running")) timer = setTimeout(() => ctx.alive() && load(), 2500);
 	};
 
@@ -186,7 +253,7 @@ export function checksPanel(ctx, repo, base, R, group, capsules) {
 		h(
 			"div.box-body",
 			{},
-			h("p.small.muted", { style: { margin: "0 0 12px" } }, "Pick the revision with your fix. tinhub builds it and replays the requests that failed in production against it, answering every call (Redis, HTTP, SQL) from the capsule exactly as production saw it. Each capsule then passes, diverges, panics or still fails, with the reason."),
+			h("p.small.muted", { style: { margin: "0 0 12px" } }, "Pick the branch with your fix. tinhub builds it and replays the failed requests against it, with every Redis, HTTP and SQL answer exactly as production saw it."),
 			notice,
 			h("div.row", { style: { gap: "8px", "flex-wrap": "wrap" } }, target, targets, which, run),
 			legend,
