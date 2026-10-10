@@ -1,0 +1,55 @@
+package main
+
+// Issue 1208: argo.Get sets the elements of an inline array past a shorter JSON array's
+// end to their zero value, as Go does; null keeps the array, and elements past N are
+// skipped. Expected lines checked against Go 1.27.
+
+import "argo"
+import "say"
+
+type P value struct {
+	n i64
+	s str
+}
+
+type T value struct {
+	a [3]str
+	f [2]f64
+	b [2]bool
+	p [2]P
+	o [2]?i64
+	i [3]i64
+}
+
+type W struct {
+	t T
+}
+
+fn fill() W {
+	return W{t: T{a: [3]str{"x", "y", "z"}, f: [2]f64{1.5, 2.5}, b: [2]bool{true, true}, p: [2]P{P{n: 1, s: "p"}, P{n: 2, s: "q"}}, o: [2]?i64{7, 8}, i: [3]i64{4, 5, 6}}}
+}
+
+fn show(label str, text str) {
+	mut w = fill()
+	argo.Get(text, mut w) catch err {
+		say.Line("{label}: {err}")
+		return
+	}
+	let t = w.t
+	mut os = ""
+	for k in 0..2 {
+		if let v = t.o[k] {
+			os = os + "{v},"
+		} else {
+			os = os + "nil,"
+		}
+	}
+	say.Line("{label}: a={t.a[0]}|{t.a[1]}|{t.a[2]} f={t.f[0]},{t.f[1]} b={t.b[0]},{t.b[1]} p={t.p[0].n}{t.p[0].s},{t.p[1].n}{t.p[1].s} o={os} i={t.i[0]},{t.i[1]},{t.i[2]}")
+}
+
+fn main() {
+	show("short", `{"t":{"a":["m"],"f":[9],"b":[false],"p":[{"n":5}],"o":[null],"i":[1]}}`)
+	show("empty", `{"t":{"a":[],"f":[],"b":[],"p":[],"o":[],"i":[]}}`)
+	show("null", `{"t":{"a":null,"i":null}}`)
+	show("long", `{"t":{"i":[1,2,3,4,5]}}`)
+}

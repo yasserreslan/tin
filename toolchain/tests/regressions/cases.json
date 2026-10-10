@@ -1529,5 +1529,15 @@
       "stdout": "[keep] old/9\ntrue\n[3]\nfault\n[keep] [keep]\n[keep y]\nargo: expected an integer in [0, 255] at offset 4, found \"-\"\n0\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "argo-inline-array-short.tin",
+    "issue": 1208,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "short: a=m|| f=9,0 b=false,false p=5p,0 o=nil,nil, i=1,0,0\nempty: a=|| f=0,0 b=false,false p=0,0 o=nil,nil, i=0,0,0\nnull: a=x|y|z f=1.5,2.5 b=true,true p=1p,2q o=7,8, i=4,5,6\nlong: a=x|y|z f=1.5,2.5 b=true,true p=1p,2q o=7,8, i=1,2,3\n",
+      "stderr": ""
+    }
   }
 ]
