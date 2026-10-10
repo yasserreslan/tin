@@ -441,6 +441,15 @@ fn TestFixes(t mut crucible.T) {
 	crucible.Equal(mut t, "status", s.Status, 500)
 	crucible.Equal(mut t, "route", Route(s), "GET /a/b")
 	crucible.Equal(mut t, "panic", s.Panic, "boom")
+	// one route's failures are one group whatever ids their paths hold; a summary with no route groups by its path (#1106)
+	let c1 = ParseSummary("status=500\nmethod=POST\npath=/checkout/1\nroute=/checkout/{{id}}\npanic=boom\n")
+	let c2 = ParseSummary("status=500\nmethod=POST\npath=/checkout/2\nroute=/checkout/{{id}}\npanic=boom\n")
+	crucible.Equal(mut t, "the route pattern", Route(c1), "POST /checkout/{{id}}")
+	t.True("one group for one route", GroupId(c1) == GroupId(c2))
+	let old1 = ParseSummary("status=500\nmethod=POST\npath=/checkout/1\npanic=boom\n")
+	let old2 = ParseSummary("status=500\nmethod=POST\npath=/checkout/2\npanic=boom\n")
+	t.True("no route: each path is its own group, as before", GroupId(old1) != GroupId(old2))
+	crucible.Equal(mut t, "no route: the group is the one recorded before", GroupId(old1), seal.Hex(seal.Sha256("tinhub replay group\nPOST /checkout/1\npanic boom")))
 }
 
 // sizeOf is the size of the object at key in this core's store, -1 for none.

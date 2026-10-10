@@ -677,6 +677,24 @@ fn recording(e Env) {
 	} else {
 		flag("the chunked request was not kept")
 	}
+	// Version 2 through the Router: the plain summary names the route that served the request, a panicked one too, so
+	// failures group by route rather than by each path (#1106).
+	let routeReader = newReader(e, "rec-route-reader")
+	let routeSpool = ci.Join(e.Work, "spool-anvil-v2")
+	serveRecording(e, exe, routeSpool, []str{cartRequest("/cart/7?fail=1", ""), cartRequest("/cart/8?panic=1", "")}, []str{"TIN_REPLAY_RECIPIENTS=" + routeReader.pub, "TIN_REPLAY_SIGNING_KEY=" + signSeedHex()})
+	mut routed = []str{}
+	for n in spoolNames(routeSpool) {
+		let (_, rs, rerr) = replay.Summary(ci.Read(ci.Join(routeSpool, n)))
+		if rerr != nil {
+			flag(n + ": v2 summary: " + say.Str(rerr))
+			continue
+		}
+		routed = append(routed, rs)
+	}
+	if len(routed) == 2 && routed[0] > routed[1] {
+		routed = []str{routed[1], routed[0]}
+	}
+	equal("v2 summaries name the route", twine.Join(routed, "|"), "status=500\nmethod=GET\npath=/cart/8\nroute=/cart/{{id}}\n|status=504\nmethod=GET\npath=/cart/7\nroute=/cart/{{id}}\n")
 	// Recording off: no spool, and the server answers the same.
 	let off = serveRecording(e, exe, "", []str{cartRequest("/cart/7?fail=1", "")}, []str{})
 	equal("off", statusOf(off.Answers[0]), "504")

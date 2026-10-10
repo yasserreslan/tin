@@ -281,8 +281,9 @@ capsule. A reader replays with the handles' key carried inside the encrypted bod
 8 bytes    "TINCAP\x02\x00"            magic and envelope version
 32 bytes   signer                       the server's ed25519 public key
 string     summary                      plain text, readable without a key: "status=N\nmethod=M\npath=P\n",
-                                        and "panic=TEXT\n" with TIN_REPLAY_SUMMARY_PANIC=1 (path: the target
-                                        without its query)
+                                        "route=R\n" when an anvil Router served the request (R: the route's
+                                        pattern, "/checkout/{id}"; #1106), and "panic=TEXT\n" with
+                                        TIN_REPLAY_SUMMARY_PANIC=1 (path: the target without its query)
 word       r                            readers, 1 to 64
 r ×        reader, 1200 bytes:
   32 bytes   key id                     SHA-256 of the reader's public key bytes (X25519 || ML-KEM)

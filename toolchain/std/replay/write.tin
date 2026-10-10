@@ -237,7 +237,8 @@ fn Encode(tp i64, core i64, flags i64) str {
 }
 
 // summaryOf is a version 2 capsule's plain summary of tape tp (section 6.1): its status, its request's method and
-// path (the target without its query), and the panic message only with TIN_REPLAY_SUMMARY_PANIC=1.
+// path (the target without its query), the Router pattern that served it when there is one (#1106), and the panic
+// message only with TIN_REPLAY_SUMMARY_PANIC=1.
 fn summaryOf(tp i64) str {
 	mut req = ""
 	if tp[8] != 0 {
@@ -258,6 +259,10 @@ fn summaryOf(tp i64) str {
 		path = req[j:k]
 	}
 	mut out = "status=" + say.Str(tp[10]) + "\nmethod=" + method + "\npath=" + path + "\n"
+	let route = rt_tape_route(tp)
+	if route != "" {
+		out = out + "route=" + route + "\n"
+	}
 	if gSummaryPanic && tp[11] != 0 {
 		let pan = rt_str_from_raw(tp[11], tp[12])
 		mut clean = make([]u8, 0, len(pan))

@@ -61,18 +61,20 @@ fn refused(c transport.Code, message str) ! {
 
 // ---- summaries and groups ----
 
-// Summary is a capsule's plain summary, as the recording server wrote it: "status=N\nmethod=M\npath=P\n" and
-// "panic=TEXT\n" with TIN_REPLAY_SUMMARY_PANIC=1 (design/interface_replay.md §6.1).
+// Summary is a capsule's plain summary, as the recording server wrote it: "status=N\nmethod=M\npath=P\n", "route=R\n"
+// when a Router pattern served the request (#1106), and "panic=TEXT\n" with TIN_REPLAY_SUMMARY_PANIC=1
+// (design/interface_replay.md §6.1).
 type Summary struct {
-	Status i64
-	Method str
-	Path   str
-	Panic  str
+	Status  i64
+	Method  str
+	Path    str
+	Pattern str
+	Panic   str
 }
 
 // ParseSummary reads a summary; lines it does not know are ignored.
 fn ParseSummary(text str) Summary {
-	mut s = Summary{Status: 0, Method: "", Path: "", Panic: ""}
+	mut s = Summary{Status: 0, Method: "", Path: "", Pattern: "", Panic: ""}
 	for line in twine.Split(text, "\n") {
 		let (k, v, ok) = twine.Cut(line, "=")
 		if !ok {
@@ -87,6 +89,9 @@ fn ParseSummary(text str) Summary {
 			}
 			"path" => {
 				s.Path = v
+			}
+			"route" => {
+				s.Pattern = v
 			}
 			"panic" => {
 				s.Panic = v
@@ -109,8 +114,13 @@ fn atoi(v str) i64 {
 	return n
 }
 
-// Route is a summary's route: its method and path.
+// Route is a summary's route: its method and the Router pattern that served it ("POST /checkout/{id}"), so the
+// failures of one route make one group whatever ids their paths hold (#1106); its method and path when the summary
+// has no pattern (a capsule recorded before, or a server without a Router).
 fn Route(s Summary) str {
+	if len(s.Pattern) > 0 {
+		return s.Method + " " + s.Pattern
+	}
 	return s.Method + " " + s.Path
 }
 
@@ -131,12 +141,13 @@ type summaryJson struct {
 	status i64
 	method str
 	path   str
+	route  str
 	panic  str
 }
 
 fn summaryJsonOf(text str, s Summary) str {
 	mut b = []u8{}
-	argo.Put(mut b, summaryJson{text: text, status: s.Status, method: s.Method, path: s.Path, panic: s.Panic})
+	argo.Put(mut b, summaryJson{text: text, status: s.Status, method: s.Method, path: s.Path, route: s.Pattern, panic: s.Panic})
 	return str(b)
 }
 
