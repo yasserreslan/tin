@@ -1,0 +1,94 @@
+# The generator check ties these assembled syscall leaves to syscall_fast.tin.
+# syscall_check.tin covers native behavior; this pins the register ABI on both Linux CPUs.
+# Pinned to GNU objdump's `objdump -d` syntax, which is what the Linux CI runners use.
+# LLVM objdump spells some immediates and widths differently, so patterns below accept
+# both forms where they describe the same instruction. These are generated rt_sys_* leaves.
+
+[arm64]
+CHECK: <rt_sys_read>:
+CHECK: mov\s+x8,\s+#(?:0x3f|63)
+CHECK: svc\s+#0
+CHECK: cmn\s+x0,\s+#(?:0xfff|4095)
+CHECK: b\.(?:cc|lo)
+CHECK: neg\s+x0,\s+x0
+CHECK: str\s+x0,\s+\[x28,\s+#(?:0x50|80)\]
+CHECK: mov\s+x0,\s+#-(?:0x1|1)
+CHECK: ret
+CHECK: <rt_sys_write>:
+CHECK: mov\s+x8,\s+#(?:0x40|64)
+CHECK: svc\s+#0
+CHECK: <rt_sys_recv>:
+CHECK: mov\s+x4,\s+#0x0
+CHECK: mov\s+x5,\s+#0x0
+CHECK: mov\s+x8,\s+#(?:0xcf|207)
+CHECK: svc\s+#0
+CHECK: <rt_sys_epoll_wait>:
+CHECK: mov\s+x4,\s+#0x0
+CHECK: mov\s+x5,\s+#0x8
+CHECK: mov\s+x8,\s+#(?:0x16|22)
+CHECK: svc\s+#0
+CHECK: <rt_sys_clock_gettime>:
+CHECK: mov\s+x8,\s+#(?:0x71|113)
+CHECK: svc\s+#0
+CHECK: <rt_sys_clone>:
+CHECK: stp\s+x4,\s+x5,\s+\[x1,\s+#-0x10\]!
+CHECK: mov\s+x4,\s+x3
+CHECK: mov\s+x3,\s+#0x0
+CHECK: mov\s+x8,\s+#(?:0xdc|220)
+CHECK: svc\s+#0
+CHECK: cbz\s+x0
+CHECK: cmn\s+x0,\s+#(?:0xfff|4095)
+
+[amd64]
+CHECK: <rt_sys_read>:
+# The syscall receives its first three arguments unchanged in rdi, rsi, rdx.
+# Reject writes to those destinations before the syscall while allowing uses of them.
+CHECK-NOT: (?:mov|xor|pop|lea)[a-z]*\s+[^,]+,\s+%(?:rdi|rsi|rdx)\b
+CHECK: movl?\s+\$0x0, %eax
+CHECK: syscall
+CHECK: cmpq?\s+\$-0xfff, %rax
+CHECK: jb
+CHECK: negq?\s+%rax
+CHECK: testq?\s+%r15, %r15
+CHECK: movq?\s+%rax, 0x50\(%r15\)
+CHECK: movq?\s+\$-0x1, %rax
+CHECK: retq?
+CHECK: <rt_sys_write>:
+CHECK: movl?\s+\$0x1, %eax
+CHECK: syscall
+CHECK: <rt_sys_recv>:
+CHECK: movq?\s+%rcx, %r10
+CHECK: xorl?\s+%r8d, %r8d
+CHECK: xorl?\s+%r9d, %r9d
+CHECK: movl?\s+\$0x2d, %eax
+CHECK: syscall
+CHECK: <rt_sys_epoll_wait>:
+CHECK: movq?\s+%rcx, %r10
+CHECK: xorl?\s+%r8d, %r8d
+CHECK: movl?\s+\$0x8, %r9d
+CHECK: movl?\s+\$0x119, %eax
+CHECK: syscall
+CHECK: <rt_sys_clock_gettime>:
+CHECK: testq?\s+%rdx, %rdx
+CHECK: movq?\s+%rdi, \(%rsp\)
+CHECK: movq?\s+%rsi, 0x8\(%rsp\)
+CHECK: callq?\s+\*%rdx
+CHECK: movq?\s+\(%rsp\), %rdi
+CHECK: movq?\s+0x8\(%rsp\), %rsi
+CHECK: movl?\s+\$0xe4, %eax
+CHECK: syscall
+CHECK: cmpq?\s+\$-0xfff, %rax
+CHECK: movq?\s+%rax, 0x50\(%r15\)
+CHECK: movq?\s+\$-0x1, %rax
+CHECK: retq?
+CHECK: <rt_sys_clone>:
+CHECK: movq?\s+%r8, \(%rsi\)
+CHECK: movq?\s+%r9, 0x8\(%rsi\)
+CHECK: movq?\s+%rcx, %r10
+CHECK: xorl?\s+%r8d, %r8d
+CHECK: movl?\s+\$0x38, %eax
+CHECK: syscall
+CHECK: testq?\s+%rax, %rax
+CHECK: je
+CHECK: cmpq?\s+\$-0xfff, %rax
+CHECK: callq?\s+\*%rax
