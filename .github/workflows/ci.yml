@@ -314,15 +314,13 @@ jobs:
       - name: S3 client against MinIO (Linux x86-64; a 5 GiB multipart upload in bounded memory)
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: |
-          # dl.min.io no longer serves the server binary (410): a pinned release image from quay.io
-          image=
-          for tag in RELEASE.2025-04-22T22-12-26Z RELEASE.2025-02-28T09-55-16Z RELEASE.2024-12-18T13-15-44Z; do
-            docker pull -q "quay.io/minio/minio:$tag" > /dev/null && { image="quay.io/minio/minio:$tag"; break; }
-          done
-          [ -n "$image" ] || { echo "no MinIO image could be pulled"; exit 1; }
-          docker run -d --name tin-minio -p 127.0.0.1:9000:9000 -e MINIO_ROOT_USER=tinminio -e MINIO_ROOT_PASSWORD=tinminiosecret "$image" server /data --quiet > /dev/null
+          # dl.min.io answers 410 for the server binary and quay.io refuses anonymous pulls: MinIO built from a pinned
+          # source version through the Go module proxy, which keeps every published version
+          GOBIN="$RUNNER_TEMP/minio-bin" go install github.com/minio/minio@v0.0.0-20260212201848-7aac2a2c5b7c
+          mkdir -p "$RUNNER_TEMP/minio-data"
+          MINIO_ROOT_USER=tinminio MINIO_ROOT_PASSWORD=tinminiosecret nohup "$RUNNER_TEMP/minio-bin/minio" server "$RUNNER_TEMP/minio-data" --address 127.0.0.1:9000 --quiet > "$RUNNER_TEMP/minio.log" 2>&1 &
           for i in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
-          S3_ENDPOINT=http://127.0.0.1:9000 S3_ACCESS_KEY=tinminio S3_SECRET_KEY=tinminiosecret S3_BUCKET=tin-ci S3_UPLOAD_BYTES=5368709120 sh tools/ci/tin.sh s3_check real || { docker logs --tail 50 tin-minio; exit 1; }
+          S3_ENDPOINT=http://127.0.0.1:9000 S3_ACCESS_KEY=tinminio S3_SECRET_KEY=tinminiosecret S3_BUCKET=tin-ci S3_UPLOAD_BYTES=5368709120 sh tools/ci/tin.sh s3_check real || { tail -n 50 "$RUNNER_TEMP/minio.log"; exit 1; }
       - name: tinhub (unit tests and the build; design/tinhub.md)
         if: ${{ !(runner.os == 'Linux' && runner.arch == 'X64') }}
         run: sh products/tinhub/tests/run.sh
