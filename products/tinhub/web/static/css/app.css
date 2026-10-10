@@ -387,7 +387,12 @@ svg.icon.xl { width: 28px; height: 28px; }
 @media (max-width: 600px) {
 	.container { padding: 0 var(--s-4); }
 	.page { padding-top: var(--s-5); padding-bottom: var(--s-7); }
+	/* a phone's commit strip keeps the message and the time; the commit's id is a tap away on its page */
+	.commit-strip .hash, .commit-strip .hash + .faint { display: none; }
+	.box-head { flex-wrap: wrap; row-gap: var(--s-2); }
 }
+/* "3 hours ago" never breaks across lines */
+time { white-space: nowrap; }
 
 /* ---- page heads ---- */
 
