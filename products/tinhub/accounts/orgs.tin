@@ -106,7 +106,7 @@ fn setMemberIn(tx mut postgres.Tx, by Actor, orgId i64, userId i64, role str) ! 
 	if !may {
 		fail fault.Wrap(ErrForbidden, "only an owner of the org changes its members")
 	}
-	let u = try tx.Query("SELECT 1 FROM users WHERE id = {userId} AND deleted_at IS NULL")
+	let u = try tx.Query("SELECT o.name FROM users u JOIN owners o ON o.id = u.owner_id WHERE u.id = {userId} AND u.deleted_at IS NULL")
 	if len(u.Rows) == 0 {
 		fail fault.Wrap(ErrNotFound, "no user {userId}")
 	}
@@ -114,7 +114,8 @@ fn setMemberIn(tx mut postgres.Tx, by Actor, orgId i64, userId i64, role str) ! 
 		// the org row is locked: two owners demoting each other cannot both pass this
 		let owners = try tx.Query("SELECT count(*) FILTER (WHERE user_id <> {userId}), count(*) FILTER (WHERE user_id = {userId}) FROM members WHERE org_id = {orgId} AND role = 'owner'")
 		if owners.Rows[0][1].Int() == 1 && owners.Rows[0][0].Int() == 0 {
-			fail fault.Wrap(ErrInvalid, "user {userId} is the org's last owner")
+			// the message names the user: it reaches people, who know no ids
+			fail fault.Wrap(ErrInvalid, "{u.Rows[0][0].Text()} is the org's last owner")
 		}
 	}
 	if role == "" {
@@ -229,9 +230,13 @@ fn setTeamMemberIn(tx mut postgres.Tx, by Actor, teamId i64, userId i64, add boo
 		try audit(mut tx, by, "team.member.remove", "team", teamId, []str{"user", "{userId}"})
 		return
 	}
-	let m = try tx.Query("SELECT 1 FROM members WHERE org_id = {orgId} AND user_id = {userId}")
-	if len(m.Rows) == 0 {
-		fail fault.Wrap(ErrInvalid, "user {userId} is not a member of the team's org")
+	let m = try tx.Query("SELECT o.name, count(m.user_id) FROM users u JOIN owners o ON o.id = u.owner_id LEFT JOIN members m ON m.user_id = u.id AND m.org_id = {orgId} WHERE u.id = {userId} GROUP BY o.name")
+	if len(m.Rows) == 0 || m.Rows[0][1].Int() == 0 {
+		mut who = "user {userId}"
+		if len(m.Rows) > 0 {
+			who = m.Rows[0][0].Text()
+		}
+		fail fault.Wrap(ErrInvalid, "{who} is not a member of the team's org")
 	}
 	_ = try tx.Exec("INSERT INTO team_members (team_id, user_id) VALUES ({teamId}, {userId}) ON CONFLICT DO NOTHING")
 	try audit(mut tx, by, "team.member", "team", teamId, []str{"user", "{userId}"})

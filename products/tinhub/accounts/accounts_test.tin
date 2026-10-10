@@ -8,6 +8,7 @@ import "fault"
 import "postgres"
 import "quarry"
 import "seal"
+import "twine"
 
 // Tests for accounts (#1012). The Postgres tests run when TINHUB_TEST_DB is set (and empty that database); the
 // session tests use the Redis at TINHUB_TEST_REDIS (host:port) under a fresh key prefix, and are skipped without it.
@@ -177,6 +178,8 @@ fn accessMatrix(t mut crucible.T, c postgres.Client) ! {
 	try SetMember(c, Actor{Id: frank, Ip: ""}, org.Id, gina, "member")
 	let devs = try CreateTeam(c, Actor{Id: frank, Ip: ""}, org.Id, "devs")
 	try SetTeamMember(c, Actor{Id: frank, Ip: ""}, devs.Id, erin, true)
+	let outsider = SetTeamMember(c, Actor{Id: frank, Ip: ""}, devs.Id, zed, true)
+	t.True("a team takes only the org's members, named: {fault.Message(outsider)}", fault.Is(outsider, ErrInvalid) && twine.HasPrefix(fault.Message(outsider), "zed is not a member"))
 	// who may make repositories
 	let (_, e1) = CreateRepo(c, Actor{Id: gina, Ip: ""}, "acme", "nope", "private", 1000)
 	t.True("an org member makes no org repository", fault.Is(e1, ErrForbidden))
@@ -263,6 +266,7 @@ fn accessMatrix(t mut crucible.T, c postgres.Client) ! {
 	crucible.Equal(mut t, "out of the org, out of its teams", left, RoleNone)
 	let last = SetMember(c, Actor{Id: frank, Ip: ""}, org.Id, frank, "member")
 	t.True("the last owner stays", fault.Is(last, ErrInvalid))
+	t.True("the last owner is named: {fault.Message(last)}", twine.HasPrefix(fault.Message(last), "frank is the org's last owner"))
 	try SetMember(c, Actor{Id: frank, Ip: ""}, org.Id, gina, "owner")
 	let promoted = try RoleOf(c, gina, orgRepo)
 	crucible.Equal(mut t, "a new org owner administers its repositories", promoted, RoleAdmin)

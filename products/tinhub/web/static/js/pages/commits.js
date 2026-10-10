@@ -81,6 +81,8 @@ export async function render(ctx) {
 	try {
 		if (await load()) body.append(more(load));
 	} catch (err) {
-		list.replaceChildren(errorBox(err));
+		// a repository nothing was pushed to has no history yet, not a missing branch
+		if (err.status === 404 && !repo.pushed_at) list.replaceChildren(empty("history", "No commits yet", "Push a branch with tit and its history shows up here.", h("a.btn", { href: base }, icon("code", "sm"), "How to push")));
+		else list.replaceChildren(errorBox(err));
 	}
 }

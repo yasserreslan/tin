@@ -118,12 +118,15 @@ async function membersTab(ctx, o, content) {
 						["owner", "Owner"],
 					],
 					m.role,
-					{ style: { width: "120px", height: "30px" } },
+					{ style: { width: "120px", height: "30px" }, "aria-label": `${m.name}'s role` },
 				);
 				s.onchange = () =>
 					api.put(`/orgs/${o.name}/members/${encodeURIComponent(m.name)}`, { role: s.value }).then(
-						() => toast(`${m.name} is now ${s.value === "owner" ? "an owner" : "a member"}`),
-						(err) => toast(err.message, "error"),
+						() => toast(`${m.name} is now ${(m.role = s.value) === "owner" ? "an owner" : "a member"}`),
+						(err) => {
+							s.value = m.role;
+							toast(err.message, "error");
+						},
 					);
 				const rm = btn("", { sm: true, ghost: true, icon: "x", title: `Remove ${m.name}` });
 				rm.onclick = () =>
@@ -143,7 +146,7 @@ async function membersTab(ctx, o, content) {
 				["owner", "Owner"],
 			],
 			"member",
-			{ style: { width: "120px" } },
+			{ style: { width: "120px" }, "aria-label": "Role" },
 		);
 		const add = btn("Add member", { primary: true, icon: "plus" });
 		add.onclick = () =>
