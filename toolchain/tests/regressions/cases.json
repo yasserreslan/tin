@@ -1427,5 +1427,25 @@
       "stdout": "first run 3\n",
       "stderr_contains": "hearth.Run starts a program's cores once"
     }
+  },
+  {
+    "source": "wire-stream-read-local.tin",
+    "issue": 1036,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "no server\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "limit-spawned-task.tin",
+    "issue": 1079,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "spawned: limit exceeded\nparallel: limit exceeded\n-1 -1 4194308\n",
+      "stderr": ""
+    }
   }
 ]
