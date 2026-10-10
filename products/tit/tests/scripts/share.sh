@@ -138,6 +138,13 @@ t sync > /dev/null
 [ "$(t -C "$d/server" log --format=id -n 1 "$top")" = "$(t log --format=id -n 1)" ] || fail "the server's version of the amended change"
 echo "ok a pushed stack carries its change versions"
 
+# a version the server already has is no update: the same stack pushed again with no record of the last push
+rm -rf "$(find .tit -type d -name pushed)"
+t switch -c again > /dev/null
+t push > "$d/out.txt" 2>&1 || fail "a push of versions the server has: $(cat "$d/out.txt")"
+[ "$(t -C "$d/server" log --format=id -n 1 "$top")" = "$(t log --format=id -n 1)" ] || fail "the server's version after the same push"
+echo "ok a version the server has is not pushed again"
+
 # a client with no key is refused
 mkdir "$d/stranger"
 if HOME="$d/stranger" XDG_CONFIG_HOME="$d/stranger" t clone "$url" "$d/s" > "$d/out.txt" 2>&1; then
