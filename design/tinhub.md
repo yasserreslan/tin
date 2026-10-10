@@ -604,6 +604,32 @@ effect numbers and kinds: no request, body or effect key leaves the sandbox. `GE
 (`?version=N`) answers the run and its groups, `calls` first; it and the settings (`GET|PUT …/runner`: `entry`, `sample`,
 `env`; admins set them) take read access and the replay permission, like capsules.
 
+### 12.1 Replay checks: a revision against a failure
+
+A run answers "what does this change do to production's requests?". A check answers the question after an incident:
+"does my fix handle the request that failed?". `POST …/replay/checks` (`{"target", "group", "capsule"}`) resolves the
+target (a branch, a tag, a change's newest version or a full commit id) to a commit, and queues a `replay.check` job
+(`runner_checks`, migration 0009) for the runner role, under the same opt-in, key, sample bound (the group's 20 newest
+capsules, or the one asked for) and sandboxes as a run. The job builds that commit alone and replays each capsule
+against it; there is no base: each replay is judged against its own recording (`runner.Judge`), in the order a
+request meets the questions:
+
+| verdict | when |
+|---|---|
+| `diverged` | a call differs from the recording at effect N (another kind, the same kind with other arguments, one more), or recorded calls are left: past that point a replay has no true answers, so the status proves nothing |
+| `timeout` | the replay did not finish |
+| `panicked` | a panic on stderr, or no response; the label names the function it was in, and the message only when it is the group's own |
+| `failing` | the same calls, no panic, a 5xx (a recorded outage replays as the same outage, so this can be right) |
+| `passed` | the same calls in the same order, no panic, below 500: the fix, on what actually happened |
+| `skipped` | not replayed (not sealed for the runner's key) |
+
+Each result keeps its verdict, a label, an explanation, the statuses, the first differing effect's number and kinds,
+and the frame a panic was in (`runner_check_results`): as for runs, no request, body or effect key. The group page's
+"Check a fix" panel requests checks and shows them, refreshing while they run. `runner.sandbox = off` runs builds and
+replays as plain child processes for development machines without the sandbox. `products/tinhub/dev/shop` is a
+checkout service with one recorded panic, one recorded outage and five fix branches (one passes, three diverge in
+three ways, one still panics); `tests/checks.sh` checks every verdict end to end and `web/dev/seed.sh` shows them.
+
 **What the key's exposure is.** The replayed program opens the capsule itself, so it can read the key file in its
 scratch directory: a writer of an opted-in repository could make a change that prints it. The runner stores no body
 or key it prints, and the sandbox has no network, so it cannot leave that way; a key per owner would close the rest

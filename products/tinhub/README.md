@@ -108,7 +108,23 @@ then an org owner `PUT /api/v1/orgs/<org>/runner` (it answers the `public_key` t
 - `GET …/changes/<change>/behaviour` (`?version=N`): the run and its groups (`calls`, `error` for a new 5xx, panic or
   timeout, `body`, `same`, `skipped`), each with its count, label, first differing effect and up to 20 capsule ids.
 
-Both take read access and the replay permission. Postgres keeps outcomes only, never a request, body or effect key; the
+Both take read access and the replay permission.
+
+**Replay checks: does my fix handle what happened?** On a failure group's page, "Check a fix" takes any branch, tag, change
+or commit; the runner builds it and replays the group's capsules (or one of them) against it, each judged against its
+own recording: `passed` (production's calls in the same order, no panic, below 500), `diverged` (a different call at
+effect N, one more, or one fewer: the replay cannot judge past it), `panicked`, `failing` (a 5xx), `timeout` or
+`skipped`, each with an explanation of why. Same opt-in, key and sandbox as runs.
+
+- `POST /api/v1/repos/<owner>/<repo>/replay/checks` (`{"target": "fix/x", "group": ID, "capsule": ID}`, capsule
+  optional) queues one: 202, 404 for an unknown revision or group, 409 when the owner has not opted in.
+- `GET …/replay/checks` (`?group=ID`): the checks with their verdicts counted; `GET …/replay/checks/<id>`: each capsule's
+  verdict, label and explanation.
+
+`runner.sandbox = off` (default `on`) builds and replays as plain child processes, for a development machine with no
+sandbox such as macOS: the replayed program then has the host's network and files. Never set it on a server.
+
+Postgres keeps outcomes only, never a request, body or effect key; the
 private key is written only into a run's sandbox directory and removed with it. See
 [design/tinhub.md §12](../../design/tinhub.md#12-the-runner-a-changes-behaviour-against-productions-requests-1028).
 
@@ -206,6 +222,8 @@ history and a release:
 ```sh
 TINHUB_WEB_DIR=$PWD/products/tinhub/web/static tinhub run &
 sh products/tinhub/web/dev/seed.sh path/to/tinhub path/to/tit   # then open the URL it prints
+# with the runner on (TINHUB_RUNNER_KEY=file:KEY from `tin replay key KEY`, TINHUB_RUNNER_TIN=$PWD, and on macOS
+# TINHUB_RUNNER_SANDBOX=off), the seed also records dev/shop's failures and checks five fix branches against them
 node --test products/tinhub/web/test/*.test.js                 # the UI's unit tests
 ```
 

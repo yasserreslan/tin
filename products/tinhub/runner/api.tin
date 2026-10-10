@@ -15,6 +15,10 @@ import "tide"
 //   POST repos/<owner>/<repo>/changes/<change>/behaviour   request a run of a version ({"version": N}; none: the newest)
 //   GET  repos/<owner>/<repo>/runner, PUT (admin)          what the repository's runs build and replay
 //   GET  orgs/<org>/runner, PUT, DELETE (org owners)        the org's opt-in, and the runner key to seal capsules for
+//   GET  repos/<owner>/<repo>/replay/checks                 replay checks, newest first (?group=ID, ?limit=N)
+//   POST repos/<owner>/<repo>/replay/checks                 check a revision against a failure group or one capsule
+//                                                           ({"target", "group", "capsule"}; checks_api.tin)
+//   GET  repos/<owner>/<repo>/replay/checks/<id>            a check and each capsule's verdict with its explanation
 //
 // The repository's routes take read access and the replay permission (capsules.CanRead), as capsules do: a repository
 // the caller cannot read is 404, one whose capsules they cannot read 403. Errors are {"code", "message"}.
@@ -28,6 +32,9 @@ fn Mount(r mut anvil.Router) {
 	r.Get(`/api/v1/orgs/{org}/runner`, getOptIn)
 	r.Put(`/api/v1/orgs/{org}/runner`, putOptIn)
 	r.Delete(`/api/v1/orgs/{org}/runner`, deleteOptIn)
+	r.Get(`/api/v1/repos/{owner}/{repo}/replay/checks`, getChecks)
+	r.Post(`/api/v1/repos/{owner}/{repo}/replay/checks`, postCheck)
+	r.Get(`/api/v1/repos/{owner}/{repo}/replay/checks/{id}`, getCheck)
 }
 
 // readWithin and writeWithin are a request's budget (design/tinhub.md §8).

@@ -14,6 +14,7 @@ import "quarry"
 import "replay"
 import "sandbox"
 import "seal"
+import "spawn"
 import "tide"
 import "twine"
 
@@ -55,11 +56,14 @@ type Deps struct {
 	// BuildTimeout and ReplayTimeout bound one build and one replay
 	BuildTimeout  i64
 	ReplayTimeout i64
+	// Sandbox is runner.sandbox: "on" (every build and replay in packages/sandbox), or "off" (plain child processes with
+	// a timeout: the host's network and files; for development on a machine with no sandbox, such as macOS)
+	Sandbox str
 }
 
 // NewDeps is Deps with the default lease (5m) and timeouts (a build 5m, a replay 30s).
 fn NewDeps(c postgres.Client, s dyn packs.PackStore, dir str, tin str, key secret str, cgroup str, auth fn(anvil.Req) !i64) Deps {
-	return Deps{Db: c, Store: s, Dir: twine.TrimRight(dir, "/"), Tin: twine.TrimRight(tin, "/"), Key: key, Cgroup: cgroup, Auth: auth, Lease: 5 * tide.Minute, BuildTimeout: 5 * tide.Minute, ReplayTimeout: 30 * tide.Second}
+	return Deps{Db: c, Store: s, Dir: twine.TrimRight(dir, "/"), Tin: twine.TrimRight(tin, "/"), Key: key, Cgroup: cgroup, Auth: auth, Lease: 5 * tide.Minute, BuildTimeout: 5 * tide.Minute, ReplayTimeout: 30 * tide.Second, Sandbox: "on"}
 }
 
 // deps is this core's: globals are per core.
@@ -364,11 +368,11 @@ fn RequestNow(c postgres.Client, repoId i64, changeId str, version i64, by i64) 
 
 // ---- the job ----
 
-// Handlers is the runner's job kind for the runner role's own claim loop (never the worker's: a run takes minutes of
-// CPU in sandboxes): replay.run, in 60m and 512mb. It configures the core with d.
+// Handlers is the runner's job kinds for the runner role's own claim loop (never the worker's: a run takes minutes of
+// CPU in sandboxes): replay.run and replay.check (checks.tin), each in 60m and 512mb. It configures the core with d.
 fn Handlers(d Deps) []events.Handler {
 	Configure(d)
-	return []events.Handler{events.Handler{Kind: KindRun, Within: 60 * tide.Minute, Memory: 512 * 1024 * 1024, Tasks: 16, MaxAttempts: 3, Run: runJob}}
+	return []events.Handler{events.Handler{Kind: KindRun, Within: 60 * tide.Minute, Memory: 512 * 1024 * 1024, Tasks: 16, MaxAttempts: 3, Run: runJob}, events.Handler{Kind: KindCheck, Within: 60 * tide.Minute, Memory: 512 * 1024 * 1024, Tasks: 16, MaxAttempts: 3, Run: checkJob}}
 }
 
 fn runJob(j events.Job) ! {
@@ -685,7 +689,7 @@ fn Build(d Deps, src str, scratch str, entry str, out str) !str {
 	mut env = baseEnv()
 	env = append(env, "TIN_ROOT=/tin")
 	let argv = []str{"/tin/bin/tinc", "-o", "/scratch/" + out, "/src/" + entry}
-	let r = try sandbox.Run(SandboxFor(d, src, scratch, argv, env))
+	let r = try runIn(d, SandboxFor(d, src, scratch, argv, env), src)
 	if r.TimedOut {
 		return "the build timed out"
 	}
@@ -702,6 +706,12 @@ fn Build(d Deps, src str, scratch str, entry str, out str) !str {
 // ReplayOne replays scratch/capsule.tcap against scratch/bin with tin replay --against in a sandbox, trusting signers,
 // the program's environment env added.
 fn ReplayOne(d Deps, scratch str, bin str, signers str, env []str) !Report {
+	let (rep, _) = try replayFull(d, scratch, bin, signers, env)
+	return rep
+}
+
+// replayFull is ReplayOne and what the replayed program printed on stderr (a panic's message and frames).
+fn replayFull(d Deps, scratch str, bin str, signers str, env []str) !(Report, str) {
 	mut e = baseEnv()
 	e = append(e, "TIN_REPLAY_IDENTITY=/scratch/runner.key")
 	e = append(e, "TIN_REPLAY_SIGNERS=" + signers)
@@ -709,19 +719,67 @@ fn ReplayOne(d Deps, scratch str, bin str, signers str, env []str) !Report {
 		e = append(e, x)
 	}
 	let argv = []str{"/bin/sh", "/tin/tin", "replay", "/scratch/capsule.tcap", "--against", "/scratch/" + bin}
-	let r = try sandbox.Run(SandboxFor(d, "", scratch, argv, e))
+	let r = try runIn(d, SandboxFor(d, "", scratch, argv, e), "")
 	if r.TimedOut || r.OOM {
 		mut rep = ParseReport(r.Stdout, r.Stderr)
 		rep.Ran = true
 		rep.Why = ""
 		rep.TimedOut = true
 		rep.Status = 0
-		return rep
+		return rep, r.Stderr
 	}
 	if r.Code == 4 {
-		return NoReport(unreadable(r.Stderr))
+		return NoReport(unreadable(r.Stderr)), ""
 	}
-	return ParseReport(r.Stdout, r.Stderr)
+	return ParseReport(r.Stdout, r.Stderr), r.Stderr
+}
+
+// runIn runs a sandbox's program: in the sandbox, or with runner.sandbox = off as a plain child process whose paths
+// /tin, /src (src) and /scratch are the host's directories, under the sandbox's timeout.
+fn runIn(d Deps, s sandbox.Spec, src str) !sandbox.Result {
+	if d.Sandbox != "off" {
+		return try sandbox.Run(s)
+	}
+	mut argv = []str{}
+	for a in s.Argv {
+		argv = append(argv, hostPath(d, a, src, s.Scratch))
+	}
+	mut env = []str{}
+	for e in s.Env {
+		env = append(env, hostPath(d, e, src, s.Scratch))
+	}
+	let (out, err) = spawnWithin(argv, env, s.Scratch, 2 * s.MaxOutput, s.Timeout)
+	if err != nil {
+		if fault.Is(err, fault.DeadlineExceeded) {
+			return sandbox.Result{Code: -1, Signal: 9, TimedOut: true, OOM: false, Stdout: "", Stderr: "", StdoutTruncated: false, StderrTruncated: false}
+		}
+		fail err
+	}
+	return sandbox.Result{Code: out.Code, Signal: 0, TimedOut: false, OOM: false, Stdout: out.Stdout, Stderr: out.Stderr, StdoutTruncated: false, StderrTruncated: false}
+}
+
+// spawnWithin runs argv in dir with exactly env, collecting at most max bytes of output; past timeout it is killed and
+// fails with fault.DeadlineExceeded.
+fn spawnWithin(argv []str, env []str, dir str, max i64, timeout i64) !spawn.Result {
+	return try within timeout {
+		try spawn.Run(spawn.Cmd{Argv: argv, Env: spawn.Env.Set(env), Dir: dir, Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Pipe, Stderr: spawn.Stdio.Pipe, MaxOutput: max, Input: ""})
+	}
+}
+
+// hostPath is a sandbox path (or NAME=path) as the host's: /tin, /src and /scratch, wherever they start a path.
+fn hostPath(d Deps, s str, src str, scratch str) str {
+	mut t = s
+	t = twine.ReplaceAll(t, "/scratch", scratch)
+	if len(src) > 0 {
+		t = twine.ReplaceAll(t, "/src/", src + "/")
+	}
+	if twine.HasPrefix(t, "/tin/") || twine.HasPrefix(t, "/tin") && len(t) == 4 {
+		t = d.Tin + t[4:]
+	}
+	if twine.HasPrefix(t, "TIN_ROOT=/tin") {
+		t = "TIN_ROOT=" + d.Tin + t[len("TIN_ROOT=/tin"):]
+	}
+	return t
 }
 
 // ---- reading runs ----

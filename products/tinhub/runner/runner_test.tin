@@ -4,6 +4,7 @@ import "../db"
 import "../packs"
 import "anvil"
 import "crucible"
+import "fault"
 import "mint"
 import "postgres"
 import "replay"
@@ -373,4 +374,168 @@ fn TestGroupsAndApi(t mut crucible.T) {
 		return
 	}
 	t.True("out", opt == nil)
+}
+
+// ---- replay checks (checks.tin, verdict.tin) ----
+
+fn replayed(status i64, recorded i64, effect i64, got str, want str, left i64) Report {
+	return Report{Ran: true, Why: "", Status: status, Recorded: recorded, TimedOut: false, Effect: effect, Got: got, Want: want, Left: left, Body: ""}
+}
+
+fn TestPanicOf(t mut crucible.T) {
+	let (msg, where) = PanicOf("panic: index out of range [1] with length 1\n\ncore 0:\n\tcheckout\n\tanvil.chain_next\n")
+	crucible.Equal(mut t, "message", msg, "index out of range [1] with length 1")
+	crucible.Equal(mut t, "where", where, "checkout")
+	let (none, nowhere) = PanicOf("replay: capsule: not sealed for this key\n")
+	crucible.Equal(mut t, "no panic", none, "")
+	crucible.Equal(mut t, "nowhere", nowhere, "")
+	// a frame keeps only a function's name
+	let (_, odd) = PanicOf("panic: x\ncore 1:\n\tshop.charge$1 (main.tin:12)\n")
+	crucible.Equal(mut t, "frame", odd, "shop.charge$1")
+}
+
+fn TestJudge(t mut crucible.T) {
+	let p = "index out of range [1] with length 1"
+	// the fix: the same calls, no panic, a 4xx where production panicked
+	let fixed = Judge(replayed(402, 500, -1, "", "", 0), "", "", p)
+	crucible.Equal(mut t, "fixed", fixed.Verdict, VerdictPassed)
+	crucible.Equal(mut t, "fixed label", fixed.Label, "passed: 402, recorded 500 after a panic")
+	t.True("fixed says so", twine.HasPrefix(fixed.Detail, "Fixed."))
+	// production's own panic again
+	let again = Judge(replayed(500, 500, -1, "", "", 0), p, "checkout", p)
+	crucible.Equal(mut t, "panicked", again.Verdict, VerdictPanicked)
+	crucible.Equal(mut t, "panicked label", again.Label, "panicked in checkout: the recorded panic")
+	crucible.Equal(mut t, "panic in", again.PanicIn, "checkout")
+	// a panic that is not the group's keeps its message out
+	let other = Judge(replayed(500, 500, -1, "", "", 0), "card 4111 refused", "charge", p)
+	crucible.Equal(mut t, "other label", other.Label, "panicked in charge")
+	t.True("no message", !twine.Contains(other.Detail, "4111"))
+	// an extra call at the end, a different call, the same kind with other arguments, a call not made
+	let retry = Judge(replayed(503, 500, 3, "wire.http@1", "", 0), "", "", p)
+	crucible.Equal(mut t, "retry", retry.Verdict, VerdictDiverged)
+	crucible.Equal(mut t, "retry label", retry.Label, "diverged at effect 3: an extra wire.http@1")
+	let lookup = Judge(replayed(502, 500, 2, "redis@1", "wire.http@1", 1), "", "", p)
+	crucible.Equal(mut t, "lookup label", lookup.Label, "diverged at effect 2: redis@1 where production made wire.http@1")
+	t.True("lookup words", twine.Contains(lookup.Detail, "a Redis command (redis@1) where production made an HTTP request (wire.http@1)"))
+	let env = Judge(replayed(500, 500, 2, "wire.http@1", "wire.http@1", 1), "", "", p)
+	crucible.Equal(mut t, "env label", env.Label, "diverged at effect 2: wire.http@1 with other arguments")
+	let early = Judge(replayed(422, 500, -1, "", "", 1), "", "", p)
+	crucible.Equal(mut t, "early", early.Verdict, VerdictDiverged)
+	crucible.Equal(mut t, "early label", early.Label, "diverged: answered without 1 recorded call")
+	// an outage replayed: no panic, still a 5xx
+	let outage = Judge(replayed(503, 500, -1, "", "", 0), "", "", "")
+	crucible.Equal(mut t, "outage", outage.Verdict, VerdictFailing)
+	crucible.Equal(mut t, "outage label", outage.Label, "still fails: status 503")
+	let same = Judge(replayed(500, 500, -1, "", "", 0), "", "", "")
+	t.True("reproduced", twine.Contains(same.Detail, "reproduced, not fixed"))
+	// a request that did not fail, served the same
+	let ok = Judge(replayed(200, 200, -1, "", "", 0), "", "", "")
+	crucible.Equal(mut t, "ok label", ok.Label, "passed: 200, as recorded")
+	let slow = Judge(Report{Ran: true, Why: "", Status: 0, Recorded: 500, TimedOut: true, Effect: -1, Got: "", Want: "", Left: 0, Body: ""}, "", "", p)
+	crucible.Equal(mut t, "timeout", slow.Verdict, VerdictTimeout)
+	let skipped = Judge(NoReport("not sealed for the runner's key"), "", "", p)
+	crucible.Equal(mut t, "skipped", skipped.Verdict, VerdictSkipped)
+	crucible.Equal(mut t, "call names", CallName("postgres@1"), "a Postgres query")
+	crucible.Equal(mut t, "unknown call", CallName("nats@2"), "a nats call")
+}
+
+fn TestChecks(t mut crucible.T) {
+	let got = testDb(mut t)
+	if got == nil {
+		return
+	}
+	let c = got
+	let w = setup(c) catch err {
+		t.Error("setup: {err}")
+		return
+	}
+	let group = twine.Repeat("9f", 6)
+	let capsule = twine.Repeat("c1", 32)
+	let other = twine.Repeat("c2", 32)
+	_ = c.Exec("INSERT INTO replay_groups (repo_id, id, panic, route, state, count) VALUES ({w.repo}, {group}, 'index out of range [1] with length 1', 'POST /checkout/{{id}}', 'open', 2)") catch err {
+		t.Error("group: {err}")
+		postgres.Result{Affected: 0}
+	}
+	_ = c.Exec("INSERT INTO capsules (repo_id, id, group_id, status, route, expires_at) VALUES ({w.repo}, {capsule}, {group}, 500, 'POST /checkout/2', now() + interval '1 day'), ({w.repo}, {other}, {group}, 500, 'POST /checkout/3', now() + interval '1 day')") catch err {
+		t.Error("capsules: {err}")
+		postgres.Result{Affected: 0}
+	}
+	let commit = twine.Repeat("ab", 32)
+	mut tx = c.Begin() catch err {
+		t.Error("begin: {err}")
+		return
+	}
+	let none = RequestCheck(mut tx, w.repo, "fix/declined", commit, group, "", w.ada) catch err {
+		t.Error("request: {err}")
+		0
+	}
+	crucible.Equal(mut t, "not opted in", none, 0)
+	let (priv, _) = replay.NewIdentity() catch err {
+		t.Error("identity: {err}")
+		return
+	}
+	let keyId = Register(c, priv) catch err {
+		t.Error("register: {err}")
+		return
+	}
+	t.NoFault("opt in", SetOptIn(c, w.owner, keyId, []str{}, w.ada))
+	let id = RequestCheck(mut tx, w.repo, "fix/declined", commit, group, "", w.ada) catch err {
+		t.Error("request: {err}")
+		0
+	}
+	t.True("queued", id > 0)
+	let (_, noGroup) = RequestCheck(mut tx, w.repo, "fix/declined", commit, "nogroup", "", w.ada)
+	t.True("no such group", fault.Is(noGroup, ErrNoGroup))
+	tx.Rollback() catch _ {
+	}
+	mut tx2 = c.Begin() catch err {
+		t.Error("begin: {err}")
+		return
+	}
+	let (_, wrongCapsule) = RequestCheck(mut tx2, w.repo, "fix/declined", commit, group, twine.Repeat("dd", 32), w.ada)
+	t.True("no such capsule in the group", fault.Is(wrongCapsule, ErrNoGroup))
+	tx2.Rollback() catch _ {
+	}
+	mut tx3 = c.Begin() catch err {
+		t.Error("begin: {err}")
+		return
+	}
+	let one = RequestCheck(mut tx3, w.repo, "fix/declined", commit, group, capsule, w.ada) catch err {
+		t.Error("request one: {err}")
+		0
+	}
+	t.NoFault("commit", tx3.Commit())
+	crucible.Equal(mut t, "a job", count(c, "SELECT count(*) FROM events WHERE kind = 'replay.check'"), 1)
+	// verdicts as a check stores them: what needs a look first, counted per verdict
+	let p = "index out of range [1] with length 1"
+	let a = Judge(replayed(500, 500, -1, "", "", 0), p, "checkout", p)
+	let b = Judge(replayed(402, 500, -1, "", "", 0), "", "", p)
+	let f = checkEnd{state: "done", reason: "", results: []checkResult{checkResult{capsule: other, judged: b, report: replayed(402, 500, -1, "", "", 0)}, checkResult{capsule: capsule, judged: a, report: replayed(500, 500, -1, "", "", 0)}}}
+	t.NoFault("store", storeCheck(Deps{Db: c, Store: packs.DirStore{Root: "/nonexistent"}, Dir: "", Tin: "", Key: "", Cgroup: "", Auth: testAuth, Lease: 0, BuildTimeout: 0, ReplayTimeout: 0, Sandbox: "on"}, one, f))
+	let rs = CheckResults(c, one) catch err {
+		t.Error("results: {err}")
+		return
+	}
+	crucible.Equal(mut t, "two results", len(rs), 2)
+	crucible.Equal(mut t, "panicked first", rs[0].Verdict, VerdictPanicked)
+	crucible.Equal(mut t, "its route", rs[0].Route, "POST /checkout/2")
+	crucible.Equal(mut t, "then passed", rs[1].Verdict, VerdictPassed)
+	// the API: read access and the replay permission
+	mut r = anvil.NewRouter()
+	Mount(mut r)
+	let list = "/api/v1/repos/shop/checkout/replay/checks?group=" + group
+	crucible.Equal(mut t, "no access", r.RunWith("GET", list, []str{"X-Test-User: {w.carol}"}, "").Code(), 404)
+	crucible.Equal(mut t, "read, no replay", r.RunWith("GET", list, []str{"X-Test-User: {w.bob}"}, "").Code(), 403)
+	let shown = r.RunWith("GET", list, []str{"X-Test-User: {w.ada}"}, "")
+	crucible.Equal(mut t, "list", shown.Code(), 200)
+	t.True("counted", twine.Contains(str(shown.Body), "\"counts\":[{{\"verdict\":\"panicked\",\"count\":1}},{{\"verdict\":\"passed\",\"count\":1}}]"))
+	t.True("opted in", twine.Contains(str(shown.Body), "\"opted_in\":true"))
+	let detail = r.RunWith("GET", "/api/v1/repos/shop/checkout/replay/checks/{one}", []str{"X-Test-User: {w.ada}"}, "")
+	crucible.Equal(mut t, "detail", detail.Code(), 200)
+	t.True("explains", twine.Contains(str(detail.Body), "Fixed. Production answered 500 after a panic"))
+	crucible.Equal(mut t, "another repository's check", r.RunWith("GET", "/api/v1/repos/shop/checkout/replay/checks/999999", []str{"X-Test-User: {w.ada}"}, "").Code(), 404)
+	// a revision the repository does not have
+	let post = "/api/v1/repos/shop/checkout/replay/checks"
+	crucible.Equal(mut t, "no group", r.RunWith("POST", post, []str{"X-Test-User: {w.ada}"}, "{{\"target\":\"main\"}}").Code(), 400)
+	crucible.Equal(mut t, "no branch", r.RunWith("POST", post, []str{"X-Test-User: {w.ada}"}, "{{\"target\":\"fix/none\",\"group\":\"{group}\"}}").Code(), 404)
 }

@@ -70,6 +70,8 @@ sh products/tinhub/tests/review.sh "$tmp/review_node" "$tmp/tit"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_driver" products/tinhub/tests/programs/runner_driver.tin
 TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_probe" products/tinhub/tests/programs/runner_probe.tin
 sh products/tinhub/tests/runner.sh "$tmp/runner_driver" "$tmp/runner_probe" "$compiler"
+# replay checks: dev/shop's fix branches built and replayed against its recorded failures, each capsule's verdict
+sh products/tinhub/tests/checks.sh "$tmp/runner_driver" "$compiler"
 # benchmark history and releases: the Tin repo's fib benchmark timed, recorded with tit bench and pushed; a change made
 # slower fails its check with a note on its review; tit ship's release with its verified signature (#1029)
 TIN_ROOT=$PWD "$compiler" -o "$tmp/bench_node" products/tinhub/tests/programs/bench_node.tin

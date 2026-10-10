@@ -141,4 +141,62 @@ if command -v psql > /dev/null 2>&1 && [ -n "${TINHUB_DB_ADDR:-}" ]; then
 	ON CONFLICT DO NOTHING;
 	SQL
 fi
+
+# tinlang/shop: replay checks (design/tinhub.md §12.1) with real capsules. dev/shop's checkout service is recorded
+# failing twice (a panic on a declined cart, a 500 while its payment service is down), sealed for the node's runner key,
+# and pushed with five fix branches; each branch and main is then checked against both failures, so the shop's Replay
+# page shows a fix that passes, three ways to diverge and a fix that still panics, each with its explanation. Needs the
+# runner (runner.key and runner.tin set, the runner role; runner.sandbox = off where the sandbox cannot run, such as
+# macOS), a Tin compiler ($SEED_TINC, default bin/tinc) and Redis (redis-server, or $SEED_REDIS_ADDR); skipped without.
+seed_checks() {
+	tinc=${SEED_TINC:-$root/bin/tinc}
+	[ -x "$tinc" ] || { echo "seed: no replay checks: no compiler at $tinc (set SEED_TINC)" >&2; return 0; }
+	api ada POST /api/v1/repos '{"owner":"tinlang","name":"shop","visibility":"private","description":"A checkout service, its production failures and the fixes tried for them"}' > /dev/null
+	pub=$(api ada PUT /api/v1/orgs/tinlang/runner '{}' 2> /dev/null | jq -r '.public_key // empty' || true)
+	[ -n "$pub" ] || { echo "seed: no replay checks: no runner has registered a key (run tinhub with the runner role and runner.key)" >&2; return 0; }
+	redis=${SEED_REDIS_ADDR:-}
+	rpid=
+	if [ -z "$redis" ]; then
+		command -v redis-server > /dev/null 2>&1 || { echo "seed: no replay checks: no redis-server (or SEED_REDIS_ADDR) to record with" >&2; return 0; }
+		rport=16399
+		while redis-cli -p $rport ping > /dev/null 2>&1; do rport=$((rport + 1)); done
+		redis-server --port $rport --bind 127.0.0.1 --save '' --appendonly no > "$dir/redis.log" 2>&1 &
+		rpid=$!
+		redis=127.0.0.1:$rport
+		for i in $(seq 1 50); do redis-cli -p $rport ping > /dev/null 2>&1 && break; sleep 0.1; done
+	fi
+	shop=$root/products/tinhub/dev/shop
+	pay_port=${SEED_PAYMENTS_PORT:-9197}
+	api ada PUT /api/v1/repos/tinlang/shop/runner "{\"entry\":\"main.tin\",\"sample\":20,\"env\":[\"PAYMENTS_URL=http://127.0.0.1:$pay_port\"]}" > /dev/null
+	cd "$dir"
+	(as ada clone "$base/tinlang/shop" shop > "$dir/clone.out" 2>&1) || fail "clone shop: $(cat "$dir/clone.out")"
+	cd "$dir/shop"
+	cp "$shop/main.tin" main.tin
+	as ada add main.tin > /dev/null
+	as ada commit -m "shop: checkout reads the receipt the payment service answers" > /dev/null
+	as ada push > "$dir/push.out" 2>&1 || fail "push shop: $(cat "$dir/push.out")"
+	for f in "$shop"/branches/fix-*.tin; do
+		name=fix/$(basename "$f" .tin | sed 's/^fix-//')
+		# the commit message is the file's own account of the fix: its "// fix/..." comment
+		msg=$(awk -v n="// $name: " 'index($0, n) == 1 { on = 1 } on && !/^\/\/ / { exit } on { print substr($0, 4) }' "$f")
+		as ada switch main > /dev/null 2>&1
+		as ada switch -c "$name" > /dev/null
+		cp "$f" main.tin
+		as ada commit -a -m "$msg" > /dev/null
+		as ada push > "$dir/push.out" 2>&1 || fail "push $name: $(cat "$dir/push.out")"
+	done
+	as ada switch main > /dev/null 2>&1
+	signing=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	REDIS_ADDR=$redis TIN_REPLAY_RECIPIENTS=$pub TIN_REPLAY_SIGNING_KEY=$signing PAYMENTS_PORT=$pay_port \
+		sh "$shop/record.sh" "$tinc" "$dir/spool" > "$dir/record.out" 2>&1 || fail "recording shop: $(cat "$dir/record.out")"
+	[ -n "$rpid" ] && kill "$rpid" 2>/dev/null || true
+	as ada replay push "$dir/spool" --commit main > "$dir/replay.out" 2>&1 || fail "tit replay push: $(cat "$dir/replay.out")"
+	for g in $(api ada GET "/api/v1/repos/tinlang/shop/replay/groups?state=open" | jq -r '.groups[].id'); do
+		for b in main fix/declined-cart fix/retry-charge fix/coupon-lookup fix/limit-cart-size fix/split-on-colon; do
+			api ada POST /api/v1/repos/tinlang/shop/replay/checks "{\"target\":\"$b\",\"group\":\"$g\"}" > /dev/null || fail "check $b"
+		done
+	done
+	echo "seed: tinlang/shop has two failures and checks of six revisions against them: $base/tinlang/shop/replay (the runner works through them)"
+}
+seed_checks
 echo "seeded $base: ada (site admin) and bob; sessions in $dir/ada.cookie and $dir/bob.cookie"
