@@ -19,7 +19,8 @@ const tpWall = 13
 const tpLive = 14    // replaying: ",kind,kind," served by real calls (malloc'd str), 0: none
 const tpSched = 15   // reserved for #243
 const tpPeer = 16    // the request's peer, "ip:port" as RemoteAddr gives it (malloc'd str), 0: none (#355)
-const tpWords = 17
+const tpRoute = 17   // the Router pattern that served the request ("/checkout/{id}", malloc'd str), 0: none (#1106)
+const tpWords = 18
 
 const tapeRecord = 1
 const tapeReplay = 2
@@ -70,6 +71,7 @@ fn rt_tape_free(tp i64) {
 	free(tp[tpPanic])
 	free(tp[tpLive])
 	free(tp[tpPeer])
+	free(tp[tpRoute])
 	rt_sched_free(tp)
 	free(tp)
 }
@@ -98,6 +100,24 @@ fn rt_tape_peer(tp i64) str {
 		return ""
 	}
 	return cast(str, tp[tpPeer])
+}
+
+// rt_tape_route_set keeps the Router pattern that served the request, which the capsule's plain summary carries so
+// that failures group by route rather than by each concrete path (#1106).
+fn rt_tape_route_set(tp i64, route str) {
+	free(tp[tpRoute])
+	tp[tpRoute] = 0
+	if route != "" {
+		tp[tpRoute] = rt_raw_str(route)
+	}
+}
+
+// rt_tape_route is the pattern rt_tape_route_set kept, "" if none.
+fn rt_tape_route(tp i64) str {
+	if tp[tpRoute] == 0 {
+		return ""
+	}
+	return cast(str, tp[tpRoute])
 }
 
 // rt_tape_panic keeps the first panic message of a request.

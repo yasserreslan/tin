@@ -73,3 +73,15 @@ fn TestSigningPayload(t mut crucible.T) {
 	let (_, _, _, herr) = ParseSignatureHeader("ada@example.com sig")
 	t.True("two fields", herr != nil)
 }
+
+// A capsule's group is its route's when its summary names one, and its whole summary's otherwise (#1106).
+fn TestReplayGroup(t mut crucible.T) {
+	let a = replayGroup("k", "status=500\nmethod=POST\npath=/checkout/1\nroute=/checkout/{{id}}\n")
+	let b = replayGroup("k", "status=500\nmethod=POST\npath=/checkout/2\nroute=/checkout/{{id}}\n")
+	crucible.Equal(mut t, "one route, one group", a, b)
+	t.True("another signer, another group", a != replayGroup("j", "status=500\nmethod=POST\npath=/checkout/1\nroute=/checkout/{{id}}\n"))
+	t.True("another status, another group", a != replayGroup("k", "status=504\nmethod=POST\npath=/checkout/1\nroute=/checkout/{{id}}\n"))
+	let old = "status=500\nmethod=POST\npath=/checkout/1\n"
+	crucible.Equal(mut t, "no route: the group is the one before", replayGroup("k", old), seal.Hex(seal.Sha256("k\n" + old)))
+	t.True("no route: each path is its own group", replayGroup("k", old) != replayGroup("k", "status=500\nmethod=POST\npath=/checkout/2\n"))
+}
