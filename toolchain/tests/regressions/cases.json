@@ -1377,5 +1377,15 @@
       "stdout": "3\nnegative\nj\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "limit-name-bound.tin",
+    "issue": 1070,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "34\n",
+      "stderr": ""
+    }
   }
 ]

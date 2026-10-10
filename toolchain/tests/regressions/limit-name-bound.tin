@@ -1,0 +1,41 @@
+package main
+
+// #1070: a limit bound that ends in a name or a parenthesized expression is not a struct literal with the block.
+
+import "say"
+
+type Box struct {
+	n i64
+}
+
+fn f(d i64, m i64, n i64) !i64 {
+	let v = try within d {
+		try limit memory m, tasks n {
+			3
+		}
+	}
+	let w = try limit memory m {
+		4
+	}
+	let x = try limit memory (m) {
+		5
+	}
+	let y = try limit tasks n {
+		6
+	}
+	let z = try limit memory 1mb, tasks n {
+		7
+	}
+	let b = Box{n: 8}
+	let u = try limit memory m, tasks b.n {
+		Box{n: 9}.n
+	}
+	return v + w + x + y + z + u
+}
+
+fn main() {
+	let v = f(1000000000, 1000000, 4) catch _ {
+		0
+	}
+	say.Line(v)
+}
