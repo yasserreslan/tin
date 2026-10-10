@@ -5,6 +5,9 @@ import { h, copy, on, clear } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import * as fmt from "../lib/format.js";
 import { session } from "../lib/store.js";
+import { loginHref } from "../lib/router.js";
+
+export { loginHref };
 
 // avatar is a person's or org's initials on a colour of their name.
 export function avatar(name, size = "", { square = false, title } = {}) {
@@ -242,13 +245,6 @@ export function loading(label = "Loading") {
 
 export function skeleton(lines = 4) {
 	return h("div", { style: { padding: "8px 16px" } }, Array.from({ length: lines }, (_, i) => h("div.skeleton.skel-line", { style: { width: `${90 - ((i * 17) % 40)}%` } })));
-}
-
-// loginHref is the sign-in page's address, coming back here afterwards. On the sign-in page itself it keeps the
-// address it was given, so a second click does not send the visitor back to sign-in.
-export function loginHref() {
-	if (location.pathname === "/login") return "/login" + location.search;
-	return "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
 }
 
 // signInFirst is what a page shows a signed-out visitor where the server refused them: the fix is to sign in, not to
