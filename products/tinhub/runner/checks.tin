@@ -400,7 +400,6 @@ type CheckResult struct {
 	Route    str
 }
 
-
 // checkOfRow reads a row of the checks queries: the check's columns, its requester's name and "verdict:count,..."
 fn checkOfRow(r []postgres.Value) CheckInfo {
 	mut counts = []VerdictCount{}
