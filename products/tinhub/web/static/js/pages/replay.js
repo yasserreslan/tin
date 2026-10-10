@@ -7,6 +7,7 @@ import * as api from "../lib/api.js";
 import * as fmt from "../lib/format.js";
 import { setQuery } from "../lib/router.js";
 import { frame } from "./repo.js";
+import { checksPanel } from "../ui/checks.js";
 import { badge, btn, busy, confirm, copyButton, empty, errorBox, kv, more, refused, segmented, signInFirst, skeleton, time, toast } from "../ui/kit.js";
 
 const noAccess = (err) =>
@@ -119,6 +120,7 @@ async function group(ctx, repo, body, base, R, id) {
 				toast("Deleted");
 				location.assign(`${base}/replay`);
 			});
+	const checks = checksPanel(ctx, repo, base, R, g, d.capsules || []);
 	const rows = (d.capsules || []).map((c) => {
 		const tr = h(
 			"tr",
@@ -132,6 +134,7 @@ async function group(ctx, repo, body, base, R, id) {
 			h(
 				"td",
 				{ style: { "white-space": "nowrap", "text-align": "right" } },
+				btn("Check", { sm: true, ghost: true, icon: "play", title: "Replay this capsule against a branch or commit", onclick: () => checks.pick(c.id) }),
 				h("a.btn.sm.ghost", { href: `/api/v1/repos/${repo.owner}/${repo.name}/replay/capsules/${encodeURIComponent(c.id)}/download`, "data-native": "", title: "Download the sealed capsule" }, icon("download", "sm")),
 				admin
 					? (() => {
@@ -171,6 +174,7 @@ async function group(ctx, repo, body, base, R, id) {
 				])),
 			),
 		),
+		checks,
 		h(
 			"div.box",
 			{},

@@ -178,6 +178,7 @@ fn indexDeps(c config.Config, st dyn packs.PackStore, cache repo.RefCache) index
 fn runnerDeps(c config.Config, st dyn packs.PackStore) runner.Deps {
 	mut rd = runner.NewDeps(pg, st, c.PacksDir, c.RunnerTin, c.RunnerKey, c.RunnerCgroup, signin.Caller)
 	rd.Lease = c.WorkerLease
+	rd.Sandbox = c.RunnerSandbox
 	return rd
 }
 
@@ -350,7 +351,7 @@ on core.start {
 	}
 }
 
-// startRunner registers the runner's key and starts runner.concurrency loops claiming replay.run jobs only (the
+// startRunner registers the runner's key and starts runner.concurrency loops claiming replay.run and replay.check jobs only (the
 // worker role never runs them); their slots start at 100 so their names differ from the worker's.
 fn startRunner() {
 	_ = runner.Register(pg, boot.Conf.RunnerKey) catch err {
@@ -362,6 +363,9 @@ fn startRunner() {
 		return
 	}
 	let rd = keep(runnerDeps(boot.Conf, st))
+	if rd.Sandbox == "off" {
+		herald.Log(herald.LWarn, "runner.sandbox = off: builds and replays run as plain child processes with the host's network and files (development only)", []str{})
+	}
 	for slot in 0..boot.Conf.RunnerConcurrency {
 		let s = slot
 		detach {

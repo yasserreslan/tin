@@ -60,6 +60,9 @@ type Config struct {
 	RunnerTin   str
 	RunnerCgroup str
 	RunnerConcurrency i64
+	// RunnerSandbox is runner.sandbox: "on", or "off" to build and replay as plain child processes (development only,
+	// on a machine with no sandbox such as macOS: the replayed program has the host's network and files)
+	RunnerSandbox str
 	// WebEnabled serves the pages on a node; WebDir serves the UI from that directory instead of the embedded files
 	// (development only, design/tinhub.md §15).
 	WebEnabled bool
@@ -118,6 +121,7 @@ fn Keys() []Key {
 		Key{Name: "runner.tin", Default: "/usr/local/lib/tin", Secret: false},
 		Key{Name: "runner.cgroup", Default: "", Secret: false},
 		Key{Name: "runner.concurrency", Default: "1", Secret: false},
+		Key{Name: "runner.sandbox", Default: "on", Secret: false},
 		Key{Name: "web.enabled", Default: "true", Secret: false},
 		Key{Name: "web.dir", Default: "", Secret: false},
 	}
@@ -311,6 +315,10 @@ fn Build(vals map[str]str) !Config {
 	let apiRateV = try count(vals, "api.rate")
 	let runnerConcurrencyV = try count(vals, "runner.concurrency")
 	let webEnabledV = try flag(vals, "web.enabled")
+	let runnerSandboxV = vals["runner.sandbox"]
+	if runnerSandboxV != "on" && runnerSandboxV != "off" {
+		fail fault.Wrap(ErrConfig, "runner.sandbox: {runnerSandboxV} is not on or off")
+	}
 	return Config{
 		Roles: roles,
 		Listen: vals["listen"],
@@ -354,6 +362,7 @@ fn Build(vals map[str]str) !Config {
 		RunnerTin: twine.TrimRight(vals["runner.tin"], "/"),
 		RunnerCgroup: vals["runner.cgroup"],
 		RunnerConcurrency: runnerConcurrencyV,
+		RunnerSandbox: runnerSandboxV,
 		WebEnabled: webEnabledV,
 		WebDir: twine.TrimRight(vals["web.dir"], "/"),
 	}
