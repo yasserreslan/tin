@@ -1397,5 +1397,25 @@
       "stdout": "arena (i64, bool) 7 false\narena (bool, i64) false 7\n[w0 w1 w2] 6\n5 6 7 big5 node5 [k5 j5] true\n4 ok4\nnegative -1\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "named-foreign-scalar.tin",
+    "issue": 824,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "q 4 One(r) Two(2 t)\n5 z g\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "value-foreign-str.tin",
+    "issue": 847,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "one two three\nid0 id2 id1 2\nvx vy\nc both\nbv bw\n",
+      "stderr": ""
+    }
   }
 ]
