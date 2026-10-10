@@ -311,6 +311,8 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--s-5) 0; }
 .mt-4 { margin-top: var(--s-4); }
 .mt-6 { margin-top: var(--s-6); }
 .mb-4 { margin-bottom: var(--s-4); }
+.mb-5 { margin-bottom: var(--s-5); }
+.mb-6 { margin-bottom: var(--s-6); }
 
 svg.icon { width: 16px; height: 16px; flex: none; vertical-align: -3px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 svg.icon.sm { width: 14px; height: 14px; vertical-align: -2px; }
