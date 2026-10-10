@@ -7,9 +7,10 @@ import * as api from "../lib/api.js";
 import * as fmt from "../lib/format.js";
 import { setQuery } from "../lib/router.js";
 import { frame } from "./repo.js";
-import { badge, btn, busy, confirm, copyButton, empty, errorBox, kv, more, segmented, skeleton, time, toast } from "../ui/kit.js";
+import { badge, btn, busy, confirm, copyButton, empty, errorBox, kv, more, refused, segmented, signInFirst, skeleton, time, toast } from "../ui/kit.js";
 
-const noAccess = (err) => empty("lock", "You can't read replays here", [err.message || "Reading capsules needs the replay permission.", " A repository admin grants it in Settings, Replay."]);
+const noAccess = (err) =>
+	refused(err, "You can't read replays here", [err.message || "Reading capsules needs the replay permission.", " A repository admin grants it in Settings, Replay."], signInFirst("Sign in to read replays", "Replays hold production requests: reading them needs an account with the replay permission."));
 
 function statusBadge(code) {
 	if (!code) return null;
