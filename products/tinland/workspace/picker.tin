@@ -1,5 +1,7 @@
 package workspace
 
+import "../editor"
+import "mint"
 import "../project"
 import "twine"
 
@@ -12,6 +14,7 @@ const PickNewFolder = 3
 const PickRename = 4
 const PickRecent = 5
 const PickSymbol = 6
+const PickPlaces = 7
 
 // Picker is the state of the box.
 type Picker struct {
@@ -22,6 +25,34 @@ type Picker struct {
 	// Targets are what the items stand for: a path, or a command number.
 	Targets []i64
 	Sel i64
+	// Choices are the places a PickPlaces picker offers (usages, implementations, declarations), and Title says what they are.
+	Choices []editor.Choice
+	Title str
+}
+
+// naming reports whether the picker of that kind takes a name typed (a new file or folder, a rename) instead of a choice.
+fn naming(kind i64) bool {
+	return kind == PickNewFile || kind == PickNewFolder || kind == PickRename
+}
+
+// takeChoices shows the places the editor offers to choose from in the picker (the editor's list is then empty).
+fn (ws mut Workspace) takeChoices() {
+	if len(ws.Ed.Choices) == 0 {
+		return
+	}
+	ws.Picker.Choices = ws.Ed.Choices
+	ws.Picker.Title = ws.Ed.ChoiceTitle
+	ws.Ed.Choices = []editor.Choice{}
+	ws.OpenPicker(PickPlaces)
+}
+
+// placeLabel is the line of the picker for a place: the file below the project, the line and the text there.
+fn (ws Workspace) placeLabel(c editor.Choice) str {
+	mut path = c.At.Path
+	if ws.HasProj {
+		path = ws.relPath(path)
+	}
+	return path + ":" + mint.Itoa(c.At.Row + 1) + "  " + c.Text
 }
 
 // A command of the palette: its name and the number Perform takes.
@@ -79,7 +110,12 @@ fn commands() []command {
 		command{name: "Go: Jump to Matching Bracket", cmd: 33},
 		command{name: "Go: Go to Declaration", cmd: 24},
 		command{name: "Go: Back", cmd: 25},
+		command{name: "Go: Forward", cmd: editor.CmdForward},
+		command{name: "Go: Go to Type Declaration", cmd: editor.CmdTypeDeclaration},
+		command{name: "Go: Go to Implementation", cmd: editor.CmdImplementations},
+		command{name: "Go: Show Usages", cmd: editor.CmdUsages},
 		command{name: "Run: Run File", cmd: 22},
+		command{name: "Run: Build File", cmd: editor.CmdBuild},
 		command{name: "Project: New File...", cmd: CmdNewFile},
 		command{name: "Project: Refresh", cmd: CmdRefresh},
 		command{name: "View: Zoom In", cmd: CmdZoomIn},
@@ -118,12 +154,33 @@ fn (ws mut Workspace) ClosePicker() {
 fn (ws mut Workspace) refilter() {
 	mut items = []str{}
 	mut targets = []i64{}
-	if ws.Picker.Kind >= PickNewFile && ws.Picker.Kind != PickRecent {
+	if naming(ws.Picker.Kind) {
 		ws.Picker.Items = items
 		ws.Picker.Targets = targets
 		return
 	}
-	if ws.Picker.Kind == PickRecent {
+	if ws.Picker.Kind == PickPlaces {
+		// every place in order, or those the query matches best first; a label seen twice gets a count
+		mut labels = []str{}
+		mut index = map[str]i64{}
+		for i in 0..len(ws.Picker.Choices) {
+			mut l = ws.placeLabel(ws.Picker.Choices[i])
+			let (_, seen) = index[l]
+			if seen {
+				l = l + " (" + mint.Itoa(i + 1) + ")"
+			}
+			index[l] = i
+			labels = append(labels, l)
+		}
+		if len(ws.Picker.Query) == 0 {
+			items = labels
+		} else {
+			items = project.Ranked(ws.Picker.Query, labels, len(labels))
+		}
+		for it in items {
+			targets = append(targets, index[it])
+		}
+	} else if ws.Picker.Kind == PickRecent {
 		items = project.Ranked(ws.Picker.Query, ws.Recent, 14)
 		for it in items {
 			targets = append(targets, 0)
@@ -196,7 +253,7 @@ fn (ws mut Workspace) pickerKey(code i64, flags i64, chars str) {
 	if code == keyEscape {
 		ws.ClosePicker()
 	} else if code == keyReturn {
-		if ws.Picker.Kind >= PickNewFile {
+		if naming(ws.Picker.Kind) {
 			ws.applyName()
 		} else {
 			ws.accept(ws.Picker.Sel)
@@ -231,6 +288,13 @@ fn (ws mut Workspace) accept(i i64) {
 	ws.ClosePicker()
 	if kind == PickFile {
 		ws.OpenFile(ws.Proj.Root + "/" + item)
+	} else if kind == PickPlaces {
+		if target >= 0 && target < len(ws.Picker.Choices) && ws.Ed.GoTo(ws.Picker.Choices[target].At) {
+			if ws.HasProj {
+				ws.Proj.Reveal(ws.Ed.Buf.Path)
+			}
+			ws.Ed.Say(item)
+		}
 	} else if kind == PickRecent {
 		ws.OpenFile(item)
 	} else if kind == PickSymbol {
@@ -285,6 +349,9 @@ fn (ws Workspace) pickerPrompt() str {
 	}
 	if ws.Picker.Kind == PickSymbol {
 		return "Go to symbol in file"
+	}
+	if ws.Picker.Kind == PickPlaces {
+		return ws.Picker.Title + " (" + mint.Itoa(len(ws.Picker.Choices)) + ")"
 	}
 	if ws.Picker.Kind == PickNewFile {
 		return "New file name"

@@ -78,7 +78,21 @@ type Editor struct {
 	Diags    []tinsym.Diag
 	Syms     []tinsym.Sym
 	Back     []Place
+	// Fwd are the places Back left, for Forward (a new jump forgets them).
+	Fwd      []Place
 	Info     []str
+	// Choices are places a command found to choose from (usages, implementations, the declarations a name may mean), and
+	// ChoiceTitle says what they are: the workspace offers them in its picker and empties the list.
+	Choices  []Choice
+	ChoiceTitle str
+	// The name under the mouse while the command key is held, drawn as a link to follow: its line (-1 for none), its bytes
+	// [LinkFrom, LinkTo), the file and edit it was found in, and what it is (empty when Cmd+click has nowhere to go from it).
+	LinkRow  i64
+	LinkFrom i64
+	LinkTo   i64
+	LinkPath str
+	LinkVer  i64
+	LinkInfo []str
 	CompOpen bool
 	Comp     []tinsym.Item
 	CompSel  i64
@@ -131,6 +145,11 @@ type Editor struct {
 fn New(buf textedit.Buffer) Editor {
 	let ed = Editor{Buf: buf, FindFrom: textedit.Pos{}, Marks: []i64{}, Folds: []fold{}, Extra: []textedit.Pos{}, External: []tinsym.Item{}, AreaW: 800.0, AreaH: 500.0, CharW: 7.8, LineH: 17.0, Redraw: true, Blink: true}
 	ed.rawFor = -1
+	ed.Back = []Place{}
+	ed.Fwd = []Place{}
+	ed.Choices = []Choice{}
+	ed.LinkRow = -1
+	ed.LinkInfo = []str{}
 	ed.Diags = []tinsym.Diag{}
 	ed.DiagFor = -1
 	ed.Tabs = []Tab{Tab{Buf: buf}}
@@ -755,6 +774,10 @@ fn (ed mut Editor) command(k Key, shift bool) {
 	}
 	if k.Code == keyLeft && (k.Flags & flagAlt) != 0 {
 		ed.goBack()
+	} else if k.Code == keyRight && (k.Flags & flagAlt) != 0 {
+		ed.goForward()
+	} else if c == 'b' && (k.Flags & flagAlt) != 0 {
+		ed.gotoImplementations()
 	} else if c == 'b' {
 		ed.gotoDefinition()
 	} else if k.Code == keyBackspace {

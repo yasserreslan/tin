@@ -23,3 +23,6 @@ chain n:
 local Line: field:From field:name field:n 
 local i64: 
 unknown field: true
+method by type: /p/c.tin:25 
+field: /p/c.tin:20  field X Point X i64
+type not known: /p/c.tin:25 /p/c.tin:30 

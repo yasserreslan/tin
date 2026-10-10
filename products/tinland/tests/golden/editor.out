@@ -289,4 +289,34 @@ prev: true 4 2
 at broken.tin 4 2
 prev: true 4 2
 at broken.tin 4 2
-message: missing return value
+diags: 0
+link: true talk | fn talk[S Speaker](s S) str
+at usages.tin 28 4
+link: true talk | fn talk[S Speaker](s S) str | click: its usages
+choices: Usages of talk 2
+  products/tinland/tests/fixtures/usages.tin:35:11 say.Line(talk(d), talk(c), d.Name, d.Speak(), c.Lives)
+  products/tinland/tests/fixtures/usages.tin:35:20 say.Line(talk(d), talk(c), d.Name, d.Speak(), c.Lives)
+at usages.tin 35 20
+at usages.tin 28 4
+at usages.tin 35 11
+at usages.tin 28 4
+at usages.tin 16 12
+at usages.tin 13 2
+choices: Usages of Name 4
+  products/tinland/tests/fixtures/usages.tin:17:21 return "woof " + d.Name
+  products/tinland/tests/fixtures/usages.tin:35:31 say.Line(talk(d), talk(c), d.Name, d.Speak(), c.Lives)
+  products/tinland/tests/fixtures/usages.tin:36:27 say.Line(twine.ToUpper(d.Name), "talk {d.Name}")
+  products/tinland/tests/fixtures/usages.tin:36:43 say.Line(twine.ToUpper(d.Name), "talk {d.Name}")
+choices: Implementations of Speaker 2
+  products/tinland/tests/fixtures/usages.tin:12:6 type Dog struct
+  products/tinland/tests/fixtures/usages.tin:20:6 type Cat struct
+at usages.tin 12 6
+link: true twine | package twine
+in twine.tin
+in usages.tin
+link: true twine | package twine
+link: false fn | 
+at usages.tin 35 50
+prompt: 0 21 Lives is i64
+prompt: 0 21 Lives is not a shape or a method
+message: Lives is not a shape or a method

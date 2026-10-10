@@ -9,6 +9,7 @@ import "appkit"
 import "say"
 import "twine"
 import "textedit"
+import "tinsym"
 import "trail"
 
 fn put(path str, text str) {
@@ -251,6 +252,26 @@ added
 	}
 	say.Line("written with hygiene", withHygiene, len(withHygiene), twine.HasSuffix(withHygiene, "\n"))
 	ws.SaveHygiene(false, false)
+	// GoLand's Go to Declaration or Usages from a declaration: its usages are offered in the picker, typing narrows them,
+	// Return goes to the one chosen; Go to Symbol in File lists the file's declarations
+	put(root + "/nav.tin", "package main\n\nfn helper() i64 {{\n\treturn 1\n}}\n\nfn main() {{\n\tlet a = helper()\n\tlet b = helper() + a\n\tsay.Line(b)\n}}\n")
+	ws.OpenFile(root + "/nav.tin")
+	let (navSyms, _) = tinsym.Parse("{{\"kind\":\"fn\",\"name\":\"helper\",\"pkg\":\"\",\"file\":\"" + root + "/nav.tin\",\"line\":3,\"col\":4,\"endCol\":10,\"exported\":false,\"sig\":\"fn helper() i64\"}}\n{{\"kind\":\"fn\",\"name\":\"main\",\"pkg\":\"\",\"file\":\"" + root + "/nav.tin\",\"line\":7,\"col\":4,\"endCol\":8,\"exported\":false,\"sig\":\"fn main()\"}}\n")
+	ws.Ed.Syms = navSyms
+	ws.Ed.Buf.MoveTo(2, 4, false)
+	ws.Perform(editor.CmdDefinition)
+	say.Line("usages picker", ws.Picker.Open, ws.Picker.Kind == workspace.PickPlaces, ws.Picker.Items)
+	typeText(mut ws, ":9")
+	say.Line("narrowed", ws.Picker.Items)
+	key(mut ws, 36, "")
+	say.Line("went to", ws.Picker.Open, ws.Ed.Buf.Row + 1, ws.Ed.Buf.Col + 1, ws.Ed.Message)
+	ws.Ed.Perform(editor.CmdBack)
+	say.Line("back at", ws.Ed.Buf.Row + 1, ws.Ed.Buf.Col + 1)
+	ws.Perform(workspace.CmdGotoSymbol)
+	say.Line("symbols", ws.Picker.Items)
+	typeText(mut ws, "main")
+	key(mut ws, 36, "")
+	say.Line("at symbol", ws.Picker.Open, ws.Ed.Buf.Row + 1, ws.Ed.Message)
 	ws.ToggleTerminal()
 	say.Line("shell running", ws.TermUp, ws.Bottom, ws.Focus)
 	appkit.RunCapture("sleep 0.5")

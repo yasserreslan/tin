@@ -14,7 +14,7 @@ products/tinland/
   editor/         the text editor: a buffer, its view, selections, completion, diagnostics, commands
   project/        folders: the file tree, ignore rules, project-wide search                                       (planned)
   ui/             the UI framework: geometry, colors, text, a tree of elements, layout, input, focus, themes      (planned)
-  language/       what Tinland knows about Tin: asking tinc for declarations and errors, building, running, formatting
+  language/       what Tinland knows about Tin: finding tin, tinc and tit, asking tinc for declarations and errors, building, running, formatting
   tests/          scripts, fixtures and golden output for the macOS tests (run.sh)
   vscode/         the VS Code extension (separate, not part of the application)
 
@@ -48,7 +48,8 @@ main
   or Windows port is another binding with the same shape plus a backend in `ui`.
 - **`ui`** knows nothing of editing: it draws, lays out and routes input. **`editor`** and **`project`** are built from `ui`
   elements and know nothing of each other; **`workspace`** puts them in a window.
-- **`language`** has no windows: paths and text in, declarations, errors and output back.
+- **`language`** has no windows: paths and text in, declarations, errors and output back. `toolchain.tin` finds the Tin tree
+  (and tit) and puts a folder of links to them first in PATH, so the terminal, Run, Build and the checks use one toolchain.
 - A feature gets a package of its own when it has its own state and tests (a terminal, a git panel), not a folder inside
   another package.
 

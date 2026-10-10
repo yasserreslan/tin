@@ -94,6 +94,19 @@ fn main() {
 	say.Line("local Line:", names(tinsym.Complete(cs, "/p/c.tin", src, 6, 4)))
 	say.Line("local i64:", names(tinsym.Complete(cs, "/p/c.tin", src, 7, 3)))
 	say.Line("unknown field:", len(tinsym.Complete(cs, "/p/c.tin", src, 8, 12)) > 5)
+
+	// Resolve after a value's dot: its type's method, not every method of the name; its type's field; every method of the
+	// name when the value's type is not known
+	let (rs, _) = tinsym.Parse(sym("fn", "main", "", "/p/c.tin", 3, "", "fn main()", "[]") +
+			sym("type", "Point", "", "/p/c.tin", 20, "", "type Point struct", "[{{\"name\":\"X\",\"detail\":\"i64\"}}]") +
+			sym("method", "Dist", "", "/p/c.tin", 25, "Point", "fn (p Point) Dist() i64", "[]") +
+			sym("method", "Dist", "", "/p/c.tin", 30, "Line", "fn (l Line) Dist() i64", "[]") +
+			fmtLocal(local, "pt", "mut Point"))
+	let calls = "package main\n\nfn main() {{\n\tpt.Dist()\n\tpt.X\n\tq.Dist()\n}}\n"
+	say.Line("method by type:", found(tinsym.Resolve(rs, "/p/c.tin", calls, 3, 5)))
+	let field = tinsym.Resolve(rs, "/p/c.tin", calls, 4, 4)
+	say.Line("field:", found(field), field[0].Kind, field[0].Name, field[0].Recv, field[0].Sig)
+	say.Line("type not known:", found(tinsym.Resolve(rs, "/p/c.tin", calls, 5, 4)))
 }
 
 // fmtLocal is a local variable's JSON line with its name and type filled in.
