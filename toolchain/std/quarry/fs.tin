@@ -183,15 +183,62 @@ fn ReadDirEntries(path str) ![]DirEntry {
 		let info = try Lstat(path + "/" + out[i].Name)
 		out[i].Type = info.Type
 	}
-	sortEntries(mut out)
+	sortEntries(mut out, 0, len(out))
 	return out
 }
 
-fn sortEntries(xs mut []DirEntry) {
-	for i in 1..len(xs) {
+// sortEntries sorts xs[lo:hi] by name, bytewise, in place: quicksort like sortStrs, insertion sort for short runs (a
+// directory of a few thousand entries is common, and insertion sort alone is quadratic, #807).
+fn sortEntries(xs mut []DirEntry, lo0 i64, hi0 i64) {
+	mut lo = lo0
+	mut hi = hi0
+	for hi-lo > 12 {
+		let mid = lo + (hi-lo)/2
+		if rt_str_cmp(xs[mid].Name, xs[lo].Name) < 0 {
+			let t = xs[mid]
+			xs[mid] = xs[lo]
+			xs[lo] = t
+		}
+		if rt_str_cmp(xs[hi-1].Name, xs[lo].Name) < 0 {
+			let t = xs[hi-1]
+			xs[hi-1] = xs[lo]
+			xs[lo] = t
+		}
+		if rt_str_cmp(xs[hi-1].Name, xs[mid].Name) < 0 {
+			let t = xs[hi-1]
+			xs[hi-1] = xs[mid]
+			xs[mid] = t
+		}
+		let pivot = xs[mid].Name
+		mut i = lo
+		mut j = hi - 1
+		for i <= j {
+			for rt_str_cmp(xs[i].Name, pivot) < 0 {
+				i += 1
+			}
+			for rt_str_cmp(pivot, xs[j].Name) < 0 {
+				j -= 1
+			}
+			if i <= j {
+				let t = xs[i]
+				xs[i] = xs[j]
+				xs[j] = t
+				i += 1
+				j -= 1
+			}
+		}
+		if j-lo < hi-i {
+			sortEntries(mut xs, lo, j+1)
+			lo = i
+		} else {
+			sortEntries(mut xs, i, hi)
+			hi = j + 1
+		}
+	}
+	for i in lo + 1..hi {
 		let x = xs[i]
 		mut j = i
-		for j > 0 && xs[j - 1].Name > x.Name {
+		for j > lo && rt_str_cmp(xs[j - 1].Name, x.Name) > 0 {
 			xs[j] = xs[j - 1]
 			j -= 1
 		}
