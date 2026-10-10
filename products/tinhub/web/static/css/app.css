@@ -401,6 +401,9 @@ time { white-space: nowrap; }
 .page-head .sub { color: var(--fg-muted); margin-top: 6px; }
 .page-head .actions { margin-left: auto; display: flex; gap: var(--s-2); align-items: center; min-width: 0; max-width: 100%; }
 .page-head > :first-child { flex: 1 1 auto; min-width: 0; }
+/* an avatar leading a page head keeps its size; the title beside it takes the room */
+.page-head > .avatar:first-child { flex: none; }
+.page-head > .avatar:first-child + * { flex: 1 1 auto; min-width: 0; }
 .section-head { display: flex; align-items: center; gap: var(--s-3); margin: var(--s-6) 0 var(--s-3); }
 .section-head h2, .section-head h3 { font-size: var(--t-lg); }
 .section-head .actions { margin-left: auto; display: flex; gap: var(--s-2); }
@@ -776,7 +779,7 @@ table.diff tr.comment-row td { background: var(--bg-soft); padding: var(--s-3) v
 .review-head { display: flex; gap: var(--s-4); align-items: flex-start; flex-wrap: wrap; margin-bottom: var(--s-4); }
 .review-head h1 { font-size: var(--t-2xl); font-weight: 600; }
 .review-head .meta { color: var(--fg-muted); margin-top: 8px; display: flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; }
-.state { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px; font-weight: 650; font-size: var(--t-sm); color: #fff; }
+.state { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px; font-weight: 650; font-size: var(--t-sm); color: #fff; white-space: nowrap; flex: none; }
 .state.open { background: var(--green); }
 .state.approved { background: var(--blue); }
 .state.changes_requested { background: var(--amber); }
