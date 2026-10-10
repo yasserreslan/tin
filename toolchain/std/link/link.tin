@@ -506,8 +506,9 @@ fn parseHost(scheme str, host str) !str {
 	mut i = twine.Index(host, ":")
 	if i != -1 {
 		let lastColon = twine.LastIndex(host, ":")
-		if lastColon != i && (scheme == "postgresql" || scheme == "postgres") {
-			// libpq takes a comma-separated host list with ports in the host part.
+		if lastColon != i && scheme != "http" && scheme != "https" {
+			// RFC 3986 has no colon in a host, but databases such as PostgreSQL and MongoDB take a comma-separated host list
+			// with ports there; as in Go 1.27 (go.dev/issue/78077), only http and https hold to one colon.
 			i = lastColon
 		}
 		let colonPort = host[i:]
@@ -626,7 +627,13 @@ fn (u URL) String() str {
 				}
 			}
 		}
-		let path = u.EscapedPath()
+		mut path = u.EscapedPath()
+		if u.OmitHost && u.Host == "" && ui == nil && twine.HasPrefix(path, "//") {
+			// With no authority, a path that starts with "//" would read back as one (Path "//host/p" giving
+			// "http://host/p"): its first slash is escaped.
+			b.Str("%2F")
+			path = path[1:]
+		}
 		// A rootless path after a host needs a slash.
 		if path != "" && path[0] != '/' && u.Host != "" {
 			b.Byte('/')
@@ -753,10 +760,11 @@ fn resolvePath(base str, ref str) str {
 			let index = twine.LastIndexByte(last, '/')
 			if index == -1 {
 				dst = "/"
-				first = true
 			} else {
 				dst = "/" + last[:index]
 			}
+			// back at the root (from "/x" as well as from "x"), the next element takes no slash
+			first = len(dst) == 1
 		} else {
 			if !first {
 				dst += "/"

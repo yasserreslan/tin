@@ -1,0 +1,42 @@
+package main
+
+import "lasso"
+import "say"
+import "twine"
+
+// compiles reports whether pat compiles, with the fault when it does not.
+fn compiles(pat str) str {
+	let (_, err) = lasso.Compile(pat)
+	if err != nil {
+		return err.Error()
+	}
+	return "ok"
+}
+
+fn main() {
+	// #1186: a 100000-way alternation: following its Alt chain used to recurse once per branch and
+	// ran the thread's stack out.
+	let alt = lasso.MustCompile(twine.Repeat("a|", 100000) + "b")
+	say.Line("alternation", alt.Match("b"), alt.Match("a"), alt.Match("c"))
+	let words = lasso.MustCompile(`(` + twine.Repeat("x|", 50000) + `(y))z`)
+	say.Line("alternation captures", words.SubmatchIndex("..yz"))
+
+	// Nested counts multiply, and Go refuses a product past 1000 as an invalid repeat count.
+	say.Line(compiles(`(a{1000}){1000}`))
+	say.Line(compiles(`((a{100}){100}){100}`))
+	say.Line(compiles(`(a{2}){501}`))
+	say.Line(compiles(`(a{2,}){501}`))
+	say.Line(compiles(`(a{0,2}){1000}`))
+	say.Line(compiles(`(a{2}){500}`))
+	say.Line(compiles(`(a{10}b{100}){100}`))
+	say.Line(compiles(`(a{10}|b{100}){10}`))
+	say.Line(compiles(`(a*){1000}`))
+	say.Line(compiles(`(a{0}){1000}`))
+	say.Line(compiles(`a{1000}`))
+
+	// Captures set inside one alternative are put back for the next one.
+	let re = lasso.MustCompile(`(?:(a)|(b)|(c))+d`)
+	say.Line("captures", re.SubmatchIndex("xabcd"), re.SubmatchIndex("cabd"))
+	let opt = lasso.MustCompile(`((a)|b)*?(a)`)
+	say.Line("lazy", opt.SubmatchIndex("bba"))
+}

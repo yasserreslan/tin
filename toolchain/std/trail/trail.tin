@@ -238,7 +238,8 @@ fn Rel(base str, targ str) !str {
 			store8(d+n, '/')
 			memcpy(d+n+1, cast(i64, t)+8+t0, tl-t0)
 		}
-		return cast(str, p)
+		// Clean, as Go does, so a target of "." gives ".." rather than "../."
+		return Clean(cast(str, p))
 	}
 	return t[t0:tl]
 }

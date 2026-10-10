@@ -1,0 +1,81 @@
+package main
+
+import "cairn"
+import "say"
+
+// Pair is a struct element type.
+type Pair struct {
+	k str
+	v i64
+}
+
+fn main() {
+	// #1153: 300000 pushes at the front; each used to copy the whole deque, so this ran out of memory.
+	mut d = cairn.NewDeque[i64]()
+	let n = 300000
+	for i in 0..n {
+		d.PushFront(i)
+	}
+	mut ok = d.Len() == n
+	for i in 0..n {
+		if d.At(i) != n-1-i {
+			ok = false
+		}
+	}
+	say.Line("front", d.Len(), ok)
+
+	// Alternating ends, then draining from both, across many ring wraps and growths.
+	mut e = cairn.NewDeque[i64]()
+	for i in 0..n {
+		e.PushFront(-i - 1)
+		e.PushBack(i + 1)
+	}
+	mut sum = i64(0)
+	mut good = true
+	for i in 0..n {
+		if let a = e.PopFront() {
+			if a != i-n {
+				good = false
+			}
+			sum += a
+		}
+		if let b = e.PopBack() {
+			if b != n-i {
+				good = false
+			}
+			sum += b
+		}
+	}
+	say.Line("alternate", e.Len(), good, sum, e.PopFront() == nil, e.PopBack() == nil)
+
+	// A queue that wraps the ring: the head walks around while the length stays small.
+	mut q = cairn.NewDeque[str]()
+	mut last = ""
+	for i in 0..100000 {
+		q.PushBack("x" + say.Fmt("%d", i))
+		if q.Len() > 5 {
+			if let s = q.PopFront() {
+				last = s
+			}
+		}
+	}
+	say.Line("queue", q.Len(), last, q.Front(), q.Back(), q.At(0), q.At(4))
+
+	// Struct values, pushed at both ends of an empty deque and read back in order.
+	mut p = cairn.NewDeque[Pair]()
+	p.PushBack(Pair{k: "b", v: 2})
+	p.PushFront(Pair{k: "a", v: 1})
+	p.PushBack(Pair{k: "c", v: 3})
+	mut keys = ""
+	for i in 0..p.Len() {
+		keys += p.At(i).k
+	}
+	mut ends = ""
+	if let b = p.PopBack() {
+		ends += b.k
+	}
+	if let f = p.PopFront() {
+		ends += f.k
+	}
+	say.Line("pairs", keys, ends, p.Len())
+}

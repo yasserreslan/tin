@@ -12,16 +12,32 @@ import "tide"
 import "twine"
 import "wire"
 
-// Port is a port below the ephemeral ranges (Linux 32768+, macOS 49152+) that nothing listens on: a port the kernel picks for
-// bind(0) is an ephemeral one, which a client connection can take as its source port before the server binds it ("cannot bind the
-// address" under load).
+// given are the ports Port has handed out in this process. A server started on one may not listen yet when the next port is
+// picked, so the probe alone could hand the same port to two servers (#1144).
+mut given map[i64]bool = map[i64]bool{}
+
+// Port is a port below the ephemeral ranges (Linux 32768+, macOS 49152+) that nothing listens on and that Port has not handed out
+// before: a port the kernel picks for bind(0) is an ephemeral one, which a client connection can take as its source port before the
+// server binds it ("cannot bind the address" under load).
 fn Port() i64 {
 	for i in 0..500 {
 		let port = dice.Range(20000, 30000)
-		let c = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 200000000) catch _ {
-			return port
+		if given[port] {
+			continue
 		}
-		c.Close()
+		let (c, err) = wire.DialTimeout("127.0.0.1:" + mint.Itoa(port), 200000000)
+		if err == nil {
+			c.Close()
+			continue
+		}
+		// The checks dial localhost, which macOS resolves to ::1 first: a port taken there is taken too (#1144).
+		let (c6, err6) = wire.DialTimeout("[::1]:" + mint.Itoa(port), 200000000)
+		if err6 == nil {
+			c6.Close()
+			continue
+		}
+		given[port] = true
+		return port
 	}
 	ci.Fail("no free port below the ephemeral range")
 	return 0

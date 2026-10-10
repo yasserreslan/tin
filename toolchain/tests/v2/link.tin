@@ -172,4 +172,24 @@ fn main() {
 	say.Line("values", q(v.Encode()), v.Len(), q(v.Get("a")), b(v.Has("b")), len(v.All("a")), len(v.All("zz")))
 	v.Add("e f", "g")
 	say.Line("values", q(v.Encode()), v.Len(), q(v.Get("a")), b(v.Has("b")), len(v.All("a")), len(v.All("zz")))
+	// Only http and https hold a host to one colon; other schemes take a host list, as in Go 1.27.
+	for _, s in []str{"mongodb://h1:1,h2:2,h3:3/db", "redis://a:b:c/", "https://a:b:80/", "http://a:b:80/"} {
+		show("parse", s, false)
+	}
+	// ".." back to the root drops the slash before the next element.
+	resolve("http://a/b/c/d;p?q", "/x/..//b")
+	resolve("http://a/b/c/d;p?q", "/..//b")
+	resolve("http://a/b/c/", "../..//x")
+	resolve("mailto:/a/b", "..//x")
+	// With no authority, a path starting with "//" keeps its first slash escaped so it does not read back as a host.
+	mut m = link.Parse("mailto:/a") catch e {
+		say.Line("omithost", "ERR", say.Str(e))
+		return
+	}
+	m.Path = "//h/p"
+	let back = link.Parse(m.String()) catch e {
+		say.Line("omithost", q(m.String()), "ERR", say.Str(e))
+		return
+	}
+	say.Line("omithost", q(m.String()), q(back.Host), q(back.Path))
 }

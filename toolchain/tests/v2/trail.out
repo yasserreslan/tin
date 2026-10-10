@@ -155,6 +155,10 @@ rel "/" "/" -> "." <nil>
 rel "/" "/x" -> "x" <nil>
 rel "a/b" "/a/b" -> "" Rel: can't make /a/b relative to a/b
 rel "é/ß" "é/x" -> "../x" <nil>
+rel "a" "." -> ".." <nil>
+rel "a/b" "" -> "../.." <nil>
+rel "a/b/c" "./" -> "../../.." <nil>
+rel "x/.." "y/.." -> "." <nil>
 match "abc" "abc" true <nil>
 match "*" "abc" true <nil>
 match "*c" "abc" true <nil>
