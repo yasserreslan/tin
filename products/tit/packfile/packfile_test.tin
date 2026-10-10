@@ -446,6 +446,56 @@ fn TestReuse(t mut crucible.T) {
 	}
 }
 
+// Reuse sends an entry larger than its window from the pack's file a window at a time (#1076): a blob of 3 MiB that
+// does not compress, and the small objects around it, come back from Unpack with their content.
+fn TestReuseLarge(t mut crucible.T) {
+	let d = fresh("reuselarge")
+	mut s = store.NewMem()
+	mut big = make([]u8, 3 << 20)
+	mut x = u64(88172645463325252)
+	for i in 0..len(big) {
+		x = x ^ (x << 13)
+		x = x ^ (x >> 7)
+		x = x ^ (x << 17)
+		big[i] = u8(x & 0xff)
+	}
+	mut ids = []object.Id{}
+	for body in []str{"before\n", str(big), "after\n"} {
+		let id = s.PutRaw(object.Kind.Blob, body) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	let p = Write(mut s, ids, d + "/pack") catch e {
+		t.Error("write: {e}")
+		return
+	}
+	t.True("the pack holds the blob", p.size > 3 << 20)
+	mut packs = []Pack{p}
+	let data = Reuse(mut s, mut packs, ids) catch e {
+		t.Error("reuse: {e}")
+		return
+	}
+	mut m = store.NewMem()
+	let got = Unpack(data, mut m, 4 << 20) catch e {
+		t.Error("unpack: {e}")
+		return
+	}
+	crucible.Equal(mut t, "objects", len(got), len(ids))
+	for id in ids {
+		let (_, want) = s.GetRaw(id) catch _ {
+			return
+		}
+		let (_, have) = m.GetRaw(id) catch _ {
+			t.Error("{id.Hex()} missing")
+			return
+		}
+		t.True("content", have == want)
+	}
+	quarry.RemoveAll(d) catch _ {
+	}
+}
+
 // Keep writes a received pack as it is and indexes it (#795): every object reads back from it with its content, the
 // pack verifies, and a damaged or cut pack is refused with nothing written.
 fn TestKeep(t mut crucible.T) {

@@ -2,7 +2,9 @@ package packfile
 
 import "../object"
 import "../store"
+import "fault"
 import "io"
+import "quarry"
 import "seal"
 import "sift"
 import "squash"
@@ -89,11 +91,14 @@ fn ReuseTo[S store.ObjectStore, W io.Writer](s mut S, packs mut []Pack, ids []ob
 	appendLE64(mut head, len(list))
 	try put(mut w, mut h, head)
 	mut sent = map[str]bool{}
+	// an entry's header goes out of e, its compressed bytes straight from the pack's file through window (#1076): a
+	// clone of a file of any size costs a window, not the file
+	mut e = []u8{}
+	mut window = []u8{}
 	for r in list {
-		mut e = []u8{}
 		if r.pack >= 0 {
 			mut p = packs[r.pack]
-			let (t, size, baseOff, baseId, z) = try p.entry(r.pos)
+			let (t, size, baseOff, baseId, zAt, zLen) = try p.stored(r.pos)
 			mut base = baseId
 			if baseOff >= 0 {
 				let (bpos, known) = posOf[r.pack][baseOff]
@@ -102,33 +107,88 @@ fn ReuseTo[S store.ObjectStore, W io.Writer](s mut S, packs mut []Pack, ids []ob
 				}
 			}
 			if t != typeOfsDelta && t != typeRefDelta {
+				e = e[0:0]
 				e = append(e, u8(t))
 				appendUv(mut e, size)
-				appendUv(mut e, len(z))
-				appendStr(mut e, z)
+				appendUv(mut e, zLen)
+				try put(mut w, mut h, e)
+				if len(window) == 0 {
+					window = make([]u8, sendWindow)
+				}
+				try sendRange(mut p, zAt, zLen, mut window, mut w, mut h)
 			} else if len(base) == 32 && sent[base] {
+				e = e[0:0]
 				e = append(e, u8(typeRefDelta))
 				appendUv(mut e, size)
 				appendStr(mut e, base)
-				appendUv(mut e, len(z))
-				appendStr(mut e, z)
+				appendUv(mut e, zLen)
+				try put(mut w, mut h, e)
+				if len(window) == 0 {
+					window = make([]u8, sendWindow)
+				}
+				try sendRange(mut p, zAt, zLen, mut window, mut w, mut h)
 			} else {
 				// the base is not in this pack, or not sent: the object goes whole
 				let id = try object.IdOf(r.raw)
 				let (kind, body) = try p.GetRaw(id)
-				e = try wholeEntry(kind, body)
+				let whole = try wholeEntry(kind, body)
+				try put(mut w, mut h, whole)
 			}
 			packs[r.pack] = p
 		} else {
 			let id = try object.IdOf(r.raw)
 			let (kind, body) = try s.GetRaw(id)
-			e = try wholeEntry(kind, body)
+			let whole = try wholeEntry(kind, body)
+			try put(mut w, mut h, whole)
 		}
-		try put(mut w, mut h, e)
 		sent[r.raw] = true
 	}
 	_ = try w.Write(h.Sum())
 	return len(list)
+}
+
+// sendWindow is how much of a pack's file a fetch reads at a time to send an entry's compressed bytes.
+const sendWindow = 1 << 20
+
+// sendRange writes n bytes of the pack from off to w and to the hash h, a window at a time through buf: an entry of
+// any size costs the window (buf, sendWindow bytes), and each window's read is freed before the next (#1076).
+fn sendRange[W io.Writer](p mut Pack, off i64, n i64, buf mut []u8, w mut W, h mut seal.Hasher) ! {
+	mut done = 0
+	for done < n {
+		let k = min(sendWindow, n - done)
+		let at = off + done
+		mut part = buf[0:k]
+		mut got = 0
+		if p.loaded {
+			let data = p.data
+			got = arena {
+				copy(part, data[at:at + k])
+			}
+		} else {
+			let path = p.Path
+			let (read, err) = arena {
+				let chunk = try quarry.ReadAt(path, at, k)
+				copy(part, chunk)
+			}
+			got = read
+			if err != nil {
+				if !p.followRetired() {
+					fail err
+				}
+				let moved = p.Path
+				got = try arena {
+					let chunk = try quarry.ReadAt(moved, at, k)
+					copy(part, chunk)
+				}
+			}
+		}
+		if got != k {
+			fail fault.Wrap(ErrBadPack, "{p.Path} is shorter than its index says")
+		}
+		_ = try h.Write(part)
+		_ = try w.Write(part)
+		done += k
+	}
 }
 
 // put writes b to w and to the pack's hash.
