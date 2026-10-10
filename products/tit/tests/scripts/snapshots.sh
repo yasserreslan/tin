@@ -82,10 +82,11 @@ echo "ok a private key is never kept"
 # watch keeps each save
 t watch --every 100 --for 3 > "$d/watch.txt" &
 w=$!
+# each save lands whole (a rename): a poll between printf's truncate and its write would keep an empty file
 sleep 1
-printf 'watched one\n' > other.txt
+printf 'watched one\n' > other.new && mv other.new other.txt
 sleep 1
-printf 'watched two\n' > other.txt
+printf 'watched two\n' > other.new && mv other.new other.txt
 wait $w
 tl=$(t timeline other.txt)
 echo "$tl" | grep -q "before tit watch" || fail "watch kept nothing: $tl"
