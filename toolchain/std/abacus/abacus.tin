@@ -227,11 +227,16 @@ fn FromBytes(b []u8) Int {
 
 // Parse returns the value of s, like Go's big.Int.SetString: base 2 to 36, or 0 to read a prefix
 // (0x and 0X for 16, 0o and 0O for 8, 0b and 0B for 2, a leading 0 for 8, otherwise 10). The
-// string may start with + or -.
+// string may start with + or -. With base 0 an underscore may stand between the prefix and a digit
+// or between two digits, as in Go (#1234).
 fn Parse(s str, base i64) !Int {
 	mut b = base
 	mut neg = false
 	mut i = 0
+	// afterDigit is whether the last character was a digit or a prefix, after which an underscore
+	// may follow; afterSep whether it was an underscore (Go's natconv.go scan).
+	mut afterDigit = false
+	mut afterSep = false
 	if i < len(s) && (s[i] == '+' || s[i] == '-') {
 		neg = s[i] == '-'
 		i += 1
@@ -242,12 +247,15 @@ fn Parse(s str, base i64) !Int {
 			if c == 'x' || c == 'X' {
 				b = 16
 				i += 2
+				afterDigit = true
 			} else if c == 'o' || c == 'O' {
 				b = 8
 				i += 2
+				afterDigit = true
 			} else if c == 'b' || c == 'B' {
 				b = 2
 				i += 2
+				afterDigit = true
 			} else {
 				b = 8
 			}
@@ -261,13 +269,27 @@ fn Parse(s str, base i64) !Int {
 	mut limbs = []u64{}
 	mut digits = 0
 	for i < len(s) {
+		if s[i] == '_' && base == 0 {
+			if !afterDigit {
+				fail say.Fault("abacus: %s: '_' must separate successive digits", s)
+			}
+			afterDigit = false
+			afterSep = true
+			i += 1
+			continue
+		}
 		let d = digitValue(s[i])
 		if d < 0 || d >= b {
 			fail say.Fault("abacus: %s: invalid digit", s)
 		}
 		limbs = umulAddSmall(limbs, u64(b), u64(d))
 		digits += 1
+		afterDigit = true
+		afterSep = false
 		i += 1
+	}
+	if afterSep {
+		fail say.Fault("abacus: %s: '_' must separate successive digits", s)
 	}
 	if digits == 0 {
 		fail say.Fault("abacus: %s: no digits", s)
