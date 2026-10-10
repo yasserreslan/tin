@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      seed_base:
+        description: Optional seed base for reproducing a failure (0 uses the workflow run number)
+        required: false
+        type: number
+        default: 0
 
 permissions:
   contents: read
@@ -390,9 +395,9 @@ jobs:
         run: ./tin build toolchain/tests/v2/map_growth_stress.tin -o bin/map_growth_stress
       - name: Check 200 seeded executions
         env:
-          SEED_BASE: ${{ github.run_number }}
+          SEED_BASE: ${{ inputs.seed_base || github.run_number }}
         run: |
-          expected='4200000 0 0 8819997900000'
+          expected='4200000 0 0 8819997900000 -1 0 0 true'
           for i in $(seq 0 199); do
             seed=$((SEED_BASE * 1000 + i))
             actual=$(bin/map_growth_stress "$seed")

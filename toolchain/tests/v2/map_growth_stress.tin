@@ -28,9 +28,10 @@ fn main() {
 	mut k3 = i64(0)
 	mut k4 = i64(0)
 	let args = quarry.Args()
-	mut seed = i64(12345)
+	// This seed reproduced the missing map value on native Linux amd64 (#484).
+	mut seed = i64(2233011)
 	if len(args) > 1 {
-		seed = mint.Atoi(args[1]) catch _ { 12345 }
+		seed = mint.Atoi(args[1]) catch _ { 2233011 }
 	}
 	mut k = seed
 	mut bad = i64(0)
@@ -60,13 +61,24 @@ fn main() {
 	mut kk = seed
 	mut after = i64(0)
 	mut sum = i64(0)
+	mut badAt = i64(-1)
+	mut badKey = i64(0)
+	mut badValue = i64(0)
+	mut badOK = true
 	for i in i64(0)..n {
 		kk = lcg(kk)
 		let value = m[kk]
 		sum += value
 		if value != i {
 			after += 1
+			if badAt < 0 {
+				badAt = i
+				badKey = kk
+				badValue = value
+				let (_, ok) = m[kk]
+				badOK = ok
+			}
 		}
 	}
-	say.Line(len(m), bad, after, sum)
+	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK)
 }
