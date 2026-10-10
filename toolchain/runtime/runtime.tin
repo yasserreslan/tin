@@ -6399,9 +6399,42 @@ fn rt_bnd_charge(n i64) {
 		rt_panic("limit exceeded: the request's memory budget (TIN_REQUEST_MEMORY)")
 	}
 	rt_bnd_cancel(over, cast(fault, rt_fault_limit()))
+	if rt_bnd_target(over) != over {
+		// The block belongs to the task that spawned this one (a scope inside it): this task cannot
+		// land there, so it ends with the fault as a cancelled task does, and the block's task sees
+		// the cancel as it waits for its children (#1079).
+		rt_bnd_charge_end(over, rt_fault_limit())
+		return
+	}
 	if over[bLand] != 0 {
 		rt_land(over[bLand], rt_fault_limit())
 	}
+}
+
+// rt_bnd_charge_end ends the running task with fault f after limit block over, around the task
+// that spawned it, ran out: as rt_bnd_poll ends a cancelled task, at a landing of its own when
+// one stops the cancel, else by ending the task (its scope gets f) (#1079).
+fn rt_bnd_charge_end(over i64, f i64) {
+	let g = rt_bnd_landing(rt_bnd_target(over))
+	if g != 0 {
+		if g[gUnwinding] != 0 { return }
+		rt_land(g, f)
+	}
+	let t = curTask
+	if t == 0 || t[tPanicked] != 0 { return }
+	if t[tRecoverable] != 0 {
+		t[tRecover] = 0
+		t[tPanicked] = 1
+		if t[tChild] != 0 {
+			t[tChild][spFault] = f
+		} else {
+			rt_fault_say("request canceled: " + cast(str, f) + "\n")
+		}
+		rt_bnd_join_scopes(rt_bnd_root(t), f)
+		rt_defer_run(0)
+		rt_task_abort(t)
+	}
+	rt_panic(cast(str, f))
 }
 
 // rt_bnd_charge_n charges n bytes to the running limit budgets (rt_bnd_charge) and gives the
