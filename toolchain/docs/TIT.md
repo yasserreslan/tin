@@ -102,7 +102,7 @@ hash, find deltas and compress; the other commands run on one, since starting th
 | `tit tag <name> [rev]` | a lightweight tag |
 | `tit tag -a <name> -m <msg> [rev]` | an annotated tag, signed when you have a key |
 | `tit tag -d <name>` | delete a tag |
-| `tit ship <version> [--remote name] [--no-push] [--dry-run]` | a release: an annotated tag on HEAD whose message is the changelog (the first line of every change since the last tag, oldest first), signed when you have a key, then the branch and the tag pushed (`origin` by default); refuses uncommitted changes; `--dry-run` prints the changelog |
+| `tit ship <version> [--remote name] [--no-push] [--dry-run]` | a release: an annotated tag on HEAD whose message is the changelog (the first line of every change since the last tag, oldest first), signed when you have a key, then the branch and the tag pushed (`origin` by default); refuses uncommitted changes; `--dry-run` prints the changelog; run again on the same commit, it pushes the tag it made when that push did not finish (or `--no-push` held it back) |
 
 ## Workspaces
 
