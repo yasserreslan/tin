@@ -1432,7 +1432,15 @@ fn x_gen_conv(e i64, dst i64, d i64) {
 		return
 	}
 	if k == CV_I2F {
-		if is_unsigned_t(cast(Ty, x.type_)) != 0 && cast(Ty, x.type_).width == 8 {
+		let ft = cast(Ty, cast(Node, e).type_)
+		if is_f32(ft) != 0 {
+			if is_unsigned_t(cast(Ty, x.type_)) != 0 && cast(Ty, x.type_).width == 8 {
+				x_cvt_u2f32(dst, v)
+			} else {
+				emit2(X_CVTSI2SS, dst, v)
+			}
+			emit2(X_CVTSS2SD, dst, dst)
+		} else if is_unsigned_t(cast(Ty, x.type_)) != 0 && cast(Ty, x.type_).width == 8 {
 			x_cvt_u2f(dst, v)
 		} else {
 			emit2(X_CVTSI2SD, dst, v)
@@ -1482,6 +1490,24 @@ fn x_cvt_u2f(dst i64, v i64) {
 	emit2(X_OR, XSCR, XSCR2)
 	emit2(X_CVTSI2SD, dst, XSCR)
 	emit2(X_ADDSD, dst, dst)
+	x_label(done_l)
+}
+
+fn x_cvt_u2f32(dst i64, v i64) {
+	let neg_l = new_label()
+	let done_l = new_label()
+	emit2(X_TEST, v, v)
+	emit2(X_JCC, XC_S, neg_l)
+	emit2(X_CVTSI2SS, dst, v)
+	emit1(X_JMP, done_l)
+	x_label(neg_l)
+	x_mov(XSCR, v)
+	emit2(X_SHRI, XSCR, 1)
+	x_mov(XSCR2, v)
+	emit2(X_ANDI, XSCR2, 1)
+	emit2(X_OR, XSCR, XSCR2)
+	emit2(X_CVTSI2SS, dst, XSCR)
+	emit2(X_ADDSS, dst, dst)
 	x_label(done_l)
 }
 
