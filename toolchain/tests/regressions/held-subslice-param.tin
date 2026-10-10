@@ -1,0 +1,26 @@
+package main
+
+// Issue 1080: a sub-slice of a parameter held by a local slice must not make every
+// slice held by a local struct count as the parameter. Appending to res.Skipped writes
+// to res, not to files. Storing through the slice that holds files is still E701
+// (held-param-alias-bad.tin).
+
+import "say"
+
+type Res struct {
+	Skipped []str
+}
+
+fn pick(files []str) []str {
+	mut res = Res{Skipped: []str{}}
+	mut queue = [][]str{}
+	queue = append(queue, files[0:2])
+	let b = queue[0]
+	res.Skipped = append(res.Skipped, b[0])
+	return res.Skipped
+}
+
+fn main() {
+	let got = pick([]str{"a", "b", "c"})
+	say.Line("{len(got)} {got[0]}")
+}

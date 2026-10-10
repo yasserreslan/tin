@@ -1480,5 +1480,34 @@
       "stdout": "read 44970 past the end 0 at the end 3\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "held-subslice-param.tin",
+    "issue": 1080,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "1 a\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "held-arena-result.tin",
+    "issue": 1078,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "2 a0 a1\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "held-param-alias-bad.tin",
+    "issue": 1080,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr_contains": "E701 NOT_MUT: cannot modify parameter 'files'"
+    }
   }
 ]
