@@ -81,8 +81,23 @@ as ada add README.md > /dev/null
 as bob config set --user user.name bob > /dev/null 2>&1 || true
 as ada commit -m "README: point at tinhub" > /dev/null
 as ada push > "$dir/push.out" 2>&1 || fail "push: $(cat "$dir/push.out")"
-as ada tag v0.1.0 -m "v0.1.0" > /dev/null 2>&1 || true
-as ada push --tags > /dev/null 2>&1 || true
+as ada ship v0.1.0 > "$dir/ship.out" 2>&1 || fail "ship: $(cat "$dir/ship.out")"
+
+# bob's stack on ada/tin: two changes on a branch, pushed for review; the top one amended and pushed again
+cd "$dir"
+(as bob clone "$base/ada/tin" tin-bob > "$dir/clone.out" 2>&1) || fail "bob's clone: $(cat "$dir/clone.out")"
+cd "$dir/tin-bob"
+as bob switch -c anvil-stream > /dev/null
+printf '\n## Streaming\n\nLarge bodies stream from the pack.\n' >> README.md
+as bob commit -a -m "README: say how large bodies stream" > /dev/null
+f=products/tit/main.tin
+sed 's/^\/\/ tit: version control written in Tin/\/\/ tit: version control, written in Tin,/' "$f" > "$f.new" && mv "$f.new" "$f"
+printf '\n// banner is what tit prints first.\nfn banner() str {\n\treturn "tit"\n}\n' >> "$f"
+as bob commit -a -m "tit: a banner for the first line" > /dev/null
+as bob push > "$dir/push.out" 2>&1 || fail "bob's push: $(cat "$dir/push.out")"
+printf '\n// version is the build'"'"'s version.\nfn version() str {\n\treturn "1"\n}\n' >> "$f"
+as bob commit -a --amend -m "tit: a banner and a version" > /dev/null
+as bob sync > "$dir/push.out" 2>&1 || fail "bob's second push: $(cat "$dir/push.out")"
 
 # tinlang/tinhub: one commit
 cd "$dir"
