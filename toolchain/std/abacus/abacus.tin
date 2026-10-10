@@ -228,7 +228,7 @@ fn FromBytes(b []u8) Int {
 // Parse returns the value of s, like Go's big.Int.SetString: base 2 to 36, or 0 to read a prefix
 // (0x and 0X for 16, 0o and 0O for 8, 0b and 0B for 2, a leading 0 for 8, otherwise 10). The
 // string may start with + or -. With base 0 an underscore may stand between the prefix and a digit
-// or between two digits, as in Go (#1234).
+// or between two digits, as in Go.
 fn Parse(s str, base i64) !Int {
 	mut b = base
 	mut neg = false

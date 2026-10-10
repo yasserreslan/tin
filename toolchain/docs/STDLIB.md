@@ -2121,7 +2121,7 @@ It is not constant-time: use seal for cryptography. There is no formatting hook 
 - `(a Int) F64() f64`: F64 returns the value as the nearest f64, ties to even, like Go's Int.Float64 (which is ±Inf when the value is too large).
 - `(a Int) Bytes() []u8`: Bytes returns the magnitude as big-endian bytes, like Go's Int.Bytes (zero is empty).
 - `FromBytes(b []u8) Int`: FromBytes returns the value of the big-endian magnitude b (the sign is always positive).
-- `Parse(s str, base i64) !Int`: Parse returns the value of s, like Go's big.Int.SetString: base 2 to 36, or 0 to read a prefix (0x and 0X for 16, 0o and 0O for 8, 0b and 0B for 2, a leading 0 for 8, otherwise 10). The string may start with + or -.
+- `Parse(s str, base i64) !Int`: Parse returns the value of s, like Go's big.Int.SetString: base 2 to 36, or 0 to read a prefix (0x and 0X for 16, 0o and 0O for 8, 0b and 0B for 2, a leading 0 for 8, otherwise 10). The string may start with + or -. With base 0 an underscore may stand between the prefix and a digit or between two digits, as in Go.
 - `(a Int) Str() str`: Str returns the decimal value.
 - `(a Int) Text(base i64) str`: Text returns the value in the given base, 2 to 36.
 - `(a Int) Not() Int`: Not returns ^a, which is -a-1.
