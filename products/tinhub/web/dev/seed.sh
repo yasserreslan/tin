@@ -142,6 +142,38 @@ if command -v psql > /dev/null 2>&1 && [ -n "${TINHUB_DB_ADDR:-}" ]; then
 	SQL
 fi
 
+# push_fixes REPO DIR MESSAGE: tinlang/REPO gets DIR/main.tin on main (committed with MESSAGE), and a branch fix/NAME for
+# each DIR/branches/fix-NAME.tin, whose commit message is the file's own "// fix/NAME: ..." comment. Leaves $dir/REPO on
+# main.
+push_fixes() {
+	cd "$dir"
+	(as ada clone "$base/tinlang/$1" "$1" > "$dir/clone.out" 2>&1) || fail "clone $1: $(cat "$dir/clone.out")"
+	cd "$dir/$1"
+	cp "$2/main.tin" main.tin
+	as ada add main.tin > /dev/null
+	as ada commit -m "$3" > /dev/null
+	as ada push > "$dir/push.out" 2>&1 || fail "push $1: $(cat "$dir/push.out")"
+	for f in "$2"/branches/fix-*.tin; do
+		name=fix/$(basename "$f" .tin | sed 's/^fix-//')
+		msg=$(awk -v n="// $name: " 'index($0, n) == 1 { on = 1 } on && !/^\/\/ / { exit } on { print substr($0, 4) }' "$f")
+		as ada switch main > /dev/null 2>&1
+		as ada switch -c "$name" > /dev/null
+		cp "$f" main.tin
+		as ada commit -a -m "$msg" > /dev/null
+		as ada push > "$dir/push.out" 2>&1 || fail "push $1 $name: $(cat "$dir/push.out")"
+	done
+	as ada switch main > /dev/null 2>&1
+}
+# check_all REPO DIR: a check of main and of each fix branch push_fixes made from DIR, against each of tinlang/REPO's
+# open failure groups.
+check_all() {
+	for g in $(api ada GET "/api/v1/repos/tinlang/$1/replay/groups?state=open" | jq -r '.groups[].id'); do
+		for b in main $(for f in "$2"/branches/fix-*.tin; do basename "$f" .tin | sed 's#^fix-#fix/#'; done); do
+			api ada POST "/api/v1/repos/tinlang/$1/replay/checks" "{\"target\":\"$b\",\"group\":\"$g\"}" > /dev/null || fail "check $1 $b"
+		done
+	done
+}
+
 # tinlang/shop: replay checks (design/tinhub.md §12.1) with real capsules. dev/shop's checkout service is recorded
 # failing twice (a panic on a declined cart, a 500 while its payment service is down), sealed for the node's runner key,
 # and pushed with five fix branches; each branch and main is then checked against both failures, so the shop's Replay
@@ -168,35 +200,38 @@ seed_checks() {
 	shop=$root/products/tinhub/dev/shop
 	pay_port=${SEED_PAYMENTS_PORT:-9197}
 	api ada PUT /api/v1/repos/tinlang/shop/runner "{\"entry\":\"main.tin\",\"sample\":20,\"env\":[\"PAYMENTS_URL=http://127.0.0.1:$pay_port\"]}" > /dev/null
-	cd "$dir"
-	(as ada clone "$base/tinlang/shop" shop > "$dir/clone.out" 2>&1) || fail "clone shop: $(cat "$dir/clone.out")"
-	cd "$dir/shop"
-	cp "$shop/main.tin" main.tin
-	as ada add main.tin > /dev/null
-	as ada commit -m "shop: checkout reads the receipt the payment service answers" > /dev/null
-	as ada push > "$dir/push.out" 2>&1 || fail "push shop: $(cat "$dir/push.out")"
-	for f in "$shop"/branches/fix-*.tin; do
-		name=fix/$(basename "$f" .tin | sed 's/^fix-//')
-		# the commit message is the file's own account of the fix: its "// fix/..." comment
-		msg=$(awk -v n="// $name: " 'index($0, n) == 1 { on = 1 } on && !/^\/\/ / { exit } on { print substr($0, 4) }' "$f")
-		as ada switch main > /dev/null 2>&1
-		as ada switch -c "$name" > /dev/null
-		cp "$f" main.tin
-		as ada commit -a -m "$msg" > /dev/null
-		as ada push > "$dir/push.out" 2>&1 || fail "push $name: $(cat "$dir/push.out")"
-	done
-	as ada switch main > /dev/null 2>&1
+	push_fixes shop "$shop" "shop: checkout reads the receipt the payment service answers"
 	signing=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 	REDIS_ADDR=$redis TIN_REPLAY_RECIPIENTS=$pub TIN_REPLAY_SIGNING_KEY=$signing PAYMENTS_PORT=$pay_port \
 		sh "$shop/record.sh" "$tinc" "$dir/spool" > "$dir/record.out" 2>&1 || fail "recording shop: $(cat "$dir/record.out")"
-	[ -n "$rpid" ] && kill "$rpid" 2>/dev/null || true
 	as ada replay push "$dir/spool" --commit main > "$dir/replay.out" 2>&1 || fail "tit replay push: $(cat "$dir/replay.out")"
-	for g in $(api ada GET "/api/v1/repos/tinlang/shop/replay/groups?state=open" | jq -r '.groups[].id'); do
-		for b in main fix/declined-cart fix/retry-charge fix/coupon-lookup fix/limit-cart-size fix/split-on-colon; do
-			api ada POST /api/v1/repos/tinlang/shop/replay/checks "{\"target\":\"$b\",\"group\":\"$g\"}" > /dev/null || fail "check $b"
-		done
-	done
+	check_all shop "$shop"
 	echo "seed: tinlang/shop has two failures and checks of six revisions against them: $base/tinlang/shop/replay (the runner works through them)"
 }
+# tinlang/orders: replay checks on Postgres, Redis and a real website (dev/orders/README.md). Its payment service reads an
+# order from Postgres, an exchange rate from Redis or api.frankfurter.dev, writes the payment and answers the card fee's
+# share; it is recorded failing three ways (an unpriced currency, a double click, a free order) and checked at main and
+# eight fix branches. It calls the internet, so it runs only with SEED_ORDERS=1, and needs psql and a Postgres database
+# it may empty: SEED_ORDERS_PG_ADDR, SEED_ORDERS_PG_USER, SEED_ORDERS_PG_PASSWORD and SEED_ORDERS_PG_DATABASE.
+seed_orders() {
+	[ "${SEED_ORDERS:-}" = 1 ] || return 0
+	[ -n "${pub:-}" ] && [ -n "${redis:-}" ] || { echo "seed: no tinlang/orders: replay checks were skipped" >&2; return 0; }
+	[ -n "${SEED_ORDERS_PG_ADDR:-}" ] && [ -n "${SEED_ORDERS_PG_DATABASE:-}" ] || { echo "seed: no tinlang/orders: set SEED_ORDERS_PG_ADDR, _USER, _PASSWORD and _DATABASE" >&2; return 0; }
+	orders=$root/products/tinhub/dev/orders
+	pg="\"POSTGRES_ADDR=$SEED_ORDERS_PG_ADDR\",\"POSTGRES_USER=${SEED_ORDERS_PG_USER:-}\",\"POSTGRES_PASSWORD=${SEED_ORDERS_PG_PASSWORD:-}\",\"POSTGRES_DATABASE=$SEED_ORDERS_PG_DATABASE\""
+	api ada POST /api/v1/repos '{"owner":"tinlang","name":"orders","visibility":"private","description":"A payment service on Postgres, Redis and a rates website, its failures and the fixes tried for them"}' > /dev/null
+	# a replay never connects, but the service reads its settings before it serves
+	api ada PUT /api/v1/repos/tinlang/orders/runner "{\"entry\":\"main.tin\",\"sample\":20,\"env\":[$pg,\"REDIS_ADDR=$redis\"]}" > /dev/null
+	push_fixes orders "$orders" "orders: charge an order in US dollars at today's rate"
+	signing=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	POSTGRES_ADDR=$SEED_ORDERS_PG_ADDR POSTGRES_USER=${SEED_ORDERS_PG_USER:-} POSTGRES_PASSWORD=${SEED_ORDERS_PG_PASSWORD:-} \
+		POSTGRES_DATABASE=$SEED_ORDERS_PG_DATABASE REDIS_ADDR=$redis TIN_REPLAY_RECIPIENTS=$pub TIN_REPLAY_SIGNING_KEY=$signing \
+		sh "$orders/record.sh" "$tinc" "$dir/orders-spool" > "$dir/record.out" 2>&1 || fail "recording orders: $(cat "$dir/record.out")"
+	as ada replay push "$dir/orders-spool" --commit main > "$dir/replay.out" 2>&1 || fail "tit replay push orders: $(cat "$dir/replay.out")"
+	check_all orders "$orders"
+	echo "seed: tinlang/orders has three failures and checks of nine revisions against them: $base/tinlang/orders/replay"
+}
 seed_checks
+seed_orders
+[ -n "${rpid:-}" ] && kill "$rpid" 2>/dev/null || true
 echo "seeded $base: ada (site admin) and bob; sessions in $dir/ada.cookie and $dir/bob.cookie"
