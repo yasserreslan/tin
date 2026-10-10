@@ -23,14 +23,18 @@ export async function render(ctx) {
 	if (!SECTIONS.some((s) => s.key === section)) return ctx.notFound();
 	ctx.title("Settings");
 	const main = h("div");
-	ctx.main.append(
-		h(
-			"div.container.page",
-			{},
-			h("div.page-head", {}, h("div.row", { style: { gap: "14px" } }, avatar(me.display || me.name, "lg"), h("div", {}, h("h1", {}, me.display || me.name), h("p.sub", { style: { margin: "2px 0 0" } }, h("a", { href: "/" + me.name }, me.name), " · your account")))),
-			h("div.layout-sidebar", {}, sidenav(SECTIONS.map((s) => ({ ...s, href: s.key === "profile" ? "/settings" : "/settings/" + s.key })), section), main),
-		),
+	const head = (u) => h("div.page-head", {}, h("div.row", { style: { gap: "14px" } }, avatar(u.display || u.name, "lg"), h("div", {}, h("h1", {}, u.display || u.name), h("p.sub", { style: { margin: "2px 0 0" } }, h("a", { href: "/" + u.name }, u.name), " · your account"))));
+	let top = head(me);
+	// A saved display name shows in the head at once.
+	ctx.cleanup(
+		store.onUser((u) => {
+			if (!u) return;
+			const next = head(u);
+			top.replaceWith(next);
+			top = next;
+		}),
 	);
+	ctx.main.append(h("div.container.page", {}, top, h("div.layout-sidebar", {}, sidenav(SECTIONS.map((s) => ({ ...s, href: s.key === "profile" ? "/settings" : "/settings/" + s.key })), section), main)));
 	try {
 		await PAGES[section](ctx, me, main);
 	} catch (err) {
