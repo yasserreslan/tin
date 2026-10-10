@@ -138,6 +138,9 @@ done
 grep -q "^$change 1 failure$" "$tmp/checks" || fail "the slower change's check: $(cat "$tmp/checks") (fib $base ms, then $slow ms)"
 "$node" notes > "$tmp/notes"
 grep -q '^- fib: .* ms, .*% slower (Linux ' "$tmp/notes" || fail "the note: $(cat "$tmp/notes")"
+# a first version's diff is against what it applies to, main: two files modified, not the whole tree added
+curl -sf -o "$tmp/diff.json" "http://$hubaddr/api/v1/repos/ada/fib/changes/$change/diff" || fail "GET the change's diff"
+jq -e '.from == 0 and .to == 1 and ([.files[].path] | sort) == [".bench/fib.jsonl", "fib.tin"] and all(.files[]; .kind == "modified")' "$tmp/diff.json" > /dev/null || fail "the change's diff: $(cat "$tmp/diff.json")"
 get "/changes/$change/bench" '.state == "failure" and .version == 1 and .benchmarks[0].name == "fib" and .benchmarks[0].regressed == true and .benchmarks[0].slower > 0.1'
 # the function reviews call when a review opens: the same verdict, and still one note
 "$node" compare ada fib "$change" 1 "$tmp/packs" > "$tmp/out" || fail "compare"
