@@ -52,13 +52,14 @@ async function invites(ctx, me, owned, main) {
 		const r = await api.get("/invites");
 		const list = r.invites || [];
 		pending.replaceChildren(
+			// an invite with no maker was made on the server (tinhub invite), the audit log's "system"
 			...(list.length
 				? list.map((x) =>
 						h(
 							"div.box-row",
 							{},
 							icon("mail", "sm"),
-							h("div.grow", {}, h("b", {}, x.email), h("div.small.muted", {}, x.org ? ["into ", h("a", { href: "/" + x.org }, x.org), " · "] : null, "by ", x.created_by || "?", " · ", time(x.created_at))),
+							h("div.grow", {}, h("b", {}, x.email), h("div.small.muted", {}, x.org ? ["into ", h("a", { href: "/" + x.org }, x.org), " · "] : null, x.created_by ? ["by ", h("a", { href: "/" + x.created_by }, x.created_by)] : "made on the server", " · ", time(x.created_at))),
 							x.site_admin ? badge("site admin", "purple") : null,
 							h("span.small.muted", {}, "expires ", time(x.expires_at)),
 						),
