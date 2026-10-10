@@ -651,3 +651,31 @@ fn sessionsRestart(t mut crucible.T) ! {
 	let (_, derr) = down.Lookup(ses.Cookie)
 	t.True("an unreachable Redis", derr != nil)
 }
+
+fn TestDefaultBranch(t mut crucible.T) {
+	let got = testDb(mut t)
+	if got == nil {
+		return
+	}
+	let err = defaultBranch(mut t, got)
+	t.NoFault("default branch", err)
+}
+
+// A default branch is a branch the repository has (#1136); an empty repository may name the one its first push makes.
+fn defaultBranch(t mut crucible.T, c postgres.Client) ! {
+	let ada = try mkUser(c, "ada")
+	let by = Actor{Id: ada, Ip: ""}
+	let r = try CreateRepo(c, by, "ada", "tin", "private", 1000)
+	let empty = try SetRepoInfo(c, by, r, RepoInfo{Description: "", DefaultBranch: "dev"})
+	t.True("an empty repository names a branch to come", empty.DefaultBranch == "dev")
+	_ = try c.Exec("INSERT INTO refs (repo_id, name, target) VALUES ({r.Id}, 'refs/heads/dev', 'a'), ({r.Id}, 'refs/heads/main', 'b'), ({r.Id}, 'refs/tags/v1', 'c')")
+	let (_, missing) = SetRepoInfo(c, by, r, RepoInfo{Description: "", DefaultBranch: "nope"})
+	t.True("a branch it does not have", fault.Is(missing, ErrInvalid))
+	let (_, tag) = SetRepoInfo(c, by, r, RepoInfo{Description: "", DefaultBranch: "v1"})
+	t.True("a tag is not a branch", fault.Is(tag, ErrInvalid))
+	let moved = try SetRepoInfo(c, by, r, RepoInfo{Description: "", DefaultBranch: "main"})
+	t.True("a branch it has", moved.DefaultBranch == "main")
+	_ = try c.Exec("DELETE FROM refs WHERE repo_id = {r.Id} AND name = 'refs/heads/main'")
+	let kept = try SetRepoInfo(c, by, r, RepoInfo{Description: "described", DefaultBranch: "main"})
+	t.True("a description changes while the default branch is gone", kept.DefaultBranch == "main")
+}

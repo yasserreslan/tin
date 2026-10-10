@@ -71,6 +71,12 @@ get "$r/changes/$change" '.change == "'"$change"'" and (.versions | length) == 1
 # a unique prefix, as tit and the web show a change (#1129), answers with the full id; too short a one is not found
 get "$r/changes/$(echo "$change" | cut -c1-12)" '.change == "'"$change"'" and (.versions | length) == 1'
 status "$r/changes/$(echo "$change" | cut -c1-3)" 404 not_found
+# a NUL or bytes that are not UTF-8, in the address or a JSON body, are the caller's error, not an unavailable database (#1135)
+status "/api/v1/owners/%00" 400 invalid
+status "$r/changes/abcd%FF" 400 invalid
+status "/api/v1/search?q=%00" 400 invalid
+code=$(curl -s -o "$tmp/out.json" -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"body":"a\u0000b"}' "$base$r/changes/$change/comments")
+[ "$code" = 400 ] || fail "a comment with a NUL: $code $(cat "$tmp/out.json")"
 get "$r/changes/$change/diff" '.from == 0 and .to == 1 and (.files | length) == 1 and .files[0].kind == "added" and .files[0].path == "a.txt"'
 blob=$(jq -r '.files[0].new_blob' "$tmp/out.json")
 get "$r/stacks/ada" '(.changes | length) == 0'

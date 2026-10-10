@@ -20,9 +20,11 @@ import "./web"
 import "./workers"
 import "anvil"
 import "fault"
+import "glyph"
 import "hearth"
 import "mint"
 import "herald"
+import "link"
 import "postgres"
 import "quarry"
 import "redis"
@@ -415,6 +417,64 @@ fn logged(q anvil.Req, w mut anvil.Out, next fn(anvil.Req, mut anvil.Out)) {
 	herald.Log(herald.LInfo, "request", []str{"req", id, "method", q.Method, "route", q.Pattern(), "status", say.Str(w.Code()), "client", q.ClientIP()})
 }
 
+// textOnly refuses a request (#1135) whose path or query, decoded, or JSON body holds a NUL or bytes that are not UTF-8. No
+// name, search or comment can hold them, and Postgres refuses them as text, so they are the caller's error (400), not
+// an unavailable database (503) with its message.
+fn textOnly(q anvil.Req, w mut anvil.Out, next fn(anvil.Req, mut anvil.Out)) {
+	if !isText(q.Path, false) || !isText(q.Query, true) || (twine.HasPrefix(q.Header("content-type"), "application/json") && !isJsonText(q.Body())) {
+		w.Status(400)
+		w.Type("application/json")
+		w.Text("{{\"code\":\"invalid\",\"message\":\"the request holds a NUL or bytes that are not UTF-8\"}}\n")
+		return
+	}
+	next(q, mut w)
+}
+
+// isText reports whether s, %-decoded, is UTF-8 without a NUL. A malformed escape is left to the handler.
+fn isText(s str, query bool) bool {
+	mut d = s
+	if twine.Contains(s, "%") {
+		if query {
+			d = link.QueryUnescape(s) catch _ {
+				return true
+			}
+		} else {
+			d = link.PathUnescape(s) catch _ {
+				return true
+			}
+		}
+	}
+	for i in 0..len(d) {
+		if d[i] == 0 {
+			return false
+		}
+	}
+	return glyph.Valid(d)
+}
+
+// isJsonText reports whether a JSON body is UTF-8 and has no NUL, raw or escaped (\u0000 after an even run of
+// backslashes, which is not itself an escaped backslash).
+fn isJsonText(b str) bool {
+	if !glyph.Valid(b) {
+		return false
+	}
+	for i in 0..len(b) {
+		if b[i] == 0 {
+			return false
+		}
+		if b[i] == '\\' && i + 5 < len(b) && b[i + 1] == 'u' && b[i + 2:i + 6] == "0000" {
+			mut run = 1
+			for run <= i && b[i - run] == '\\' {
+				run += 1
+			}
+			if run % 2 == 1 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 fn healthz(q anvil.Req, w mut anvil.Out) {
 	w.Text("ok\n")
 }
@@ -481,6 +541,7 @@ fn metrics(q anvil.Req, w mut anvil.Out) {
 fn routes(c config.Config) anvil.Router {
 	mut r = anvil.NewRouter()
 	r.Use(logged)
+	r.Use(textOnly)
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz)
 	r.Get("/metrics", metrics)
