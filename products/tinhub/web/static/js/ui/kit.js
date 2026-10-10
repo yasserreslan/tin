@@ -262,6 +262,8 @@ export function refused(err, title, message, signedOut) {
 export function errorBox(err, retry) {
 	const status = err && err.status;
 	if ((status === 403 || status === 401) && !session.user) return signInFirst();
+	// A private repository is a 404 to someone signed out, so the way in is to sign in.
+	if (status === 404 && !session.user) return empty("search", "Not found", `${(err && err.message) || "Not found"}. If it is private, sign in to see it.`, btn("Sign in", { icon: "login", primary: true, href: loginHref() }));
 	const title = status === 404 ? "Not found" : status === 403 ? "No access" : status === 0 ? "Offline" : "Something went wrong";
 	return h("div.empty", {}, h("div.art", {}, icon(status === 404 ? "search" : status === 403 ? "lock" : "alert")), h("h3", {}, title), h("p", {}, err && err.message ? err.message : String(err)), retry && status !== 404 && status !== 403 ? btn("Try again", { icon: "refresh", onclick: retry }) : null);
 }

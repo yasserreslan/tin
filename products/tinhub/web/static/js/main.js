@@ -121,7 +121,7 @@ export function notFound() {
 			h("div.big", {}, "404"),
 			h("h2", { style: { margin: "16px 0 8px" } }, "This page isn't here"),
 			h("p.muted", {}, "It may be private, moved, or never have existed."),
-			h("div.row", { style: { "justify-content": "center", "margin-top": "24px" } }, h("a.btn.primary", { href: "/" }, "Go home"), h("a.btn", { href: "/explore" }, "Explore")),
+			h("div.row", { style: { "justify-content": "center", "margin-top": "24px" } }, store.session.user ? null : h("a.btn.primary", { href: loginHref() }, "Sign in"), h("a", { class: ["btn", store.session.user && "primary"], href: "/" }, "Go home"), h("a.btn", { href: "/explore" }, "Explore")),
 		),
 	);
 }
