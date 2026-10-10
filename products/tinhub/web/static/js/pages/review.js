@@ -21,6 +21,16 @@ import { line as lineChart } from "../ui/chart.js";
 
 const DECL_COLOR = { added: "green", removed: "red", changed: "amber", moved: "blue", renamed: "purple" };
 
+// OPEN_LINES is about how many diff lines the Files tab shows before it folds the files after them.
+const OPEN_LINES = 3000;
+
+// lineCount is the lines of a unified diff's text.
+function lineCount(text) {
+	let n = 0;
+	for (let i = (text || "").indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) n++;
+	return n;
+}
+
 export async function render(ctx) {
 	const { repo, body, base } = await frame(ctx, "reviews");
 	const ch = ctx.params.id;
@@ -472,7 +482,7 @@ export async function render(ctx) {
 				? files.map((f) =>
 						h(
 							"a.box-row.plain",
-							{ href: "#" + encodeURIComponent(f.path), style: { "min-height": "34px", padding: "6px 16px" } },
+							{ href: "#" + encodeURIComponent(f.path), style: { "min-height": "34px", padding: "6px 16px" }, onclick: (e) => (e.preventDefault(), jump(f.path)) },
 							icon("fileCode", "sm"),
 							h("span.mono.small.grow.ellipsis", {}, f.old_path && f.old_path !== f.path ? `${f.old_path} → ${f.path}` : f.path),
 							(f.decls || []).length ? h("span.row", { style: { gap: "4px" } }, Object.entries(countKinds(f.decls)).map(([k, n]) => badge(`${n} ${k}`, DECL_COLOR[k] || ""))) : null,
@@ -480,78 +490,92 @@ export async function render(ctx) {
 					)
 				: h("div.box-empty", {}, "No files changed."),
 		);
+		// A long review opens its first files, and any with comments, and folds the rest until asked, so the page
+		// never builds every line of a large change at once.
+		const folds = new Map();
+		// jump opens a file's diff and scrolls to it, without a new URL that would render the page again.
+		const jump = (path) => {
+			const fold = folds.get(path);
+			if (!fold) return;
+			fold.expand();
+			fold.scrollIntoView({ block: "start" });
+			window.scrollBy(0, -70);
+		};
+		let budget = OPEN_LINES;
 		const blocks = files.map((f) => {
 			const lang = fmt.language(f.path);
 			const fileComments = anchored.filter((c) => c.file === f.path);
-			return h(
-				"div",
-				{ id: encodeURIComponent(f.path) },
-				fileBlock({
-					path: f.path,
-					oldPath: f.old_path,
-					kind: "",
-					badge: fileComments.length ? badge(fmt.plural(fileComments.length, "comment"), "accent", "comment") : null,
-					actions: [h("a.btn.sm.ghost", { href: `${base}/blob/${d.to}/${api.enc(f.path)}`, title: "View the file at this version" }, icon("eye", "sm"))],
-					build: () => {
-						if ((f.decls || []).length) {
-							return h(
-								"div",
-								{},
-								f.decls.map((dc) => {
-									const declComments = fileComments.filter((c) => c.decl === dc.key);
-									const hk = df.parseUnified(dc.diff);
-									const rowExtra = (row) => {
-										if (!row || !row.b) return null;
-										const off = row.b - 1;
-										const here = declComments.filter((c) => c.line_offset === off && !c.parent);
-										const key = `${f.path}|${dc.key}|${off}`;
-										const parts = threads(state.comments.filter((c) => c.file === f.path && c.decl === dc.key && (c.line_offset === off || c.parent))).filter((t) => here.includes(t.root));
-										if (!parts.length && pendingBox.key !== key) return null;
-										return h("div.col", { style: { gap: "10px", "max-width": "860px" } }, parts.map((t) => thread(t, commentAct, { showAnchor: false })), pendingBox.key === key ? pendingBox.el : null);
-									};
-									const onComment =
-										me && isNewest && dc.change !== "removed"
-											? (row) => {
-													if (!row.b) {
-														toast("Comment on a line of the new version.", "info");
-														return;
-													}
-													const off = row.b - 1;
-													pendingBox.key = `${f.path}|${dc.key}|${off}`;
-													pendingBox.el = composer({
-														placeholder: `Comment on ${dc.key}, line ${off + 1}`,
-														submitLabel: "Comment",
-														compact: true,
-														onCancel: () => {
-															pendingBox.key = "";
-															redrawDecl();
-														},
-														onSubmit: async (text) => {
-															pendingBox.key = "";
-															await addComment(text, { file: f.path, decl: dc.key, line_offset: off, version: versionN });
-														},
-													});
-													redrawDecl();
-													setTimeout(() => pendingBox.el && pendingBox.el.focus(), 20);
+			const lines = (f.decls || []).length ? f.decls.reduce((n, dc) => n + lineCount(dc.diff), 0) : lineCount(f.diff);
+			const collapsed = budget <= 0 && !fileComments.length;
+			budget -= lines;
+			const fold = fileBlock({
+				path: f.path,
+				oldPath: f.old_path,
+				kind: "",
+				collapsed,
+				badge: fileComments.length ? badge(fmt.plural(fileComments.length, "comment"), "accent", "comment") : null,
+				actions: [h("a.btn.sm.ghost", { href: `${base}/blob/${d.to}/${api.enc(f.path)}`, title: "View the file at this version" }, icon("eye", "sm"))],
+				build: () => {
+					if ((f.decls || []).length) {
+						return h(
+							"div",
+							{},
+							f.decls.map((dc) => {
+								const declComments = fileComments.filter((c) => c.decl === dc.key);
+								const hk = df.parseUnified(dc.diff);
+								const rowExtra = (row) => {
+									if (!row || !row.b) return null;
+									const off = row.b - 1;
+									const here = declComments.filter((c) => c.line_offset === off && !c.parent);
+									const key = `${f.path}|${dc.key}|${off}`;
+									const parts = threads(state.comments.filter((c) => c.file === f.path && c.decl === dc.key && (c.line_offset === off || c.parent))).filter((t) => here.includes(t.root));
+									if (!parts.length && pendingBox.key !== key) return null;
+									return h("div.col", { style: { gap: "10px", "max-width": "860px" } }, parts.map((t) => thread(t, commentAct, { showAnchor: false })), pendingBox.key === key ? pendingBox.el : null);
+								};
+								const onComment =
+									me && isNewest && dc.change !== "removed"
+										? (row) => {
+												if (!row.b) {
+													toast("Comment on a line of the new version.", "info");
+													return;
 												}
-											: null;
-									const wrap = h("div");
-									const redrawDecl = () => wrap.replaceChildren(hk.length ? hunkTable(hk, { lang, split, onComment, rowExtra }) : h("div.box-empty.small", {}, dc.change === "moved" ? "Moved without changes." : "No line changes."));
-									redrawDecl();
-									return h(
-										"div.decl-block",
-										{},
-										h("div.decl-head", {}, badge(dc.change, DECL_COLOR[dc.change] || ""), dc.old_key && dc.old_key !== dc.key ? [h("span.old", {}, dc.old_key), icon("arrowRight", "sm")] : null, h("span.key", {}, dc.key), declComments.length ? badge(String(declComments.length), "accent", "comment") : null),
-										h("div", { style: { overflow: "auto" } }, wrap),
-									);
-								}),
-							);
-						}
-						const hk = df.parseUnified(f.diff || "");
-						return hk.length ? h("div", { style: { overflow: "auto" } }, hunkTable(hk, { lang, split })) : h("div.box-empty", {}, "No line changes.");
-					},
-				}),
-			);
+												const off = row.b - 1;
+												pendingBox.key = `${f.path}|${dc.key}|${off}`;
+												pendingBox.el = composer({
+													placeholder: `Comment on ${dc.key}, line ${off + 1}`,
+													submitLabel: "Comment",
+													compact: true,
+													onCancel: () => {
+														pendingBox.key = "";
+														redrawDecl();
+													},
+													onSubmit: async (text) => {
+														pendingBox.key = "";
+														await addComment(text, { file: f.path, decl: dc.key, line_offset: off, version: versionN });
+													},
+												});
+												redrawDecl();
+												setTimeout(() => pendingBox.el && pendingBox.el.focus(), 20);
+											}
+										: null;
+								const wrap = h("div");
+								const redrawDecl = () => wrap.replaceChildren(hk.length ? hunkTable(hk, { lang, split, onComment, rowExtra }) : h("div.box-empty.small", {}, dc.change === "moved" ? "Moved without changes." : "No line changes."));
+								redrawDecl();
+								return h(
+									"div.decl-block",
+									{},
+									h("div.decl-head", {}, badge(dc.change, DECL_COLOR[dc.change] || ""), dc.old_key && dc.old_key !== dc.key ? [h("span.old", {}, dc.old_key), icon("arrowRight", "sm")] : null, h("span.key", {}, dc.key), declComments.length ? badge(String(declComments.length), "accent", "comment") : null),
+									h("div", { style: { overflow: "auto" } }, wrap),
+								);
+							}),
+						);
+					}
+					const hk = df.parseUnified(f.diff || "");
+					return hk.length ? h("div", { style: { overflow: "auto" } }, hunkTable(hk, { lang, split })) : h("div.box-empty", {}, "No line changes.");
+				},
+			});
+			folds.set(f.path, fold);
+			return h("div", { id: encodeURIComponent(f.path) }, fold);
 		});
 		const general = !isNewest ? callout("info", "You're looking at an older version; comments go on the newest.") : null;
 		out.replaceChildren(general || "", sum, ...blocks);
