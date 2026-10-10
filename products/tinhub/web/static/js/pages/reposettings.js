@@ -232,7 +232,7 @@ const PAGES = {
 			panel(
 				"Reviews",
 				"What a change needs before it can land on the default branch.",
-				h("div", {}, field("Approvals needed", approvals, "Votes on the newest version from people with write access. A request for changes blocks landing until it is withdrawn."), field("Required checks", h("div.col", { style: { gap: "10px" } }, chips, h("div.row", {}, newCheck, addCheck)), "Each must report success on the newest version.")),
+				h("div", {}, field("Approvals needed", approvals, "Approvals from people with write access other than the change's author; each person's newest vote counts. A request for changes blocks landing until it is withdrawn."), field("Required checks", h("div.col", { style: { gap: "10px" } }, chips, h("div.row", {}, newCheck, addCheck)), "Each must report success on the newest version.")),
 				saveButton(() => api.put(R("/review/settings"), { approvals: Number(approvals.value) || 0, checks })),
 			),
 		);
