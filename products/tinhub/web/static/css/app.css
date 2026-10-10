@@ -735,10 +735,17 @@ table.diff tr.del td.ln { background: var(--del-bg-strong); color: var(--del-fg)
 table.diff tr.del td.sign { color: var(--del-fg); }
 table.diff tr.hunk td { background: var(--hunk-bg); color: var(--fg-muted); padding: 4px var(--s-3); font-size: 12px; }
 table.diff td.empty { background: var(--bg-sunken); }
-table.diff.split td.lc { width: 50%; }
+table.diff.split td.d { background: var(--del-bg); }
+table.diff.split td.ln.d { background: var(--del-bg-strong); color: var(--del-fg); }
+table.diff.split td.sign.d { color: var(--del-fg); }
+table.diff.split td.a { background: var(--add-bg); }
+table.diff.split td.ln.a { background: var(--add-bg-strong); color: var(--add-fg); }
+table.diff.split td.sign.a { color: var(--add-fg); }
+table.diff.split td.e { background: var(--bg-sunken); }
+table.diff td.sign { position: relative; }
 table.diff ins { text-decoration: none; background: var(--add-bg-strong); border-radius: 2px; }
 table.diff del { text-decoration: none; background: var(--del-bg-strong); border-radius: 2px; }
-table.diff tr .add-comment { visibility: hidden; position: absolute; margin-left: -22px; margin-top: 1px; width: 18px; height: 18px; border-radius: 4px; border: 0; background: var(--accent); color: var(--accent-fg); cursor: pointer; display: grid; place-items: center; padding: 0; }
+table.diff tr .add-comment { visibility: hidden; position: absolute; left: -10px; top: 1px; z-index: 2; width: 18px; height: 18px; border-radius: 4px; border: 0; background: var(--accent); color: var(--accent-fg); cursor: pointer; display: grid; place-items: center; padding: 0; }
 table.diff tr:hover .add-comment { visibility: visible; }
 table.diff tr.comment-row td { background: var(--bg-soft); padding: var(--s-3) var(--s-4); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); font-family: var(--font-sans); white-space: normal; }
 
