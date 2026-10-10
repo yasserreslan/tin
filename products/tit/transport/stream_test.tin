@@ -102,8 +102,11 @@ fn TestStreamedHostile(t mut crucible.T) {
 	mut bad = []str{}
 	// cut short, a byte flipped in an entry, the trailing hash wrong, bytes after the trailer, nothing but a header
 	bad = append(bad, pack[0:len(pack) / 2])
-	bad = append(bad, pack[0:30] + "\xff" + pack[31:])
-	bad = append(bad, pack[0:len(pack) - 1] + "\x00")
+	bad = append(bad, pack[0:30] + str([]u8{pack[30] ^ 0xff}) + pack[31:])
+	// Flip the last byte: overwriting it with a constant is the real pack when
+	// the random change id makes that byte already equal (#1111).
+	let last = pack[len(pack) - 1]
+	bad = append(bad, pack[0:len(pack) - 1] + str([]u8{last ^ 0xff}))
 	bad = append(bad, pack + "extra")
 	bad = append(bad, "TITPACK")
 	for i, p in bad {
