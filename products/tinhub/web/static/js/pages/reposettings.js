@@ -10,7 +10,7 @@ import { navigate } from "../lib/router.js";
 import { frame, forget } from "./repo.js";
 import { refsOf } from "../ui/refs.js";
 import { sidenav, panel, input, textarea, select, checkbox, userInput, saveButton } from "../ui/forms.js";
-import { avatar, badge, btn, busy, callout, confirm, copyButton, dialog, empty, errorBox, field, kv, more, skeleton, time, toast } from "../ui/kit.js";
+import { avatar, badge, btn, busy, callout, confirm, copyButton, dialog, empty, errorBox, field, kv, more, refused, signInFirst, skeleton, time, toast } from "../ui/kit.js";
 
 const SECTIONS = [
 	{ key: "general", label: "General", icon: "settings" },
@@ -32,7 +32,7 @@ export async function render(ctx) {
 	const section = ctx.params.section || "general";
 	ctx.title("Settings", `${repo.owner}/${repo.name}`);
 	if (repo.role !== "admin") {
-		body.append(h("div.box", {}, empty("lock", "Settings are for admins", `Ask an admin of ${repo.owner}/${repo.name} to change its settings.`)));
+		body.append(h("div.box", {}, refused(null, "Settings are for admins", `Ask an admin of ${repo.owner}/${repo.name} to change its settings.`, signInFirst("Sign in to change settings", `Settings of ${repo.owner}/${repo.name} are for its admins.`))));
 		return;
 	}
 	const S = SECTIONS.find((s) => s.key === section);

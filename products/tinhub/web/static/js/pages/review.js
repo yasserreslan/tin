@@ -16,7 +16,7 @@ import { markdown, hunkTable, fileBlock } from "../ui/code.js";
 import { composer } from "../ui/composer.js";
 import { threads, thread } from "../ui/comments.js";
 import * as filediff from "../ui/filediff.js";
-import { avatar, badge, btn, busy, callout, confirm, copyButton, empty, errorBox, segmented, skeleton, stateBadge, tabs, time, toast, kv } from "../ui/kit.js";
+import { avatar, badge, btn, busy, callout, confirm, copyButton, empty, errorBox, refused, segmented, signInFirst, skeleton, stateBadge, tabs, time, toast, kv } from "../ui/kit.js";
 import { line as lineChart } from "../ui/chart.js";
 
 const DECL_COLOR = { added: "green", removed: "red", changed: "amber", moved: "blue", renamed: "purple" };
@@ -659,7 +659,7 @@ export async function render(ctx) {
 				),
 			);
 		} catch (err) {
-			content.replaceChildren(err.status === 404 ? empty("runner", "No behaviour run yet", "A run replays recorded production requests against this version and its base, and groups what changed.", ask) : err.status === 403 ? empty("lock", "No access to replays", err.message) : errorBox(err));
+			content.replaceChildren(err.status === 404 ? empty("runner", "No behaviour run yet", "A run replays recorded production requests against this version and its base, and groups what changed.", ask) : err.status === 403 ? refused(err, "No access to replays", err.message, signInFirst("Sign in to see behaviour runs", "A behaviour run replays production requests: seeing it needs an account with the replay permission.")) : errorBox(err));
 		}
 	};
 
