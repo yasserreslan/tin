@@ -1539,6 +1539,9 @@ fn rt_flush() {
 // newline (say.Text) waits for the next one.
 fn rt_out(p i64, n i64) {
 	rt_lock(&rtOutLock)
+	if rtOutHold && rtOut[0]+n > rtOut[1] && rtOut[0]+n <= rtOutHoldMost {
+		rt_out_grow(rtOut[0] + n)
+	}
 	if rtOut[0]+n > rtOut[1] {
 		rt_flush()
 		if n > rtOut[1] {
@@ -1553,6 +1556,21 @@ fn rt_out(p i64, n i64) {
 		rt_flush()
 	}
 	rt_unlock(&rtOutLock)
+}
+
+// rtOutHoldMost bounds the stdout buffer while it is held: past it, held lines go out as plain text.
+const rtOutHoldMost = 64 << 20
+
+// rt_out_grow doubles the held stdout buffer until it holds need bytes: crucible's -json capture takes a test's
+// lines from the buffer as output events, and a test that printed more than 64 KiB had the rest written out as
+// plain lines between the JSON events (#1217).
+fn rt_out_grow(need i64) {
+	mut c = rtOut[1]
+	for c < need {
+		c *= 2
+	}
+	rtOut[2] = realloc(rtOut[2], c)
+	rtOut[1] = c
 }
 
 fn rt_panic(msg str) {

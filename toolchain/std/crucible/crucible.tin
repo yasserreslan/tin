@@ -6,6 +6,7 @@
 package crucible
 
 import "constraints"
+import "glyph"
 import "lasso"
 import "say"
 
@@ -168,12 +169,30 @@ fn selected(name str) bool {
 	return len(runFilter) == 0 || runFilter[0].Match(name)
 }
 
-// jsonText is s as a JSON string.
+// jsonText is s as a JSON string, escaped as Go's test2json does: control characters as \u00XX and a byte that is
+// not UTF-8 as \ufffd, so the line is valid JSON whatever the test printed.
 fn jsonText(s str) str {
+	let hex = "0123456789abcdef"
 	mut out = []u8{}
 	out = append(out, '"')
-	for i in 0..len(s) {
+	mut i = 0
+	for i < len(s) {
 		let c = s[i]
+		if c >= 0x80 {
+			let (r, size) = glyph.DecodeRune(s, i)
+			if r == glyph.RuneError && size == 1 {
+				let esc = "\\ufffd"
+				for k in 0..len(esc) {
+					out = append(out, esc[k])
+				}
+			} else {
+				for k in 0..size {
+					out = append(out, s[i+k])
+				}
+			}
+			i += size
+			continue
+		}
 		if c == '"' || c == '\\' {
 			out = append(out, '\\')
 			out = append(out, c)
@@ -184,10 +203,16 @@ fn jsonText(s str) str {
 			out = append(out, '\\')
 			out = append(out, 't')
 		} else if c < 32 {
-			out = append(out, '?')
+			let esc = "\\u00"
+			for k in 0..len(esc) {
+				out = append(out, esc[k])
+			}
+			out = append(out, hex[c >> 4])
+			out = append(out, hex[c & 15])
 		} else {
 			out = append(out, c)
 		}
+		i += 1
 	}
 	out = append(out, '"')
 	return str(out)
