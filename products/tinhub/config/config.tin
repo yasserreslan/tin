@@ -88,7 +88,7 @@ fn Keys() []Key {
 		Key{Name: "db.replica", Default: "", Secret: false},
 		Key{Name: "db.max_total", Default: "16", Secret: false},
 		Key{Name: "redis.addr", Default: "", Secret: false},
-		Key{Name: "packs.store", Default: "dir", Secret: false},
+		Key{Name: "packs.store", Default: "s3", Secret: false},
 		Key{Name: "packs.dir", Default: "/var/lib/tinhub", Secret: false},
 		Key{Name: "packs.cache", Default: "10gb", Secret: false},
 		Key{Name: "packs.grace", Default: "1h", Secret: false},
@@ -276,8 +276,13 @@ fn Build(vals map[str]str) !Config {
 	if store != "dir" && store != "s3" {
 		fail fault.Wrap(ErrConfig, "packs.store: {store} is not dir or s3")
 	}
-	if store == "s3" && (len(vals["s3.endpoint"]) == 0 || len(vals["s3.bucket"]) == 0) {
-		fail fault.Wrap(ErrConfig, "packs.store = s3 needs s3.endpoint and s3.bucket")
+	// object storage is where content lives in every deployment (design/tinhub.md §1); dir is for development and tests
+	if store == "s3" {
+		for k in []str{"s3.endpoint", "s3.bucket", "s3.access_key", "s3.secret_key"} {
+			if len(vals[k]) == 0 {
+				fail fault.Wrap(ErrConfig, "packs.store = s3 (the default) needs {k}: an S3-compatible bucket such as R2 (s3.endpoint = https://ACCOUNT.r2.cloudflarestorage.com, s3.region = auto); packs.store = dir is for development and tests only")
+			}
+		}
 	}
 	if (len(vals["tls.cert"]) == 0) != (len(vals["tls.key"]) == 0) {
 		fail fault.Wrap(ErrConfig, "tls.cert and tls.key go together")

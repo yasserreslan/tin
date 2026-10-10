@@ -266,6 +266,11 @@ fn TestRebasedVersions(t mut crucible.T) {
 		return
 	}
 	crucible.Equal(mut t, "every job ran", ran, 3)
+	let rows = c.Query("SELECT count(*), count(*) FILTER (WHERE stored AND body = '') FROM diffs WHERE repo_id = {f.r.Id}") catch err {
+		t.Error("rows: {err}")
+		return
+	}
+	t.True("every diff, small ones too, is in the pack store and its row only the pointer", rows.Rows[0][0].Int() >= 5 && rows.Rows[0][1].Int() == rows.Rows[0][0].Int())
 	let base1 = diffOf(f, cid, 1, "base") catch err {
 		t.Error("v1 base: {err}")
 		return
@@ -361,7 +366,7 @@ fn TestLargeFile(t mut crucible.T) {
 	}
 }
 
-// TestStoredBody: a diff over bodyMax is kept in the pack store and read back from it.
+// TestStoredBody: a large diff is kept in the pack store, its row only the pointer, and read back from it.
 fn TestStoredBody(t mut crucible.T) {
 	let got = testDb(mut t)
 	if got == nil {
@@ -406,7 +411,7 @@ fn TestStoredBody(t mut crucible.T) {
 	mut r = anvil.NewRouter()
 	Mount(mut r)
 	let w = r.Run("GET", "/api/v1/repos/ada/store/changes/" + chId + "/diffs/base", "")
-	t.True("GET answers it", w.Code() == 200 && len(w.Body) > bodyMax)
+	t.True("GET answers it", w.Code() == 200 && len(w.Body) > 256 * 1024)
 	quarry.RemoveAll(f.dir) catch _ {
 	}
 }

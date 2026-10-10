@@ -2,6 +2,7 @@ package config
 
 import "crucible"
 import "fault"
+import "twine"
 
 // Tests for the configuration (design/tinhub.md §3): the file format, defaults, the environment and the checks.
 
@@ -9,11 +10,22 @@ fn noEnv(name str) (str, bool) {
 	return "", false
 }
 
+// r2 is an R2 bucket's keys: the default store is object storage, so a configuration without a bucket is refused.
+fn r2(vals mut map[str]str) {
+	vals["s3.endpoint"] = "https://acct.r2.cloudflarestorage.com"
+	vals["s3.bucket"] = "tinhub"
+	vals["s3.access_key"] = "key"
+	vals["s3.secret_key"] = "secret"
+}
+
 fn TestDefaults(t mut crucible.T) {
-	let vals = Resolve(map[str]str{}, noEnv) catch err {
+	mut vals = Resolve(map[str]str{}, noEnv) catch err {
 		t.Error("resolve: {err}")
 		return
 	}
+	let (_, none) = Build(vals)
+	t.True("no bucket, no default store: {none}", none != nil && fault.Is(none, ErrConfig) && twine.Contains(fault.Message(none), "needs s3.endpoint"))
+	r2(mut vals)
 	let c = Build(vals) catch err {
 		t.Error("build: {err}")
 		return
@@ -24,13 +36,14 @@ fn TestDefaults(t mut crucible.T) {
 	crucible.Equal(mut t, "push deadline", c.PushDeadline, 60 * 1000000000)
 	crucible.Equal(mut t, "shutdown follows push deadline", c.Shutdown, 70 * 1000000000)
 	crucible.Equal(mut t, "push memory", c.PushMemory, 512 * 1024 * 1024)
-	crucible.Equal(mut t, "packs store", c.PacksStore, "dir")
+	crucible.Equal(mut t, "packs store: object storage", c.PacksStore, "s3")
+	crucible.Equal(mut t, "R2 region", c.S3Region, "auto")
 	t.True("path style", c.S3PathStyle)
 	t.HasFault("secrets required", c.RequireSecrets())
 }
 
 fn TestFile(t mut crucible.T) {
-	let text = "# tinhub\nroles = node\n\nlisten = \"127.0.0.1:9000\"\npush.deadline = 2m\nrepo.quota = 3gb\nsecrets.nonce = 0123456789abcdef\nsecrets.cookie = fedcba9876543210\n"
+	let text = "# tinhub\nroles = node\n\nlisten = \"127.0.0.1:9000\"\npush.deadline = 2m\nrepo.quota = 3gb\nsecrets.nonce = 0123456789abcdef\nsecrets.cookie = fedcba9876543210\npacks.store = dir\n"
 	let file = ParseText(text) catch err {
 		t.Error("parse: {err}")
 		return
@@ -62,9 +75,13 @@ fn TestErrors(t mut crucible.T) {
 	let (_, e3) = Build(vals)
 	t.HasFault("unknown role", e3)
 	vals["roles"] = "node"
-	vals["packs.store"] = "s3"
+	r2(mut vals)
+	vals["s3.secret_key"] = ""
 	let (_, e4) = Build(vals)
-	t.HasFault("s3 needs endpoint", e4)
+	t.HasFault("s3 needs its secret key", e4)
+	vals["packs.store"] = "disk"
+	let (_, e7) = Build(vals)
+	t.HasFault("unknown store", e7)
 	vals["packs.store"] = "dir"
 	vals["push.deadline"] = "soon"
 	let (_, e5) = Build(vals)

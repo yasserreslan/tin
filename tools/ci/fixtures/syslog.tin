@@ -4,6 +4,7 @@ import "mint"
 import "quarry"
 import "say"
 import "syslog"
+import "tide"
 import "twine"
 
 // The Tin side of syslog_check (#929): it runs the script bench/ref/syslog reads on stdin through syslog.Dial, with the arguments
@@ -44,6 +45,45 @@ fn sendAt(w mut syslog.Writer, sev i64, msg str) ! {
 	}
 }
 
+// A Unix datagram socket on macOS refuses a send with ENOBUFS when the collector's buffer is full instead of blocking,
+// and the writer (like Go's) gives up after one reconnect, so the collector would wait forever for the rest (#1077).
+// Over unixgram a refused message was not delivered, so it is sent again after a short pause, for up to 10 s.
+const retryPause = 2 * tide.Millisecond
+
+const retryTries = 5000
+
+// sendRetry is sendAt, retried over unixgram while the socket refuses the message.
+fn sendRetry(w mut syslog.Writer, network str, sev i64, msg str) ! {
+	mut tries = 0
+	for {
+		let err = sendAt(mut w, sev, msg)
+		if err == nil {
+			return
+		}
+		tries += 1
+		if network != "unixgram" || tries >= retryTries {
+			fail err
+		}
+		tide.Sleep(retryPause)
+	}
+}
+
+// writeRetry is Write, retried over unixgram while the socket refuses the message.
+fn writeRetry(w mut syslog.Writer, network str, msg []u8) ! {
+	mut tries = 0
+	for {
+		let (_, err) = w.Write(msg)
+		if err == nil {
+			return
+		}
+		tries += 1
+		if network != "unixgram" || tries >= retryTries {
+			fail err
+		}
+		tide.Sleep(retryPause)
+	}
+}
+
 fn run() ! {
 	let args = quarry.Args()
 	let prio = try mint.Atoi(args[3])
@@ -57,10 +97,10 @@ fn run() ! {
 		if f[0] == "C" {
 			w.Close()
 		} else if f[0] == "W" {
-			let n = try w.Write(unhex(f[1]))
+			try writeRetry(mut w, args[1], unhex(f[1]))
 		} else if f[0] == "S" {
 			let sev = try mint.Atoi(f[1])
-			try sendAt(mut w, sev, str(unhex(f[2])))
+			try sendRetry(mut w, args[1], sev, str(unhex(f[2])))
 		} else {
 			fail "unknown operation {f[0]}"
 		}

@@ -94,6 +94,16 @@ dbaddr=${TINHUB_TEST_DB%%/*}
 export TINHUB_DB_ADDR="$dbaddr" TINHUB_DB_NAME="${TINHUB_TEST_DB#*/}" TINHUB_DB_USER="${TINHUB_TEST_DB_USER:-}" TINHUB_DB_PASSWORD="${TINHUB_TEST_DB_PASSWORD:-}"
 export TINHUB_SECRETS_NONCE=test-nonce-secret-0123456789 TINHUB_SECRETS_COOKIE=test-cookie-key-0123456789 TINHUB_TEST_ROUTES=1
 export TINHUB_LISTEN=127.0.0.1:18431 TINHUB_SHUTDOWN_DEADLINE=10s TINHUB_PACKS_DIR="$tmp/packs"
+# on a bucket when there is one, as production runs (content in object storage); else the directory store
+if [ -n "${TINHUB_TEST_S3:-}" ]; then
+	export TINHUB_S3_ENDPOINT="$TINHUB_TEST_S3" TINHUB_S3_ACCESS_KEY="$TINHUB_TEST_S3_KEY" TINHUB_S3_SECRET_KEY="$TINHUB_TEST_S3_SECRET"
+	export TINHUB_S3_REGION=us-east-1 TINHUB_S3_BUCKET="tinhub-server-$$"
+	# packs copy of an empty directory makes the bucket and copies nothing
+	TINHUB_PACKS_STORE=dir "$tmp/tinhub" packs copy > "$tmp/bucket.out" 2>&1 || { cat "$tmp/bucket.out"; echo "FAIL tinhub: the bucket"; exit 1; }
+	export TINHUB_PACKS_STORE=s3
+else
+	export TINHUB_PACKS_STORE=dir
+fi
 "$tmp/queue_worker" reset > /dev/null
 if "$tmp/tinhub" run > "$tmp/early.log" 2>&1; then
 	echo "FAIL tinhub run started before tinhub migrate"; exit 1
@@ -110,6 +120,14 @@ newest=$(ls products/tinhub/db/migrations/*.sql | wc -l | tr -d ' ')
 "$tmp/tinhub" migrate | grep -q 'applied 0 migrations' || { echo "FAIL tinhub migrate twice"; exit 1; }
 echo "PASS tinhub migrate (concurrent, idempotent)"
 "$tmp/tinhub" packs sweep | grep -q 'swept' || { echo "FAIL tinhub packs sweep"; exit 1; }
+if [ "$TINHUB_PACKS_STORE" = s3 ]; then
+	# a bucket the keys cannot read stops the node at start, not at its first push
+	if TINHUB_S3_SECRET_KEY=wrong-secret "$tmp/tinhub" run > "$tmp/nobucket.log" 2>&1; then
+		echo "FAIL tinhub run started with a wrong bucket key"; exit 1
+	fi
+	grep -q "the bucket tinhub-server-$$" "$tmp/nobucket.log" || { cat "$tmp/nobucket.log"; echo "FAIL tinhub run's refusal of the bucket"; exit 1; }
+	echo "PASS tinhub run refuses a bucket it cannot read"
+fi
 "$tmp/tinhub" run > "$tmp/server.log" 2>&1 &
 pid=$!
 up=0
@@ -127,4 +145,4 @@ wait "$slow"
 grep -q 'waited 2000ms' "$tmp/slow.out" || { cat "$tmp/slow.out" "$tmp/server.log"; echo "FAIL a request in flight at SIGTERM did not complete"; exit 1; }
 wait "$pid" || { cat "$tmp/server.log"; echo "FAIL tinhub run did not exit cleanly after SIGTERM"; exit 1; }
 pid=
-echo "PASS tinhub server (readiness, drain)"
+echo "PASS tinhub server (readiness, drain; packs.store = $TINHUB_PACKS_STORE)"

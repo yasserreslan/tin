@@ -15,12 +15,27 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/syslog"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
+
+// retry runs send again while a Unix datagram socket refuses it with ENOBUFS, for up to 10 s. On macOS a full collector
+// buffer makes the send fail instead of block, and log/syslog gives up after one reconnect, so the collector would wait
+// forever for the rest (#1077). A refused datagram was not delivered, so sending it again duplicates nothing.
+func retry(send func() error) error {
+	err := send()
+	for tries := 0; err != nil && errors.Is(err, syscall.ENOBUFS) && tries < 5000; tries++ {
+		time.Sleep(2 * time.Millisecond)
+		err = send()
+	}
+	return err
+}
 
 func main() {
 	if len(os.Args) != 5 {
@@ -60,13 +75,13 @@ func main() {
 				fmt.Fprintln(os.Stderr, "severity:", fields[1])
 				os.Exit(2)
 			}
-			err = methods[sev](string(msg))
+			err = retry(func() error { return methods[sev](string(msg)) })
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "send:", err)
 				os.Exit(1)
 			}
 		case "W":
-			if _, err := w.Write(msg); err != nil {
+			if err := retry(func() error { _, err := w.Write(msg); return err }); err != nil {
 				fmt.Fprintln(os.Stderr, "write:", err)
 				os.Exit(1)
 			}
