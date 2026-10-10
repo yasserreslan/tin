@@ -500,9 +500,31 @@ fn readVersions(c call, ch str) !versionsOut {
 		}
 	}
 	if len(out.versions) == 0 {
+		// a unique prefix (tit and the web show twelve letters) answers as its change, under the change's full id
+		if len(ch) >= 4 && len(ch) < 32 {
+			let full = try changeOfPrefix(c, ch)
+			if len(full) > 0 {
+				return try readVersions(c, full)
+			}
+		}
 		fail fault.Wrap(ErrNotFound, "no change {ch}")
 	}
 	return out
+}
+
+// changeOfPrefix is the one change of the repository whose id starts with prefix, "" for none; more than one is a
+// not-found that says so.
+fn changeOfPrefix(c call, prefix str) !str {
+	let repoId = c.r.Id
+	let n = len(prefix)
+	let rows = try c.d.Stale.Query("SELECT DISTINCT change_id FROM changes WHERE repo_id = {repoId} AND left(change_id, {n}::int) = {prefix} LIMIT 2")
+	if len(rows.Rows) > 1 {
+		fail fault.Wrap(ErrNotFound, "{prefix} matches more than one change: give more of its letters")
+	}
+	if len(rows.Rows) == 0 {
+		return ""
+	}
+	return rows.Rows[0][0].Text()
 }
 
 type fileOut struct {

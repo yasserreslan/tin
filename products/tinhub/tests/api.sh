@@ -68,6 +68,9 @@ get "$r/changes" '(.changes | length) == 1 and .changes[0].newest.version == 1 a
 change=$(jq -r '.changes[0].change' "$tmp/out.json")
 get "$r/changes?limit=1" '(.changes | length) == 1'
 get "$r/changes/$change" '.change == "'"$change"'" and (.versions | length) == 1 and .versions[0].op == 1'
+# a unique prefix, as tit and the web show a change (#1129), answers with the full id; too short a one is not found
+get "$r/changes/$(echo "$change" | cut -c1-12)" '.change == "'"$change"'" and (.versions | length) == 1'
+status "$r/changes/$(echo "$change" | cut -c1-3)" 404 not_found
 get "$r/changes/$change/diff" '.from == 0 and .to == 1 and (.files | length) == 1 and .files[0].kind == "added" and .files[0].path == "a.txt"'
 blob=$(jq -r '.files[0].new_blob' "$tmp/out.json")
 get "$r/stacks/ada" '(.changes | length) == 0'
