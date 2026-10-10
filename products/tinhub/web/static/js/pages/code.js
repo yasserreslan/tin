@@ -277,7 +277,7 @@ function renderBlob(ctx, body, bar, repo, base, apiBase, rev, path, res) {
 	}
 	const box = h("div.box", {}, strip, head, content);
 	const mainCol = h("div", {}, bar, box);
-	body.replaceChildren(outlineBox.childNodes.length ? h("div.layout-aside", { style: { "grid-template-columns": "minmax(0,1fr) 260px" } }, mainCol, outlineBox) : mainCol);
+	body.replaceChildren(outlineBox.childNodes.length ? h("div.layout-aside.narrow", {}, mainCol, outlineBox) : mainCol);
 	latestCommit(repo, res.commit, path).then(
 		(c) => ctx.alive() && strip.replaceWith(commitStrip(base, c, rev, path)),
 		() => strip.replaceChildren(h("span.muted", {}, "History unavailable.")),

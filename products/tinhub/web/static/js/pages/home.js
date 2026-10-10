@@ -72,7 +72,7 @@ async function dashboard(ctx, u) {
 	ctx.title("Dashboard");
 	const left = h("aside.col", { style: { gap: "20px" } });
 	const center = h("div");
-	ctx.main.replaceChildren(h("div.container.page", {}, h("div.layout-sidebar", { style: { "grid-template-columns": "300px minmax(0,1fr)" } }, left, center)));
+	ctx.main.replaceChildren(h("div.container.page", {}, h("div.layout-sidebar.wide.feed-first", {}, left, center)));
 
 	// your repositories
 	const repoBox = h("div.box", {}, h("div.box-head", {}, h("b.grow", {}, "Your repositories"), btn("New", { sm: true, primary: true, icon: "plus", href: "/new" })), skeleton(5));
