@@ -130,8 +130,9 @@ panic, 1 when startup fails, or with the code passed to `quarry.Exit`.
   documentation (`tools/gen/gendoc.tin` builds [STDLIB.md](STDLIB.md) from them).
 - **Statements end at a newline.** There are no semicolons in source. A line whose last
   token is an operator, `,`, `(`, `[` or `{` continues on the next line; so does a call or
-  literal whose brackets are still open. Write the opening brace of a block on the same
-  line.
+  literal whose brackets are still open. A bare `!` result (`Close() !` in a shape,
+  `fn(Job) !` as a field's type) ends its line. Write the opening brace of a block on the
+  same line.
 - **Identifiers**: letters, digits and `_`, not starting with a digit. `_` alone is the
   blank identifier.
 - **Reserved words** (never names): `break catch const continue defer detach else enum
