@@ -10,6 +10,9 @@ import "twine"
 // tinc -g: a DWARF line table and the functions' names in the executable (#409 macOS, #370 Linux), read back here without a debugger:
 // the sections are found in the ELF or Mach-O file, the line program is run, and the compilation unit's subprograms are listed.
 // Without -g the executable has none of it, and with it the program prints the same.
+// The same line, file-table and function-range assertions below run for Linux arm64 and amd64; addresses are intentionally
+// compared only between Tin's reader and Go's reader, never pinned. The writer currently emits no DW_LNS_set_prologue_end
+// opcode, so prologue-end rows cannot be asserted for either architecture until the writer has that feature.
 
 fn fixture() str {
 	return ci.Join(ci.Root(), "tools/ci/fixtures/debug_lines.tin")
@@ -193,6 +196,7 @@ fn checkTarget(target str, dir str) {
 		}
 	}
 	ci.Test(target + ": at least one PC maps", mapped)
+	ci.Test(target + ": the line-table prologue has source files", len(table.Files) > 0)
 	ci.Same(target + ": the first file", table.Files[0], fixture())
 	ci.Test(target + ": the sequence ends", table.Rows[len(table.Rows) - 1].End)
 	// addresses never go back, and the statements of the fixture are there, in order within a function
@@ -218,6 +222,15 @@ fn checkTarget(target str, dir str) {
 		}
 		ci.Test(target + ": line " + mint.Itoa(want), found)
 	}
+	// Keep the first executable source row tied to the fixture's first statement on both native targets.
+	mut firstSource = false
+	for r in table.Rows {
+		if !r.End && r.File == 1 {
+			firstSource = r.Line == 9
+			break
+		}
+	}
+	ci.Test(target + ": first source row is the first add statement", firstSource)
 	let dies = dwarf.Dies(info, abbrev) catch err {
 		ci.Fail(target + ": " + say.Str(err))
 		panic("unreachable")
