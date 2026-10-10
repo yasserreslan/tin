@@ -77,6 +77,10 @@ fn main() {
 	mut badHash = i64(0)
 	mut scanFound = false
 	mut scanValue = i64(0)
+	mut retryValue = i64(0)
+	mut retryOK = false
+	mut freshValue = i64(0)
+	mut freshOK = false
 	for i in i64(0)..n {
 		kk = lcg(kk)
 		let value = m[kk]
@@ -102,6 +106,14 @@ fn main() {
 				scanValue = entryValue
 			}
 		}
+		let (retried, retryFound) = m[badKey]
+		retryValue = retried
+		retryOK = retryFound
+		let freshMap = make(map[i64]i64)
+		freshMap[badKey] = scanValue
+		let (freshGot, freshFound) = freshMap[badKey]
+		freshValue = freshGot
+		freshOK = freshFound
 	}
-	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash, scanFound, scanValue)
+	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash, scanFound, scanValue, retryValue, retryOK, freshValue, freshOK)
 }
