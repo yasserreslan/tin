@@ -27,9 +27,10 @@ export function commitRow(base, c) {
 				c.committer && c.committer.name !== c.author.name ? h("span", {}, "with ", c.committer.name) : null,
 				time(c.committer.when),
 				c.change ? h("a.chip", { href: `${base}/change/${c.change}`, title: "Change " + c.change }, icon("change", "sm"), fmt.shortChange(c.change)) : null,
+				// with the commit's details, where it wraps on a phone rather than squeezing the title
+				c.signed ? h("span.badge.green.outline", { title: "Signed by its author's key" }, icon("signed"), "Signed") : null,
 			),
 		),
-		c.signed ? h("span.badge.green.outline", { title: "Signed by its author's key" }, icon("signed"), "Signed") : null,
 		h("a.btn.sm.mono", { href: `${base}/commit/${c.id}` }, fmt.short(c.id, 8)),
 		copyButton(c.id, { title: "Copy the commit id" }),
 		h("a.btn.sm.icon.ghost", { href: `${base}/tree/${c.id}`, title: "Browse the files at this commit", "aria-label": "Browse files" }, icon("code", "sm")),
