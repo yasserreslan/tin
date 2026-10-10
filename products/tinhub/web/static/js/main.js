@@ -104,11 +104,21 @@ async function route(r) {
 	} finally {
 		clearTimeout(slow);
 	}
+	if (current.token === token) showActiveTabs();
 	if (current.token === token && r.scroll !== false) {
 		if (r.hash) {
 			const el = document.getElementById(r.hash);
 			if (el) el.scrollIntoView({ block: "center" });
 		} else window.scrollTo(0, 0);
+	}
+}
+
+// showActiveTabs scrolls each tab strip wider than the screen, as on a phone, so its current tab is in view.
+function showActiveTabs() {
+	for (const a of main.querySelectorAll(".tabs > a.active, .sidenav > a.active")) {
+		const nav = a.parentElement;
+		if (nav.scrollWidth <= nav.clientWidth) continue;
+		nav.scrollLeft += a.getBoundingClientRect().left - nav.getBoundingClientRect().left - (nav.clientWidth - a.offsetWidth) / 2;
 	}
 }
 
