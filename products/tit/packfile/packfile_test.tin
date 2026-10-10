@@ -726,3 +726,48 @@ fn TestRanged(t mut crucible.T) {
 	quarry.RemoveAll(d) catch _ {
 	}
 }
+
+// A pack fitted to a memory budget it would outgrow read whole is read by ranges however many objects are read, and
+// keeps at most a quarter of the budget of decoded entries; without a budget it is read whole after 64 (tinhub: a log of
+// a large repository read the whole pack within a 16 MiB request).
+fn TestBudget(t mut crucible.T) {
+	mut r = dice.New(13)
+	mut s = store.NewMem()
+	mut ids = []object.Id{}
+	for i in 0..300 {
+		let id = s.PutRaw(object.Kind.Blob, str(r.Bytes(200 + r.Intn(1500)))) catch _ {
+			object.NoId
+		}
+		ids = append(ids, id)
+	}
+	let d = fresh("budget")
+	let written = Write(mut s, ids, d) catch err {
+		t.Error("write: {fault.Message(err)}")
+		return
+	}
+	t.True("larger than wholeUnder", written.size > wholeUnder)
+	mut fitted = Open(written.Path) catch err {
+		t.Error("open: {fault.Message(err)}")
+		return
+	}
+	fitted.Budget(written.size * 2)
+	mut plain = Open(written.Path) catch err {
+		t.Error("open: {fault.Message(err)}")
+		return
+	}
+	mut wrong = 0
+	for id in ids {
+		let (k1, b1, e1) = fitted.GetRaw(id)
+		let (k2, b2, e2) = plain.GetRaw(id)
+		let (k3, b3, e3) = s.GetRaw(id)
+		if e1 != nil || e2 != nil || e3 != nil || k1 != k3 || b1 != b3 || k2 != k3 || b2 != b3 {
+			wrong += 1
+		}
+	}
+	crucible.Equal(mut t, "objects read back wrong", wrong, 0)
+	t.False("fitted to the budget: still read by ranges", fitted.loaded)
+	t.True("no budget: read whole", plain.loaded)
+	t.True("decoded entries kept within a quarter of the budget", fitted.held <= written.size / 2)
+	quarry.RemoveAll(d) catch _ {
+	}
+}

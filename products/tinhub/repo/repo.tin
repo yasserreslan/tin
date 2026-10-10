@@ -116,11 +116,16 @@ fn (r mut PgRepo) Packs() ![]packfile.Pack {
 	mut out = []packfile.Pack{}
 	for h in hashes {
 		let path = try r.localPack(h)
-		let p = try packfile.Open(path)
+		mut p = try packfile.Open(path)
+		p.Budget(packBudget)
 		out = append(out, p)
 	}
 	return out
 }
+
+// packBudget is the memory a pack's reading is fitted to (packfile.Pack.Budget): the API's read budget (16 MiB,
+// design/tinhub.md §8), so a log or a compare of a large repository reads its pack entry by entry instead of whole.
+const packBudget = 16 << 20
 
 // localPack is a file holding the pack (with its index beside it), fetched into the cache when the store has none.
 fn (r mut PgRepo) localPack(hash str) !str {
