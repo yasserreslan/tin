@@ -25,6 +25,13 @@ const SECTIONS = [
 	{ key: "audit", label: "Audit log", icon: "scroll" },
 ];
 
+// ROLES are the roles a person or team is given on a repository, as its pickers show them.
+const ROLES = [
+	["read", "Read"],
+	["write", "Write"],
+	["admin", "Admin"],
+];
+
 const HOOK_KINDS = ["push", "review.opened", "review.voted", "review.comment", "review.check", "review.landed", "review.state"];
 
 export async function render(ctx) {
@@ -109,15 +116,18 @@ const PAGES = {
 			const teams = isOrg ? ((await api.get(`/orgs/${repo.owner}/teams`).catch(() => ({ teams: [] }))).teams || []) : [];
 			const roleSel = (role, onChange) => {
 				const s = select(
-					[
-						["read", "Read"],
-						["write", "Write"],
-						["admin", "Admin"],
-					],
+					ROLES,
 					role,
 					{ style: { width: "110px", height: "30px" }, "aria-label": "Role" },
 				);
-				s.onchange = () => onChange(s.value).catch((err) => toast(err.message, "error"));
+				s.onchange = () =>
+					onChange(s.value).then(
+						() => (role = s.value),
+						(err) => {
+							s.value = role;
+							toast(err.message, "error");
+						},
+					);
 				return s;
 			};
 			const removeBtn = (what, fn) => {
@@ -131,7 +141,7 @@ const PAGES = {
 				return b;
 			};
 			const who = userInput();
-			const role = select(["read", "write", "admin"], "write", { style: { width: "110px" }, "aria-label": "Role" });
+			const role = select(ROLES, "write", { style: { width: "110px" }, "aria-label": "Role" });
 			const add = btn("Add", { primary: true, icon: "plus" });
 			add.onclick = () =>
 				busy(add, async () => {
@@ -164,7 +174,7 @@ const PAGES = {
 							"",
 							{ style: { width: "180px" }, "aria-label": "Team" },
 						);
-						const trole = select(["read", "write", "admin"], "read", { style: { width: "110px" }, "aria-label": "Role" });
+						const trole = select(ROLES, "read", { style: { width: "110px" }, "aria-label": "Role" });
 						const addT = btn("Add team", { icon: "plus" });
 						addT.onclick = () =>
 							busy(addT, async () => {
