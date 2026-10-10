@@ -178,6 +178,25 @@ through the API. Under `/api/v1/repos/{owner}/{repo}`:
 Review events (`review.opened`, `review.voted`, `review.comment`, `review.check`, `review.landed`, `review.state`) reach
 webhooks, mail and the live websocket. See [design/tinhub.md §14](../../design/tinhub.md#14-reviews-comments-checks-and-landing-1025).
 
+## The web UI
+
+The same binary serves the pages: every page URL answers the app shell, which loads the UI (plain ES modules and CSS
+under `web/static`, embedded at build time, no build step and no Node at run time) and reads and writes through the
+JSON API. There is a page for every feature: the code and its history, changes and stacks, reviews with semantic diffs
+and line comments, votes and landing, checks, benchmark history, releases, replay failure groups, activity, repository
+and org settings, account settings and site administration. Sign-in is a key: the page shows a code, and
+`tit login <site> --code CODE` approves it. See [design/tinhub.md §15](../../design/tinhub.md#15-the-web-layer-1081).
+
+To work on the UI against a running node, set `web.dir` to `products/tinhub/web/static`: files are read from disk on
+every request. `web/dev/seed.sh` fills a fresh node with people, an org, repositories, a reviewed stack, benchmark
+history and a release:
+
+```sh
+TINHUB_WEB_DIR=$PWD/products/tinhub/web/static tinhub run &
+sh products/tinhub/web/dev/seed.sh path/to/tinhub path/to/tit   # then open the URL it prints
+node --test products/tinhub/web/test/*.test.js                 # the UI's unit tests
+```
+
 ## Health and shutdown
 
 - `GET /healthz`: 200 while the process runs.
@@ -204,5 +223,6 @@ timed and recorded with tit, a change made three times slower failing its check 
 With `TINHUB_TEST_REDIS=host:port` as well, the accounts tests also check that sessions survive a restart and that a
 login code is claimed once (under a random key prefix).
 
-The test database is emptied by the tests. CI runs the Postgres checks on Linux x86-64 against the runner's
+`tests/web.sh` checks the shell, its security headers and the assets against a running node, and runs the UI's unit
+tests when Node is installed. The test database is emptied by the tests. CI runs the Postgres checks on Linux x86-64 against the runner's
 PostgreSQL, and the rest on every native job.

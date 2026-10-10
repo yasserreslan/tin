@@ -713,6 +713,8 @@ does not start with `/api/` or `/-/` (those keep a JSON or plain 404). The pages
 | `…/commits/<rev>[/<path>]`, `…/commit/<id>`, `…/refs` | history, a commit and its diff, branches and tags |
 | `…/changes`, `…/stacks/<user>`, `…/reviews`, `…/change/<id>` | changes, a person's stacks, reviews, one review |
 | `…/releases[/<tag>]`, `…/bench[/<name>]`, `…/replay[/<group>]` | releases, benchmark history, replay failure groups |
+| `…/change/<id>/files`, `…/checks`, `…/bench`, `…/behaviour` | one review's semantic diff (any version, against its base or the version before, with comments on lines), checks, benchmark verdict, behaviour run |
+| `…/activity` | the repository's events, live |
 | `…/settings/<section>` | the repository's settings (admin) |
 
 **Assets.** `/-/<build>/<path>` serves the embedded file at `path`, where `build` is the first 12 hex digits of the
@@ -758,9 +760,21 @@ them, in lists too). A write never acts as `accounts.System()`: no signed-in use
 | `GET /api/v1/repos/<o>/<r>/events`, `GET /api/v1/feed` | live events of a repository; of those the caller follows or owns |
 | `GET /api/v1/repos/<o>/<r>/resolve?rev=&path=` | the commit `rev` names, and at `path` a tree's entries or a blob's id and size |
 | `GET /api/v1/repos/<o>/<r>/log?rev=&path=&cursor=&limit=` | commits from `rev`, newest first; with `path`, those that changed it |
+| `GET /api/v1/repos/<o>/<r>/raw/<path>?rev=[&download=1]` | a file's bytes, `nosniff` and `Content-Security-Policy: default-src 'none'; …; sandbox`; `immutable` when `rev` is a commit id |
+| `GET /api/v1/repos/<o>/<r>/compare?from=&to=` | the files changed between two revisions (`kind, path, old_path, old_blob, new_blob`); a commit's diff is `from` its first parent |
+| `GET /api/v1/repos/<o>/<r>/replay/grants` | who holds a replay grant: `users`, `teams` (admin) |
 | `POST /api/v1/orgs`, `GET …/<org>/members`, `PUT\|DELETE …/members/<user>` | orgs and members (`member`, `owner`) |
 | `GET\|POST /api/v1/orgs/<org>/teams`, `DELETE …/<team>`, `GET\|PUT\|DELETE …/<team>/members[/<user>]` | teams |
 | `POST /api/v1/invites`, `GET /api/v1/invites` | an invite (site admins; org owners into their org) and its one-use code; pending invites |
 
 `GET /api/v1/repos/<o>/<r>` also answers `description`, `role` (the caller's: `none`, `read`, `write`, `admin`),
-`following`, `pushed_at` and `created_at`.
+`following`, `pushed_at` and `created_at`. `GET …/reviews` answers, for each review, the newest version's `commit`,
+`opened_by` (a name) and `created_at`; `GET …/changes/<change>/review` adds `opened_by_name` and `landed_by_name`.
+
+**Reviews from tit.** `tit push` of a branch sends a version of every change on its first-parent line above the trunk
+(`stack.trunk`, else `main`), each replacing the version the server had (from its heads, else from
+`.tit/pushed/<remote>`, which records what this client pushed), so pushing a stack opens its reviews and pushing an
+amended change (`tit sync`) adds its next version. Pushing the trunk itself, or a tag, sends none.
+
+**Owner names** that are the app's first path segments (`about admin api assets explore healthz help join login
+logout metrics new readyz search settings static tit`) are reserved: no user or org may take one.
