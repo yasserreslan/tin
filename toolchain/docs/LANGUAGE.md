@@ -2107,7 +2107,8 @@ fn main() {
 - `argo.Get(text, mut v)` fills a struct, slice (appending) or map (adding entries; a map
   with integer keys reads each member name as a base-10 integer that must fit the key type,
   as Go does: `"+7"` and `"007"` are 7, `"x"` or `"256"` for a `u8` key is a fault, #716);
-  nested struct fields are filled in place, `?T` fields accept `null` (nil), `null` for a value
+  nested struct fields are filled in place, as is the struct a `?S` field already holds,
+  a slice field appends (a duplicate member replaces what the first one appended, #1149), `?T` fields accept `null` (nil), `null` for a value
   that cannot be nil is read as Go reads it (a field keeps its value, so a slice or map field
   is left as it was where Go makes it nil; an element or map value is its zero value; #715),
   unknown members are skipped, numbers follow the JSON grammar and must fit their type (`007`, `1.`, `700`

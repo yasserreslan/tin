@@ -1509,5 +1509,25 @@
       "exit": 1,
       "stderr_contains": "E701 NOT_MUT: cannot modify parameter 'files'"
     }
+  },
+  {
+    "source": "argo-duplicate-members.tin",
+    "issue": 1149,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "dup slice: ss=1 [b] p=nil q=/0 m=0 b=0\ndup slice empty: ss=0 [] p=nil q=/0 m=0 b=0\ndup opt struct: ss=0 [] p=x/1 q=/0 m=0 b=0\ndup struct: ss=0 [] p=nil q=x/1 m=0 b=0\ndup map: ss=0 [] p=nil q=/0 m=2 b=0\nneg zero u8: fault argo: expected an integer in [0, 255] at offset 5, found \"-\"\nneg zero ok: ss=0 [] p=nil q=/0 m=0 b=0\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "argo-field-fill.tin",
+    "issue": 1149,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "[keep] old/9\ntrue\n[3]\nfault\n[keep] [keep]\n[keep y]\nargo: expected an integer in [0, 255] at offset 4, found \"-\"\n0\n",
+      "stderr": ""
+    }
   }
 ]
