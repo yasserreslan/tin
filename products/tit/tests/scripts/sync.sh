@@ -114,3 +114,20 @@ trunk=$(t -C "$d/server" log --format=id -n 1 main)
 [ "$(t -C "$d/server" log --format=change -n 2 feat | tr '\n' ' ')" = "$bchanges" ] || fail "feat's change ids"
 [ "$(t -C "$d/server" log --format=change -n 2 cfeat | tr '\n' ' ')" = "$cchanges" ] || fail "cfeat's change ids"
 echo "ok two users' stacks both rebased onto the moved trunk and pushed"
+
+# the bottom change of c's stack lands on main as it is: sync replays only the change above it, not the landed one
+# again; then the rest lands and sync moves cfeat to main with nothing to replay
+cd "$d/server"
+t merge "$(t log --format=id -n 1 cfeat~1)" > /dev/null || fail "landing cfeat one on the server's main"
+cd "$d/c"
+t sync > "$d/out.txt" || fail "sync after a landing: $(cat "$d/out.txt")"
+grep -q "rebased 1 change " "$d/out.txt" || fail "sync after a landing said: $(cat "$d/out.txt")"
+[ "$(t log --format=subject -n 3 | tr '\n' '|')" = "cfeat two|cfeat one|b on main|" ] || fail "c's stack after a landing: $(t log --format=subject -n 3)"
+[ "$(t log --format=id -n 1 HEAD~1)" = "$(t -C "$d/server" log --format=id -n 1 main)" ] || fail "cfeat one was replayed again instead of being the landed commit"
+[ "$(t stack | grep -c '^  ')" = 1 ] || fail "the stack after a landing: $(t stack)"
+cd "$d/server"
+t merge "$(t log --format=id -n 1 cfeat)" > /dev/null || fail "landing cfeat two"
+cd "$d/c"
+t sync > "$d/out.txt" || fail "sync after the whole stack landed: $(cat "$d/out.txt")"
+[ "$(t log --format=id -n 1)" = "$(t -C "$d/server" log --format=id -n 1 main)" ] || fail "cfeat is not main after the stack landed: $(t log --format=subject -n 2)"
+echo "ok sync drops the changes that landed on the trunk"
