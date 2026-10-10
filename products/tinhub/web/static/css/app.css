@@ -619,6 +619,8 @@ a.hash:hover { color: var(--accent); }
 /* ---- tables ---- */
 
 .table { width: 100%; border-collapse: collapse; font-size: var(--t-sm); }
+/* a box around a table scrolls it sideways on a phone instead of cutting its last columns off */
+.box:has(> .table) { overflow-x: auto; }
 .table th { text-align: left; font-weight: 600; color: var(--fg-muted); font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .05em; padding: 10px var(--s-4); background: var(--bg-soft); border-bottom: 1px solid var(--border); }
 .table td { padding: 10px var(--s-4); border-top: 1px solid var(--border-faint); vertical-align: middle; }
 .table tr:hover td { background: var(--bg-hover); }

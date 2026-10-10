@@ -424,7 +424,9 @@ fn deleteMirror(q anvil.Req, w mut anvil.Out) {
 // ---- the audit log ----
 
 // auditJson writes audit rows as {"entries": [{"id", "at", "actor", "action", "target_kind", "target_id", "detail",
-// "ip"}], "next"}; the detail is the row's JSON as it is.
+// "ip", "target_name", "user_name", "team_name"}], "next"}; the detail is the row's JSON as it is, and the names are
+// what its ids name now (the target's, and the detail's user and team), "" for none: the log keeps ids, which a
+// rename does not change.
 fn auditJson(rows postgres.Rows, n i64, ip bool) str {
 	mut b = []u8{}
 	b = append(b, "{{\"entries\":["...)
@@ -460,6 +462,12 @@ fn auditJson(rows postgres.Rows, n i64, ip bool) str {
 			b = append(b, ",\"ip\":"...)
 			argo.Put(mut b, x[7].Text())
 		}
+		b = append(b, ",\"target_name\":"...)
+		argo.Put(mut b, x[8].Text())
+		b = append(b, ",\"user_name\":"...)
+		argo.Put(mut b, x[9].Text())
+		b = append(b, ",\"team_name\":"...)
+		argo.Put(mut b, x[10].Text())
 		b = append(b, '}')
 	}
 	b = append(b, "],\"next\":"...)
@@ -484,7 +492,7 @@ fn repoAudit(q anvil.Req, w mut anvil.Out) {
 	let n = pageLimit(q)
 	let more = n + 1
 	let id = c.r.Id
-	let rows = c.d.Db.Query("SELECT a.id, extract(epoch FROM a.at)::bigint, coalesce(o.name, ''), a.action, a.target_kind, a.target_id, coalesce(a.detail::text, ''), a.ip FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id LEFT JOIN owners o ON o.id = u.owner_id WHERE a.target_kind = 'repo' AND a.target_id = {id} AND a.id < {before} ORDER BY a.id DESC LIMIT {more}") catch err {
+	let rows = c.d.Db.Query("SELECT a.id, extract(epoch FROM a.at)::bigint, coalesce(o.name, ''), a.action, a.target_kind, a.target_id, coalesce(a.detail::text, ''), a.ip, coalesce(CASE a.target_kind WHEN 'repo' THEN (SELECT ro.name || '/' || tr.name FROM repos tr JOIN owners ro ON ro.id = tr.owner_id WHERE tr.id = a.target_id) WHEN 'user' THEN (SELECT uo.name FROM users tu JOIN owners uo ON uo.id = tu.owner_id WHERE tu.id = a.target_id) WHEN 'org' THEN (SELECT oo.name FROM orgs tg JOIN owners oo ON oo.id = tg.owner_id WHERE tg.id = a.target_id) WHEN 'team' THEN (SELECT oo.name || '/' || tt.name FROM teams tt JOIN orgs tg ON tg.id = tt.org_id JOIN owners oo ON oo.id = tg.owner_id WHERE tt.id = a.target_id) WHEN 'owner' THEN (SELECT name FROM owners WHERE id = a.target_id) END, ''), coalesce((SELECT xo.name FROM users xu JOIN owners xo ON xo.id = xu.owner_id WHERE xu.id = CASE WHEN a.detail->>'user' ~ '^[0-9]+$' THEN (a.detail->>'user')::bigint END), ''), coalesce((SELECT xg.name || '/' || xt.name FROM teams xt JOIN orgs xr ON xr.id = xt.org_id JOIN owners xg ON xg.id = xr.owner_id WHERE xt.id = CASE WHEN a.detail->>'team' ~ '^[0-9]+$' THEN (a.detail->>'team')::bigint END), '') FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id LEFT JOIN owners o ON o.id = u.owner_id WHERE a.target_kind = 'repo' AND a.target_id = {id} AND a.id < {before} ORDER BY a.id DESC LIMIT {more}") catch err {
 		answerErr(mut w, err)
 		return
 	}
@@ -511,7 +519,7 @@ fn siteAudit(q anvil.Req, w mut anvil.Out) {
 	let n = pageLimit(q)
 	let more = n + 1
 	let action = q.Param("action")
-	let rows = c.d.Db.Query("SELECT a.id, extract(epoch FROM a.at)::bigint, coalesce(o.name, ''), a.action, a.target_kind, a.target_id, coalesce(a.detail::text, ''), a.ip FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id LEFT JOIN owners o ON o.id = u.owner_id WHERE a.id < {before} AND left(a.action, length({action})) = {action} ORDER BY a.id DESC LIMIT {more}") catch err {
+	let rows = c.d.Db.Query("SELECT a.id, extract(epoch FROM a.at)::bigint, coalesce(o.name, ''), a.action, a.target_kind, a.target_id, coalesce(a.detail::text, ''), a.ip, coalesce(CASE a.target_kind WHEN 'repo' THEN (SELECT ro.name || '/' || tr.name FROM repos tr JOIN owners ro ON ro.id = tr.owner_id WHERE tr.id = a.target_id) WHEN 'user' THEN (SELECT uo.name FROM users tu JOIN owners uo ON uo.id = tu.owner_id WHERE tu.id = a.target_id) WHEN 'org' THEN (SELECT oo.name FROM orgs tg JOIN owners oo ON oo.id = tg.owner_id WHERE tg.id = a.target_id) WHEN 'team' THEN (SELECT oo.name || '/' || tt.name FROM teams tt JOIN orgs tg ON tg.id = tt.org_id JOIN owners oo ON oo.id = tg.owner_id WHERE tt.id = a.target_id) WHEN 'owner' THEN (SELECT name FROM owners WHERE id = a.target_id) END, ''), coalesce((SELECT xo.name FROM users xu JOIN owners xo ON xo.id = xu.owner_id WHERE xu.id = CASE WHEN a.detail->>'user' ~ '^[0-9]+$' THEN (a.detail->>'user')::bigint END), ''), coalesce((SELECT xg.name || '/' || xt.name FROM teams xt JOIN orgs xr ON xr.id = xt.org_id JOIN owners xg ON xg.id = xr.owner_id WHERE xt.id = CASE WHEN a.detail->>'team' ~ '^[0-9]+$' THEN (a.detail->>'team')::bigint END), '') FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id LEFT JOIN owners o ON o.id = u.owner_id WHERE a.id < {before} AND left(a.action, length({action})) = {action} ORDER BY a.id DESC LIMIT {more}") catch err {
 		answerErr(mut w, err)
 		return
 	}

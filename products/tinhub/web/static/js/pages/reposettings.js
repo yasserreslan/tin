@@ -392,9 +392,18 @@ const PAGES = {
 	},
 };
 
-export function auditRow(e, { ip = false } = {}) {
-	const d = e.detail && typeof e.detail === "object" ? Object.entries(e.detail).map(([k, v]) => h("span.chip", { style: { "margin-right": "4px" } }, `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`)) : null;
-	return h("tr", {}, h("td.small.muted", { style: { "white-space": "nowrap" } }, time(e.at)), h("td", {}, e.actor ? h("a", { href: "/" + e.actor }, e.actor) : h("span.muted", {}, "system")), h("td", {}, h("span.mono.small", {}, e.action), ip && e.ip ? h("div.tiny.muted", {}, e.ip) : null), h("td.small", {}, d));
+// auditRow is one audit_log row. The log keeps ids; the server names what they name now (target_name, user_name,
+// team_name), shown in their place. target shows what the row is about, for the site's log.
+export function auditRow(e, { ip = false, target = false } = {}) {
+	const named = { user: e.user_name, team: e.team_name };
+	const chip = (k, v) => {
+		const name = named[k];
+		const text = name || (typeof v === "object" ? JSON.stringify(v) : v);
+		return h("span.chip", { style: { "margin-right": "4px" }, title: name ? `${k} ${v}` : null }, `${k}: `, name ? h("a", { href: "/" + name.split("/")[0] }, text) : text);
+	};
+	const d = e.detail && typeof e.detail === "object" ? Object.entries(e.detail).map(([k, v]) => chip(k, v)) : null;
+	const what = target && e.target_name ? h("div.small", {}, h("a", { href: "/" + (e.target_kind === "team" ? e.target_name.split("/")[0] : e.target_name) }, e.target_name)) : null;
+	return h("tr", {}, h("td.small.muted", { style: { "white-space": "nowrap" } }, time(e.at)), h("td", {}, e.actor ? h("a", { href: "/" + e.actor }, e.actor) : h("span.muted", {}, "system")), h("td", {}, h("span.mono.small", {}, e.action), what, ip && e.ip ? h("div.tiny.muted", {}, e.ip) : null), h("td.small", {}, d));
 }
 
 // hookDialog adds a webhook (hook null) or edits one.

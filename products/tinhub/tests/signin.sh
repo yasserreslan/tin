@@ -142,6 +142,12 @@ claim=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/tit/v1/login/$logi
 curl -sf -b "$tmp/jar" -c "$tmp/jar" -X POST "$base/tit/v1/login/$login/session" > "$tmp/out" || fail "the claim: $(cat "$tmp/out")"
 code=$(curl -s -b "$tmp/jar" -o "$tmp/out" -w '%{http_code}' "$base/api/v1/repos/ada/tin")
 [ "$code" = 200 ] || fail "a signed-in read of the private repository: $code $(cat "$tmp/out")"
+# the audit log names what its ids name (#1127): an admin's grant reads as ada/tin and bob, not as two numbers
+"$driver" grant bob@example.com admin
+code=$(curl -s -b "$tmp/jar" -o "$tmp/out" -w '%{http_code}' -X PUT -H 'Content-Type: application/json' -d '{"role":"admin"}' "$base/api/v1/repos/ada/tin/collaborators/bob")
+[ "$code" = 204 ] || fail "an admin's grant: $code $(cat "$tmp/out")"
+curl -sf -b "$tmp/jar" "$base/api/v1/repos/ada/tin/audit" > "$tmp/out" || fail "the repository's audit log"
+jq -e '.entries[0].action == "repo.grant" and .entries[0].target_name == "ada/tin" and .entries[0].user_name == "bob" and .entries[0].team_name == ""' "$tmp/out" > /dev/null || fail "the audit log's names: $(cat "$tmp/out")"
 curl -sf -b "$tmp/jar" -c "$tmp/jar" -X POST "$base/tit/v1/logout" > /dev/null || fail "sign-out"
 code=$(curl -s -b "$tmp/jar" -o /dev/null -w '%{http_code}' "$base/api/v1/repos/ada/tin")
 [ "$code" = 404 ] || fail "a read after sign-out: $code"
