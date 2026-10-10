@@ -43,7 +43,9 @@ s3.secret_key = file:/run/secrets/tinhub-s3
 packs.dir = /var/lib/tinhub
 ```
 
-`packs.store = dir` keeps content on local disk at `packs.dir` instead. It is for development and tests only.
+For development, `products/tinhub/dev/local-s3.sh` starts a local S3-compatible store (MinIO, built from the version CI
+pins) and prints the `TINHUB_S3_*` variables, so a laptop runs tinhub on object storage the way production does.
+`packs.store = dir` keeps content on local disk at `packs.dir` instead; it is for tests and quick experiments only.
 
 ## Packs
 

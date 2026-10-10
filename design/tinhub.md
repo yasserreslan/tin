@@ -25,7 +25,8 @@ replay capsules and sign-in) is design/tit.md §15 – §18; nothing here change
    `packs.store = s3`, the default), from a single server up. Postgres keeps what points at them and their state (a
    `packs` row's hash, size and `pending`/`live`/`retired`; a `diffs` row's kind and `stored`), never the bytes. A
    node's disk holds a cache of the bucket and scratch space, nothing of record, so a node is replaced without a copy
-   and phase 2 only adds nodes. `packs.store = dir` (content on local disk) is for development and tests only.
+   and phase 2 only adds nodes. Development runs on a local S3-compatible store (`products/tinhub/dev/local-s3.sh`,
+   MinIO); `packs.store = dir` (content on local disk) is for tests and quick experiments only.
 4. **Refs, change versions, the repository lock and the job queue live in Postgres.** A push commits in one
    transaction under `pg_advisory_xact_lock(<repo id>)`: the pack goes live, refs move by compare-and-swap, the new
    change versions are inserted and a `push` event is queued. This state stays in Postgres because it changes, and
