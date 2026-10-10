@@ -130,12 +130,17 @@ fn BuildMenus(win gpuwin.Window, cfg Settings) appkit.Menu {
 	item(m, nav, "Previous Problem", "\xef\x9c\x83", shift, editor.CmdPrevProblem)
 	item(m, nav, "Jump to Matching Bracket", "\\", cmd | shift, editor.CmdJumpBracket)
 	item(m, nav, "Go to Declaration", "b", cmd | shift, editor.CmdDefinition)
+	item(m, nav, "Go to Type Declaration", "b", ctrl | shift, editor.CmdTypeDeclaration)
+	item(m, nav, "Go to Implementation", "b", cmd | alt, editor.CmdImplementations)
+	item(m, nav, "Show Usages", "\xef\x9c\x8a", cmd | alt, editor.CmdUsages)
 	appkit.AddItem(m, nav, "Back", "\xef\x9c\x82", cmd | alt, editor.CmdBack)
+	appkit.AddItem(m, nav, "Forward", "\xef\x9c\x83", cmd | alt, editor.CmdForward)
 	appkit.AddItem(m, nav, "Quick Info", "q", ctrl, editor.CmdInfo)
 	appkit.AddItem(m, nav, "Complete", " ", ctrl, editor.CmdComplete)
 
 	let run = appkit.AddMenu(m, "Run")
 	item(m, run, "Run File", "r", cmd, editor.CmdRun)
+	item(m, run, "Build File", "\xef\x9c\x8c", cmd, editor.CmdBuild)
 
 	let window = appkit.AddMenu(m, "Window")
 	appkit.AddSystemItem(window, "Minimize", "performMiniaturize:", "m", cmd)

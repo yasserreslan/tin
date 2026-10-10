@@ -74,6 +74,13 @@ fn (ws Workspace) titleBar(t mut ui.Tree) {
 		t.Text(ws.Proj.Branch, render.FontUI, th.Muted, ui.Box())
 		t.Close()
 	}
+	if twine.HasSuffix(ws.Ed.Buf.Path, ".tin") {
+		// Build and Run for the active Tin file, at the right as in GoLand's toolbar
+		t.Leaf(ui.Box().Flex(1.0), 0)
+		ws.iconButton(mut t, render.IconBuild, idBuildButton)
+		ws.iconButton(mut t, render.IconRun, idRunButton)
+		t.Leaf(ui.Box().Wide(0.0), 0)
+	}
 	t.Close()
 	t.Leaf(ui.Box().High(1.0).Fill(th.Border), 0)
 }
@@ -399,7 +406,9 @@ fn (ws Workspace) pickerOverlay(t mut ui.Tree) {
 	if len(ws.Picker.Items) > 0 {
 		t.Leaf(ui.Box().High(1.0).Fill(th.Border), 0)
 		t.Open(ui.VBox().PadXY(6.0, 6.0), 0)
-		for i in 0..len(ws.Picker.Items) {
+		// at most pickerRows of a long list, the chosen one among them
+		let first = max(0, min(ws.Picker.Sel - pickerRows / 2, len(ws.Picker.Items) - pickerRows))
+		for i in first..min(first + pickerRows, len(ws.Picker.Items)) {
 			mut bg = ui.None()
 			if i == ws.Picker.Sel {
 				bg = th.Selected
@@ -412,6 +421,9 @@ fn (ws Workspace) pickerOverlay(t mut ui.Tree) {
 	}
 	t.Close()
 }
+
+// pickerRows is how many of the picker's choices show at once.
+const pickerRows = 14
 
 // breadcrumbs is the path of the pane's file below the project folder, a chevron between its parts.
 fn (ws Workspace) breadcrumbs(t mut ui.Tree, pane i64) {

@@ -61,6 +61,12 @@ written with hygiene keep
 	trailing
 the end
  23 true
+usages picker true true [nav.tin:8  let a = helper() nav.tin:9  let b = helper() + a]
+narrowed [nav.tin:9  let b = helper() + a]
+went to false 9 10 nav.tin:9  let b = helper() + a
+back at 3 5
+symbols [helper  fn main  fn]
+at symbol false 7 at main
 shell running true 2 3
 terminal output seen true
 terminal selection pty-ok-42

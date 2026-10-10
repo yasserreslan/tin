@@ -279,6 +279,33 @@ fn localNamed(syms []Sym, path str, n i64, name str) (Sym, bool) {
 	return all[at], true
 }
 
+// valueType is the type, as (package, name), of the value written qualifier ("p" or "line.start") at line n (0-based) of the
+// file: a local variable or parameter, then perhaps fields. typed is false when it is not known; the name is "" when the type
+// is not a named one (a number, a str, a slice).
+fn valueType(syms []Sym, path str, n i64, qualifier str) (str, str, bool) {
+	let parts = twine.Split(qualifier, ".")
+	let (local, isLocal) = localNamed(syms, path, n + 1, parts[0])
+	if !isLocal {
+		return "", "", false
+	}
+	let (tpkg, tname0) = TypeParts(local.Type)
+	mut owner = tpkg
+	if len(tpkg) == 0 {
+		owner = local.Pkg
+	}
+	mut tname = tname0
+	mut typed = len(local.Type) > 0
+	mut step = 1
+	for step < len(parts) && len(tname) > 0 && typed {
+		let (npkg, nname, found) = fieldType(syms, owner, tname, parts[step])
+		owner = npkg
+		tname = nname
+		typed = found
+		step += 1
+	}
+	return owner, tname, typed
+}
+
 // TypeParts splits a type as the compiler writes it ("mut geo.Point", "?Point", "[]str") into the package ("" when
 // unqualified) and the name of the named type it is, or "" when it is not one (a slice, a map, a number).
 fn TypeParts(t str) (str, str) {
@@ -319,6 +346,30 @@ fn Resolve(syms []Sym, path str, text str, n i64, col i64) []Sym {
 	let (qualifier, dotted) = qualifierAt(l, from)
 	if dotted {
 		let isPackage = isImported(text, qualifier)
+		if !isPackage {
+			// a value whose type is known: that type's method, or its field (found as its type's declaration, named after it)
+			let (owner, tname, typed) = valueType(syms, path, n, qualifier)
+			if typed && len(tname) > 0 {
+				for sym in syms {
+					if sym.Kind == "method" && sym.Name == word && sym.Recv == tname && sym.Pkg == owner {
+						found = append(found, sym)
+					}
+				}
+				if len(found) > 0 {
+					return found
+				}
+				for sym in syms {
+					if sym.Kind == "type" && sym.Name == tname && sym.Pkg == owner {
+						for m in sym.Members {
+							if m.Name == word {
+								found = append(found, Sym{Kind: "field", Name: word, Pkg: owner, File: sym.File, Line: sym.Line, Col: sym.Col, EndCol: sym.EndCol, Recv: tname, Exported: sym.Exported, Sig: word + " " + m.Detail, Members: []Member{}, DeclEndLine: sym.DeclEndLine, DeclEndCol: sym.DeclEndCol, DocLine: sym.DocLine})
+								return found
+							}
+						}
+					}
+				}
+			}
+		}
 		for sym in syms {
 			if isPackage && sym.Pkg == qualifier && sym.Name == word && sym.Recv == "" {
 				found = append(found, sym)
@@ -373,33 +424,15 @@ fn Complete(syms []Sym, path str, text str, n i64, col i64) []Item {
 		let isPackage = isImported(text, qualifier)
 		if !isPackage {
 			// a local variable or parameter of a known type, perhaps followed by fields: that type's fields and methods
-			let parts = twine.Split(qualifier, ".")
-			let (local, isLocal) = localNamed(syms, path, n + 1, parts[0])
-			if isLocal {
-				let (tpkg, tname0) = TypeParts(local.Type)
-				mut owner = tpkg
-				if len(tpkg) == 0 {
-					owner = local.Pkg
-				}
-				mut tname = tname0
-				mut typed = len(local.Type) > 0
-				mut step = 1
-				for step < len(parts) && len(tname) > 0 && typed {
-					let (npkg, nname, found) = fieldType(syms, owner, tname, parts[step])
-					owner = npkg
-					tname = nname
-					typed = found
-					step += 1
-				}
-				if typed && len(tname) == 0 {
-					// the value is of a type without fields or methods (a number, a str, a slice)
-					return items
-				}
-				if typed && len(tname) > 0 {
-					let (found, known) = membersOf(syms, owner, tname)
-					if known {
-						return found
-					}
+			let (owner, tname, typed) = valueType(syms, path, n, qualifier)
+			if typed && len(tname) == 0 {
+				// the value is of a type without fields or methods (a number, a str, a slice)
+				return items
+			}
+			if typed && len(tname) > 0 {
+				let (found, known) = membersOf(syms, owner, tname)
+				if known {
+					return found
 				}
 			}
 		}

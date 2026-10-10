@@ -172,6 +172,7 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 	let textX = x + gutter
 	let lh = ed.LineH
 	let pad = (lh - render.LineHeight(render.FontCode)) / 2.0
+	let linked = ed.Linked()
 	mut n = 0
 	mut row = ed.Scroll
 	mut seg = ed.ScrollSeg
@@ -240,6 +241,13 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 				from = from + at + len(needle)
 			}
 		}
+		// the name Cmd+click would follow, while the command key is held over it: drawn as a link
+		mut lf = -1
+		mut lt = -1
+		if linked && row == ed.LinkRow {
+			lf = textedit.DisplayCol(line, ed.LinkFrom, 4)
+			lt = textedit.DisplayCol(line, ed.LinkTo, 4)
+		}
 		// the text, in runs of one syntax class
 		mut i = hs
 		mut last = hs + ed.cols() + 2
@@ -248,10 +256,13 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 		}
 		for i < len(cells) && i < last {
 			mut j = i + 1
-			for j < len(cells) && j < last && cells[j].kind == cells[i].kind {
+			for j < len(cells) && j < last && cells[j].kind == cells[i].kind && j != lf && j != lt {
 				j += 1
 			}
-			let color = kindColor(th, cells[i].kind)
+			mut color = kindColor(th, cells[i].kind)
+			if i >= lf && i < lt {
+				color = th.Accent
+			}
 			mut k = i
 			for k < j {
 				mut m = k
@@ -269,6 +280,12 @@ fn (ed mut Editor) Paint(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 				k = m
 			}
 			i = j
+		}
+		if lt > lf {
+			let (u0, u1, inRow) = ed.clampSpan(lf, lt, hs)
+			if inRow {
+				render.Fill(mut scene, textX + f64(u0 - hs) * ed.CharW, top + lh - 3.0, f64(u1 - u0) * ed.CharW, 1.0, th.Accent)
+			}
 		}
 		// the whitespace marks: a dot for a space, an arrow at the start of a tab
 		if showWhitespace {
@@ -456,11 +473,20 @@ fn (ed Editor) scrollbar(th theme.Theme, x f64, y f64, w f64, h f64, scene mut m
 	render.FillRound(mut scene, x + w - 9.0, y + at, 6.0, thumb, 3.0, ui.HexA(0xffffff, 0.18))
 }
 
-// popups draws the completion list or the quick info next to the caret.
+// popups draws the completion list or the quick info next to the caret, or what a link is below it.
 fn (ed Editor) popups(th theme.Theme, x f64, y f64, w f64, h f64, scene mut metal.Scene) {
 	mut lines = []str{}
 	mut sel = -1
-	if ed.CompOpen {
+	let b = ed.Buf
+	mut atRow = b.Row
+	mut atCol = b.Col
+	if !ed.CompOpen && len(ed.Info) == 0 && ed.Linked() {
+		for l in ed.LinkInfo {
+			lines = append(lines, l)
+		}
+		atRow = ed.LinkRow
+		atCol = ed.LinkFrom
+	} else if ed.CompOpen {
 		let first = max(0, min(ed.CompSel - 4, len(ed.Comp) - 9))
 		mut i = first
 		for i < len(ed.Comp) && i < first + 9 {
@@ -488,9 +514,8 @@ fn (ed Editor) popups(th theme.Theme, x f64, y f64, w f64, h f64, scene mut meta
 		widest = max(widest, len(l))
 	}
 	widest = min(widest, 100)
-	let b = ed.Buf
-	let pdc = textedit.DisplayCol(b.Lines[b.Row], b.Col, 4)
-	let cn = ed.visRow(b.Row, pdc)
+	let pdc = textedit.DisplayCol(b.Lines[atRow], atCol, 4)
+	let cn = ed.visRow(atRow, pdc)
 	let cx = x + ed.gutterW() + f64(pdc - ed.baseOf(pdc)) * ed.CharW
 	let boxW = f64(widest + 2) * ed.CharW
 	let boxH = f64(len(lines)) * ed.LineH + 8.0

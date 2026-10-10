@@ -47,11 +47,37 @@ const CmdSelectNext = 47
 const CmdCloseAll = 46
 const CmdNextProblem = 50
 const CmdPrevProblem = 51
+const CmdBuild = 60
+const CmdForward = 61
+const CmdTypeDeclaration = 62
+const CmdImplementations = 63
+const CmdUsages = 64
 
 // Perform does a menu command by pressing the key that does the same.
 fn (ed mut Editor) Perform(cmd i64) {
 	if cmd == CmdBack {
 		ed.handleKey(Key{Code: keyLeft, Flags: flagCmd | flagAlt, Chars: ""})
+		return
+	}
+	if cmd == CmdForward {
+		ed.handleKey(Key{Code: keyRight, Flags: flagCmd | flagAlt, Chars: ""})
+		return
+	}
+	if cmd == CmdBuild {
+		ed.Mode = modeEdit
+		ed.buildFile()
+		return
+	}
+	if cmd == CmdTypeDeclaration {
+		ed.gotoTypeDeclaration()
+		return
+	}
+	if cmd == CmdImplementations {
+		ed.gotoImplementations()
+		return
+	}
+	if cmd == CmdUsages {
+		ed.showUsagesAtCaret()
 		return
 	}
 	if cmd == CmdToggleGuides {

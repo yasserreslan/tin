@@ -5,6 +5,7 @@ package app
 import "appkit"
 import "../editor"
 import "gpuwin"
+import "../language"
 import "metal"
 import "quarry"
 import "../render"
@@ -34,6 +35,12 @@ fn Run(paths []str) bool {
 			ws.OpenFile(p)
 		}
 	}
+	// tin, tinc and tit for the terminal, Run, Build and the checks: found again when another folder opens
+	mut toolsFor = ""
+	if ws.HasProj {
+		toolsFor = ws.Proj.Root
+	}
+	language.Setup(toolsFor)
 	let (win, gpu) = gpuwin.Open("Tinland", 1180.0, 760.0)
 	if gpu.Device == 0 {
 		quarry.Eprintln("Tinland draws on the GPU and this machine has none: " + gpu.Error)
@@ -87,6 +94,10 @@ fn Run(paths []str) bool {
 			got = gpuwin.Pump(win, 0.0)
 		}
 		take(mut ws, win)
+		if ws.HasProj && ws.Proj.Root != toolsFor {
+			toolsFor = ws.Proj.Root
+			language.Setup(toolsFor)
+		}
 		if ws.WantSettings {
 			ws.WantSettings = false
 			ws.OpenFile(EnsureSettingsFile())
@@ -117,8 +128,12 @@ fn Run(paths []str) bool {
 	ws.StopLsp()
 	ws.StopTerminal()
 	ws.Ed.Cleanup()
+	language.Cleanup()
 	return true
 }
+
+// pointing is whether the mouse shows the pointing hand.
+mut pointing = false
 
 // take acts on everything the callbacks queued.
 fn take(ws mut workspace.Workspace, win gpuwin.Window) {
@@ -154,6 +169,15 @@ fn take(ws mut workspace.Workspace, win gpuwin.Window) {
 // event handles a key or mouse event of the window.
 fn event(ws mut workspace.Workspace, win gpuwin.Window, e i64) {
 	ws.Event(e)
+	// over a name Cmd+click would follow the mouse is the pointing hand, as over a link
+	if ws.Pointing() != pointing {
+		pointing = ws.Pointing()
+		mut cursor = "arrowCursor"
+		if pointing {
+			cursor = "pointingHandCursor"
+		}
+		appkit.Send(appkit.Send(appkit.Class("NSCursor"), cursor), "set")
+	}
 	if ws.Menu == workspace.MenuTree {
 		ws.Menu = workspace.MenuNone
 		gpuwin.PopUp(win, e, []str{"New File...", "New Folder...", "-", "Rename...", "Delete", "-", "Refresh"}, []i64{workspace.CmdNewFile, workspace.CmdNewFolder2, 0, workspace.CmdRename, workspace.CmdDelete, 0, workspace.CmdRefresh})

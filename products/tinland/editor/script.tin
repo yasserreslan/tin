@@ -1,6 +1,7 @@
 package editor
 
 import "appkit"
+import "mint"
 import "say"
 import "textedit"
 import "tide"
@@ -92,6 +93,10 @@ fn (ed Editor) dump() {
 //   nextproblem, prevproblem  put the caret at the next or previous problem the compiler found
 //   one, closeall leaves one empty tab
 //   guides           toggles the indent guides (prints the new state)
+//   click:MODS:R:C   a click with the modifiers (cmd, cmd+alt, cmd+shift) on the character at line R, column C
+//   hover:R:C        the mouse over that character with the command key held: prints the link and what it says
+//   usages, impls, typedecl  Show Usages, Go to Implementation, Go to Type Declaration at the caret
+//   choices          prints the places offered to choose from; choose:N goes to the Nth (taking the list, as the picker does)
 //   snap:PATH        draws the editor and writes it as a PNG
 //   view:W,H         sets the window size in points
 fn RunScript(ed mut Editor, script str) {
@@ -261,6 +266,56 @@ fn RunScript(ed mut Editor, script str) {
 			say.Line("ruler:", ToggleRuler(), RulerColumn())
 		} else if step == "rulercol" {
 			say.Line("ruler column:", ed.RulerCol())
+		} else if twine.HasPrefix(step, "click:") || twine.HasPrefix(step, "hover:") {
+			// the point in the middle of the character at line R, column C (scrolled into view)
+			let parts = twine.Split(step, ":")
+			let row = parseInt(parts[len(parts) - 2]) - 1
+			let col = parseInt(parts[len(parts) - 1]) - 1
+			if row < ed.Scroll || row >= ed.Scroll + ed.rows() {
+				ed.Scroll = row
+			}
+			let dc = textedit.DisplayCol(ed.Buf.Lines[row], col, 4)
+			let px = ed.gutterW() + (f64(dc - ed.HScroll) + 0.5) * ed.CharW
+			let py = (f64(row - ed.Scroll) + 0.5) * ed.LineH
+			if parts[0] == "hover" {
+				ed.HoverLink(px, py, true)
+				mut word = ""
+				if ed.LinkRow >= 0 {
+					word = ed.Buf.Lines[ed.LinkRow][ed.LinkFrom:ed.LinkTo]
+				}
+				say.Line("link:", ed.Linked(), word, "|", twine.Join(ed.LinkInfo, " | "))
+			} else {
+				mut flags = 0
+				for m in twine.Split(parts[1], "+") {
+					if m == "cmd" {
+						flags = flags | flagCmd
+					} else if m == "alt" {
+						flags = flags | flagAlt
+					} else if m == "shift" {
+						flags = flags | flagShift
+					}
+				}
+				ed.MouseDown(px, py, 1, flags)
+				ed.MouseUp()
+			}
+		} else if step == "usages" {
+			ed.Perform(CmdUsages)
+		} else if step == "impls" {
+			ed.Perform(CmdImplementations)
+		} else if step == "typedecl" {
+			ed.Perform(CmdTypeDeclaration)
+		} else if step == "choices" {
+			say.Line("choices:", ed.ChoiceTitle, len(ed.Choices))
+			for c in ed.Choices {
+				say.Line("  " + c.At.Path + ":" + mint.Itoa(c.At.Row + 1) + ":" + mint.Itoa(c.At.Col + 1), c.Text)
+			}
+		} else if twine.HasPrefix(step, "choose:") {
+			let k = parseInt(step[7:]) - 1
+			if k >= 0 && k < len(ed.Choices) {
+				let to = ed.Choices[k].At
+				ed.Choices = []Choice{}
+				ed.GoTo(to)
+			}
 		} else if twine.HasPrefix(step, "snap:") {
 			ed.Snapshot(step[5:])
 		} else if twine.HasPrefix(step, "view:") {

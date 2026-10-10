@@ -25,6 +25,22 @@ fn (ed mut Editor) runFile() {
 	ed.Redraw = true
 }
 
+// buildFile compiles the active file with tinc into an executable beside it named after it (as tin build names it), and shows
+// what the compiler said in the output panel.
+fn (ed mut Editor) buildFile() {
+	if !twine.HasSuffix(ed.Buf.Path, ".tin") {
+		ed.Say("Build works on a saved .tin file")
+		return
+	}
+	if ed.Buf.Dirty && !ed.save(false) {
+		return
+	}
+	let out = ed.Buf.Path[:len(ed.Buf.Path) - 4]
+	ed.Output = language.Build(ed.Buf.Path, out, ed.Name())
+	ed.OutputOpen = true
+	ed.Redraw = true
+}
+
 // JumpTo opens the file and line named by a compiler message "path:line:col: ..." (false for any other line).
 fn (ed mut Editor) JumpTo(text str) bool {
 	let parts = twine.SplitN(text, ":", 4)

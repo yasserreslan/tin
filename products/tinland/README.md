@@ -49,15 +49,25 @@ open it (it is signed ad hoc, not with a developer identity, so the first time u
 | View > Toggle Whitespace (also in the palette) | show spaces as dots and tabs as arrows |
 | Cmd+Alt+[ , Cmd+Alt+] (Edit > Fold, Unfold, Unfold All) | fold the block at the caret (the lines indented deeper than its first line), open it; a click on the arrow in the gutter does the same. Up and Down skip a fold; a fold that would hide the caret opens; switching tabs drops the folds, and an edit that changes the number of lines moves them as if it was made at the caret |
 | Cmd+Shift+I | format the file with the rules of `tin fmt` |
-| Cmd+Shift+B or Cmd+click, Cmd+Alt+Left | go to the declaration of the name (in another file too), and back |
+| Cmd+click or Cmd+Shift+B, Cmd+Alt+Left and Right | as GoLand does: on a use of a name, go to its declaration (in another file too; a list to choose from when the name may mean several, such as a method of a value whose type is not known); on the declaration itself, its usages (straight there when there is one); on an import or a package's name, the package's source. Back and Forward retrace the jumps. Holding Cmd over a name draws it as a link, with its signature beside it and the pointing hand |
+| Cmd+Alt+click or Cmd+Alt+B, Cmd+Shift+click or Ctrl+Shift+B, Cmd+Alt+F7 | go to the implementations (of a shape: the types that have its methods; of a method: every method of that name), go to the declaration of the value's type, show the usages from a use as well |
 | Ctrl+Q | quick info: the signature and documentation of the name |
 | Ctrl+Space, or typing a `.` | completion: names after `pkg.`, methods and fields after another dot, the package's names (Up and Down choose, Tab or Return accepts, Escape closes); in Go, Rust, TypeScript, JavaScript and Python files a language server (`gopls`, `rust-analyzer`, `typescript-language-server`, `pyright-langserver` or `pylsp`, when installed: looked for in PATH, ~/go/bin, ~/.cargo/bin, /opt/homebrew/bin) completes and underlines its problems; in other files, the words of the open files |
-| Cmd+R | compile and run the file with `tinc` (output in a panel; click a compiler message to jump to it) |
+| Cmd+R, Cmd+F9 | compile and run the file with `tinc` (output in a panel; click a compiler message to jump to it), build it into an executable beside it named after it; the play and hammer buttons at the right of the title bar do the same for a Tin file |
 
 Every key command is also in the menu bar. Errors are underlined while you type: after a pause the compiler checks the text (`tinc -check -json` with the
 unsaved buffer as an overlay), the line gets a red mark and its message shows in the status line.
 
 Double click selects a word, triple click a line, and the status bar counts the selection's lines and characters beside the caret ("3 lines, 11 chars selected") and the whole text's ("274 lines, 1283 words, 8214 chars") beside the file's name; the wheel scrolls what is under the mouse; the divider beside the project panel drags; the title bar moves the window (a double click zooms it); a right click in the project panel opens a menu (new file, new folder, rename, delete). The folder and the open files come back at the next start when no path is given. Files and folders dropped on the window open; a file changed by another program is read again (or flagged when it has unsaved changes); binary files are not opened; a file with CRLF line endings is saved with them. Syntax colors for Tin, Go, Rust, JavaScript and TypeScript, Python, C and C++, Java, Swift, shell, JSON, YAML and TOML, and Markdown, chosen by the file name. A minimap at the right of an editor wider than 640 points shows the whole file as bars with the part in the window shaded; a click or a drag in it scrolls. Lines git sees as added, changed or removed have a mark in the gutter.
+
+## tin, tinc and tit
+
+Tinland puts the Tin toolchain first in PATH for everything it starts: the terminal's shell, Run and Build, the error checks and
+the language servers. An application opened from the Finder or the Dock gets only `/usr/bin:/bin:/usr/sbin:/sbin`, so Tinland
+started that way first asks the login shell for the user's PATH. The tree it uses is the first of: the one `$TINLAND_TINC`
+belongs to, the open folder when it is a Tin checkout, `$TIN_ROOT`, the tree of the `tin` (or `tinc`) on the PATH, `~/.tin`, and
+the tree Tinland was built in. In a tree with tit's source, `tit` is built into the tree's `bin/` the first time it is used and
+again when the compiler or its source changed; otherwise it is the `tit` on the PATH or in `~/.tin/bin`.
 
 ## Without a window
 

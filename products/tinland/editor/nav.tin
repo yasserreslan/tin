@@ -1,5 +1,6 @@
 package editor
 
+import "mint"
 import "sift"
 import "textedit"
 import "tinsym"
@@ -15,35 +16,108 @@ type Place struct {
 	Col  i64
 }
 
-// gotoDefinition moves to the declaration of the name at the caret (opening its file when it is in another).
+// gotoDefinition is Cmd+B and Cmd+click, GoLand's Go to Declaration or Usages: on a use of a name, its declaration (a list to
+// choose from when the name may mean several); on the declaration itself, its usages (straight there when there is one); on
+// an import path or a package's name, the package's source.
 fn (ed mut Editor) gotoDefinition() {
+	if ed.openPackageAt(ed.Buf.Row, ed.Buf.Col) {
+		return
+	}
+	let (decl, isDecl) = ed.declarationAt(ed.Buf.Row, ed.Buf.Col)
+	if isDecl {
+		ed.showUsages(decl)
+		return
+	}
 	let found = tinsym.Resolve(ed.Syms, ed.Buf.Path, ed.Buf.Text(), ed.Buf.Row, ed.Buf.Col)
 	if len(found) == 0 {
 		ed.Say("no declaration found")
 		return
 	}
-	let sym = found[0]
-	let here = Place{Path: ed.Buf.Path, Row: ed.Buf.Row, Col: ed.Buf.Col}
-	if sym.File != ed.Buf.Path && !ed.Load(sym.File) {
+	if len(found) > 1 {
+		mut choices = []Choice{}
+		for sym in found {
+			choices = append(choices, Choice{At: ed.placeOf(sym), Text: sym.Sig})
+		}
+		ed.offer("Declarations of " + found[0].Name, choices)
 		return
 	}
-	ed.Back = append(ed.Back, here)
-	ed.Buf.MoveTo(sym.Line - 1, sym.Col - 1, false)
-	ed.Say(sym.Sig)
+	let sym = found[0]
+	if ed.jump(ed.placeOf(sym)) {
+		ed.Say(sym.Sig)
+	}
 }
 
-// goBack returns to where the last go to declaration came from.
+// jump moves to the place, opening its file, and remembers where it came from for Back; a new jump forgets Forward.
+fn (ed mut Editor) jump(to Place) bool {
+	let here = Place{Path: ed.Buf.Path, Row: ed.Buf.Row, Col: ed.Buf.Col}
+	if to.Path != ed.Buf.Path && !ed.Load(to.Path) {
+		return false
+	}
+	ed.Back = append(ed.Back, here)
+	ed.Fwd = []Place{}
+	ed.moveTo(to)
+	return true
+}
+
+// GoTo goes to a place chosen from the editor's Choices (the workspace's picker calls it); Back returns from it.
+fn (ed mut Editor) GoTo(to Place) bool {
+	return ed.jump(to)
+}
+
+// moveTo puts the caret at the place in the open file (inside its text) and scrolls it into view.
+fn (ed mut Editor) moveTo(at Place) {
+	let row = max(0, min(at.Row, len(ed.Buf.Lines) - 1))
+	let col = max(0, min(at.Col, len(ed.Buf.Lines[row])))
+	ed.Buf.MoveTo(row, col, false)
+	ed.Follow = true
+	ed.Redraw = true
+}
+
+// offer gives the places to choose from (the workspace shows them); with only one there is nothing to choose: it goes there.
+fn (ed mut Editor) offer(title str, choices []Choice) {
+	if len(choices) == 0 {
+		return
+	}
+	if len(choices) == 1 {
+		ed.jump(choices[0].At)
+		ed.Say(title + ": " + choices[0].Text)
+		return
+	}
+	ed.Choices = choices
+	ed.ChoiceTitle = title
+	ed.Say(title + ": " + mint.Itoa(len(choices)))
+}
+
+// goBack returns to where the last jump came from.
 fn (ed mut Editor) goBack() {
 	if len(ed.Back) == 0 {
 		ed.Say("nowhere to go back to")
 		return
 	}
 	let at = ed.Back[len(ed.Back) - 1]
-	ed.Back = ed.Back[:len(ed.Back) - 1]
+	let here = Place{Path: ed.Buf.Path, Row: ed.Buf.Row, Col: ed.Buf.Col}
 	if at.Path != ed.Buf.Path && !ed.Load(at.Path) {
 		return
 	}
-	ed.Buf.MoveTo(at.Row, at.Col, false)
+	ed.Back = ed.Back[:len(ed.Back) - 1]
+	ed.Fwd = append(ed.Fwd, here)
+	ed.moveTo(at)
+}
+
+// goForward goes again where Back came from.
+fn (ed mut Editor) goForward() {
+	if len(ed.Fwd) == 0 {
+		ed.Say("nowhere to go forward to")
+		return
+	}
+	let at = ed.Fwd[len(ed.Fwd) - 1]
+	let here = Place{Path: ed.Buf.Path, Row: ed.Buf.Row, Col: ed.Buf.Col}
+	if at.Path != ed.Buf.Path && !ed.Load(at.Path) {
+		return
+	}
+	ed.Fwd = ed.Fwd[:len(ed.Fwd) - 1]
+	ed.Back = append(ed.Back, here)
+	ed.moveTo(at)
 }
 
 // quickInfo shows the signature and the documentation of the name at the caret.

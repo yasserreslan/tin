@@ -43,12 +43,18 @@ const evMouseUp = 2
 const evMouseMoved = 5
 const evMouseDragged = 6
 const evKeyDown = 10
+const evFlagsChanged = 12
 const evScroll = 22
 
 // Event acts on one window event: a key goes to the shortcuts and then the editor; the mouse is matched against what the last
 // frame drew.
 fn (ws mut Workspace) Event(e i64) {
 	let t = appkit.EventType(e)
+	if t == evFlagsChanged {
+		// the command key went down or up over the text: the name under the mouse becomes a link, or stops being one
+		ws.hoverLink(appkit.EventFlags(e))
+		return
+	}
 	if t == evKeyDown {
 		ws.key(appkit.EventKeyCode(e), appkit.EventFlags(e), appkit.EventChars(e))
 		return
@@ -78,6 +84,11 @@ fn (ws mut Workspace) Event(e i64) {
 			ws.Hover = over
 			ws.Dirty = true
 		}
+		mut flags = appkit.EventFlags(e)
+		if t == evMouseDragged {
+			flags = 0
+		}
+		ws.hoverLink(flags)
 	}
 	if t == evRightDown {
 		let id = ws.Hits.At(x, y)
@@ -103,6 +114,8 @@ fn (ws mut Workspace) Key(code i64, flags i64, chars str) {
 
 // key handles a key press: the workspace's own shortcuts first, then the editor.
 fn (ws mut Workspace) key(code i64, flags i64, chars str) {
+	// a key pressed with the command key held is a shortcut, not Cmd+hover: the link goes until the mouse moves again
+	ws.hoverLink(0)
 	if ws.Picker.Open {
 		ws.pickerKey(code, flags, chars)
 		return
@@ -136,7 +149,37 @@ fn (ws mut Workspace) key(code i64, flags i64, chars str) {
 	if chars == "." && (flags & appkit.ModCmd) == 0 {
 		ws.LspComplete()
 	}
+	ws.takeChoices()
 	ws.Dirty = true
+}
+
+// hoverLink is GoLand's Cmd+hover: while the command key is held (in flags), the name under the mouse that Cmd+click would
+// follow is drawn as a link in the pane under the mouse, with what it is beside it; every other pane shows none.
+fn (ws mut Workspace) hoverLink(flags i64) {
+	let cmd = (flags & appkit.ModCmd) != 0 && !ws.Picker.Open && ws.Drag == dragNone
+	let over = ws.Hits.At(ws.MouseX, ws.MouseY)
+	for p in 0..len(ws.Panes) {
+		mut changed = false
+		if cmd && isPane(over) && paneOf(over) == p {
+			let (ex, ey, ew, eh) = ws.Hits.Rect(over)
+			changed = ws.Panes[p].HoverLink(ws.MouseX - ex, ws.MouseY - ey, true)
+		} else {
+			changed = ws.Panes[p].HoverLink(0.0, 0.0, false)
+		}
+		if changed {
+			ws.Dirty = true
+		}
+	}
+}
+
+// Pointing reports whether a pane draws a link under the mouse (the application shows the pointing hand then).
+fn (ws Workspace) Pointing() bool {
+	for p in ws.Panes {
+		if p.Linked() {
+			return true
+		}
+	}
+	return false
 }
 
 // scroll moves what is under the mouse: the project panel, the output panel or the text.
@@ -166,6 +209,7 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		let (ex, ey, ew, eh) = ws.Hits.Rect(id)
 		ws.Ed.MouseDown(x - ex, y - ey, clicks, flags)
 		ws.Drag = dragText
+		ws.takeChoices()
 		return
 	}
 	if ws.Picker.Open {
@@ -184,6 +228,10 @@ fn (ws mut Workspace) press(x f64, y f64, clicks i64, flags i64) {
 		ws.Focus = FocusReplace
 	} else if id == idReplaceAll {
 		ws.ReplaceAll()
+	} else if id == idBuildButton {
+		ws.Ed.Perform(editor.CmdBuild)
+	} else if id == idRunButton {
+		ws.Ed.Perform(editor.CmdRun)
 	} else if id == idSearchCase {
 		ws.Search.Case = !ws.Search.Case
 		ws.Search.Done = false
@@ -415,6 +463,7 @@ fn (ws mut Workspace) Perform(cmd i64) {
 		}
 	} else {
 		ws.Ed.Perform(cmd)
+		ws.takeChoices()
 	}
 }
 

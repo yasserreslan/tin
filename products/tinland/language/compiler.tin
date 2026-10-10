@@ -11,11 +11,14 @@ import "twine"
 // and text and gets declarations, errors and output back, so the same calls serve the editor, a project panel and, later,
 // a language server client.
 
-// CompilerPath is the Tin compiler to use: $TINLAND_TINC, else tinc from the PATH.
+// CompilerPath is the Tin compiler to use: $TINLAND_TINC, else the one of the tree Setup found, else tinc from the PATH.
 fn CompilerPath() str {
 	let c = quarry.Getenv("TINLAND_TINC")
 	if len(c) > 0 {
 		return c
+	}
+	if len(tools.Root) > 0 {
+		return tools.Root + "/bin/tinc"
 	}
 	return "tinc"
 }
@@ -36,11 +39,16 @@ fn TinRoot(compiler str) str {
 // Capture runs a program (standard error folded into the output) for at most ten seconds and returns its exit code and
 // everything it printed. The time limit is perl's alarm, which is on every Mac.
 fn Capture(argv []str) (i64, str) {
+	return captureFor(10, argv)
+}
+
+// captureFor is Capture with a time limit of that many seconds.
+fn captureFor(seconds i64, argv []str) (i64, str) {
 	mut words = []str{}
 	for a in argv {
 		words = append(words, Quoted(a))
 	}
-	return appkit.RunCapture("exec perl -e 'alarm 10; exec @ARGV' " + twine.Join(words, " "))
+	return appkit.RunCapture("exec perl -e 'alarm " + mint.Itoa(seconds) + "; exec @ARGV' " + twine.Join(words, " "))
 }
 
 // Check has the compiler read path with text as its contents (overlay is a file the caller wrote the text to) and returns
@@ -84,4 +92,20 @@ fn Run(path str, exe str, name str) []str {
 	}
 	let lines = twine.Split(twine.TrimSpace(shown), "\n")
 	return append([]str{"-- " + name + ": " + title}, lines...)
+}
+
+// Build compiles path into the executable out with the compiler: a title (where it went, or that it did not compile) and the
+// lines the compiler printed.
+fn Build(path str, out str, name str) []str {
+	let (code, text) = Capture([]str{CompilerPath(), "-o", out, path})
+	mut title = "built " + out
+	if code != 0 {
+		title = "compile failed"
+	}
+	mut lines = []str{"-- " + name + ": " + title}
+	let shown = twine.TrimSpace(text)
+	if len(shown) > 0 {
+		lines = append(lines, twine.Split(shown, "\n")...)
+	}
+	return lines
 }

@@ -33,6 +33,8 @@ const IconGear = 15
 const IconText = 16
 const IconImage = 17
 const IconRefresh = 18
+const IconBuild = 19
+const IconRun = 20
 
 // Canvas is the GPU, the glyph atlas and the screen scale.
 type Canvas struct {
@@ -68,7 +70,7 @@ fn Init(gpu metal.Gpu, scale f64, codePoints f64) {
 	cv.Atlas.AddFont(uiBold, 13.0 * scale)
 	cv.Atlas.AddFont(uiFont, 11.0 * scale)
 	cv.Atlas.AddFont(codeFont, codePoints * scale)
-	for name in []str{"folder", "folder.fill", "doc", "chevron.left.forwardslash.chevron.right", "chevron.right", "chevron.down", "sidebar.left", "arrow.triangle.branch", "list.bullet.indent", "magnifyingglass", "exclamationmark.triangle", "terminal", "ladybug", "xmark", "plus", "gearshape", "doc.text", "photo", "arrow.clockwise"} {
+	for name in []str{"folder", "folder.fill", "doc", "chevron.left.forwardslash.chevron.right", "chevron.right", "chevron.down", "sidebar.left", "arrow.triangle.branch", "list.bullet.indent", "magnifyingglass", "exclamationmark.triangle", "terminal", "ladybug", "xmark", "plus", "gearshape", "doc.text", "photo", "arrow.clockwise", "hammer", "play.fill"} {
 		cv.Atlas.AddIcon(name)
 	}
 }
