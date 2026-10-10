@@ -6129,6 +6129,29 @@ fn argo_null_return(pos i64, body []i64, p i64) {
 	body = append(body, cast(i64, ifs))
 }
 
+// argo_zero_tail sets elements j.. of inline array x of type t to their zero value, as Go
+// does for the elements a shorter JSON array leaves out (#1208):
+//
+//	for j < N { x[j] = zero; j = j + 1 }
+//
+// An element type with no zero value (a map, a struct, a nested inline array) is left as it
+// was.
+fn argo_zero_tail(pos i64, body []i64, x Sym, j Sym, t Ty) {
+	let et = cast(Ty, t.elem)
+	let ek = kind_of(et)
+	if ek == K_MAP || ek == K_FUNC || ek == K_DYN || ek == K_VARRAY || (ek == K_STRUCT && (is_value_struct(et) == 0 || value_no_zero(et) != 0 || cast(i64, et.enum_) != 0)) {
+		return
+	}
+	let w = cast(WhileStmt, node_new(ST_WHILE, pos))
+	w.cond = mk_bin(pos, "<", sym_ref_node(pos, j), mk_int(pos, t.key, ty_int), ty_bool)
+	w.body = empty_block(pos)
+	mut wb = cast(Block, w.body).stmts
+	let el = mk_mem(pos, sym_ref_node(pos, x), sym_ref_node(pos, j), type_width(et), 0, cast(i64, et))
+	wb = append(wb, assign_stmt(pos, el, zero_value(pos, cast(i64, et))))
+	wb = append(wb, assign_stmt(pos, sym_ref_node(pos, j), mk_bin(pos, "+", sym_ref_node(pos, j), mk_int(pos, 1, ty_int), ty_int)))
+	body = append(body, cast(i64, w))
+}
+
 // argo_opt_struct reports whether ft is ?S for a struct S that is not an enum or a value
 // struct: such a field is filled in place when it already holds an object (#1149).
 fn argo_opt_struct(ft Ty) i64 {
@@ -6358,16 +6381,18 @@ fn argo_dfn(pos i64, t Ty) i64 {
 		}
 		argo_more(pos, wb, cast(i64, p), '}')
 	} else if k == K_VARRAY {
-		// Up to N elements in place; JSON elements past N are skipped, as Go does (#631).
+		// Up to N elements in place; JSON elements past N are skipped, and elements past the
+		// JSON array's end are set to their zero value, as Go does (#631, #1208).
 		let et = t.elem
+		let jv = declare_local(pos, "$", ty_int)
+		body = append(body, let_stmt(pos, cast(Sym, jv), mk_int(pos, 0, ty_int)))
 		let ifs4 = cast(IfStmt, node_new(ST_IF, pos))
 		ifs4.cond = mk_unot(pos, argo_rd(pos, cast(i64, p), "argo.rarr", ty_bool))
 		ifs4.then = empty_block(pos)
+		argo_zero_tail(pos, cast(Block, ifs4.then).stmts, cast(Sym, x), cast(Sym, jv), t)
 		mut vs15 = cast(Block, ifs4.then).stmts
 		vs15 = append(vs15, node_new(ST_RETURN, pos))
 		body = append(body, cast(i64, ifs4))
-		let jv = declare_local(pos, "$", ty_int)
-		body = append(body, let_stmt(pos, cast(Sym, jv), mk_int(pos, 0, ty_int)))
 		let w4 = forever(pos)
 		body = append(body, cast(i64, w4))
 		mut wb4 = cast(Block, w4.body).stmts
@@ -6395,6 +6420,7 @@ fn argo_dfn(pos i64, t Ty) i64 {
 		wb4 = append(wb4, assign_stmt(pos, sym_ref_node(pos, cast(Sym, jv)), mk_bin(pos, "+", sym_ref_node(pos, cast(Sym, jv)), mk_int(pos, 1, ty_int), ty_int)))
 		argo_err_return(pos, wb4, cast(i64, p))
 		argo_more(pos, wb4, cast(i64, p), ']')
+		argo_zero_tail(pos, body, cast(Sym, x), cast(Sym, jv), t)
 	} else if k == K_SLICE {
 		let et = t.elem
 		let ifs2 = cast(IfStmt, node_new(ST_IF, pos))
