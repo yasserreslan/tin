@@ -96,27 +96,42 @@ fn (r mut Reader) Next() !?Header {
 			if r.ext {
 				fail "tar: extension entry is not followed by a file"
 			}
+			// The end is two zero blocks, or one at the end of the data, as Go reads it: a zero
+			// block followed by anything else is a bad header.
+			let rest = i64(len(r.data)) - r.at - BlockSize
+			if rest > 0 && rest < BlockSize {
+				fail "tar: unexpected EOF in header"
+			}
+			if rest >= BlockSize && !zeroBlock(r.data[r.at+BlockSize:r.at+2*BlockSize]) {
+				fail "tar: zero block followed by a header"
+			}
 			r.ended = true
 			return nil
 		}
-		let expected = octal(b, 148, 8)
+		// Go accepts the checksum computed with signed or unsigned bytes.
+		let (expected, sumOK) = octalField(b, 148, 8)
 		mut sum = i64(0)
+		mut ssum = i64(0)
 		for i in 0..BlockSize {
 			if i >= 148 && i < 156 {
 				sum += 32
+				ssum += 32
 			} else {
 				sum += i64(b[i])
+				ssum += i64(i8(b[i]))
 			}
 		}
-		if expected < 0 || sum != expected {
+		if !sumOK || (sum != expected && ssum != expected) {
 			fail "tar: invalid header checksum"
 		}
-		let size = octal(b, 124, 12)
-		let mode = octal(b, 100, 8)
-		let uid = octal(b, 108, 8)
-		let gid = octal(b, 116, 8)
-		let mtime = octal(b, 136, 12)
-		if size < 0 || mode < 0 || uid < 0 || gid < 0 || mtime < 0 { fail "tar: invalid octal header field" }
+		let (size, ok1) = numeric(b, 124, 12)
+		let (mode, ok2) = numeric(b, 100, 8)
+		let (uid, ok3) = numeric(b, 108, 8)
+		let (gid, ok4) = numeric(b, 116, 8)
+		let (mtime, ok5) = numeric(b, 136, 12)
+		let (devmajor, ok6) = numeric(b, 329, 8)
+		let (devminor, ok7) = numeric(b, 337, 8)
+		if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || size < 0 || mode < 0 || uid < 0 || gid < 0 || mtime < 0 { fail "tar: invalid numeric header field" }
 		let f = b[156]
 		if f == u8('x') || f == u8('g') || f == u8('L') || f == u8('K') {
 			r.at += BlockSize
@@ -137,7 +152,7 @@ fn (r mut Reader) Next() !?Header {
 		let prefix = cstring(b, 345, 155)
 		mut fullName = name
 		if prefix != "" { fullName = prefix + "/" + name }
-		mut h = Header{Name: fullName, Mode: mode, Uid: uid, Gid: gid, Size: size, Mtime: mtime, MtimeNsec: 0, Type: ty, Linkname: cstring(b, 157, 100), Uname: cstring(b, 265, 32), Gname: cstring(b, 297, 32), Devmajor: octal(b, 329, 8), Devminor: octal(b, 337, 8)}
+		mut h = Header{Name: fullName, Mode: mode, Uid: uid, Gid: gid, Size: size, Mtime: mtime, MtimeNsec: 0, Type: ty, Linkname: cstring(b, 157, 100), Uname: cstring(b, 265, 32), Gname: cstring(b, 297, 32), Devmajor: devmajor, Devminor: devminor}
 		r.at += BlockSize
 		try applyRecords(mut h, r.global, r.local, r.longName, r.longLink)
 		if h.Size < 0 || h.Size > r.maxBytes {
@@ -566,18 +581,55 @@ fn cstring(b []u8, at i64, n i64) str {
 	return str(b[at:end])
 }
 
-fn octal(b []u8, at i64, n i64) i64 {
-	mut i = at
-	for i < at+n && (b[i] == 0 || b[i] == u8(' ')) { i += 1 }
-	mut v = i64(0)
-	mut any = false
-	for i < at+n && b[i] >= u8('0') && b[i] <= u8('7') {
-		any = true
-		v = v * 8 + i64(b[i] - u8('0'))
-		i += 1
+// numeric reads a number field as Go's parseNumeric does: base-256 when the first byte has its
+// high bit set (GNU tar writes values that do not fit the octal digits so, the second bit
+// marking a negative one), else octal. ok is false for a malformed field.
+fn numeric(b []u8, at i64, n i64) (i64, bool) {
+	if n > 0 && b[at]&0x80 != 0 {
+		mut inv = u8(0)
+		if b[at]&0x40 != 0 {
+			inv = 0xff
+		}
+		mut x = u64(0)
+		for i in 0..n {
+			mut c = b[at+i] ^ inv
+			if i == 0 {
+				c &= 0x7f
+			}
+			if x>>56 > 0 {
+				return 0, false
+			}
+			x = x<<8 | u64(c)
+		}
+		if x>>63 > 0 {
+			return 0, false
+		}
+		if inv == 0xff {
+			return ^i64(x), true
+		}
+		return i64(x), true
 	}
-	if !any { return -1 }
-	return v
+	return octalField(b, at, n)
+}
+
+// octalField reads an octal field as Go's parseOctal does: the spaces and NULs around the digits
+// are ignored, an empty field is 0, and the digits end at a NUL. ok is false for any other byte.
+fn octalField(b []u8, at i64, n i64) (i64, bool) {
+	mut lo = at
+	mut hi = at + n
+	for lo < hi && (b[lo] == 0 || b[lo] == u8(' ')) { lo += 1 }
+	for hi > lo && (b[hi-1] == 0 || b[hi-1] == u8(' ')) { hi -= 1 }
+	mut v = u64(0)
+	for i in lo..hi {
+		if b[i] == 0 {
+			break
+		}
+		if b[i] < u8('0') || b[i] > u8('7') || v>>61 > 0 {
+			return 0, false
+		}
+		v = v*8 + u64(b[i]-u8('0'))
+	}
+	return i64(v), true
 }
 
 fn putString(b mut []u8, at i64, n i64, s str) {

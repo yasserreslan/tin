@@ -1,0 +1,31 @@
+package main
+
+import "gauge"
+import "say"
+
+// A negative float literal takes the float type its use wants, as the literal without the
+// minus does (#1236): f32 in an f32 argument, declaration or constant, and a named float type.
+
+type Celsius f64
+
+const Low f32 = -0.1
+
+fn half(x f32) f32 {
+	return x / 2
+}
+
+fn main() {
+	let a f32 = -0.1
+	let b = half(-3.4028235e38)
+	let c f32 = -(2.5)
+	let d Celsius = -40.0
+	let e = -1.5
+	let f f64 = -0.1
+	mut g = []f32{-1.0, 0.5, -0.25}
+	g = append(g, -16777217.0)
+	say.Line(a, b, c, d, e, f, Low)
+	say.Line(say.Fmt("%08x %08x %08x %016x", u64(gauge.F32bits(a)), u64(gauge.F32bits(b)), u64(gauge.F32bits(Low)), gauge.F64bits(f)))
+	for x in g {
+		say.Line(say.Fmt("%08x", u64(gauge.F32bits(x))))
+	}
+}

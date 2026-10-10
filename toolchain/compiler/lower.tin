@@ -677,7 +677,9 @@ fn chk_unary(e i64, want i64) i64 {
 			replace_node(e, x)
 			cast(FloatLit, e).bits = cast(FloatLit, e).bits ^ (1 << 63)
 			cast(Node, e).type_ = 0
-			return ty_float
+			// The literal took the float type its use wants (f32 or a named float), so -1.0
+			// does too, as 1.0 does: let x f32 = -1.0 (#1236).
+			return t
 		}
 		if cast(Node, x).kind == EX_INT && (kind_of(cast(Ty, t)) == K_UINT) {
 			let nv = const_neg(cast(IntLit, x).val, cast(IntLit, x).big)

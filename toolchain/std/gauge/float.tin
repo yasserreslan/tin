@@ -343,6 +343,12 @@ fn FMA(x f64, y f64, z f64) f64 {
 	let bx = F64bits(x)
 	let by = F64bits(y)
 	let bz = F64bits(z)
+	// A zero z with a finite, non-zero product: the sum is the product rounded once, and it keeps
+	// the product's sign when it rounds to zero, as the hardware's fused multiply-add does (Go's
+	// math.FMA on amd64 and arm64); x*y + z would give -0 + 0 = +0.
+	if z == 0.0 && x != 0.0 && y != 0.0 && bx&fmaUvinf != fmaUvinf && by&fmaUvinf != fmaUvinf {
+		return x * y
+	}
 	// Inf or NaN or zero involved: at most one rounding will occur.
 	if x == 0.0 || y == 0.0 || z == 0.0 || bx&fmaUvinf == fmaUvinf || by&fmaUvinf == fmaUvinf {
 		return x*y + z

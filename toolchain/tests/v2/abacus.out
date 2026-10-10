@@ -13,6 +13,17 @@ parse 12x 0 fault: abacus: 12x: invalid digit
 parse  0 fault: abacus: : no digits
 parse 0x 0 fault: abacus: 0x: no digits
 parse - 0 fault: abacus: -: no digits
+parse 1_000 0 1000
+parse -0x_dead_beef 0 -3735928559
+parse 0b1_0 0 2
+parse 0_17 0 15
+parse 0o_7 0 7
+parse _1 0 fault: abacus: _1: '_' must separate successive digits
+parse 1__2 0 fault: abacus: 1__2: '_' must separate successive digits
+parse 1_ 0 fault: abacus: 1_: '_' must separate successive digits
+parse -_1 0 fault: abacus: -_1: '_' must separate successive digits
+parse 0x_ 0 fault: abacus: 0x_: '_' must separate successive digits
+parse 1_0 36 fault: abacus: 1_0: invalid digit
 parse base 1 fault: abacus: invalid base 1
 parse base 37 fault: abacus: invalid base 37
 parse base -1 fault: abacus: invalid base -1
