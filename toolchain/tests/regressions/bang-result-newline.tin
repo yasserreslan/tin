@@ -1,0 +1,50 @@
+package main
+
+// #825, #1072: a bare ! result at the end of a line ends it, in a shape (not last) and in a fn-typed field.
+
+import "say"
+
+shape S {
+	mut Put(x i64) !
+	Get() i64
+}
+
+type T struct {
+	v i64
+}
+
+fn (t mut T) Put(x i64) ! {
+	t.v = x
+}
+
+fn (t T) Get() i64 {
+	return t.v
+}
+
+type Job struct {
+	Run  fn(i64) !
+	Name str
+}
+
+fn check(n i64) ! {
+	if n < 0 {
+		fail "negative"
+	}
+}
+
+fn run[X S](x mut X) ! {
+	try x.Put(3)
+	say.Line(x.Get())
+}
+
+fn main() {
+	mut t = T{v: 0}
+	run(mut t) catch err {
+		say.Line(err)
+	}
+	let j = Job{Run: check, Name: "j"}
+	j.Run(-1) catch err {
+		say.Line(err)
+	}
+	say.Line(j.Name)
+}

@@ -1,0 +1,37 @@
+package main
+
+// #858: hearth.Run starts the cores once; a second Run panics at once with a clear message instead of hanging.
+
+import "hearth"
+import "relay"
+import "say"
+
+mut got = 0
+
+fn work(core i64) {
+	if core == 0 {
+		for k in 1..relay.Cores() {
+			relay.Send(k, "go")
+		}
+		mut n = 0
+		for n < relay.Cores() - 1 {
+			let (_, m) = relay.Recv()
+			if m == "done" {
+				n += 1
+			}
+		}
+		got += n
+		return
+	}
+	let (_, m) = relay.Recv()
+	if m == "go" {
+		relay.Send(0, "done")
+	}
+}
+
+fn main() {
+	hearth.Run(4, work)
+	say.Line("first run", got)
+	hearth.Run(4, work)
+	say.Line("second run", got)
+}

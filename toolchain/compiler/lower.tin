@@ -3297,10 +3297,30 @@ fn chk_parallel(e i64) i64 {
 // result_cell is the size of the cell a block's value of type vt is stored in: two words, or a
 // value struct's bytes when it is wider (#669).
 fn result_cell(vt i64) i64 {
+	if kind_of(cast(Ty, vt)) == K_TUPLE {
+		let cells = tuple_cells(vt)
+		return cells[len(cells) - 1]
+	}
 	if is_value_struct(cast(Ty, vt)) != 0 && cast(Ty, vt).size > 16 {
 		return align_up(cast(Ty, vt).size, 8)
 	}
 	return 16
+}
+
+// tuple_cells is where each result of a call's tuple value vt lies in a boundary block's result cell, then the
+// cell's size (#1067): each result has a result_cell of its own, as parallel's values do.
+fn tuple_cells(vt i64) []i64 {
+	let fs = cast(Ty, vt).fields
+	mut out = []i64{}
+	mut at = 0
+	mut i = 0
+	for i < len(fs) {
+		out = append(out, at)
+		at = at + result_cell(fs[i])
+		i = i + 1
+	}
+	out = append(out, at)
+	return out
 }
 
 // parallel_wrapper builds parallel$N(c1..cn) (T1..Tn, fault): it spawns each ci with its own
@@ -3580,7 +3600,10 @@ fn chk_arena(e i64) i64 {
 	cast(Call, c).fn_ = cast(i64, w)
 	cast(Call, c).args = cast([]i64, args1(cast(i64, lit)))
 	mut results = []i64{}
-	if kind_of(cast(Ty, vt)) != K_VOID {
+	if kind_of(cast(Ty, vt)) == K_TUPLE {
+		// a call's several results are the arena's (#1067)
+		results = append(results, cast(Ty, vt).fields...)
+	} else if kind_of(cast(Ty, vt)) != K_VOID {
 		results = append(results, vt)
 	}
 	if fails != 0 {
@@ -3601,6 +3624,16 @@ fn chk_arena(e i64) i64 {
 // value (their objects are not described by the type). A recursive one is copied object by
 // object, and a cycle in it panics (#628).
 fn arena_value_check(pos i64, vt i64) {
+	if kind_of(cast(Ty, vt)) == K_TUPLE {
+		// a call's results, each copied out on its own (#1067)
+		let fs = cast(Ty, vt).fields
+		mut i = 0
+		for i < len(fs) {
+			arena_value_check(pos, fs[i])
+			i = i + 1
+		}
+		return
+	}
 	mut bad = ""
 	if arena_copyable(cast(Ty, vt), []i64{}) == 0 {
 		bad = " holds a func or dyn value, which cannot be copied: return the data it needs instead"
@@ -3629,7 +3662,9 @@ fn arena_wrapper(pos i64, ct i64, vt i64, fails i64) i64 {
 	f.bang = fails
 	f.params = append(f.params, "c")
 	f.ptypes = append(f.ptypes, ct)
-	if kind_of(cast(Ty, vt)) != K_VOID {
+	if kind_of(cast(Ty, vt)) == K_TUPLE {
+		f.rtypes = append(f.rtypes, cast(Ty, vt).fields...)
+	} else if kind_of(cast(Ty, vt)) != K_VOID {
 		f.rtypes = append(f.rtypes, vt)
 	}
 	if fails != 0 {
@@ -3661,7 +3696,27 @@ fn arena_wrapper(pos i64, ct i64, vt i64, fails i64) i64 {
 	body = append(body, assign_stmt(pos, sym_ref_node(pos, cast(Sym, fe.sym)), rt_call(pos, "rt_arena_fault", args1(sym_ref_node(pos, cast(Sym, fe.sym))), ty_error)))
 	// The value is read out of the cell before the arena closes.
 	mut v = cast(LetStmt, 0)
-	if kind_of(cast(Ty, vt)) != K_VOID {
+	mut parts = []i64{}
+	if kind_of(cast(Ty, vt)) == K_TUPLE {
+		// each of a call's results from its own part of the cell (#1067), its references copied out
+		let fs = cast(Ty, vt).fields
+		let cells = tuple_cells(vt)
+		mut i = 0
+		for i < len(fs) {
+			let pv = temp(pos, mk_mem(pos, sym_ref_node(pos, cast(Sym, r.sym)), 0, 0, cells[i], fs[i]), fs[i])
+			body = append(body, cast(i64, pv))
+			parts = append(parts, cast(i64, pv))
+			if is_ref(fs[i]) != 0 || value_has_ref(cast(Ty, fs[i])) != 0 {
+				let ifp = cast(IfStmt, node_new(ST_IF, pos))
+				ifp.cond = mk_bin(pos, "==", sym_ref_node(pos, cast(Sym, fe.sym)), mk_int(pos, 0, ty_error), ty_bool)
+				ifp.then = empty_block(pos)
+				mut vp = cast(Block, ifp.then).stmts
+				vp = append(vp, assign_stmt(pos, sym_ref_node(pos, cast(Sym, pv.sym)), keep_call(pos, arenacopy_fn(cast(Ty, fs[i])), sym_ref_node(pos, cast(Sym, pv.sym)), fs[i])))
+				body = append(body, cast(i64, ifp))
+			}
+			i = i + 1
+		}
+	} else if kind_of(cast(Ty, vt)) != K_VOID {
 		v = temp(pos, mk_mem(pos, sym_ref_node(pos, cast(Sym, r.sym)), 0, 0, 0, vt), vt)
 		body = append(body, cast(i64, v))
 	}
@@ -3685,7 +3740,13 @@ fn arena_wrapper(pos i64, ct i64, vt i64, fails i64) i64 {
 	}
 	let ret = cast(ReturnStmt, node_new(ST_RETURN, pos))
 	mut rv = []i64{}
-	if kind_of(cast(Ty, vt)) != K_VOID {
+	if kind_of(cast(Ty, vt)) == K_TUPLE {
+		mut i = 0
+		for i < len(parts) {
+			rv = append(rv, sym_ref_node(pos, cast(Sym, cast(LetStmt, parts[i]).sym)))
+			i = i + 1
+		}
+	} else if kind_of(cast(Ty, vt)) != K_VOID {
 		rv = append(rv, sym_ref_node(pos, cast(Sym, v.sym)))
 	}
 	if fails != 0 {

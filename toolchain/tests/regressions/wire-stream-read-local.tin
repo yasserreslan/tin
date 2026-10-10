@@ -1,0 +1,33 @@
+package main
+
+// #1036: wire.Stream.Read on a fresh local from DoStream compiles (no E312). The stream's TLS layer, when
+// it comes from the keep-alive pool, is the request's own (tls.Conn.Taken), so its reads store nothing
+// into long-lived memory.
+
+import "say"
+import "wire"
+
+fn opts() wire.Options {
+	mut o = wire.Options{Timeout: 600 * 1000000000, MaxBody: 1 << 40, MaxIdle: 0}
+	return o
+}
+
+fn down(url str) ! {
+	mut s = try wire.DoStream("GET", url, []str{}, wire.NoBody{}, opts())
+	mut buf = make([]u8, 65536)
+	mut got = 0
+	for {
+		let k = try s.Read(mut buf)
+		if k == 0 {
+			break
+		}
+		got += k
+	}
+	say.Line("status={s.Status} got={got}")
+}
+
+fn main() {
+	down("http://127.0.0.1:1/") catch _ {
+		say.Line("no server")
+	}
+}

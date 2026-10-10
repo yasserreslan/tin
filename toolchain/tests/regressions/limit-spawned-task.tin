@@ -1,0 +1,77 @@
+package main
+
+// #1079: a task spawned inside a limit memory block that runs the budget out ends with "limit exceeded", and so does
+// the block; it used to spin forever in rt_bnd_charge, past any enclosing deadline.
+
+import "say"
+import "tide"
+
+fn grow(n i64) !i64 {
+	mut total = 0
+	mut held = [][]u8{}
+	for i in 0..n {
+		let b = make([]u8, 1 << 20)
+		b[0] = u8(i)
+		held = append(held, b)
+		total += len(b)
+		try tide.Wait(1ms)
+	}
+	return total + len(held)
+}
+
+fn spawned() !i64 {
+	mut got = 0
+	try limit memory 16 * 1024 * 1024 + 0 {
+		scope sc {
+			sc.spawn(fn() ! {
+				got = try grow(1000)
+			})
+		}
+	}
+	return got
+}
+
+fn both() !i64 {
+	let n = try limit memory 16 * 1024 * 1024 + 0 {
+		let (a, b) = try parallel {
+			grow(4)
+			grow(1000)
+		}
+		a + b
+	}
+	return n
+}
+
+fn small() !i64 {
+	mut got = 0
+	try limit memory 64 * 1024 * 1024 + 0 {
+		scope sc {
+			sc.spawn(fn() ! {
+				got = try grow(4)
+			})
+		}
+	}
+	return got
+}
+
+fn main() {
+	let a = within 10000ms {
+		try spawned()
+	} catch err {
+		say.Line("spawned: {err}")
+		-1
+	}
+	let b = within 10000ms {
+		try both()
+	} catch err {
+		say.Line("parallel: {err}")
+		-1
+	}
+	let c = within 10000ms {
+		try small()
+	} catch err {
+		say.Line("small: {err}")
+		-1
+	}
+	say.Line(a, b, c)
+}

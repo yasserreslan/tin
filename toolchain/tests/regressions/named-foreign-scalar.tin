@@ -1,0 +1,35 @@
+package main
+
+import "./namedmap"
+import "constraints"
+import "say"
+
+// A named str or number of another package is a struct field, an enum payload, a slice element, a map key and value,
+// and a generic argument (#824).
+type S struct {
+	name  namedmap.Name
+	count namedmap.Count
+}
+
+type E enum {
+	One(namedmap.Name)
+	Two(namedmap.Count, namedmap.Name)
+}
+
+type Box[T constraints.Any] struct {
+	v T
+}
+
+fn echo(n namedmap.Name) namedmap.Name {
+	return n
+}
+
+fn main() {
+	let s = S{name: namedmap.Name("q"), count: namedmap.Count(4)}
+	say.Line(str(s.name), i64(s.count), E.One(echo(namedmap.Name("r"))), E.Two(namedmap.Count(2), namedmap.Name("t")))
+	mut m = map[namedmap.Name]namedmap.Count{}
+	m[namedmap.Name("k")] = namedmap.Count(5)
+	let names = []namedmap.Name{namedmap.Name("z")}
+	let b = Box[namedmap.Name]{v: namedmap.Name("g")}
+	say.Line(i64(m[namedmap.Name("k")]), str(names[0]), str(b.v))
+}

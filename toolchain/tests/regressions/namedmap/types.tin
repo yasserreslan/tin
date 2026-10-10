@@ -29,3 +29,14 @@ type Tag value struct {
 fn MakeTag(s str) Tag {
 	return Tag{raw: s}
 }
+
+// Name is a named str of another package (#824).
+type Name str
+
+// Count is a named number of another package (#824).
+type Count i64
+
+// Text is the tag's text.
+fn (t Tag) Text() str {
+	return t.raw
+}

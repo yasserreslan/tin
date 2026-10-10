@@ -1,0 +1,67 @@
+package main
+
+import "./namedmap"
+import "constraints"
+import "say"
+
+// Fields of another package's value struct holding a str each keep their own slot (#847, the form of #708): in a
+// struct, as its last field, in a value struct, an enum payload with another field after it, a generic struct, and
+// through keep.
+type C struct {
+	p str
+	x namedmap.Tag
+	y namedmap.Tag
+	z namedmap.Tag
+}
+
+type Entry struct {
+	Path str
+	Size i64
+	Id   namedmap.Tag
+}
+
+type V value struct {
+	x namedmap.Tag
+	y namedmap.Tag
+}
+
+type R enum {
+	Clean(namedmap.Tag)
+	Both(namedmap.Tag, []str)
+}
+
+type Box[T constraints.Any] struct {
+	v T
+	w T
+}
+
+mut kept = []Entry{}
+
+fn idOf(r R) namedmap.Tag {
+	return match r {
+		Clean(i) => i
+		Both(i, _) => i
+	}
+}
+
+fn entries(n i64) []Entry {
+	mut es = []Entry{}
+	for i in 0..n {
+		es = append(es, Entry{Path: "p{i}", Size: i, Id: namedmap.MakeTag("id{i}")})
+	}
+	return es
+}
+
+fn main() {
+	let c = C{p: "p", x: namedmap.MakeTag("one"), y: namedmap.MakeTag("two"), z: namedmap.MakeTag("three")}
+	say.Line(c.x.Text(), c.y.Text(), c.z.Text())
+	let es = entries(3)
+	let other = []str{"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbb"}
+	kept = keep(es)
+	say.Line(es[0].Id.Text(), es[2].Id.Text(), kept[1].Id.Text(), len(other))
+	let v = V{x: namedmap.MakeTag("vx"), y: namedmap.MakeTag("vy")}
+	say.Line(v.x.Text(), v.y.Text())
+	say.Line(idOf(R.Clean(namedmap.MakeTag("c"))).Text(), idOf(R.Both(namedmap.MakeTag("both"), []str{"x"})).Text())
+	let b = Box[namedmap.Tag]{v: namedmap.MakeTag("bv"), w: namedmap.MakeTag("bw")}
+	say.Line(b.v.Text(), b.w.Text())
+}

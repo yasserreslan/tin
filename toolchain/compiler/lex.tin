@@ -281,7 +281,8 @@ fn ends_statement(t Token) i64 {
 	if k == TK_KEYWORD {
 		return i64(s == "break" || s == "continue" || s == "return" || s == "true" || s == "false" || s == "nil")
 	}
-	return i64(k == TK_PUNCT && (s == ")" || s == "]" || s == "}}" || s == "++" || s == "--"))
+	// "!": a bare fault result ends its line (a shape method or a fn type, #825); no expression ends in a prefix !
+	return i64(k == TK_PUNCT && (s == ")" || s == "]" || s == "}}" || s == "++" || s == "--" || s == "!"))
 }
 
 fn lex_next() i64 {

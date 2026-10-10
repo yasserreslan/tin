@@ -458,7 +458,7 @@ Package hearth runs a program on every core: one thread per core, each with its 
 - `Cores() i64`: Cores is the number of CPUs this program may use: the CPUs online, capped on Linux by the affinity mask (cpuset) and the cgroup CPU quota (ceil of cpu.max quota/period); never 0. It is how many cores to start (hearth.Run(hearth.Cores(), entry)), not how many run: relay.Cores() is the number started, and only those read their relay inbox.
 - `MemLimit() i64`: MemLimit is the memory limit in bytes the container (cgroup) imposes: 0 when there is none.
 - `ID() i64`: ID is the current core's number: 0 for the main core.
-- `Run(n i64, entry fn(i64))`: Run starts entry(i) on cores 1..n-1, runs entry(0) here, then waits for every core. Before starting it sizes the request pools to the memory limit and decides whether cores pin themselves to CPUs (only when they map one-to-one onto the allowed CPUs, or TIN_PIN=1).
+- `Run(n i64, entry fn(i64))`: Run starts entry(i) on cores 1..n-1, runs entry(0) here, then waits for every core. Before starting it sizes the request pools to the memory limit and decides whether cores pin themselves to CPUs (only when they map one-to-one onto the allowed CPUs, or TIN_PIN=1). A program starts its cores once: a second Run that would start cores again panics (#858); run every step under one Run, core 0 handing the others work over relay.
 - `PoolChunk() i64`: PoolChunk is the request pool chunk size in bytes each core uses (after pool_tune).
 - `PoolCapacity() i64`: PoolCapacity is the usable size in bytes of this core's current base pool chunk (0 before its first request allocation).
 - `Reset()`: Reset ends the current request: the core's pool is emptied for the next one.
@@ -510,7 +510,7 @@ let r = try wire.Get("http://127.0.0.1:8080/json")
 - `(b mut NoBody) Read(buf mut []u8) !i64`: Read gives nothing: the body has ended.
 - `DoStream[R io.Reader](method str, url str, headers []str, body R, opt Options) !Stream`: DoStream sends one request with its body read from body, and returns the response once its headers are in; see the section comment above.
 - `type Copied struct`: decimal is a Content-Length header's value. Copied is what DoStreamTo gives back: the response's status and how many body bytes it copied.
-- `DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body R, opt Options, w mut W) !Copied`: DoStreamTo is DoStream with the response's body copied to w as it arrives, a buffer at a time, whatever its status (an error answer's body too). Reading the Stream here, inside wire, keeps a caller's code from tripping #1036 (a false E312 on Stream.Read from outside the package).
+- `DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body R, opt Options, w mut W) !Copied`: DoStreamTo is DoStream with the response's body copied to w as it arrives, a buffer at a time, whatever its status (an error answer's body too).
 - `type Head struct`: Head is a response's status and header fields, as DoStreamToHead gives them before the body.
 - `(h Head) Header(name str) str`: Header returns the response header name (any case), or "".
 - `shape HeadWriter`: HeadWriter is an io.Writer that is told the response's head before its body: a client that must know the status before it keeps a body (an object store's error answer is no object).
@@ -680,6 +680,7 @@ try c.Write("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 - `const RequireClientCert = 2`
 - `CheckServerConfig(cfg ServerConfig) !`: CheckServerConfig checks the client-certificate settings of cfg before a server starts: a known ClientAuth, and ClientCAs that hold certificates when it asks for any.
 - `type Conn struct`: Conn is a TLS 1.3 connection over a wire.Conn. After the handshake its memory only changes in place (record buffers made once, keys rewritten by seal.AEAD.Rekey), so a Conn stays valid wherever it lives: a request's pool, or keep()'s long-lived heap for a client that holds connections across requests.
+- `(c Conn) Taken() Conn`: Taken is c as a Conn of the running request: the same connection in the same state, in a struct of its own. A pool that keeps Conns in long-lived memory (wire's) gives a request the one it takes off the pool this way, so the request's reads and writes, which may store request memory into the Conn, never store it into long-lived memory; the pool keeps a copy again when the Conn comes back (#1036). It copies every field: a field added to Conn is added here as well.
 - `const TLS_AES_128_GCM_SHA256 = 0x1301`: TLS_AES_128_GCM_SHA256 is cipher suite 0x1301 (Conn.CipherSuite).
 - `const TLS_AES_256_GCM_SHA384 = 0x1302`: TLS_AES_256_GCM_SHA384 is cipher suite 0x1302.
 - `const TLS_CHACHA20_POLY1305_SHA256 = 0x1303`: TLS_CHACHA20_POLY1305_SHA256 is cipher suite 0x1303.

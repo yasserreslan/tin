@@ -2526,6 +2526,9 @@ fn parse_boundary() i64 {
 		p_nolit = saved
 	} else if word == "limit" {
 		boundary.kind = BOUND_LIMIT
+		// a bound that ends in a name is not a struct literal with the block (#1070)
+		let saved3 = p_nolit
+		p_nolit = 1
 		for p_is("{{") == 0 {
 			let item = name_bind(p_expect_ident().text, parse_expr(1))
 			boundary.args = append(boundary.args, item)
@@ -2534,6 +2537,7 @@ fn parse_boundary() i64 {
 			}
 			p_next()
 		}
+		p_nolit = saved3
 		if len(boundary.args) == 0 {
 			p_fail_code(pos, "E020 UNEXPECTED", "limit needs at least one bound")
 		}
