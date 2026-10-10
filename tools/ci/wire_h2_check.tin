@@ -30,6 +30,13 @@ fn main() {
 	ci.BuildTin("tools/ci/fixtures/h2.tin", ci.Join(out, "anvil_h2"), "", []str{})
 	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(out, "h2upstream"), "tools/ci/fixtures/h2upstream.go"}, ci.Root(), 300), "go build h2upstream.go")
 	ci.Must(ci.Exec([]str{"go", "build", "-o", ci.Join(out, "goaway_server"), "tools/ci/fixtures/goaway_server.go"}, ci.Root(), 300), "go build goaway_server.go")
+	// a port is never handed out twice, even before its server listens (#1144: the client's port was Go's TLS port)
+	mut seen = map[i64]bool{}
+	for i in 0..300 {
+		let p = nettest.Port()
+		ci.Check(!seen[p], "nettest.Port handed out " + mint.Itoa(p) + " twice")
+		seen[p] = true
+	}
 	let gtls = nettest.Port()
 	let gh2c = nettest.Port()
 	let gp = nettest.Start(ci.Join(out, "h2upstream"), []str{mint.Itoa(gtls), mint.Itoa(gh2c), cert.Cert, cert.Key}, []str{}, ci.Join(out, "go.log"), 0)
