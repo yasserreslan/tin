@@ -158,8 +158,8 @@ fn isBinary(s str) bool {
 
 fn readResolve(c call, rev str, path str) !resolveOut {
 	mut out ?resolveOut = nil
-	try within readWithin + 0 {
-		try limit memory blobMemory + 0 {
+	try within readWithin {
+		try limit memory blobMemory {
 			mut r = pgRepo(c)
 			mut st = try r.Objects()
 			let rv = try revisionOf(c, mut st, rev)
@@ -346,8 +346,8 @@ fn titleOf(message str) str {
 
 fn readLog(c call, rev str, path str, cursor str, n i64) !logOut {
 	mut out = logOut{commits: []logEntry{}, next: ""}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut r = pgRepo(c)
 			mut st = try r.Objects()
 			mut frontier = []pending{}
@@ -524,8 +524,8 @@ fn compare(q anvil.Req, w mut anvil.Out) {
 
 fn readCompare(c call, from str, to str) !compareOut {
 	mut out ?compareOut = nil
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut r = pgRepo(c)
 			mut st = try r.Objects()
 			let b = try revisionOf(c, mut st, to)

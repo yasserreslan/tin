@@ -252,7 +252,7 @@ fn nameOf(db postgres.Client, user i64) !str {
 
 fn reviewOf(c call, ch str) !reviewOut {
 	mut out ?reviewOut = nil
-	try within readWithin + 0 {
+	try within readWithin {
 		let rv = try Open(c.d.Db, c.r.Id, ch)
 		let t = try TallyOf(c.d.Db, c.r, ch)
 		let s = try SettingsOf(c.d.Db, c.r.Id)
@@ -339,7 +339,7 @@ fn patchReview(q anvil.Req, w mut anvil.Out) {
 }
 
 fn setState(c call, ch str, state str) ! {
-	try within writeWithin + 0 {
+	try within writeWithin {
 		_ = try SetState(c.d.Db, c.r, ch, c.user, state)
 	}
 }
@@ -382,7 +382,7 @@ fn getComments(q anvil.Req, w mut anvil.Out) {
 
 fn readComments(c call, ch str) !commentsOut {
 	mut out = commentsOut{comments: []commentOut{}}
-	try within readWithin + 0 {
+	try within readWithin {
 		_ = try Open(c.d.Db, c.r.Id, ch)
 		let cs = try Comments(c.r.Id, ch)
 		mut list = []commentOut{}
@@ -431,7 +431,7 @@ fn postComment(q anvil.Req, w mut anvil.Out) {
 
 fn addComment(c call, ch str, v commentIn_) !i64 {
 	mut id = 0
-	try within writeWithin + 0 {
+	try within writeWithin {
 		id = try AddComment(c.r.Id, ch, c.user, NewComment{Version: v.version, File: v.file, Decl: v.decl, Offset: v.line_offset, Parent: v.parent, Body: v.body})
 	}
 	return id
@@ -464,7 +464,7 @@ fn patchComment(q anvil.Req, w mut anvil.Out) {
 }
 
 fn resolve(c call, ch str, id i64, resolved bool) ! {
-	try within writeWithin + 0 {
+	try within writeWithin {
 		let author = try AuthorOf(c.r.Id, ch, id)
 		if c.role < accounts.RoleWrite && (c.user == 0 || author != c.user) {
 			fail fault.Wrap(ErrForbidden, "only the comment's author or a writer can resolve it")
@@ -503,7 +503,7 @@ fn getApprovals(q anvil.Req, w mut anvil.Out) {
 
 fn readVotes(c call, ch str) !votesOut {
 	mut out = votesOut{votes: []voteOut{}, counted: tallyOut{approvals: 0, blocking: 0, needed: 0}}
-	try within readWithin + 0 {
+	try within readWithin {
 		_ = try Open(c.d.Db, c.r.Id, ch)
 		let vs = try Votes(c.d.Db, c.r.Id, ch)
 		let t = try TallyOf(c.d.Db, c.r, ch)
@@ -548,7 +548,7 @@ fn postApproval(q anvil.Req, w mut anvil.Out) {
 }
 
 fn vote(c call, ch str, v str) ! {
-	try within writeWithin + 0 {
+	try within writeWithin {
 		_ = try Vote(c.d.Db, c.r, ch, c.user, v)
 	}
 }
@@ -574,7 +574,7 @@ fn getChecks(q anvil.Req, w mut anvil.Out) {
 
 fn readChecks(c call, ch str) !checksList {
 	mut out = checksList{checks: []checkOut{}}
-	try within readWithin + 0 {
+	try within readWithin {
 		_ = try Open(c.d.Db, c.r.Id, ch)
 		let cs = try Checks(c.d.Db, c.r.Id, ch)
 		out = keep(checksList{checks: checksOut(cs)})
@@ -619,7 +619,7 @@ fn postCheck(q anvil.Req, w mut anvil.Out) {
 
 fn postCheck_(c call, ch str, v checkIn_) !checkOut {
 	mut out ?checkOut = nil
-	try within writeWithin + 0 {
+	try within writeWithin {
 		let k = try PostCheck(c.r.Id, ch, c.key, Check{Version: v.version, Name: v.name, State: v.state, Url: v.url, Description: v.description, KeyId: 0, Updated: 0})
 		out = keep(checkOut{version: k.Version, name: k.Name, state: k.State, url: k.Url, description: k.Description, key_id: k.KeyId, updated_at: k.Updated})
 	}
@@ -697,7 +697,7 @@ fn land(c call, ch str, withStack bool) LandResult {
 
 fn landWithin_(c call, ch str, withStack bool) !LandResult {
 	mut out = LandResult{Landed: []Landed{}, Err: nil}
-	try within landWithin + 0 {
+	try within landWithin {
 		let got = Land(c.r.Id, ch, c.user, withStack)
 		out = keep(got)
 	}
@@ -739,7 +739,7 @@ fn getReviews(q anvil.Req, w mut anvil.Out) {
 fn listReviews(c call, state str) !listOut {
 	mut out = listOut{reviews: []listItem{}}
 	let repoId = c.r.Id
-	try within readWithin + 0 {
+	try within readWithin {
 		let rows = try c.d.Db.Query("SELECT r.change_id, r.state, r.target, coalesce(v.version, 0), extract(epoch FROM r.updated_at)::bigint, coalesce(v.commit_id, ''), coalesce(o.name, ''), extract(epoch FROM r.created_at)::bigint FROM reviews r LEFT JOIN LATERAL (SELECT version, commit_id FROM changes x WHERE x.repo_id = r.repo_id AND x.change_id = r.change_id ORDER BY version DESC LIMIT 1) v ON true LEFT JOIN users u ON u.id = r.opened_by LEFT JOIN owners o ON o.id = u.owner_id WHERE r.repo_id = {repoId} AND ({state} = '' OR r.state = {state}) ORDER BY r.updated_at DESC, r.change_id LIMIT 200")
 		mut list = []listItem{}
 		for x in rows.Rows {

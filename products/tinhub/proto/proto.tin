@@ -194,8 +194,7 @@ fn get(q anvil.Req, w mut anvil.Out) {
 fn answer(srv transport.Server, q anvil.Req, within_ i64, mem i64) !transport.Reply {
 	mut out = transport.Reply{Status: 500, Body: ""}
 	try within within_ {
-		// + 0: a bare name before the block is read as a struct literal (#1070)
-		try limit memory mem + 0 {
+		try limit memory mem {
 			mut s = srv
 			out = s.Handle(q.Method, q.Path, q.Header("tit-signature"), q.Body(), now())
 		}
@@ -281,8 +280,7 @@ fn post(q anvil.Req, w mut anvil.Out) {
 fn push(srv transport.Server, q anvil.Req, body anvil.BodyReader, within_ i64, mem i64) !transport.Reply {
 	mut out = transport.Reply{Status: 500, Body: ""}
 	try within within_ {
-		// + 0: a bare name before the block is read as a struct literal (#1070)
-		try limit memory mem + 0 {
+		try limit memory mem {
 			mut s = srv
 			mut b = body
 			out = transport.HandleStream(mut s, q.Method, q.Path, q.Header("tit-signature"), mut b, now())
@@ -295,8 +293,7 @@ fn push(srv transport.Server, q anvil.Req, body anvil.BodyReader, within_ i64, m
 fn plan(srv transport.Server, q anvil.Req, req str, within_ i64, mem i64) !transport.Fetching {
 	mut out ?transport.Fetching = nil
 	try within within_ {
-		// + 0: a bare name before the block is read as a struct literal (#1070)
-		try limit memory mem + 0 {
+		try limit memory mem {
 			mut s = srv
 			let f = try s.StartFetch(q.Path, q.Header("tit-signature"), req, now())
 			out = keep(f)

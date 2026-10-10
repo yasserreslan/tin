@@ -215,8 +215,8 @@ fn readRepoSymbols(d Deps, r accounts.Repo, ref str, ch str, qy Query, off i64, 
 	let commit = try commitOf(d, r, ref, ch)
 	let repoId = r.Id
 	mut out = repoSymbolsOut{commit: commit, indexed: false, symbols: []symOut{}, next: ""}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = repoSymbolsOut{commit: commit, indexed: false, symbols: []symOut{}, next: ""}
 			page.indexed = try Indexed(d.Db, repoId, commit)
 			let pattern = likePrefix(qy.Name)
@@ -293,8 +293,8 @@ fn search(q anvil.Req, w mut anvil.Out) {
 fn Search(d Deps, user i64, text str, off i64, n i64) !searchOut {
 	let qy = ParseQuery(text)
 	mut out = searchOut{query: text, results: []hitOut{}, next: ""}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = searchOut{query: text, results: []hitOut{}, next: ""}
 			let name = qy.Name
 			let kind = qy.Kind

@@ -105,7 +105,7 @@ fn versionDiff(q anvil.Req, w mut anvil.Out) {
 
 fn readDiff(d Deps, repoId i64, ch str, n i64, against str) !str {
 	mut out = ""
-	try within readWithin + 0 {
+	try within readWithin {
 		let v = try versionAt(d.Db, repoId, ch, n)
 		if against == "previous" && len(v.Previous) == 0 {
 			fail fault.Wrap(ErrNoVersion, "{ch} version {v.Number} has no version before it")
@@ -146,8 +146,8 @@ fn overlaps(q anvil.Req, w mut anvil.Out) {
 
 fn readOverlaps(d Deps, repoId i64, ch str) !overlapOut {
 	mut out = overlapOut{change: ch, version: 0, overlaps: []otherOut{}}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			let got = try Overlaps(d.Db, repoId, ch)
 			out = keep(got)
 		}

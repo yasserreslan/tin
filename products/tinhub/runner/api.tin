@@ -167,7 +167,7 @@ fn answerErr(w mut anvil.Out, err fault) {
 
 fn readBehaviour(c call, change str, version i64) !behaviourOut {
 	mut out ?behaviourOut = nil
-	try within readWithin + 0 {
+	try within readWithin {
 		let run = try RunOf(c.d.Db, c.r.Id, change, version)
 		if run == nil {
 			fail fault.Wrap(ErrNotFound, "no run of change {change}")
@@ -227,7 +227,7 @@ fn postBehaviour(q anvil.Req, w mut anvil.Out) {
 
 fn requestRun(c call, change str, version i64) !requestOut {
 	mut out = requestOut{run: 0, change: change, version: version, state: ""}
-	try within writeWithin + 0 {
+	try within writeWithin {
 		mut n = version
 		if n <= 0 {
 			let rows = try c.d.Db.Query("SELECT coalesce(max(version), 0) FROM changes WHERE repo_id = {c.r.Id} AND change_id = {change}")

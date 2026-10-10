@@ -431,7 +431,9 @@ function hookDialog(env, hook) {
 	});
 	save.onclick = () =>
 		busy(save, async () => {
-			const body = { url: url.value.trim(), secret: secret.value, kinds: every.input.checked ? [] : boxes.filter(([, c]) => c.input.checked).map(([k]) => k), active: active.input.checked };
+			const body = { url: url.value.trim(), kinds: every.input.checked ? [] : boxes.filter(([, c]) => c.input.checked).map(([k]) => k), active: active.input.checked };
+			// An empty secret keeps the hook's own (or, for a new hook, has the server make one).
+			if (secret.value) body.secret = secret.value;
 			if (hook) await api.patch(R(`/hooks/${hook.id}`), body);
 			else {
 				const r = await api.post(R("/hooks"), body);
