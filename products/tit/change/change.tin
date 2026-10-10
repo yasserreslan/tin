@@ -146,11 +146,36 @@ fn tryLock(path str, me str, host str) !bool {
 			0
 		}
 		if pid > 0 && !quarry.Alive(pid) {
-			quarry.Remove(path) catch _ {
-			}
+			clearStale(path, text)
 		}
 	}
 	return false
+}
+
+// clearStale removes the lock file at path when it still holds text, the lock of a process that is gone. Removing it by
+// its path could take a live process's lock: between the read and the remove, the holder that wrote text may let go and
+// exit, and another process lock again (two processes then both held the lock, and a commit was lost). So the file is
+// moved aside first, which takes whichever lock is there in one step, and a lock that is not the stale one is put back
+// as its owner wrote it (only a process locking in the moment between the move and the put back can still miss it).
+fn clearStale(path str, text str) {
+	let aside = path + ".stale.{quarry.Pid()}"
+	quarry.Rename(path, aside) catch _ {
+		return
+	}
+	let (now, err) = quarry.ReadFile(aside)
+	if err != nil {
+		// whose lock it is cannot be told: it goes back
+		quarry.Rename(aside, path) catch _ {
+		}
+		return
+	}
+	if now != text {
+		let _ = flumeCreateExcl(path, now) catch _ {
+			false
+		}
+	}
+	quarry.Remove(aside) catch _ {
+	}
 }
 
 // Close releases the lock.
