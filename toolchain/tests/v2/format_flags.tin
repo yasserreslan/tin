@@ -1,0 +1,29 @@
+package main
+
+// say.Fmt's verbs and flags against Go's fmt (#1152): a width or precision counts runes, a signed
+// value keeps its sign in hex, octal and binary, # adds 0x, 0X, 0b or 0, the space flag stands in
+// for a + sign, a precision turns off zero padding, %q of a character escapes it as strconv.QuoteRune
+// does, %x of a string takes the space and # flags, and %G writes a capital E. Every line was checked
+// against Go 1.27.
+
+import "say"
+
+fn main() {
+	for f in []str{"%#b", "%#o", "%#x", "%#X", "%O", "% d", "% x", "%+x", "%08.3d", "%-8.3d|", "% 5d", "%+ d", "%#8x", "%#08x", "%x", "%X", "%o", "%b", "%.0d|", "%5.0d|", "%+.3d", "%010d", "%-010d|"} {
+		say.Line(say.Fmt("%q:", f), "[" + say.Fmt(f, -28) + "]", "[" + say.Fmt(f, 28) + "]", "[" + say.Fmt(f, 0) + "]", "[" + say.Fmt(f, u8(200)) + "]", "[" + say.Fmt(f, u64(18446744073709551615)) + "]")
+	}
+	say.Line(say.Fmt("%x %X %d %b", -9223372036854775807-1, -9223372036854775807-1, -9223372036854775807-1, i8(-128)))
+	for f in []str{"%x", "% x", "%#x", "%# x", "%X", "%#X", "%.2x", "%8x|", "%-8x|", "%08x", "%#10x|"} {
+		say.Line(say.Fmt("%q:", f), "[" + say.Fmt(f, "hé") + "]")
+	}
+	for f in []str{"%5s|", "%-7s|", "%.2s|", "%5.1s|", "%07s|", "%7v|", "%.3v|", "%8q|", "%-8q|", "%.2q|"} {
+		say.Line(say.Fmt("%q:", f), "[" + say.Fmt(f, "héllo") + "]", "[" + say.Fmt(f, "日本語") + "]")
+	}
+	for f in []str{"%c|", "%5c|", "%-5c|", "%q", "%+q", "%8q|", "%08q|", "%U", "%#U", "%.6U", "%#10U|", "%08U"} {
+		say.Line(say.Fmt("%q:", f), "[" + say.Fmt(f, 0xe9) + "]", "[" + say.Fmt(f, 21) + "]", "[" + say.Fmt(f, 0x1F600) + "]", "[" + say.Fmt(f, -5) + "]", "[" + say.Fmt(f, 39) + "]", "[" + say.Fmt(f, 92) + "]", "[" + say.Fmt(f, 0x80) + "]")
+	}
+	for f in []str{"% g", "% f", "%+g", "% e", "%G", "%.3G", "%E", "%.6v", "%.2v", "% 8.2f|", "%08.2f|", "%-+8.2f|", "% 08.2f|", "% 12G|", "%010v|"} {
+		say.Line(say.Fmt("%q:", f), "[" + say.Fmt(f, 1234567.0) + "]", "[" + say.Fmt(f, -0.000012345) + "]", "[" + say.Fmt(f, 1e21) + "]", "[" + say.Fmt(f, 1.0/0.0) + "]", "[" + say.Fmt(f, 0.0/0.0) + "]")
+	}
+	say.Line(say.Fmt("%G %x %5d|", []f64{1e21, 2.5}, []i64{-1, 255}, []u8{7, 200}))
+}
