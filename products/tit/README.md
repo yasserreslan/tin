@@ -96,7 +96,8 @@ tit sync                      # fetch, rebase the stack onto origin's main, push
 ```
 
 A stack never stops halfway: a rebase that meets a conflict records it in the change (`tit stack` shows it), and
-`tit sync` will not push it until `tit edit` resolves it. Each of these is one operation, so one `tit undo` reverses
+`tit sync` will not push it until `tit edit` resolves it. A change that has landed on the trunk since (as it is, or
+rebased by the host from the version you pushed) leaves the stack at the next `tit sync`. Each of these is one operation, so one `tit undo` reverses
 it. `tit rewrite --all '<command>'` runs a command (a formatter, say) on every change of every branch, again as one
 operation.
 

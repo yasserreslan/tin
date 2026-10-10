@@ -505,6 +505,13 @@ fn syncRebase(g Global, a ShareArgs) !i64 {
 			}
 		}
 		if upstream != localTrunk || base != upstream {
+			// the branch's tip, and its changes but those that landed on the remote's trunk since: they are not replayed
+			// onto it again
+			mut tip = localTrunk
+			if len(st.Commits) > 0 {
+				tip = st.Commits[len(st.Commits) - 1]
+			}
+			let ours = try unlanded(mut r, a.Remote, st.Commits, localTrunk, upstream)
 			mut extra = []oplog.RefChange{}
 			if upstream != localTrunk {
 				let behind = try revwalk.IsAncestor(mut r.Store, localTrunk, upstream)
@@ -513,21 +520,20 @@ fn syncRebase(g Global, a ShareArgs) !i64 {
 				}
 				extra = append(extra, oplog.RefChange{Name: "refs/heads/" + trunk, Before: commitText(localTrunk), After: commitText(upstream)})
 			}
-			if len(st.Commits) == 0 {
-				// nothing of ours above the trunk: the branch follows the trunk
+			if len(ours) == 0 {
+				// nothing of ours above the trunk (or all of it landed): the branch follows the trunk
 				if st.Branch != "refs/heads/" + trunk {
-					extra = append(extra, oplog.RefChange{Name: st.Branch, Before: commitText(localTrunk), After: commitText(upstream)})
+					extra = append(extra, oplog.RefChange{Name: st.Branch, Before: commitText(tip), After: commitText(upstream)})
 				}
-				let from = try r.treeOf(localTrunk)
+				let from = try r.treeOf(tip)
 				let to = try r.treeOf(upstream)
 				try checkMove(mut r, from, to)
 				try recordRefs(r, "tit sync", oplog.Op.Rebase([]str{}), extra)
 				mut fresh = try open(g)
 				try moveTo(mut fresh, from, to, true)
 			} else {
-				let tip = st.Commits[len(st.Commits) - 1]
 				mut versions = []Version{}
-				let fresh = try replay(mut r, st.Commits, upstream, mut versions)
+				let fresh = try replay(mut r, ours, upstream, mut versions)
 				let names = try changeNames(mut r, fresh)
 				try restack(mut r, "tit sync", oplog.Op.Rebase(names), st.Branch, tip, fresh[len(fresh) - 1], versions, extra, true)
 				rebased = len(fresh)
@@ -535,6 +541,33 @@ fn syncRebase(g Global, a ShareArgs) !i64 {
 		}
 	}
 	return rebased
+}
+
+// unlanded is the stack's commits without the changes that landed on the remote's trunk (between localTrunk and
+// upstream): a commit the trunk now holds as it is, or a change the trunk holds (landed by a host, rebased: tinhub's
+// land keeps the change id) whose local version is the one this repository pushed last, so nothing of it is lost.
+fn unlanded(r mut Repo, remote str, commits []object.Id, localTrunk object.Id, upstream object.Id) ![]object.Id {
+	let line = try revwalk.Walk(mut r.Store, []object.Id{upstream}, []object.Id{localTrunk}, revwalk.Order.FirstParent, 0)
+	mut onTrunk = map[str]bool{}
+	for id in line {
+		let c = try commitData(mut r, id)
+		onTrunk[c.Change.Letters()] = true
+	}
+	let pushed = try readPushed(r, remote)
+	mut out = []object.Id{}
+	for id in commits {
+		let landed = try revwalk.IsAncestor(mut r.Store, id, upstream)
+		if landed {
+			continue
+		}
+		let c = try commitData(mut r, id)
+		let letters = c.Change.Letters()
+		if onTrunk[letters] && pushed[letters] == id.Hex() {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 fn syncPush(g Global, a ShareArgs, rebased i64, o mut Out) ! {
