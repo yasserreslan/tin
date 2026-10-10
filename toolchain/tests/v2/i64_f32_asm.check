@@ -9,10 +9,14 @@ CHECK: ucvtf s[0-9]+, x[0-9]+
 CHECK: fcvt d[0-9]+, s[0-9]+
 
 [amd64]
-CHECK: # L[0-9]+: signed32
-CHECK: cvtsi2ss xmm[0-9]+, r[0-9]+
-CHECK: cvtss2sd xmm[0-9]+, xmm[0-9]+
-CHECK: # L[0-9]+: unsigned32
-CHECK: cvtsi2ss xmm[0-9]+, r[0-9]+
-CHECK: addss xmm[0-9]+, xmm[0-9]+
-CHECK: cvtss2sd xmm[0-9]+, xmm[0-9]+
+# The listing opens with a table of every label, so the label names come before any code: they are
+# matched first, then each function's code from its label, as div10_asm does.
+CHECK: # L1: signed32
+CHECK: # L2: unsigned32
+CHECK: \nL1:\n
+CHECK: cvtsi2ss xmm\w+,r\w+
+CHECK: cvtss2sd xmm\w+,xmm\w+
+CHECK: \nL2:\n
+CHECK: cvtsi2ss xmm\w+,r\w+
+CHECK: addss xmm\w+,xmm\w+
+CHECK: cvtss2sd xmm\w+,xmm\w+
