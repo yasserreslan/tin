@@ -37,7 +37,10 @@ fn main() {
 		hashSeed = mint.Atoi(args[2]) catch _ { seed }
 	}
 	// Pin the runtime's randomized map hash key so a seed reproduces the same table layout.
-	rtHashK0 = hashSeed
+	// A negative override keeps the runtime's random hash key for probability sweeps.
+	if hashSeed >= 0 {
+		rtHashK0 = hashSeed
+	}
 	let m = make(map[i64]i64)
 	mut k = seed
 	mut bad = i64(0)
