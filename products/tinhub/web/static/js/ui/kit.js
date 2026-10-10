@@ -335,9 +335,22 @@ export function more(load) {
 	return wrap;
 }
 
-// field wraps an input with its label and hint.
+let fieldIds = 0;
+
+// field wraps an input with its label and hint. The label names the field's control (the input itself, or the only
+// one inside it, not a group of checkboxes), so a click on it focuses the control and a screen reader reads it.
 export function field(label, input, hint, error) {
-	return h("div.field", {}, label ? h("label.label", {}, label) : null, input, hint ? h("div.hint", {}, hint) : null, error ? h("div.error-text", {}, error) : null);
+	let lab = null;
+	if (label) {
+		lab = h("label.label", {}, label);
+		const ctls = input instanceof Element ? (input.matches("input, select, textarea") ? [input] : [...input.querySelectorAll("input, select, textarea")]) : [];
+		const ctl = ctls.length === 1 && ctls[0].type !== "checkbox" && ctls[0].type !== "radio" ? ctls[0] : null;
+		if (ctl) {
+			if (!ctl.id) ctl.id = `field-${++fieldIds}`;
+			lab.htmlFor = ctl.id;
+		}
+	}
+	return h("div.field", {}, lab, input, hint ? h("div.hint", {}, hint) : null, error ? h("div.error-text", {}, error) : null);
 }
 
 // tabs is a tab bar of links: [{label, href, icon, count, active}].

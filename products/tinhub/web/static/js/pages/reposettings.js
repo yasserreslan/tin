@@ -115,7 +115,7 @@ const PAGES = {
 						["admin", "Admin"],
 					],
 					role,
-					{ style: { width: "110px", height: "30px" } },
+					{ style: { width: "110px", height: "30px" }, "aria-label": "Role" },
 				);
 				s.onchange = () => onChange(s.value).catch((err) => toast(err.message, "error"));
 				return s;
@@ -131,7 +131,7 @@ const PAGES = {
 				return b;
 			};
 			const who = userInput();
-			const role = select(["read", "write", "admin"], "write", { style: { width: "110px" } });
+			const role = select(["read", "write", "admin"], "write", { style: { width: "110px" }, "aria-label": "Role" });
 			const add = btn("Add", { primary: true, icon: "plus" });
 			add.onclick = () =>
 				busy(add, async () => {
@@ -162,9 +162,9 @@ const PAGES = {
 						const pick = select(
 							teams.map((t) => t.name),
 							"",
-							{ style: { width: "180px" } },
+							{ style: { width: "180px" }, "aria-label": "Team" },
 						);
-						const trole = select(["read", "write", "admin"], "read", { style: { width: "110px" } });
+						const trole = select(["read", "write", "admin"], "read", { style: { width: "110px" }, "aria-label": "Role" });
 						const addT = btn("Add team", { icon: "plus" });
 						addT.onclick = () =>
 							busy(addT, async () => {
