@@ -427,7 +427,6 @@ fn readLog(c call, rev str, path str, cursor str, n i64) !logOut {
 	return out
 }
 
-
 // ---- raw files ----
 
 // rawType is the content type a raw file is served as: images as themselves, text as plain text, anything else as
