@@ -1,0 +1,127 @@
+package main
+
+// A sub-slice passed straight to a parameter that keeps nothing of it, to copy or to
+// append(s, x...), or bound to a local that never leaves its function, takes no pool memory:
+// its header lives in the caller's frame (#944). Every way a callee or the local could keep the
+// header still gets a header of its own, so what was kept reads the right bytes afterwards.
+
+import "say"
+
+type Holder struct {
+	f []u8
+	n i64
+}
+
+type Keeper struct {
+	b []u8
+	all [][]u8
+}
+
+fn total(p []u8) i64 {
+	mut t = 0
+	for i in 0..len(p) {
+		t += i64(p[i])
+	}
+	return t
+}
+
+fn (h mut Holder) step(src []u8, i i64) {
+	let p = src[i:i + 2]
+	h.n += len(p) + i64(p[0])
+	copy(h.f[0:2], src[i:i + 2])
+	h.n += total(src[i + 1:i + 3])
+	if h.n < 0 {
+		// Never runs, but the loop keeps what it stores: no loop pool gives the steps back.
+		h.f = h.f[0:2]
+	}
+}
+
+fn keepField(k mut Keeper, p []u8) {
+	k.b = p
+}
+
+fn keepList(k mut Keeper, p []u8) {
+	k.all = append(k.all, p)
+}
+
+fn echo(p []u8) []u8 {
+	return p
+}
+
+fn later(p []u8) fn() i64 {
+	return fn() i64 {
+		return total(p)
+	}
+}
+
+fn keepMap(m mut map[str][]u8, k str, p []u8) {
+	m[k] = p
+}
+
+fn deep(src []u8, n i64) i64 {
+	if n == 0 {
+		return 0
+	}
+	return total(src[0:n]) + deep(src[1:], n - 1)
+}
+
+fn main() {
+	mut src = make([]u8, 16)
+	for i in 0..16 {
+		src[i] = u8(i)
+	}
+	mut h = Holder{f: make([]u8, 4, 64), n: 0}
+	let before = rt_pool_used()
+	for r in 0..100000 {
+		h.step(src, r % 8)
+	}
+	let grew = rt_pool_used() - before
+	say.Line("steps", h.n, h.f[0], h.f[1], "pool grew", grew)
+	mut acc = make([]u8, 0, 64)
+	for i in 0..4 {
+		acc = append(acc, src[i * 3:i * 3 + 2]...)
+	}
+	say.Line("str", str(src[4:6]) == str(src[4:6]), len(str(src[1:4])))
+	say.Line("appended", acc[0], acc[1], acc[2], acc[7], len(acc))
+
+	mut k = Keeper{b: []u8{}, all: [][]u8{}}
+	for i in 0..4 {
+		keepField(mut k, src[i:i + 3])
+		keepList(mut k, src[i * 2:i * 2 + 2])
+	}
+	say.Line("field", k.b[0], len(k.b), "list", k.all[0][0], k.all[1][0], k.all[3][1])
+	let a = echo(src[1:3])
+	let b = echo(src[5:7])
+	say.Line("returned", a[0], b[0])
+	let f1 = later(src[2:4])
+	let f2 = later(src[8:10])
+	say.Line("closures", f1(), f2())
+	mut m = map[str][]u8{}
+	keepMap(mut m, "x", src[3:5])
+	keepMap(mut m, "y", src[10:12])
+	say.Line("map", m["x"][0], m["y"][1])
+	say.Line("deep", deep(src, 4))
+
+	// A local whose header is passed on, captured or returned keeps a header of its own.
+	mut views [][]u8 = [][]u8{}
+	for i in 0..3 {
+		let v = src[i:i + 1]
+		views = append(views, v)
+	}
+	say.Line("locals", views[0][0], views[1][0], views[2][0])
+	mut fs []fn() i64 = []fn() i64{}
+	for i in 0..3 {
+		let w = src[i + 6:i + 7]
+		fs = append(fs, fn() i64 {
+			return total(w)
+		})
+	}
+	say.Line("captured", fs[0](), fs[1](), fs[2]())
+	mut s = 0
+	for i in 0..3 {
+		let q = src[i:i + 4]
+		s += total(q) + len(q)
+		q[0] = q[0]
+	}
+	say.Line("contained", s)
+}

@@ -1447,5 +1447,15 @@
       "stdout": "spawned: limit exceeded\nparallel: limit exceeded\n-1 -1 4194308\n",
       "stderr": ""
     }
+  },
+  {
+    "expected": {
+      "exit": 0,
+      "phase": "run",
+      "stderr": "",
+      "stdout": "steps 1550000 7 8 pool grew 0\nstr true 3\nappended 0 1 3 10 8\nfield 3 3 list 0 2 7\nreturned 1 5\nclosures 5 17\nmap 3 11\ndeep 20\nlocals 0 1 2\ncaptured 6 7 8\ncontained 42\n"
+    },
+    "issue": 944,
+    "source": "slice-header-frame.tin"
   }
 ]

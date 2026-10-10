@@ -2258,6 +2258,26 @@ fn rt_slice_sub(s i64, lo i64, hi i64, esz i64, hasHi i64) i64 {
 	return h
 }
 
+// rt_slice_sub_in is rt_slice_sub writing the header into h, an area in its caller's frame
+// (#944): a sub-slice that only a call reads, or a local that never leaves its function, takes
+// no pool memory.
+fn rt_slice_sub_in(h i64, s i64, lo i64, hi i64, esz i64, hasHi i64) i64 {
+	if hasHi == 0 {
+		hi = s[0]
+	}
+	if lo < 0 || hi > s[0] || lo > hi {
+		rt_panic("slice bounds out of range")
+	}
+	h[0] = hi - lo
+	h[1] = s[1] - lo
+	h[2] = s[2] + lo*esz
+	h[3] = 0
+	if s[3] != 0 {
+		h[3] = 2
+	}
+	return h
+}
+
 fn rt_slice_copy(dst i64, src i64, esz i64) i64 {
 	mut n = dst[0]
 	if src[0] < n {
