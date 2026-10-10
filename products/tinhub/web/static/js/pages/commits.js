@@ -57,7 +57,11 @@ export async function render(ctx) {
 	let lastDay = "";
 	let box = null;
 	const load = async () => {
-		const r = await api.get(api.R(repo.owner, repo.name)("/log"), { rev, path, cursor, limit: 40 });
+		let r = await api.get(api.R(repo.owner, repo.name)("/log"), { rev, path, cursor, limit: 40 });
+		// a page of a path's history reads a bounded part of the history: go on while it found nothing
+		for (let i = 0; !(r.commits || []).length && r.next && i < 20; i++) {
+			r = await api.get(api.R(repo.owner, repo.name)("/log"), { rev, path, cursor: r.next, limit: 40 });
+		}
 		if (!cursor) list.replaceChildren();
 		for (const c of r.commits || []) {
 			const day = fmt.date(c.committer.when);

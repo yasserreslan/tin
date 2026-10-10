@@ -72,9 +72,13 @@ type Pack struct {
 	fanout []i64
 	cache  map[i64]str
 	kinds  map[i64]object.Kind
-	// order is the cached offsets, oldest first; held their bytes (at most cacheMost)
+	// order is the cached offsets, oldest first; held their bytes (at most cacheMax)
 	order []i64
 	held  i64
+	// wholeMax is the largest pack read whole once many of its entries were read one by one, and cacheMax the bytes
+	// of decoded entries kept: Budget lowers them for a reader within a memory budget
+	wholeMax i64
+	cacheMax i64
 }
 
 fn le32(s str, at i64) i64 {
@@ -132,7 +136,7 @@ fn Open(path str) !Pack {
 	}
 	// The index's hash and the order of its ids are checked by Verify (tit verify), as git checks its own indexes
 	// in fsck: an open reads only what it needs, and an offset is checked where it is used.
-	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ranged: 0, win: "", winAt: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0}
+	return Pack{Path: path, Count: count, size: info.Size, trailer: idx[len(idx) - 64:len(idx) - 32], loaded: false, data: "", idx: idx, ranged: 0, win: "", winAt: 0, fanout: fanout, cache: map[i64]str{}, kinds: map[i64]object.Kind{}, order: []i64{}, held: 0, wholeMax: wholeMost, cacheMax: cacheMost}
 }
 
 // idsAt is where the ids start in an index: after its header (20 bytes) and fan-out table (1024).
@@ -254,7 +258,7 @@ fn (p mut Pack) entrySpan(off i64) !(str, i64, i64) {
 		fail fault.Wrap(ErrBadPack, "no entry at {off}")
 	}
 	// a small pack, or one read entry by entry many times already, is read whole: one read beats many
-	if !p.loaded && (p.size <= wholeUnder || (p.ranged >= 64 && p.size <= 256 << 20)) {
+	if !p.loaded && (p.size <= wholeUnder || (p.ranged >= 64 && p.size <= p.wholeMax)) {
 		try p.load()
 	}
 	if p.loaded {
@@ -562,10 +566,22 @@ fn (p mut Pack) entryAt(off i64, depth i64) !(object.Kind, str) {
 // cacheMost is how many bytes of decoded entries a pack keeps for the deltas read after them.
 const cacheMost = 32 << 20
 
+// wholeMost is the largest pack read whole after many of its entries were read one by one.
+const wholeMost = 256 << 20
+
+// Budget fits the pack's reading to a memory budget of n bytes, for a reader that reads some objects within a `limit
+// memory` (a tinhub request: 16 MiB): the pack is read whole only when it is under n / 4, and the decoded entries kept
+// for deltas take at most n / 4. Otherwise a log of a large repository read the whole pack after 64 entries and
+// failed with fault.LimitExceeded.
+fn (p mut Pack) Budget(n i64) {
+	p.wholeMax = min(wholeMost, n / 4)
+	p.cacheMax = min(cacheMost, n / 4)
+}
+
 // remember keeps a decoded entry for the deltas that build on it, dropping the oldest past cacheMost: a delta chain
 // is then decoded once, not once for every object on it.
 fn (p mut Pack) remember(off i64, kind object.Kind, body str) {
-	if len(body) > cacheMost / 8 {
+	if len(body) > p.cacheMax / 8 {
 		return
 	}
 	let (_, had) = p.cache[off]
@@ -577,7 +593,7 @@ fn (p mut Pack) remember(off i64, kind object.Kind, body str) {
 	p.order = append(p.order, off)
 	p.held += len(body)
 	mut drop = 0
-	for p.held > cacheMost && drop < len(p.order) {
+	for p.held > p.cacheMax && drop < len(p.order) {
 		let old = p.order[drop]
 		let (b, ok) = p.cache[old]
 		if ok {

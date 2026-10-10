@@ -62,9 +62,16 @@ function mdBase(base, rev, dir, apiBase) {
 	};
 }
 
+// latestCommit is the newest commit that changed path. A page of a path's history reads a bounded part of the
+// history, so one that changed long ago comes back empty with a cursor to go on from.
 async function latestCommit(repo, rev, path) {
-	const r = await api.get(api.R(repo.owner, repo.name)("/log"), { rev, path, limit: 1 });
-	return (r.commits || [])[0] || null;
+	let cursor = "";
+	for (let i = 0; i < 20; i++) {
+		const r = await api.get(api.R(repo.owner, repo.name)("/log"), { rev, path, cursor, limit: 1 });
+		if ((r.commits || []).length || !r.next) return (r.commits || [])[0] || null;
+		cursor = r.next;
+	}
+	return null;
 }
 
 function commitStrip(base, c, rev, path) {
