@@ -12,6 +12,13 @@ on:
         description: Enable experimental CPU safepoints in the head compiler
         type: boolean
         default: false
+      amd64_runner:
+        description: Runner for the amd64 job (dedicated requires a self-hosted tin-bench-amd64 runner)
+        type: choice
+        options:
+          - shared
+          - dedicated
+        default: shared
   schedule:
     - cron: '0 6 * * 1'
 
@@ -32,7 +39,7 @@ concurrency:
 jobs:
   bench:
     name: Linux ${{ matrix.arch }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.arch == 'amd64' && inputs.amd64_runner == 'dedicated' && fromJSON('["self-hosted","linux","x64","tin-bench-amd64"]') || matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -85,8 +92,13 @@ jobs:
           cpu=$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -n 1)
           kernel=$(uname -srmo)
           go=$(go version)
-          machine="GitHub-hosted ubuntu-24.04${EXPECTED_ARCH:+} shared runner"
-          if [ "$EXPECTED_ARCH" = arm64 ]; then machine="GitHub-hosted ubuntu-24.04-arm shared runner"; fi
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            machine="Self-hosted runner $RUNNER_NAME"
+          elif [ "$EXPECTED_ARCH" = arm64 ]; then
+            machine="GitHub-hosted ubuntu-24.04-arm shared runner ($RUNNER_NAME)"
+          else
+            machine="GitHub-hosted ubuntu-24.04 shared runner ($RUNNER_NAME)"
+          fi
           {
             echo "## Linux $EXPECTED_ARCH benchmark run (shared-runner ratios only)"
             echo '| field | value |'
@@ -96,6 +108,7 @@ jobs:
             echo "| kernel | $kernel |"
             echo "| Go | $go |"
             echo "| architecture | $EXPECTED_ARCH |"
+            echo "| runner environment | $RUNNER_ENVIRONMENT |"
             echo "| compiler option | TINC_POLLS=$TINC_POLLS (head opt-in; base uses its committed default) |"
             echo "| load generator | $(wrk --version 2>&1 | head -n 1) |"
             echo "| HTTP/2 tool | $(h2load --version 2>&1 | head -n 1) |"

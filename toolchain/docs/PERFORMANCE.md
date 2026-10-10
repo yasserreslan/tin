@@ -31,6 +31,9 @@ development platform (toolchain/docs/PORTING.md, "Platform roles").
   Linux amd64 reference table yet; the CPU workflow does run on amd64, but its results are
   shared-runner ratios. The loop-memory check already reports Linux amd64 and arm64 values
   from their respective shared GitHub runners, so those are not dedicated-machine figures.
+  For a manual run on dedicated x86-64 hardware, select `dedicated` for `amd64_runner`;
+  this requires a self-hosted Linux x64 runner registered with the `tin-bench-amd64` label.
+  The arm64 job continues to use its shared runner.
 - **Existing macOS numbers:** the sections below were measured on the macOS development
   machine before this policy. They are kept for history until Linux reference runs replace
   them, section by section; do not add new macOS numbers.
