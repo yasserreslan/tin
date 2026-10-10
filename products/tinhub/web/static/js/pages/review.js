@@ -307,14 +307,21 @@ export async function render(ctx) {
 			),
 		);
 		const ready = !rv.blocked;
-		rows.push(h("div.merge-row", {}, h("div", { class: ["merge-icon", ready ? "ok" : "info"] }, icon(ready ? "landed" : "info", "sm")), h("div", {}, h("b", {}, ready ? "Ready to land" : "Not ready to land"), h("div.small.muted", {}, ready ? `Landing rebases the change onto ${rv.target.replace("refs/heads/", "")} if it has moved.` : rv.blocked))));
+		const below = rv.below || [];
+		const stackReady = below.length > 0 && !rv.stack_blocked;
+		const headline = ready ? "Ready to land" : stackReady ? "Ready to land with the stack" : "Not ready to land";
+		const detail = ready ? `Landing rebases the change onto ${rv.target.replace("refs/heads/", "")} if it has moved.` : stackReady ? `${fmt.plural(below.length, "change")} below this one ${below.length === 1 ? "has" : "have"} not landed. Landing the stack lands ${below.length === 1 ? "it" : "them"} first, bottom up.` : (rv.stack_blocked || rv.blocked).replace(/\b[k-z]{32}\b/g, (id) => fmt.shortChange(id));
+		rows.push(h("div.merge-row", {}, h("div", { class: ["merge-icon", ready || stackReady ? "ok" : "info"] }, icon(ready || stackReady ? "landed" : "info", "sm")), h("div", {}, h("b", {}, headline), h("div.small.muted", {}, detail))));
 		const foot = h("div.merge-foot");
 		if (canWrite) {
 			const l = btn("Land", { success: true, icon: "landed", disabled: !ready });
 			l.onclick = () => land(false, l);
-			const ls = btn("Land stack", { icon: "stack", title: "Land every change below this one, then this one" });
-			ls.onclick = () => land(true, ls);
-			foot.append(l, ls, h("span.small.muted", {}, ready ? "" : "The stack can still land when every change in it is ready."));
+			foot.append(l);
+			if (below.length) {
+				const ls = btn("Land stack", { success: stackReady, icon: "stack", disabled: !stackReady, title: `Land the ${fmt.plural(below.length, "change")} below this one, then this one` });
+				ls.onclick = () => land(true, ls);
+				foot.append(ls);
+			}
 		} else foot.append(h("span.small.muted", {}, me ? "Only people with write access can land changes." : "Sign in to vote or comment."));
 		return h("div.merge-box", {}, rows, foot);
 	};

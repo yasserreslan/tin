@@ -221,6 +221,10 @@ type reviewOut struct {
 	required      []str
 	checks        []checkOut
 	blocked       str
+	// below is the changes under this one that have not landed, bottom first; stack_blocked is why the stack (those
+	// and this one) cannot land yet, "" when it can
+	below         []str
+	stack_blocked str
 	// opened_by_name and landed_by_name are those users' names, for pages ("" for none)
 	opened_by_name str
 	landed_by_name str
@@ -259,9 +263,34 @@ fn reviewOf(c call, ch str) !reviewOut {
 		} else {
 			blocked = try Readiness(c.d.Db, c.r, ch, rv.Version)
 		}
+		mut below = []str{}
+		mut stackBlocked = blocked
+		if rv.State != StateLanded && rv.State != StateAbandoned {
+			let (order, serr) = StackBelow(c.r.Id, ch)
+			if serr != nil {
+				if len(stackBlocked) == 0 {
+					stackBlocked = fault.Message(serr)
+				}
+			} else {
+				below = order[0:len(order) - 1]
+			}
+			for b in below {
+				if len(stackBlocked) > 0 {
+					break
+				}
+				let brv = try Open(c.d.Db, c.r.Id, b)
+				let why = try Readiness(c.d.Db, c.r, b, brv.Version)
+				if len(why) > 0 {
+					stackBlocked = "{b} below it: {why}"
+				}
+			}
+			if len(blocked) == 0 && len(below) > 0 {
+				blocked = "{below[len(below) - 1]} below it has not landed: land it first, or land the stack"
+			}
+		}
 		let opener = try nameOf(c.d.Db, rv.OpenedBy)
 		let lander = try nameOf(c.d.Db, rv.LandedBy)
-		out = keep(reviewOut{change: ch, state: rv.State, target: rv.Target, opened_by: rv.OpenedBy, version: rv.Version, commit: rv.Commit, created_at: rv.Created, updated_at: rv.Updated, landed_at: rv.Landed, landed_commit: rv.LandedAt, landed_by: rv.LandedBy, votes: tallyOut{approvals: t.Approvals, blocking: t.Blocking, needed: t.Needed}, required: s.Checks, checks: checksOut(cs), blocked: blocked, opened_by_name: opener, landed_by_name: lander})
+		out = keep(reviewOut{change: ch, state: rv.State, target: rv.Target, opened_by: rv.OpenedBy, version: rv.Version, commit: rv.Commit, created_at: rv.Created, updated_at: rv.Updated, landed_at: rv.Landed, landed_commit: rv.LandedAt, landed_by: rv.LandedBy, votes: tallyOut{approvals: t.Approvals, blocking: t.Blocking, needed: t.Needed}, required: s.Checks, checks: checksOut(cs), blocked: blocked, below: below, stack_blocked: stackBlocked, opened_by_name: opener, landed_by_name: lander})
 	}
 	if out == nil {
 		fail fault.Wrap(ErrNotFound, "no change {ch}")

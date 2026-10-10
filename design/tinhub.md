@@ -769,7 +769,9 @@ them, in lists too). A write never acts as `accounts.System()`: no signed-in use
 
 `GET /api/v1/repos/<o>/<r>` also answers `description`, `role` (the caller's: `none`, `read`, `write`, `admin`),
 `following`, `pushed_at` and `created_at`. `GET …/reviews` answers, for each review, the newest version's `commit`,
-`opened_by` (a name) and `created_at`; `GET …/changes/<change>/review` adds `opened_by_name` and `landed_by_name`.
+`opened_by` (a name) and `created_at`; `GET …/changes/<change>/review` adds `opened_by_name` and `landed_by_name`, and for a change in a stack `below` (the
+changes under it that have not landed, bottom first) and `stack_blocked` (why landing the stack would stop, `""` when it
+can land). `blocked` names the change below while one has not landed, since `land` without `stack` refuses it.
 
 **Reviews from tit.** `tit push` of a branch sends a version of every change on its first-parent line above the trunk
 (`stack.trunk`, else `main`), each replacing the version the server had (from its heads, else from

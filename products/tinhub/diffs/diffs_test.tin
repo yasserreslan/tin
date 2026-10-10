@@ -536,3 +536,25 @@ fn TestInterdiffUnits(t mut crucible.T) {
 	crucible.Equal(mut t, "rest is what lies outside declarations", rest("package a\n\nfn F() {{\n}}\n", []semantic.Decl{semantic.Decl{Key: "fn F", Name: "F", Line: 3, Text: "fn F() {{\n}}", Norm: ""}}), "package a\n")
 	t.True("binary", binary("a\x00b") && !binary("ab"))
 }
+
+// A declaration whose comments changed shows against the base and between versions: tit/semantic leaves comments out
+// of its comparison, but a reviewer reads them. A change tin fmt would undo still shows nothing.
+fn TestComments(t mut crucible.T) {
+	let a = "package a\n\n// F says hello.\nfn F() {{\n\treturn\n}}\n\nfn G() {{\n\treturn\n}}\n"
+	let doc = "package a\n\n// F says hello to the world.\nfn F() {{\n\treturn\n}}\n\nfn G() {{\n\treturn\n}}\n"
+	let inner = "package a\n\n// F says hello.\nfn F() {{\n\treturn\n}}\n\nfn G() {{\n\t// nothing to do\n\treturn\n}}\n"
+	let spaces = "package a\n\n// F says  hello.\nfn F() {{\n\treturn \n}}\n\nfn G() {{\n\n\treturn\n}}\n"
+	let f = baseFile("a.tin", "", a, doc)
+	crucible.Equal(mut t, "a doc comment's change is one declaration's", len(f.decls), 1)
+	if len(f.decls) == 1 {
+		crucible.Equal(mut t, "it is F's", f.decls[0].key, "fn F")
+		crucible.Equal(mut t, "changed", f.decls[0].change, "changed")
+		t.True("its diff has the comment: {f.decls[0].diff}", twine.Contains(f.decls[0].diff, "+// F says hello to the world."))
+	}
+	crucible.Equal(mut t, "nothing outside the declarations changed", f.diff, "")
+	let g = baseFile("a.tin", "", a, inner)
+	t.True("a comment in a body: {len(g.decls)}", len(g.decls) == 1 && g.decls[0].key == "fn G")
+	crucible.Equal(mut t, "a change tin fmt undoes is none", len(baseFile("a.tin", "", a, spaces).decls), 0)
+	let x = interFile(fileIn{path: "a.tin", oldPath: "a.tin", ob: a, o: a, nb: a, n: doc}, true)
+	t.True("between versions too", x != nil && len(x.decls) == 1 && x.decls[0].key == "fn F")
+}

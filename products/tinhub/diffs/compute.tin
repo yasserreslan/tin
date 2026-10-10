@@ -11,7 +11,8 @@ import "twine"
 
 // Computing a diff. Against the base it is tit's semantic diff: each Tin file's declarations that were added,
 // removed, changed, moved or renamed, each with the line diff of its text, and the line diff of what lies outside
-// every declaration (the package line, imports); any other file is a line diff. Against the previous version it is an
+// every declaration (the package line, imports); a declaration whose comments alone changed shows as changed too, though
+// tit's semantic diff leaves comments out. Any other file is a line diff. Against the previous version it is an
 // interdiff: of the paths either version touched, a declaration shows only when the two versions differ in it and the
 // difference is not the rebase's (neither version edited it, or both made the same edit to it on their own bases).
 // The line diff fallback is the same over whole files. The files are read first (in the job's budget); the semantic
@@ -532,13 +533,62 @@ fn textOf(ds map[str]semantic.Decl, key str) str {
 	return d.Text
 }
 
-// normOf is a declaration's normalized text, "\x00" when there is none (so an empty one still differs from none).
+// normOf is a declaration's text with its whitespace normalized and its comments kept, "\x00" when there is none (so
+// an empty one still differs from none).
 fn normOf(ds map[str]semantic.Decl, key str) str {
 	let (d, ok) = ds[key]
 	if !ok {
 		return "\x00"
 	}
-	return d.Norm
+	return squash(d.Text)
+}
+
+// squash is text with each line trimmed, runs of spaces and tabs as one space and blank lines dropped: what tin fmt
+// would undo is no change, while a comment, which tit/semantic's Norm leaves out, still counts for a reviewer.
+fn squash(text str) str {
+	mut out = []u8{}
+	for raw in twine.Split(text, "\n") {
+		let line = twine.TrimSpace(raw)
+		if len(line) == 0 {
+			continue
+		}
+		mut space = false
+		for i in 0..len(line) {
+			let c = line[i]
+			if c == ' ' || c == '\t' {
+				space = true
+				continue
+			}
+			if space {
+				out = append(out, ' ')
+			}
+			space = false
+			out = append(out, c)
+		}
+		out = append(out, '\n')
+	}
+	return str(out)
+}
+
+// commentsChanged is the declarations in both texts whose comments (the doc comment above, or ones in the body)
+// changed while tit/semantic saw no change, in the new file's order.
+fn commentsChanged(od []semantic.Decl, nd []semantic.Decl, cs []semantic.Change) []str {
+	mut seen = map[str]bool{}
+	for c in cs {
+		seen[c.Key] = true
+		seen[c.OldKey] = true
+	}
+	let olds = byKey(od)
+	mut out = []str{}
+	for d in nd {
+		let (_, done) = seen[d.Key]
+		let (o, both) = olds[d.Key]
+		if !done && both && squash(o.Text) != squash(d.Text) {
+			seen[d.Key] = true
+			out = append(out, d.Key)
+		}
+	}
+	return out
 }
 
 // rest is a file's lines outside every declaration (its package line, imports, stray comments), blank lines left out.
@@ -606,6 +656,9 @@ fn baseFile(path str, oldPath str, a str, b str) fileOut {
 			}
 			for c in cs {
 				f.decls = append(f.decls, declOut{change: semantic.KindText(c.Kind), key: c.Key, old_key: c.OldKey, diff: lineDiff(c.OldKey, c.Key, textOf(olds, c.OldKey), textOf(news, c.Key))})
+			}
+			for k in commentsChanged(od, nd, cs) {
+				f.decls = append(f.decls, declOut{change: "changed", key: k, old_key: k, diff: lineDiff(k, k, textOf(olds, k), textOf(news, k))})
 			}
 			f.diff = lineDiff(before, path, rest(a, od), rest(b, nd))
 			return f
