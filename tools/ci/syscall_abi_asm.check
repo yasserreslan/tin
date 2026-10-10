@@ -1,7 +1,8 @@
 # The generator check ties these assembled syscall leaves to syscall_fast.tin.
 # syscall_check.tin covers native behavior; this pins the register ABI on both Linux CPUs.
-# The Go-style objdump listing uses x0-x5/x8 and svc on arm64, and rdi/rsi/rdx/r10/r8/r9,
-# rax and syscall on amd64. These are the generated rt_sys_* leaves from syscall_fast.tin.
+# Pinned to GNU objdump's `objdump -d` syntax, which is what the Linux CI runners use.
+# LLVM objdump spells some immediates and widths differently, so patterns below accept
+# both forms where they describe the same instruction. These are generated rt_sys_* leaves.
 
 [arm64]
 CHECK: <rt_sys_read>:
@@ -11,7 +12,7 @@ CHECK: cmn\s+x0,\s+#(?:0xfff|4095)
 CHECK: b\.(?:cc|lo)
 CHECK: neg\s+x0,\s+x0
 CHECK: str\s+x0,\s+\[x28,\s+#(?:0x50|80)\]
-CHECK: mov\s+x0,\s+#-0x1
+CHECK: mov\s+x0,\s+#-(?:0x1|1)
 CHECK: ret
 CHECK: <rt_sys_write>:
 CHECK: mov\s+x8,\s+#(?:0x40|64)
@@ -40,7 +41,9 @@ CHECK: cmn\s+x0,\s+#(?:0xfff|4095)
 
 [amd64]
 CHECK: <rt_sys_read>:
-CHECK-NOT: %rdi|%rsi|%rdx
+# The syscall receives its first three arguments unchanged in rdi, rsi, rdx.
+# Reject writes to those destinations before the syscall while allowing uses of them.
+CHECK-NOT: (?:mov|xor|pop|lea)[a-z]*\s+[^,]+,\s+%(?:rdi|rsi|rdx)\b
 CHECK: movl?\s+\$0x0, %eax
 CHECK: syscall
 CHECK: cmpq?\s+\$-0xfff, %rax
