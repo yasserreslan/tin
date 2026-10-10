@@ -11,6 +11,24 @@ export class ApiError extends Error {
 
 const BASE = "/api/v1";
 
+// The API's messages end with the kind of fault they wrap ("ada/x exists: already exists", "…: invalid"). The
+// status already says that much, so tidy drops those endings to leave what happened.
+const KINDS = [": invalid", ": already exists", ": not found", ": forbidden", ": conflict", ": webhook URL"];
+
+export function tidy(message) {
+	let m = String(message || "");
+	for (let cut = true; cut; ) {
+		cut = false;
+		for (const k of KINDS) {
+			if (m.length > k.length && m.endsWith(k)) {
+				m = m.slice(0, -k.length);
+				cut = true;
+			}
+		}
+	}
+	return m;
+}
+
 // enc encodes each path segment of a repository-relative path, keeping the slashes.
 export function enc(path) {
 	return String(path).split("/").map(encodeURIComponent).join("/");
@@ -56,7 +74,7 @@ export async function request(method, path, { body, params, raw, signal, accept2
 		try {
 			const j = await res.json();
 			code = j.code || "";
-			message = j.message || "";
+			message = tidy(j.message);
 		} catch {}
 		if (!message) message = res.status === 404 ? "Not found" : res.status === 403 ? "You don't have access to this." : `The server answered ${res.status}.`;
 		throw new ApiError(res.status, code, message);
