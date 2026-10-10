@@ -60,7 +60,6 @@ const PAGES = {
 		const vis = select(
 			[
 				["public", "Public: anyone can read it"],
-				["internal", "Internal: anyone signed in can read it"],
 				["private", "Private: only people given access"],
 			],
 			repo.visibility,
@@ -71,7 +70,7 @@ const PAGES = {
 			if (desc.value !== (repo.description || "")) patch.description = desc.value;
 			if (branch.value !== repo.default_branch) patch.default_branch = branch.value;
 			if (vis.value !== repo.visibility) {
-				if (vis.value !== "public" && !(await confirm({ title: "Change visibility?", message: `${repo.owner}/${repo.name} becomes ${vis.value}. People without access lose it, along with their follows.`, confirmLabel: "Change" }))) return;
+				if (vis.value === "private" && !(await confirm({ title: "Change visibility?", message: `${repo.owner}/${repo.name} becomes ${vis.value}. People without access lose it, along with their follows.`, confirmLabel: "Change" }))) return;
 				patch.visibility = vis.value;
 			}
 			if (!Object.keys(patch).length) return;
