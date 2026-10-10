@@ -90,6 +90,7 @@ def emit_mutation(src: str, rng: random.Random, other: str | None = None) -> tup
     choices = ['delete', 'duplicate', 'swap', 'move', 'insert', 'splice', 'truncate']
     op = rng.choice(choices if other is not None else choices[:-2] + ['truncate'])
     vals = [t.text for t in toks]
+    original = vals.copy()
     i = rng.randrange(len(vals))
     if op == 'delete':
         del vals[i]
@@ -108,6 +109,9 @@ def emit_mutation(src: str, rng: random.Random, other: str | None = None) -> tup
             vals[i:i] = b[j:k]
     elif op == 'truncate':
         del vals[rng.randrange(len(vals) + 1):]
+    if vals == original:
+        vals.insert(rng.randrange(len(vals) + 1), rng.choice(INSERT))
+        op += '-fallback'
     # Whitespace between lexical tokens keeps identifiers and operators separable.
     return ' '.join(vals) + '\n', op
 
