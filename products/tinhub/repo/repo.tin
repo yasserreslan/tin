@@ -183,6 +183,18 @@ fn (r mut PgRepo) Commit(u transport.Update) !i64 {
 	return op
 }
 
+// CommitTx is Commit inside the caller's transaction, for an update that must commit with other rows (landing a
+// change, #1025): it takes the repository's lock in tx and does what Commit does; the caller commits tx and then, when
+// u moved refs, calls Moved.
+fn (r PgRepo) CommitTx(tx mut postgres.Tx, u transport.Update) !i64 {
+	return try r.commitIn(mut tx, u)
+}
+
+// Moved bumps the ref cache's generation after a CommitTx that moved refs has committed.
+fn (r PgRepo) Moved() {
+	r.Cache.bump(r.Id)
+}
+
 fn (r PgRepo) commitIn(tx mut postgres.Tx, u transport.Update) !i64 {
 	try packs.Lock(mut tx, r.Id)
 	try recheck(mut tx, r.Id, u)

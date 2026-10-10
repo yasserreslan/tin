@@ -226,6 +226,7 @@ fake with nodes killed mid-push, mid-fetch and mid-job (`phase2.sh`), the Tin re
 short clone timings and a one-versus-three-node fetch count (`clones.sh`; its `TINHUB_BENCH_*` variables lengthen
 them), benchmark history (`bench.sh`, #1029: the Tin repo's `bench/fib.tin` timed, recorded with `tit bench record`
 and pushed under `.bench/`, read into `bench_results` with the CPU and kernel; a change made three times slower fails
-its `bench` check with a note on its review; `tit ship`'s release listed with a verified signature), and a server that
-refuses to start before `tinhub migrate`,
-turns ready after it, and finishes a request in flight at SIGTERM.
+its `bench` check with a note on its review; `tit ship`'s release listed with a verified signature), reviews (#1025: the unit tests keep a comment on `fn Lstat` through three
+rebases and a reformat; `review.sh` pushes a stack of three change versions over the protocol, posts the required check
+signed with a key, lands the stack with one move of main per change, and is refused a landing whose rebase conflicts),
+and a server that refuses to start before `tinhub migrate`, turns ready after it, and finishes a request in flight at SIGTERM.

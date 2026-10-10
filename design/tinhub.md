@@ -178,6 +178,7 @@ else 16 random hex digits, echoed in the answer).
 | `GET /api/v1/subscriptions`, `PUT\|DELETE /api/v1/repos/<owner>/<repo>/subscription`, `PUT\|DELETE …/changes/<change>/subscription` | node | #1023 |
 | `GET\|POST /api/v1/repos/<owner>/<repo>/changes/<change>/behaviour`, `GET\|PUT …/runner`, `GET\|PUT\|DELETE /api/v1/orgs/<org>/runner` | node | #1028 |
 | `GET /api/v1/repos/<owner>/<repo>/bench`, `GET …/bench/<name>`, `GET …/changes/<change>/bench`, `GET …/releases`, `GET …/releases/<tag>` | node | #1029 |
+| `GET\|PATCH /api/v1/repos/<owner>/<repo>/changes/<change>/review`, `GET\|POST …/comments`, `PATCH …/comments/<id>`, `GET\|POST …/approvals`, `GET\|POST …/checks` (POST signed), `POST …/land`, `GET …/<repo>/reviews`, `GET\|PUT …/<repo>/review/settings` | node | #1025 |
 
 Owner names (users and orgs share one namespace) and repository names match `[a-z0-9][a-z0-9-]{0,38}` and
 `[A-Za-z0-9._-]{1,100}` (not `.` or `..`, not ending in `.tit`). A private repository answers 404, never 403, to
@@ -233,6 +234,12 @@ versions (design/tit.md §16).
 | `approvals` | `repo_id`, `change_id`, `version int`, `user_id`, `vote text` (`approve`, `changes`), `created_at` | `primary key (repo_id, change_id, version, user_id)` |
 | `comments` | `id`, `repo_id`, `change_id text`, `version int`, `author_id`, `parent_id` (nullable), `decl text` (the declaration's qualified name, `""` for a file comment), `file text`, `line_offset int` (lines from the declaration's first line), `body text`, `outdated bool`, `created_at`, `resolved_at` | index `(repo_id, change_id)` |
 | `checks` | `repo_id`, `change_id text`, `version int`, `name text`, `state text` (`pending`, `success`, `failure`, `error`), `url text`, `key_id`, `updated_at` | `primary key (repo_id, change_id, version, name)` |
+| `review_settings` (migration `0008_review`) | `repo_id`, `approvals int` (0 to 10, no row: 1), `required_checks text[]`, `updated_by`, `updated_at` | `primary key (repo_id)`; set by a repository's admins |
+
+Migration `0008_review` also adds `reviews.landed_commit` and `reviews.landed_by`, `comments.written_on` (the version a
+comment was written on; `version` is the one it is anchored to now) and `comments.outdated_at`, and `checks.description`.
+A comment's `decl` is tit/semantic's key (`fn Lstat`, `method Repo.Commit`) in `file`; `author_id` NULL is a system
+comment (the bench, #1029). How the rows are used is §14.
 
 ### Workers' results (#1020, #1021, #1029)
 
@@ -339,6 +346,7 @@ in the push transaction). Workers run handlers by `kind`; a job is an event in t
 | `replay.retention` | nightly | #1022 | 5m, 64mb |
 | `replay.run` | a review's new version (#1025), or the API | #1028, on the runner role only | 60m, 512mb (the sandboxes apart) |
 | `bench` | `push` (`bench.Enqueue`), or a review (`bench.Recheck`) | #1029, §13 | 1m, 64mb |
+| `review.version` | `push` (`review.EnqueueFor`), when the change has comments | its comments moved onto the new version (#1025) | 60s, 256mb |
 
 Metrics: `GET /metrics` (Prometheus text, answered to loopback clients only): ready and dead jobs per kind, claimed
 jobs, and the age of the oldest ready job of each kind.
@@ -629,3 +637,51 @@ Lightweight tags are not releases.
 What `main.tin` wires: `bench.Handlers(bench.NewDeps(pg, st, packs.dir, signin.Caller))` on a worker,
 `bench.Configure(…)` and `bench.Mount(r)` on a node.
 
+
+---
+
+## 14. Reviews, comments, checks and landing (#1025)
+
+`products/tinhub/review` on the tables of §5 (migration `0008_review`).
+
+**Reviews.** The push fan-out (`workers/push.tin` followUps) calls `review.EnqueueFor(tx, repo, payload)` for each change
+version a push carries (the push payload's `changes`, which only a client sending change versions in its push request
+fills: `tit push` and `tit sync` send none today): it opens the change's review when it has none (state `open`,
+`target` the repository's default branch, `opened_by` the version's pusher), asks the runner for a run of the version
+while the review is open (`runner.Request`, once per version; nothing unless the owner opted in), and queues a
+`review.version` job when the change has comments on older versions. The API opens a review on its first use too. Votes
+are per version; each user's newest vote counts: an `approve` from a writer who is not the change's author counts toward
+`review_settings.approvals` (1 when unset), a `changes` vote from a writer blocks; a reader's vote is kept but not
+counted. The state (`open`, `approved`, `changes_requested`) follows the votes; `abandoned` and back to `open` by the
+author or a writer; `landed` by a landing alone.
+
+**Comments.** A comment is anchored to a file, a declaration of it (tit/semantic's key) and a line offset from the
+declaration's first line (its doc comment included), at a version; a reply takes its parent's anchor; one with no
+declaration is on the file, one with no file on the change. The `review.version` job re-anchors each comment of the
+change on a version older than the new one: the declaration is looked up in its file at the new version, else in the
+other Tin files of the same directory (moved within its package); found, the comment moves to the version, its offset
+carried through a line diff of the declaration's old and new text with whitespace runs collapsed (a reformat keeps it on
+its line, a removed line puts it where the removal was); not found (renamed or deleted), it is `outdated` and stays on
+the version it was last anchored to. A rebase that leaves the declaration alone changes nothing.
+
+**Checks.** `POST …/checks` must carry a `Tit-Signature` (design/tit.md §15: a nonce from the 401 answer, the request's
+method, path and body hash signed by a live key of a user with write access); the key's id is kept in `checks.key_id`.
+One status per name and version, posted again to change it. A `success` on a landed change calls
+`capsules.CheckPassed` in its transaction. The bench (#1029) writes its own `bench` row and system comments.
+
+**Landing.** `POST …/changes/<change>/land` (write access) lands the change, or with `{"stack": true}` every change below
+it first: each change whose newest version is the parent of the one above, down to a landed change or a commit that is
+no change's (a change on an old version of the one below is refused). Without `stack`, a change with an unlanded change
+below it is refused. For each change, bottom-up: its votes and required checks (`success` on its newest version) are
+checked; when its parent is not the target's commit it is rebased onto it on the server (tit's `stack.Pick`, ported to
+`review/rebase.tin` without the rename step, since tit/merge imports a package named `index` like tinhub's own: the
+same change id, author and message, the lander as committer; a conflict refuses the landing), the new objects packed and
+staged; then one transaction takes the repository's lock, reads the review, the newest version, the votes and the
+checks again, moves the target by compare-and-swap with the rebased commit as the change's new version
+(`repo.PgRepo.CommitTx`: the push event is queued as for any push), marks the review `landed` (`landed_commit`,
+`landed_by`) and calls `capsules.ChangeLanded` with the change's message. A target moved meanwhile is rebased onto again
+(three tries). A refused landing leaves no pending pack. The answer lists what landed, and why the rest did not (409).
+
+**Events.** Each act writes a `done` row of `events` (`review.opened`, `review.voted`, `review.comment`, `review.check`,
+`review.landed`, `review.state`; payload `{change, version, by, state, detail, changes}`) and calls
+`notify.EnqueueFor` in the same transaction; `notify.LiveKinds` lists them for the websocket.

@@ -576,7 +576,9 @@ fn TestPushFanOut(t mut crucible.T) {
 	for row in kinds.Rows {
 		seen = seen + row[0].Text() + "=" + "{row[1].Int()} "
 	}
-	crucible.Equal(mut t, "queued", seen, "index=4 mirror=1 repack=1 review.diff=4 ")
+	// review.opened is the review the first version opened (#1025), recorded done for live updates: once, however
+	// many versions and fan-outs
+	crucible.Equal(mut t, "queued", seen, "index=4 mirror=1 repack=1 review.diff=4 review.opened=1 ")
 	let idx = got.Query("SELECT count(*) FROM events WHERE kind = 'index' AND (payload->>'push')::bigint = {last[0].Int()} AND payload->>'pack' <> ''") catch err {
 		t.Error("index: {err}")
 		return

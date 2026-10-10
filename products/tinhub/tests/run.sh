@@ -60,6 +60,10 @@ TIN_ROOT=$PWD "$compiler" -o "$tmp/fetch_load" products/tinhub/tests/programs/fe
 TINHUB_BENCH_RUNS=${TINHUB_BENCH_RUNS:-1} TINHUB_BENCH_SECONDS=${TINHUB_BENCH_SECONDS:-5} sh products/tinhub/tests/clones.sh "$tmp/tinhub" "$tmp/repo_driver" "$tmp/tit" "$tmp/fetch_load"
 TIN_ROOT=$PWD "$compiler" -o "$tmp/workers_driver" products/tinhub/tests/programs/workers_driver.tin
 sh products/tinhub/tests/workers.sh "$tmp/workers_driver"
+# reviews: a stack pushed over the protocol with its change versions, approved, its required check posted signed with
+# a key, and landed bottom-up on a main that moved; a conflicting landing refused (#1025)
+TIN_ROOT=$PWD "$compiler" -o "$tmp/review_node" products/tinhub/tests/programs/review_node.tin
+sh products/tinhub/tests/review.sh "$tmp/review_node" "$tmp/tit"
 # the runner: a change's build replayed in the sandbox against examples/checkout.tin's capsules (Linux; skipped without
 # user namespaces or Redis)
 TIN_ROOT=$PWD "$compiler" -o "$tmp/runner_driver" products/tinhub/tests/programs/runner_driver.tin

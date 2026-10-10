@@ -156,6 +156,28 @@ rows only for current heads and open changes. A file the compiler cannot read is
 
 `TINHUB_TEST_INDEX_TIN=1` adds the index of this repository to the Postgres tests (about a minute).
 
+## Reviews and landing
+
+Each change gets a review when its first version arrives in a push (the push's change versions) or on its first use
+through the API. Under `/api/v1/repos/{owner}/{repo}`:
+
+- `GET changes/{change}/review`: state (`open`, `approved`, `changes_requested`, `landed`, `abandoned`), target, newest
+  version, the votes that count, the checks, and `blocked` (why it cannot land yet, `""` when it can).
+  `PATCH` with `{"state": "abandoned"|"open"}` (the author or a writer).
+- `GET|POST changes/{change}/approvals` (`{"vote": "approve"|"changes"}`): a writer's approve counts (not the author's),
+  a writer's changes blocks.
+- `GET|POST changes/{change}/comments` (`{"body", "file", "decl": "fn Lstat", "line_offset", "version", "parent"}`),
+  `PATCH changes/{change}/comments/{id}` (`{"resolved": true}`): a comment stays on its declaration through rebases and
+  reformats, and is `outdated` once the declaration is renamed or deleted.
+- `GET|POST changes/{change}/checks` (`{"name", "state": "pending"|"success"|"failure"|"error", "url", "description"}`):
+  posting takes a `Tit-Signature` by a writer's key (an unsigned POST answers 401 with a `nonce` to sign with).
+- `POST changes/{change}/land` (`{"stack": true}` lands the changes below it first): each change is rebased onto the
+  target on the server when needed (a conflict refuses it), and the target moves once per change.
+- `GET reviews?state=`, `GET|PUT review/settings` (`{"approvals": 1, "checks": ["ci"]}`, admin).
+
+Review events (`review.opened`, `review.voted`, `review.comment`, `review.check`, `review.landed`, `review.state`) reach
+webhooks, mail and the live websocket. See [design/tinhub.md §14](../../design/tinhub.md#14-reviews-comments-checks-and-landing-1025).
+
 ## Health and shutdown
 
 - `GET /healthz`: 200 while the process runs.

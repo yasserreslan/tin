@@ -24,8 +24,9 @@ import "websocket"
 // again until they appear. LISTEN/NOTIFY (when the postgres package has it, design/tinhub.md §10) would only replace
 // the poll's timer.
 
-// LiveKinds is the comma list of the event kinds a websocket sees (review events, #1025, add theirs here).
-const LiveKinds = "push"
+// LiveKinds is the comma list of the event kinds a websocket sees: pushes, and the review events (#1025; the review
+// package writes them done, in the transaction that made them).
+const LiveKinds = "push,review.opened,review.voted,review.comment,review.check,review.landed,review.state"
 
 // ringSize is how many live events each core keeps for its websockets; a websocket further behind skips the rest.
 const ringSize = 256
