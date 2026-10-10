@@ -1548,7 +1548,9 @@ There are no threads in user code and no shared mutable state.
 - `hearth.Run(n, f)` runs `f(core)` on n core threads (the calling thread is core 0) and
   returns when all have returned. `hearth.Cores()` is the number of CPUs the process may
   use (on Linux it respects the container's CPU limit and affinity), `hearth.ID()` the
-  current core.
+  current core. A program starts its cores once: a second `hearth.Run` that would start
+  cores panics, so run every step under one `Run`, core 0 handing the others work over
+  `relay`.
 - `relay.Send(core, msg)` copies a `str` message into another core's inbox (a lock-free
   queue); `relay.Recv()` blocks for the next one, `relay.TryRecv()` polls,
   `relay.Broadcast(msg)` sends to every other core. Encode structs with `argo.Put` /

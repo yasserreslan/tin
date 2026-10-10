@@ -1417,5 +1417,15 @@
       "stdout": "one two three\nid0 id2 id1 2\nvx vy\nc both\nbv bw\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "hearth-run-twice.tin",
+    "issue": 858,
+    "expected": {
+      "phase": "run",
+      "exit": 2,
+      "stdout": "first run 3\n",
+      "stderr_contains": "hearth.Run starts a program's cores once"
+    }
   }
 ]

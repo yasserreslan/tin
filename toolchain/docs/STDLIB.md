@@ -458,7 +458,7 @@ Package hearth runs a program on every core: one thread per core, each with its 
 - `Cores() i64`: Cores is the number of CPUs this program may use: the CPUs online, capped on Linux by the affinity mask (cpuset) and the cgroup CPU quota (ceil of cpu.max quota/period); never 0. It is how many cores to start (hearth.Run(hearth.Cores(), entry)), not how many run: relay.Cores() is the number started, and only those read their relay inbox.
 - `MemLimit() i64`: MemLimit is the memory limit in bytes the container (cgroup) imposes: 0 when there is none.
 - `ID() i64`: ID is the current core's number: 0 for the main core.
-- `Run(n i64, entry fn(i64))`: Run starts entry(i) on cores 1..n-1, runs entry(0) here, then waits for every core. Before starting it sizes the request pools to the memory limit and decides whether cores pin themselves to CPUs (only when they map one-to-one onto the allowed CPUs, or TIN_PIN=1).
+- `Run(n i64, entry fn(i64))`: Run starts entry(i) on cores 1..n-1, runs entry(0) here, then waits for every core. Before starting it sizes the request pools to the memory limit and decides whether cores pin themselves to CPUs (only when they map one-to-one onto the allowed CPUs, or TIN_PIN=1). A program starts its cores once: a second Run that would start cores again panics (#858); run every step under one Run, core 0 handing the others work over relay.
 - `PoolChunk() i64`: PoolChunk is the request pool chunk size in bytes each core uses (after pool_tune).
 - `PoolCapacity() i64`: PoolCapacity is the usable size in bytes of this core's current base pool chunk (0 before its first request allocation).
 - `Reset()`: Reset ends the current request: the core's pool is emptied for the next one.

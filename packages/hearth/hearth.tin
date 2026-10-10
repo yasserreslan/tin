@@ -24,10 +24,21 @@ fn ID() i64 {
 	return rt_core_id()
 }
 
+// coresStarted is set once Run has started cores (on the core that called it).
+mut coresStarted = false
+
 // Run starts entry(i) on cores 1..n-1, runs entry(0) here, then waits for every core. Before
 // starting it sizes the request pools to the memory limit and decides whether cores pin
 // themselves to CPUs (only when they map one-to-one onto the allowed CPUs, or TIN_PIN=1).
+// A program starts its cores once: a second Run that would start cores again panics (#858);
+// run every step under one Run, core 0 handing the others work over relay.
 fn Run(n i64, entry fn(i64)) {
+	if n > 1 {
+		if coresStarted {
+			rt_panic("hearth.Run starts a program's cores once: run each step under the same Run (core 0 hands the others work over relay)")
+		}
+		coresStarted = true
+	}
 	rt_pin_setup(n)
 	pool_tune(n)
 	rt_life_cores(n)
