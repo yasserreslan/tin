@@ -38,8 +38,8 @@ fn main() {
 	say.Line("join3", say.Fmt("%q %q %q %q", trail.Join3("/", "a", "b"), trail.Join3("a", "", "b"), trail.Join3("", "", ""), trail.Join3("a", "..", "c")))
 	say.Line("joinall", say.Fmt("%q %q %q %q %q", trail.JoinAll([]str{}), trail.JoinAll([]str{""}), trail.JoinAll([]str{"", "", "x", "", "y/"}), trail.JoinAll([]str{"/", "", "a", "b", "..", "c"}), trail.JoinAll([]str{"a"})))
 
-	let relBase = []str{"a/b", "a/b/.", "a/b", "./a/b", "a/b", "ab/cd", "ab/cd", "a/b", "a/b", "a/b/../c", "a/b/c", "a/b", "a/b/c/d", "a/b/c/d", "a/b/c/d/", "a/b/c/d/", "../../a/b", "/a/b", "/a/b/.", "/a/b", "/ab/cd", "/ab/cd", "/a/b", "/a/b", "/a/b/../c", "/a/b/c", "/a/b", "/a/b/c/d", "/a/b/c/d", "/a/b/c/d/", "/a/b/c/d/", "/../../a/b", ".", ".", "..", "..", "../..", "a", "/a", "", "/", "/", "a/b", "é/ß"}
-	let relTarg = []str{"a/b", "a/b", "a/b/.", "a/b", "./a/b", "ab/cde", "ab/c", "a/b/c/d", "a/b/../c", "a/b", "a/c/d", "c/d", "a/b", "a/b/", "a/b", "a/b/", "../../a/b/c/d", "/a/b", "/a/b", "/a/b/.", "/ab/cde", "/ab/c", "/a/b/c/d", "/a/b/../c", "/a/b", "/a/c/d", "/c/d", "/a/b", "/a/b/", "/a/b", "/a/b/", "/../../a/b/c/d", "a/b", "..", ".", "a", "..", "/a", "a", "x/y", "/", "/x", "/a/b", "é/x"}
+	let relBase = []str{"a/b", "a/b/.", "a/b", "./a/b", "a/b", "ab/cd", "ab/cd", "a/b", "a/b", "a/b/../c", "a/b/c", "a/b", "a/b/c/d", "a/b/c/d", "a/b/c/d/", "a/b/c/d/", "../../a/b", "/a/b", "/a/b/.", "/a/b", "/ab/cd", "/ab/cd", "/a/b", "/a/b", "/a/b/../c", "/a/b/c", "/a/b", "/a/b/c/d", "/a/b/c/d", "/a/b/c/d/", "/a/b/c/d/", "/../../a/b", ".", ".", "..", "..", "../..", "a", "/a", "", "/", "/", "a/b", "é/ß", "a", "a/b", "a/b/c", "x/.."}
+	let relTarg = []str{"a/b", "a/b", "a/b/.", "a/b", "./a/b", "ab/cde", "ab/c", "a/b/c/d", "a/b/../c", "a/b", "a/c/d", "c/d", "a/b", "a/b/", "a/b", "a/b/", "../../a/b/c/d", "/a/b", "/a/b", "/a/b/.", "/ab/cde", "/ab/c", "/a/b/c/d", "/a/b/../c", "/a/b", "/a/c/d", "/c/d", "/a/b", "/a/b/", "/a/b", "/a/b/", "/../../a/b/c/d", "a/b", "..", ".", "a", "..", "/a", "a", "x/y", "/", "/x", "/a/b", "é/x", ".", "", "./", "y/.."}
 	for i, bp in relBase {
 		let (r, err) = trail.Rel(bp, relTarg[i])
 		say.Line("rel", say.Fmt("%q %q -> %q", bp, relTarg[i], r), err)
