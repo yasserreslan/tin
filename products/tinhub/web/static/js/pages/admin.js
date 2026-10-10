@@ -8,11 +8,11 @@ import * as store from "../lib/store.js";
 import { navigate } from "../lib/router.js";
 import { sidenav, panel, input, select, checkbox } from "../ui/forms.js";
 import { auditRow } from "./reposettings.js";
-import { badge, btn, busy, callout, copyButton, empty, errorBox, field, more, skeleton, time, toast } from "../ui/kit.js";
+import { badge, btn, busy, callout, copyButton, empty, errorBox, field, more, skeleton, time, toast, loginHref } from "../ui/kit.js";
 
 export async function render(ctx) {
 	const me = store.session.user;
-	if (!me) return navigate("/login?next=" + encodeURIComponent(location.pathname), { replace: true });
+	if (!me) return navigate(loginHref(), { replace: true });
 	const owned = (me.orgs || []).filter((o) => o.role === "owner");
 	const sections = [{ key: "invites", label: "Invites", icon: "mail" }, me.site_admin ? { key: "audit", label: "Audit log", icon: "scroll" } : null].filter(Boolean);
 	const section = ctx.params.section || "invites";

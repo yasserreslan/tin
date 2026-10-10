@@ -6,7 +6,7 @@ import * as api from "../lib/api.js";
 import * as store from "../lib/store.js";
 import * as live from "../lib/live.js";
 import { navigate } from "../lib/router.js";
-import { avatar, btn, menu } from "./kit.js";
+import { avatar, btn, menu, loginHref } from "./kit.js";
 
 export function header() {
 	const end = h("div.topbar-end");
@@ -38,7 +38,11 @@ export function header() {
 			me.onclick = () => userMenu(me, u);
 			end.append(dot, plus, me);
 		} else {
-			end.append(themeButton(), btn("Sign in", { icon: "login", primary: true, href: "/login?next=" + encodeURIComponent(location.pathname + location.search) }));
+			// The header outlives the page, so the link takes the address it comes back to when it is used.
+			const signIn = btn("Sign in", { icon: "login", primary: true, href: loginHref() });
+			const fresh = () => signIn.setAttribute("href", loginHref());
+			for (const ev of ["pointerdown", "focus", "click"]) signIn.addEventListener(ev, fresh);
+			end.append(themeButton(), signIn);
 		}
 	};
 	store.onUser(draw);

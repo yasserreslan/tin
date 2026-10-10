@@ -40,7 +40,7 @@ export async function render(ctx) {
 		if (my !== token) return false;
 		if (!cursor) list.replaceChildren();
 		for (const x of r.results || []) list.append(hit(x));
-		if (!list.childNodes.length) list.append(empty("search", "No symbols found", "Repositories are indexed after each push; try a shorter name."));
+		if (!list.childNodes.length) list.append(empty("search", "No symbols found", "This search matches whole names, ignoring case. Repositories are indexed after each push."));
 		cursor = r.next || "";
 		info.textContent = "";
 		return Boolean(cursor);

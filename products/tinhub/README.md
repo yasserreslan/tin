@@ -176,7 +176,7 @@ rows only for current heads and open changes. A file the compiler cannot read is
 - `GET /api/v1/repos/{owner}/{repo}/symbols?q=&ref=&change=&limit=&cursor=`: the declarations at a head (`ref`,
   default the default branch) or a change's newest version whose names start with `q` (`kind:Name`, `Type.Method`).
 - `GET /api/v1/search?q=fn:ReadFile`: a declaration by name at the default branch of every repository the caller can
-  read.
+  read (`fn ReadFile` works too).
 - `GET /api/v1/repos/{owner}/{repo}/changes/{change}/diffs/{base|previous}?version=`: a version's kept diff against its
   base or the version before it (semantic: each changed declaration with its line diff; or `kind: lines` with the
   reason); 202 until the job has computed it.

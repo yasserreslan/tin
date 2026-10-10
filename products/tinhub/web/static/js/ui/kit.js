@@ -5,6 +5,9 @@ import { h, copy, on, clear } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import * as fmt from "../lib/format.js";
 import { session } from "../lib/store.js";
+import { loginHref } from "../lib/router.js";
+
+export { loginHref };
 
 // avatar is a person's or org's initials on a colour of their name.
 export function avatar(name, size = "", { square = false, title } = {}) {
@@ -247,7 +250,7 @@ export function skeleton(lines = 4) {
 // signInFirst is what a page shows a signed-out visitor where the server refused them: the fix is to sign in, not to
 // ask for a permission.
 export function signInFirst(title = "Sign in to see this", message = "This needs an account with access to it.") {
-	return empty("login", title, message, btn("Sign in", { icon: "login", primary: true, href: "/login?next=" + encodeURIComponent(location.pathname + location.search) }));
+	return empty("login", title, message, btn("Sign in", { icon: "login", primary: true, href: loginHref() }));
 }
 
 // refused is the state for a 403: a sign-in prompt when no one is signed in, else no access with the server's reason.
@@ -259,6 +262,8 @@ export function refused(err, title, message, signedOut) {
 export function errorBox(err, retry) {
 	const status = err && err.status;
 	if ((status === 403 || status === 401) && !session.user) return signInFirst();
+	// A private repository is a 404 to someone signed out, so the way in is to sign in.
+	if (status === 404 && !session.user) return empty("search", "Not found", `${(err && err.message) || "Not found"}. If it is private, sign in to see it.`, btn("Sign in", { icon: "login", primary: true, href: loginHref() }));
 	const title = status === 404 ? "Not found" : status === 403 ? "No access" : status === 0 ? "Offline" : "Something went wrong";
 	return h("div.empty", {}, h("div.art", {}, icon(status === 404 ? "search" : status === 403 ? "lock" : "alert")), h("h3", {}, title), h("p", {}, err && err.message ? err.message : String(err)), retry && status !== 404 && status !== 403 ? btn("Try again", { icon: "refresh", onclick: retry }) : null);
 }

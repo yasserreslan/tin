@@ -10,8 +10,8 @@ import "tide"
 import "twine"
 
 // Search by declaration (#1020): a repository's symbols at a head or a change, and one name across every repository
-// the caller can read (at each one's default branch). A query is a name, optionally after a kind ("fn:ReadFile",
-// "type:Repo", "method:PgRepo.Commit"); within a repository it matches names that start with it, across
+// the caller can read (at each one's default branch). A query is a name, optionally after a kind ("fn:ReadFile" or
+// "fn ReadFile", "type:Repo", "method:PgRepo.Commit"); within a repository it matches names that start with it, across
 // repositories names that are it, ignoring case. A private repository the caller cannot read is never searched.
 
 const readWithin = 2 * tide.Second
@@ -80,14 +80,20 @@ type Query struct {
 	Name str
 }
 
-// ParseQuery reads "kind:Name", "Type.Method" and "Name".
+// ParseQuery reads "kind:Name", "kind Name", "Type.Method" and "Name".
 fn ParseQuery(q str) Query {
 	mut kind = ""
 	mut rest = twine.TrimSpace(q)
 	let (k, after, ok) = twine.Cut(rest, ":")
 	if ok && isKind(k) {
 		kind = k
-		rest = after
+		rest = twine.TrimSpace(after)
+	} else {
+		let (word, name, spaced) = twine.Cut(rest, " ")
+		if spaced && isKind(word) {
+			kind = word
+			rest = twine.TrimSpace(name)
+		}
 	}
 	mut recv = ""
 	let dot = twine.LastIndex(rest, ".")

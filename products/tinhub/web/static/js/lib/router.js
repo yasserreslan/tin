@@ -84,6 +84,13 @@ export function navigate(url, { replace = false } = {}) {
 	dispatch(!same);
 }
 
+// loginHref is the sign-in page's address, coming back here afterwards. On the sign-in page itself it keeps the
+// address it was given, so a second click does not send the visitor back to sign-in.
+export function loginHref() {
+	if (location.pathname === "/login") return "/login" + location.search;
+	return "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
+}
+
 // setQuery changes the URL's query without a new history entry and without routing again.
 export function setQuery(params, { push = false } = {}) {
 	const q = new URLSearchParams(location.search);

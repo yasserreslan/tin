@@ -31,23 +31,39 @@ export function markdown(src, base = {}) {
 }
 
 // fileView is a file's lines with numbers. Clicking a number selects the line (shift: a range) and calls onSelect.
+// A long file shows its first lines at once and adds the rest a block at a time, so the page never waits on all of it.
 export function fileView(text, { lang = "", selected = null, onSelect, wrap = false, maxLines = 20000 } = {}) {
 	const rows = hl.lines(text, lang);
 	const shown = rows.length > maxLines ? rows.slice(0, maxLines) : rows;
 	const tbody = h("tbody");
 	let anchor = selected ? selected[0] : 0;
-	const trs = shown.map((toks, i) => {
-		const n = i + 1;
-		const tr = h("tr", { id: "L" + n }, h("td.ln", { dataset: { n: String(n) } }, String(n)), h("td.lc", {}, tokens(toks)));
-		return tr;
-	});
-	tbody.append(...trs);
+	let current = selected;
+	const trs = [];
+	const upto = (n) => {
+		const end = Math.min(n, shown.length);
+		if (end <= trs.length) return;
+		const add = [];
+		for (let i = trs.length; i < end; i++) {
+			const n = i + 1;
+			const tr = h("tr", { id: "L" + n, class: current && n >= current[0] && n <= current[1] ? "hl" : null }, h("td.ln", { dataset: { n: String(n) } }, String(n)), h("td.lc", {}, tokens(shown[i])));
+			trs.push(tr);
+			add.push(tr);
+		}
+		tbody.append(...add);
+	};
+	upto(Math.max(FIRST_LINES, selected ? selected[1] + FIRST_LINES / 2 : 0));
+	const rest = () => {
+		if (trs.length >= shown.length) return;
+		upto(trs.length + MORE_LINES);
+		setTimeout(rest, 0);
+	};
+	setTimeout(rest, 0);
 	const mark = (sel) => {
+		current = sel;
 		for (const tr of tbody.querySelectorAll("tr.hl")) tr.classList.remove("hl");
 		if (!sel) return;
 		for (let i = sel[0]; i <= sel[1]; i++) if (trs[i - 1]) trs[i - 1].classList.add("hl");
 	};
-	mark(selected);
 	tbody.addEventListener("click", (e) => {
 		const td = e.target.closest("td.ln");
 		if (!td) return;
@@ -61,11 +77,15 @@ export function fileView(text, { lang = "", selected = null, onSelect, wrap = fa
 	const wrapEl = h("div", { class: ["code-wrap", wrap && "wrap"] }, h("table.code", {}, tbody));
 	if (rows.length > maxLines) wrapEl.appendChild(h("div.box-empty", {}, `Showing the first ${maxLines} of ${rows.length} lines.`));
 	wrapEl.scrollToLine = (n) => {
+		upto(n + FIRST_LINES / 2);
 		const tr = trs[n - 1];
 		if (tr) tr.scrollIntoView({ block: "center" });
 	};
 	return wrapEl;
 }
+
+const FIRST_LINES = 800;
+const MORE_LINES = 2000;
 
 // parseLines reads "L10" or "L10-L20" into [10, 20].
 export function parseLines(hash) {

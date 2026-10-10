@@ -6,7 +6,7 @@ import { define, start, navigate } from "./lib/router.js";
 import * as store from "./lib/store.js";
 import * as api from "./lib/api.js";
 import { header, footer, keys } from "./ui/layout.js";
-import { errorBox, loading } from "./ui/kit.js";
+import { errorBox, loading, loginHref } from "./ui/kit.js";
 
 const page = (path) => () => import(path);
 
@@ -97,18 +97,28 @@ async function route(r) {
 		if (current.token !== token) return;
 		console.error(err);
 		if (err && err.status === 401) {
-			navigate("/login?next=" + encodeURIComponent(location.pathname + location.search), { replace: true });
+			navigate(loginHref(), { replace: true });
 			return;
 		}
 		main.replaceChildren(h("div.container.page", {}, errorBox(err, () => route(r))));
 	} finally {
 		clearTimeout(slow);
 	}
+	if (current.token === token) showActiveTabs();
 	if (current.token === token && r.scroll !== false) {
 		if (r.hash) {
 			const el = document.getElementById(r.hash);
 			if (el) el.scrollIntoView({ block: "center" });
 		} else window.scrollTo(0, 0);
+	}
+}
+
+// showActiveTabs scrolls each tab strip wider than the screen, as on a phone, so its current tab is in view.
+function showActiveTabs() {
+	for (const a of main.querySelectorAll(".tabs > a.active, .sidenav > a.active")) {
+		const nav = a.parentElement;
+		if (nav.scrollWidth <= nav.clientWidth) continue;
+		nav.scrollLeft += a.getBoundingClientRect().left - nav.getBoundingClientRect().left - (nav.clientWidth - a.offsetWidth) / 2;
 	}
 }
 
@@ -121,7 +131,7 @@ export function notFound() {
 			h("div.big", {}, "404"),
 			h("h2", { style: { margin: "16px 0 8px" } }, "This page isn't here"),
 			h("p.muted", {}, "It may be private, moved, or never have existed."),
-			h("div.row", { style: { "justify-content": "center", "margin-top": "24px" } }, h("a.btn.primary", { href: "/" }, "Go home"), h("a.btn", { href: "/explore" }, "Explore")),
+			h("div.row", { style: { "justify-content": "center", "margin-top": "24px" } }, store.session.user ? null : h("a.btn.primary", { href: loginHref() }, "Sign in"), h("a", { class: ["btn", store.session.user && "primary"], href: "/" }, "Go home"), h("a.btn", { href: "/explore" }, "Explore")),
 		),
 	);
 }
