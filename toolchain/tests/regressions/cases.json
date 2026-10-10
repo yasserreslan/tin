@@ -1367,5 +1367,15 @@
       "stdout": "100 xxx0 xxx99 490\n2 1 2\nzzzz 80 443\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "bang-result-newline.tin",
+    "issue": 825,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "3\nnegative\nj\n",
+      "stderr": ""
+    }
   }
 ]
