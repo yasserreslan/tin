@@ -3616,6 +3616,11 @@ fn rt_map_slots(m i64) i64 {
 }
 
 fn rt_map_live(m i64, i i64) bool {
+	// A range takes its slot count when it starts; a grow inside its body can compact the
+	// entries into tables shorter than that, and the slots past the end are not entries (#1222).
+	if i >= m[10] {
+		return false
+	}
 	if m[15] != 0 {
 		return load8(rt_cmap_lw(m, i)) == 1
 	}
