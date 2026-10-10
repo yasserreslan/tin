@@ -8,7 +8,9 @@ import "../repo"
 import "../signin"
 import "anvil"
 import "fault"
+import "herald"
 import "io"
+import "mint"
 import "postgres"
 import "tide"
 import "twine"
@@ -70,6 +72,16 @@ fn refuse(w mut anvil.Out, status i64, code str, message str) {
 	w.Status(status)
 	w.Type("application/x-tit")
 	w.Body = []u8(transport.Frame(transport.Kind.Error, transport.Encode(transport.ErrorAnswer{Code: code, Message: message, Ref: "", Nonce: ""}), ""))
+}
+
+// refusal answers err as tit's server does, and logs the cause when it is the server's own failure (a 5xx), which the
+// client sees only as its code ("Internal: limit exceeded", #1105).
+fn refusal(w mut anvil.Out, srv transport.Server, q anvil.Req, err fault) {
+	let r = srv.Refusal(err, now())
+	if r.Status >= 500 {
+		herald.Log(herald.LError, "tit request failed", []str{"method", q.Method, "path", q.Path, "status", mint.Itoa(r.Status), "error", fault.Message(err)})
+	}
+	reply(mut w, r)
 }
 
 // notFound is the answer for a repository that does not exist, and for a private one to anyone outside it.
@@ -184,7 +196,7 @@ fn get(q anvil.Req, w mut anvil.Out) {
 	let d = a.Deps
 	let (r, err) = answer(a.Server, q, d.FetchWithin, d.FetchMemory)
 	if err != nil {
-		reply(mut w, a.Server.Refusal(err, now()))
+		refusal(mut w, a.Server, q, err)
 		return
 	}
 	reply(mut w, r)
@@ -237,7 +249,7 @@ fn post(q anvil.Req, w mut anvil.Out) {
 		}
 		let (r, err) = push(srv, q, body, d.PushWithin, d.PushMemory)
 		if err != nil {
-			reply(mut w, srv.Refusal(err, now()))
+			refusal(mut w, srv, q, err)
 			return
 		}
 		reply(mut w, r)
@@ -256,7 +268,7 @@ fn post(q anvil.Req, w mut anvil.Out) {
 	// request's deadline
 	let (planned, perr) = plan(srv, q, req, d.FetchWithin, d.FetchMemory)
 	if perr != nil {
-		reply(mut w, srv.Refusal(perr, now()))
+		refusal(mut w, srv, q, perr)
 		return
 	}
 	mut f = planned
