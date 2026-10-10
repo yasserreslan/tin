@@ -60,6 +60,10 @@ type Config struct {
 	RunnerTin   str
 	RunnerCgroup str
 	RunnerConcurrency i64
+	// WebEnabled serves the pages on a node; WebDir serves the UI from that directory instead of the embedded files
+	// (development only, design/tinhub.md §15).
+	WebEnabled bool
+	WebDir     str
 }
 
 // Key is one setting: its name, its default and whether it is a secret.
@@ -114,6 +118,8 @@ fn Keys() []Key {
 		Key{Name: "runner.tin", Default: "/usr/local/lib/tin", Secret: false},
 		Key{Name: "runner.cgroup", Default: "", Secret: false},
 		Key{Name: "runner.concurrency", Default: "1", Secret: false},
+		Key{Name: "web.enabled", Default: "true", Secret: false},
+		Key{Name: "web.dir", Default: "", Secret: false},
 	}
 }
 
@@ -299,6 +305,7 @@ fn Build(vals map[str]str) !Config {
 	let repackPacksV = try count(vals, "repack.packs")
 	let apiRateV = try count(vals, "api.rate")
 	let runnerConcurrencyV = try count(vals, "runner.concurrency")
+	let webEnabledV = try flag(vals, "web.enabled")
 	return Config{
 		Roles: roles,
 		Listen: vals["listen"],
@@ -342,6 +349,8 @@ fn Build(vals map[str]str) !Config {
 		RunnerTin: twine.TrimRight(vals["runner.tin"], "/"),
 		RunnerCgroup: vals["runner.cgroup"],
 		RunnerConcurrency: runnerConcurrencyV,
+		WebEnabled: webEnabledV,
+		WebDir: twine.TrimRight(vals["web.dir"], "/"),
 	}
 }
 

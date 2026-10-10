@@ -16,6 +16,7 @@ import "./repo"
 import "./review"
 import "./runner"
 import "./signin"
+import "./web"
 import "./workers"
 import "anvil"
 import "fault"
@@ -259,7 +260,7 @@ fn configureProto(c config.Config) {
 	}
 	let cache = repo.NewRefCache(c.RedisAddr, "tinhub:", tide.Minute)
 	let limits = redis.Open(redis.Options{Addr: c.RedisAddr, Username: "", Password: "", DB: 0, Proto: 0, Timeout: 0, TLS: nil})
-	api.Configure(api.Deps{Db: pg, Stale: stale, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: signin.Caller})
+	api.Configure(api.Deps{Db: pg, Stale: stale, Store: st, Cache: cache, Dir: c.PacksDir, Limits: limits, LimitsOn: len(c.RedisAddr) > 0, Window: tide.Minute, PerWindow: c.ApiRate, Auth: signin.Caller, Quota: c.RepoQuota, PublicURL: c.PublicURL})
 	let sessions = accounts.NewSessions(c.RedisAddr, "tinhub:", accounts.SessionTTL, c.CookieKey)
 	signin.Configure(signin.Deps{Db: pg, Sessions: sessions, NonceKey: c.NonceSecret, CookieKey: c.CookieKey, PublicUrl: c.PublicURL, Secure: twine.HasPrefix(c.PublicURL, "https:")})
 	capsules.Configure(capsules.Deps{Db: pg, Store: st, Dir: c.PacksDir, Auth: signin.Caller})
@@ -271,6 +272,7 @@ fn configureProto(c config.Config) {
 	mut bd = bench.NewDeps(pg, st, c.PacksDir, signin.Caller)
 	bd.PublicURL = c.PublicURL
 	bench.Configure(bd)
+	web.Configure(web.Deps{Dir: c.WebDir, PublicURL: c.PublicURL, Version: version})
 	proto.Configure(proto.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Pack: c.LimitPack, Refs: c.LimitRefs, PushWithin: c.PushDeadline, PushMemory: c.PushMemory, FetchWithin: fetchWithin, FetchMemory: fetchMemory})
 }
 
@@ -470,6 +472,9 @@ fn routes(c config.Config) anvil.Router {
 		bench.Mount(mut r)
 		proto.Mount(mut r)
 		api.Mount(mut r)
+		if c.WebEnabled {
+			web.Mount(mut r)
+		}
 	}
 	// tests/run.sh checks the drain with a request that waits; never on in a deployment
 	if quarry.Getenv("TINHUB_TEST_ROUTES") == "1" {

@@ -38,6 +38,9 @@ type Deps struct {
 	PerWindow i64
 	// Auth is the signed-in user of a request (a session or a signature), 0 for nobody
 	Auth fn(anvil.Req) !i64
+	// Quota is a new repository's size quota (config repo.quota), PublicURL the site's URL (config public_url)
+	Quota     i64
+	PublicURL str
 }
 
 mut deps ?Deps = nil
@@ -69,6 +72,7 @@ fn Mount(r mut anvil.Router) {
 	r.Get(`/api/v1/repos/{owner}/{repo}/commits/{id}`, commit)
 	r.Get(`/api/v1/repos/{owner}/{repo}/trees/{id}`, tree)
 	r.Get(`/api/v1/repos/{owner}/{repo}/blobs/{id}`, blob)
+	MountWeb(mut r)
 }
 
 // apiError is every error's body.
@@ -200,12 +204,13 @@ fn repoOf(r accounts.Repo) repoOut {
 	return repoOut{owner: r.Owner, name: r.Name, visibility: r.Visibility, default_branch: r.DefaultBranch, size_bytes: r.SizeBytes}
 }
 
+// repoInfo is the repository with its description, the caller's role and whether they follow it (design §15).
 fn repoInfo(q anvil.Req, w mut anvil.Out) {
 	let c = begin(q, mut w, true)
 	if c == nil {
 		return
 	}
-	send(mut w, repoOf(c.r))
+	sendDetail(c, mut w, c.r)
 }
 
 type repoPage struct {

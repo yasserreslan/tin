@@ -66,6 +66,7 @@ products/tinhub/notify/           notifications, webhooks and the live websocket
 products/tinhub/review/           reviews, comments, checks and landing (#1025)
 products/tinhub/runner/           the runner role (#1028)
 products/tinhub/bench/            benchmark history and releases (#1029)
+products/tinhub/web/              the pages: the embedded UI, its assets and the app shell (#1081, §15)
 products/tinhub/deploy/           systemd unit, container image, backup and restore, runbook (#1024, #1026)
 products/tinhub/tests/run.sh      the tinhub checks (#1005)
 ```
@@ -685,3 +686,81 @@ checks again, moves the target by compare-and-swap with the rebased commit as th
 **Events.** Each act writes a `done` row of `events` (`review.opened`, `review.voted`, `review.comment`, `review.check`,
 `review.landed`, `review.state`; payload `{change, version, by, state, detail, changes}`) and calls
 `notify.EnqueueFor` in the same transaction; `notify.LiveKinds` lists them for the websocket.
+
+---
+
+## 15. The web layer (#1081)
+
+tinhub's pages are served by the same binary as everything else: `products/tinhub/web` embeds the UI's files and
+answers every page URL with the app shell, which then reads and writes through the JSON API. No second server, no
+Node at run time, no build step: the UI is plain ES modules and CSS under `products/tinhub/web/static`, and `tin
+build` embeds them. One machine runs `tinhub` (every role, the UI included), Postgres and Redis; packs go to the object
+store §7 names (a local S3 service in development).
+
+**URLs.** Routes beat pages: `/api/v1/…`, `/tit/v1/…`, `/<owner>/<repo>/tit/v1/…`, `/healthz`, `/readyz` and
+`/metrics` are matched first, and the router's `NotFound` gives the shell to every other `GET` or `HEAD` whose path
+does not start with `/api/` or `/-/` (those keep a JSON or plain 404). The pages:
+
+| URL | page |
+|---|---|
+| `/`, `/explore`, `/search?q=` | dashboard (signed in) or landing, public repositories, symbol search |
+| `/login`, `/join` | sign-in with a key (§11), accepting an invite |
+| `/new`, `/new/org` | new repository, new org |
+| `/settings/<section>`, `/admin/<section>` | the user's profile, keys and follows; site admin: invites, audit |
+| `/<owner>` (`?tab=`) | a user's or org's page: repositories, members, teams, settings |
+| `/<owner>/<repo>` | the repository: README and files |
+| `…/tree/<rev>/<path>`, `…/blob/<rev>/<path>` | a directory, a file (`rev` a branch, tag, change or commit) |
+| `…/commits/<rev>[/<path>]`, `…/commit/<id>`, `…/refs` | history, a commit and its diff, branches and tags |
+| `…/changes`, `…/stacks/<user>`, `…/reviews`, `…/change/<id>` | changes, a person's stacks, reviews, one review |
+| `…/releases[/<tag>]`, `…/bench[/<name>]`, `…/replay[/<group>]` | releases, benchmark history, replay failure groups |
+| `…/settings/<section>` | the repository's settings (admin) |
+
+**Assets.** `/-/<build>/<path>` serves the embedded file at `path`, where `build` is the first 12 hex digits of the
+SHA-256 of every embedded file; modules import each other relatively, so one page load fetches everything under one
+build. With the current build the answer is `Cache-Control: public, max-age=31536000, immutable`; with another (a page
+loaded before a deploy) it is the current file with `no-cache`. Every asset has an `ETag` (its own SHA-256) and answers
+`If-None-Match` with 304; text (`.js`, `.css`, `.svg`, `.json`, `.html`) is gzipped once per core when the client
+accepts it. Paths with `..`, empty segments or hidden names are 404.
+
+**Headers on the shell:** `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self';
+img-src 'self' data: https:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none';
+form-action 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `Cache-Control: no-cache`. The
+shell carries the build and `public_url` in `<meta>` tags; there is no inline script. User content (READMEs, comments,
+release notes, file text) is rendered by building DOM nodes, never `innerHTML` of user text; Markdown allows no raw
+HTML and only `http`, `https`, `mailto` and relative links.
+
+**Configuration.** `web.enabled` (`true`): serve the pages on a node. `web.dir` (none): serve the UI from that
+directory instead of the embedded files, re-read on every request with no caching, for editing the UI against a
+running node; never in production.
+
+**Sign-in in the browser** is §11's: `POST /tit/v1/login` (the answer's `code`, and the `tinhub_login` cookie), the
+page shows `tit login --code <code> <public_url>` to copy and polls `GET /tit/v1/login/<code>` until `approved`, then
+`POST /tit/v1/login/<code>/session`. Sign-out is `POST /tit/v1/logout`.
+
+**The API the pages add** (`products/tinhub/api`, any client may use it; a session or a `Tit-Signature`; reads within
+2 s and 16 MiB, writes within 5 s; errors `{"code", "message"}`; private repositories are 404 to whoever cannot read
+them, in lists too). A write never acts as `accounts.System()`: no signed-in user is 401 before any accounts call.
+
+| route | answer |
+|---|---|
+| `GET /api/v1/user`, `PATCH` `{"display"}` | the caller: `id, name, email, display, site_admin, orgs` (401 when signed out) |
+| `GET /api/v1/user/keys`, `DELETE …/keys/<id>` | the caller's keys: `id, name, public_key, created_at, last_used_at`; revoke |
+| `GET /api/v1/user/repos` | repositories the caller can write, newest push first |
+| `GET /api/v1/users?q=` | users by name prefix (signed in): `name, display` |
+| `GET /api/v1/owners/<owner>` | `name, kind, display, created_at, members` (an org's member count) |
+| `GET /api/v1/repos?q=&cursor=` | repositories the caller can read, newest push first |
+| `POST /api/v1/repos` | `{"owner", "name", "visibility", "description"}`: 201 and the repository |
+| `PATCH /api/v1/repos/<o>/<r>`, `DELETE` | `{"name", "visibility", "description", "default_branch"}` (admin); soft delete |
+| `GET /api/v1/repos/<o>/<r>/collaborators`, `PUT\|DELETE …/<user>` | grants to users and teams; `{"role"}` |
+| `PUT\|DELETE /api/v1/repos/<o>/<r>/teams/<team>` | a team of the owning org's grant |
+| `GET\|PUT\|DELETE /api/v1/repos/<o>/<r>/mirror` | `{"url", "token", "active"}`; the token is never answered |
+| `GET /api/v1/repos/<o>/<r>/audit`, `GET /api/v1/admin/audit` | audit rows, newest first (admin, site admin) |
+| `GET /api/v1/repos/<o>/<r>/events`, `GET /api/v1/feed` | live events of a repository; of those the caller follows or owns |
+| `GET /api/v1/repos/<o>/<r>/resolve?rev=&path=` | the commit `rev` names, and at `path` a tree's entries or a blob's id and size |
+| `GET /api/v1/repos/<o>/<r>/log?rev=&path=&cursor=&limit=` | commits from `rev`, newest first; with `path`, those that changed it |
+| `POST /api/v1/orgs`, `GET …/<org>/members`, `PUT\|DELETE …/members/<user>` | orgs and members (`member`, `owner`) |
+| `GET\|POST /api/v1/orgs/<org>/teams`, `DELETE …/<team>`, `GET\|PUT\|DELETE …/<team>/members[/<user>]` | teams |
+| `POST /api/v1/invites`, `GET /api/v1/invites` | an invite (site admins; org owners into their org) and its one-use code; pending invites |
+
+`GET /api/v1/repos/<o>/<r>` also answers `description`, `role` (the caller's: `none`, `read`, `write`, `admin`),
+`following`, `pushed_at` and `created_at`.
