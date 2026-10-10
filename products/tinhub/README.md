@@ -11,6 +11,7 @@ tinhub run [--config FILE] [--roles node,worker,runner]   # serve; every role by
 tinhub migrate [--config FILE]                             # apply the pending migrations, then exit
 tinhub packs sweep [--config FILE]                         # delete what crashed pushes and repacks left, once
 tinhub packs copy [--config FILE]                          # copy packs.dir into the s3.* bucket; rerun to catch up
+tinhub packs backup|restore DIR [--config FILE]            # the store's objects into DIR, or back (deploy/backup.sh)
 tinhub check [--config FILE]                               # every live pack in the store; refs and packs fingerprints
 tinhub admin invite EMAIL [--site-admin]                   # a one-use code for tit key add
 tinhub version
@@ -25,7 +26,8 @@ A file of `key = value` lines (`--config`, else `$TINHUB_CONFIG`, else `/etc/tin
 environment: `TINHUB_` and the key in upper case with dots as underscores (`db.password` is `TINHUB_DB_PASSWORD`). A
 value `file:PATH` is read from that file, for secrets mounted as files. Every key and its default is in
 [design/tinhub.md §3](../../design/tinhub.md#3-the-binary-and-its-configuration). A node needs `secrets.nonce` and
-`secrets.cookie`, the same on every node.
+`secrets.cookie`, the same on every node, and a bucket: content lives in S3-compatible object storage (R2, S3, MinIO)
+in every deployment, one server included, and `tinhub run` stops at start when it cannot read the bucket.
 
 ```sh
 db.addr = 127.0.0.1:5432
@@ -33,13 +35,21 @@ db.user = tinhub
 db.password = file:/run/secrets/tinhub-db
 secrets.nonce = file:/run/secrets/tinhub-nonce
 secrets.cookie = file:/run/secrets/tinhub-cookie
+s3.endpoint = https://ACCOUNT_ID.r2.cloudflarestorage.com
+s3.region = auto
+s3.bucket = tinhub
+s3.access_key = R2_ACCESS_KEY_ID
+s3.secret_key = file:/run/secrets/tinhub-s3
 packs.dir = /var/lib/tinhub
 ```
 
+`packs.store = dir` keeps content on local disk at `packs.dir` instead. It is for development and tests only.
+
 ## Packs
 
-Packs live in the pack store (`packs.store = dir`, at `packs.dir`; or `s3`, a bucket with each node's copies under
-`packs.dir/cache`); whether a pack is pending, live or retired is its row in Postgres. Refs and change versions are
+Packs, their indexes, replay capsules and review diffs live in the pack store: a bucket (`packs.store = s3`, the
+default), with each node's copies of what it read or wrote under `packs.dir/cache`. Postgres holds the pointers and
+the state: whether a pack is pending, live or retired is its row. Refs and change versions are
 rows too, moved by compare-and-swap in one transaction per push under the repository's lock, and cached in Redis when
 `redis.addr` is set. Every `packs.sweep` the sweeps delete the packs crashed pushes left and those retired longer than
 `packs.grace`. See [design/tinhub.md §7](../../design/tinhub.md#7-the-pack-store-1011-1015).
@@ -58,7 +68,7 @@ Without `redis.addr` there are no browser sessions, and key-signed requests stil
 
 ## Deployment
 
-Phase 1 is one Linux server with every role, Postgres beside it and packs on disk: `deploy/` has the systemd units,
+Phase 1 is one Linux server with every role, Postgres beside it and content in a bucket (R2): `deploy/` has the systemd units,
 a container image and compose file, the nightly backup and the restore, and the mirror sync that keeps the Tin repo a
 read-only copy of GitHub. Follow [deploy/RUNBOOK.md](deploy/RUNBOOK.md) for install, upgrade, secrets and restore.
 

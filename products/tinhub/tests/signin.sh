@@ -31,7 +31,8 @@ start_redis || fail "sessions need Redis (redis-server, or docker)"
 dbaddr=${TINHUB_TEST_DB%%/*}
 export TINHUB_DB_ADDR="$dbaddr" TINHUB_DB_NAME="${TINHUB_TEST_DB#*/}" TINHUB_DB_USER="${TINHUB_TEST_DB_USER:-}" TINHUB_DB_PASSWORD="${TINHUB_TEST_DB_PASSWORD:-}"
 export TINHUB_SECRETS_NONCE=test-nonce-secret-0123456789 TINHUB_SECRETS_COOKIE=test-cookie-key-0123456789
-export TINHUB_LISTEN=127.0.0.1:18434 TINHUB_PACKS_DIR="$tmp/node" TINHUB_PACKS_SWEEP=0 TINHUB_REDIS_ADDR="127.0.0.1:$port"
+# the directory store: the driver writes the repository to disk (production uses a bucket: backup.sh, phase2.sh)
+export TINHUB_PACKS_STORE=dir TINHUB_LISTEN=127.0.0.1:18434 TINHUB_PACKS_DIR="$tmp/node" TINHUB_PACKS_SWEEP=0 TINHUB_REDIS_ADDR="127.0.0.1:$port"
 base=http://$TINHUB_LISTEN
 export TINHUB_PUBLIC_URL="$base"
 start() {

@@ -34,7 +34,8 @@ fail() {
 dbaddr=${TINHUB_TEST_DB%%/*}
 export TINHUB_DB_ADDR="$dbaddr" TINHUB_DB_NAME="${TINHUB_TEST_DB#*/}" TINHUB_DB_USER="${TINHUB_TEST_DB_USER:-}" TINHUB_DB_PASSWORD="${TINHUB_TEST_DB_PASSWORD:-}"
 export TINHUB_SECRETS_NONCE=test-nonce-secret-0123456789 TINHUB_SECRETS_COOKIE=test-cookie-key-0123456789
-export TINHUB_PACKS_SWEEP=0 TINHUB_PACKS_DIR="$tmp/packs" TIT_NO_PAGER=1
+# the directory store: the driver writes the repository to disk (production uses a bucket: backup.sh, phase2.sh)
+export TINHUB_PACKS_STORE=dir TINHUB_PACKS_SWEEP=0 TINHUB_PACKS_DIR="$tmp/packs" TIT_NO_PAGER=1
 hubaddr=127.0.0.1:18461
 nodeaddr=127.0.0.1:18462
 TINHUB_LISTEN=$hubaddr TINHUB_PUBLIC_URL=http://$hubaddr TINHUB_ROLES=node "$hub" run > "$tmp/hub.log" 2>&1 &

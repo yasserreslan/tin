@@ -1,5 +1,6 @@
 # Shared by backup.sh and restore.sh: the Postgres connection from the same TINHUB_DB_* variables tinhub reads
-# (a value of the form file:PATH is read from PATH), and the packs directory.
+# (a value of the form file:PATH is read from PATH). The pack store is reached through the tinhub binary
+# (TINHUB_BIN, tinhub on the PATH by default), which reads its own configuration (/etc/tinhub/tinhub.conf).
 pg_env() {
 	addr=${TINHUB_DB_ADDR:-127.0.0.1:5432}
 	export PGHOST="${addr%:*}" PGPORT="${addr##*:}" PGDATABASE="${TINHUB_DB_NAME:-tinhub}" PGUSER="${TINHUB_DB_USER:-tinhub}"
@@ -8,22 +9,12 @@ pg_env() {
 	file:*) pw=$(cat "${pw#file:}") ;;
 	esac
 	[ -n "$pw" ] && export PGPASSWORD="$pw"
-	packs=${TINHUB_PACKS_DIR:-/var/lib/tinhub}
-	packs=${packs%/}
+	return 0
 }
 
-# copy_new FROM TO: every file under FROM/repos that TO/repos lacks, through a temporary name and a rename, so an
-# interrupted copy leaves no partial pack under its real name. Packs never change once written, so a file already
-# there is the same file, and nothing is ever deleted from TO.
-copy_new() {
-	[ -d "$1/repos" ] || return 0
-	n=0
-	for f in $(cd "$1" && find repos -type f ! -name '.*' | sort); do
-		[ -e "$2/$f" ] && continue
-		mkdir -p "$2/$(dirname "$f")"
-		cp "$1/$f" "$2/$f.partial"
-		mv "$2/$f.partial" "$2/$f"
-		n=$((n + 1))
-	done
+# copied OUTPUT: the object count in tinhub packs backup's or restore's line ("tinhub: copied N objects ...").
+copied() {
+	n=$(printf '%s\n' "$1" | sed -n 's/^tinhub: copied \([0-9][0-9]*\) objects.*/\1/p')
+	[ -n "$n" ] || { echo "unexpected output from tinhub packs: $1" >&2; return 1; }
 	echo "$n"
 }
