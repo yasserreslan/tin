@@ -49,3 +49,11 @@ test("percent", () => {
 	assert.equal(f.percent(-0.05, true), "-5.0%");
 	assert.equal(f.percent(0.5), "50%");
 });
+
+test("compareSpec", () => {
+	assert.deepEqual(f.compareSpec("main...feature/x", "main"), { from: "main", to: "feature/x" });
+	assert.deepEqual(f.compareSpec("v1.0...v1.1", "main"), { from: "v1.0", to: "v1.1" });
+	assert.deepEqual(f.compareSpec("feature", "main"), { from: "main", to: "feature" });
+	assert.deepEqual(f.compareSpec("", "main"), { from: "main", to: "main" });
+	assert.deepEqual(f.compareSpec("...feature", "main"), { from: "main", to: "feature" });
+});

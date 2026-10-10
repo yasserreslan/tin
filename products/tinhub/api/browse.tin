@@ -3,6 +3,7 @@ package api
 import "../../tit/change"
 import "../../tit/diff"
 import "../../tit/object"
+import "../../tit/revwalk"
 import "../../tit/store"
 import "anvil"
 import "fault"
@@ -465,6 +466,34 @@ fn readLog(c call, rev str, path str, cursor str, n i64) !logOut {
 	return out
 }
 
+// splitPoint is where the commits to has and from lacks (ids, with their datas) left from's history: the newest of
+// their parents that is not one of them. When there are none, to is in from's history and is the point itself; when
+// they share no history, it is from.
+fn splitPoint[S store.ObjectStore](st mut S, ids []object.Id, datas []object.CommitData, from object.Id, to object.Id) !object.Id {
+	if len(ids) == 0 {
+		return to
+	}
+	mut listed = map[str]bool{}
+	for id in ids {
+		listed[id.Hex()] = true
+	}
+	mut best = from
+	mut bestWhen = -1
+	for cd in datas {
+		for par in cd.Parents {
+			if listed[par.Hex()] {
+				continue
+			}
+			let pd = try commitOf(mut st, par)
+			if pd.Committer.When > bestWhen {
+				best = par
+				bestWhen = pd.Committer.When
+			}
+		}
+	}
+	return best
+}
+
 // ---- raw files ----
 
 // rawType is the content type a raw file is served as: images as themselves, text as plain text, anything else as
@@ -542,17 +571,25 @@ fn raw(q anvil.Req, w mut anvil.Out) {
 type compareOut struct {
 	@json("from") from_ str
 	to                  str
+	base                str
+	commits             []logEntry
+	more                bool
 	files               []fileOut
 }
 
+// compareCommits is the most commits a compare lists.
+const compareCommits = 250
+
 // compare is the files that differ from ?from= to ?to= (each a branch, tag, change or commit; from empty compares
-// with nothing, so every file of to is added): a commit's diff against its first parent, or two branches.
+// with nothing, so every file of to is added): a commit's diff against its first parent, or two branches. With
+// ?since=base it is what to did since it left from: the files from their merge base (base) to to, and to's commits
+// that from lacks (commits, newest first, at most 250; more when there are others).
 fn compare(q anvil.Req, w mut anvil.Out) {
 	let c = begin(q, mut w, true)
 	if c == nil {
 		return
 	}
-	let (out, err) = readCompare(c, q.Param("from"), q.Param("to"))
+	let (out, err) = readCompare(c, q.Param("from"), q.Param("to"), q.Param("since") == "base")
 	if err != nil {
 		answerErr(mut w, err)
 		return
@@ -560,7 +597,7 @@ fn compare(q anvil.Req, w mut anvil.Out) {
 	send(mut w, out)
 }
 
-fn readCompare(c call, from str, to str) !compareOut {
+fn readCompare(c call, from str, to str, sinceBase bool) !compareOut {
 	mut out ?compareOut = nil
 	try within readWithin {
 		try limit memory readMemory {
@@ -570,12 +607,31 @@ fn readCompare(c call, from str, to str) !compareOut {
 			let tb = try treeOf(mut st, b.commit.Hex())
 			mut ta = object.NoId
 			mut fromHex = ""
+			mut page = compareOut{from_: "", to: b.commit.Hex(), base: "", commits: []logEntry{}, more: false, files: []fileOut{}}
 			if len(from) > 0 {
 				let a = try revisionOf(c, mut st, from)
 				ta = try treeOf(mut st, a.commit.Hex())
 				fromHex = a.commit.Hex()
+				if sinceBase {
+					let (ids, datas) = try revwalk.WalkCommits(mut st, []object.Id{b.commit}, []object.Id{a.commit}, revwalk.Order.Date, 0)
+					let base = try splitPoint(mut st, ids, datas, a.commit, b.commit)
+					page.base = base.Hex()
+					ta = try treeOf(mut st, page.base)
+					for i in 0..len(ids) {
+						if i == compareCommits {
+							page.more = true
+							break
+						}
+						let cd = datas[i]
+						mut parents = []str{}
+						for par in cd.Parents {
+							parents = append(parents, par.Hex())
+						}
+						page.commits = append(page.commits, logEntry{id: ids[i].Hex(), change: cd.Change.Letters(), title: titleOf(cd.Message), message: cd.Message, author: personOf(cd.Author), committer: personOf(cd.Committer), parents: parents, signed: len(cd.Signature) > 0})
+					}
+				}
 			}
-			mut page = compareOut{from_: fromHex, to: b.commit.Hex(), files: []fileOut{}}
+			page.from_ = fromHex
 			let fcs = try diff.TreeDiff(mut st, ta, tb, true)
 			for f in fcs {
 				page.files = append(page.files, fileOut{kind: kindName(f.Kind), path: f.Path, old_path: f.OldPath, old_blob: hexOf(f.OldHash), new_blob: hexOf(f.NewHash)})
