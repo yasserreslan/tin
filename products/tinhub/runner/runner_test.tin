@@ -3,6 +3,7 @@ package runner
 import "../db"
 import "../packs"
 import "anvil"
+import "argo"
 import "crucible"
 import "fault"
 import "mint"
@@ -534,6 +535,39 @@ fn TestChecks(t mut crucible.T) {
 	crucible.Equal(mut t, "detail", detail.Code(), 200)
 	t.True("explains", twine.Contains(str(detail.Body), "Fixed. Production answered 500 after a panic"))
 	crucible.Equal(mut t, "another repository's check", r.RunWith("GET", "/api/v1/repos/shop/checkout/replay/checks/999999", []str{"X-Test-User: {w.ada}"}, "").Code(), 404)
+	// pages: every check once, newest first, ?before= the page's next until it is 0
+	mut tx4 = c.Begin() catch err {
+		t.Error("begin: {err}")
+		return
+	}
+	for i in 0..4 {
+		RequestCheck(mut tx4, w.repo, "fix/declined", commit, group, "", w.ada) catch err {
+			t.Error("request {i}: {err}")
+		}
+	}
+	t.NoFault("commit more", tx4.Commit())
+	mut seen = []i64{}
+	mut before = 0
+	for page in 0..5 {
+		let got = r.RunWith("GET", "/api/v1/repos/shop/checkout/replay/checks?limit=2&before={before}", []str{"X-Test-User: {w.ada}"}, "")
+		crucible.Equal(mut t, "page {page}", got.Code(), 200)
+		mut v = checksOut{opted_in: false, checks: []checkOut{}, next: 0}
+		argo.Get(str(got.Body), mut v) catch err {
+			t.Error("page {page}: {err}")
+			return
+		}
+		t.True("page {page} holds at most 2", len(v.checks) <= 2)
+		for k in v.checks {
+			t.True("newest first", len(seen) == 0 || k.id < seen[len(seen) - 1])
+			seen = append(seen, k.id)
+		}
+		if v.next == 0 {
+			break
+		}
+		crucible.Equal(mut t, "next is the page's last", v.next, seen[len(seen) - 1])
+		before = v.next
+	}
+	crucible.Equal(mut t, "every check, once", len(seen), 5)
 	// a revision the repository does not have
 	let post = "/api/v1/repos/shop/checkout/replay/checks"
 	crucible.Equal(mut t, "no group", r.RunWith("POST", post, []str{"X-Test-User: {w.ada}"}, "{{\"target\":\"main\"}}").Code(), 400)

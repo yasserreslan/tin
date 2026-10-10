@@ -118,7 +118,8 @@ effect N, one more, or one fewer: the replay cannot judge past it), `panicked`, 
 
 - `POST /api/v1/repos/<owner>/<repo>/replay/checks` (`{"target": "fix/x", "group": ID, "capsule": ID}`, capsule
   optional) queues one: 202, 404 for an unknown revision or group, 409 when the owner has not opted in.
-- `GET …/replay/checks` (`?group=ID`): the checks with their verdicts counted; `GET …/replay/checks/<id>`: each capsule's
+- `GET …/replay/checks` (`?group=ID`, `?limit=N`, `?before=ID`): the checks, newest first, with their verdicts counted,
+  20 to a page; `next` is the following page's `before` (0 on the last). `GET …/replay/checks/<id>`: each capsule's
   verdict, label and explanation.
 
 `runner.sandbox = off` (default `on`) builds and replays as plain child processes, for a development machine with no

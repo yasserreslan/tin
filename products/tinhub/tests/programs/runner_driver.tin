@@ -189,7 +189,7 @@ fn checks(dir str, tin str, keyPath str) ! {
 			break
 		}
 	}
-	let ks = try runner.ChecksOf(pg, 1, "", 100)
+	let ks = try runner.ChecksOf(pg, 1, "", 0, 100)
 	for i in 0..len(ks) {
 		let k = ks[len(ks) - 1 - i]
 		let g = try pg.Query("SELECT panic FROM replay_groups WHERE repo_id = 1 AND id = {k.Group}")
