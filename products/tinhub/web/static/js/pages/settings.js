@@ -7,7 +7,7 @@ import * as fmt from "../lib/format.js";
 import * as store from "../lib/store.js";
 import { navigate } from "../lib/router.js";
 import { sidenav, panel, input, saveButton } from "../ui/forms.js";
-import { avatar, badge, btn, busy, confirm, copyButton, empty, errorBox, field, kv, repoLink, time, toast } from "../ui/kit.js";
+import { avatar, badge, btn, busy, confirm, copyButton, empty, errorBox, field, kv, repoLink, time, toast, loginHref } from "../ui/kit.js";
 
 const SECTIONS = [
 	{ key: "profile", label: "Profile", icon: "user" },
@@ -18,7 +18,7 @@ const SECTIONS = [
 
 export async function render(ctx) {
 	const me = store.session.user;
-	if (!me) return navigate("/login?next=" + encodeURIComponent(location.pathname), { replace: true });
+	if (!me) return navigate(loginHref(), { replace: true });
 	const section = ctx.params.section || "profile";
 	if (!SECTIONS.some((s) => s.key === section)) return ctx.notFound();
 	ctx.title("Settings");

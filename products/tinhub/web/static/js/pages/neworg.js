@@ -5,13 +5,13 @@ import * as api from "../lib/api.js";
 import * as store from "../lib/store.js";
 import { navigate } from "../lib/router.js";
 import { input } from "../ui/forms.js";
-import { btn, busy, field } from "../ui/kit.js";
+import { btn, busy, field, loginHref } from "../ui/kit.js";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,38}$/;
 
 export async function render(ctx) {
 	const me = store.session.user;
-	if (!me) return navigate("/login?next=" + encodeURIComponent(location.pathname), { replace: true });
+	if (!me) return navigate(loginHref(), { replace: true });
 	ctx.title("New org");
 	const name = input("", { placeholder: "acme", autocomplete: "off", spellcheck: "false" });
 	const display = input("", { placeholder: "Acme Inc.", maxlength: 100 });

@@ -244,10 +244,17 @@ export function skeleton(lines = 4) {
 	return h("div", { style: { padding: "8px 16px" } }, Array.from({ length: lines }, (_, i) => h("div.skeleton.skel-line", { style: { width: `${90 - ((i * 17) % 40)}%` } })));
 }
 
+// loginHref is the sign-in page's address, coming back here afterwards. On the sign-in page itself it keeps the
+// address it was given, so a second click does not send the visitor back to sign-in.
+export function loginHref() {
+	if (location.pathname === "/login") return "/login" + location.search;
+	return "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
+}
+
 // signInFirst is what a page shows a signed-out visitor where the server refused them: the fix is to sign in, not to
 // ask for a permission.
 export function signInFirst(title = "Sign in to see this", message = "This needs an account with access to it.") {
-	return empty("login", title, message, btn("Sign in", { icon: "login", primary: true, href: "/login?next=" + encodeURIComponent(location.pathname + location.search) }));
+	return empty("login", title, message, btn("Sign in", { icon: "login", primary: true, href: loginHref() }));
 }
 
 // refused is the state for a 403: a sign-in prompt when no one is signed in, else no access with the server's reason.

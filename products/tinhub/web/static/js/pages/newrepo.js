@@ -6,14 +6,14 @@ import * as api from "../lib/api.js";
 import * as store from "../lib/store.js";
 import { navigate } from "../lib/router.js";
 import { input, textarea, select } from "../ui/forms.js";
-import { btn, busy, field } from "../ui/kit.js";
+import { btn, busy, field, loginHref } from "../ui/kit.js";
 
 // as accounts.ValidRepoName
 const valid = (v) => /^[A-Za-z0-9._-]{1,100}$/.test(v) && v !== "." && v !== ".." && !v.endsWith(".tit");
 
 export async function render(ctx) {
 	const me = store.session.user;
-	if (!me) return navigate("/login?next=" + encodeURIComponent(location.pathname + location.search), { replace: true });
+	if (!me) return navigate(loginHref(), { replace: true });
 	ctx.title("New repository");
 	const owners = [me.name, ...(me.orgs || []).filter((o) => o.role === "owner").map((o) => o.name)];
 	const owner = select(owners, owners.includes(ctx.query.owner) ? ctx.query.owner : me.name, { style: { width: "auto", "min-width": "160px" } });

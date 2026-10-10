@@ -16,7 +16,7 @@ import { markdown, hunkTable, fileBlock } from "../ui/code.js";
 import { composer } from "../ui/composer.js";
 import { threads, thread } from "../ui/comments.js";
 import * as filediff from "../ui/filediff.js";
-import { avatar, badge, btn, busy, callout, confirm, copyButton, empty, errorBox, refused, segmented, signInFirst, skeleton, stateBadge, tabs, time, toast, kv } from "../ui/kit.js";
+import { avatar, badge, btn, busy, callout, confirm, copyButton, empty, errorBox, refused, segmented, signInFirst, skeleton, stateBadge, tabs, time, toast, kv, loginHref } from "../ui/kit.js";
 import { line as lineChart } from "../ui/chart.js";
 
 const DECL_COLOR = { added: "green", removed: "red", changed: "amber", moved: "blue", renamed: "purple" };
@@ -361,7 +361,7 @@ export async function render(ctx) {
 		items.sort((a, b) => a.at - b.at);
 		const box = me
 			? composer({ placeholder: "Leave a comment on the change", onSubmit: (text) => addComment(text) })
-			: h("div.callout", {}, icon("login"), h("span", {}, h("a", { href: "/login?next=" + encodeURIComponent(location.pathname) }, "Sign in"), " to comment, vote or land."));
+			: h("div.callout", {}, icon("login"), h("span", {}, h("a", { href: loginHref() }, "Sign in"), " to comment, vote or land."));
 		content.replaceChildren(desc, h("div.timeline", { style: { "margin-top": "16px" } }, items.map((i) => i.el)), mergeBox(), h("div", { style: { "margin-top": "20px" } }, box));
 	};
 
