@@ -246,7 +246,7 @@ export function skeleton(lines = 4) {
 export function errorBox(err, retry) {
 	const status = err && err.status;
 	const title = status === 404 ? "Not found" : status === 403 ? "No access" : status === 0 ? "Offline" : "Something went wrong";
-	return h("div.empty", {}, h("div.art", {}, icon(status === 404 ? "search" : status === 403 ? "lock" : "alert")), h("h3", {}, title), h("p", {}, err && err.message ? err.message : String(err)), retry ? btn("Try again", { icon: "refresh", onclick: retry }) : null);
+	return h("div.empty", {}, h("div.art", {}, icon(status === 404 ? "search" : status === 403 ? "lock" : "alert")), h("h3", {}, title), h("p", {}, err && err.message ? err.message : String(err)), retry && status !== 404 && status !== 403 ? btn("Try again", { icon: "refresh", onclick: retry }) : null);
 }
 
 export function callout(kind, ...children) {
