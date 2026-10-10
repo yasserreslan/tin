@@ -1,6 +1,8 @@
 package main
 
 import "say"
+import "quarry"
+import "mint"
 
 // Incremental growth of a chunked map (#484): a lookup that runs while the index is being
 // migrated must still find every key inserted before the doubling began. The benchmark that
@@ -25,7 +27,12 @@ fn main() {
 	mut k2 = i64(0)
 	mut k3 = i64(0)
 	mut k4 = i64(0)
-	mut k = i64(12345)
+	let args = quarry.Args()
+	mut seed = i64(12345)
+	if len(args) > 1 {
+		seed = mint.Atoi(args[1]) catch _ { 12345 }
+	}
+	mut k = seed
 	mut bad = i64(0)
 	for i in i64(0)..n {
 		k = lcg(k)
@@ -50,13 +57,16 @@ fn main() {
 		k1 = k
 	}
 	// Every key once more, from the same sequence, with the map no longer growing.
-	mut kk = i64(12345)
+	mut kk = seed
 	mut after = i64(0)
+	mut sum = i64(0)
 	for i in i64(0)..n {
 		kk = lcg(kk)
-		if m[kk] != i {
+		let value = m[kk]
+		sum += value
+		if value != i {
 			after += 1
 		}
 	}
-	say.Line(len(m), bad, after)
+	say.Line(len(m), bad, after, sum)
 }
