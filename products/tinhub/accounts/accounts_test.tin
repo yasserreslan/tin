@@ -90,6 +90,8 @@ fn TestNames(t mut crucible.T) {
 	t.False("owner name in upper case", ValidOwnerName("Ada"))
 	t.False("empty owner name", ValidOwnerName(""))
 	t.False("40-byte owner name", ValidOwnerName("a123456789012345678901234567890123456789"))
+	t.False("a page's name as an owner name", ValidOwnerName("settings"))
+	t.False("login as an owner name", ValidOwnerName("login"))
 	t.True("repo name", ValidRepoName("Tin.go_x-1"))
 	t.False("repo name .", ValidRepoName("."))
 	t.False("repo name ..", ValidRepoName(".."))

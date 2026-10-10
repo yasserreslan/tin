@@ -6,6 +6,7 @@ import "anvil"
 import "argo"
 import "fault"
 import "mint"
+import "postgres"
 import "tide"
 import "twine"
 
@@ -220,6 +221,13 @@ type reviewOut struct {
 	required      []str
 	checks        []checkOut
 	blocked       str
+	// below is the changes under this one that have not landed, bottom first; stack_blocked is why the stack (those
+	// and this one) cannot land yet, "" when it can
+	below         []str
+	stack_blocked str
+	// opened_by_name and landed_by_name are those users' names, for pages ("" for none)
+	opened_by_name str
+	landed_by_name str
 }
 
 fn checksOut(cs []Check) []checkOut {
@@ -228,6 +236,18 @@ fn checksOut(cs []Check) []checkOut {
 		out = append(out, checkOut{version: c.Version, name: c.Name, state: c.State, url: c.Url, description: c.Description, key_id: c.KeyId, updated_at: c.Updated})
 	}
 	return out
+}
+
+// nameOf is a user's name, "" for none.
+fn nameOf(db postgres.Client, user i64) !str {
+	if user <= 0 {
+		return ""
+	}
+	let rows = try db.Query("SELECT o.name FROM users u JOIN owners o ON o.id = u.owner_id WHERE u.id = {user}")
+	if len(rows.Rows) == 0 {
+		return ""
+	}
+	return rows.Rows[0][0].Text()
 }
 
 fn reviewOf(c call, ch str) !reviewOut {
@@ -243,7 +263,34 @@ fn reviewOf(c call, ch str) !reviewOut {
 		} else {
 			blocked = try Readiness(c.d.Db, c.r, ch, rv.Version)
 		}
-		out = keep(reviewOut{change: ch, state: rv.State, target: rv.Target, opened_by: rv.OpenedBy, version: rv.Version, commit: rv.Commit, created_at: rv.Created, updated_at: rv.Updated, landed_at: rv.Landed, landed_commit: rv.LandedAt, landed_by: rv.LandedBy, votes: tallyOut{approvals: t.Approvals, blocking: t.Blocking, needed: t.Needed}, required: s.Checks, checks: checksOut(cs), blocked: blocked})
+		mut below = []str{}
+		mut stackBlocked = blocked
+		if rv.State != StateLanded && rv.State != StateAbandoned {
+			let (order, serr) = StackBelow(c.r.Id, ch)
+			if serr != nil {
+				if len(stackBlocked) == 0 {
+					stackBlocked = fault.Message(serr)
+				}
+			} else {
+				below = order[0:len(order) - 1]
+			}
+			for b in below {
+				if len(stackBlocked) > 0 {
+					break
+				}
+				let brv = try Open(c.d.Db, c.r.Id, b)
+				let why = try Readiness(c.d.Db, c.r, b, brv.Version)
+				if len(why) > 0 {
+					stackBlocked = "{b} below it: {why}"
+				}
+			}
+			if len(blocked) == 0 && len(below) > 0 {
+				blocked = "{below[len(below) - 1]} below it has not landed: land it first, or land the stack"
+			}
+		}
+		let opener = try nameOf(c.d.Db, rv.OpenedBy)
+		let lander = try nameOf(c.d.Db, rv.LandedBy)
+		out = keep(reviewOut{change: ch, state: rv.State, target: rv.Target, opened_by: rv.OpenedBy, version: rv.Version, commit: rv.Commit, created_at: rv.Created, updated_at: rv.Updated, landed_at: rv.Landed, landed_commit: rv.LandedAt, landed_by: rv.LandedBy, votes: tallyOut{approvals: t.Approvals, blocking: t.Blocking, needed: t.Needed}, required: s.Checks, checks: checksOut(cs), blocked: blocked, below: below, stack_blocked: stackBlocked, opened_by_name: opener, landed_by_name: lander})
 	}
 	if out == nil {
 		fail fault.Wrap(ErrNotFound, "no change {ch}")
@@ -665,6 +712,10 @@ type listItem struct {
 	target     str
 	version    i64
 	updated_at i64
+	// commit is the newest version's commit, opened_by the name of who opened the review ("" when unknown)
+	commit     str
+	opened_by  str
+	created_at i64
 }
 
 type listOut struct {
@@ -689,10 +740,10 @@ fn listReviews(c call, state str) !listOut {
 	mut out = listOut{reviews: []listItem{}}
 	let repoId = c.r.Id
 	try within readWithin + 0 {
-		let rows = try c.d.Db.Query("SELECT r.change_id, r.state, r.target, coalesce((SELECT max(version) FROM changes v WHERE v.repo_id = r.repo_id AND v.change_id = r.change_id), 0), extract(epoch FROM r.updated_at)::bigint FROM reviews r WHERE r.repo_id = {repoId} AND ({state} = '' OR r.state = {state}) ORDER BY r.updated_at DESC, r.change_id LIMIT 200")
+		let rows = try c.d.Db.Query("SELECT r.change_id, r.state, r.target, coalesce(v.version, 0), extract(epoch FROM r.updated_at)::bigint, coalesce(v.commit_id, ''), coalesce(o.name, ''), extract(epoch FROM r.created_at)::bigint FROM reviews r LEFT JOIN LATERAL (SELECT version, commit_id FROM changes x WHERE x.repo_id = r.repo_id AND x.change_id = r.change_id ORDER BY version DESC LIMIT 1) v ON true LEFT JOIN users u ON u.id = r.opened_by LEFT JOIN owners o ON o.id = u.owner_id WHERE r.repo_id = {repoId} AND ({state} = '' OR r.state = {state}) ORDER BY r.updated_at DESC, r.change_id LIMIT 200")
 		mut list = []listItem{}
 		for x in rows.Rows {
-			list = append(list, listItem{change: x[0].Text(), state: x[1].Text(), target: x[2].Text(), version: x[3].Int(), updated_at: x[4].Int()})
+			list = append(list, listItem{change: x[0].Text(), state: x[1].Text(), target: x[2].Text(), version: x[3].Int(), updated_at: x[4].Int(), commit: x[5].Text(), opened_by: x[6].Text(), created_at: x[7].Int()})
 		}
 		out = keep(listOut{reviews: list})
 	}

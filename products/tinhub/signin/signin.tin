@@ -41,6 +41,23 @@ fn Mount(r mut anvil.Router) {
 	r.Get(`/tit/v1/login/{code}`, Serve)
 	r.Post(`/tit/v1/login/{code}`, Serve)
 	r.Post(`/tit/v1/login/{code}/session`, claim)
+	r.Get("/tit/v1/heads", rootHeads)
+}
+
+// rootHeads answers heads at the site's root: no refs, and a nonce to sign the next request with, so `tit login URL`
+// (which asks heads for a nonce before it approves a code) works with the site's own URL, for a user with no
+// repository yet (design/tinhub.md §15).
+fn rootHeads(q anvil.Req, w mut anvil.Out) {
+	let got = deps
+	if got == nil {
+		w.Status(503)
+		w.Text("sign-in is not configured on this core")
+		return
+	}
+	let d = got
+	let h = transport.Heads{Refs: []transport.RefHead{}, Changes: []transport.ChangeHead{}, Nonce: transport.NewNonce(d.NonceKey, now()), Server: "tinhub", Limits: transport.Limits{Pack: 0, Refs: 0}}
+	w.Type("application/x-tit")
+	w.Body = []u8(transport.Frame(transport.Kind.HeadsAnswer, transport.Encode(h), ""))
 }
 
 // Handles reports whether a protocol path is one of sign-in's: the protocol's handler passes those to Serve.

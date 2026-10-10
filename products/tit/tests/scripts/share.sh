@@ -118,6 +118,33 @@ t clone "$url" "$d/tagged" > /dev/null || fail "a clone of a repository with ann
 [ "$(t -C "$d/tagged" log --format=subject -n 1 v1.0)" = "Add dirty" ] || fail "the clone's v1.0"
 echo "ok a clone takes the annotated tags"
 
+# a branch above the trunk carries a version of each of its changes (the reviews a hosting server opens), and an
+# amended change pushed again by sync its next version
+cd "$d/b"
+t pull > /dev/null
+t switch -c stack > /dev/null
+printf 'six\n' >> a.txt
+t commit -am "Add six" > /dev/null
+low=$(t log --format=change -n 1)
+printf 'seven\n' >> a.txt
+t commit -am "Add seven" > /dev/null
+top=$(t log --format=change -n 1)
+t push > /dev/null
+[ "$(t -C "$d/server" log --format=id -n 1 "$low")" = "$(t log --format=id -n 1 HEAD~1)" ] || fail "the server has no version of the stack's lower change"
+[ "$(t -C "$d/server" log --format=id -n 1 "$top")" = "$(t log --format=id -n 1)" ] || fail "the server has no version of the stack's top change"
+printf 'seven and a half\n' >> a.txt
+t commit -a --amend -m "Add seven, amended" > /dev/null
+t sync > /dev/null
+[ "$(t -C "$d/server" log --format=id -n 1 "$top")" = "$(t log --format=id -n 1)" ] || fail "the server's version of the amended change"
+echo "ok a pushed stack carries its change versions"
+
+# a version the server already has is no update: the same stack pushed again with no record of the last push
+rm -rf "$(find .tit -type d -name pushed)"
+t switch -c again > /dev/null
+t push > "$d/out.txt" 2>&1 || fail "a push of versions the server has: $(cat "$d/out.txt")"
+[ "$(t -C "$d/server" log --format=id -n 1 "$top")" = "$(t log --format=id -n 1)" ] || fail "the server's version after the same push"
+echo "ok a version the server has is not pushed again"
+
 # a client with no key is refused
 mkdir "$d/stranger"
 if HOME="$d/stranger" XDG_CONFIG_HOME="$d/stranger" t clone "$url" "$d/s" > "$d/out.txt" 2>&1; then

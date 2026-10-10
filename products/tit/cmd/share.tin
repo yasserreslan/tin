@@ -417,11 +417,14 @@ fn doPush(g Global, a ShareArgs, o mut Out) ! {
 	let tmp = r.Ws.Store + "/tmp-push-" + seal.Hex(seal.RandomBytes(8))
 	let p = try packfile.Write(mut r.Store, ids, tmp)
 	// the pack streams from its file (#1009)
-	let (_, perr) = c.PushFile(transport.PushRequest{Changes: []transport.ChangeUpdate{}, Refs: []transport.RefUpdate{transport.RefUpdate{Name: branch, Old: old, New: tip.Hex()}}}, p.Path)
+	let pushed = try readPushed(r, a.Remote)
+	let versions = try stackVersions(mut r, branch, tip, heads, pushed)
+	let (_, perr) = c.PushFile(transport.PushRequest{Changes: versions, Refs: []transport.RefUpdate{transport.RefUpdate{Name: branch, Old: old, New: tip.Hex()}}}, p.Path)
 	try quarry.RemoveAll(tmp)
 	if perr != nil {
 		fail perr
 	}
+	try writePushed(r, a.Remote, pushed, versions)
 	// this repository's copy of the server's branch
 	let tracking = "refs/remotes/" + a.Remote + "/" + shortBranch(branch)
 	if !twine.Contains(a.Remote, "://") {
@@ -552,4 +555,114 @@ fn syncPush(g Global, a ShareArgs, rebased i64, o mut Out) ! {
 	mut pushOut = Out{buf: []u8{}}
 	try doPush(g, ShareArgs{Remote: a.Remote, Branch: shortBranch(st2.Branch), Dir: "", Lease: true, Lazy: false}, mut pushOut)
 	o.Line("Synced: rebased " + count(rebased, "change", "changes") + " onto {a.Remote}/{trunk}; " + twine.TrimSpace(str(pushOut.buf)))
+}
+
+// pushedFile keeps, per remote, the version of each change this repository pushed last: "<letters> <commit>" lines.
+fn pushedFile(r Repo, remote str) str {
+	mut name = []u8{}
+	for i in 0..len(remote) {
+		let b = remote[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '.' {
+			name = append(name, b)
+		} else {
+			name = append(name, '_')
+		}
+	}
+	return r.Ws.Store + "/pushed/" + str(name)
+}
+
+fn readPushed(r Repo, remote str) !map[str]str {
+	mut out = map[str]str{}
+	let path = pushedFile(r, remote)
+	if !quarry.Exists(path) {
+		return out
+	}
+	let text = try quarry.ReadFile(path)
+	for line in twine.Split(text, "\n") {
+		let (k, v, ok) = twine.Cut(line, " ")
+		if ok && len(k) > 0 && len(v) > 0 {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// writePushed records the versions a push sent, keeping the newest 4096 changes.
+fn writePushed(r Repo, remote str, before map[str]str, sent []transport.ChangeUpdate) ! {
+	if len(sent) == 0 {
+		return
+	}
+	mut all = map[str]str{}
+	for k, v in before {
+		all[k] = v
+	}
+	for cu in sent {
+		delete(all, cu.Change)
+		all[cu.Change] = cu.Commit
+	}
+	mut lines = []str{}
+	for k, v in all {
+		lines = append(lines, k + " " + v)
+	}
+	if len(lines) > 4096 {
+		lines = lines[len(lines) - 4096:]
+	}
+	try quarry.MkdirAll(r.Ws.Store + "/pushed")
+	try quarry.WriteFile(pushedFile(r, remote), twine.Join(lines, "\n") + "\n")
+}
+
+// stackVersions are the change versions a push of branch sends (design/tit.md §15): the changes of the branch above
+// the trunk (stack.trunk, main), oldest first, each with the server's newest version of it as the one it replaces.
+// A host reviews them (tinhub opens a review per change). Pushing the trunk itself sends none, and so does a
+// repository with no trunk, or a change the server already has at this commit.
+fn stackVersions(r mut Repo, branch str, tip object.Id, heads transport.Heads, pushed map[str]str) ![]transport.ChangeUpdate {
+	mut out = []transport.ChangeUpdate{}
+	let trunk = try trunkOf(r)
+	if branch == "refs/heads/" + trunk || !twine.HasPrefix(branch, "refs/heads/") {
+		return out
+	}
+	mut hide = []object.Id{}
+	let local = r.resolve("refs/heads/" + trunk) catch _ {
+		object.NoId
+	}
+	if local != object.NoId {
+		hide = append(hide, local)
+	}
+	for ref in heads.Refs {
+		if ref.Name != "refs/heads/" + trunk {
+			continue
+		}
+		let id = object.ParseId(ref.Target) catch _ {
+			continue
+		}
+		if r.Store.Has(id) {
+			hide = append(hide, id)
+		}
+	}
+	if len(hide) == 0 {
+		return out
+	}
+	let line = try revwalk.Walk(mut r.Store, []object.Id{tip}, hide, revwalk.Order.FirstParent, 0)
+	// the heads name only the changes a ref follows; for the others, the version this repository pushed last
+	mut server = map[str]str{}
+	for k, v in pushed {
+		server[k] = v
+	}
+	for ch in heads.Changes {
+		server[ch.Change] = ch.Commit
+	}
+	for i in 0..len(line) {
+		let id = line[len(line) - 1 - i]
+		let cd = try commitData(mut r, id)
+		let letters = cd.Change.Letters()
+		if len(letters) == 0 {
+			continue
+		}
+		let was = server[letters]
+		if was == id.Hex() {
+			continue
+		}
+		out = append(out, transport.ChangeUpdate{Change: letters, Replaces: was, Commit: id.Hex()})
+	}
+	return out
 }

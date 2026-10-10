@@ -76,6 +76,17 @@ treeid=$(jq -r '.tree' "$tmp/out.json")
 get "$r/trees/$treeid" '(.entries | length) == 1 and .entries[0].name == "a.txt" and .entries[0].mode == "file" and .entries[0].id == "'"$blob"'"'
 body=$(curl -sf "$base$r/blobs/$blob") || fail "GET blob"
 [ "$body" = one ] || fail "the blob is '$body', not 'one'"
+# the raw file (#1081): its bytes with nosniff and a sandboxing policy, cached for good when named by commit
+curl -s -D "$tmp/raw.h" -o "$tmp/raw.out" "$base$r/raw/a.txt?rev=main" || fail "GET raw"
+[ "$(cat "$tmp/raw.out")" = one ] || fail "raw a.txt is '$(cat "$tmp/raw.out")', not 'one'"
+grep -qi '^x-content-type-options: nosniff' "$tmp/raw.h" || fail "raw: no nosniff: $(cat "$tmp/raw.h")"
+grep -qi '^content-security-policy:.*sandbox' "$tmp/raw.h" || fail "raw: no sandbox policy: $(cat "$tmp/raw.h")"
+curl -s -D "$tmp/raw.h" -o /dev/null "$base$r/raw/a.txt?rev=$main&download=1" || fail "GET raw by commit"
+grep -qi '^cache-control:.*immutable' "$tmp/raw.h" || fail "raw by commit is not immutable: $(cat "$tmp/raw.h")"
+grep -qi '^content-disposition: attachment' "$tmp/raw.h" || fail "raw download: no attachment: $(cat "$tmp/raw.h")"
+status "$r/raw/nope.txt?rev=main" 404 not_found
+# compare (#1081): the files changed between two revisions
+get "$r/compare?from=$main&to=main" '.from == "'"$main"'" and .to == "'"$main"'" and (.files | length) == 0'
 status /api/v1/repos/ada/nope 404 not_found
 status "$r/commits/$treeid" 404 not_found
 status "$r/blobs/0000000000000000000000000000000000000000000000000000000000000000" 404 not_found

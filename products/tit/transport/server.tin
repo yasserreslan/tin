@@ -669,10 +669,28 @@ fn (s mut Server) pushChecked(header str, path str, size i64, who str, now i64, 
 	}
 	layers = append(layers, here)
 	mut st = store.NewLayered(layers)
+	mut rp = s.repo
+	// a version the repository already holds as the change's newest is no update: the same push sent again (its answer
+	// was lost), or a version a host recorded before the push that carries it
+	mut fresh = []ChangeUpdate{}
+	for cu in req.Changes {
+		let cid = object.ParseChangeId(cu.Change) catch _ {
+			fresh = append(fresh, cu)
+			continue
+		}
+		let newest = try rp.Newest(cid)
+		if newest != nil {
+			let nid = try object.IdOf(newest.Hash)
+			if nid.Hex() == cu.Commit {
+				continue
+			}
+		}
+		fresh = append(fresh, cu)
+	}
+	req.Changes = fresh
 	// design/tit.md §16 step 2: the checks without the lock, against what the repository holds now (Commit makes
 	// those on versions and refs again under it)
 	let checks = Update{Who: who, Command: "push by " + who, Changes: req.Changes, Refs: req.Refs, Pack: "", Time: now * 1000000000}
-	mut rp = s.repo
 	try recheck(mut rp, checks)
 	for cu in req.Changes {
 		let cmt = object.ParseId(cu.Commit) catch _ {

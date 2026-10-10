@@ -85,9 +85,13 @@ fn ParseRole(s str) !i64 {
 	}
 }
 
-// ValidOwnerName reports whether name may name a user or org: [a-z0-9][a-z0-9-]{0,38}.
+// reservedOwners are the first path segments of the web pages and routes (design/tinhub.md §15), which no user or org
+// may take: /<owner> is the owner's page.
+const reservedOwners = " about admin api assets explore healthz help join login logout metrics new readyz search settings static tit "
+
+// ValidOwnerName reports whether name may name a user or org: [a-z0-9][a-z0-9-]{0,38}, not a reserved page name.
 fn ValidOwnerName(name str) bool {
-	if len(name) == 0 || len(name) > 39 {
+	if len(name) == 0 || len(name) > 39 || twine.Contains(reservedOwners, " " + name + " ") {
 		return false
 	}
 	for i in 0..len(name) {

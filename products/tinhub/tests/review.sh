@@ -76,13 +76,18 @@ for ch in $A $B $C; do
 	expect "$(call 3 POST "$r/changes/$ch/approvals" '{"vote":"approve"}')" 200 "carol approves $ch"
 	jq -e '.state == "approved"' "$tmp/out.json" > /dev/null || fail "approved: $(cat "$tmp/out.json")"
 done
+expect "$(call 3 GET "$r/changes/$C/review")" 200 "C's review"
+jq -e '.below == ["'"$A"'", "'"$B"'"] and (.blocked | contains("ci")) and (.stack_blocked | contains("ci"))' "$tmp/out.json" > /dev/null || fail "C without the check: $(cat "$tmp/out.json")"
 expect "$(call 3 POST "$r/changes/$C/land" '{"stack":true}')" 409 "the stack without its check"
 jq -e '.code == "not_ready" and (.message | contains("ci none")) and (.landed | length) == 0' "$tmp/out.json" > /dev/null || fail "without the check: $(cat "$tmp/out.json")"
 for ch in $A $B $C; do
 	"$node" check "$base" "$tmp/node" "$ch" success > "$tmp/check.out" 2>&1 || fail "ci's signed check on $ch: $(cat "$tmp/check.out")"
 done
 wait_for "$r/changes/$A/checks" '(.checks | length) == 1 and .checks[0].state == "success" and .checks[0].key_id > 0'
+wait_for "$r/changes/$C/review" '.below == ["'"$A"'", "'"$B"'"] and .stack_blocked == "" and (.blocked | contains("'"$B"' below it has not landed"))'
+expect "$(call 3 POST "$r/changes/$C/land" '{"stack":false}')" 409 "C alone, above B"
 echo "PASS tinhub review: a change cannot land without its required check; ci posts it signed with its key"
+echo "PASS tinhub review: the top of a stack is ready only with the stack, and lands alone only once the changes below have"
 
 "$node" push "$base" "$tmp/node" move > /dev/null || fail "the push that moves main"
 m1=$(commit m1)

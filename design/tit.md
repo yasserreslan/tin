@@ -489,7 +489,9 @@ The server takes a push whole or not at all, under its repository lock, in one o
 
 1. The signature and its nonce check (below), or `Unauthorized` / `NonceExpired`.
 2. Every change's newest version on the server equals the version the push says it replaces (`""` for a new
-   change), or `Moved`, naming the change: someone pushed a newer version since this client fetched.
+   change), or `Moved`, naming the change: someone pushed a newer version since this client fetched. A change whose
+   newest version on the server is already the pushed commit is no update and is left out: the same push sent again
+   after its answer was lost, or a version a host recorded before the push that carries it.
 3. Every ref holds the push's `old` value, or `RefChanged` naming the ref (compare-and-swap, as section 8).
 4. No pushed commit records a conflict (#786): `Conflicted`, naming the change.
 5. The pack verifies (section 6) and is complete: every pushed commit's tree, parents and blobs are in the pack
