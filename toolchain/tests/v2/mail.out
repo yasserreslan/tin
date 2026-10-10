@@ -6,5 +6,5 @@ framing <nil> one two <nil> .dot
 
 canonical Content-Md5 bad key
 dot write "line\r\n..dot\r\n.\r\n"
-dot writer "line\r\n..dot\r\n.\r\ntail\n..dot\r\n.\r\n"
-dot reader 10 ".one\n.two\n"
+dot writer "line\r\n..dot\r\n.\r\ntail\r\n..dot\r\n.\r\n"
+dot reader 9 "one\n.two\n"

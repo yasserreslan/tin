@@ -1,0 +1,55 @@
+package main
+
+// textproto's lines, continued lines and dot framing follow Go's net/textproto (#1238). Every
+// expected line was checked against Go 1.27.
+
+import "say"
+import "textproto"
+import "twine"
+
+fn q(s str) str {
+	return say.Fmt("%q", s)
+}
+
+fn main() {
+	for s in []str{"a\r", "a\r\nb\r", "a\rb\n", "\r"} {
+		mut r = textproto.NewReader(s)
+		mut out = []str{}
+		for {
+			let l = r.ReadLine() catch _ {
+				break
+			}
+			out = append(out, q(l))
+		}
+		say.Line("line", q(s), twine.Join(out, " "))
+	}
+	for s in []str{"\r\n x\r\n", "a \t\r\n\t b \r\n  c\r\nd\r\n", "a\r\n \r\n b\r\n", " a\r\n", "a\r\n  "} {
+		mut r = textproto.NewReader(s)
+		mut out = []str{}
+		for {
+			let l = r.ReadContinuedLine() catch _ {
+				break
+			}
+			out = append(out, q(l))
+		}
+		say.Line("continued", q(s), twine.Join(out, " "))
+	}
+	for s in []str{".a\r\n..b\r\n.\r\n", "a\nb\n.\n", "a\r\n.", "a\r\n", ".\r", "a\rb\r\n.\r\n", ".x\r.\r\n.\r\n", "\r\r\n.\n"} {
+		mut r = textproto.NewReader(s)
+		let d = r.ReadDotBytes() catch _ {
+			say.Line("dot", q(s), "error")
+			continue
+		}
+		say.Line("dot", q(s), q(d))
+	}
+	let writes = [][]str{[]str{}, []str{"a"}, []str{"a\n"}, []str{"a\r\n"}, []str{"a\r"}, []str{".a\n.b"}, []str{"x\r", "\n.y"}, []str{"\n", "."}}
+	for chunks in writes {
+		mut w = textproto.NewWriter()
+		mut dw = w.DotWriter()
+		for c in chunks {
+			dw.Write([]u8(c)) catch _ {}
+		}
+		dw.Close() catch _ {}
+		say.Line("writer", q(twine.Join(chunks, "|")), q(w.String()))
+	}
+}

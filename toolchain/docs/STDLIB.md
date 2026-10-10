@@ -3526,14 +3526,14 @@ Package textproto reads and writes the line-oriented framing used by Internet pr
 - `NewReader(data str) Reader`: NewReader creates a reader over data.
 - `NewWriter() Writer`: NewWriter creates an empty protocol writer.
 - `(r mut Reader) ReadLine() !str`: ReadLine reads one CRLF or LF terminated line; the terminator is not returned.
-- `(r mut Reader) ReadContinuedLine() !str`: ReadContinuedLine joins a line and following whitespace-prefixed lines with single spaces.
-- `(r mut Reader) ReadDotBytes() !str`: ReadDotBytes reads through the terminating dot line and removes one leading dot per body line.
+- `(r mut Reader) ReadContinuedLine() !str`: ReadContinuedLine joins a line and following whitespace-prefixed lines with single spaces, as Go's ReadContinuedLine: each part loses the spaces and tabs around it, and an empty first line has no continuation.
+- `(r mut Reader) ReadDotBytes() !str`: ReadDotBytes reads through the terminating dot line and decodes the body as Go's DotReader does: a leading dot is removed from every line, "\r\n" becomes "\n", and the body ends at a line that is only a dot. Input that ends before that line fails.
 - `(r mut Reader) ReadDotReader() !DotReader`: ReadDotReader consumes a dot-framed body and returns a reader over its decoded bytes.
 - `(r mut DotReader) Read(buf mut []u8) !i64`: Read returns the next decoded bytes, or 0 at the end of the dot body.
 - `(w mut Writer) WriteLine(line str)`: WriteLine appends one line and its CRLF terminator.
 - `(w Writer) DotWriter() DotWriter`: DotWriter starts a dot-stuffed body writer.
-- `(d mut DotWriter) Write(data []u8) !i64`: Write dot-stuffs a chunk and appends it to the associated Writer.
-- `(d mut DotWriter) Close() !`: Close writes the terminating dot line.
+- `(d mut DotWriter) Write(data []u8) !i64`: Write dot-stuffs a chunk and appends it to the associated Writer, as Go's DotWriter: a leading dot is doubled and a bare "\n" becomes "\r\n".
+- `(d mut DotWriter) Close() !`: Close ends the last line if it is open and writes the terminating dot line. With nothing written the body is one empty line, as Go's DotWriter writes it.
 - `(w mut Writer) WriteDotBytes(body str)`: WriteDotBytes writes a body with dot-stuffing and the terminating dot line.
 - `(w Writer) String() str`: String returns the bytes written so far.
 - `CanonicalMIMEHeaderKey(key str) str`: CanonicalMIMEHeaderKey returns the canonical capitalization of a header key.
