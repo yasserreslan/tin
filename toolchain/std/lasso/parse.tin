@@ -233,6 +233,10 @@ fn (p mut parser) maybeRepeat(re regexp) !regexp {
 		}
 	}
 	try p.rejectNested(start)
+	if (min >= 2 || max >= 2) && !repeatIsValid(re, maxRepeat/repeatCount(min, max)) {
+		// Go's limit on nested counts, (a{100}){100} included, so the expanded program stays small.
+		fail say.Fault("lasso: pattern: at byte %d: invalid repeat count", start)
+	}
 	if exact {
 		mut n = node(opConcat)
 		mut subs = []regexp{}
@@ -240,10 +244,49 @@ fn (p mut parser) maybeRepeat(re regexp) !regexp {
 			subs = append(subs, re)
 		}
 		n.sub = subs
+		// The count stays on the node for repeatIsValid.
+		n.min = min
+		n.max = min
 		return n
 	}
 	let n = regexp{op: op, flags: flags, sub: []regexp{re}, runes: []i64{}, min: min, max: max, cap: 0, name: ""}
 	return n
+}
+
+// repeatCount is the count of a repeat that repeatIsValid weighs: its max, or its min when it
+// is unbounded.
+fn repeatCount(min i64, max i64) i64 {
+	if max < 0 {
+		return min
+	}
+	return max
+}
+
+// repeatIsValid is Go's: it reports whether no chain of repeats nested in re multiplies past n.
+// An exact x{n} is a concat of n copies of x that keeps n in min and max, and one copy is checked.
+fn repeatIsValid(re regexp, n0 i64) bool {
+	mut n = n0
+	if re.op == opRepeat || (re.op == opConcat && re.max > 0) {
+		let m = repeatCount(re.min, re.max)
+		if m == 0 {
+			return true
+		}
+		if m > n {
+			return false
+		}
+		if m > 0 {
+			n /= m
+		}
+		if re.op == opConcat {
+			return repeatIsValid(re.sub[0], n)
+		}
+	}
+	for _, sub in re.sub {
+		if !repeatIsValid(sub, n) {
+			return false
+		}
+	}
+	return true
 }
 
 // rejectNested fails when another repetition operator follows the one that began at start: Go reports

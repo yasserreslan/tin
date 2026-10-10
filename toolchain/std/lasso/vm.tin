@@ -35,12 +35,13 @@ type machine struct {
 	pool     [][]i64
 	hasEmpty bool
 	gen      i64
+	stk      []i64
 }
 
 // newMachine makes a machine for the program.
 fn newMachine(p prog) machine {
 	let n = i64(len(p.insts))
-	mut m = machine{p: p, input: "", matched: false, matchcap: make([]i64, p.ncap), qs: []queue{}, pool: [][]i64{}, hasEmpty: false, gen: 3}
+	mut m = machine{p: p, input: "", matched: false, matchcap: make([]i64, p.ncap), qs: []queue{}, pool: [][]i64{}, hasEmpty: false, gen: 3, stk: make([]i64, 2*n+2)}
 	for _, inst in p.insts {
 		if inst.op == instEmptyWidth {
 			m.hasEmpty = true
@@ -133,61 +134,77 @@ fn classMatch(c class, r i32) bool {
 	return false
 }
 
-// add adds a thread for pc to queue which at pos, following epsilon instructions. start is the
-// position the match began at and cap its capture slots (used only with capturing groups).
-// Capture instructions recurse so the slot can be restored for the other alternatives, as Go's
-// add does.
+// add adds the threads for pc to queue which at pos, following epsilon instructions in Go's
+// order: an Alt's out before its arg, and a Capture's slot set to pos for what follows it and put
+// back afterwards so the other alternatives see the old value. start is the position the match
+// began at and cap its capture slots (used only with capturing groups). The pending work is a
+// stack of pairs in m.stk, not recursion, so a long alternation (a|b|c|... with 100000 branches)
+// cannot run the thread's stack out: a pair (pc, 0) is an Alt's arg still to follow, and
+// (-1-slot, old) puts a capture slot back.
 fn (m mut machine) add(which i64, pc0 i64, pos i64, start i64, cap []i64, c cond) {
+	let mark = m.qs[which].mark
+	let gen = m.qs[which].gen
+	let insts = m.p.insts
+	let stk = m.stk
+	mut top = i64(0)
 	mut pc = pc0
 	for {
-		if pc == 0 {
-			return
-		}
-		if m.qs[which].mark[pc] == m.qs[which].gen {
-			return
-		}
-		m.qs[which].mark[pc] = m.qs[which].gen
-		let inst = m.p.insts[pc]
-		if inst.op == instFail {
-			return
-		}
-		if inst.op == instAlt {
-			m.add(which, inst.out, pos, start, cap, c)
-			pc = inst.arg
-			continue
-		}
-		if inst.op == instEmptyWidth {
-			if matchEmpty(inst.arg, c) {
+		if pc != 0 && mark[pc] != gen {
+			mark[pc] = gen
+			let inst = insts[pc]
+			let op = inst.op
+			if op == instAlt {
+				stk[top] = inst.arg
+				stk[top+1] = 0
+				top += 2
 				pc = inst.out
 				continue
 			}
+			if op == instNop {
+				pc = inst.out
+				continue
+			}
+			if op == instEmptyWidth {
+				if matchEmpty(inst.arg, c) {
+					pc = inst.out
+					continue
+				}
+			} else if op == instCapture {
+				if inst.arg < i64(len(cap)) {
+					stk[top] = -1 - inst.arg
+					stk[top+1] = cap[inst.arg]
+					top += 2
+					cap[inst.arg] = pos
+				}
+				pc = inst.out
+				continue
+			} else if op != instFail {
+				// instRune or instMatch: a real thread. Without capturing groups the start
+				// position is all the thread needs, so no slice is allocated or copied.
+				mut t = thread{pc: pc, start: start, cap: []i64{}}
+				if len(m.matchcap) > 2 {
+					let saved = m.takeCap(len(cap))
+					copy(saved, cap)
+					t.cap = saved
+				}
+				m.qs[which].dense = append(m.qs[which].dense, t)
+			}
+		}
+		// This path ended: put back the slots it set and take the next pending arg.
+		pc = 0
+		for top > 0 {
+			top -= 2
+			let a = stk[top]
+			if a < 0 {
+				cap[-1-a] = stk[top+1]
+			} else if a != 0 {
+				pc = a
+				break
+			}
+		}
+		if pc == 0 {
 			return
 		}
-		if inst.op == instNop {
-			pc = inst.out
-			continue
-		}
-		if inst.op == instCapture {
-			if inst.arg < i64(len(cap)) {
-				let old = cap[inst.arg]
-				cap[inst.arg] = pos
-				m.add(which, inst.out, pos, start, cap, c)
-				cap[inst.arg] = old
-				return
-			}
-			pc = inst.out
-			continue
-		}
-		// instRune or instMatch: a real thread. Without capturing groups the start position is
-		// all the thread needs, so no slice is allocated or copied.
-		mut t = thread{pc: pc, start: start, cap: []i64{}}
-		if len(m.matchcap) > 2 {
-			let saved = m.takeCap(len(cap))
-			copy(saved, cap)
-			t.cap = saved
-		}
-		m.qs[which].dense = append(m.qs[which].dense, t)
-		return
 	}
 }
 

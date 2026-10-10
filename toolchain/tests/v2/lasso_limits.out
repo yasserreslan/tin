@@ -1,0 +1,15 @@
+alternation true true false
+alternation captures [2 4 2 3 2 3]
+lasso: pattern: at byte 9: invalid repeat count
+lasso: pattern: at byte 9: invalid repeat count
+lasso: pattern: at byte 6: invalid repeat count
+lasso: pattern: at byte 7: invalid repeat count
+lasso: pattern: at byte 8: invalid repeat count
+ok
+lasso: pattern: at byte 13: invalid repeat count
+ok
+ok
+ok
+ok
+captures [1 5 1 2 2 3 3 4] [0 4 1 2 2 3 0 1]
+lazy [0 3 1 2 -1 -1 2 3]
