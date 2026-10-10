@@ -811,3 +811,16 @@ values "a=1&a=2&a=3&c=%C3%A9%26%3D%2B" 2 "1" false 3 0
 values "a=1&a=2&a=3&c=%C3%A9%26%3D%2B&d=" 3 "1" false 3 0
 values "a=1&a=2&a=3&c=%C3%A9%26%3D%2B&d=z" 3 "1" false 3 0
 values "a=1&a=2&a=3&c=%C3%A9%26%3D%2B&d=z&e+f=g" 4 "1" false 3 0
+parse "mongodb://h1:1,h2:2,h3:3/db" "mongodb://h1:1,h2:2,h3:3/db" "mongodb" "" "" "" false "h1:1,h2:2,h3:3" "h1:1,h2:2,h3" "3" "/db" "" "/db" "" false "" "" "" false "/db" true "mongodb://h1:1,h2:2,h3:3/db" ""
+parse "redis://a:b:c/" ERR parse "redis://a:b:c/": invalid port ":c" after host
+parse "https://a:b:80/" ERR parse "https://a:b:80/": invalid port ":b:80" after host
+parse "http://a:b:80/" ERR parse "http://a:b:80/": invalid port ":b:80" after host
+resolve "http://a/b/c/d;p?q" "/x/..//b" "http://a/b"
+resolve-parse "http://a/b/c/d;p?q" "/x/..//b" "http://a/b"
+resolve "http://a/b/c/d;p?q" "/..//b" "http://a/b"
+resolve-parse "http://a/b/c/d;p?q" "/..//b" "http://a/b"
+resolve "http://a/b/c/" "../..//x" "http://a/x"
+resolve-parse "http://a/b/c/" "../..//x" "http://a/x"
+resolve "mailto:/a/b" "..//x" "mailto:///x"
+resolve-parse "mailto:/a/b" "..//x" "mailto:///x"
+omithost "mailto:%2F/h/p" "" ""
