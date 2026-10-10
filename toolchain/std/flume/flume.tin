@@ -323,7 +323,21 @@ fn (r mut Reader) ReadAll() !str {
 
 // ReadFile returns the contents of the file at path.
 fn ReadFile(path str) !str {
-	let r = try Open(path)
+	let fd = i64(i32(rt_sys_open(cast(i64, path)+8, 0, 0)))
+	if fd < 0 {
+		fail errno_fault(path)
+	}
+	// a regular file's size is known: one buffer of that size, and a byte more to see the end, instead of a buffer that
+	// doubles and is copied as it fills (#807)
+	mut size = bufSize - 1
+	mut wait = 0
+	let st = calloc(1, 256)
+	if i64(i32(rt_sys_fstat(fd, st))) == 0 && rt_stat_mode(st) & 0xf000 == 0x8000 {
+		size = rt_stat_size(st)
+		wait = 2
+	}
+	free(st)
+	mut r = Reader{open: true, fd: fd, buf: make([]u8, size + 1), wait: wait}
 	defer r.Close()
 	return try r.ReadAll()
 }

@@ -28,6 +28,12 @@ let mlZetas = ml_powers(0)
 let mlGammas = ml_powers(1)
 
 fn ml_powers(gamma i64) []i64 {
+	// 17^e for every exponent used (below 256), by one multiplication each: this runs when a program starts (#807)
+	mut pow = make([]i64, 256)
+	pow[0] = 1
+	for k in 1..256 {
+		pow[k] = pow[k - 1] * 17 % mlq
+	}
 	mut out = make([]i64, 128)
 	for i in 0..128 {
 		mut r = 0
@@ -38,11 +44,7 @@ fn ml_powers(gamma i64) []i64 {
 		if gamma != 0 {
 			e = 2*r + 1
 		}
-		mut v = 1
-		for k in 0..e {
-			v = v * 17 % mlq
-		}
-		out[i] = v
+		out[i] = pow[e]
 	}
 	return out
 }
