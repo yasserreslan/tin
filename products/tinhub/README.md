@@ -217,7 +217,9 @@ under `web/static`, embedded at build time, no build step and no Node at run tim
 JSON API. There is a page for every feature: the code and its history, changes and stacks, reviews with semantic diffs
 and line comments, votes and landing, checks, benchmark history, releases, replay failure groups, activity, repository
 and org settings, account settings and site administration. Sign-in is a key: the page shows a code, and
-`tit login <site> --code CODE` approves it. See [design/tinhub.md §15](../../design/tinhub.md#15-the-web-layer-1081).
+`tit login <site> --code CODE` approves it. `/` (or Ctrl+K) opens a palette that jumps to a repository, page or
+command, a symbol after `#`, and on a repository's pages to a file by name (`t` opens it there too). See
+[design/tinhub.md §15](../../design/tinhub.md#15-the-web-layer-1081).
 
 To work on the UI against a running node, set `web.dir` to `products/tinhub/web/static`: files are read from disk on
 every request. `web/dev/seed.sh` fills a fresh node with people, an org, repositories, a reviewed stack, benchmark
