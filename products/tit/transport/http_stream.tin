@@ -10,8 +10,7 @@ import "wire"
 
 // The client's streamed requests (#1009): a fetch's pack goes from the connection to a file a buffer at a time, where
 // packfile.KeepFile indexes it as it lies, and a push's pack goes from its file to the connection; a clone or a push
-// of gigabytes takes the memory of a few buffers. The response is read inside wire (wire.DoStreamTo): reading a
-// wire.Stream from here trips a false E312 in the region pass (#1036).
+// of gigabytes takes the memory of a few buffers. The response is copied to its writer by wire.DoStreamTo.
 
 // strReader reads a string.
 type strReader struct {

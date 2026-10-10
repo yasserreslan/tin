@@ -118,8 +118,7 @@ type Copied struct {
 }
 
 // DoStreamTo is DoStream with the response's body copied to w as it arrives, a buffer at a time,
-// whatever its status (an error answer's body too). Reading the Stream here, inside wire, keeps a
-// caller's code from tripping #1036 (a false E312 on Stream.Read from outside the package).
+// whatever its status (an error answer's body too).
 fn DoStreamTo[R io.Reader, W io.Writer](method str, url str, headers []str, body R, opt Options, w mut W) !Copied {
 	mut s = try DoStream(method, url, headers, body, opt)
 	mut buf = make([]u8, streamBuf)

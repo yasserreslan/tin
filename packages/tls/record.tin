@@ -189,6 +189,22 @@ fn new_conn(tcp wire.Conn) Conn {
 		waad: make([]u8, 13)}
 }
 
+// Taken is c as a Conn of the running request: the same connection in the same state, in a struct
+// of its own. A pool that keeps Conns in long-lived memory (wire's) gives a request the one it takes
+// off the pool this way, so the request's reads and writes, which may store request memory into
+// the Conn, never store it into long-lived memory; the pool keeps a copy again when the Conn comes
+// back (#1036). It copies every field: a field added to Conn is added here as well.
+fn (c Conn) Taken() Conn {
+	return Conn{tcp: c.tcp, fd: c.fd, timeout: c.timeout, until: c.until, ready: c.ready, closed: c.closed,
+		failure: c.failure, eof: c.eof, suite: c.suite, hash: c.hash, rd: c.rd, riv: c.riv, rseq: c.rseq,
+		rsecret: c.rsecret, wr: c.wr, wiv: c.wiv, wseq: c.wseq, wsecret: c.wsecret, in: c.in, ins: c.ins,
+		ine: c.ine, plain: c.plain, ps: c.ps, pe: c.pe, ph: c.ph, phn: c.phn, phskip: c.phskip, alpn: c.alpn,
+		certs: c.certs, group: c.group, retried: c.retried, alertCt: c.alertCt, resumption: c.resumption,
+		skey: c.skey, resumed: c.resumed, phcollect: c.phcollect, phbuf: c.phbuf, wnonce: c.wnonce,
+		whdr: c.whdr, rnonce: c.rnonce, rhdr: c.rhdr, raad: c.raad, version: c.version, gcm12: c.gcm12,
+		wantCCS: c.wantCCS, waad: c.waad}
+}
+
 // wait blocks the task until the socket is readable (want 1) or writable (2), within the
 // per-call timeout and the handshake's deadline.
 fn (c Conn) wait(want i64, what str) ! {

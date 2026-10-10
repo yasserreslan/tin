@@ -941,7 +941,9 @@ fn pool_take(key str, secure bool) i64 {
 	return fd
 }
 
-// pool_take_tls returns a kept https connection to key, or nil.
+// pool_take_tls returns a kept https connection to key, or nil. The pool keeps its copy of the
+// Conn in long-lived memory; the caller gets it as a Conn of its request (tls.Conn.Taken), whose
+// reads may store request memory into it, and pool_put keeps a copy again (#1036).
 fn pool_take_tls(key str) ?tls.Conn {
 	let r = pool_find(key, true)
 	if r == 0 {
@@ -952,7 +954,10 @@ fn pool_take_tls(key str) ?tls.Conn {
 	delete(idleTLS, fd)
 	free(r[iKey])
 	free(r)
-	return tc
+	if tc != nil {
+		return tc.Taken()
+	}
+	return nil
 }
 
 // pool_put keeps the connection fd (with its TLS layer tc, for https) for the next call to key,
