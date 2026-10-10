@@ -62,9 +62,32 @@ echo "ok an old file is fetched on first read, once"
 
 t switch --detach HEAD~15 > /dev/null
 [ "$(cat a.txt)" = "version 5 of a" ] || fail "the switch: $(cat a.txt)"
+before=$(count .)
+[ "$(t status -s)" = "" ] || fail "status on the old commit: $(t status -s)"
+[ "$(count .)" = "$before" ] || fail "status on a detached HEAD fetched something: $before objects, then $(count .)"
+short=$(t log -n 1 --format=id | cut -c1-12)
+t show "$short" > /dev/null || fail "show $short on a detached HEAD"
 t switch main > /dev/null
 [ "$(cat a.txt)" = "version 20 of a" ] || fail "back on main"
 echo "ok a switch in a lazy clone fetches the files it writes"
+
+# a switch that writes many files keeps them as the one pack it fetched, not as a loose file each
+cd "$d/server"
+mkdir many
+i=1
+while [ $i -le 100 ]; do
+	printf 'file %s\n' $i > "many/f$i.txt"
+	i=$((i + 1))
+done
+t add . > /dev/null
+t commit -m "many files" > /dev/null
+cd "$d/lazy"
+loose=$(find .tit/objects -type f | wc -l | tr -d ' ')
+t pull > "$d/pull.txt" 2>&1 || fail "pull in the lazy clone: $(cat "$d/pull.txt")"
+[ "$(cat many/f73.txt)" = "file 73" ] || fail "the pulled files: $(ls many | wc -l)"
+[ "$(find .tit/objects -type f | wc -l | tr -d ' ')" -lt $((loose + 10)) ] || fail "the pulled files were kept loose: $loose loose objects, then $(find .tit/objects -type f | wc -l)"
+[ "$(t status -s)" = "" ] || fail "status after the pull: $(t status -s)"
+echo "ok a switch that writes many files keeps the pack it fetched"
 
 kill $server
 wait $server 2> /dev/null || true

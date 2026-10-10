@@ -70,7 +70,7 @@ fn doFocus(g Global, dirs []str, all bool, o mut Out) ! {
 				}
 			}
 		}
-		try fetchObjects(z, missing)
+		try r.fetchInto(z, missing)
 	}
 	let path = r.Ws.State() + "/focus"
 	if len(next) == 0 {
