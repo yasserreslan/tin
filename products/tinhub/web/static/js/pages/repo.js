@@ -109,6 +109,7 @@ export async function frame(ctx, tab, { wide = false } = {}) {
 			{ label: `${repo.owner}/${repo.name}: Changes`, icon: "change", href: `${b}/changes`, group: "This repository" },
 			{ label: `${repo.owner}/${repo.name}: History`, icon: "history", href: `${b}/commits`, group: "This repository" },
 			{ label: `${repo.owner}/${repo.name}: Branches and tags`, icon: "branch", href: `${b}/refs`, group: "This repository" },
+			{ label: `${repo.owner}/${repo.name}: Compare`, icon: "split", href: `${b}/compare`, group: "This repository" },
 			{ label: `${repo.owner}/${repo.name}: Releases`, icon: "tag", href: `${b}/releases`, group: "This repository" },
 			{ label: `${repo.owner}/${repo.name}: Bench`, icon: "gauge", href: `${b}/bench`, group: "This repository" },
 			{ label: `${repo.owner}/${repo.name}: Replay`, icon: "replay", href: `${b}/replay`, group: "This repository" },

@@ -36,7 +36,8 @@ export async function render(ctx) {
 			meta,
 			h("a.hash", { href: `${base}/commit/${r.target}` }, fmt.short(r.target, 8)),
 			copyButton(r.short, { title: "Copy the name" }),
-			h("a.btn.sm", { href: `${base}/commits/${enc(r.short)}` }, icon("history", "sm"), "History"),
+			r.kind === "branch" && r.short !== repo.default_branch ? h("a.btn.sm", { href: `${base}/compare/${enc(repo.default_branch)}...${enc(r.short)}`, title: `What ${r.short} did since it left ${repo.default_branch}` }, icon("split", "sm"), h("span.btn-label", {}, "Compare")) : null,
+			h("a.btn.sm", { href: `${base}/commits/${enc(r.short)}`, title: "History" }, icon("history", "sm"), h("span.btn-label", {}, "History")),
 		);
 	};
 	body.replaceChildren(

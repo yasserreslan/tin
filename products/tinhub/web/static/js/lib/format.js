@@ -218,3 +218,11 @@ export function stateLabel(state) {
 	const map = { open: "Open", approved: "Approved", changes_requested: "Changes requested", landed: "Landed", abandoned: "Abandoned" };
 	return map[state] || state || "";
 }
+
+// compareSpec reads a compare page's "base...head" (a lone head is compared with fallback, as is an empty side).
+export function compareSpec(spec, fallback) {
+	const s = spec || "";
+	const at = s.indexOf("...");
+	if (at < 0) return { from: fallback, to: s || fallback };
+	return { from: s.slice(0, at) || fallback, to: s.slice(at + 3) || fallback };
+}

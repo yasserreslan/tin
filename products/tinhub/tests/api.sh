@@ -96,6 +96,8 @@ grep -qi '^content-disposition: attachment' "$tmp/raw.h" || fail "raw download: 
 status "$r/raw/nope.txt?rev=main" 404 not_found
 # compare (#1081): the files changed between two revisions
 get "$r/compare?from=$main&to=main" '.from == "'"$main"'" and .to == "'"$main"'" and (.files | length) == 0'
+# since=base: what to did since it left from; a revision has nothing new on itself and is its own split point
+get "$r/compare?from=main&to=main&since=base" '.base == "'"$main"'" and (.commits | length) == 0 and .more == false and (.files | length) == 0'
 status /api/v1/repos/ada/nope 404 not_found
 status "$r/commits/$treeid" 404 not_found
 status "$r/blobs/0000000000000000000000000000000000000000000000000000000000000000" 404 not_found

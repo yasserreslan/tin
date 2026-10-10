@@ -214,7 +214,8 @@ webhooks, mail and the live websocket. See [design/tinhub.md §14](../../design/
 
 The same binary serves the pages: every page URL answers the app shell, which loads the UI (plain ES modules and CSS
 under `web/static`, embedded at build time, no build step and no Node at run time) and reads and writes through the
-JSON API. There is a page for every feature: the code and its history, changes and stacks, reviews with semantic diffs
+JSON API. There is a page for every feature: the code and its history, comparing two branches
+(`/<owner>/<repo>/compare/main...feature`), changes and stacks, reviews with semantic diffs
 and line comments, votes and landing, checks, benchmark history, releases, replay failure groups, activity, repository
 and org settings, account settings and site administration. Sign-in is a key: the page shows a code, and
 `tit login <site> --code CODE` approves it. `/` (or Ctrl+K) opens a palette that jumps to a repository, page or

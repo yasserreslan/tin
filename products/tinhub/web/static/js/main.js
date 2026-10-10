@@ -28,6 +28,8 @@ const routes = define([
 	["/:owner/:repo/commits", page("./pages/commits.js")],
 	["/:owner/:repo/commit/:id", page("./pages/commit.js")],
 	["/:owner/:repo/refs", page("./pages/refs.js")],
+	["/:owner/:repo/compare", page("./pages/compare.js")],
+	["/:owner/:repo/compare/*spec", page("./pages/compare.js")],
 	["/:owner/:repo/changes", page("./pages/changes.js")],
 	["/:owner/:repo/stacks/:user", page("./pages/stacks.js")],
 	["/:owner/:repo/stacks", page("./pages/stacks.js")],

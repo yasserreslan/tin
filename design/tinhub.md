@@ -762,6 +762,7 @@ does not start with `/api/` or `/-/` (those keep a JSON or plain 404). The pages
 | `/<owner>/<repo>` | the repository: README and files |
 | `…/tree/<rev>/<path>`, `…/blob/<rev>/<path>` | a directory, a file (`rev` a branch, tag, change or commit) |
 | `…/commits/<rev>[/<path>]`, `…/commit/<id>`, `…/refs` | history, a commit and its diff, branches and tags |
+| `…/compare/<base>...<head>` | what `head` did since it left `base`: its commits and the files they changed |
 | `…/changes`, `…/stacks/<user>`, `…/reviews`, `…/change/<id>` | changes, a person's stacks, reviews, one review |
 | `…/releases[/<tag>]`, `…/bench[/<name>]`, `…/replay[/<group>]` | releases, benchmark history, replay failure groups |
 | `…/change/<id>/files`, `…/checks`, `…/bench`, `…/behaviour` | one review's semantic diff (any version, against its base or the version before, with comments on lines), checks, benchmark verdict, behaviour run |
@@ -812,7 +813,7 @@ them, in lists too). A write never acts as `accounts.System()`: no signed-in use
 | `GET /api/v1/repos/<o>/<r>/resolve?rev=&path=` | the commit `rev` names, and at `path` a tree's entries or a blob's id and size |
 | `GET /api/v1/repos/<o>/<r>/log?rev=&path=&cursor=&limit=` | commits from `rev`, newest first; with `path`, those that changed it |
 | `GET /api/v1/repos/<o>/<r>/raw/<path>?rev=[&download=1]` | a file's bytes, `nosniff` and `Content-Security-Policy: default-src 'none'; …; sandbox`; `immutable` when `rev` is a commit id |
-| `GET /api/v1/repos/<o>/<r>/compare?from=&to=` | the files changed between two revisions (`kind, path, old_path, old_blob, new_blob`); a commit's diff is `from` its first parent |
+| `GET /api/v1/repos/<o>/<r>/compare?from=&to=` | the files changed between two revisions (`kind, path, old_path, old_blob, new_blob`); a commit's diff is `from` its first parent. With `since=base`, what `to` did since it left `from`: the files from their split point (`base`, the newest parent of `to`'s new commits that `from` has) and `to`'s commits that `from` lacks (`commits`, as `log`'s, newest first, at most 250; `more` when there are others) |
 | `GET /api/v1/repos/<o>/<r>/replay/grants` | who holds a replay grant: `users`, `teams` (admin) |
 | `POST /api/v1/orgs`, `GET …/<org>/members`, `PUT\|DELETE …/members/<user>` | orgs and members (`member`, `owner`) |
 | `GET\|POST /api/v1/orgs/<org>/teams`, `DELETE …/<team>`, `GET\|PUT\|DELETE …/<team>/members[/<user>]` | teams |
