@@ -1,0 +1,53 @@
+package main
+
+// Issue 1149: a slice field appends to what it held before the call, and a duplicate member
+// replaces only what the first one appended (null keeps it); a ?struct field already holding
+// an object is filled in place (null makes it nil); a fault still leaves the target as it was.
+
+import "argo"
+import "say"
+
+type In struct {
+	s str
+	a i64
+}
+
+type T struct {
+	ss []str
+	p ?In
+	n []i64 max 2
+}
+
+fn main() {
+	mut t = T{ss: []str{"keep"}, p: In{s: "old", a: 5}}
+	argo.Get(`{"ss":null,"p":{"a":9}}`, mut t) catch err {
+		say.Line(err)
+	}
+	mut ps = "nil"
+	if let p = t.p {
+		ps = "{p.s}/{p.a}"
+	}
+	say.Line("{t.ss} {ps}")
+	argo.Get(`{"p":null}`, mut t) catch err {
+		say.Line(err)
+	}
+	say.Line(t.p == nil)
+	argo.Get(`{"n":[1,2],"n":[3]}`, mut t) catch err {
+		say.Line(err)
+	}
+	say.Line(t.n)
+	let before = t.ss
+	argo.Get(`{"ss":["x"],"bad":}`, mut t) catch _ {
+		say.Line("fault")
+	}
+	say.Line("{t.ss} {before}")
+	argo.Get(`{"ss":["x"],"ss":["y"]}`, mut t) catch err {
+		say.Line(err)
+	}
+	say.Line(t.ss)
+	mut u8s = []u8{}
+	argo.Get(`[1, -0]`, mut u8s) catch err {
+		say.Line(err)
+	}
+	say.Line(len(u8s))
+}

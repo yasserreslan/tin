@@ -779,13 +779,23 @@ fn rint(p mut Parser) i64 {
 fn rintr(p mut Parser, lo i64, hi i64) i64 {
 	let at = p.i
 	let v = rint(mut p)
-	if p.err == nil && (v < lo || v > hi) {
+	if p.err == nil && (v < lo || v > hi || (lo >= 0 && negAt(p.s, at))) {
 		p.i = at
 		ws(mut p)
 		bad(mut p, say.Fmt("an integer in [%d, %d]", lo, hi))
 		return 0
 	}
 	return v
+}
+
+// negAt reports whether the number at s[i:] (after white space) has a minus sign: -0 is
+// not an unsigned integer, as in Go (#1149).
+fn negAt(s str, i_in i64) bool {
+	mut i = i_in
+	for i < len(s) && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t') {
+		i += 1
+	}
+	return i < len(s) && s[i] == '-'
 }
 
 fn ruint(p mut Parser) u64 {

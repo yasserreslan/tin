@@ -1,0 +1,45 @@
+package main
+
+// Issue 1149: argo.Get lets the last duplicate member win, as Go's encoding/json does: a
+// duplicate slice member replaces what the first appended, a duplicate ?struct member
+// merges into the first's object, and -0 is not an unsigned integer. Expected lines
+// checked against Go 1.27.
+
+import "argo"
+import "say"
+
+type In struct {
+	s str
+	a i64
+}
+
+type T struct {
+	ss []str
+	p ?In
+	q In
+	m map[str]i64
+	b u8
+}
+
+fn show(label str, text str) {
+	mut t = T{ss: []str{}, q: In{s: "", a: 0}, m: map[str]i64{}}
+	argo.Get(text, mut t) catch err {
+		say.Line("{label}: fault {err}")
+		return
+	}
+	mut ps = "nil"
+	if let p = t.p {
+		ps = "{p.s}/{p.a}"
+	}
+	say.Line("{label}: ss={len(t.ss)} {t.ss} p={ps} q={t.q.s}/{t.q.a} m={len(t.m)} b={t.b}")
+}
+
+fn main() {
+	show("dup slice", `{"ss":["a"],"ss":["b"]}`)
+	show("dup slice empty", `{"ss":["a"],"ss":[]}`)
+	show("dup opt struct", `{"p":{"s":"x"},"p":{"a":1}}`)
+	show("dup struct", `{"q":{"s":"x"},"q":{"a":1}}`)
+	show("dup map", `{"m":{"x":1},"m":{"y":2}}`)
+	show("neg zero u8", `{"b":-0}`)
+	show("neg zero ok", `{"b":0}`)
+}

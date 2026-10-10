@@ -6129,6 +6129,50 @@ fn argo_null_return(pos i64, body []i64, p i64) {
 	body = append(body, cast(i64, ifs))
 }
 
+// argo_opt_struct reports whether ft is ?S for a struct S that is not an enum or a value
+// struct: such a field is filled in place when it already holds an object (#1149).
+fn argo_opt_struct(ft Ty) i64 {
+	if kind_of(ft) != K_OPT || opt_scalar(ft) != 0 || opt_value(ft) != 0 {
+		return 0
+	}
+	let et = cast(Ty, ft.elem)
+	return i64(kind_of(et) == K_STRUCT && cast(i64, et.enum_) == 0 && is_value_struct(et) == 0)
+}
+
+// argo_opt_fill decodes ?S field fi of struct x, as Go decodes into a pointer: null makes it
+// nil, and an object goes into the struct the field already holds, or into a new one when it
+// is nil, so a duplicate member merges with the first (#1149).
+//
+//	mut cur = x.f
+//	if argo.rnull(p) { cur = nil } else { if cur == nil { cur = new S }; fill(p, cur) }
+//	x.f = cur
+fn argo_opt_fill(pos i64, body []i64, p Sym, x Sym, t Ty, fi i64) {
+	let ft = field_type(t, fi)
+	let et = cast(Ty, ft).elem
+	let cur = declare_local(pos, "$", ft)
+	body = append(body, let_stmt(pos, cast(Sym, cur), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi), ft)))
+	let ifs = cast(IfStmt, node_new(ST_IF, pos))
+	ifs.cond = argo_rd(pos, cast(i64, p), "argo.rnull", ty_bool)
+	ifs.then = empty_block(pos)
+	mut tb = cast(Block, ifs.then).stmts
+	tb = append(tb, assign_stmt(pos, sym_ref_node(pos, cast(Sym, cur)), mk_int(pos, 0, ft)))
+	ifs.else_ = empty_block(pos)
+	mut eb = cast(Block, ifs.else_).stmts
+	let mk = cast(IfStmt, node_new(ST_IF, pos))
+	mk.cond = mk_bin(pos, "==", sym_ref_node(pos, cast(Sym, cur)), mk_int(pos, 0, ft), ty_bool)
+	mk.then = empty_block(pos)
+	mut mb = cast(Block, mk.then).stmts
+	let obj = argo_new(pos, mb, cast(Ty, et))
+	mb = append(mb, assign_stmt(pos, sym_ref_node(pos, cast(Sym, cur)), mk_conv(pos, obj, CV_SAME, ft)))
+	eb = append(eb, cast(i64, mk))
+	let df = argo_dfn(pos, cast(Ty, et))
+	if df != 0 {
+		eb = append(eb, expr_stmt(call_fn(pos, cast(Fn, df), args2(sym_ref_node(pos, p), mk_conv(pos, sym_ref_node(pos, cast(Sym, cur)), CV_SAME, et)), ty_void)))
+	}
+	body = append(body, cast(i64, ifs))
+	body = append(body, assign_stmt(pos, field_store(pos, sym_ref_node(pos, x), cast(i64, t), fi), sym_ref_node(pos, cast(Sym, cur))))
+}
+
 // argo_null_keeps puts the statements of block b that decode a field of type ft under
 // if !argo.rnullok(p): a null leaves the field as it was, as in Go (#715). An optional field
 // reads null as nil itself.
@@ -6237,6 +6281,19 @@ fn argo_dfn(pos i64, t Ty) i64 {
 		mut vs10 = cast(Block, ifs.then).stmts
 		vs10 = append(vs10, node_new(ST_RETURN, pos))
 		body = append(body, cast(i64, ifs))
+		// Each slice field's length on entry, which its member appends after (#1149).
+		mut lens = []i64{}
+		mut li = 0
+		for li < len(t.fields) {
+			mut ln = 0
+			let lft = field_type(t, li)
+			if kind_of(cast(Ty, lft)) == K_SLICE {
+				ln = declare_local(pos, "$", ty_int)
+				body = append(body, let_stmt(pos, cast(Sym, ln), mk_hdr(pos, mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, li), lft), 0)))
+			}
+			lens = append(lens, ln)
+			li = li + 1
+		}
 		let w = forever(pos)
 		body = append(body, cast(i64, w))
 		mut wb = cast(Block, w.body).stmts
@@ -6259,12 +6316,20 @@ fn argo_dfn(pos i64, t Ty) i64 {
 			mut bb = cast(Block, br.then).stmts
 			let fk = kind_of(cast(Ty, ft))
 			if fk == K_STRUCT || fk == K_SLICE || fk == K_MAP || fk == K_VARRAY {
+				if fk == K_SLICE {
+					// Back to the length the field had on entry: a duplicate member replaces
+					// what the first one appended, so the last one wins, as in Go (#1149).
+					let cutf = mk_conv(pos, mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi), ft), CV_SAME, ty_int)
+					bb = append(bb, expr_stmt(call_fn(pos, argo_lib(pos, "argo.cut"), args2(cutf, sym_ref_node(pos, cast(Sym, lens[fi]))), ty_void)))
+				}
 				// Fill the object the field already holds (a value struct's or inline array's
 				// bytes in place, #631).
 				let df = argo_dfn(pos, cast(Ty, ft))
 				if df != 0 {
 					bb = append(bb, expr_stmt(call_fn(pos, cast(Fn, df), args2(sym_ref_node(pos, p), mk_mem(pos, sym_ref_node(pos, x), 0, 0, field_offset(t, fi), ft)), ty_void)))
 				}
+			} else if argo_opt_struct(cast(Ty, ft)) != 0 {
+				argo_opt_fill(pos, bb, p, x, t, fi)
 			} else {
 				let val = argo_value(pos, bb, cast(i64, p), cast(Ty, ft))
 				if val != 0 {
