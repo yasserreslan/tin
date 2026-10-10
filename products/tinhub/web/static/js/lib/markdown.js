@@ -27,6 +27,8 @@ const HR = /^ {0,3}((\*[ \t]*){3,}|(-[ \t]*){3,}|(_[ \t]*){3,})$/;
 const BULLET = /^( {0,3})([-*+])([ \t]+|$)(.*)$/;
 const ORDERED = /^( {0,3})(\d{1,9})([.)])([ \t]+|$)(.*)$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
+const HTML_BLOCK = /^ {0,3}(<!--|<\/?(p|div|img|picture|details|summary|table|center|h[1-6]|br|hr|a|ul|ol|li|dl|blockquote|pre|figure|section|kbd|sub|sup|b|strong|em|i|span|source)(\s|\/?>|$))/i;
+const INLINE_TAG = /^<(\/?)(br|img|kbd|sub|sup|b|strong|i|em|u|s|del|ins|code|span|a|mark|small|abbr)(\s[^<>]*)?\/?>/i;
 const TABLE_SEP = /^ {0,3}\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
 function isBlank(l) {
@@ -137,6 +139,12 @@ function blocks(lines) {
 				i++;
 			}
 			out.push({ t: "table", aligns, head: head.map(inline), rows });
+			continue;
+		}
+		if (HTML_BLOCK.test(line)) {
+			const body = [];
+			while (i < lines.length && !isBlank(lines[i])) body.push(lines[i++]);
+			out.push({ t: "html", v: body.join("\n") });
 			continue;
 		}
 		// a paragraph, or a setext heading
@@ -289,6 +297,23 @@ export function inline(src) {
 				flush();
 				out.push({ t: "link", href: safeUrl(l.href), title: l.title, c: inline(l.text) });
 				i = l.end;
+				continue;
+			}
+		}
+		if (c === "<" && s[i + 1] === "!" && s.startsWith("<!--", i)) {
+			const end = s.indexOf("-->", i + 4);
+			if (end > 0) {
+				flush();
+				i = end + 3;
+				continue;
+			}
+		}
+		if (c === "<") {
+			const t = INLINE_TAG.exec(s.slice(i));
+			if (t) {
+				flush();
+				out.push({ t: "tag", v: t[0] });
+				i += t[0].length;
 				continue;
 			}
 		}
@@ -447,6 +472,7 @@ export function plain(nodes) {
 		else if (n.t === "br") out += " ";
 		else if (n.c) out += plain(n.c);
 		else if (n.t === "img") out += n.alt;
+		else if (n.t === "tag") out += "";
 	}
 	return out;
 }
@@ -455,7 +481,7 @@ export function plain(nodes) {
 // opts.image(src) relative images; opts.code(lang, text) may return a highlighted element.
 export function render(nodes, h, opts = {}) {
 	const usedSlugs = new Map();
-	const inl = (list) => list.map((n) => renderInline(n, h, opts));
+	const inl = (list) => (opts.html && list.some((n) => n.t === "tag") ? opts.html(toHtml(list)) : list.map((n) => renderInline(n, h, opts)));
 	const blk = (list, tight) =>
 		list.map((b) => {
 			switch (b.t) {
@@ -476,6 +502,8 @@ export function render(nodes, h, opts = {}) {
 					return h("blockquote", {}, blk(b.c));
 				case "hr":
 					return h("hr");
+				case "html":
+					return opts.html ? opts.html(b.v) : h("p", {}, b.v);
 				case "list":
 					return h(
 						b.ordered ? "ol" : "ul",
@@ -503,6 +531,36 @@ export function render(nodes, h, opts = {}) {
 	return blk(nodes);
 }
 
+const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// toHtml serializes inline nodes (text escaped) so that raw tags among them can be sanitized together.
+export function toHtml(list) {
+	return list
+		.map((n) => {
+			switch (n.t) {
+				case "text":
+					return esc(n.v);
+				case "tag":
+					return n.v;
+				case "code":
+					return `<code>${esc(n.v)}</code>`;
+				case "br":
+					return "<br>";
+				case "em":
+				case "strong":
+				case "del":
+					return `<${n.t}>${toHtml(n.c)}</${n.t}>`;
+				case "link":
+					return n.href ? `<a href="${esc(n.href)}"${n.title ? ` title="${esc(n.title)}"` : ""}>${toHtml(n.c)}</a>` : toHtml(n.c);
+				case "img":
+					return n.src ? `<img src="${esc(n.src)}" alt="${esc(n.alt)}">` : esc(n.alt);
+				default:
+					return "";
+			}
+		})
+		.join("");
+}
+
 function renderInline(n, h, opts) {
 	switch (n.t) {
 		case "text":
@@ -524,6 +582,8 @@ function renderInline(n, h, opts) {
 			const external = /^https?:/i.test(href);
 			return h("a", { href, title: n.title || null, rel: external ? "nofollow noopener noreferrer" : null, target: external ? "_blank" : null }, kids);
 		}
+		case "tag":
+			return n.v;
 		case "img": {
 			if (!n.src) return n.alt;
 			const src = opts.image ? opts.image(n.src) : n.src;

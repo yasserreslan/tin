@@ -1,6 +1,7 @@
 package api
 
 import "../../tit/change"
+import "../../tit/diff"
 import "../../tit/object"
 import "../../tit/store"
 import "anvil"
@@ -426,3 +427,127 @@ fn readLog(c call, rev str, path str, cursor str, n i64) !logOut {
 	return out
 }
 
+
+// ---- raw files ----
+
+// rawType is the content type a raw file is served as: images as themselves, text as plain text, anything else as
+// bytes. Never HTML or script: a repository's files are not this site's pages.
+fn rawType(path str, binary bool) str {
+	let dot = twine.LastIndex(path, ".")
+	mut ext = ""
+	if dot >= 0 {
+		ext = twine.ToLower(path[dot + 1:])
+	}
+	mut other = "text/plain; charset=utf-8"
+	if binary {
+		other = "application/octet-stream"
+	}
+	return match ext {
+		"png" => "image/png"
+		"jpg", "jpeg" => "image/jpeg"
+		"gif" => "image/gif"
+		"webp" => "image/webp"
+		"avif" => "image/avif"
+		"ico" => "image/x-icon"
+		"svg" => "image/svg+xml"
+		_ => other
+	}
+}
+
+// rawPolicy keeps a raw file inert when opened directly: no scripts, no plugins, a sandboxed origin.
+const rawPolicy = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox"
+
+// raw is the file at {path...} of ?rev= (the default branch when empty), as bytes: what READMEs' relative images
+// and the file page's Raw link load.
+fn raw(q anvil.Req, w mut anvil.Out) {
+	let c = begin(q, mut w, true)
+	if c == nil {
+		return
+	}
+	let path = twine.Trim(q.PathParam("path"), "/")
+	let rev = q.Param("rev")
+	let (res, err) = readResolve(c, rev, path)
+	if err != nil {
+		answerErr(mut w, err)
+		return
+	}
+	if res.kind != "blob" {
+		fail_(mut w, 404, "not_found", "{path} is a directory")
+		return
+	}
+	let (body, berr) = readBlob(c, res.id)
+	if berr != nil {
+		fail_(mut w, errStatus(berr), errCode(berr), fault.Message(berr))
+		return
+	}
+	w.Type(rawType(path, res.binary))
+	w.Head("X-Content-Type-Options", "nosniff")
+	w.Head("Content-Security-Policy", rawPolicy)
+	w.Head("ETag", "\"" + res.id + "\"")
+	if res.commit == rev {
+		w.Head("Cache-Control", "private, max-age=31536000, immutable")
+	} else {
+		w.Head("Cache-Control", "private, max-age=60")
+	}
+	if q.Param("download") == "1" {
+		let name = twine.ReplaceAll(path[twine.LastIndex(path, "/") + 1:], "\"", "")
+		w.Head("Content-Disposition", "attachment; filename=\"" + name + "\"")
+	}
+	if q.Header("If-None-Match") == "\"" + res.id + "\"" {
+		w.Status(304)
+		return
+	}
+	w.Body = []u8(body)
+}
+
+// ---- comparing ----
+
+type compareOut struct {
+	@json("from") from_ str
+	to                  str
+	files               []fileOut
+}
+
+// compare is the files that differ from ?from= to ?to= (each a branch, tag, change or commit; from empty compares
+// with nothing, so every file of to is added): a commit's diff against its first parent, or two branches.
+fn compare(q anvil.Req, w mut anvil.Out) {
+	let c = begin(q, mut w, true)
+	if c == nil {
+		return
+	}
+	let (out, err) = readCompare(c, q.Param("from"), q.Param("to"))
+	if err != nil {
+		answerErr(mut w, err)
+		return
+	}
+	send(mut w, out)
+}
+
+fn readCompare(c call, from str, to str) !compareOut {
+	mut out ?compareOut = nil
+	try within readWithin + 0 {
+		try limit memory readMemory + 0 {
+			mut r = pgRepo(c)
+			mut st = try r.Objects()
+			let b = try revisionOf(c, mut st, to)
+			let tb = try treeOf(mut st, b.commit.Hex())
+			mut ta = object.NoId
+			mut fromHex = ""
+			if len(from) > 0 {
+				let a = try revisionOf(c, mut st, from)
+				ta = try treeOf(mut st, a.commit.Hex())
+				fromHex = a.commit.Hex()
+			}
+			mut page = compareOut{from_: fromHex, to: b.commit.Hex(), files: []fileOut{}}
+			let fcs = try diff.TreeDiff(mut st, ta, tb, true)
+			for f in fcs {
+				page.files = append(page.files, fileOut{kind: kindName(f.Kind), path: f.Path, old_path: f.OldPath, old_blob: hexOf(f.OldHash), new_blob: hexOf(f.NewHash)})
+			}
+			out = keep(page)
+		}
+	}
+	if out == nil {
+		fail fault.Wrap(ErrNotFound, "nothing to compare")
+	}
+	return out
+}

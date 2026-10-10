@@ -470,7 +470,7 @@ svg.icon.xl { width: 28px; height: 28px; }
 .card-head { padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: var(--s-2); background: var(--bg-soft); border-radius: var(--r-lg) var(--r-lg) 0 0; }
 .card-head h3 { font-size: var(--t-md); }
 .card-foot { padding: var(--s-3) var(--s-4); border-top: 1px solid var(--border); background: var(--bg-soft); border-radius: 0 0 var(--r-lg) var(--r-lg); }
-.box { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--bg-raised); overflow: hidden; }
+.box { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--bg-raised); overflow: clip; }
 .box-head { display: flex; align-items: center; gap: var(--s-3); padding: 10px var(--s-4); background: var(--bg-soft); border-bottom: 1px solid var(--border); min-height: 46px; font-size: var(--t-sm); }
 .box-row { display: flex; align-items: center; gap: var(--s-3); padding: 10px var(--s-4); border-top: 1px solid var(--border-faint); min-height: 44px; }
 .box-row:first-child { border-top: 0; }
@@ -698,7 +698,8 @@ pre.block { margin: 0; padding: var(--s-4); overflow: auto; background: var(--bg
 .tok-attr { color: var(--tok-attr); }
 .tok-interp { color: var(--tok-attr); }
 
-.outline { position: sticky; top: calc(var(--header-h) + var(--s-4)); max-height: calc(100vh - var(--header-h) - var(--s-6)); overflow: auto; font-size: var(--t-sm); }
+.outline-col { position: sticky; top: calc(var(--header-h) + var(--s-4)); }
+.outline { max-height: calc(100vh - var(--header-h) - var(--s-6)); overflow: auto; font-size: var(--t-sm); }
 .outline a { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: var(--r-xs); color: var(--fg-soft); }
 .outline a:hover { background: var(--bg-hover); color: var(--fg); text-decoration: none; }
 .outline .kind { font-family: var(--font-mono); font-size: 10px; width: 34px; flex: none; color: var(--fg-faint); text-transform: uppercase; }
@@ -710,7 +711,7 @@ pre.block { margin: 0; padding: var(--s-4); overflow: auto; background: var(--bg
 
 /* ---- diffs ---- */
 
-.diff-file { border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; background: var(--bg-raised); }
+.diff-file { border: 1px solid var(--border); border-radius: var(--r-lg); overflow: clip; background: var(--bg-raised); }
 .diff-file + .diff-file { margin-top: var(--s-4); }
 .diff-file-head { position: sticky; top: var(--header-h); z-index: 5; display: flex; align-items: center; gap: var(--s-2); padding: 8px var(--s-3) 8px var(--s-4); background: var(--bg-soft); border-bottom: 1px solid var(--border); font-size: var(--t-sm); }
 .diff-file-head .path { font-family: var(--font-mono); font-weight: 600; color: var(--fg); }
@@ -875,6 +876,7 @@ table.diff tr.comment-row td { background: var(--bg-soft); padding: var(--s-3) v
 .chart .area { opacity: .08; }
 .chart .pt { stroke: var(--bg); stroke-width: 2; cursor: pointer; transition: r .1s; }
 .chart .pt:hover { r: 6; }
+.chart .pt.link { cursor: pointer; }
 .chart-tip { position: fixed; z-index: 60; pointer-events: none; background: var(--bg-inverse); color: var(--fg-inverse); padding: 8px 10px; border-radius: var(--r-md); font-size: var(--t-xs); box-shadow: var(--shadow-lg); max-width: 280px; }
 .legend { display: flex; gap: var(--s-4); flex-wrap: wrap; font-size: var(--t-sm); color: var(--fg-soft); }
 .legend .key { display: inline-flex; align-items: center; gap: 6px; }

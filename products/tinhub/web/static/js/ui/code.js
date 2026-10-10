@@ -6,6 +6,7 @@ import { icon } from "../lib/icons.js";
 import * as hl from "../lib/highlight.js";
 import * as df from "../lib/diff.js";
 import * as md from "../lib/markdown.js";
+import { sanitize } from "../lib/sanitize.js";
 
 // tokens renders one line's tokens.
 export function tokens(toks) {
@@ -25,7 +26,8 @@ export function highlightBlock(lang, text) {
 // markdown renders Markdown source into a .md element. base resolves relative links and images
 // ({link(path), image(path)}).
 export function markdown(src, base = {}) {
-	return h("div.md", {}, md.render(md.parse(src), h, { code: highlightBlock, link: base.link, image: base.image }));
+	const html = (raw) => sanitize(raw, { link: base.link, image: base.image });
+	return h("div.md", {}, md.render(md.parse(src), h, { code: highlightBlock, link: base.link, image: base.image, html }));
 }
 
 // fileView is a file's lines with numbers. Clicking a number selects the line (shift: a range) and calls onSelect.

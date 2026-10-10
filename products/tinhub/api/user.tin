@@ -38,6 +38,8 @@ fn MountWeb(r mut anvil.Router) {
 	r.Get("/api/v1/feed", feed)
 	r.Get(`/api/v1/repos/{owner}/{repo}/resolve`, resolve)
 	r.Get(`/api/v1/repos/{owner}/{repo}/log`, log)
+	r.Get(`/api/v1/repos/{owner}/{repo}/raw/{path...}`, raw)
+	r.Get(`/api/v1/repos/{owner}/{repo}/compare`, compare)
 	r.Post("/api/v1/orgs", createOrg)
 	r.Patch(`/api/v1/orgs/{org}`, patchOrg)
 	r.Get(`/api/v1/orgs/{org}/members`, orgMembers)
@@ -459,7 +461,7 @@ fn repoEvents(q anvil.Req, w mut anvil.Out) {
 	let more = n + 1
 	let repoId = c.r.Id
 	let kinds = liveKinds
-	let rows = c.d.Stale.Query("SELECT e.id, e.kind, o.name || '/' || r.name, coalesce(CASE WHEN jsonb_typeof(e.payload->'by') = 'number' THEN (SELECT ow.name FROM users u JOIN owners ow ON ow.id = u.owner_id WHERE u.id = (e.payload->>'by')::bigint) END, e.payload->>'who', ''), extract(epoch FROM e.created_at)::bigint, e.payload::text FROM events e JOIN repos r ON r.id = e.repo_id JOIN owners o ON o.id = r.owner_id WHERE e.repo_id = {repoId} AND e.id < {before} AND e.kind = ANY(string_to_array({kinds}, ',')) ORDER BY e.id DESC LIMIT {more}") catch err {
+	let rows = c.d.Stale.Query("SELECT e.id, e.kind, o.name || '/' || r.name, coalesce(CASE WHEN jsonb_typeof(e.payload->'by') = 'number' THEN (SELECT ow.name FROM users u JOIN owners ow ON ow.id = u.owner_id WHERE u.id = (e.payload->>'by')::bigint) END, (SELECT ow.name FROM users u JOIN owners ow ON ow.id = u.owner_id WHERE u.email = e.payload->>'who' AND u.deleted_at IS NULL), e.payload->>'who', ''), extract(epoch FROM e.created_at)::bigint, e.payload::text FROM events e JOIN repos r ON r.id = e.repo_id JOIN owners o ON o.id = r.owner_id WHERE e.repo_id = {repoId} AND e.id < {before} AND e.kind = ANY(string_to_array({kinds}, ',')) ORDER BY e.id DESC LIMIT {more}") catch err {
 		answerErr(mut w, err)
 		return
 	}
@@ -483,7 +485,7 @@ fn feed(q anvil.Req, w mut anvil.Out) {
 		return
 	}
 	let kinds = liveKinds
-	let rows = c.d.Stale.Query("SELECT e.id, e.kind, o.name || '/' || r.name, coalesce(CASE WHEN jsonb_typeof(e.payload->'by') = 'number' THEN (SELECT ow.name FROM users u JOIN owners ow ON ow.id = u.owner_id WHERE u.id = (e.payload->>'by')::bigint) END, e.payload->>'who', ''), extract(epoch FROM e.created_at)::bigint, e.payload::text FROM events e JOIN repos r ON r.id = e.repo_id JOIN owners o ON o.id = r.owner_id WHERE r.deleted_at IS NULL AND e.id < {before} AND e.kind = ANY(string_to_array({kinds}, ',')) AND e.created_at > now() - interval '90 days' AND (EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = {u} AND s.repo_id = r.id) OR r.owner_id = (SELECT owner_id FROM users WHERE id = {u}) OR EXISTS (SELECT 1 FROM members m JOIN orgs g ON g.id = m.org_id WHERE g.owner_id = r.owner_id AND m.user_id = {u} AND g.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM grants x WHERE x.repo_id = r.id AND (x.user_id = {u} OR x.team_id IN (SELECT team_id FROM team_members WHERE user_id = {u})))) AND (r.visibility = 'public' OR {admin} OR r.owner_id = (SELECT owner_id FROM users WHERE id = {u} AND deleted_at IS NULL) OR EXISTS (SELECT 1 FROM members m JOIN orgs g ON g.id = m.org_id WHERE g.owner_id = r.owner_id AND m.user_id = {u} AND m.role = 'owner' AND g.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM grants x WHERE x.repo_id = r.id AND (x.user_id = {u} OR x.team_id IN (SELECT team_id FROM team_members WHERE user_id = {u})))) ORDER BY e.id DESC LIMIT {more}") catch err {
+	let rows = c.d.Stale.Query("SELECT e.id, e.kind, o.name || '/' || r.name, coalesce(CASE WHEN jsonb_typeof(e.payload->'by') = 'number' THEN (SELECT ow.name FROM users u JOIN owners ow ON ow.id = u.owner_id WHERE u.id = (e.payload->>'by')::bigint) END, (SELECT ow.name FROM users u JOIN owners ow ON ow.id = u.owner_id WHERE u.email = e.payload->>'who' AND u.deleted_at IS NULL), e.payload->>'who', ''), extract(epoch FROM e.created_at)::bigint, e.payload::text FROM events e JOIN repos r ON r.id = e.repo_id JOIN owners o ON o.id = r.owner_id WHERE r.deleted_at IS NULL AND e.id < {before} AND e.kind = ANY(string_to_array({kinds}, ',')) AND e.created_at > now() - interval '90 days' AND (EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = {u} AND s.repo_id = r.id) OR r.owner_id = (SELECT owner_id FROM users WHERE id = {u}) OR EXISTS (SELECT 1 FROM members m JOIN orgs g ON g.id = m.org_id WHERE g.owner_id = r.owner_id AND m.user_id = {u} AND g.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM grants x WHERE x.repo_id = r.id AND (x.user_id = {u} OR x.team_id IN (SELECT team_id FROM team_members WHERE user_id = {u})))) AND (r.visibility = 'public' OR {admin} OR r.owner_id = (SELECT owner_id FROM users WHERE id = {u} AND deleted_at IS NULL) OR EXISTS (SELECT 1 FROM members m JOIN orgs g ON g.id = m.org_id WHERE g.owner_id = r.owner_id AND m.user_id = {u} AND m.role = 'owner' AND g.deleted_at IS NULL) OR EXISTS (SELECT 1 FROM grants x WHERE x.repo_id = r.id AND (x.user_id = {u} OR x.team_id IN (SELECT team_id FROM team_members WHERE user_id = {u})))) ORDER BY e.id DESC LIMIT {more}") catch err {
 		answerErr(mut w, err)
 		return
 	}
