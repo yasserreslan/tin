@@ -1,0 +1,37 @@
+package main
+
+// Issue 1078: what an arena-returning function's result holds must not leak into every
+// slice of the same type held by the caller's local struct. Appending an element of the
+// result's slice into res.syms is accepted, as appending it into a local slice is.
+
+import "say"
+
+type step struct {
+	syms []str
+}
+
+type result struct {
+	syms []str
+}
+
+fn inArena(n i64) step {
+	return arena {
+		step{syms: []str{"a{n}"}}
+	}
+}
+
+fn gather() result {
+	mut res = result{syms: []str{}}
+	for i in 0..2 {
+		let s = inArena(i)
+		for x in s.syms {
+			res.syms = append(res.syms, x)
+		}
+	}
+	return res
+}
+
+fn main() {
+	let r = gather()
+	say.Line("{len(r.syms)} {r.syms[0]} {r.syms[1]}")
+}

@@ -1,0 +1,37 @@
+package main
+
+// Issue 1080: holding is tracked per container type, but a parameter stored into a local
+// slice, struct or map and modified through what is read back out is still E701.
+
+import "say"
+
+type H struct {
+	xs []str
+}
+
+fn viaSlice(files []str) {
+	mut q = [][]str{}
+	q = append(q, files)
+	let b = q[0]
+	b[0] = "x"
+}
+
+fn viaStruct(files []str) {
+	mut h = H{xs: []str{}}
+	h.xs = files
+	h.xs[0] = "x"
+}
+
+fn viaMap(files []str) {
+	mut m = map[str][]str{}
+	m["a"] = files
+	let b = m["a"]
+	b[0] = "x"
+}
+
+fn main() {
+	viaSlice([]str{"a"})
+	viaStruct([]str{"a"})
+	viaMap([]str{"a"})
+	say.Line("unreachable")
+}

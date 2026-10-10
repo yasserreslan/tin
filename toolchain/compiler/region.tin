@@ -27,7 +27,7 @@ shared mut rg_lchanged i64 // a local's bits grew
 shared mut rg_nparams i64
 shared mut rg_multi []i64 // per-result bits of the last call (for ST_CALLMULTI)
 shared mut rg_modrep i64 // parameters already reported as modified
-shared mut rg_held []i64 // [type, bits] pairs: origins held by containers that may not be long-lived
+shared mut rg_held []i64 // [holder type, type, bits] triples: origins held by containers that may not be long-lived (#1080)
 shared mut rg_fnsum i64 // the summaries of all functions used as values, joined (indirect calls)
 shared mut rs_active i64 // the use-after-reset walk is running (rs_walk)
 shared mut rs_dead []i64 // locals that may hold request memory from before a hearth.Reset()
@@ -137,11 +137,11 @@ fn rg_fn_pass(f Fn, report i64) {
 	// Callers can reach what is held only through the parameters and results.
 	i = 0
 	for i < len(rg_held) {
-		let t = rg_held[i]
-		if rg_visible(f, t) != 0 && rg_merge(cast([]i64, rg_sum[1]), t, rg_held[i + 1]) != 0 {
+		let t = rg_held[i + 1]
+		if rg_visible(f, t) != 0 && rg_merge3(cast([]i64, rg_sum[1]), rg_held[i], t, rg_held[i + 2]) != 0 {
 			rg_changed = 1
 		}
-		i = i + 2
+		i = i + 3
 	}
 	if report != 0 && file_trusted[f.file] == 0 {
 		rg_report = 1
@@ -317,12 +317,32 @@ fn rg_result(i i64, bits i64) {
 // held by long-lived memory is long-lived (the pass keeps it so); anything else may be
 // ember, or whatever such containers were given (rg_hold).
 fn rg_load(b i64, t i64) i64 {
+	return rg_load_in(b, t, 0)
+}
+
+// rg_load_in is rg_load for a read out of a container of key type o (0: unknown): only what
+// was stored into containers of that type comes back out (#1080).
+fn rg_load_in(b i64, t i64, o i64) i64 {
 	mut r = b & ~RG_EMB
 	if (b & ~RG_INGOT) != 0 {
 		r = r | RG_EMB
 	}
 	if b != RG_INGOT {
-		r = r | rg_lookup(rg_held, rg_key(t))
+		r = r | rg_held_lookup(o, rg_key(t))
+	}
+	return r
+}
+
+// rg_held_lookup joins the bits of the held triples for type t whose holder type is o; a
+// holder of 0 on either side is unknown and matches every holder.
+fn rg_held_lookup(o i64, t i64) i64 {
+	mut r = 0
+	mut i = 0
+	for t != 0 && i < len(rg_held) {
+		if rg_held[i + 1] == t && (o == 0 || rg_held[i] == 0 || rg_held[i] == o) {
+			r = r | rg_held[i + 2]
+		}
+		i = i + 3
 	}
 	return r
 }
@@ -371,6 +391,24 @@ fn rg_merge(h []i64, t i64, bits i64) i64 {
 	return 1
 }
 
+// rg_merge3 adds bits to the entry for holder type o and type t in the triple vector h
+// (held objects, rg_held) and reports whether it grew.
+fn rg_merge3(h []i64, o i64, t i64, bits i64) i64 {
+	mut i = 0
+	for i < len(h) {
+		if h[i] == o && h[i + 1] == t {
+			let old = h[i + 2]
+			h[i + 2] = old | bits
+			return i64((old | bits) != old)
+		}
+		i = i + 3
+	}
+	h = append(h, o)
+	h = append(h, t)
+	h = append(h, bits)
+	return 1
+}
+
 fn rg_lookup(h []i64, t i64) i64 {
 	mut i = 0
 	for t != 0 && i < len(h) {
@@ -386,9 +424,15 @@ fn rg_lookup(h []i64, t i64) i64 {
 // with bits v. Fresh and ember origins are what reads out of such a container give anyway;
 // long-lived, unknown and parameter origins must come back out with the value.
 fn rg_hold(t i64, v i64) {
+	rg_hold_in(0, t, v)
+}
+
+// rg_hold_in is rg_hold for a container of key type o (0: unknown), so that reads out of
+// containers of other types do not pick up what it holds (#1080).
+fn rg_hold_in(o i64, t i64, v i64) {
 	let k = rg_key(t)
 	let b = v & ~(RG_FRESH | RG_EMB)
-	if k != 0 && b != 0 && rg_merge(rg_held, k, b) != 0 {
+	if k != 0 && b != 0 && rg_merge3(rg_held, o, k, b) != 0 {
 		rg_lchanged = 1
 	}
 }
@@ -430,7 +474,7 @@ fn rg_deep(b_in i64, t i64, o i64, v i64) i64 {
 	}
 	mut i = 0
 	for i < len(rg_held) {
-		let h = rg_held[i]
+		let h = rg_held[i + 1]
 		mut on_ = i64((o == 0 && v == 0) || h == o || h == v)
 		if on_ == 0 && o != 0 {
 			on_ = rg_reaches(h, o, []i64{})
@@ -438,9 +482,9 @@ fn rg_deep(b_in i64, t i64, o i64, v i64) i64 {
 			on_ = rg_reaches(h, v, []i64{})
 		}
 		if on_ != 0 && rg_reaches(t, h, []i64{}) != 0 {
-			b = b | rg_held[i + 1]
+			b = b | rg_held[i + 2]
 		}
-		i = i + 2
+		i = i + 3
 	}
 	return b
 }
@@ -502,7 +546,7 @@ fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname str) {
 		i = i + 1
 	}
 	if c != RG_INGOT {
-		rg_hold(t, v)
+		rg_hold_in(ct, t, v)
 	}
 	if (v & RG_EMB) == 0 {
 		return
@@ -784,7 +828,7 @@ fn rg_expr(e i64) i64 {
 		if has_ptr(cast(Ty, cast(Node, cast(MemExpr, e).base).type_)) == 0 {
 			return b | RG_UNK | RG_EMB
 		}
-		return rg_load(b, cast(Node, e).type_)
+		return rg_load_in(b, cast(Node, e).type_, rg_key(cast(Node, cast(MemExpr, e).base).type_))
 	}
 	if k == EX_ELEM {
 		let b2 = rg_expr(cast(ElemExpr, e).seq)
@@ -792,7 +836,7 @@ fn rg_expr(e i64) i64 {
 		if has_ptr(cast(Ty, cast(Node, e).type_)) == 0 {
 			return 0
 		}
-		return rg_load(b2, cast(Node, e).type_)
+		return rg_load_in(b2, cast(Node, e).type_, rg_key(cast(Node, cast(ElemExpr, e).seq).type_))
 	}
 	if k == EX_SEQ {
 		if rs_active != 0 {
@@ -832,10 +876,10 @@ fn rg_expr(e i64) i64 {
 		let g = cast(Fn, cast(FuncRef, e).fn_).regsum
 		mut i = 0
 		for i < len(cast([]i64, g[1])) {
-			if rg_merge(cast([]i64, rg_fnsum[1]), cast([]i64, g[1])[i], cast([]i64, g[1])[i + 1]) != 0 {
+			if rg_merge3(cast([]i64, rg_fnsum[1]), cast([]i64, g[1])[i], cast([]i64, g[1])[i + 1], cast([]i64, g[1])[i + 2]) != 0 {
 				rg_changed = 1
 			}
-			i = i + 2
+			i = i + 3
 		}
 		i = 0
 		for i < len(cast([]i64, g[10])) {
@@ -1574,13 +1618,13 @@ fn rg_pass(recs []i64, i i64, args []Node, b []i64, v i64, pos i64) i64 {
 	return all
 }
 
-// rg_import adds a callee's held pairs to the caller's, in terms of the call's arguments.
+// rg_import adds a callee's held triples to the caller's, in terms of the call's arguments.
 fn rg_import(h []i64, args []i64, b []i64) {
 	mut i = 0
 	for i < len(h) {
-		let t = h[i]
-		rg_hold(t, rg_subst(h[i + 1], cast([]Node, args), b, t))
-		i = i + 2
+		let t = h[i + 1]
+		rg_hold_in(h[i], t, rg_subst(h[i + 2], cast([]Node, args), b, t))
+		i = i + 3
 	}
 }
 
@@ -1667,7 +1711,7 @@ fn rg_runtime_call(e i64, name str, b []i64, pos i64) i64 {
 			et = cast(Ty, a1.type_).elem
 		}
 		if has_ptr(cast(Ty, et)) != 0 {
-			rg_store(b0, co, ct, rg_load(b[1], et), et, pos, "")
+			rg_store(b0, co, ct, rg_load_in(b[1], et, rg_key(a1.type_)), et, pos, "")
 		} else {
 			rg_store(b0, co, ct, 0, 0, pos, "")
 		}
@@ -1679,17 +1723,17 @@ fn rg_runtime_call(e i64, name str, b []i64, pos i64) i64 {
 	}
 	if name == "rt_map_get" || name == "rt_map_key" || name == "rt_map_val" {
 		if has_ptr(cast(Ty, cast(Node, e).type_)) != 0 {
-			return rg_load(b0, cast(Node, e).type_)
+			return rg_load_in(b0, cast(Node, e).type_, ct)
 		}
 		return 0
 	}
 	if name == "rt_map_vget" {
 		// The value struct in a map's cell, or the zero given (#669).
-		return rg_load(b0, cast(Node, e).type_) | b[2]
+		return rg_load_in(b0, cast(Node, e).type_, ct) | b[2]
 	}
 	if name == "rt_map_get_dyn" || name == "rt_map_val_dyn" {
 		// The dyn value in a map's cell (#567).
-		return rg_load(b0, cast(Node, e).type_)
+		return rg_load_in(b0, cast(Node, e).type_, ct)
 	}
 	if name == "rt_slice_sub" {
 		return b0 | RG_FRESH | RG_EMB
@@ -3540,11 +3584,11 @@ fn fo_param_escapes(f Fn, i i64) i64 {
 	}
 	let held = cast([]i64, sum[1])
 	j = 0
-	for cast(i64, held) != 0 && j + 1 < len(held) {
-		if (held[j + 1] & bit) != 0 {
+	for cast(i64, held) != 0 && j + 2 < len(held) {
+		if (held[j + 2] & bit) != 0 {
 			return 1
 		}
-		j = j + 2
+		j = j + 3
 	}
 	return 0
 }
