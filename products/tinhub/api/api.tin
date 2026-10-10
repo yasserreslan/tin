@@ -574,6 +574,14 @@ fn readDiff(c call, ch str, from0 i64, to0 i64) !diffOut {
 			mut ta = object.NoId
 			if len(a) > 0 {
 				ta = try treeOf(mut st, a)
+			} else {
+				// version 0 is what the change applies to: the parent of the version shown (none for a root commit),
+				// so a first version's diff is what it changes, not every file as added
+				let bid = try object.ParseId(b)
+				let cd = try commitOf(mut st, bid)
+				if len(cd.Parents) > 0 {
+					ta = try treeOf(mut st, cd.Parents[0].Hex())
+				}
 			}
 			let fcs = try diff.TreeDiff(mut st, ta, tb, true)
 			for f in fcs {
