@@ -1,0 +1,42 @@
+package main
+
+// The first second of the range i64 nanoseconds hold (1677-09-21 00:12:43.145224192 UTC) and
+// ParseDuration's overflow checks. Each result was checked against Go 1.27's time package.
+// Truncate, Round, Parse and DateIn panicked with an integer overflow on these instants, where
+// the result fits but seconds times 1e9 alone does not; ParseDuration panicked on two terms of
+// 1<<63 nanoseconds, which Go's uint64 sum wraps to 0 (#1227).
+
+import "say"
+import "tide"
+
+fn parse(v str) {
+	let ns = tide.Parse("2006-01-02 15:04:05.999999999", v, tide.UTCZone()) catch e {
+		say.Line(v, "fails:", e)
+		return
+	}
+	say.Line(v, ns)
+}
+
+fn dur(s str) {
+	let d = tide.ParseDuration(s) catch e {
+		say.Line(s, "fails:", e)
+		return
+	}
+	say.Line(s, d)
+}
+
+fn main() {
+	let t = -9223372035854775808
+	say.Line("Truncate", tide.Truncate(t, 975421115), "Round", tide.Round(t, 975421115))
+	parse("1677-09-21 00:12:43.145224192")
+	parse("1677-09-21 00:12:43.999999999")
+	parse("1677-09-21 00:12:44")
+	parse("1677-09-21 00:12:43.145224191")
+	say.Line("Date", tide.Date(1677, 9, 21, 0, 12, 43, 145224192))
+	say.Line("DateIn", tide.DateIn(1677, 9, 20, 23, 12, 43, 500000000, tide.FixedZone("W", -3600)))
+	dur("9223372036854775808ns9223372036854775808ns")
+	dur("9223372036854775808ns1ns")
+	dur("-9223372036854775808ns")
+	dur("2562047h47m16.854775807s")
+	dur("2562047h47m16.854775808s")
+}

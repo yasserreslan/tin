@@ -346,7 +346,9 @@ fn ParseDuration(s str) !i64 {
 				fail say.Fault("time: invalid duration %s", quote(s))
 			}
 		}
-		d += v
+		// Go's sum is a uint64 that wraps (two 1<<63 terms add up to 0), and its check runs after
+		// the add; a checked add here panicked on such input.
+		d = d +% v
 		if d > top {
 			fail say.Fault("time: invalid duration %s", quote(s))
 		}

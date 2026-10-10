@@ -1148,5 +1148,9 @@ fn stamp(unix i64, nano i64) !i64 {
 	if unix > 9223372036 || unix < -9223372037 || (unix == 9223372036 && nano > 854775807) || (unix == -9223372037 && nano < 145224192) {
 		fail say.Fault("tide: the parsed time is outside the range of Unix nanoseconds (1677-09-21 to 2262-04-11)")
 	}
+	// unix*Second alone overflows in the first second of the range: borrow it back.
+	if unix < 0 && nano > 0 {
+		return (unix+1)*Second + (nano - Second)
+	}
 	return unix*Second + nano
 }
