@@ -201,7 +201,7 @@ through the API. Under `/api/v1/repos/{owner}/{repo}`:
   posting takes a `Tit-Signature` by a writer's key (an unsigned POST answers 401 with a `nonce` to sign with).
 - `POST changes/{change}/land` (`{"stack": true}` lands the changes below it first): each change is rebased onto the
   target on the server when needed (a conflict refuses it), and the target moves once per change.
-- `GET reviews?state=`, `GET|PUT review/settings` (`{"approvals": 1, "checks": ["ci"]}`, admin).
+- `GET reviews?state=` (`active` is every review not landed or abandoned), `GET|PUT review/settings` (`{"approvals": 1, "checks": ["ci"]}`, admin).
 
 Review events (`review.opened`, `review.voted`, `review.comment`, `review.check`, `review.landed`, `review.state`) reach
 webhooks, mail and the live websocket. See [design/tinhub.md §14](../../design/tinhub.md#14-reviews-comments-checks-and-landing-1025).

@@ -44,8 +44,9 @@ export function describe(e, { showRepo = true } = {}) {
 		}
 		case "review.landed":
 			return { icon: "landed", color: "purple", body: ["landed ", changeA(p.change), p.detail ? [" as ", h("a.hash", { href: `${base}/commit/${p.detail}` }, fmt.short(p.detail, 8))] : null, ...repoA] };
+		// a review.state event is only ever an abandon or a reopen (review.SetState)
 		case "review.state":
-			return { icon: p.state === "abandoned" ? "xCircle" : "refresh", color: p.state === "abandoned" ? "" : "green", body: [p.state === "abandoned" ? "abandoned " : `marked ${fmt.stateLabel(p.state).toLowerCase()} `, changeA(p.change), ...repoA] };
+			return { icon: p.state === "abandoned" ? "xCircle" : "refresh", color: p.state === "abandoned" ? "" : "green", body: [p.state === "abandoned" ? "abandoned " : "reopened ", changeA(p.change), ...repoA] };
 		default:
 			return { icon: "activity", color: "", body: [e.kind, ...repoA] };
 	}

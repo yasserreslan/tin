@@ -80,8 +80,9 @@ export async function render(ctx) {
 						"div.meta",
 						{},
 						rv ? stateBadge(rv.state, true) : badge("No review", "outline lg"),
-						opener() ? h("b", {}, opener()) : null,
-						rv ? [rv.state === "landed" ? "landed this into " : "wants to land this into ", h("a.chip", { href: `${base}/tree/${encodeURIComponent(target)}` }, icon("branch", "sm"), target)] : "pushed this change",
+						// a landed change names who landed it, an open one who opened it
+						rv && rv.state === "landed" && rv.landed_by_name ? h("b", {}, rv.landed_by_name) : opener() ? h("b", {}, opener()) : null,
+						rv ? [rv.state === "landed" ? "landed this into " : rv.state === "abandoned" ? "wanted to land this into " : "wants to land this into ", h("a.chip", { href: `${base}/tree/${encodeURIComponent(target)}` }, icon("branch", "sm"), target)] : "pushed this change",
 						h("span.faint", {}, "·"),
 						fmt.plural(state.versions.length, "version"),
 						h("span.faint", {}, "·"),
@@ -187,17 +188,19 @@ export async function render(ctx) {
 		const votes = state.votes.votes || [];
 		const counted = state.votes.counted || {};
 		const voteRows = votes.length
-			? votes.map((v) => h("div.row", {}, avatar(v.name, "sm"), h("b.grow.ellipsis", {}, v.name), h("span", { class: v.vote === "approve" ? "green" : "amber", title: v.vote === "approve" ? "Approved" : "Requested changes" }, icon(v.vote === "approve" ? "checkCircle" : "alert", "sm")), h("span.tiny.faint", { title: v.version < newest.version ? "On an older version" : "" }, "v" + v.version)))
+			? votes.map((v) => h("div.row", {}, avatar(v.name, "sm"), h("b.grow.ellipsis", {}, v.name), rv && v.user === rv.opened_by && v.vote === "approve" ? h("span.tiny.faint", { title: "The author's own approval does not count toward landing" }, "author") : null, h("span", { class: v.vote === "approve" ? "green" : "amber", title: v.vote === "approve" ? "Approved" : "Requested changes" }, icon(v.vote === "approve" ? "checkCircle" : "alert", "sm")), h("span.tiny.faint", { title: v.version < newest.version ? "On an older version" : "" }, "v" + v.version)))
 			: h("p.small.muted", {}, "No votes yet.");
 		// the caller's own vote on the newest version
 		const mineV = me ? votes.find((v) => v.name === me.name && v.version === newest.version) : null;
 		const mine = mineV ? mineV.vote : "";
+		// the author's own approval does not count (design/tinhub.md §14), so the author is not offered one
+		const authorMe = Boolean(me && rv && rv.opened_by === me.id);
 		const voteBtns =
 			me && rv && rv.state !== "landed" && rv.state !== "abandoned"
 				? h(
 						"div.row",
 						{ style: { "margin-top": "10px" } },
-						(() => {
+						authorMe && mine !== "approve" ? null : (() => {
 							const b = btn(mine === "approve" ? "Approved" : "Approve", { sm: true, success: mine !== "approve", icon: "thumbsUp", class: mine === "approve" ? "selected" : "" });
 							b.onclick = () => vote("approve", b);
 							return b;
@@ -209,6 +212,7 @@ export async function render(ctx) {
 						})(),
 					)
 				: null;
+		const authorHint = voteBtns && authorMe ? h("p.hint", { style: { "margin-top": "8px" } }, "Your own approval does not count: another writer has to approve this change.") : null;
 		const versionRows = [...state.versions].reverse().map((v) => h("div.row.small", {}, h("span.badge.outline", {}, "v" + v.version), h("a.hash.grow", { href: `${base}/commit/${v.commit}` }, fmt.short(v.commit, 8)), h("span.muted.ellipsis", {}, v.pushed_by), time(v.time)));
 		const stackBox = h("div", {}, h("p.small.muted", {}, "…"));
 		const overlapBox = h("div", {}, h("p.small.muted", {}, "…"));
@@ -225,7 +229,7 @@ export async function render(ctx) {
 			}
 		}
 		sidebar.replaceChildren(
-			rv ? section(h("span.grow", {}, "Approvals"), h("div.small.muted", { style: { "margin-bottom": "8px" } }, `${counted.approvals || 0} of ${counted.needed || 0} needed`, counted.blocking ? h("span.amber", {}, ` · ${counted.blocking} blocking`) : null), voteRows, voteBtns) : null,
+			rv ? section(h("span.grow", {}, "Approvals"), h("div.small.muted", { style: { "margin-bottom": "8px" } }, `${counted.approvals || 0} of ${counted.needed || 0} needed`, counted.blocking ? h("span.amber", {}, ` · ${counted.blocking} blocking`) : null), voteRows, voteBtns, authorHint) : null,
 			section("Stack", stackBox),
 			section("Overlaps", overlapBox),
 			section("Versions", versionRows),
@@ -293,7 +297,7 @@ export async function render(ctx) {
 		}
 		if (rv.state === "abandoned") return h("div.merge-box", {}, h("div.merge-row", {}, h("div.merge-icon.info", {}, icon("xCircle", "sm")), h("div", {}, h("b", {}, "Abandoned"), h("div.small.muted", {}, "Reopen it, or push a new version, to review it again."))));
 		const approved = (counted.approvals || 0) >= (counted.needed || 0) && !(counted.blocking > 0);
-		rows.push(h("div.merge-row", {}, h("div", { class: ["merge-icon", approved ? "ok" : counted.blocking ? "bad" : "wait"] }, icon(approved ? "check" : counted.blocking ? "x" : "clock", "sm")), h("div", {}, h("b", {}, approved ? "Approved" : counted.blocking ? "Changes requested" : "Waiting for approvals"), h("div.small.muted", {}, `${counted.approvals || 0} of ${counted.needed || 0} approvals on the newest version`, counted.blocking ? `, ${counted.blocking} asking for changes` : ""))));
+		rows.push(h("div.merge-row", {}, h("div", { class: ["merge-icon", approved ? "ok" : counted.blocking ? "bad" : "wait"] }, icon(approved ? "check" : counted.blocking ? "x" : "clock", "sm")), h("div", {}, h("b", {}, approved ? "Approved" : counted.blocking ? "Changes requested" : "Waiting for approvals"), h("div.small.muted", {}, `${counted.approvals || 0} of ${counted.needed || 0} approvals`, counted.blocking ? `, ${counted.blocking} asking for changes` : ""))));
 		const failing = versionChecks.filter((c) => c.state === "failure" || c.state === "error");
 		const pending = versionChecks.filter((c) => c.state === "pending");
 		const missing = required.filter((n) => !versionChecks.some((c) => c.name === n));
