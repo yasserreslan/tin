@@ -145,8 +145,8 @@ fn listBench(q anvil.Req, w mut anvil.Out) {
 
 fn readBench(c call) !benchList {
 	mut out = benchList{benchmarks: []benchOut{}}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut l = benchList{benchmarks: []benchOut{}}
 			let rows = try c.d.Db.Query("SELECT name, count(*), count(*) FILTER (WHERE os = 'Linux'), extract(epoch FROM max(created_at))::bigint FROM bench_results WHERE repo_id = {c.r.Id} GROUP BY name ORDER BY name LIMIT 1000")
 			for r in rows.Rows {
@@ -197,8 +197,8 @@ fn seriesOf(q anvil.Req, w mut anvil.Out) {
 // readSeries is a benchmark's series, each its newest n points oldest first; Linux series before the others.
 fn readSeries(c call, name str, n i64) !seriesList {
 	mut out = seriesList{name: name, series: []seriesOut{}}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			let rows = try c.d.Db.Query("SELECT os, arch, cpu, machine, unit, commit_id, change_id, value, kernel, extract(epoch FROM created_at)::bigint FROM bench_results WHERE repo_id = {c.r.Id} AND name = {name} ORDER BY (os = 'Linux') DESC, os, arch, machine, unit, created_at DESC, id DESC LIMIT 20000")
 			if len(rows.Rows) == 0 {
 				fail fault.Wrap(ErrNotFound, "no benchmark {name}")
@@ -275,8 +275,8 @@ fn changeBench(q anvil.Req, w mut anvil.Out) {
 
 fn readVerdict(c call, change str, version i64) !verdictOut {
 	mut out ?verdictOut = nil
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut v = version
 			if v <= 0 {
 				v = try NewestVersion(c.d.Db, c.r.Id, change)
@@ -363,8 +363,8 @@ fn readReleases(c call, from0 i64, n i64) !releasePage {
 	if from < 0 {
 		from = 0
 	}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			let all = try Releases(c.d.Db, c.r.Id)
 			mut page = releasePage{releases: []releaseOut{}, next: ""}
 			mut i = from
@@ -396,8 +396,8 @@ fn oneRelease(q anvil.Req, w mut anvil.Out) {
 
 fn readRelease(c call, name str) !releaseOut {
 	mut out ?releaseOut = nil
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			let r = try ReleaseNamed(c.d.Db, c.r.Id, name)
 			if r != nil {
 				out = keep(releaseOutOf(r))

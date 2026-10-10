@@ -156,8 +156,8 @@ fn indexed(c postgres.Client, repoId i64, commit str) !str {
 // timed indexes commit from hints inside the job's budget and says how long it took.
 fn timed(c postgres.Client, repoId i64, commit str, hints []str, what str) ! {
 	let started = tide.Now()
-	try within index.Within + 0 {
-		try limit memory index.Memory + 0 {
+	try within index.Within {
+		try limit memory index.Memory {
 			try index.IndexCommit(repoId, commit, hints)
 		}
 	}

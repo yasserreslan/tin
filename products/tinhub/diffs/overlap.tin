@@ -45,8 +45,8 @@ fn fileDecls(f fileIn) []str {
 // fileDeclsWithin is fileDecls inside the semantic diff's budget.
 fn fileDeclsWithin(f fileIn) ![]str {
 	mut out = []str{}
-	try within semanticWithin + 0 {
-		try limit memory semanticMemory + 0 {
+	try within semanticWithin {
+		try limit memory semanticMemory {
 			let got = fileDecls(f)
 			out = keep(got)
 		}

@@ -192,8 +192,7 @@ fn runJob(h Handler, j Job) ! {
 	let tasks = h.Tasks
 	if h.Memory > 0 && h.Tasks > 0 {
 		try within d {
-			// + 0: a bare name before the block is read as a struct literal (#1070)
-			try limit memory mem + 0, tasks tasks + 0 {
+			try limit memory mem, tasks tasks {
 				try guard {
 					try run(j)
 				}
@@ -203,8 +202,7 @@ fn runJob(h Handler, j Job) ! {
 	}
 	if h.Memory > 0 {
 		try within d {
-			// + 0: a bare name before the block is read as a struct literal (#1070)
-			try limit memory mem + 0 {
+			try limit memory mem {
 				try guard {
 					try run(j)
 				}

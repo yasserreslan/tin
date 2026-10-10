@@ -146,8 +146,8 @@ fn finish(w mut anvil.Out, status i64, body str, err fault) {
 // bounded runs f inside a call's budget and gives its JSON text.
 fn bounded(f fn() !str) !str {
 	mut out = ""
-	try within callWithin + 0 {
-		try limit memory callMemory + 0 {
+	try within callWithin {
+		try limit memory callMemory {
 			let s = try f()
 			out = keep(s)
 		}

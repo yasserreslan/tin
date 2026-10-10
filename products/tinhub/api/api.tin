@@ -237,8 +237,8 @@ fn ownerRepos(q anvil.Req, w mut anvil.Out) {
 
 fn readRepos(c call, owner str, after str, n i64) !repoPage {
 	mut out = repoPage{repos: []repoOut{}, next: ""}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = repoPage{repos: []repoOut{}, next: ""}
 			// a page and one more, of which those the caller cannot read are left out
 			let rows = try c.d.Stale.Query("SELECT r.name FROM repos r JOIN owners o ON o.id = r.owner_id WHERE o.name = {owner} AND r.deleted_at IS NULL AND r.name > {after} ORDER BY r.name LIMIT 1000")
@@ -312,8 +312,8 @@ fn repoOf_(id i64) repo.PgRepo {
 
 fn readRefs(c call, prefix str, after str, n i64) !refPage {
 	mut out = refPage{refs: []refOut{}, next: ""}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = refPage{refs: []refOut{}, next: ""}
 			let r = pgRepo(c)
 			let all = try r.Refs(prefix)
@@ -424,8 +424,8 @@ fn readChanges(c call, user str, cursor str, n i64) !changePage {
 		}
 		beforeChange = ch
 	}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = changePage{changes: []changeOut{}, next: ""}
 			let repoId = c.r.Id
 			let limitN = n + 1
@@ -488,8 +488,8 @@ fn versions(q anvil.Req, w mut anvil.Out) {
 
 fn readVersions(c call, ch str) !versionsOut {
 	mut out = versionsOut{change: ch, versions: []versionOut{}}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = versionsOut{change: ch, versions: []versionOut{}}
 			let repoId = c.r.Id
 			let rows = try c.d.Stale.Query("SELECT v.version, v.commit_id, v.op, coalesce(o.name, ''), (extract(epoch FROM v.created_at) * 1000000)::bigint FROM changes v LEFT JOIN users u ON u.id = v.pushed_by LEFT JOIN owners o ON o.id = u.owner_id WHERE v.repo_id = {repoId} AND v.change_id = {ch} ORDER BY v.version LIMIT 1000")
@@ -565,8 +565,8 @@ fn readDiff(c call, ch str, from0 i64, to0 i64) !diffOut {
 		fail fault.Wrap(ErrNotFound, "{ch} has no version {from} or {to}")
 	}
 	mut out = diffOut{change: ch, from: from, to: to, files: []fileOut{}}
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			mut page = diffOut{change: ch, from: from, to: to, files: []fileOut{}}
 			mut r = pgRepo(c)
 			mut st = try r.Objects()
@@ -690,8 +690,8 @@ fn commit(q anvil.Req, w mut anvil.Out) {
 
 fn readCommit(c call, hex str) !commitOut {
 	mut out ?commitOut = nil
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			let o = try readObject(c, hex)
 			match o {
 				Commit(cd) => {
@@ -741,8 +741,8 @@ fn modeName(m object.Mode) str {
 
 fn readTree(c call, hex str) !treeOut {
 	mut out ?treeOut = nil
-	try within readWithin + 0 {
-		try limit memory readMemory + 0 {
+	try within readWithin {
+		try limit memory readMemory {
 			let o = try readObject(c, hex)
 			match o {
 				Tree(es) => {
@@ -799,8 +799,8 @@ fn blob(q anvil.Req, w mut anvil.Out) {
 
 fn readBlob(c call, hex str) !str {
 	mut out = ""
-	try within readWithin + 0 {
-		try limit memory blobMemory + 0 {
+	try within readWithin {
+		try limit memory blobMemory {
 			let o = try readObject(c, hex)
 			match o {
 				Blob(b) => {

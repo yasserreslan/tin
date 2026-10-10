@@ -167,7 +167,7 @@ const gatherMemory = 128 * 1024 * 1024
 
 fn gatherAll(repoId i64, p pair) ![]fileIn {
 	return try arena {
-		try limit memory gatherMemory + 0 {
+		try limit memory gatherMemory {
 			mut r = try pgRepo(repoId)
 			mut st = try r.Objects()
 			let xs = try slots(mut st, p)
@@ -282,8 +282,8 @@ fn Compute(repoId i64, v Version, against str) !(DiffOut, []fileIn) {
 // semanticWithin_ is the semantic diff of files inside its budget (semanticWithin, semanticMemory).
 fn semanticWithin_(inter bool, files []fileIn) ![]fileOut {
 	mut out = []fileOut{}
-	try within semanticWithin + 0 {
-		try limit memory semanticMemory + 0 {
+	try within semanticWithin {
+		try limit memory semanticMemory {
 			let got = semanticFiles(inter, files)
 			out = keep(got)
 		}

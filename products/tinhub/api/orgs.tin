@@ -168,7 +168,7 @@ fn deleteMember(q anvil.Req, w mut anvil.Out) {
 
 // leave takes the caller (a plain member) out of the org and its teams.
 fn leave(c call, orgId i64) ! {
-	try within writeWithin + 0 {
+	try within writeWithin {
 		let u = c.user
 		mut tx = try c.d.Db.Begin()
 		let err = leaveIn(mut tx, orgId, u)
