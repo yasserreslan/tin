@@ -20,7 +20,6 @@ fn main() {
 	// Past the 2^21 and 2^22 slot doublings, which is where the report's missing value
 	// (2^22 + 16) sits.
 	let n = i64(4200000)
-	let m = make(map[i64]i64)
 	// The last four keys inserted, re-checked on every step so lookups run through the whole
 	// migration (sixteen entries move per operation).
 	mut k1 = i64(0)
@@ -33,6 +32,13 @@ fn main() {
 	if len(args) > 1 {
 		seed = mint.Atoi(args[1]) catch _ { 2233011 }
 	}
+	mut hashSeed = seed
+	if len(args) > 2 {
+		hashSeed = mint.Atoi(args[2]) catch _ { seed }
+	}
+	// Pin the runtime's randomized map hash key so a seed reproduces the same table layout.
+	rtHashK0 = hashSeed
+	let m = make(map[i64]i64)
 	mut k = seed
 	mut bad = i64(0)
 	for i in i64(0)..n {

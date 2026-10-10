@@ -17,6 +17,16 @@ on:
         required: false
         type: number
         default: 0
+      hash_seed:
+        description: Optional fixed runtime hash seed (0 derives it from each key seed)
+        required: false
+        type: number
+        default: 0
+      run_count:
+        description: Number of executions in this batch (1 to 200; defaults to 200)
+        required: false
+        type: number
+        default: 200
 
 permissions:
   contents: read
@@ -396,11 +406,19 @@ jobs:
       - name: Check 200 seeded executions
         env:
           SEED_BASE: ${{ inputs.seed_base || github.run_number }}
+          HASH_SEED: ${{ inputs.hash_seed }}
+          RUN_COUNT: ${{ inputs.run_count }}
         run: |
           expected='4200000 0 0 8819997900000 -1 0 0 true 0'
-          for i in $(seq 0 199); do
+          if [ "$RUN_COUNT" -lt 1 ] || [ "$RUN_COUNT" -gt 200 ]; then
+            echo "run_count must be from 1 to 200; got $RUN_COUNT"
+            exit 2
+          fi
+          for i in $(seq 0 $((RUN_COUNT - 1))); do
             seed=$((SEED_BASE * 1000 + i))
-            actual=$(bin/map_growth_stress "$seed")
+            hash_seed=$HASH_SEED
+            if [ "$hash_seed" -eq 0 ]; then hash_seed=$seed; fi
+            actual=$(bin/map_growth_stress "$seed" "$hash_seed")
             if [ "$actual" != "$expected" ]; then
               echo "Mismatch: arch=${{ matrix.arch }} seed=$seed expected='$expected' actual='$actual'"
               echo "Program: toolchain/tests/v2/map_growth_stress.tin"
@@ -408,8 +426,8 @@ jobs:
             fi
           done
           {
-            echo "Native Linux ${{ matrix.arch }}: 200/200 seeded executions matched '$expected'."
-            echo "Seed range: $((SEED_BASE * 1000))..$((SEED_BASE * 1000 + 199))"
+            echo "Native Linux ${{ matrix.arch }}: $RUN_COUNT/$RUN_COUNT seeded executions matched '$expected'."
+            echo "Seed range: $((SEED_BASE * 1000))..$((SEED_BASE * 1000 + RUN_COUNT - 1))"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   issue-policy:
