@@ -30,4 +30,7 @@ fn main() {
 	show("crlf and no final newline", "package main\r\n\r\nfn f() {{\r\n    return\r\n}}")
 	show("empty", "")
 	show("only blanks", "\n\n  \n")
+	// #1214: a raw string left open at the end kept the final newline as an empty line of its own, so each run added one
+	show("raw string open at the end", "fn f() {{\n\tlet s = ~open\n  to the end\n")
+	show("raw string open at the end, no final newline", "fn f() {{\n\tlet s = ~open")
 }

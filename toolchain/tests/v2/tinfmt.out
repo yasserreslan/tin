@@ -90,3 +90,10 @@ fn f() {
 }
 == empty
 == only blanks
+== raw string open at the end
+fn f() {
+	let s = `open
+  to the end
+== raw string open at the end, no final newline
+fn f() {
+	let s = `open

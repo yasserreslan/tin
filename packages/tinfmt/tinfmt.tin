@@ -249,7 +249,12 @@ fn indentLevel(open []i64) i64 {
 // newline.
 fn Format(src str) str {
 	let text = twine.ReplaceAll(src, "\r\n", "\n")
-	let lines = twine.Split(text, "\n")
+	mut lines = twine.Split(text, "\n")
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+		// the final newline ends the last line rather than starting an empty one (inside a raw string left open at the
+		// end, that empty line was kept and every run added another)
+		lines = lines[:len(lines)-1]
+	}
 	mut out = []str{}
 	mut raw = false
 	mut open = []i64{} // the line each open bracket was opened on
