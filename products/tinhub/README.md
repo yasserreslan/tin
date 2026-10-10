@@ -224,7 +224,9 @@ history and a release:
 TINHUB_WEB_DIR=$PWD/products/tinhub/web/static tinhub run &
 sh products/tinhub/web/dev/seed.sh path/to/tinhub path/to/tit   # then open the URL it prints
 # with the runner on (TINHUB_RUNNER_KEY=file:KEY from `tin replay key KEY`, TINHUB_RUNNER_TIN=$PWD, and on macOS
-# TINHUB_RUNNER_SANDBOX=off), the seed also records dev/shop's failures and checks five fix branches against them
+# TINHUB_RUNNER_SANDBOX=off), the seed also records dev/shop's failures and checks five fix branches against them;
+# SEED_ORDERS=1 with SEED_ORDERS_PG_ADDR/_USER/_PASSWORD/_DATABASE adds dev/orders (Postgres, Redis and a real website,
+# so it needs the network): three failures and eight fix branches
 node --test products/tinhub/web/test/*.test.js                 # the UI's unit tests
 ```
 

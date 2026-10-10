@@ -629,6 +629,8 @@ and the frame a panic was in (`runner_check_results`): as for runs, no request, 
 replays as plain child processes for development machines without the sandbox. `products/tinhub/dev/shop` is a
 checkout service with one recorded panic, one recorded outage and five fix branches (one passes, three diverge in
 three ways, one still panics); `tests/checks.sh` checks every verdict end to end and `web/dev/seed.sh` shows them.
+`products/tinhub/dev/orders` is a payment service on Postgres, Redis and a real rates website, recorded failing three
+ways with eight fix branches (its README lists each verdict); the seed adds it with `SEED_ORDERS=1`.
 
 **What the key's exposure is.** The replayed program opens the capsule itself, so it can read the key file in its
 scratch directory: a writer of an opted-in repository could make a change that prints it. The runner stores no body
