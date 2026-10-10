@@ -1467,5 +1467,18 @@
       "stdout": "entries 1508 sorted true same as ReadDir true\nfirst B Dir _ a a.b a0\ndirs Dir f70x f7x\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "readat-task-no-ring.tin",
+    "issue": 1105,
+    "env": {
+      "TIN_IO_URING": "0"
+    },
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "read 44970 past the end 0 at the end 3\n",
+      "stderr": ""
+    }
   }
 ]

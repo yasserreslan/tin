@@ -183,20 +183,52 @@ fn limitFault(path str, cap i64) ! {
 
 // ReadAt returns up to n bytes of the file at path from offset off: fewer at the file's end, "" past it. Only those
 // bytes are read (pread), so one record of a large file costs its own size, inside a request task too (a local file's
-// pages come from the page cache; a whole file read for a few bytes cost a request its size in memory). Recording or
-// replaying a tape, and inside a task on a file system that may wait for a daemon or a server (FUSE, 9p, CIFS: see
-// useRing) or without the core's io_uring, it reads the file through ReadFileBound and gives the same bytes.
+// pages come from the page cache; a whole file read for a few bytes cost a request its size in memory). Inside a task
+// on a file system that may wait for a daemon or a server (FUSE, 9p, CIFS: see useRing), or without the core's io_uring
+// (macOS, a container that refuses it), the same pread runs on a helper thread: reading the whole file there made a
+// push, which reads each object of a pack, quadratic in the pack's size (#1105). Recording or replaying a tape, it
+// reads the file through ReadFileBound and gives the same bytes.
 fn ReadAt(path str, off i64, n i64) !str {
 	if off < 0 || n < 0 {
 		fail invalidFault("read", path)
 	}
-	if rt_tape() != 0 || (rt_task_current() != 0 && !useRing(path)) {
+	if rt_tape() != 0 {
 		let s = try ReadFileBound(path, 1 << 60)
 		if off >= len(s) {
 			return ""
 		}
 		return s[off:min(len(s), off + n)]
 	}
+	if rt_task_current() != 0 && !useRing(path) {
+		return try readAtOnHelper(path, off, n)
+	}
+	return try readAtHere(path, off, n)
+}
+
+// readAtOnHelper is readAtHere on a helper thread, the core serving other tasks meanwhile.
+fn readAtOnHelper(path str, off i64, n i64) !str {
+	let job = calloc(10, 8)
+	job[0] = rt_heap_str(path)
+	job[8] = off
+	job[9] = n
+	try rt_helper_run(readAtJob, job, jobDrop)
+	return try jobResult(job)
+}
+
+// readAtJob runs readAtHere on a helper thread, copying the bytes (or the fault's message) into malloc'd memory.
+fn readAtJob(job i64) {
+	let (s, err) = readAtHere(cast(str, job[0]), job[8], job[9])
+	if err != nil {
+		jobFault(job, err)
+		return
+	}
+	job[1] = malloc(len(s) + 1)
+	memcpy(job[1], cast(i64, s)+8, len(s))
+	job[2] = len(s)
+}
+
+// readAtHere is ReadAt's pread where it runs.
+fn readAtHere(path str, off i64, n i64) !str {
 	if badPath(path) {
 		fail invalidFault("open", path)
 	}
