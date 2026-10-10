@@ -141,10 +141,26 @@ fn (s mut Server) replayPush(body str, now i64) !str {
 		return ""
 	}
 	let id = seal.Hex(seal.Sha256(data))
-	let group = seal.Hex(seal.Sha256(signer + "\n" + summary))
+	let group = replayGroup(signer, summary)
 	let e = ReplayEntry{Id: id, Group: group, Name: baseName(h.Name), Commit: h.Commit, Signer: signer, Summary: summary, Time: now}
 	let fresh = try s.replays.Put(e, data)
 	return Frame(Kind.ReplayAnswer, Encode(ReplayAnswer{Id: id, Group: group, New: fresh}), "")
+}
+
+// replayGroup is the group of a capsule with summary from signer: the same failure of one route is one group whatever
+// ids its paths hold, so a summary naming its Router pattern ("route=", #1106) groups without its path line; one
+// without a route groups by the whole summary, as before.
+fn replayGroup(signer str, summary str) str {
+	mut key = summary
+	if twine.HasPrefix(summary, "route=") || twine.Contains(summary, "\nroute=") {
+		key = ""
+		for line in twine.SplitAfter(summary, "\n") {
+			if !twine.HasPrefix(line, "path=") {
+				key = key + line
+			}
+		}
+	}
+	return seal.Hex(seal.Sha256(signer + "\n" + key))
 }
 
 fn (s mut Server) replayList() !str {

@@ -3968,6 +3968,9 @@ fn dispatch(t rtable, q mut Req, w mut Out) {
 	let ep = cast(i64, t.ends[e])
 	q.ep = ep
 	w.ep = ep
+	if gRecord {
+		record_route(cast(rend, ep).pattern)
+	}
 	w.ci = 0
 	w.meth = q.Method
 	w.rpath = q.Path
