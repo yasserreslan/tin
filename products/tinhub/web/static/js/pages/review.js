@@ -46,7 +46,12 @@ export async function render(ctx) {
 		const newest = state.versions[state.versions.length - 1];
 		state.commit = newest ? await commitOf(repo, newest.commit).catch(() => null) : null;
 	};
-	await loadAll();
+	try {
+		await loadAll();
+	} catch (e) {
+		if (e.status !== 404 || !ctx.alive()) throw e;
+		return unreviewed(ctx, repo, body, base, R, ch);
+	}
 	if (!ctx.alive()) return;
 	const newest = state.versions[state.versions.length - 1];
 	const titleText = state.commit ? fmt.title(state.commit.message) : fmt.shortChange(ch);
@@ -671,4 +676,25 @@ export async function render(ctx) {
 	// live: reload when anything happens to the change
 	const again = debounce(() => reload().catch(() => {}), 400);
 	ctx.cleanup(live.follow(`change:${repo.owner}/${repo.name}/${ch}`, () => again()));
+}
+
+// unreviewed is the page of a change tinhub holds no versions of. Every commit names its change, also one pushed
+// straight to a branch without a review, so the commit with that change on the default branch is linked when the
+// newest commits there have it.
+async function unreviewed(ctx, repo, body, base, R, ch) {
+	const branch = repo.default_branch || "main";
+	const log = await api.get(R("/log"), { rev: branch, limit: 200 }).catch(() => ({ commits: [] }));
+	if (!ctx.alive()) return;
+	const c = (log.commits || []).find((x) => x.change === ch);
+	ctx.title(c ? fmt.title(c.message) : fmt.shortChange(ch), `${repo.owner}/${repo.name}`);
+	body.replaceChildren(
+		c
+			? empty(
+					"change",
+					"This change was not reviewed here",
+					["It was pushed straight to ", h("b", {}, branch), " as commit ", h("a.mono", { href: `${base}/commit/${c.id}` }, fmt.short(c.id)), ": ", fmt.title(c.message)],
+					btn("View the commit", { href: `${base}/commit/${c.id}`, icon: "commit" }),
+				)
+			: empty("search", "No versions of this change", `Nothing has pushed change ${fmt.shortChange(ch)} to this repository for review.`, btn("All changes", { href: `${base}/changes` })),
+	);
 }
