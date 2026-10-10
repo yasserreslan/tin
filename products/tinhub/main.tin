@@ -13,6 +13,7 @@ import "./notify"
 import "./packs"
 import "./proto"
 import "./repo"
+import "./review"
 import "./runner"
 import "./signin"
 import "./workers"
@@ -152,6 +153,7 @@ fn handlers() []events.Handler {
 	all = append(all, index.Handlers(indexDeps(boot.Conf, st, cache))...)
 	all = append(all, bench.Handlers(bench.NewDeps(pg, st, boot.Conf.PacksDir, signin.Caller))...)
 	all = append(all, diffs.Handlers(diffs.Deps{Db: pg, Store: st, Cache: cache, Dir: boot.Conf.PacksDir, Auth: signin.Caller})...)
+	all = append(all, review.Handlers(reviewDeps(boot.Conf, st, cache))...)
 	return all
 }
 
@@ -238,6 +240,11 @@ const fetchWithin = 10 * tide.Minute
 
 const fetchMemory = 256 * 1024 * 1024
 
+// reviewDeps is what reviews, comments, checks and landing need (#1025).
+fn reviewDeps(c config.Config, st dyn packs.PackStore, cache repo.RefCache) review.Deps {
+	return review.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, NonceKey: c.NonceSecret, Auth: signin.Caller}
+}
+
 // notifyDeps is what notifications, webhooks and the live websocket need (#1023).
 fn notifyDeps(c config.Config) notify.Deps {
 	let (_, test) = quarry.LookupEnv("TINHUB_TEST_ROUTES")
@@ -260,6 +267,7 @@ fn configureProto(c config.Config) {
 	runner.Configure(runnerDeps(c, st))
 	index.Configure(indexDeps(c, st, cache))
 	diffs.Configure(diffs.Deps{Db: pg, Store: st, Cache: cache, Dir: c.PacksDir, Auth: signin.Caller})
+	review.Configure(reviewDeps(c, st, cache))
 	mut bd = bench.NewDeps(pg, st, c.PacksDir, signin.Caller)
 	bd.PublicURL = c.PublicURL
 	bench.Configure(bd)
@@ -458,6 +466,7 @@ fn routes(c config.Config) anvil.Router {
 		runner.Mount(mut r)
 		index.Mount(mut r)
 		diffs.Mount(mut r)
+		review.Mount(mut r)
 		bench.Mount(mut r)
 		proto.Mount(mut r)
 		api.Mount(mut r)
