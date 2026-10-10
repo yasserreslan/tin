@@ -110,7 +110,7 @@ fn image(segSize i64) []u8 {
 }
 
 fn main() {
-	let path = "/tmp/tin-test-macho-ok"
+	let path = "/tmp/tin-test-macho-ok-{quarry.Pid()}"
 	quarry.WriteFile(path, str(image(152))) catch err {
 		say.Line("write failed {err}")
 		return
@@ -158,7 +158,7 @@ fn main() {
 	}
 
 	// A file cut inside the symbol table: the commands are whole, so Open succeeds; the symbols fail on their own read.
-	let cut = "/tmp/tin-test-macho-cut"
+	let cut = "/tmp/tin-test-macho-cut-{quarry.Pid()}"
 	quarry.WriteFile(cut, str(image(152)[0:350])) catch err {
 		say.Line("write failed {err}")
 		return
@@ -180,7 +180,7 @@ fn main() {
 	}
 
 	// Rejected files: each one's fault is macho.ErrFormat.
-	let short = "/tmp/tin-test-macho-short"
+	let short = "/tmp/tin-test-macho-short-{quarry.Pid()}"
 	quarry.WriteFile(short, str(image(152)[0:100])) catch err {
 		say.Line("write failed {err}")
 		return
@@ -195,7 +195,7 @@ fn main() {
 	fat[1] = 0xfe
 	fat[2] = 0xba
 	fat[3] = 0xbe
-	let fatPath = "/tmp/tin-test-macho-fat"
+	let fatPath = "/tmp/tin-test-macho-fat-{quarry.Pid()}"
 	quarry.WriteFile(fatPath, str(fat)) catch err {
 		say.Line("write failed {err}")
 		return
@@ -205,7 +205,7 @@ fn main() {
 	quarry.Remove(fatPath) catch err {
 		say.Line("remove failed {err}")
 	}
-	let badPath = "/tmp/tin-test-macho-bad"
+	let badPath = "/tmp/tin-test-macho-bad-{quarry.Pid()}"
 	quarry.WriteFile(badPath, str(image(8))) catch err {
 		say.Line("write failed {err}")
 		return
@@ -223,7 +223,7 @@ fn main() {
 	elfBytes[1] = 'E'
 	elfBytes[2] = 'L'
 	elfBytes[3] = 'F'
-	let elfPath = "/tmp/tin-test-macho-elf"
+	let elfPath = "/tmp/tin-test-macho-elf-{quarry.Pid()}"
 	quarry.WriteFile(elfPath, str(elfBytes)) catch err {
 		say.Line("write failed {err}")
 		return

@@ -11,7 +11,25 @@ import "sift"
 // the changes as `git diff --no-index -M --name-status` and `--stat` print them (rename scores left out: git measures
 // similarity its own way). The golden output is git's, for the same directories (products/tit/tests/treediff_git.sh).
 
-let root = "/tmp/tin-test-tit-treediff"
+// dir is the scratch directory (#1065): $TIN_TEST_DIR when the script that writes the golden output names one (it
+// reads what this program leaves there), else this run's own, removed when main ends.
+let given = quarry.Getenv("TIN_TEST_DIR")
+let root = scratchDir("tin-test-tit-treediff")
+
+fn scratchDir(name str) str {
+	if len(given) > 0 {
+		return given
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
+
+// done removes this run's own scratch directory.
+fn done() {
+	if len(given) == 0 {
+		quarry.RemoveAll(root) catch _ {
+		}
+	}
+}
 
 fn put(rel str, text str) {
 	let path = root + "/" + rel
@@ -121,6 +139,7 @@ fn treeOf(s mut store.Mem, dir str) object.Id {
 }
 
 fn main() {
+	defer done()
 	let args = quarry.Args()
 	setup()
 	if len(args) > 1 && args[1] == "setup" {

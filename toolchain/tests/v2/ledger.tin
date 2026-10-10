@@ -376,7 +376,7 @@ fn main() {
 	say.Line("bom reader", show(rec3[0]))
 
 	// Streaming: the same text through a file, arenas included, and the window limit.
-	let path = "/tmp/tin-test-ledger.txt"
+	let path = "/tmp/tin-test-ledger-{quarry.Pid()}.txt"
 	let stream = "a,b,\"c,d\"\r\n\"e\nf\",g,h\n#comment\nlast,m,n\n"
 	let w = flume.Create(path) catch err {
 		say.Line("create fault", err)

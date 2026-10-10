@@ -9,7 +9,16 @@ import "spawn"
 // Two processes write the same objects into one loose store at the same time (#777): every object ends up whole
 // and readable, and no temporary file is left. The program runs itself twice as the writers.
 
-let dir = "/tmp/tin-test-tit-store-race"
+// dir is this run's own scratch directory (#1065), which the writers it starts are given as their second argument.
+let dir = scratchDir("tin-test-tit-store-race")
+
+fn scratchDir(name str) str {
+	let args = quarry.Args()
+	if len(args) > 2 && args[1] == "writer" {
+		return args[2]
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
 
 const count = 300
 
@@ -36,11 +45,11 @@ fn main() {
 	}
 	quarry.RemoveAll(dir) catch _ {
 	}
-	mut a = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
+	mut a = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer", dir}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
 		say.Line(err)
 		return
 	}
-	mut b = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
+	mut b = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer", dir}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
 		say.Line(err)
 		return
 	}

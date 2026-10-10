@@ -6,8 +6,10 @@ cd "$(dirname "$0")/../../.." || exit 1
 compiler=${1:-bin/tinc}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# the program works in this directory and leaves its files there (#1065)
+export TIN_TEST_DIR="$tmp/work"
 "$compiler" -o "$tmp/status_git" products/tit/tests/programs/status_git.tin
-d=/tmp/tin-test-tit-status
+d=$TIN_TEST_DIR
 "$tmp/status_git" init
 (cd "$d" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm init)
 "$tmp/status_git" stage-files

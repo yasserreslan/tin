@@ -7,18 +7,20 @@ cd "$(dirname "$0")/../../.." || exit 1
 compiler=${1:-bin/tinc}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# the program works in this directory and leaves its files there (#1065)
+export TIN_TEST_DIR="$tmp/work"
 "$compiler" -o "$tmp/treediff_git" products/tit/tests/programs/treediff_git.tin
 "$tmp/treediff_git" setup
 out=$PWD/products/tit/tests/golden/treediff_git.out
 repo=$tmp/repo
 mkdir "$repo"
-cp -R /tmp/tin-test-tit-treediff/a/. "$repo/"
+cp -R "$TIN_TEST_DIR"/a/. "$repo/"
 cd "$repo"
 git init -q
 git add -A
 git -c user.name=t -c user.email=t@t commit -qm a
 find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-cp -R /tmp/tin-test-tit-treediff/b/. .
+cp -R "$TIN_TEST_DIR"/b/. .
 git add -A
 {
 	git diff --cached -M --name-status | sed 's/^R[0-9]*/R/'

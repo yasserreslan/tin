@@ -9,7 +9,8 @@ import "say"
 // Packs real files (#778): every .tin file of the standard library, plus an edited second version of each, is packed;
 // the pack verifies and every object reads back the same. Run from the repository root (products/tit/tests/run.sh).
 
-let out = "/tmp/tin-test-tit-pack-tree"
+// out is this run's own pack directory (#1065).
+let out = "/tmp/tin-test-tit-pack-tree-{quarry.Pid()}"
 
 fn main() {
 	mut s = store.NewMem()

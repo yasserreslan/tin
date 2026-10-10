@@ -177,7 +177,9 @@ fn target(tag str, i i64) str {
 
 // race moves main n times, each from what it read: a move another process made in between is refused RefChanged.
 fn race(n i64, tag str) {
-	mut r = node("/tmp/tin-test-tinhub-race-" + tag)
+	// this run's own store directory (#1065)
+	let dir = "/tmp/tin-test-tinhub-race-{tag}-{quarry.Pid()}"
+	mut r = node(dir)
 	mut landed = 0
 	for i in 0..n {
 		let old = mainOf(mut r)
@@ -190,6 +192,8 @@ fn race(n i64, tag str) {
 		}
 	}
 	say.Line("{landed}")
+	quarry.RemoveAll(dir) catch _ {
+	}
 }
 
 fn checkRace() {
@@ -220,8 +224,10 @@ fn checkRace() {
 
 // redisReads pushes n times and reads each push back through two nodes (two Redis clients), which must see it.
 fn redisReads(n i64) {
-	mut a = node("/tmp/tin-test-tinhub-redis-a")
-	mut b = node("/tmp/tin-test-tinhub-redis-b")
+	// this run's own store directories (#1065)
+	let base = "/tmp/tin-test-tinhub-redis-{quarry.Pid()}"
+	mut a = node(base + "-a")
+	mut b = node(base + "-b")
 	mut old = mainOf(mut a)
 	for i in 0..n {
 		let next = target("redis", i)
@@ -240,6 +246,10 @@ fn redisReads(n i64) {
 		}
 	}
 	say.Line("PASS redis: {n} pushes, each read back through both nodes")
+	for d in []str{base + "-a", base + "-b"} {
+		quarry.RemoveAll(d) catch _ {
+		}
+	}
 }
 
 // crashRun pushes c2, repacks c1's and c2's packs into one and retires the two, then sweeps.

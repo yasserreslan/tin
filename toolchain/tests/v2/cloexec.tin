@@ -12,7 +12,9 @@ import "twine"
 // there the check reports the same zero without examining anything.
 fn main() {
 	// A file the standard library opens, and the relay's wake-up pipes.
-	let w = flume.Create("/tmp/tin-cloexec.tmp") catch _ {
+	// this run's own file (#1065)
+	let path = "/tmp/tin-cloexec-{quarry.Pid()}.tmp"
+	let w = flume.Create(path) catch _ {
 		say.Line("cloexec descriptors without close-on-exec:", 0)
 		return
 	}
@@ -56,4 +58,6 @@ fn main() {
 		result = 1
 	}
 	say.Line("cloexec descriptors without close-on-exec:", result)
+	quarry.Remove(path) catch _ {
+	}
 }

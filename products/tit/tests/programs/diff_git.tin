@@ -9,7 +9,25 @@ import "say"
 // pairs, with its "diff --git" and "index" lines and the function names after "@@" left out (regenerate with
 // products/tit/tests/diff_git.sh).
 
-let dir = "/tmp/tin-test-tit-diff"
+// dir is the scratch directory (#1065): $TIN_TEST_DIR when the script that writes the golden output names one (it
+// reads what this program leaves there), else this run's own, removed when main ends.
+let given = quarry.Getenv("TIN_TEST_DIR")
+let dir = scratchDir("tin-test-tit-diff")
+
+fn scratchDir(name str) str {
+	if len(given) > 0 {
+		return given
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
+
+// done removes this run's own scratch directory.
+fn done() {
+	if len(given) == 0 {
+		quarry.RemoveAll(dir) catch _ {
+		}
+	}
+}
 
 fn numbered(n i64, edits map[i64]str) str {
 	mut out = ""
@@ -43,6 +61,7 @@ fn cases() [][]str {
 }
 
 fn main() {
+	defer done()
 	quarry.RemoveAll(dir) catch _ {
 	}
 	quarry.MkdirAll(dir) catch err {

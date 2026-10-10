@@ -3,20 +3,29 @@ package main
 import "flume"
 import "quarry"
 import "say"
+import "twine"
 
 // quarry's file details (#771): Stat, Lstat, Chmod, Symlink, Readlink, Sync, ReadDirEntries, and flume's
 // CreateExcl and Writer.Sync. The Go twin (bench/ref/quarry_fs) prints the same lines.
+
+// d is this run's own directory (#1065); the lines name it as /tmp/tin-test-quarry-fs.
+let d = "/tmp/tin-test-quarry-fs-{quarry.Pid()}"
+
+// named is an error's text with this run's directory named as the golden output names it.
+fn named(err fault) str {
+	return twine.ReplaceAll("{err}", d, "/tmp/tin-test-quarry-fs")
+}
 
 fn show(label str, path str, follow bool) {
 	mut info = quarry.FileInfo{Type: quarry.FileType.Regular, Perm: 0, Size: 0, Mtime: 0, Ctime: 0, Inode: 0, Device: 0, Links: 0}
 	if follow {
 		info = quarry.Stat(path) catch err {
-			say.Line(label, "error:", err)
+			say.Line(label, "error:", named(err))
 			return
 		}
 	} else {
 		info = quarry.Lstat(path) catch err {
-			say.Line(label, "error:", err)
+			say.Line(label, "error:", named(err))
 			return
 		}
 	}
@@ -30,7 +39,6 @@ fn show(label str, path str, follow bool) {
 }
 
 fn main() {
-	let d = "/tmp/tin-test-quarry-fs"
 	quarry.RemoveAll(d) catch _ {
 	}
 	quarry.MkdirAll(d + "/sub/deeper") catch err {
@@ -74,7 +82,7 @@ fn main() {
 	}
 	say.Line("readlink:", t1)
 	let (_, e1) = quarry.Readlink(d + "/a.txt")
-	say.Line("readlink of a file:", e1)
+	say.Line("readlink of a file:", named(e1))
 	let e2 = quarry.Symlink("x", d + "/link")
 	say.Line("symlink over a name:", e2 != nil)
 	let es = quarry.ReadDirEntries(d) catch err {
@@ -93,7 +101,7 @@ fn main() {
 		say.Line(err)
 	}
 	let e4 = quarry.Sync(d + "/missing")
-	say.Line("sync missing:", e4)
+	say.Line("sync missing:", named(e4))
 	mut w = flume.CreateExcl(d + "/lock") catch err {
 		say.Line(err)
 		return

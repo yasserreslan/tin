@@ -2,6 +2,7 @@ package main
 
 import "say"
 import "flume"
+import "quarry"
 
 fn write_file(path str, content str) ! {
 	let w = try flume.Create(path)
@@ -10,7 +11,7 @@ fn write_file(path str, content str) ! {
 }
 
 fn main() {
-	let path = "/tmp/tin-test-flume_test.txt"
+	let path = "/tmp/tin-test-flume_test-{quarry.Pid()}.txt"
 	let long = say.Fmt("%0100000d", 42)
 	let err = write_file(path, "alpha\nbeta\r\n\ngamma\n" + long + "\nlast line no newline")
 	say.Line("write", err == nil)
@@ -82,7 +83,7 @@ fn main() {
 	say.Line("read", chunks > 0, total, sum, zero)
 	let (_, e4) = flume.Open("/tmp/tin-test-no/such/file")
 	say.Line("missing", e4)
-	let empty = "/tmp/tin-test-flume_empty.txt"
+	let empty = "/tmp/tin-test-flume_empty-{quarry.Pid()}.txt"
 	let ee = write_file(empty, "")
 	let r3 = flume.Open(empty) catch err {
 		say.Line(err)
@@ -99,4 +100,8 @@ fn main() {
 	w.Int(-77)
 	w.Line("!")
 	say.Line("flush", w.Flush() == nil)
+	quarry.Remove(path) catch _ {
+	}
+	quarry.Remove(empty) catch _ {
+	}
 }

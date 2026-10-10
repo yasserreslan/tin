@@ -49,7 +49,7 @@ fn proxy(q anvil.Req, w mut anvil.Out) {
 
 fn file(q anvil.Req, w mut anvil.Out) {
 	let n = q.Param("n")
-	let path = "/tmp/tin-test-tasks-{n}.txt"
+	let path = "/tmp/tin-test-tasks-{quarry.Pid()}-{n}.txt"
 	quarry.WriteFile(path, "hello from a helper thread") catch err {
 		w.Status(500)
 		w.Text("write: {err}")
@@ -59,6 +59,8 @@ fn file(q anvil.Req, w mut anvil.Out) {
 		w.Status(500)
 		w.Text("read: {err}")
 		return
+	}
+	quarry.Remove(path) catch _ {
 	}
 	w.Text("file: {data}")
 }

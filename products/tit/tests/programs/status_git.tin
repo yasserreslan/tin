@@ -13,7 +13,25 @@ import "tide"
 // `git status --porcelain` after the same file changes with git doing the staging (products/tit/tests/status_git.sh
 // runs this program's init, stage-files and work steps around git).
 
-let dir = "/tmp/tin-test-tit-status"
+// dir is the scratch directory (#1065): $TIN_TEST_DIR when the script that writes the golden output names one (it
+// reads what this program leaves there), else this run's own, removed when main ends.
+let given = quarry.Getenv("TIN_TEST_DIR")
+let dir = scratchDir("tin-test-tit-status")
+
+fn scratchDir(name str) str {
+	if len(given) > 0 {
+		return given
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
+
+// done removes this run's own scratch directory.
+fn done() {
+	if len(given) == 0 {
+		quarry.RemoveAll(dir) catch _ {
+		}
+	}
+}
 
 fn put(rel str, text str) {
 	let path = dir + "/" + rel
@@ -97,6 +115,7 @@ fn pathOf(f index.FileStatus) str {
 }
 
 fn main() {
+	defer done()
 	let args = quarry.Args()
 	if len(args) > 1 {
 		if args[1] == "init" {

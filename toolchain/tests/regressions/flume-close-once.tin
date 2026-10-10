@@ -1,6 +1,7 @@
 package main
 
 import "flume"
+import "quarry"
 import "say"
 
 fn check(what str, err fault) {
@@ -19,30 +20,33 @@ fn contents(path str) str {
 	return s
 }
 
+// base is this run's own prefix for its files (#1065).
+let base = "/tmp/tin-test-flume-{quarry.Pid()}"
+
 fn main() {
 	// A second Close must not close the descriptor the OS hands to the next file.
-	let (w, err) = flume.Create("/tmp/tin-test-flume-first")
+	let (w, err) = flume.Create(base + "-first")
 	check("create first", err)
 	check("close first", w.Close())
-	let (v, err2) = flume.Create("/tmp/tin-test-flume-second")
+	let (v, err2) = flume.Create(base + "-second")
 	check("create second", err2)
 	check("close first again", w.Close())
 	v.Str("hello")
 	check("close second", v.Close())
-	say.Line("second holds", contents("/tmp/tin-test-flume-second"))
+	say.Line("second holds", contents(base + "-second"))
 
 	// Writes after Close fail instead of reaching a reused descriptor.
 	w.Str("late")
 	check("flush closed", w.Flush())
 	check("close closed", w.Close())
-	say.Line("first holds", len(contents("/tmp/tin-test-flume-first")))
+	say.Line("first holds", len(contents(base + "-first")))
 
 	// Failed opens carry no descriptor: with fd 0 reused by a file, closing them must leave it alone.
 	let stdin = flume.NewWriter(0)
 	if stdin.Close() != nil {
 		// fd 0 was already closed: the next open reuses it either way.
 	}
-	let (keep0, err3) = flume.Create("/tmp/tin-test-flume-fd0")
+	let (keep0, err3) = flume.Create(base + "-fd0")
 	check("create fd0", err3)
 	let (bad, err4) = flume.Create("/tmp/tin-test-flume-missing/dir/file")
 	check("create missing", err4)
@@ -52,5 +56,9 @@ fn main() {
 	r.Close()
 	keep0.Str("still open")
 	check("close fd0", keep0.Close())
-	say.Line("fd0 holds", contents("/tmp/tin-test-flume-fd0"))
+	say.Line("fd0 holds", contents(base + "-fd0"))
+	for n in []str{"-first", "-second", "-fd0"} {
+		quarry.Remove(base + n) catch _ {
+		}
+	}
 }

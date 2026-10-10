@@ -9,7 +9,25 @@ import "sift"
 // every file the rules ignore. The golden output is what `git ls-files -o -i --exclude-standard` printed for the
 // same tree (regenerate with products/tit/tests/ignore_git.sh).
 
-let root = "/tmp/tin-test-tit-ignore"
+// dir is the scratch directory (#1065): $TIN_TEST_DIR when the script that writes the golden output names one (it
+// reads what this program leaves there), else this run's own, removed when main ends.
+let given = quarry.Getenv("TIN_TEST_DIR")
+let root = scratchDir("tin-test-tit-ignore")
+
+fn scratchDir(name str) str {
+	if len(given) > 0 {
+		return given
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
+
+// done removes this run's own scratch directory.
+fn done() {
+	if len(given) == 0 {
+		quarry.RemoveAll(root) catch _ {
+		}
+	}
+}
 
 let rootRules = "# comment line\n*.log\n!keep.log\nbuild/\n/dist\ndocs/**/*.tmp\n**/cache\na/**/z\nfoo/bar\n[abc]x.txt\n[!0-9]num.dat\n\\#hash\n\\!bang\n*.o\n!lib/*.o\nlogs/\n!logs/\ntmp*\ntrailing\\ \nspaces   \n*.[ch]~\nnested/**\n!nested/keep/\nq?.cfg\n"
 
@@ -28,6 +46,7 @@ let files = []str{
 }
 
 fn main() {
+	defer done()
 	quarry.RemoveAll(root) catch _ {
 	}
 	quarry.MkdirAll(root) catch err {

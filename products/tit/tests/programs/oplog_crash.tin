@@ -12,7 +12,16 @@ import "tide"
 // refs but not reached the commit point. Recovery puts every ref back, and the oplog holds only the operations
 // before it. The program runs itself as the writer.
 
-let dir = "/tmp/tin-test-tit-oplog-crash"
+// dir is this run's own scratch directory (#1065), which the writers it starts are given as their second argument.
+let dir = scratchDir("tin-test-tit-oplog-crash")
+
+fn scratchDir(name str) str {
+	let args = quarry.Args()
+	if len(args) > 2 && args[1] == "writer" {
+		return args[2]
+	}
+	return "/tmp/{name}-{quarry.Pid()}"
+}
 
 fn c(s str) str {
 	return object.Hash(object.Kind.Blob, s).Hex()
@@ -57,7 +66,7 @@ fn main() {
 		say.Line(err)
 		0
 	}
-	mut p = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer"}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
+	mut p = spawn.Start(spawn.Cmd{Argv: []str{args[0], "writer", dir}, Env: spawn.Env.Inherit, Dir: "", Stdin: spawn.Stdio.Null, Stdout: spawn.Stdio.Inherit, Stderr: spawn.Stdio.Inherit, MaxOutput: 0}) catch err {
 		say.Line(err)
 		return
 	}
