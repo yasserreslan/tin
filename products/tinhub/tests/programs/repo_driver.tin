@@ -411,14 +411,15 @@ fn main() {
 			}
 		}
 		"grant" => {
-			// grant EMAIL ROLE [REPO]: the user with that email gets ROLE on ada/REPO (ada/tin by default)
+			// grant EMAIL ROLE [REPO]: the user with that email gets ROLE on ada/REPO (ada/tin by default), in place of a role
+			// they had
 			let email = arg(2)
 			let role = arg(3)
 			mut name = "tin"
 			if len(args) > 4 {
 				name = args[4]
 			}
-			_ = pg.Exec("INSERT INTO grants (repo_id, user_id, role) SELECT r.id, u.id, {role} FROM users u, repos r WHERE lower(u.email) = lower({email}) AND r.owner_id = 1 AND r.name = {name}") catch err {
+			_ = pg.Exec("INSERT INTO grants (repo_id, user_id, role) SELECT r.id, u.id, {role} FROM users u, repos r WHERE lower(u.email) = lower({email}) AND r.owner_id = 1 AND r.name = {name} ON CONFLICT (repo_id, user_id) DO UPDATE SET role = excluded.role") catch err {
 				die("grant", err)
 				postgres.Result{Affected: 0}
 			}

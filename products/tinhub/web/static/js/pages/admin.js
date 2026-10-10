@@ -103,7 +103,7 @@ async function audit(ctx, main) {
 			rows.replaceChildren();
 		}
 		const r = await api.get("/admin/audit", { cursor, limit: 50, action: filter.value.trim() });
-		for (const e of r.entries || []) rows.append(auditRow(e, { ip: true }));
+		for (const e of r.entries || []) rows.append(auditRow(e, { ip: true, target: true }));
 		cursor = r.next || "";
 		if (!rows.childNodes.length) rows.append(h("tr", {}, h("td.muted.center", { colspan: 4 }, "Nothing matches.")));
 		if (reset) moreBox.replaceChildren(cursor ? more(() => load(false)) : "");
