@@ -1550,5 +1550,33 @@
       "stdout": "short: a=m|| f=9,0 b=false,false p=5p,0 o=nil,nil, i=1,0,0\nempty: a=|| f=0,0 b=false,false p=0,0 o=nil,nil, i=0,0,0\nnull: a=x|y|z f=1.5,2.5 b=true,true p=1p,2q o=7,8, i=4,5,6\nlong: a=x|y|z f=1.5,2.5 b=true,true p=1p,2q o=7,8, i=1,2,3\n",
       "stderr": ""
     }
+  },
+  {
+    "source": "arena-alias-mut-param.tin",
+    "issue": 707,
+    "expected": {
+      "phase": "run",
+      "exit": 0,
+      "stdout": "3\n10\n",
+      "stderr": ""
+    }
+  },
+  {
+    "source": "arena-alias-nonmut-param.tin",
+    "issue": 707,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr": "toolchain/tests/regressions/arena-alias-nonmut-param.tin:12:7: error E701 NOT_MUT: cannot modify parameter 'w': declare it mut\n"
+    }
+  },
+  {
+    "source": "arena-alias-request-escape.tin",
+    "issue": 707,
+    "expected": {
+      "phase": "compile",
+      "exit": 1,
+      "stderr": "toolchain/tests/regressions/arena-alias-request-escape.tin:19:2: error E312 ARG_ESCAPE: fill stores request memory into its mut parameter 'w', but this argument may be long-lived: keep() the stored values inside fill\n"
+    }
   }
 ]

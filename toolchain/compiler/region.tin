@@ -528,20 +528,25 @@ fn rg_record(recs []i64, i i64, o i64, t i64) {
 }
 
 fn rg_param_name(i i64) str {
-	return cast(Fn, rg_fn).locals[i].name
+	let pf = rg_param_fn()
+	return pf.locals[i].name
 }
 
 // rg_store checks a store of a value with bits v and type t into a container with bits c,
 // an object of type ct held by an object of type co (see rg_record).
 fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname str) {
+	let pf = rg_param_fn()
+	let psum = pf.regsum
 	mut i = 0
-	for i < rg_nparams && i < RG_MAXP {
+	for i < len(pf.params) && i < RG_MAXP {
 		if (c & (RG_P0 << i)) != 0 {
-			if rg_report != 0 && cast(Fn, rg_fn).muts[i] == 0 && (rg_modrep & (1 << i)) == 0 {
+			if rg_report != 0 && pf.muts[i] == 0 && (rg_modrep & (1 << i)) == 0 {
 				rg_modrep = rg_modrep | (1 << i)
 				err_code_quoted(pos, "E701 NOT_MUT", "cannot modify parameter ", rg_param_name(i), ": declare it mut")
 			}
-			rg_record(cast([]i64, rg_sum[11]), i, co, ct)
+			if psum != 0 {
+				rg_record(cast([]i64, psum[11]), i, co, ct)
+			}
 		}
 		i = i + 1
 	}
@@ -569,13 +574,13 @@ fn rg_store(c i64, co i64, ct i64, v i64, t i64, pos i64, gname str) {
 		}
 	}
 	i = 0
-	for i < rg_nparams && i < RG_MAXP {
-		if (c & (RG_P0 << i)) != 0 {
-			if (rg_sum[0] & (1 << i)) == 0 {
-				rg_sum[0] = rg_sum[0] | (1 << i)
+	for i < len(pf.params) && i < RG_MAXP {
+		if (c & (RG_P0 << i)) != 0 && psum != 0 {
+			if (psum[0] & (1 << i)) == 0 {
+				psum[0] = psum[0] | (1 << i)
 				rg_changed = 1
 			}
-			rg_record(cast([]i64, rg_sum[10]), i, co, ct)
+			rg_record(cast([]i64, psum[10]), i, co, ct)
 		}
 		i = i + 1
 	}
@@ -1003,6 +1008,18 @@ fn rg_in_arena() i64 {
 	return 0
 }
 
+// rg_param_fn is the function whose parameters the running function's parameter bits name. An
+// arena's closure has one parameter, $r, an integer that holds no bits, so the parameter bits it
+// sees came in through captured variables (rg_cell_bits): they belong to the nearest enclosing
+// function that is not an arena's closure.
+fn rg_param_fn() Fn {
+	mut f = cast(Fn, rg_fn)
+	for rg_is_arena(cast(i64, f)) != 0 && f.parent != 0 {
+		f = cast(Fn, f.parent)
+	}
+	return f
+}
+
 // rg_arena_made reports whether a value with bits v may be memory made in the arena.
 fn rg_arena_made(v i64) i64 {
 	return i64((v & RG_FRESH) != 0 || ((v & RG_EMB) != 0 && (v & RG_OUT) == 0))
@@ -1036,13 +1053,14 @@ fn rg_grow(b i64, pos i64) {
 	if (b & (RG_INGOT | RG_UNK)) != 0 {
 		rg_keeps()
 	}
+	let pf = rg_param_fn()
 	mut i = 0
-	for i < rg_nparams && i < RG_MAXP {
+	for i < len(pf.params) && i < RG_MAXP {
 		if (b & (RG_P0 << i)) != 0 {
 			if cast(i64, rg_grows) == 0 {
 				rg_grows = []i64{}
 			}
-			if rg_merge(rg_grows, rg_fn, 1 << i) != 0 {
+			if rg_merge(rg_grows, cast(i64, pf), 1 << i) != 0 {
 				rg_changed = 1
 			}
 		}
@@ -1056,20 +1074,21 @@ fn rg_grow(b i64, pos i64) {
 // rg_arena_store notes a store of bits v into a container with bits c: in terms of the running
 // function's parameters, for its callers, and as E315 when it takes arena memory outside.
 fn rg_arena_store(c i64, v i64, pos i64) {
+	let pf = rg_param_fn()
 	mut i = 0
-	for i < rg_nparams && i < RG_MAXP && i < 62 {
+	for i < len(pf.params) && i < RG_MAXP && i < 62 {
 		if (c & (RG_P0 << i)) != 0 {
 			if (v & RG_FRESH) != 0 {
 				if cast(i64, rg_fstores) == 0 {
 					rg_fstores = []i64{}
 				}
-				if rg_merge(rg_fstores, rg_fn, 1 << i) != 0 {
+				if rg_merge(rg_fstores, cast(i64, pf), 1 << i) != 0 {
 					rg_changed = 1
 				}
 			}
 			mut j = 0
 			mut from = 0
-			for j < rg_nparams && j < RG_MAXP && j < 62 {
+			for j < len(pf.params) && j < RG_MAXP && j < 62 {
 				if (v & (RG_P0 << j)) != 0 {
 					from = from | (1 << j)
 				}
@@ -1087,12 +1106,13 @@ fn rg_arena_store(c i64, v i64, pos i64) {
 }
 
 fn rg_pstore_add(i i64, from i64) i64 {
+	let f = cast(i64, rg_param_fn())
 	if cast(i64, rg_pstores) == 0 {
 		rg_pstores = []i64{}
 	}
 	mut k = 0
 	for k < len(rg_pstores) {
-		if cast([]i64, rg_pstores)[k] == rg_fn && cast([]i64, rg_pstores)[k + 1] == i {
+		if cast([]i64, rg_pstores)[k] == f && cast([]i64, rg_pstores)[k + 1] == i {
 			let old = cast([]i64, rg_pstores)[k + 2]
 			cast([]i64, rg_pstores)[k + 2] = old | from
 			return i64((old | from) != old)
@@ -1100,7 +1120,7 @@ fn rg_pstore_add(i i64, from i64) i64 {
 		k = k + 3
 	}
 	mut vs1 = cast([]i64, rg_pstores)
-	vs1 = append(vs1, rg_fn)
+	vs1 = append(vs1, f)
 	mut vs2 = cast([]i64, rg_pstores)
 	vs2 = append(vs2, i)
 	mut vs3 = cast([]i64, rg_pstores)
