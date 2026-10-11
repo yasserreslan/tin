@@ -834,7 +834,7 @@ Package glyph is UTF-8 (like Go's unicode/utf8) and Unicode: general categories,
 - `FullRune(s str, i i64) bool`: FullRune reports whether s[i:] begins with a complete encoded rune (invalid bytes count as complete).
 - `RuneCount(s str) i64`: RuneCount returns the number of runes in s, counting each invalid byte as one rune.
 - `Valid(s str) bool`: Valid reports whether s is entirely valid UTF-8.
-- `const UnicodeVersion = "15.0.0"`: UnicodeVersion is the version of the Unicode Character Database the tables come from.
+- `const UnicodeVersion = "17.0.0"`: UnicodeVersion is the version of the Unicode Character Database the tables come from.
 - `type Table enum`: Table names a set of code points by Unicode's own name: a general category (Lu, Nd, P), a script (Latin, Han, Arabic) or a property (White_Space, Dash). Use it with Is.
 - `TableOf(name str) ?Table`: TableOf returns the table with a Unicode name: a general category (Lu, Nd, P), a script (Latin, Han, Arabic) or a property (White_Space, Dash). It returns nil for a name with no table, so a pattern like \p{Greek} can be refused.
 - `TableRanges(t Table) []i64`: TableRanges returns the table's code points as low, high pairs, with strides expanded, for a caller that builds its own classes (lasso's \p{...}).
