@@ -2269,13 +2269,13 @@ Package seal has cryptographic hashes (MD5, SHA-256, SHA-384, SHA-512, SHA-1, SH
 - `Hex(b []u8) str`: Hex encodes b in lower-case hexadecimal.
 - `HexDecode(s str) ![]u8`: HexDecode decodes hexadecimal text.
 - `B64(b []u8) str`: B64 encodes b as standard padded base64.
-- `B64Decode(s str) ![]u8`: B64Decode decodes standard padded base64.
+- `B64Decode(s str) ![]u8`: B64Decode decodes standard padded base64 as Go's strict StdEncoding does: "\r" and "\n" are skipped and the unused low bits must be zero.
 - `B64URL(b []u8) str`: B64URL encodes b as unpadded URL-safe base64 (as in JWTs).
-- `B64URLDecode(s str) ![]u8`: B64URLDecode decodes unpadded URL-safe base64.
+- `B64URLDecode(s str) ![]u8`: B64URLDecode decodes unpadded URL-safe base64 as Go's strict RawURLEncoding does: "\r" and "\n" are skipped and the unused low bits must be zero.
 - `Base32(b []u8) str`: Base32 encodes b as standard padded base32 (RFC 4648).
 - `Base32Hex(b []u8) str`: Base32Hex encodes b as padded base32 with the extended-hex alphabet (RFC 4648).
 - `Base32NoPad(b []u8) str`: Base32NoPad encodes b as standard base32 without the padding characters.
-- `Base32Decode(s str) ![]u8`: Base32Decode decodes standard base32; the padding is optional.
+- `Base32Decode(s str) ![]u8`: Base32Decode decodes standard padded base32, as Go's StdEncoding does: "\r" and "\n" are skipped.
 - `Base32HexDecode(s str) ![]u8`: Base32HexDecode decodes extended-hex base32.
 - `Ascii85(b []u8) str`: Ascii85 encodes b with the ascii85 alphabet. The <~ and ~> delimiters are the caller's.
 - `Ascii85MaxLen(n i64) i64`: Ascii85MaxLen is the most Ascii85 writes for n bytes.
