@@ -1479,7 +1479,7 @@ Package trail manipulates slash-separated file paths (like Go's path/filepath on
 - `Join2(a str, b str) str`: Join2 joins two path elements like Go's filepath.Join(a, b).
 - `Join3(a str, b str, c str) str`: Join3 joins three path elements like Go's filepath.Join(a, b, c).
 - `Rel(base str, targ str) !str`: Rel returns a relative path that is lexically equivalent to targ when joined to base, or a fault when one is absolute and the other is not or base holds "..".
-- `Match(pattern str, name str) !bool`: Match reports whether name matches the shell pattern: '*' (no slash), '?', '[a-z]', '[^x]' and '\' escapes, like Go's filepath.Match.
+- `Match(pattern str, name str) !bool`: Match reports whether name matches the shell pattern: '*' (no slash), '?', '[a-z]', '[^x]' and '\' escapes, like Go's path.Match: a malformed pattern is a fault even when the name stops matching before it (Go's filepath.Match returns false there).
 
 ## lever
 
