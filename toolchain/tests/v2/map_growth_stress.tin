@@ -137,7 +137,7 @@ fn main() {
 		kk = lcg(kk)
 		let value = m[kk]
 		sum += value
-		if i == stepAt {
+		if kk == stepKey {
 			stepFinalValue = value
 			stepFinalOK = value == i
 		}
@@ -171,7 +171,7 @@ fn main() {
 		freshValue = freshGot
 		freshOK = freshFound
 	}
-	if stepAt >= 0 && badAt < 0 {
+	if stepAt >= 0 {
 		for entryKey, entryValue in m {
 			if entryKey == stepKey {
 				stepScanFound = true
