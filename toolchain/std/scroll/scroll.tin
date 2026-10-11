@@ -9,7 +9,9 @@
 package scroll
 
 import "fault"
+import "glyph"
 import "say"
+import "twine"
 
 // Token is one piece of an XML document.
 type Token enum {
@@ -56,6 +58,7 @@ type Decoder struct {
 	line     i64
 	col      i64
 	stack    []Name
+	qnames   []str // the open elements' names as written, prefix included, for their end tags
 	ns       []nsScope
 	pending  []Token
 	rootSeen bool
@@ -69,7 +72,7 @@ type Decoder struct {
 // NewDecoder returns a decoder over text in strict mode: matching end tags, a single root, valid
 // names, unique attributes and valid characters are enforced.
 fn NewDecoder(text str) Decoder {
-	return Decoder{text: text, pos: 0, line: 1, col: 1, stack: []Name{}, ns: []nsScope{}, pending: []Token{}, rootSeen: false, done: false, strict: true, maxDepth: maxDepth, maxAttrs: maxAttrs, maxToken: maxToken}
+	return Decoder{text: text, pos: 0, line: 1, col: 1, stack: []Name{}, qnames: []str{}, ns: []nsScope{}, pending: []Token{}, rootSeen: false, done: false, strict: true, maxDepth: maxDepth, maxAttrs: maxAttrs, maxToken: maxToken}
 }
 
 // NewLenientDecoder is NewDecoder without the well-formedness checks.
@@ -153,8 +156,14 @@ fn (d mut Decoder) Next() !Token {
 		if d.has("--") {
 			return try d.readComment()
 		}
+		if d.strict && d.has("-") {
+			fail d.failAt("invalid sequence <!- not part of <!--")
+		}
 		if d.has("[CDATA[") {
 			return try d.readCDATA()
+		}
+		if d.strict && d.has("[") {
+			fail d.failAt("invalid <![ sequence")
 		}
 		return try d.readDirective()
 	}
@@ -229,7 +238,21 @@ fn (d mut Decoder) readName() !str {
 	for d.pos < len(d.text) && nameByte(d.text[d.pos]) {
 		d.advance()
 	}
-	return d.text[start:d.pos]
+	let name = d.text[start:d.pos]
+	if d.strict && !glyph.Valid(name) {
+		fail d.failAt("invalid UTF-8 in a name")
+	}
+	return name
+}
+
+// readQName reads an element or attribute name. In strict mode a name with more than one colon
+// fails, as in Go's decoder (Namespaces in XML allows one).
+fn (d mut Decoder) readQName() !str {
+	let name = try d.readName()
+	if d.strict && twine.Count(name, ":") > 1 {
+		fail d.failAt(say.Fmt("invalid name %s", name))
+	}
+	return name
 }
 
 // skipSpace skips XML whitespace.
@@ -246,7 +269,7 @@ fn (d mut Decoder) skipSpace() {
 
 // readStart reads a start tag, its attributes and its namespaces, and pushes the element.
 fn (d mut Decoder) readStart() !Token {
-	let name = try d.readName()
+	let name = try d.readQName()
 	let attrs = try d.readAttrs()
 	d.skipSpace()
 	mut selfClose = false
@@ -267,8 +290,12 @@ fn (d mut Decoder) readStart() !Token {
 	// Resolve namespaces from the xmlns attributes.
 	let (element, out) = try d.pushNS(splitName(name), attrs)
 	d.stack = append(d.stack, element)
+	d.qnames = append(d.qnames, name)
 	if selfClose {
 		d.stack = d.stack[0:len(d.stack)-1]
+		d.qnames = d.qnames[0:len(d.qnames)-1]
+		// The element's declarations end with it.
+		d.popNS(len(d.stack))
 		d.pending = append(d.pending, Token.EndElement(element))
 	}
 	return Token.StartElement(element, out)
@@ -358,7 +385,7 @@ fn (d mut Decoder) readAttrs() ![]Attr {
 		if c == '>' || c == '/' {
 			return out
 		}
-		let name = try d.readName()
+		let name = try d.readQName()
 		if d.strict {
 			if len(out) >= d.maxAttrs {
 				fail fault.Wrap(fault.LimitExceeded, say.Fmt("scroll: over %d attributes", d.maxAttrs))
@@ -381,6 +408,9 @@ fn (d mut Decoder) readAttrs() ![]Attr {
 		d.advance()
 		let start = d.pos
 		for d.pos < len(d.text) && d.text[d.pos] != quote {
+			if d.strict && d.text[d.pos] == '<' {
+				fail d.failAt("unescaped < in an attribute value")
+			}
 			d.advance()
 		}
 		if d.pos >= len(d.text) {
@@ -396,20 +426,28 @@ fn (d mut Decoder) readAttrs() ![]Attr {
 	}
 }
 
-// splitName splits a qualified name into (prefix, local).
+// splitName splits a qualified name into (prefix, local). As in Go's decoder, a name with more
+// than one colon, or with nothing before or after its colon, is all local part.
 fn splitName(q str) Name {
+	mut colon = -1
 	for i in 0..len(q) {
 		if q[i] == ':' {
-			return Name{Space: q[0:i], Local: q[i+1:len(q)]}
+			if colon >= 0 {
+				return Name{Space: "", Local: q}
+			}
+			colon = i
 		}
 	}
-	return Name{Space: "", Local: q}
+	if colon <= 0 || colon == len(q)-1 {
+		return Name{Space: "", Local: q}
+	}
+	return Name{Space: q[0:colon], Local: q[colon+1:len(q)]}
 }
 
 // readEnd reads an end tag and checks it against the open element.
 fn (d mut Decoder) readEnd() !Token {
 	try d.expect('/')
-	let name = try d.readName()
+	let name = try d.readQName()
 	d.skipSpace()
 	try d.expect('>')
 	if len(d.stack) == 0 {
@@ -419,10 +457,13 @@ fn (d mut Decoder) readEnd() !Token {
 		return Token.EndElement(splitName(name))
 	}
 	let open = d.stack[len(d.stack)-1]
+	let qname = d.qnames[len(d.qnames)-1]
 	d.stack = d.stack[0:len(d.stack)-1]
-	d.popNS(len(d.stack) + 1)
-	if d.strict && open.Local != splitName(name).Local {
-		fail d.failAt(say.Fmt("end tag %s does not match %s", name, open.Local))
+	d.qnames = d.qnames[0:len(d.qnames)-1]
+	// The scope pushNS opened for this element is at its depth, the stack's length now.
+	d.popNS(len(d.stack))
+	if d.strict && qname != name {
+		fail d.failAt(say.Fmt("end tag %s does not match %s", name, qname))
 	}
 	return Token.EndElement(open)
 }
@@ -441,6 +482,11 @@ fn (d mut Decoder) readComment() !Token {
 		}
 		if d.text[d.pos] == '-' && d.text[d.pos+1] == '-' && d.text[d.pos+2] == '>' {
 			let body = d.text[start:d.pos]
+			// XML 1.0 §2.5 and Go's decoder: "--" may not appear inside a comment, and "--->" does
+			// not end one.
+			if d.strict && (len(body) > 0 && body[len(body)-1] == '-' || indexOfDashes(body) >= 0) {
+				fail d.failAt("-- is not allowed inside a comment")
+			}
 			d.advance()
 			d.advance()
 			d.advance()
@@ -462,7 +508,7 @@ fn (d mut Decoder) readCDATA() !Token {
 			fail fault.Wrap(fault.LimitExceeded, say.Fmt("scroll: token over %d bytes", d.maxToken))
 		}
 		if d.text[d.pos] == ']' && d.text[d.pos+1] == ']' && d.text[d.pos+2] == '>' {
-			let body = d.text[start:d.pos]
+			let body = normalizeNewlines(d.text[start:d.pos])
 			d.advance()
 			d.advance()
 			d.advance()
@@ -472,23 +518,53 @@ fn (d mut Decoder) readCDATA() !Token {
 	}
 }
 
-// readDirective reads <!DOCTYPE ...> and passes it through, never processing it.
+// readDirective reads <!DOCTYPE ...> and passes it through, never processing it. As in Go's
+// decoder, a quoted '<' or '>' does not nest or end it, and a comment inside it becomes a space.
 fn (d mut Decoder) readDirective() !Token {
 	let start = d.pos
+	mut body = []u8{}
 	mut depth = 0
+	mut inquote = u8(0)
 	for d.pos < len(d.text) {
+		if d.pos-start > d.maxToken {
+			fail fault.Wrap(fault.LimitExceeded, say.Fmt("scroll: token over %d bytes", d.maxToken))
+		}
 		let c = d.text[d.pos]
-		if c == '<' {
-			depth += 1
-		} else if c == '>' {
-			if depth == 0 {
-				let body = d.text[start:d.pos]
-				d.advance()
-				return Token.Directive(body)
-			}
-			depth -= 1
+		if inquote == 0 && c == '>' && depth == 0 {
+			d.advance()
+			return Token.Directive(str(body))
 		}
 		d.advance()
+		if inquote != 0 {
+			if c == inquote {
+				inquote = 0
+			}
+			body = append(body, c)
+		} else if c == '"' || c == '\'' {
+			inquote = c
+			body = append(body, c)
+		} else if c == '>' {
+			depth -= 1
+			body = append(body, c)
+		} else if c == '<' && d.has("!--") {
+			d.advanceTo(3)
+			for {
+				if d.pos+2 >= len(d.text) {
+					fail d.failAt("unclosed comment")
+				}
+				if d.has("-->") {
+					d.advanceTo(3)
+					break
+				}
+				d.advance()
+			}
+			body = append(body, u8(' '))
+		} else {
+			if c == '<' {
+				depth += 1
+			}
+			body = append(body, c)
+		}
 	}
 	fail d.failAt("unclosed directive")
 }
@@ -503,6 +579,9 @@ fn (d mut Decoder) readProcInst() !Token {
 		if d.pos+1 >= len(d.text) {
 			fail d.failAt("unclosed processing instruction")
 		}
+		if d.pos-start > d.maxToken {
+			fail fault.Wrap(fault.LimitExceeded, say.Fmt("scroll: token over %d bytes", d.maxToken))
+		}
 		if d.text[d.pos] == '?' && d.text[d.pos+1] == '>' {
 			let inst = d.text[start:d.pos]
 			d.advance()
@@ -511,6 +590,16 @@ fn (d mut Decoder) readProcInst() !Token {
 		}
 		d.advance()
 	}
+}
+
+// indexOfDashes returns the position of the first "--" in s, or -1.
+fn indexOfDashes(s str) i64 {
+	for i in 0..len(s)-1 {
+		if s[i] == '-' && s[i+1] == '-' {
+			return i
+		}
+	}
+	return -1
 }
 
 // advanceTo moves forward n bytes.

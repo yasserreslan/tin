@@ -1,0 +1,76 @@
+doc "<r><a xmlns=\"urn:a\"/><b/></r>"
+start  r
+start urn:a a :xmlns="urn:a"
+end urn:a a
+start  b
+end  b
+end  r
+done
+doc "<r><a xmlns=\"urn:a\"></a><b/></r>"
+start  r
+start urn:a a :xmlns="urn:a"
+end urn:a a
+start  b
+end  b
+end  r
+done
+doc "<r xmlns:p=\"urn:r\"><a xmlns:p=\"urn:a\"/><p:b/></r>"
+start  r xmlns:p="urn:r"
+start  a xmlns:p="urn:a"
+end  a
+start urn:r b
+end urn:r b
+end  r
+done
+doc "<r>a\r\nb\rc<![CDATA[x\r\ny\rz]]>&#13;</r>"
+start  r
+text "a\nb\nc"
+text "x\ny\nz"
+text "\r"
+end  r
+done
+doc "<r a=\"x\r\ny\rz\"/>"
+start  r :a="x\ny\nz"
+end  r
+done
+doc "<!DOCTYPE r [<!ENTITY a \"x>y\"><!-- c > --><!ATTLIST r b CDATA '>'>]><r/>"
+directive "DOCTYPE r [<!ENTITY a \"x>y\"> <!ATTLIST r b CDATA '>'>]"
+start  r
+end  r
+done
+doc "<!DOCTYPE r [<!-- a --><!-- b -->]><r/>"
+directive "DOCTYPE r [  ]"
+start  r
+end  r
+done
+doc "<x:/>"
+start  x:
+end  x:
+done
+doc "<r :a=\"1\" b:=\"2\"/>"
+start  r ::a="1" :b:="2"
+end  r
+done
+doc "<r><!-x></r>"
+start  r
+fault
+doc "<r a=\"<\"/>"
+fault
+doc "<r><![CDAT[x]]></r>"
+start  r
+fault
+doc "<a:b:c/>"
+fault
+doc "<r a:b:c=\"1\"/>"
+fault
+doc "<r\xc3/>"
+fault
+doc "<r><!-- a -- b --></r>"
+start  r
+fault
+doc "<r><!-- a ---></r>"
+start  r
+fault
+doc "<a:x xmlns:a=\"u\" xmlns:b=\"u\"></b:x>"
+start u x xmlns:a="u" xmlns:b="u"
+fault

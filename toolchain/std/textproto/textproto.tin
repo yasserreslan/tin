@@ -23,10 +23,15 @@ type DotReader struct {
 
 // DotWriter writes dot-stuffed bytes into a Writer.
 type DotWriter struct {
-	writer    Writer
-	lineStart bool
-	closed    bool
+	writer Writer
+	state  i64 // dwBegin, dwBeginLine, dwCR or dwData, as Go's dotWriter
+	closed bool
 }
+
+const dwBegin = 0
+const dwBeginLine = 1
+const dwCR = 2
+const dwData = 3
 
 // NewReader creates a reader over data.
 fn NewReader(data str) Reader {
@@ -50,44 +55,118 @@ fn (r mut Reader) ReadLine() !str {
 	mut end = r.pos
 	if r.pos < len(r.data) {
 		r.pos += 1
-	}
-	if end > start && r.data[end-1] == '\r' {
-		end -= 1
+		// Only a line ended by "\n" drops its "\r": a last line without one keeps it, as Go's
+		// bufio.Reader.ReadLine does.
+		if end > start && r.data[end-1] == '\r' {
+			end -= 1
+		}
 	}
 	return r.data[start:end]
 }
 
-// ReadContinuedLine joins a line and following whitespace-prefixed lines with single spaces.
+// ReadContinuedLine joins a line and following whitespace-prefixed lines with single spaces,
+// as Go's ReadContinuedLine: each part loses the spaces and tabs around it, and an empty first
+// line has no continuation.
 fn (r mut Reader) ReadContinuedLine() !str {
-	mut line = try r.ReadLine()
-	for r.pos < len(r.data) && (r.data[r.pos] == ' ' || r.data[r.pos] == '\t') {
-		let next = try r.ReadLine()
-		line += " " + twine.TrimSpace(next)
+	let first = try r.ReadLine()
+	if len(first) == 0 {
+		return first
+	}
+	mut line = trimSpTab(first)
+	for r.skipSpace() > 0 {
+		line += " "
+		let next = r.ReadLine() catch _ {
+			break
+		}
+		line += trimSpTab(next)
 	}
 	return line
 }
 
-// ReadDotBytes reads through the terminating dot line and removes one leading dot per body line.
+// skipSpace skips the spaces and tabs at the reader's position and returns how many.
+fn (r mut Reader) skipSpace() i64 {
+	mut n = 0
+	for r.pos < len(r.data) && (r.data[r.pos] == ' ' || r.data[r.pos] == '\t') {
+		r.pos += 1
+		n += 1
+	}
+	return n
+}
+
+// trimSpTab is s without the spaces and tabs at either end (Go's textproto trim).
+fn trimSpTab(s str) str {
+	mut i = 0
+	mut n = len(s)
+	for i < n && (s[i] == ' ' || s[i] == '\t') {
+		i += 1
+	}
+	for n > i && (s[n-1] == ' ' || s[n-1] == '\t') {
+		n -= 1
+	}
+	return s[i:n]
+}
+
+// ReadDotBytes reads through the terminating dot line and decodes the body as Go's DotReader
+// does: a leading dot is removed from every line, "\r\n" becomes "\n", and the body ends at a
+// line that is only a dot. Input that ends before that line fails.
 fn (r mut Reader) ReadDotBytes() !str {
 	mut out = []u8{}
-	mut ended = false
+	// Go's states: 0 the start of a line, 1 a dot read there, 2 a dot and "\r", 3 a "\r" read,
+	// 4 in a line.
+	mut state = 0
 	for r.pos < len(r.data) {
-		let line = try r.ReadLine()
-		if line == "." {
-			ended = true
-			break
+		let c = r.data[r.pos]
+		r.pos += 1
+		if state == 0 {
+			if c == '.' {
+				state = 1
+				continue
+			}
+			if c == '\r' {
+				state = 3
+				continue
+			}
+			state = 4
+		} else if state == 1 {
+			if c == '\r' {
+				state = 2
+				continue
+			}
+			if c == '\n' {
+				return str(out)
+			}
+			state = 4
+		} else if state == 2 {
+			if c == '\n' {
+				return str(out)
+			}
+			// Not ".\r\n": the dot is dropped and the "\r" kept; c is read again.
+			r.pos -= 1
+			out = append(out, u8('\r'))
+			state = 4
+			continue
+		} else if state == 3 {
+			if c == '\n' {
+				out = append(out, c)
+				state = 0
+				continue
+			}
+			r.pos -= 1
+			out = append(out, u8('\r'))
+			state = 4
+			continue
+		} else {
+			if c == '\r' {
+				state = 3
+				continue
+			}
+			if c == '\n' {
+				state = 0
+			}
 		}
-		mut content = line
-		if twine.HasPrefix(line, "..") {
-			content = line[1:len(line)]
-		}
-		out = append(out, content...)
-		out = append(out, u8('\n'))
+		out = append(out, c)
 	}
-	if !ended {
-		fail say.Fault("textproto: unexpected EOF")
-	}
-	return str(out)
+	fail say.Fault("textproto: unexpected EOF")
 }
 
 // ReadDotReader consumes a dot-framed body and returns a reader over its decoded bytes.
@@ -113,24 +192,53 @@ fn (w mut Writer) WriteLine(line str) {
 
 // DotWriter starts a dot-stuffed body writer.
 fn (w Writer) DotWriter() DotWriter {
-	return DotWriter{writer: w, lineStart: true}
+	return DotWriter{writer: w, state: dwBegin}
 }
 
-// Write dot-stuffs a chunk and appends it to the associated Writer.
+// Write dot-stuffs a chunk and appends it to the associated Writer, as Go's DotWriter: a
+// leading dot is doubled and a bare "\n" becomes "\r\n".
 fn (d mut DotWriter) Write(data []u8) !i64 {
-	if d.closed { fail say.Fault("textproto: write to closed dot writer") }
+	if d.closed {
+		fail say.Fault("textproto: write to closed dot writer")
+	}
 	for c in data {
-		if d.lineStart && c == '.' { d.writer.data = append(d.writer.data, u8('.')) }
+		if d.state == dwBegin || d.state == dwBeginLine {
+			d.state = dwData
+			if c == '.' {
+				d.writer.data = append(d.writer.data, u8('.'))
+			}
+		}
+		if d.state == dwData {
+			if c == '\r' {
+				d.state = dwCR
+			}
+			if c == '\n' {
+				d.writer.data = append(d.writer.data, u8('\r'))
+				d.state = dwBeginLine
+			}
+		} else if d.state == dwCR {
+			d.state = dwData
+			if c == '\n' {
+				d.state = dwBeginLine
+			}
+		}
 		d.writer.data = append(d.writer.data, c)
-		d.lineStart = c == '\n'
 	}
 	return len(data)
 }
 
-// Close writes the terminating dot line.
+// Close ends the last line if it is open and writes the terminating dot line. With nothing
+// written the body is one empty line, as Go's DotWriter writes it.
 fn (d mut DotWriter) Close() ! {
-	if d.closed { return }
-	if !d.lineStart { d.writer.data = append(d.writer.data, u8('\r'), u8('\n')) }
+	if d.closed {
+		return
+	}
+	if d.state != dwCR && d.state != dwBeginLine {
+		d.writer.data = append(d.writer.data, u8('\r'))
+	}
+	if d.state != dwBeginLine {
+		d.writer.data = append(d.writer.data, u8('\n'))
+	}
 	d.writer.data = append(d.writer.data, u8('.'), u8('\r'), u8('\n'))
 	d.closed = true
 }
