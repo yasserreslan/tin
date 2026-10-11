@@ -3506,13 +3506,13 @@ Package mail reads RFC 5322 messages, addresses and dates.
 - `type Address struct`: Address is a name-addr or addr-spec with an optional display name.
 - `type Header map[str][]str`: Header holds canonical header names and all values in wire order.
 - `type Message struct`: Message is a parsed RFC 5322 message.
-- `ReadMessage(src mut dyn io.Reader) !Message`: ReadMessage reads a message and separates its headers from its body.
+- `ReadMessage(src mut dyn io.Reader) !Message`: ReadMessage reads a message and separates its headers from its body, as Go's ReadMessage does: a header ends at the first empty line, a line that starts with a space or a tab continues the one before it, and a message that ends inside its header keeps the fields read so far.
 - `(h Header) Get(key str) str`: Get returns the first value associated with key, or an empty string.
 - `(h Header) AddressList(key str) ![]Address`: AddressList parses all addresses in the named header field.
 - `(h Header) Date() !i64`: Date parses the Date field as an RFC 5322 date.
-- `ParseDate(value str) !i64`: ParseDate parses a date in one of the standard RFC 5322 and obsolete formats.
-- `ParseAddress(value str) !Address`: ParseAddress parses a single address, accepting display names and comments.
-- `ParseAddressList(value str) ![]Address`: ParseAddressList parses comma-separated addresses and RFC 5322 groups.
+- `ParseDate(value str) !i64`: ParseDate parses an RFC 5322 date as Go's ParseDate does: the day of the week and the seconds are optional, the year has four or two digits, the zone is a numeric offset or an abbreviation such as UT or EST (read as offset 0), and a comment may follow the zone.
+- `ParseAddress(value str) !Address`: ParseAddress parses a single RFC 5322 address, such as "Barry Gibbs <bg@example.com>", with Go's net/mail parser.
+- `ParseAddressList(value str) ![]Address`: ParseAddressList parses comma-separated addresses and RFC 5322 groups with Go's net/mail parser; empty entries between commas are skipped (obs-addr-list).
 - `DecodeHeader(value str) !str`: DecodeHeader decodes RFC 2047 encoded words in a header value.
 
 ## textproto
