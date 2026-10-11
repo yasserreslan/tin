@@ -409,7 +409,7 @@ jobs:
           HASH_SEED: ${{ inputs.hash_seed }}
           RUN_COUNT: ${{ inputs.run_count }}
         run: |
-          expected='4200000 0 0 8819997900000 -1 0 0 true 0 false 0'
+          expected='4200000 0 0 8819997900000 -1 0 0 true 0 false 0 0 false 0 false -1 0 0 0 true 0 0 false false 0 0 false'
           if [ "$RUN_COUNT" -lt 1 ] || [ "$RUN_COUNT" -gt 200 ]; then
             echo "run_count must be from 1 to 200; got $RUN_COUNT"
             exit 2
