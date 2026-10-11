@@ -4841,6 +4841,10 @@ fn fmt_float(f i64, x f64, verb i64) {
 		}
 		return
 	}
+	if verb == 'x' || verb == 'X' {
+		fmt_hexfloat(f, x, verb)
+		return
+	}
 	mut prec = f[fPrec]
 	if prec < 0 {
 		prec = 6
@@ -4849,6 +4853,106 @@ fn fmt_float(f i64, x f64, verb i64) {
 		verb = 'g'
 	}
 	fmt_float_number(f, x, verb, prec)
+}
+
+// fmt_hexfloat writes x as Go's %x and %X do: -0x1.8p+00, every hex digit of the fraction (or the
+// precision's, rounded half to even) and a binary exponent of at least two digits.
+fn fmt_hexfloat(f i64, x f64, verb i64) {
+	let bits = u64(cast(i64, x))
+	let neg = bits>>63 != 0
+	mut exp = i64((bits>>52) & 0x7ff)
+	mut mant = bits & 0xfffffffffffff
+	if exp == 0 {
+		exp += 1
+	} else {
+		mant |= u64(1)<<52
+	}
+	exp -= 1023
+	if mant == 0 {
+		exp = 0
+	}
+	// The leading 1, if any, at bit 60.
+	mant <<= 8
+	for mant != 0 && mant&(u64(1)<<60) == 0 {
+		mant <<= 1
+		exp -= 1
+	}
+	let prec = f[fPrec]
+	if prec >= 0 && prec < 15 {
+		let shift = u64(prec * 4)
+		let extra = (mant << shift) & ((u64(1)<<60) - 1)
+		mant >>= 60 - shift
+		if extra|(mant&1) > u64(1)<<59 {
+			mant += 1
+		}
+		mant <<= 60 - shift
+		if mant&(u64(1)<<61) != 0 {
+			mant >>= 1
+			exp += 1
+		}
+	}
+	mut hex = "0123456789abcdef"
+	if verb == 'X' {
+		hex = "0123456789ABCDEF"
+	}
+	let out = fmt_frame_scratch(f, 64)
+	mut n = 0
+	if neg {
+		store8(out, '-')
+		n = 1
+	} else if f[fPlus] != 0 {
+		store8(out, '+')
+		n = 1
+	}
+	store8(out+n, '0')
+	store8(out+n+1, verb)
+	store8(out+n+2, '0' + i64((mant>>60)&1))
+	n += 3
+	mant <<= 4
+	if prec < 0 && mant != 0 {
+		store8(out+n, '.')
+		n += 1
+		for mant != 0 {
+			store8(out+n, i64(hex[i64((mant>>60)&15)]))
+			n += 1
+			mant <<= 4
+		}
+	} else if prec > 0 {
+		store8(out+n, '.')
+		n += 1
+		mut d = 0
+		for d < prec {
+			store8(out+n, i64(hex[i64((mant>>60)&15)]))
+			n += 1
+			mant <<= 4
+			d += 1
+		}
+	}
+	if verb == 'X' {
+		store8(out+n, 'P')
+	} else {
+		store8(out+n, 'p')
+	}
+	n += 1
+	if exp < 0 {
+		store8(out+n, '-')
+		exp = -exp
+	} else {
+		store8(out+n, '+')
+	}
+	n += 1
+	if exp >= 1000 {
+		store8(out+n, '0' + exp/1000)
+		n += 1
+	}
+	if exp >= 100 {
+		store8(out+n, '0' + (exp/100)%10)
+		n += 1
+	}
+	store8(out+n, '0' + (exp/10)%10)
+	store8(out+n+1, '0' + exp%10)
+	n += 2
+	fmt_float_pad(f, out, n)
 }
 
 fn rt_fmt_f(x f64) {
