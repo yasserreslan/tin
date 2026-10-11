@@ -44,21 +44,67 @@ fn main() {
 	let m = make(map[i64]i64)
 	mut k = seed
 	mut bad = i64(0)
+	mut stepAt = i64(-1)
+	mut stepKey = i64(0)
+	mut stepWant = i64(0)
+	mut stepGot = i64(0)
+	mut stepOK = true
+	mut stepHash = i64(0)
 	for i in i64(0)..n {
 		k = lcg(k)
 		m[k] = i
 		if i > 4 {
-			if m[k4] != i-4 {
+			let recent4 = m[k4]
+			if recent4 != i-4 {
 				bad += 1
+				if stepAt < 0 {
+					stepAt = i
+					stepKey = k4
+					stepWant = i-4
+					stepGot = recent4
+					let (_, found) = m[k4]
+					stepOK = found
+					stepHash = rtHashK0
+				}
 			}
-			if m[k3] != i-3 {
+			let recent3 = m[k3]
+			if recent3 != i-3 {
 				bad += 1
+				if stepAt < 0 {
+					stepAt = i
+					stepKey = k3
+					stepWant = i-3
+					stepGot = recent3
+					let (_, found) = m[k3]
+					stepOK = found
+					stepHash = rtHashK0
+				}
 			}
-			if m[k2] != i-2 {
+			let recent2 = m[k2]
+			if recent2 != i-2 {
 				bad += 1
+				if stepAt < 0 {
+					stepAt = i
+					stepKey = k2
+					stepWant = i-2
+					stepGot = recent2
+					let (_, found) = m[k2]
+					stepOK = found
+					stepHash = rtHashK0
+				}
 			}
-			if m[k1] != i-1 {
+			let recent1 = m[k1]
+			if recent1 != i-1 {
 				bad += 1
+				if stepAt < 0 {
+					stepAt = i
+					stepKey = k1
+					stepWant = i-1
+					stepGot = recent1
+					let (_, found) = m[k1]
+					stepOK = found
+					stepHash = rtHashK0
+				}
 			}
 		}
 		k4 = k3
@@ -81,10 +127,20 @@ fn main() {
 	mut retryOK = false
 	mut freshValue = i64(0)
 	mut freshOK = false
+	mut stepFinalValue = i64(0)
+	mut stepFinalOK = false
+	mut stepScanFound = false
+	mut stepScanValue = i64(0)
+	mut stepFreshValue = i64(0)
+	mut stepFreshOK = false
 	for i in i64(0)..n {
 		kk = lcg(kk)
 		let value = m[kk]
 		sum += value
+		if i == stepAt {
+			stepFinalValue = value
+			stepFinalOK = value == i
+		}
 		if value != i {
 			after += 1
 			if badAt < 0 {
@@ -115,5 +171,18 @@ fn main() {
 		freshValue = freshGot
 		freshOK = freshFound
 	}
-	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash, scanFound, scanValue, retryValue, retryOK, freshValue, freshOK)
+	if stepAt >= 0 && badAt < 0 {
+		for entryKey, entryValue in m {
+			if entryKey == stepKey {
+				stepScanFound = true
+				stepScanValue = entryValue
+			}
+		}
+		let freshMap = make(map[i64]i64)
+		freshMap[stepKey] = stepWant
+		let (freshGot, found) = freshMap[stepKey]
+		stepFreshValue = freshGot
+		stepFreshOK = found
+	}
+	say.Line(len(m), bad, after, sum, badAt, badKey, badValue, badOK, badHash, scanFound, scanValue, retryValue, retryOK, freshValue, freshOK, stepAt, stepKey, stepWant, stepGot, stepOK, stepHash, stepFinalValue, stepFinalOK, stepScanFound, stepScanValue, stepFreshValue, stepFreshOK)
 }
