@@ -4721,7 +4721,7 @@ fn chk_conversion(e i64, to Ty) i64 {
 			reconvert(cast(Node, x), ty_int)
 		}
 		if is_f32(to) != 0 {
-			replace_node(e, mk_conv(pos, mk_conv(pos, x, CV_I2F, ty_float), CV_ROUND32, ty_f32))
+			replace_node(e, mk_conv(pos, x, CV_I2F, ty_f32))
 			return ty_f32
 		}
 		replace_node(e, mk_conv(pos, x, CV_I2F, ty_float))

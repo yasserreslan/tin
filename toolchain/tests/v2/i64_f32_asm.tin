@@ -1,0 +1,15 @@
+package main
+
+import "say"
+
+fn signed32(x i64) f32 {
+	return f32(x)
+}
+
+fn unsigned32(x u64) f32 {
+	return f32(x)
+}
+
+fn main() {
+	say.Line(signed32(i64(123)), unsigned32(u64(123)))
+}

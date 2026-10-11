@@ -1,0 +1,19 @@
+package main
+
+import "gauge"
+import "say"
+
+fn signed(x i64) f32 {
+	return f32(x)
+}
+
+fn unsigned(x u64) f32 {
+	return f32(x)
+}
+
+fn main() {
+	let n i64 = 9007199791611905
+	let u u64 = 9007199791611905
+	say.Line(gauge.F64bits(f64(signed(n))), gauge.F64bits(f64(unsigned(u))))
+	say.Line(gauge.F64bits(f64(signed(-9007199791611905))), gauge.F64bits(f64(unsigned(18446744073709551615))))
+}

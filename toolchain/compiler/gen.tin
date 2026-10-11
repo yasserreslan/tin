@@ -2452,7 +2452,15 @@ fn gen_conv(e i64, dst i64, d i64) {
 		return
 	}
 	if k == CV_I2F {
-		if is_unsigned_t(cast(Ty, x.type_)) != 0 && cast(Ty, x.type_).width == 8 {
+		let ft = cast(Ty, cast(Node, e).type_)
+		if is_f32(ft) != 0 {
+			if is_unsigned_t(cast(Ty, x.type_)) != 0 {
+				emit2(I_UCVTFS, dst, v)
+			} else {
+				emit2(I_SCVTFS, dst, v)
+			}
+			emit2(I_FCVTDS, dst, dst)
+		} else if is_unsigned_t(cast(Ty, x.type_)) != 0 && cast(Ty, x.type_).width == 8 {
 			emit2(I_UCVTF, dst, v)
 		} else {
 			emit2(I_SCVTF, dst, v)
